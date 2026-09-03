@@ -48,6 +48,7 @@ import {
 } from "../settings";
 import { BackupTab } from "./BackupTab";
 import { ModulesTab } from "./ModulesTab";
+import { PythonStatusPanel } from "./PythonStatus";
 import { TestEmail } from "./TestEmail";
 
 /** One section as the API describes it. */
@@ -309,12 +310,14 @@ function SectionCard({
 }
 
 /** The **one** place this screen knows a section by name: a section may have an
- * *act* as well as fields, and an act cannot be declared as a `FormField`.
+ * *act* as well as fields, or a *reading* that is not a field at all, and
+ * neither can be declared as a `FormField`.
  *
  * Kept to a single lookup so it is obvious what the exception costs — a section
  * with nothing here renders its form and nothing else, which is every section
- * but Email. */
+ * but Email and Development. */
 function SectionExtra({ name }: { name: string }) {
   if (name === "email") return <TestEmail />;
+  if (name === "development") return <PythonStatusPanel />;
   return null;
 }

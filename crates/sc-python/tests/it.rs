@@ -16,6 +16,10 @@ mod python_db;
 mod python_db_live;
 
 #[cfg(feature = "python-host")]
+#[path = "python_imports.rs"]
+mod python_imports;
+
+#[cfg(feature = "python-host")]
 #[path = "python_fetch.rs"]
 mod python_fetch;
 

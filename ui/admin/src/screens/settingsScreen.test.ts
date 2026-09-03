@@ -32,6 +32,7 @@ import {
   settingsPayload,
   settingsTabs,
 } from "./Settings";
+import { showsDetail, stateBadge } from "./PythonStatus";
 import { testEmailBody } from "./TestEmail";
 
 /** The shape `getSettings` returns, trimmed to what the model reads. */
@@ -314,5 +315,35 @@ describe("the test-email form", () => {
     expect(testEmailBody("  ada@example.com ")).toEqual({
       to: "ada@example.com",
     });
+  });
+});
+
+describe("the Development tab's Python reading", () => {
+  /** Each of the states the server can be in gets its own label — the whole
+   * point of the panel is that "not built with Python", "turned off" and "not
+   * started yet" have three different remedies. */
+  it("labels each state the server can report", () => {
+    expect(stateBadge("running").label).toBe("Running");
+    expect(stateBadge("not_initialised").label).toBe("Not started yet");
+    expect(stateBadge("off").label).toBe("Turned off");
+    expect(stateBadge("not_built").label).toBe("Not built with Python");
+    expect(stateBadge("unavailable").label).toBe("Not available");
+  });
+
+  /** A server ahead of the SPA it is serving — a state added after this bundle
+   * was built — shows the server's own word rather than nothing. */
+  it("falls back to the server's own word for a state it does not know", () => {
+    expect(stateBadge("hibernating").label).toBe("hibernating");
+  });
+
+  /** A build with no interpreter has no environment, no packages and no runs,
+   * and a table of zeros beside "not built with Python" would read as though
+   * the zeros were the problem. */
+  it("hides the numbers where there is no interpreter for them to describe", () => {
+    expect(showsDetail("not_built")).toBe(false);
+    expect(showsDetail("unavailable")).toBe(false);
+    expect(showsDetail("off")).toBe(true);
+    expect(showsDetail("not_initialised")).toBe(true);
+    expect(showsDetail("running")).toBe(true);
   });
 });

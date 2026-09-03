@@ -2717,6 +2717,47 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    // What this process can do about Python, on the screen that already carries
+    // the other "what is this server doing right now" readings (§7, phase 4.2).
+    //
+    // Read-only and cheap. It is on the Development tab rather than beside the
+    // modules because none of it is a *setting* — every number here is a fact
+    // about the running process, and the two that are configurable are flags
+    // that need a restart, which is precisely the thing an admin needs told.
+    reg.register("getPythonStatus", {
+        let apps = apps.clone();
+        move |_ctx| {
+            let apps = apps.clone();
+            async move {
+                let status = match apps.python() {
+                    Some(python) => python.status(),
+                    // A server booted with no adapters at all — a test, or an
+                    // admin-only process. Nothing about Python is available
+                    // here, which is a different sentence from every other one
+                    // below and is said as such.
+                    None => {
+                        return Ok(HandlerResponse::ok(json!({
+                            "state": "unavailable",
+                            "version": Json::Null,
+                            "explanation": "this process has no Python runtime installed, so \
+                                            nothing here can say what it would do.",
+                            "dir": Json::Null,
+                            "site_packages": Json::Null,
+                            "bin": Json::Null,
+                            "packages": [],
+                            "max_inflight": 0,
+                            "resident": 0,
+                            "threads": 0,
+                            "stuck": 0,
+                            "max_stuck": 0,
+                        })));
+                    }
+                };
+                Ok(HandlerResponse::ok(python_status_json(&status)))
+            }
+        }
+    });
+
     // --- backup & restore ---------------------------------------------------
     // Four handlers for one screen, split by what crosses the wire rather than by
     // what they do (§16): the *choice* is JSON and typed, the *archive* is bytes
@@ -5389,6 +5430,57 @@ async fn settings_json(catalog: &Catalog) -> Result<Json> {
         &sc_config::all_config(catalog).await?,
     );
     Ok(json!({ "sections": sections, "values": Json::Object(values) }))
+}
+
+/// One [`sc_python::PythonStatus`] as the API returns it.
+///
+/// **The explanation is written here rather than in the SPA**, because which
+/// sentence is true depends on how this binary was built and how this process
+/// was started — and only the server knows either. Each one names its own
+/// remedy, because the three states of §7 have three different ones and an
+/// admin who cannot tell them apart goes looking for the wrong fix.
+fn python_status_json(status: &sc_python::PythonStatus) -> Json {
+    let explanation = match &status.state {
+        sc_python::PythonState::NotBuilt => {
+            "This server was built without Python support, so it has no interpreter linked \
+             in and no setting or flag can add one. A Python-capable server is a separate \
+             build (`cargo build -p sc-server --features python`), which needs libpython on \
+             the host."
+        }
+        sc_python::PythonState::Off => {
+            "This server has Python support but was started with `--python off`, so it will \
+             not start an interpreter. Restart it with `--python auto` (the default) to run \
+             Python code."
+        }
+        sc_python::PythonState::NotInitialised => {
+            "This server has Python support and has not needed it yet. The interpreter \
+             starts with the first Python trigger that fires, which is why a server that \
+             runs no Python pays nothing for it."
+        }
+        sc_python::PythonState::Running { .. } => {
+            "The interpreter is running. Everything Python in this process — every code \
+             body — runs in this one interpreter, which is what lets one body wait on a \
+             query while the others carry on."
+        }
+    };
+    json!({
+        "state": status.state.as_str(),
+        "version": status.state.version(),
+        "explanation": explanation,
+        "dir": status.dir.as_ref().map(|p| p.display().to_string()),
+        "site_packages": status.site_packages.as_ref().map(|p| p.display().to_string()),
+        "bin": status.bin.as_ref().map(|p| p.display().to_string()),
+        "packages": status
+            .packages
+            .iter()
+            .map(|package| json!({ "name": package.name, "version": package.version }))
+            .collect::<Vec<_>>(),
+        "max_inflight": status.max_inflight,
+        "resident": status.resident,
+        "threads": status.threads,
+        "stuck": status.stuck,
+        "max_stuck": status.max_stuck,
+    })
 }
 
 /// The selection an admin last made, or "everything" when they never have.

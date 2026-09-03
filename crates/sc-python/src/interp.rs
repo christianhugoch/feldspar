@@ -46,6 +46,12 @@ use crate::errors::Timeout;
 /// file to find, no version to skew and nothing to install.
 const BOOT: &str = include_str!("py/boot.py");
 
+/// The import gate (§1): the deny-list, the `os` stand-in, and the
+/// `__builtins__` a run's globals carry. Beside the pipeline rather than in it
+/// because it is a different question — the pipeline decides how a body is
+/// compiled and reported, and this decides what it may name.
+const GATE: &str = include_str!("py/gate.py");
+
 /// The **surface** an app builder writes — the five handles and the errors —
 /// compiled into the binary beside the pipeline and installed on the meta path
 /// at boot.
@@ -86,6 +92,9 @@ static START: OnceLock<std::result::Result<String, String>> = OnceLock::new();
 
 /// The boot module, imported once.
 static BOOT_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+
+/// The import gate, imported once. Its `new_builtins()` is called per run.
+static GATE_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 
 /// The `saltcorn` package, imported once — at boot, so the cost of parsing the
 /// surface lands on the interpreter's clock rather than on somebody's trigger.
@@ -168,14 +177,12 @@ use crate::bridge::sc_module;
 /// honest shape: there is one interpreter per process, so there is one
 /// `sys.path`, and the second runtime to ask for it gets the first one's.
 fn boot(py: Python<'_>, env: &PythonEnv) -> PyResult<String> {
-    let module = PyModule::from_code(
-        py,
-        std::ffi::CString::new(BOOT)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-            .as_c_str(),
-        c"<saltcorn boot>",
-        c"__sc_boot",
-    )?;
+    let module = embedded(py, BOOT, c"<saltcorn boot>", c"__sc_boot")?;
+    // The gate is imported before the surface, because from here on every run's
+    // globals carry a `__builtins__` it builds. It is *not* installed on the
+    // meta path: nothing imports it, a body least of all.
+    let gate = embedded(py, GATE, c"<saltcorn gate>", c"__sc_gate")?;
+    let _ = GATE_MODULE.set(py, gate.unbind());
     // The surface goes on the meta path before anything imports it, and is then
     // imported here rather than on the first run — `import saltcorn` from a body
     // finds it already in `sys.modules`, and a body that never mentions it has
@@ -197,6 +204,24 @@ fn boot(py: Python<'_>, env: &PythonEnv) -> PyResult<String> {
     Ok(format!("{major}.{minor}.{micro}"))
 }
 
+/// One of this crate's own Python modules, compiled from the source in the
+/// binary under a name nothing imports.
+fn embedded<'py>(
+    py: Python<'py>,
+    source: &str,
+    filename: &std::ffi::CStr,
+    name: &std::ffi::CStr,
+) -> PyResult<Bound<'py, PyModule>> {
+    PyModule::from_code(
+        py,
+        std::ffi::CString::new(source)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+            .as_c_str(),
+        filename,
+        name,
+    )
+}
+
 /// The directory an installed package lives in, under a virtual environment
 /// this server owns.
 ///
@@ -204,7 +229,7 @@ fn boot(py: Python<'_>, env: &PythonEnv) -> PyResult<String> {
 /// that will import what is there — and the version of the `python3` that built
 /// the environment may not be it, which is exactly the mismatch §9's ABI check
 /// (phase 5.2) exists to refuse.
-fn site_packages(dir: &std::path::Path, major: u32, minor: u32) -> std::path::PathBuf {
+pub(crate) fn site_packages(dir: &std::path::Path, major: u32, minor: u32) -> std::path::PathBuf {
     if cfg!(windows) {
         dir.join("Lib").join("site-packages")
     } else {
@@ -274,6 +299,15 @@ fn boot_module(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
         Some(module) => Ok(module.bind(py)),
         None => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "the Saltcorn Python runtime was not initialised",
+        )),
+    }
+}
+
+fn gate_module(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    match GATE_MODULE.get(py) {
+        Some(module) => Ok(module.bind(py)),
+        None => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "the Saltcorn Python import gate was not installed",
         )),
     }
 }
@@ -418,6 +452,18 @@ pub(crate) fn run_body(
             "__name__",
             pyo3::types::PyString::new(py, "<body>").into_any(),
         )?;
+        // The import gate (§1). Bound here rather than left to `exec`, which
+        // would fill in the real one: a run's globals carry a **copy** of
+        // `builtins` whose `__import__` is the gate's, so a body's own import
+        // statement is checked and an import inside a library it called — which
+        // reads its own module globals — is not. Per run, so a body that writes
+        // into its builtins has not written into the next body's.
+        let gate = gate_module(py).map_err(|e| py_error(py, &e))?;
+        let builtins = gate
+            .getattr("new_builtins")
+            .and_then(|f| f.call0())
+            .map_err(|e| py_error(py, &e))?;
+        bind("__builtins__", builtins)?;
         for (name, value) in bindings {
             let value = convert::from_json(py, value).map_err(|e| py_error(py, &e))?;
             bind(name, value)?;

@@ -131,6 +131,15 @@ pub struct AppMounts {
     /// *same* dispatcher a firing trigger runs from. `None` is a process with no
     /// modules installed, where the Modules tab says so rather than pretending.
     modules: Option<Arc<crate::modules::ModuleServices>>,
+    /// The Python runtime this process built from its own flags (§15), for the
+    /// **one** thing that needs the runtime rather than the adapter: the
+    /// diagnostics on Settings → Development, which report which of §7's states
+    /// this process is in, where its environment is and how many runs are
+    /// resident. It rides here for the reason the four above do — the admin
+    /// handlers already hold this handle. `None` is a process that booted no
+    /// adapters, where the screen says the same thing it says for a binary built
+    /// without Python: nothing about Python is available here.
+    python: Option<Arc<sc_python::PythonRuntime>>,
     /// Subdomain → the app served there. Behind an `RwLock` for live mutation.
     by_subdomain: RwLock<HashMap<String, Arc<MountedApp>>>,
 }
@@ -149,6 +158,7 @@ impl AppMounts {
             triggers: None,
             agents: None,
             modules: None,
+            python: None,
             by_subdomain: RwLock::new(HashMap::new()),
         }
     }
@@ -200,6 +210,18 @@ impl AppMounts {
     /// The module services, if this server has them.
     pub fn modules(&self) -> Option<&Arc<crate::modules::ModuleServices>> {
         self.modules.as_ref()
+    }
+
+    /// Attach the Python runtime, so the diagnostics screen can say which of
+    /// §7's states this process is in.
+    pub fn with_python(mut self, python: Arc<sc_python::PythonRuntime>) -> AppMounts {
+        self.python = Some(python);
+        self
+    }
+
+    /// The Python runtime, if this server built one.
+    pub fn python(&self) -> Option<&Arc<sc_python::PythonRuntime>> {
+        self.python.as_ref()
     }
 
     /// Mount an app on its declared subdomain, refusing a collision.

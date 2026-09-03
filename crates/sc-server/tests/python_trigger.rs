@@ -32,7 +32,7 @@ use axum::http::{Request, StatusCode, header};
 use sc_catalog::Catalog;
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
-use sc_expr::CodeCall;
+use sc_expr::{CodeAdapter, CodeCall};
 use sc_python::PythonState;
 use sc_server::{
     AppMounts, CSRF_COOKIE, CSRF_HEADER, PythonMode, ServerConfig, admin_handlers,
@@ -184,15 +184,23 @@ async fn setup(config: &ServerConfig) -> sc_error::Result<Server> {
     let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
     sc_auth::bootstrap(&catalog).await?;
     let agents = sc_server::install_agents(&catalog).await?;
+    // One runtime, handed to the dispatcher as an adapter and to the mounts as
+    // itself — which is how `serve` builds it, and what lets the diagnostics
+    // endpoint report the same interpreter a trigger runs on.
+    let python = python_adapter(config);
     let dispatcher = install_triggers_with_adapters(
         &catalog,
         default_js_evaluator(),
         &agents,
-        [python_adapter(config)],
+        [python.clone() as Arc<dyn sc_server::CodeAdapter>],
     )
     .await?;
 
-    let apps = Arc::new(AppMounts::new(catalog.clone()).with_triggers(dispatcher.clone()));
+    let apps = Arc::new(
+        AppMounts::new(catalog.clone())
+            .with_triggers(dispatcher.clone())
+            .with_python(python),
+    );
     let router = build_router_with_apps(
         &sc_api::admin_endpoints(),
         admin_handlers(catalog.clone(), apps.clone()),
@@ -251,6 +259,34 @@ async fn a_python_trigger_is_saved_in_every_build_and_runs_where_there_is_an_int
         PythonState::NotBuilt
     );
 
+    // And that is what Settings → Development says (phase 4.2), before anything
+    // has fired: the state, and a sentence naming the remedy for *this* state
+    // rather than a generic one.
+    let (status, before) = server.client.send("GET", "/api/python", None).await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    // The bounds are this process's flags either way, so they are reported in
+    // both builds; nothing is resident, because nothing has run.
+    assert_eq!(before["max_inflight"], json!(sc_python::DEFAULT_MAX_INFLIGHT));
+    assert_eq!(before["max_stuck"], json!(sc_python::DEFAULT_MAX_STUCK));
+    assert_eq!(before["resident"], json!(0));
+    assert_eq!(before["stuck"], json!(0));
+    #[cfg(feature = "python")]
+    {
+        assert_eq!(before["state"], json!("not_initialised"), "{before}");
+        assert_eq!(before["version"], Value::Null);
+        let said = before["explanation"].as_str().unwrap_or_default();
+        assert!(said.contains("has not needed it yet"), "{said}");
+        assert_eq!(before["threads"], json!(0), "no run, no thread");
+    }
+    #[cfg(not(feature = "python"))]
+    {
+        assert_eq!(before["state"], json!("not_built"), "{before}");
+        // The remedy is a rebuild, and the screen names it — the same sentence
+        // firing the trigger answers with, for the admin who has not fired it.
+        let said = before["explanation"].as_str().unwrap_or_default();
+        assert!(said.contains("--features python"), "{said}");
+    }
+
     let (status, body) = server
         .client
         .send(
@@ -294,6 +330,26 @@ async fn a_python_trigger_is_saved_in_every_build_and_runs_where_there_is_an_int
             sc_python::PythonRuntime::new().state(),
             PythonState::Running { .. }
         ));
+        // Which the screen now reports, with the version, and with a thread
+        // that has been kept for the next run.
+        let (status, after) = server.client.send("GET", "/api/python", None).await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        assert_eq!(after["state"], json!("running"), "{after}");
+        let version = after["version"].as_str().unwrap_or_default();
+        assert!(
+            version.starts_with("3.") && version.split('.').count() == 3,
+            "the interpreter's own version: {after}"
+        );
+        assert_eq!(after["resident"], json!(0), "the run is over");
+        assert!(
+            after["threads"].as_i64().unwrap_or_default() >= 1,
+            "a finished thread is kept for the next run: {after}"
+        );
+        // No environment was configured, so there is nowhere for a package to
+        // be and the screen says so by having neither.
+        assert_eq!(after["dir"], Value::Null);
+        assert_eq!(after["site_packages"], Value::Null);
+        assert_eq!(after["packages"], json!([]));
     }
     #[cfg(not(feature = "python"))]
     {
@@ -344,4 +400,79 @@ async fn the_flag_and_the_build_are_different_refusals() {
         // is the one about the rebuild — the deeper fact wins.
         assert!(said.contains("built without Python support"), "{said}");
     }
+}
+
+/// `--python off`, on the screen (phase 4.2).
+///
+/// The fourth state, and the one that is not in §7's list of three: a
+/// Python-capable binary that was *told* not to start an interpreter is a
+/// different fact from one that has not needed to yet, and an admin who could
+/// not tell them apart would go looking for a rebuild when a restart is the fix.
+/// No trigger and no run — the state is a property of the process, and asking
+/// for it must not be what starts anything.
+#[tokio::test]
+async fn the_screen_tells_a_process_that_was_turned_off_from_one_that_is_merely_idle()
+-> sc_error::Result<()> {
+    let config = ServerConfig {
+        python: PythonMode::Off,
+        ..ServerConfig::default()
+    };
+    let mut server = setup(&config).await?;
+    let (status, body) = server.client.send("GET", "/api/python", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    #[cfg(feature = "python")]
+    {
+        assert_eq!(body["state"], json!("off"), "{body}");
+        let said = body["explanation"].as_str().unwrap_or_default();
+        assert!(said.contains("--python off"), "{said}");
+        assert!(said.contains("--python auto"), "{said}");
+    }
+    #[cfg(not(feature = "python"))]
+    {
+        // A build with no interpreter has nothing for the flag to turn off, so
+        // the deeper fact wins here exactly as it does in the refusal.
+        assert_eq!(body["state"], json!("not_built"), "{body}");
+    }
+    Ok(())
+}
+
+/// A process that booted no Python runtime at all — a test, or an admin-only
+/// server — is a fifth answer, and it is not "not built with Python": that
+/// binary may well have an interpreter, nobody attached it to this process's
+/// mounts. Said plainly rather than reported as a state the specification does
+/// not have.
+#[tokio::test]
+async fn a_server_with_no_runtime_attached_says_that_rather_than_guessing() -> sc_error::Result<()>
+{
+    let db = TestDb::new().await?;
+    let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
+    let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
+    sc_auth::bootstrap(&catalog).await?;
+    let apps = Arc::new(AppMounts::new(catalog.clone()));
+    let router = build_router_with_apps(
+        &sc_api::admin_endpoints(),
+        admin_handlers(catalog.clone(), apps.clone()),
+        Arc::new(sc_auth::SessionStore::default()),
+        &ServerConfig::default(),
+        apps,
+    )?;
+    let mut client = Client {
+        router,
+        cookies: HashMap::new(),
+    };
+    client.send("GET", "/api/auth/status", None).await;
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/first-user",
+            Some(json!({ "email": ADMIN, "password": PASSWORD })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = client.send("GET", "/api/python", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], json!("unavailable"), "{body}");
+    Ok(())
 }

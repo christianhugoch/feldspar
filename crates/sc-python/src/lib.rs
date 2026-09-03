@@ -67,9 +67,27 @@
 //! than discovered, and per-plugin subinterpreters are the version of "more
 //! than one" worth having later.
 //!
+//! # What a body may import, and what the gate is worth
+//!
+//! `src/py/gate.py` gives every run a `__builtins__` whose `__import__` refuses
+//! the standard-library modules that reach the process, the network and the
+//! disk, and refuses `os.environ` while leaving `os.path`. Everything else —
+//! the rest of the standard library, and every package installed in this
+//! server's Python environment — is allowed.
+//!
+//! It is **hygiene, not privilege**, and this crate says so everywhere rather
+//! than in one place: `builtins.open` exists, `().__class__.__mro__` exists, and
+//! `importlib` is refused by name rather than made unreachable. What the gate
+//! buys is that `import subprocess` is a mistake shaped like an `ImportError` on
+//! the line that made it. The real bound is the one `db.sql` and installing a
+//! module already have — authoring a trigger body is an administrator's
+//! capability — and §10 of the specification is that there is no sandbox in
+//! either language's modules either.
+//!
 //! # The pieces
 //!
 //! - [`interp`] — the interpreter, the boot module, the surface, the body cache.
+//! - `gate` (Python) — the import gate, and the `os` a body sees.
 //! - [`bridge`] — the five host functions, the GIL release, the budgets.
 //! - [`convert`] — JSON ↔ Python, and what has no JSON form.
 //! - [`errors`] — the exception hierarchy, defined in Rust.
@@ -168,6 +186,131 @@ pub struct PythonEnv {
     pub bin: Option<std::path::PathBuf>,
 }
 
+impl PythonState {
+    /// The name this state crosses the API under.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PythonState::NotBuilt => "not_built",
+            PythonState::Off => "off",
+            PythonState::NotInitialised => "not_initialised",
+            PythonState::Running { .. } => "running",
+        }
+    }
+
+    /// The interpreter's version, where there is one to report.
+    #[must_use]
+    pub fn version(&self) -> Option<&str> {
+        match self {
+            PythonState::Running { version } => Some(version),
+            _ => None,
+        }
+    }
+}
+
+/// One package installed in this server's Python environment.
+///
+/// Read off the disk rather than asked of `pip`: an installed distribution
+/// leaves a `<name>-<version>.dist-info` directory beside itself, so the listing
+/// is a directory read that costs nothing and cannot hang, and a screen that
+/// shows it does not need a subprocess to render. `pip` is phase 5's, and it is
+/// how packages get *there*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PythonPackage {
+    /// The distribution's name, as it named its own metadata directory.
+    pub name: String,
+    /// Its version, where the metadata directory carries one. A legacy
+    /// `.egg-info` without a version in its name is listed without one rather
+    /// than left out — a package an admin can see is a package they can ask
+    /// about.
+    pub version: Option<String>,
+}
+
+/// What Settings → Development shows about Python (phase 4.2).
+///
+/// One structure rather than eight getters, because the whole point of the
+/// screen is that these are read **together**: "why does my Python trigger not
+/// work" has three answers in [`state`](PythonStatus::state) alone, and which
+/// one an admin has decides whether the rest of this is even interesting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PythonStatus {
+    /// Which of §7's states this process is in — the build, the flag, the
+    /// interpreter.
+    pub state: PythonState,
+    /// The environment this server installs Python modules into
+    /// (`--python-dir`). `None` until an operator names one: creating it, and
+    /// defaulting it beside the modules root, is phase 5.
+    pub dir: Option<std::path::PathBuf>,
+    /// Where inside it a package lands, under the **embedded** interpreter's
+    /// version — so this is `None` until the interpreter has started and said
+    /// what that version is.
+    pub site_packages: Option<std::path::PathBuf>,
+    /// The external interpreter `pip` will run under (`--python-bin`). `None` is
+    /// `python3` on the path.
+    pub bin: Option<std::path::PathBuf>,
+    /// What is installed in the environment, by name.
+    pub packages: Vec<PythonPackage>,
+    /// The admission bound: how many runs may be resident at once
+    /// (`--python-max-inflight`).
+    pub max_inflight: usize,
+    /// How many runs are in flight right now.
+    pub resident: usize,
+    /// How many run threads exist, resident or idle.
+    pub threads: usize,
+    /// How many threads were fired at, waited for and never came back. Anything
+    /// but zero is a leak whose remedy is a restart.
+    pub stuck: usize,
+    /// How many of those are tolerated before new runs are refused
+    /// (`--python-max-stuck`).
+    pub max_stuck: usize,
+}
+
+/// `3.14.4` as the two numbers a `site-packages` path is built from.
+#[cfg(feature = "python-host")]
+fn version_parts(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// The packages installed under one `site-packages` directory.
+///
+/// A missing or unreadable directory is an empty listing rather than an error:
+/// an environment nobody has installed into yet is the ordinary case, and a
+/// diagnostics screen that failed to render because of it would be reporting
+/// the wrong thing.
+fn packages_in(site_packages: &std::path::Path) -> Vec<PythonPackage> {
+    let Ok(entries) = std::fs::read_dir(site_packages) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PythonPackage> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let stem = name
+                .strip_suffix(".dist-info")
+                .or_else(|| name.strip_suffix(".egg-info"))?;
+            // `numpy-2.1.0.dist-info`, and `-` is legal in neither half after
+            // the normalisation a distribution's metadata directory carries — so
+            // the last one is the separator.
+            Some(match stem.rsplit_once('-') {
+                Some((name, version)) => PythonPackage {
+                    name: name.to_owned(),
+                    version: Some(version.to_owned()),
+                },
+                None => PythonPackage {
+                    name: stem.to_owned(),
+                    version: None,
+                },
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found.dedup();
+    found
+}
+
 /// The Python runtime: one interpreter, a run per thread, one admission bound.
 ///
 /// Constructing one is free and starts nothing — the interpreter is started by
@@ -175,6 +318,12 @@ pub struct PythonEnv {
 /// server that would rather pay at boot and say so.
 pub struct PythonRuntime {
     default_timeout: Duration,
+    /// The two bounds, held here rather than only on the inner runtime so that
+    /// [`status`](PythonRuntime::status) answers them in a build without the
+    /// feature too: what an operator set is a fact about this process whether or
+    /// not there is an interpreter for it to bound.
+    max_inflight: usize,
+    max_stuck: usize,
     /// `--python auto` (the default) or `--python off`. See [`PythonState::Off`].
     enabled: bool,
     env: PythonEnv,
@@ -193,10 +342,10 @@ impl PythonRuntime {
     /// tolerated — `--python-max-inflight` and `--python-max-stuck`.
     #[must_use]
     pub fn with_bounds(max_inflight: usize, max_stuck: usize) -> PythonRuntime {
-        #[cfg(not(feature = "python-host"))]
-        let _ = (max_inflight, max_stuck);
         PythonRuntime {
             default_timeout: DEFAULT_CODE_TIMEOUT,
+            max_inflight,
+            max_stuck,
             enabled: true,
             env: PythonEnv::default(),
             #[cfg(feature = "python-host")]
@@ -315,6 +464,67 @@ impl PythonRuntime {
         {
             0
         }
+    }
+
+    /// Everything Settings → Development shows about Python in this process.
+    ///
+    /// Cheap and side-effect free — it starts nothing, so asking is not what
+    /// initialises an interpreter — except for the one directory read that
+    /// lists the environment's packages.
+    #[must_use]
+    pub fn status(&self) -> PythonStatus {
+        let state = self.state();
+        // Which directory a package is imported from depends on the version of
+        // the interpreter that will import it, so there is nothing truthful to
+        // say until it has started — which a build without the feature never
+        // does.
+        #[cfg(feature = "python-host")]
+        let site_packages = match (&state, self.env.dir.as_deref()) {
+            (PythonState::Running { version }, Some(dir)) => version_parts(version)
+                .map(|(major, minor)| interp::site_packages(dir, major, minor)),
+            _ => None,
+        };
+        #[cfg(not(feature = "python-host"))]
+        let site_packages: Option<std::path::PathBuf> = None;
+        PythonStatus {
+            state,
+            dir: self.env.dir.clone(),
+            packages: site_packages.as_deref().map(packages_in).unwrap_or_default(),
+            site_packages,
+            bin: self.env.bin.clone(),
+            max_inflight: self.max_inflight(),
+            resident: self.resident(),
+            threads: self.threads(),
+            stuck: self.stuck(),
+            max_stuck: self.max_stuck(),
+        }
+    }
+
+    /// How many runs are in flight.
+    #[must_use]
+    pub fn resident(&self) -> usize {
+        #[cfg(feature = "python-host")]
+        {
+            self.inner.resident()
+        }
+        #[cfg(not(feature = "python-host"))]
+        {
+            0
+        }
+    }
+
+    /// The admission bound this runtime was built with
+    /// (`--python-max-inflight`).
+    #[must_use]
+    pub fn max_inflight(&self) -> usize {
+        self.max_inflight
+    }
+
+    /// How many stuck threads are tolerated before new runs are refused
+    /// (`--python-max-stuck`).
+    #[must_use]
+    pub fn max_stuck(&self) -> usize {
+        self.max_stuck
     }
 
     /// Run one Python body to its JSON result.

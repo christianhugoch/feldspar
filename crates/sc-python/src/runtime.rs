@@ -90,9 +90,31 @@ pub(crate) struct Inner {
     pub(crate) max_stuck: usize,
     admission: tokio::sync::Semaphore,
     idle: Mutex<Vec<IdleThread>>,
+    /// How many runs are in flight right now. Counted rather than derived from
+    /// the semaphore because §6's nested runs are admitted *past* the bound,
+    /// and a diagnostics screen that showed the permits would then under-report
+    /// exactly when a server is busiest.
+    resident: AtomicUsize,
     stuck: AtomicUsize,
     threads: AtomicUsize,
     shutdown: AtomicBool,
+}
+
+/// One run's presence in [`Inner::resident`], for as long as its caller is
+/// waiting for it.
+struct Resident<'a>(&'a AtomicUsize);
+
+impl<'a> Resident<'a> {
+    fn new(count: &'a AtomicUsize) -> Resident<'a> {
+        count.fetch_add(1, Ordering::SeqCst);
+        Resident(count)
+    }
+}
+
+impl Drop for Resident<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// A thread parked on its channel, waiting for the next run.
@@ -136,6 +158,7 @@ impl Inner {
             max_stuck,
             admission: tokio::sync::Semaphore::new(max_inflight),
             idle: Mutex::new(Vec::new()),
+            resident: AtomicUsize::new(0),
             stuck: AtomicUsize::new(0),
             threads: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
@@ -151,6 +174,11 @@ impl Inner {
     /// How many run threads exist, resident or idle.
     pub(crate) fn threads(&self) -> usize {
         self.threads.load(Ordering::Relaxed)
+    }
+
+    /// How many runs are in flight, against [`Inner::max_inflight`].
+    pub(crate) fn resident(&self) -> usize {
+        self.resident.load(Ordering::Relaxed)
     }
 
     /// Run one body. See the module documentation for the shape of it.
@@ -194,6 +222,10 @@ impl Inner {
                 }
             }
         };
+
+        // From here to the end of this function there is a run in flight,
+        // however it ends — an answer, a deadline, a panic in the caller.
+        let _resident = Resident::new(&self.resident);
 
         let (requests, mut incoming) = tokio::sync::mpsc::unbounded_channel::<HostRequest>();
         let has = Surfaces {

@@ -54,7 +54,7 @@ pub async fn install_triggers(
         catalog,
         evaluator,
         agents,
-        [crate::default_python_adapter()],
+        [crate::default_python_adapter() as Arc<dyn sc_expr::CodeAdapter>],
     )
     .await
 }

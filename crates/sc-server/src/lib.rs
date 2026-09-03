@@ -84,7 +84,12 @@ pub fn js_evaluator(config: &ServerConfig) -> std::sync::Arc<dyn sc_expr::JsEval
 /// Constructing one starts nothing. The interpreter is started by the first body
 /// that needs it, exactly as the code isolate pool is built by the first
 /// `run_js_code` — so a server that fires no Python pays for no interpreter.
-pub fn python_adapter(config: &ServerConfig) -> std::sync::Arc<dyn sc_expr::CodeAdapter> {
+/// The concrete runtime rather than an `Arc<dyn CodeAdapter>`, because the
+/// diagnostics screen (§7's three states, phase 4.2) asks it questions the
+/// adapter trait has no business carrying: which state this process is in, where
+/// its environment is, and how many runs are resident. It coerces to the trait
+/// object where a dispatcher wants one.
+pub fn python_adapter(config: &ServerConfig) -> std::sync::Arc<sc_python::PythonRuntime> {
     std::sync::Arc::new(
         sc_python::PythonRuntime::with_bounds(config.python_max_inflight, config.python_max_stuck)
             .with_enabled(config.python == config::PythonMode::Auto)
@@ -95,10 +100,14 @@ pub fn python_adapter(config: &ServerConfig) -> std::sync::Arc<dyn sc_expr::Code
 /// The Python adapter with this process's defaults — [`python_adapter`] of a
 /// [`ServerConfig::default`], for the callers that have no configuration to hand
 /// (tests, and any tool that boots a dispatcher without parsing flags).
-pub fn default_python_adapter() -> std::sync::Arc<dyn sc_expr::CodeAdapter> {
+pub fn default_python_adapter() -> std::sync::Arc<sc_python::PythonRuntime> {
     python_adapter(&ServerConfig::default())
 }
 pub use config::{DEFAULT_BIND, PythonMode, ServerConfig};
+/// The guest-language adapter trait, re-exported: a caller that hands
+/// [`install_triggers_with_adapters`] a set of adapters needs to name it, and
+/// `sc-expr` is not otherwise its dependency.
+pub use sc_expr::CodeAdapter;
 pub use handler::{
     BoxFuture, HandlerCtx, HandlerFn, HandlerRegistry, HandlerResponse, SessionAction,
 };

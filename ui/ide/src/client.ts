@@ -169,6 +169,7 @@ export type UpdateSettingsRequest = { values: unknown };
 export type UpdateSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; help: string }> }>; values: unknown };
 export type SendTestEmailRequest = { to?: string | null };
 export type SendTestEmailResponse = { sent_to: string };
+export type GetPythonStatusResponse = { state: string; version?: string | null; explanation: string; dir?: string | null; site_packages?: string | null; bin?: string | null; packages: Array<{ name: string; version?: string | null }>; max_inflight: number; resident: number; threads: number; stuck: number; max_stuck: number };
 export type GetBackupOptionsResponse = { available: { tables: Array<{ name: string; label: string; count?: number | null }>; applications: Array<{ name: string; label: string; count?: number | null }>; file_stores: Array<{ name: string; label: string; count?: number | null }>; users: number; agents: number; triggers: number; ssl: boolean }; include: { tables: Array<string>; table_data: Array<string>; applications: Array<string>; file_stores: Array<string>; users: boolean; agents: boolean; triggers: boolean; ssl: boolean } };
 export type RestoreBackupRequest = { id: string; include: { tables: Array<string>; table_data: Array<string>; applications: Array<string>; file_stores: Array<string>; users: boolean; agents: boolean; triggers: boolean; ssl: boolean } };
 export type RestoreBackupResponse = { restored: Array<string>; warnings: Array<string> };
@@ -281,6 +282,7 @@ export interface ApiClient {
   getSettings(): Promise<GetSettingsResponse>;
   updateSettings(body: UpdateSettingsRequest): Promise<UpdateSettingsResponse>;
   sendTestEmail(body: SendTestEmailRequest): Promise<SendTestEmailResponse>;
+  getPythonStatus(): Promise<GetPythonStatusResponse>;
   getBackupOptions(): Promise<GetBackupOptionsResponse>;
   restoreBackup(body: RestoreBackupRequest): Promise<RestoreBackupResponse>;
 }
@@ -1218,6 +1220,14 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("sendTestEmail", res);
       return (await res.json()) as SendTestEmailResponse;
+    },
+    async getPythonStatus() {
+      const res = await doFetch(`${baseUrl}/api/python`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getPythonStatus", res);
+      return (await res.json()) as GetPythonStatusResponse;
     },
     async getBackupOptions() {
       const res = await doFetch(`${baseUrl}/api/backup`, {

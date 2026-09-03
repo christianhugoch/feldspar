@@ -1865,6 +1865,47 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // **Python, as this process has it** (design §15; TODO "The Python code
+    // adapter" §7). Read-only, on the Development tab, and none of it is a
+    // setting: "why does my Python trigger not work" has three answers — not
+    // built with Python, built but told not to start one, running — and every
+    // number beside them is a fact about the running process rather than
+    // something an admin types. `explanation` is the server's own sentence for
+    // whichever state it is in, because which one is true depends on how this
+    // binary was built and how it was started.
+    set.register(
+        Endpoint::new("getPythonStatus", Method::Get, api().lit("python"))
+            .output(TypeSchema::struct_of([
+                StructField::new("state", TypeSchema::text()),
+                StructField::new("version", TypeSchema::optional(TypeSchema::text())),
+                StructField::new("explanation", TypeSchema::text()),
+                // Where the environment is, where a package lands inside it, and
+                // which external interpreter builds it (§9). All optional: an
+                // interpreter that has not started cannot say which directory
+                // its packages would come from, because that depends on its own
+                // version.
+                StructField::new("dir", TypeSchema::optional(TypeSchema::text())),
+                StructField::new("site_packages", TypeSchema::optional(TypeSchema::text())),
+                StructField::new("bin", TypeSchema::optional(TypeSchema::text())),
+                StructField::new(
+                    "packages",
+                    TypeSchema::array(TypeSchema::struct_of([
+                        StructField::new("name", TypeSchema::text()),
+                        StructField::new("version", TypeSchema::optional(TypeSchema::text())),
+                    ])),
+                ),
+                // The admission bound and what is against it, then the leak:
+                // a thread that never came back cannot be reclaimed, so the
+                // count is here to be seen long before it reaches its limit.
+                StructField::new("max_inflight", TypeSchema::int()),
+                StructField::new("resident", TypeSchema::int()),
+                StructField::new("threads", TypeSchema::int()),
+                StructField::new("stuck", TypeSchema::int()),
+                StructField::new("max_stuck", TypeSchema::int()),
+            ]))
+            .auth(AuthRequirement::admin()),
+    );
+
     // --- backup & restore ---------------------------------------------------
     // Two of the four backup operations are here; the other two are routes outside
     // this set, because one *is* a file and the other *takes* one, and a

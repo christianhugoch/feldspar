@@ -1098,16 +1098,71 @@ Two decisions worth naming:
 
 ## Phase 4 — The import gate and the diagnostics
 
-- [ ] 4.1 The meta-path import gate (§1 of the API): the standard-library allow-list, the
+- [x] 4.1 The import gate (§1 of the API): the standard-library allow-list, the
       deny-list, installed distributions allowed, `os.environ` unreadable — and every refusal
-      naming the module and saying what the rule is.
-- [ ] 4.2 Settings → Development: **which of §7's three states this process is in** (not built
+      naming the module and saying what the rule is. **Not** on the meta path; see below.
+- [x] 4.2 Settings → Development: **which of §7's three states this process is in** (not built
       with Python · built but not yet initialised · running, with the version), then the
       environment's path, the packages installed in it, the admission bound, how many runs are
       resident, and the quarantined-thread count.
-- [ ] 4.3 Tests: `import subprocess` refused by name; `import numpy` allowed when installed;
+- [x] 4.3 Tests: `import subprocess` refused by name; `import numpy` allowed when installed;
       `import math` allowed; the gate's honesty documented in the module docs rather than
       overstated.
+
+### What phase 4 landed, and the one thing it moved
+
+The gate is `src/py/gate.py`, and **it is not a `sys.meta_path` finder**, which is
+the one place this phase departs from what 4.1 asked for. A finder cannot tell
+whose import it is answering: a body that imports `requests` makes `urllib3`
+import `socket`, so a finder enforcing the deny-list would refuse the installed
+packages §1 exists to allow — and, because a finder is only consulted for a
+module not already in `sys.modules`, `import socket` would be refused or allowed
+depending on what some earlier body happened to import. An answer that changes
+under you is worse than the hole it closes.
+
+So the gate is the **body's own `__import__`**: a run's globals carry a copy of
+`builtins` whose `__import__` is the gate's. An import statement in the body is
+looked up there and checked; an import inside a library the body called reads
+that library's own module globals and is not. That is exactly the line §1 draws
+— the author's own mistakes — and the suite pins both halves: `import tempfile`
+works although `import shutil` is refused, and `uuid` calls `os.urandom` although
+the body's `os` has no `urandom`.
+
+Three smaller decisions worth naming:
+
+1. **The allow-list is stated as its complement.** §1 describes the standard
+   library minus what reaches the process, the network and the disk, plus
+   everything installed in this server's environment. `isolate_path` has already
+   taken the host's packages off `sys.path`, so "not standard library and not
+   denied" *is* "installed here" — one list to maintain instead of two, and a
+   name nobody installed fails as CPython's own `ModuleNotFoundError` rather than
+   as a refusal that would read as though the gate had an opinion about it.
+2. **`os` is a stand-in module, not a rule about a name.** `os.path` is a library
+   of string functions everybody uses, and `os.environ` is where this server
+   keeps its database URL — so the body gets a `ModuleType` subclass that
+   delegates everything but the environment and the exec/spawn/fork families. It
+   raises `PermissionError` rather than `AttributeError`, because
+   `from os import environ` would swallow the latter and re-raise it as "cannot
+   import name", losing the sentence that says why.
+3. **`__sc` and `__sc_boot` are deliberately *not* refused.** The bridge
+   functions are bound into a run's globals anyway wherever the run holds the
+   surface, and each checks that for itself; `boot.py` already says a body that
+   reaches into the pipeline is the same body that can reach
+   `().__class__.__mro__`. A rule that only looks like a boundary is worse than
+   no rule, which is the whole of §10 in one line.
+
+The diagnostics are `GET /api/python` (`getPythonStatus`) and a read-only panel
+on Settings → Development, beside the two logging switches. The **runtime**
+rather than the adapter rides on `AppMounts` for it, because "which state is
+this process in" is not a question `CodeAdapter` should carry; `python_adapter`
+therefore answers an `Arc<PythonRuntime>` and coerces where a dispatcher wants
+the trait object. `resident` is a counter rather than the semaphore's permits,
+since §6's nested runs are admitted *past* the bound and permits would
+under-report exactly when a server is busiest. The package listing is a
+directory read of `*.dist-info` rather than a `pip` call: a screen should not
+need a subprocess to render, and `pip` is phase 5's — which is also when the
+environment directory gets a default, so today a server with no `--python-dir`
+is reported as having no environment rather than as having an empty one.
 
 ## Phase 5 — The Python environment
 

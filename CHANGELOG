@@ -2,6 +2,68 @@
 
 Changes in reverse chronological order.
 
+## What a Python body may import, and what the screen says about Python
+
+Phase 4 of the Python code adapter: the import gate, and the diagnostics that
+answer "why does my Python trigger not work" before an admin has to guess.
+
+- **The gate is the body's own `__import__`, not a meta-path finder.** A run's
+  globals carry a copy of `builtins` whose `__import__` refuses the
+  standard-library modules that reach the process (`subprocess`, `signal`,
+  `ctypes`, …), the network (`socket`, `ssl`, `http`, `urllib.request`, …) and
+  the disk (`shutil`), plus the import machinery and the thread modules. The
+  plan asked for a finder; a finder cannot tell whose import it is answering, so
+  it would refuse `socket` to the `urllib3` inside somebody's `requests` — the
+  packages the gate exists to allow — and, since a finder is only consulted for
+  a module not already in `sys.modules`, its answer would depend on what an
+  earlier body imported. An import statement *in the body* is checked; an import
+  inside a library the body called is not, which is exactly the line the
+  specification draws.
+- **Every refusal names the module and states the rule**, with what to use
+  instead: `import socket` says `fetch(url, …)` is how a body makes a request
+  and is the one this run's budget and deadline can see; `import shutil` says
+  `fs(store)` is the one a store's permissions apply to; `import threading` says
+  a run is one thread and its deadline is enforced on that thread. It arrives as
+  an `ImportError` on the author's own line.
+- **`os` is allowed for `os.path`, and the environment is not readable.** The
+  body gets a stand-in module that delegates everything but `environ`, `getenv`,
+  `putenv` and the `exec`/`spawn`/`fork`/`system` families, refusing them with
+  `PermissionError` — not `AttributeError`, which `from os import environ` would
+  swallow and re-raise as "cannot import name", losing the sentence that says a
+  value a body needs belongs in Settings and reaches it as a binding.
+- **It is hygiene, not privilege, and it says so where somebody will read it.**
+  `builtins.open` is still there, so is `().__class__.__mro__`, and `__sc` and
+  the boot module are deliberately *not* refused — the bridge functions check the
+  run's surfaces for themselves, so a rule against the module they live in would
+  only look like a boundary. The two obvious ways around the gate are named in
+  its own docstring rather than left to be discovered. The real bound is the one
+  `db.sql` and installing a module already have.
+- **Settings → Development now reports Python.** A read-only panel over
+  `GET /api/python`: which of the states this process is in — not built with
+  Python (a rebuild), built but told `--python off` (a restart), built and not
+  needed yet, or running with the interpreter's version — the server's own
+  sentence naming that state's remedy, the environment directory and where a
+  package lands inside it, what is installed there, the admission bound and what
+  is against it, the run threads, and the count of threads that never came back.
+  Nothing on it is editable: the two numbers an operator can change are flags,
+  and a form that pretended otherwise would be worse than none.
+- **The runtime rides on `AppMounts`, not the adapter.** "Which state is this
+  process in" is not a question `CodeAdapter` should carry, so `python_adapter`
+  answers an `Arc<PythonRuntime>` and coerces where the dispatcher wants the
+  trait object. `resident` is a counter rather than the admission semaphore's
+  permits, because a nested run is admitted past the bound and permits would
+  under-report exactly when a server is busiest. The package listing is a
+  directory read of `*.dist-info`, so the screen needs no subprocess to render;
+  `pip` is phase 5's.
+- **15 new tests.** Ten in `sc-python/tests/python_imports.rs` — the refusals
+  and their sentences, `urllib.parse` surviving `urllib.request`'s refusal, a
+  package installed in a real environment directory being importable while an
+  absent one fails as CPython's own `ModuleNotFoundError`, and the two that pin
+  what the gate is *not*: `open` is there, and `import tempfile` works although
+  `import shutil` is refused. Two more drive `/api/python` through the assembled
+  router — in both builds, since what it says is different in each — and three
+  cover the panel's own model.
+
 ## The other four surfaces, in Python
 
 Phase 3 of the Python code adapter: `fetch`, `fs`, `trigger` and `modfn` join

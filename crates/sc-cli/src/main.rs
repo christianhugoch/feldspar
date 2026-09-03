@@ -202,11 +202,15 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // interpreter linked in, and starting nothing — the interpreter is the first
     // Python body's cost, exactly as the code isolate pool is the first
     // `run_js_code` body's.
+    // Built once and held: the dispatcher takes it as an adapter, and the mount
+    // registry takes the runtime itself, because the diagnostics screen asks it
+    // questions the adapter trait does not carry (phase 4.2).
+    let python = sc_server::python_adapter(&config);
     let triggers = sc_server::install_triggers_with_adapters(
         &catalog,
         evaluator.clone(),
         &agents,
-        [sc_server::python_adapter(&config)],
+        [python.clone() as Arc<dyn sc_server::CodeAdapter>],
     )
     .await?;
 
@@ -232,7 +236,8 @@ async fn serve_command(args: &[String]) -> Result<()> {
             .with_evaluator(evaluator)
             .with_triggers(triggers.clone())
             .with_agents(agents)
-            .with_modules(modules),
+            .with_modules(modules)
+            .with_python(python),
     );
     if config.base_domain.is_some() {
         mount_all(&apps).await;
