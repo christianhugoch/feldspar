@@ -1499,7 +1499,8 @@ deliberately relationship-free key/value stores — every `_sc_config` key gets 
 `FormField` declaration in `sc-config`, not from a row pointing anywhere.
 
 Tables named in §9 that are **not yet created**: `_sc_errors`, `_sc_models`,
-`_sc_model_instances`.
+`_sc_model_instances`. Named elsewhere and not yet created: `_sc_api_tokens` (§13.6), which
+will join this diagram hanging off `USERS` by value, for the reason `_sc_sessions` does.
 
 ---
 
@@ -4263,6 +4264,15 @@ All API access flows through the same authorization layer (§7), so an API calle
 the rows a user of that role/ownership would, and every provider participates in the shared
 TypeScript consumer generation (§13.1).
 
+**`mcp` here is the *application's* MCP surface, and it is not §13.6's.** The name in the
+trait's list is reserved for an application projecting its own endpoints — its tables, its
+actions, its custom queries — to its own users over MCP, mounted on a sub-path like every other
+provider and bounded by the same per-application access rules. The **administration** MCP
+server of §13.6 is a different surface with a different threat model: it projects the *admin*
+`EndpointSet`, it is one server-level route rather than one mount per application, and it
+carries a credential of its own. Two things wearing one protocol's name is a real hazard for a
+reader, so it is worth being explicit that neither is a stage of the other.
+
 #### Per-provider configuration
 
 `ApiConfig` is `{ provider, mount, config: Attrs }`, and the third field is a settings bag
@@ -4673,6 +4683,221 @@ which has no C dependency) or a few lines writing to that socket directly. **The
 on every target platform**; on non-Linux, or on Linux where `$NOTIFY_SOCKET` is unset (not run
 under systemd `Type=notify`), the call is a no-op. `RELOADING=1` / `STOPPING=1` can be sent on
 the corresponding lifecycle transitions by the same helper.
+
+### 13.6 The administration MCP server, and the API token
+
+*Not yet built; this section is the design the twentieth milestone implements
+([TODO.md](../TODO.md)).*
+
+An application built here is half **code in a git repository** and half **configuration in the
+database**: the tables and their fields, the access rules, the triggers, the workflows, the
+agents. An external coding agent has the first half through the filesystem and, until this
+section is built, no access at all to the second — so it can write every line of a feature's
+front end and neither add the column the feature stores nor the trigger that fires on it.
+
+The administration MCP server closes that half. It is served by the same process, projects the
+same admin `EndpointSet` (§13.1), runs under the same authorization layer (§7), and is reached
+with a bearer credential an administrator mints and can revoke.
+
+#### One authorization model, not two
+
+The decision everything else follows from: **an API token resolves to a `User`, and from there
+nothing is different.** A tool call is dispatched as an `ApiRequest` through the same
+`HandlerRegistry` an admin SPA request goes through, with that user as the caller. Each
+endpoint's `AuthRequirement` is enforced by the code that already enforces it; the row layer's
+ownership formulae and RLS apply because they apply to that user; every catalog endpoint stays
+behind `admin()` because it already is.
+
+An MCP surface with its own notion of who may do what would be a second answer to a question
+`sc-auth` and §7.3 already answer, and the two would drift within a release — the same argument
+`sc-api::schema_edit` makes for the schema editor living beside the row layer rather than in a
+handler, applied to the *caller* rather than to the operation.
+
+So the whole of the new authentication is a credential that **names a user**: not a principal,
+not a service account, not a role. The cost, accepted knowingly, is that a token outlives its
+owner's attention, which is what expiry, revocation and the audit line below are for.
+
+#### The token
+
+`_sc_api_tokens`, in the primary database, and — unlike `_sc_sessions` (§7.2) — a **logged**
+table: a lost session costs a re-login and a lost token costs a support call.
+
+| column | meaning |
+| --- | --- |
+| `token_hash` | SHA-256 of the token, hex — the primary key |
+| `user_id` | whose authority a call runs under; by value, not a foreign key, for §9.2's reason |
+| `label` | what the administrator called it — the name the audit line carries |
+| `grants` | the six flags below |
+| `created_at` · `expires_at` · `last_used_at` · `revoked_at` | |
+
+**What is stored MUST be the hash, never the token**, for the reason `_sc_sessions` gives: a
+bearer credential at rest is worth stealing and a hash of one is not. A fast hash is the
+correct one here — the token is 256 bits of uniform randomness, so there is no dictionary to
+run and nothing a slow hash (§7.2's argon2id, which is for passwords) would buy.
+
+Three details that are decisions rather than defaults:
+
+- **The wire format is prefixed** — `fspk_` and then the random bytes, base64url. A prefix is
+  what makes the credential greppable by a secret scanner and recognisable in a paste, and it
+  costs five characters.
+- **It is shown once**, in the mint response. Nothing reads it back, because nothing can.
+- **`last_used_at` is written at most once a minute per token.** A session writes *nothing* per
+  request and §7.2 says why; a token is rarer and its last use is worth more, but a write on
+  every tool call is still a write on the request path.
+
+Lookup reads the user rather than a copy of them, so a token whose user is deleted, demoted
+below `ROLE_ADMIN`, expired or revoked stops working at the next call — the same rule, and the
+same freshness argument, as the session cache's.
+
+#### Grants are the copilot's grants
+
+A token carries the **same six flags** an `admin_copilot` agent carries (§11.3): the four
+`schema_edit::Grants` — create, edit, drop, access changes — and the two areas, triggers and
+applications.
+
+Not a new scope language, and deliberately neither a subset nor a superset of that one. The
+vocabulary an administrator learns for *what may this agent do to my installation* should be
+one vocabulary whether the agent is the built-in copilot reached through the chat screen or an
+external one reached over MCP. It also means the enforcement is already written: a batch
+containing an ungranted operation is refused **whole**, naming the operation and the flag that
+would allow it, and an area that is off takes its tools out of the listing rather than leaving
+them to be refused — because a tool a model can see is a tool it will try.
+
+#### Bearer only, and that is the CSRF answer
+
+The route authenticates by `Authorization: Bearer` and by nothing else. **A session cookie on
+it MUST be ignored, not accepted.**
+
+This is not belt-and-braces; it is the whole of the confused-deputy story. A page an
+administrator visits cannot set an `Authorization` header cross-origin without a preflight this
+server will not answer, so no site they browse can reach the administrative surface through the
+session they happen to be logged into. Were cookies honoured here, the route would be a
+JSON-RPC-shaped hole beside every CSRF-protected endpoint in the server.
+
+Two consequences:
+
+- **The route is exempt from the CSRF middleware** (§16's double-submit check would refuse
+  every POST, since a bearer client has neither the cookie nor the header). The exemption
+  condition MUST be *authenticated by bearer, cookie ignored* rather than *the path is `/mcp`*:
+  a path-shaped exemption is one refactor away from being wrong.
+- **An `Origin` header is a refusal**, per the MCP specification's DNS-rebinding guidance —
+  rejected outright rather than validated against a list, because nothing that legitimately
+  speaks this protocol is a browser page.
+
+**On OAuth 2.1 with dynamic client registration**, which is the MCP specification's blessed path
+and which the common clients support: it is better UX — a browser consent screen, no token in a
+shell history — and it is an authorization-server metadata document, a registration endpoint,
+authorize and token endpoints, PKCE and a refresh story. That is a large new authentication
+surface for a feature whose users administer their own installation. Bearer is what is built;
+if remote multi-developer use ever justifies OAuth, `sc-auth` is where it goes and this token
+table is what it mints into — an authentication path added, not a credential model replaced.
+
+#### Off by default, and the switch is a setting
+
+Two `_sc_config` keys declared in the **Development** section (§6.2, beside `log_sql` and
+`log_verbosity`, whose section description already frames them as *for finding out what a
+running installation is doing, not for leaving on*): whether the server is enabled, and whether
+it accepts non-loopback peers.
+
+When it is off the route answers `404` **and the token table is not consulted** — a disabled
+feature should not be distinguishable from an absent one, and should not be a code path that
+reads credentials. It is a setting rather than a command-line flag for the reason the
+certificate and the SQL log are (§13.5): the moment you want it is the moment the server is
+already running.
+
+The loopback switch defaults **on**. The common deployment is a developer running an agent
+against a server on the same machine or behind a tunnel they made, and an installation that
+will never be reached remotely should be able to say so in a checkbox rather than in a reverse
+proxy.
+
+#### The tool surface: three tiers, and why it is not the whole admin API
+
+The admin `EndpointSet` is upwards of a hundred endpoints. Projecting all of them would be
+mechanical and wrong: a coding agent pays for every tool in its context on every turn, and most
+of those endpoints are the SPA's own plumbing.
+
+- **Tier 1 — composite tools.** The ones §11.3's `admin_copilot` already defines:
+  `describe_schema`, `edit_schema`, `describe_triggers`, `describe_action`, `save_trigger`,
+  `delete_trigger`, `describe_apps`, `save_query`, `delete_query`. These exist *because* a
+  one-endpoint-one-tool projection is the wrong shape — `edit_schema` takes an ordered operation
+  list because a schema is a set of connected tables and a per-operation tool turns a
+  twelve-table domain into forty round trips; `describe_action` is progressive disclosure
+  because no fixed schema can carry every action's settings.
+- **Tier 2 — generated from tagged endpoints.** An `Endpoint` gains an opt-in MCP tag carrying
+  the prose a model reads. Everything else is already in the value: the name, the typed path and
+  query parameters, and both `TypeSchema`s. `TypeSchema` → JSON Schema is the one new function,
+  and it is the sibling of the TypeScript generator's type mapping (§13.1).
+- **Tier 3 — deliberately absent.** Row CRUD, the file-store IDE routes (§12.1), backup and
+  restore, user management, and anything that reads a provider's key. Each is a real capability
+  and none of them is *administering the application*, which is what this server is for. An
+  agent that can add a column and an agent that can read customer rows are different
+  propositions, and only the first is what building an application requires.
+
+The result is on the order of twenty-five tools. **The number is a design constraint, not an
+outcome**: a tier-2 tag is a decision about somebody's context window and should be argued for
+rather than accumulated.
+
+#### Tools are `ToolSpec`s, which is why this is a projection and not a rewrite
+
+`sc_llm::ToolSpec` is `{ name, description, parameters }` and an MCP tool is `{ name,
+description, inputSchema }` — the same value with two spellings. So tier 1 is a rename.
+
+But `admin_copilot` lives in `sc-core-traits` (layer 9) and the projection belongs in `sc-api`
+(layer 8), so the **tool bodies move down**: they already touch only the catalog, the schema
+editor and the trigger set, all of which are layer 8 or below. `sc-core-traits::admin_copilot`
+becomes a thin `AgentTrait` over them, and the chat copilot and the MCP server become two
+callers of one implementation.
+
+**There is no new crate.** One would need `sc-core-traits` to reach the copilot's tools and
+`sc-server` to reach the mount registry, inverting the layering in two directions at once.
+
+#### Reloading the catalog and rebuilding an application
+
+An edit made over MCP must leave the running server coherent — and **no new machinery is
+required**, which is worth stating so nobody builds it twice.
+
+The catalog carries a `SchemaObserver` and the trigger dispatcher a `TriggerObserver`,
+installed by the server at the one place it holds both (§13.2). The reason is recorded there:
+the per-handler refresh calls "worked only while an HTTP request was the only way to change a
+schema", and an agent can change one too (§11.3). So a schema edit made through the shared
+editor — from the SPA, from the copilot, or from MCP — reloads the catalog **once**, at the end
+of the batch, re-projects the API providers of every mounted application exposing an affected
+table, and re-emits their generated clients to disk. A trigger saved, renamed or deleted does
+the same through the other observer.
+
+One gap is real and is closed here rather than left to be discovered. Re-projection
+deliberately **runs no bundler** — §13.2's reasoning is that an access change alters who may
+reach an app's data, not a byte it serves — but a *schema* change alters the generated
+TypeScript client, and a code framework serves a built bundle. Therefore:
+
+- the application build is a tier-2 tool, so an agent can rebuild what it changed; and
+- **a schema edit's result names the applications that were re-projected**, and says which of
+  them have a build and therefore want one. A result that silently leaves an application
+  serving a stale bundle is the half-finished state the batch's transaction exists to avoid.
+
+#### Transport, audit, and what a refusal reads like
+
+**One route, streamable HTTP, no server-initiated stream.** It sits beside the upload, backup
+and WebSocket routes and **outside** the `EndpointSet` for the reason they do: JSON-RPC over a
+raw body is not a shape `TypeSchema` describes. Every tool here is request/response and there
+is nothing to push, so an SSE channel would be a connection kept alive for no traffic. The
+protocol revision is pinned in **one constant** and checked against the client's — the only
+thing worse than refusing an unsupported revision is negotiating one by accident.
+
+**Every call is logged**: one line at `Info` through `sc-log` carrying the token's *label*
+(never the token and never its hash), the tool, the outcome and the duration; the arguments at
+`Verbose`. This is not an add-on. A bearer credential that lives ninety days is defensible when
+its use is visible in the log stream the operator is already watching, and indefensible when it
+is not — and the verbosity ladder that already puts an agent's tool-call arguments at `Trace`
+is the ladder this sits on.
+
+**A refusal is a result, not an exception.** §11.2's rule for agent tools applies unchanged: an
+error is what the model *reads*, so it must read as an instruction to somebody who cannot see
+the stack. "This token is not granted `drop`; the operation `drop_table invoices` was refused
+and the batch was not applied" is actionable; "Forbidden" is a turn wasted and then a guess.
+MCP has the shape for this — a tool result flagged as an error, which the model sees — and tool
+failures go there. JSON-RPC errors are reserved for what is wrong with the *call*: an unknown
+method, an unknown tool, an unsupported revision, a refused credential.
 
 ---
 

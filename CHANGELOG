@@ -2,6 +2,41 @@
 
 Changes in reverse chronological order.
 
+## The twentieth milestone: an administration MCP server, specified
+
+No code. The Python milestone is archived as `docs/TODO-post-mvp-19.md` and `TODO.md` is the
+next one: an **MCP server over the administrative surface**, so an external coding agent can
+reach the half of an application that lives in the database — tables, fields, access rules,
+triggers, workflows, agents — while it edits the half that lives in the repository. Editing
+application *source* stays out of scope: the agent already has the files.
+
+- **`docs/TECHNICAL_DESIGN.md` gains §13.6.** One authorization model rather than two — a
+  token resolves to a `User`, and every `AuthRequirement`, ownership formula and RLS rule then
+  applies because it already applies to that user. `_sc_api_tokens` with the SHA-256-at-rest
+  rule `_sc_sessions` argues for, a `fspk_` prefix so the credential is greppable, shown once,
+  and a throttled `last_used_at`. Grants are the **copilot's** six flags, not a second scope
+  language. Bearer only with the session cookie **ignored**, which is the whole CSRF story, and
+  the middleware exemption written as a condition rather than a path. Off by default as a
+  Development setting, loopback-only by default. Three tiers of tool — the copilot's composites,
+  a tagged projection of admin endpoints, and an explicit absence — landing on ~25 tools,
+  because the count is a constraint on somebody's context window rather than an outcome.
+- **§13.4 says which `mcp` is which.** The provider name reserved there is an *application*
+  projecting its own endpoints to its own users; §13.6 is the administration surface. Two things
+  under one protocol's name is a hazard for a reader, so neither is a stage of the other.
+- **§9.2 names `_sc_api_tokens`** as specified-but-not-yet-created, following the section's own
+  "as they exist today" rule; phase 2 draws it, which
+  `the_er_diagram_names_every_metadata_table` will insist on the moment the const lands.
+- **The reload/rebuild requirement turned out to be already met**, and the design says so rather
+  than leaving it to be rebuilt: the `SchemaObserver`/`TriggerObserver` seams reload the catalog
+  once per batch and re-project every affected mounted app, whatever made the edit. The one real
+  gap — re-projection runs no bundler, but a schema change moves the generated client — is
+  closed by making the build a tool and making a schema edit's result name the apps that want
+  one.
+- **One refactor, scheduled first**: `admin_copilot`'s tool bodies move from `sc-core-traits`
+  down into `sc-api`, so the chat copilot and the MCP server are two callers of one
+  `edit_schema` rather than two implementations that disagree about grants. No new crate — one
+  would invert the layering in two directions at once.
+
 ## Python, written down — and the milestone's definition of done, run by hand
 
 Phase 8 of the Python code adapter, and the last of it. Nothing in the server
