@@ -1346,18 +1346,88 @@ and the sync test confirms it.
 
 ## Phase 8 — Documentation and the definition of done
 
-- [ ] 8.1 `docs/TECHNICAL_DESIGN.md` §15 rewritten: the adapter shape as built (§2 above),
+- [x] 8.1 `docs/TECHNICAL_DESIGN.md` §15 rewritten: the adapter shape as built (§2 above),
       what a Python body is, what a Python plugin is, the GIL paragraph, the no-sandbox
       paragraph, and the reload paragraph. §15's original `CodeAdapter` trait sketch replaced.
-- [ ] 8.2 `docs/tutorial-python.md`: a `run_python_code` trigger from nothing, the five surfaces,
+- [x] 8.2 `docs/tutorial-python.md`: a `run_python_code` trigger from nothing, the five surfaces,
       then a plugin package written from an empty directory, installed, configured and used —
       ending with the two sentences an admin must read (no sandbox, restart to change versions).
-- [ ] 8.3 `README.md`: Python in the feature list; the interpreter/`pip` requirement stated where
+- [x] 8.3 `README.md`: Python in the feature list; the interpreter/`pip` requirement stated where
       the `node`/`npm` one is; and **the build line** — whether a stock build has Python, and the
       `--features python` rebuild that is the only way to add it (§7), because an operator who
       reads "off by default" and looks for a flag will not find one.
-- [ ] 8.4 CHANGELOG entry.
-- [ ] 8.5 The definition of done, by hand.
+- [x] 8.4 CHANGELOG entry.
+- [x] 8.5 The definition of done, by hand.
+
+### What phase 8 landed, and what the by-hand run found
+
+**§15 is two adapters now.** Its `CodeAdapter` sketch — `call(module, func, args)` plus
+`register(decl)` — is gone rather than left beside the built trait, and the section says why both
+halves of it turned out to be jobs something else already does: the first is the module host
+(`ModuleFnHost`, an `Action`, a `TableProviderHost`, each with its own budget and call site) and
+the second is what a manifest does. What is left is `run_code`, and one `CodeCall` in either
+language. §15.2 is the Python half — the runtime, the body, the plugin, packaging and the ABI
+check, the no-sandbox paragraph, the reload paragraph and the build table — and it carries all
+four of the gate's amendments: the feature is off because the shipped artifact is `+crt-static`,
+the in-flight host call is deadline-bounded and not only the next one, the ABI check is justified
+by the **untagged** extension that loads and reads the wrong memory in silence, and §1's two wrong
+numbers are replaced by phase 0's measurements. The stale `sc-code` crate went with it: the crate
+map, the extension-point table and the architecture diagram now name `sc-module` and `sc-python`,
+which is what exists.
+
+**`docs/tutorial-python.md`** starts where nothing else in this repository has to: with "does this
+server have Python at all", because it is the one capability a stock binary does not have and
+three of the four answers are not settings. Then a `run_python_code` trigger, the five surfaces,
+scope and imports and the bounds, and a plugin package written from an empty directory —
+`pyproject.toml`, the `saltcorn.plugins` entry point, an action, a function and a table provider —
+installed from a local directory, configured, and used from a trigger, a formula and a table. It
+ends with the two sentences an admin must read, and with the two smaller ones nobody should
+discover in production (CPU-bound runs serialise; runs share `sys.modules`).
+
+**The README's Python section sits where the npm one does**, and says the thing an operator will
+otherwise go looking for a flag to find: the feature is a **rebuild**, the packaged static
+artifact cannot carry Python at all, and a Python-capable server is a separate dynamically-linked
+build. The five flags are in the options table, the prerequisites table has a row that says
+"only for a server that runs Python", and Troubleshooting has the two failures whose cause is not
+in the message — "built without Python support", and a dynamic-linker error before `main`.
+
+**Four `repo_hygiene` tests** pin what a rewrite would quietly lose: the tutorial's coverage of
+each surface **and** its two obligations, the README's build line, §15's two adapters (including
+that the superseded sketch is *gone*), and the cross-links between the triggers, modules and
+Python tutorials.
+
+**The definition of done, by hand.** A debug `--features python` build (31 s, incremental) against
+a scratch database, driven through the admin API rather than the SPA, with the Development panel
+and the Modules tab read through the same endpoints the screens call:
+
+1. **The body.** A `run_python_code` trigger on `insert` of `orders` reads
+   `db.orders.where(status="new").rows()` and a `.sum()`, calls a local endpoint with `fetch`,
+   writes `daily/new-orders.json` into a `local` file store, runs a second Python trigger with
+   `trigger("note_it").run(...)` and returns a dict. Inserting a row fired it: the file on disk
+   held `{"count": 2, "total_usd": 381.5}`, the child trigger's row was in `audit`, and pressing
+   Run on the child returned `{"noted": 2}` to the caller. **The first attempt failed**, and
+   usefully: `total * usd` raised `TypeError: can't multiply sequence by non-int`, reported as
+   `line 13, in <body>` **with the author's own source line beside it** — which is 0.5's
+   `linecache` detail working in production rather than in a test.
+2. **The plugin.** The tutorial's package, installed from a directory as written: pip built and
+   installed it into a venv the server created, and the manifest came back with the action's
+   `note` field, the function's signature, the provider and the module's two settings. Saving
+   `{"api_key": …, "region": "us"}` returned the key as `••••••••` and re-ran `on_load` — the
+   action's result said `"region": "us"` afterwards. The action swept two `done` tasks, writing
+   `who=admin@example.com` through `sc.db` (so the caller's identity crossed into module code).
+   `shout` answered both from a body (`modfn.shout` and the qualified `modfn("saltcorn-sweeper")`)
+   and **from a formula**, as an `only_if` that let `shouty` through and declined `quiet`. A table
+   created from `Sweeper log` listed its three rows and filtered them.
+3. **The runaway.** `while True: pass` with `timeout_ms: 2000` came back at **2.03 s** with
+   "trigger `spin`: this code exceeded its 2000 ms time limit"; the next request answered 200,
+   and the panel reported `stuck 0` — the thread was reclaimed rather than quarantined.
+4. **`numpy`.** `pip install numpy` into the server's environment, then a body doing
+   `np.array(...).mean()` beside `statistics.pstdev` answered 175.0 — and the same body's
+   `import subprocess` was refused with the gate's own sentence.
+
+The Development panel told the truth at each step: `not_initialised` before anything Python ran,
+then `running` CPython 3.14.4 with two run threads, the environment's `site-packages`, and
+`numpy 2.5.2` and `saltcorn_sweeper 0.1.0` in its package list.
 
 ---
 

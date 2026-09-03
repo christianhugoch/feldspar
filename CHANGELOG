@@ -2,6 +2,82 @@
 
 Changes in reverse chronological order.
 
+## Python, written down — and the milestone's definition of done, run by hand
+
+Phase 8 of the Python code adapter, and the last of it. Nothing in the server
+changed; what changed is that the three documents an admin, an operator and a
+maintainer read now say what was built, and the milestone's definition of done
+was executed against a running server rather than inferred from the suites.
+
+- **`docs/TECHNICAL_DESIGN.md` §15 describes two adapters.** Its old
+  `CodeAdapter` sketch — `call(module, func, args)` plus `register(decl)` — is
+  **gone** rather than left beside the built trait, and the section says why both
+  halves of it turned out to be jobs something else already does: the first is
+  the module host (a `ModuleFnHost`, an `Action`, a `TableProviderHost`, each
+  with its own budget and its own call site), the second is what a manifest does.
+  What is left over is `run_code`, one `CodeCall`, in either language.
+- **§15.2 is the Python half**: one interpreter and why; the GIL paragraph with
+  phase 0's measurements in it (2.0 s where the wrong answer would have been
+  16.0 s, 34–42 KB per resident run, 6.5 MB for the interpreter, and CPU-bound
+  runs serialising *with contention on top*); what a body is, down to the `ast`
+  wrap and the lock rule the compiled-body cache follows; the four instruments
+  that stop a run and the one that cannot; the import gate stated as hygiene; the
+  plugin API and its signature inspection; packaging and the ABI check; **there
+  is no sandbox**; and **a restart is the guarantee** a reload is not.
+- **All four of the gate's amendments landed in the design document**, which is
+  where phase 0 said they should: the feature is off by default because this
+  project's shipped artifact is `+crt-static` and the Python link fails outright
+  under it; the deadline bounds the host call **already in flight**, because
+  `SetAsyncExc` provably cannot reach a thread blocked in one; the ABI check is
+  justified by the *untagged* extension that loads and reads the wrong memory in
+  silence, not by a segfault that does not happen; and `numpy` is 13.4 MB.
+- **The stale `sc-code` crate went with it.** The crate map, the extension-point
+  table and the architecture diagram named a crate this milestone deliberately
+  did not create; they name `sc-module` and `sc-python` now, which is what exists.
+- **`docs/tutorial-python.md`** (new) starts with the question no other tutorial
+  here has to ask — *does this server have Python at all* — because it is the one
+  capability a stock binary does not have and three of the four answers are not
+  settings. Then a `run_python_code` trigger written from nothing, the five
+  surfaces one at a time, scope and imports and the bounds, and a plugin package
+  built from an empty directory: `pyproject.toml`, the `saltcorn.plugins` entry
+  point, an action, a function and a table provider, installed from a local
+  directory, configured, and then used from a trigger, a formula and a table. It
+  ends with the two sentences an admin must read (no sandbox; a version change
+  needs a restart) and two smaller ones nobody should discover in production.
+- **The README says the build line where an operator will look for it.** A
+  prerequisites row that says "only for a server that runs Python"; a section
+  beside the npm one saying the feature is a **rebuild**
+  (`cargo build --release -p sc-cli --features python`), that the packaged static
+  artifact cannot carry Python at all, and that a Python-capable server is a
+  separate dynamically-linked build; the five `--python*` flags in the options
+  table; and two Troubleshooting entries for the failures whose cause is not in
+  the message — "built without Python support", and a dynamic-linker error before
+  `main`.
+- **Four `repo_hygiene` tests** pin what a rewrite would quietly lose: the
+  tutorial's coverage of each surface *and* its two obligations, the README's
+  build line, §15's two adapters (including that the superseded sketch is gone),
+  and the cross-links between the triggers, modules and Python tutorials.
+
+**The definition of done, executed.** A debug `--features python` build against a
+scratch database, driven through the admin API — the same endpoints the screens
+call:
+
+1. A `run_python_code` trigger on `insert` of `orders` read rows with
+   `db.orders.where(status="new").rows()`, called an endpoint with `fetch`, wrote
+   a JSON file into a file store, ran a second Python trigger and returned a
+   dict; inserting a row fired all of it, and the child's Run button answered its
+   result. The first attempt **failed usefully**: a `TypeError` reported as
+   `line 13, in <body>` with the author's own source line beside it.
+2. The tutorial's plugin package installed from a directory; its action, function
+   and table provider all worked from the screens' endpoints — the secret came
+   back redacted and merged, `on_load` re-ran on a settings change, the function
+   answered from a body **and** from an `only_if` formula, and a table created
+   from the provider listed and filtered its rows.
+3. `while True: pass` came back at 2.03 s naming the trigger, the next request
+   answered 200, and no thread was quarantined.
+4. `import numpy` got `numpy` (2.5.2, used), while the same body's
+   `import subprocess` was refused with the gate's own sentence.
+
 ## The admin UI learns the second language
 
 Phase 7 of the Python code adapter. Everything an admin does about Python now

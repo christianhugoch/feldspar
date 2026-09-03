@@ -605,6 +605,12 @@ action is not enough: the same event model, but the body is a **program** — st
 loop, a durable wait and an approval a person answers tomorrow — drawn on a canvas and versioned,
 so a run that has been waiting since yesterday finishes on yesterday's program.
 
+If the body you want to write is Python rather than JavaScript, that is one dropdown away:
+[tutorial-python.md](tutorial-python.md) is this step 5 in the other language — the same tables,
+the same budgets, the same triggers, `db.tasks.where(done=True).rows()` with nothing awaited —
+and it goes on to a `pip`-installable plugin package supplying an action, a function and a table
+of its own. Read step 0 of it first: Python needs a build that has it.
+
 And [tutorial-agents.md](tutorial-agents.md), which adds one more action to the table above:
 `run_agent`, whose configuration is an agent's name and a prompt formula over the same event. An
 agent is a configured LLM loop that can read your tables, run the triggers you built here, and

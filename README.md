@@ -22,6 +22,11 @@ own, for every other kind of box. (Design and planning docs live under
   present. It does **not** create the database itself — you do that once (below).
 - An admin logs in through the SPA, creates tables and fields, edits rows, and
   manages users.
+- **Triggers can run code**, in JavaScript or in **Python** — a trigger body that reads
+  and writes your tables, calls endpoints, writes files and runs other triggers. The
+  JavaScript half is in every build; **Python needs a build that has it** (§3), and the
+  shipped tarball does not. See [`docs/tutorial-triggers.md`](docs/tutorial-triggers.md)
+  and [`docs/tutorial-python.md`](docs/tutorial-python.md).
 
 The MVP is deliberately scoped: one database, basic column types only, no
 workflows/agents/models, no file stores or applications yet. See the "Out of MVP
@@ -356,6 +361,7 @@ database (§7).
 | **PostgreSQL** | 13 or newer (16 recommended) | the primary data store — *or* SQLite, see §5 Option C |
 | **libclang** (`libclang-dev`) | any recent | building the module runtime (`deno_runtime` → `bindgen`); build time only |
 | **npm** (and the Node.js it ships with) | Node 18+ | building the admin UI bundle (optional; see §6), **and** *installing* modules (Settings → Modules) |
+| **CPython** + `pip`, and `python3-dev` to build against | 3.11+ | **only** for a server that runs Python trigger bodies or installs Python modules — and only in a build that has the `python` feature (below) |
 
 Install Rust via [rustup](https://rustup.rs/):
 
@@ -380,6 +386,50 @@ permission set an admin grants on the Modules tab, closed until they do; the
 [`docs/tutorial-table-providers.md`](docs/tutorial-table-providers.md) for a module
 that supplies a **table** rather than an action.
 
+### Python, which is a build and not a flag
+
+A trigger body can be Python, and a module can be a `pip`-installable Python
+distribution ([`docs/tutorial-python.md`](docs/tutorial-python.md)). That half of the
+server is **off unless the binary was built with it**, and there is no flag that turns
+it on afterwards:
+
+```bash
+sudo apt install python3-dev                       # the libpython this links against
+cargo build --release -p sc-cli --features python  # the only way to get Python support
+```
+
+The reason is linkage rather than policy. Python is *embedded*: the build links
+`libpython3.x.so` into the binary, so a binary built with the feature **will not start
+at all** on a host that has no matching library — a dynamic-linker error before the
+server prints anything — and **the packaged artifact of §4.1 cannot carry it**, being a
+static binary with no shared-library dependencies by design. So the shipped tarball has
+no Python, and a Python-capable server is a separate, dynamically-linked build. One such
+build serves every CPython from **3.11** up (`abi3`), as long as the matching
+`libpython` is present on the host.
+
+At run time such a server wants two more things, both only when Python is actually used:
+a `python3` on its `PATH` with `pip` available (that is what *installs* a Python module,
+into a virtual environment the server owns and creates — `--python-dir`), and nothing
+else. The interpreter that runs your code is the one linked in, and it is not started
+until the first Python body or module asks for it. `--python off` keeps it that way for
+good.
+
+**The interpreter `pip` runs under must match the one linked in**, to the minor version.
+`--python-bin` names it (default `python3`); on a mismatch the server refuses to put the
+environment on its import path and says so on Settings → Development, naming both
+versions — because a compiled extension built against one version and loaded into
+another does not reliably fail, it reads the wrong memory in silence.
+
+**And there is no sandbox for Python.** A JavaScript module gets a permission set; a
+Python module runs inside the server with the server's own privileges, because CPython
+has no equivalent to grant. The Modules tab says so where the other language's
+permissions form is. Install what you trust; writing a Python trigger body is an
+administrator's capability in the same way `db.sql` already is.
+
+Settings → Development reports which of four states this process is in — not built with
+Python, built but turned off, built and not started yet, or running with its version —
+plus the environment, what is installed in it, and how many runs are in flight.
+
 ---
 
 ## 4. Get the code and do a first build
@@ -396,6 +446,13 @@ The binary is produced at `target/release/feldspar` (or `target/debug/feldspar`
 for a plain `cargo build`). You can also run it through cargo with
 `cargo run --release -p sc-cli -- <args>`.
 
+**Add `--features python`** to that command line if this server is to run Python trigger
+bodies or install Python modules (§3). It is a build-time decision and the only one:
+there is no flag that adds Python to a binary built without it, and a build without it
+still *offers* the `run_python_code` action — it fails at fire time saying the server was
+built without Python support, so a trigger's configuration keeps its meaning across
+deployments.
+
 ### 4.1 Building for a machine that will not have a toolchain
 
 Everything above builds *here*, and the binary it produces belongs here: it is
@@ -411,7 +468,10 @@ scripts/build-static.sh --help             # targets, install prefix, options
 
 The binary inside is statically linked (`+crt-static`), so it has no shared-library
 dependencies and no interpreter: the same tarball runs on Debian, Ubuntu, RHEL and
-on Alpine. It carries the admin SPA and the IDE beside it, and an `install.sh` that
+on Alpine. **That is also why it has no Python** — embedding CPython means linking
+`libpython`, which a static binary cannot do (and could not `dlopen` a C-extension wheel
+even if it did), so a Python-capable server is the separate dynamically-linked build of
+§3 rather than this artifact. It carries the admin SPA and the IDE beside it, and an `install.sh` that
 puts the tree at `/opt/feldspar` — the prefix compiled into the binary, which
 `--prefix` changes at build time.
 
@@ -718,6 +778,11 @@ other users can read it.
 | `--base-domain <domain>` | domain that applications are served under: an app with subdomain `blog` is served at `blog.<domain>` | none (app routing off) |
 | `--code-workers <n>` | V8 isolates serving `run_js_code` trigger bodies | `2` |
 | `--code-max-inflight <n>` | runs each of those isolates keeps resident at once | `256` |
+| `--python <auto\|off>` | whether this process starts its Python interpreter (never in a binary built without the `python` feature) | `auto` |
+| `--python-max-inflight <n>` | Python runs resident at once | `32` |
+| `--python-max-stuck <n>` | runs that never returned before Python is refused until a restart | `8` |
+| `--python-dir <dir>` | the virtual environment Python modules install into | the platform's data directory |
+| `--python-bin <path>` | the interpreter `pip` runs under | `python3` |
 
 Unknown flags in either group are rejected with a clear error rather than ignored.
 
@@ -946,6 +1011,17 @@ A `200` here means the process booted and is accepting requests.
   Confirm with `curl -i http://localhost:3032/` — a working setup returns a document
   linking `/assets/index-<hash>.js`, and that URL returns
   `content-type: text/javascript`.
+- **A Python trigger says the server was built without Python support.** It was: the
+  `python` feature is a build-time decision and no flag substitutes for it (§3). Rebuild
+  with `cargo build --release -p sc-cli --features python`, or check Settings →
+  Development, which names which of the four states this process is in and what to do
+  about each.
+- **The server will not start: `error while loading shared libraries: libpython3.x.so`.**
+  This binary was built with the `python` feature and the host has no matching
+  `libpython`. Install it (Debian: `python3-dev`, or the `libpython3.x` runtime package),
+  or run a binary built without the feature. `abi3` means any CPython 3.11+ will do, but
+  the *soname* is version-specific, so it must be the one the build linked against or a
+  symlink to a compatible one.
 - **Login/session doesn't stick behind HTTPS.** Add `--secure-cookies` so the
   cookies are sent over TLS. Conversely, do **not** use `--secure-cookies` for
   plain-HTTP local development, or the browser will drop the cookies.
@@ -960,6 +1036,14 @@ Run the workspace checks and tests:
 cargo fmt --check
 cargo clippy --workspace --all-targets
 cargo test --workspace
+```
+
+The workspace's default features leave Python out, so those three commands need no
+Python toolchain. The adapter's own suite does — it embeds an interpreter:
+
+```bash
+cargo test -p sc-python --features python-host    # needs python3-dev, and pip for the
+                                                  # environment tests
 ```
 
 Integration tests run against a **real Postgres**, reinitialised per test. Point

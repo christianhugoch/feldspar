@@ -320,6 +320,25 @@ fn tutorials_are_cross_linked() {
         "the triggers tutorial builds on the ownership tutorial and should link it"
     );
     assert!(
+        triggers.contains("tutorial-python.md"),
+        "the triggers tutorial should point at the Python tutorial, which is its step 5 in \
+         the other language"
+    );
+    let python = read(&root, "docs/tutorial-python.md");
+    assert!(
+        python.contains("tutorial-triggers.md"),
+        "the Python tutorial builds on the triggers tutorial and should link it"
+    );
+    assert!(
+        python.contains("tutorial-modules.md"),
+        "the Python tutorial should link the modules tutorial, which is its other half"
+    );
+    let modules = read(&root, "docs/tutorial-modules.md");
+    assert!(
+        modules.contains("tutorial-python.md"),
+        "the modules tutorial covers one of two languages and should link the other"
+    );
+    assert!(
         triggers.contains("tutorial-agents.md"),
         "the triggers tutorial should point at the agents tutorial as a next step"
     );
@@ -456,6 +475,106 @@ fn the_workflows_tutorial_teaches_each_part_of_the_engine() {
             workflows.contains(fragment),
             "the workflows tutorial should cover `{fragment}`"
         );
+    }
+}
+
+/// The Python tutorial has to teach **the whole of the second language**, and
+/// two of its fragments are obligations rather than topics: an admin who installs
+/// a Python module gets no sandbox, and a version change is not live until a
+/// restart. Both are said on the Modules tab, and a tutorial that quietly lost
+/// either would still read fine — which is exactly why they are pinned here.
+#[test]
+fn the_python_tutorial_teaches_the_language_and_says_what_it_costs() {
+    let root = workspace_root();
+    let python = read(&root, "docs/tutorial-python.md");
+    for fragment in [
+        "Settings → Development",    // which of the four states this process is in
+        "--features python",         // …and the rebuild that is the only way into it
+        "run_python_code",           // the action a body is configured on
+        "Nothing is awaited",        // the one deep difference from the JS body
+        "db.tasks",                  // the five surfaces, each at least once
+        "fetch(",                    //
+        "fs(\"uploads\")",           //
+        "trigger(\"archive_done\")", //
+        "modfn",                     //
+        "import subprocess",         // the gate, refusing the author's own import
+        "hygiene, not a sandbox",    // …and its honest account of itself
+        "saltcorn.Timeout",          // the deadline a bare `except Exception` must not eat
+        "1000 rows",                 // the bounds a body runs inside
+        "saltcorn.plugins",          // the plugin: how a distribution advertises one
+        "@sc.action",                // …the three things it can supply,
+        "@sc.function",              //
+        "@sc.table_provider",        //
+        "inspect.signature",         // …the parameter rule that is better than v1's
+        "sc.Field.string",           // …and the field vocabulary its settings speak
+        "Python — local directory",  // installing one, in the words the form uses
+        "--python-bin",              // …and the ABI trap that flag is the repair for
+        "There is no sandbox",       // the first sentence an admin must read
+        "at the next restart",       // …and the second
+    ] {
+        assert!(
+            python.contains(fragment),
+            "the Python tutorial should cover `{fragment}`"
+        );
+    }
+}
+
+/// Python is the one capability a **stock build does not have**, so the three
+/// documents an operator reads have to say the same thing about it: the feature
+/// is a rebuild, the shipped tarball has none, and there is no flag that adds it.
+/// An operator who reads "off by default" and goes looking for a flag will not
+/// find one.
+#[test]
+fn the_readme_states_the_python_build_line() {
+    let root = workspace_root();
+    let readme = read(&root, "README.md");
+    for fragment in [
+        "--features python",       // the rebuild, spelled out
+        "python3-dev",             // …and what it links against
+        "libpython",               // why it is a build-time decision at all
+        "docs/tutorial-python.md", // where an admin goes next
+        "--python-max-inflight",   // the runtime knobs, in the options table
+        "--python-bin",            //
+    ] {
+        assert!(
+            readme.contains(fragment),
+            "the README should state `{fragment}` about Python"
+        );
+    }
+    // The static artifact and the Python build are mutually exclusive, and §4.1
+    // is where somebody deciding how to deploy will look for it.
+    assert!(
+        readme.contains("why it has no Python"),
+        "§4.1 should say that the packaged static artifact carries no Python"
+    );
+}
+
+/// §15 of the design document is the code-adapter section, and since the Python
+/// milestone it describes **two** adapters. The old `CodeAdapter` sketch
+/// (`call(module, func, args)` + `register(decl)`) was superseded by what was
+/// built, and a document still carrying it would send a reader looking for a
+/// trait that does not exist.
+#[test]
+fn the_design_document_describes_both_code_adapters() {
+    let root = workspace_root();
+    let design = read(&root, "docs/TECHNICAL_DESIGN.md");
+    assert!(
+        design.contains("### 15.2 Python"),
+        "§15 should have a Python subsection beside §15.1's modules"
+    );
+    assert!(
+        !design.contains("async fn call(&self, module: &str, func: &str"),
+        "§15's superseded `CodeAdapter` sketch should be gone, not sitting beside the built one"
+    );
+    for fragment in [
+        "async fn run_code(&self, call: CodeCall<'_>)", // the trait as built
+        "Python::detach",                               // the GIL claim, with its mechanism
+        "PyThreadState_SetAsyncExc",                    // …and what stops a run
+        "There is no sandbox",                          // §10's obligation, in the design
+        "a restart is the guarantee",                   // §11's reload semantics
+        "+crt-static",                                  // why the feature is off by default
+    ] {
+        assert!(design.contains(fragment), "§15 should carry `{fragment}`");
     }
 }
 

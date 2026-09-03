@@ -78,7 +78,6 @@ feldspar/
 │  ├─ sc-catalog/                 # 4. Catalog, Table, Field, TableProvider trait, cache
 │  ├─ sc-config/                  # 5. `_sc_config`: declared settings, validation, ACME cache
 │  ├─ sc-auth/                    # 5. User, Role, authz (ACL/RLS), sessions, OAuth2 provider
-│  ├─ sc-code/                    # 5. code adapters (JS via a JS engine, Python via CPython)
 │  ├─ sc-files/                   # 5. FileStore trait, drivers (local, S3, git), xattr metadata
 │  ├─ sc-action/                  # 6. Action trait + registry, Event/Trigger model, `_sc_triggers`
 │  │                              #    storage & validation, the live set, dispatch, scheduler
@@ -220,7 +219,7 @@ Three things the graph is worth reading for:
   `sc-error`). That is the deliberate cut described below: the formula language knows the query
   AST it compiles into and nothing about tables.
 
-Crates planned in the tree above but **not yet created**: `sc-bus`, `sc-code`,
+Crates planned in the tree above but **not yet created**: `sc-bus`,
 `sc-fieldview`, `sc-viewpattern`, `sc-model`, `sc-copilot`. `sc-test-harness`
 (under `tests/`) is a dev-dependency of most crates and depends only on `sc-config-file` and
 `sc-error`; it is left out of the graph because a dev-only edge is not part of the layering.
@@ -230,7 +229,8 @@ Notes:
 - **`sc-db` drivers MUST be Rust** (per GOALS). Every other extension point (table
   providers, types, fieldviews, actions, agents/traits, importers/exporters, model
   providers, view patterns, frameworks, API providers) MAY be implemented in Rust or in a
-  guest language via `sc-code`.
+  guest language via a **code adapter** (§15): `sc-module` for JavaScript, `sc-python` for
+  Python.
 - The React apps under `ui/` (including the admin SPA) are built to static bundles and
   **served by `sc-server`**; there is no separate front-end server. A strict CSP is applied,
   and it is satisfied *structurally* by the React build (no inline scripts or handlers) rather
@@ -268,7 +268,7 @@ bundle that registers zero or more implementations of these into the catalog at 
 | `ApiProvider` | `sc-api` | any | Expose tables, actions & custom routes over a protocol; emit a typed TS client |
 | `Framework` | `sc-app` | any | Own an application's primary UI (React/Next/Svelte/v1); declares its settings for the admin UI |
 | `BusDriver` | `sc-bus` | Rust | Publish/subscribe transport for the message bus |
-| `CodeAdapter` | `sc-code` | Rust | Host a guest-language interpreter exposing the catalog |
+| `CodeAdapter` | `sc-expr` (trait); `sc-module`, `sc-python` (adapters) | Rust | Host a guest-language interpreter exposing the catalog |
 
 Object-safety and dynamic dispatch (`Box<dyn Trait>`) are the default, because
 implementations are chosen at runtime from config and may be provided by guest languages
@@ -303,8 +303,8 @@ through a single Rust shim per adapter.
                     └────────────┬─────────────┘        └──────────────────────┘
                                  │
                     ┌────────────▼─────────────┐   ┌──────────────────────────┐
-                    │ sc-db DatabaseDriver(s)  │   │ sc-code CodeAdapters      │
-                    │ Postgres (primary) + …   │   │ JS / Python interpreters  │
+                    │ sc-db DatabaseDriver(s)  │   │ CodeAdapters (§15)       │
+                    │ Postgres (primary) + …   │   │ sc-module JS / sc-python │
                     └────────────┬─────────────┘   └──────────────────────────┘
                                  │
                     ┌────────────▼─────────────┐
@@ -4732,28 +4732,51 @@ applied to new rows for prediction.
 
 ---
 
-## 15. Code adapters and polyglot plugins (`sc-code`)
+## 15. Code adapters and polyglot plugins (`sc-module`, `sc-python`)
 
 A `CodeAdapter` maintains an open interpreter for a guest language, inside which the catalog
-entities are available. Adapters are initialised lazily (not every install needs Python).
-Guest code can provide any extension point **except `DatabaseDriver`** (Rust-only).
+entities are available. Adapters are initialised lazily — a server that fires no Python body and
+loads no Python module starts no interpreter. Guest code can provide any extension point
+**except `DatabaseDriver`** (Rust-only).
+
+Two languages are built: **JavaScript**, which is §15.1 and is about *compatibility* with
+Saltcorn v1, and **Python**, which is §15.2 and has no v1 to be compatible with. The trait they
+register under is one line of naming and one line of work:
 
 ```rust
 #[async_trait]
-pub trait CodeAdapter: Send + Sync {
-    fn language(&self) -> &str;                       // "javascript" | "python" | …
-    async fn call(&self, module: &str, func: &str, args: Vec<Value>) -> Result<Value>;
-    /// Register a guest-provided extension (action, fieldview, agent trait, provider…).
-    fn register(&self, decl: &GuestDecl) -> Result<Registration>;
+pub trait CodeAdapter: Send + Sync {         // sc-expr
+    fn language(&self) -> &str;              // "python"
+    async fn run_code(&self, call: CodeCall<'_>) -> Result<Json>;
 }
 ```
 
-- **JavaScript** adapter MUST be **API-compatible with Saltcorn v1** so v1 plugin/formula
-  code can run. Initial focus is **JavaScript and Rust**; Python, Java, C#, Go follow, each
-  with its own plugin mechanism sharing this adapter shape.
+`ActionServices` carries `adapters: BTreeMap<String, Arc<dyn CodeAdapter>>` keyed by
+`language()`, reached from an action as `ctx.adapter("python")`, so the next guest language is a
+registration rather than a field.
+
+**This supersedes the sketch this section used to carry** — `call(module, func, args)` plus
+`register(decl)` — and it is worth saying why, because both halves of that sketch turned out to
+be jobs something else already does. `call(module, func, args)` is the **module host**:
+`ModuleFnHost` for a function, an `Action` for an action, a `TableProviderHost` for a provided
+table, each with its own budget and its own call site. And `register(decl)` is what a **manifest**
+does: a load answers what a package supplies as data (§15.1), and the registry is rebuilt from
+that. What was left over — run this body, under these bounds, against these hosts — is
+`run_code`, and it is the same `CodeCall` in either language.
+
+**Nothing below the plans is per-language.** `CodeCall`'s `code`, its bindings, its five borrowed
+host handles and its six budgets are the same question in any language, so a second adapter needs
+no data layer, no query builder, no ownership rule and no row layer: `TableHost`,
+`CodeFetchHost`, `FileStoreHost`, `TriggerRunHost` and the module functions are used exactly as
+`run_js_code` uses them. That is also what makes the two languages agree about authority, budgets
+and events without anybody keeping them in step — the same question asked from a Python body and
+a JavaScript body produces the same rows because it produces the same **plan**.
+
 - Guest extensions appear in the catalog as ordinary `Box<dyn Trait>` implementations backed
   by a single Rust shim per adapter, so higher layers never know or care what language an
   extension is written in.
+- Java, C#, Go follow the same shape when they come: an interpreter, a fluent surface written
+  in the guest language, and a way to reach a `CodeHost`.
 
 **What an adapter implements to reach the catalog: `CodeHost`.** Guest code that can compute
 but not read a row is guest code for arithmetic, so the *first* thing an adapter needs is
@@ -4787,7 +4810,8 @@ JavaScript a body runs between two awaits) is that for JavaScript, kept strictly
 isolate — a blocking host call on the isolate that decides ownership formulas would put every
 authorization decision in the process behind whatever a guest is doing, and would deadlock the
 moment a delegated read's own formula needed the evaluator. Any adapter that blocks a thread on
-a host call inherits that constraint, and pays for it in threads per concurrent run.
+a host call inherits that constraint, and pays for it in threads per concurrent run — which is
+exactly the shape of §15.2, where the price is measured rather than assumed.
 
 ### 15.1 Modules: v1 plugins, on a Deno worker in this process (`sc-module`)
 
@@ -4907,6 +4931,370 @@ has a sandbox:
 - **Installing a module is not.** `npm install` runs install scripts as the server, before any
   worker exists, and nothing in this design changes that. The endpoints are admin-only, and the
   screen says so rather than implying the permission set covers it.
+
+### 15.2 Python: one interpreter, code bodies and plugin modules (`sc-python`)
+
+The second adapter. It is small for a reason that is structural rather than lucky: the JavaScript
+half was built with this one in mind, so the `db` chain a code body writes is a **prelude** in the
+guest language and what crosses into Rust is a language-neutral **plan** answered by one shared
+host. A Python adapter therefore needs an **interpreter**, a **fluent surface written in Python**,
+and a way to block a thread on a host call. Everything below the plans is untouched.
+
+What it supplies is two things that share one runtime: a `run_python_code` **action**, whose body
+is Python, and Python **plugin modules**, which are `pip`-installable distributions supplying
+actions, functions and table providers beside the JavaScript ones (§15.1).
+
+**One interpreter in the process.** Not one per language feature, not one per module, not a pool:
+every body, every plugin action, function and provider runs in the same CPython. A second
+interpreter would be a second copy of every imported package (`numpy` is 13.4 MB resident, and
+that is measured on the machine the milestone was built on) for an isolation CPython does not
+actually deliver; per-plugin **subinterpreters** are the only version of "more than one" worth
+having, and they wait on the C-extension ecosystem.
+
+**The GIL, stated plainly, because the wrong summary would make this design worthless.** "Python
+is single-threaded, so a database call queues every other action behind it" is not what happens:
+
+- **Every host call releases the GIL.** The bridge wraps the blocking wait in PyO3's
+  `Python::detach` (`allow_threads`), which drops the GIL for its duration and reacquires it on
+  the answer — the same mechanism every C extension uses for blocking I/O. A run waiting on a
+  query, an endpoint, a file or a child trigger holds **a thread and not the interpreter**. This
+  was measured before it was relied on: eight runs each making one 2 000 ms host call finish in
+  **2.0 s**, against **16.0 s** for the same eight with the GIL held as a control.
+- **The GIL is contended only by Python.** The async runtime, request handling, the database pool
+  and the V8 isolates are untouched by what a Python body is doing. CPython and V8 coexist in one
+  process with no accommodation at all, including concurrently on separate threads.
+- **Two CPU-bound Python bodies serialise, with contention on top.** Eight CPU-bound runs take
+  10.8× one run's time where serial execution would be 8.0× — the hand-off costs about 35%. The
+  escapes are named rather than pretended away: a free-threaded build, subinterpreters, or a
+  `ThreadPoolExecutor` inside the body around the surfaces, which release the GIL for the same
+  reason.
+- **A run is a thread, and threads are cheap**: 34–42 KB per resident run, taken from a cache of
+  idle threads and returned to it, so a trigger firing a thousand times spawns roughly as many
+  threads as it ever runs at once. The interpreter itself is 6.5 MB — a third of one V8 isolate.
+
+**One admission bound covers everything.** `--python-max-inflight` (default 32) is the number of
+resident runs, bodies and module calls alike: one number, because there is one interpreter and one
+thing being bounded, and because a body's own `timeout_ms` already decides how long it may wait
+for a slot. The **one** exception is a deadlock this shape has and the JavaScript one does not: a run nested inside another Python run —
+a body that runs a trigger whose action is another body, or a plugin action — is admitted *past*
+the bound on a thread of its own, because otherwise every admitted run could be waiting for a slot
+held by a run waiting for it. That is safe rather than convenient: the parent is blocked in a host
+call with the GIL released, so nesting adds no interpreter contention, and the live nesting depth
+is already bounded by the trigger cascade's `MAX_DEPTH`. Nesting is known from a task-local the
+bridge sets while it services a host call, so nothing is threaded through the seam.
+
+**The reason §15.1 keeps code bodies and modules apart does not exist here.** V8's watchdog is
+blunt — terminating a runaway body stops the whole isolate and every module socket resident on
+it — so a merged pool would give a `while(true)` in a trigger a coin-flip chance of killing an
+MQTT subscription. CPython's instrument is `PyThreadState_SetAsyncExc`, which targets **one
+thread**, so the split would buy nothing and cost an interpreter's worth of duplication.
+Isolation between runs is what one interpreter can give and no more: separate globals, separate
+thread state, one shared `sys.modules`. A body that mutates a module it imported has mutated it
+for the next body.
+
+#### What a Python body is
+
+Statements, with `return` for the result, and **nothing is awaited**. A Python body is
+synchronous top to bottom, which is the one deep difference from the JavaScript surface and is
+deliberate: the overwhelming majority of Python an app builder pastes in is synchronous, and an
+`asyncio` surface would tax every line of it for a concurrency Python authors do not expect at
+this size — and would buy nothing, because a synchronous body already runs concurrently with
+every other one for the reason above. What it costs is a thread per resident run instead of a
+pending promise, and that is the 34–42 KB measured above.
+
+```python
+overdue = (db.invoices
+    .where(paid=False, due__lt=payload["today"])
+    .select("id", "amount", "customerⱵemail")
+    .order_by("due").limit(50).rows())
+for inv in overdue:
+    db.reminders.insert(invoice=inv["id"], sent_to=inv["customerⱵemail"])
+return {"chased": len(overdue), "owed": db.invoices.where(paid=False).sum("amount")}
+```
+
+**Scope is presence**, the rule the JavaScript body and the formula scope already follow: `row`
+and `old` exist exactly where the event has rows, so naming `row` in a `login` trigger is a
+`NameError` rather than a silent `None`; `user` is the caller's fields as a `dict` or `None`;
+`payload` is what a directly-run or scheduled trigger was called with; `context` is bound only in
+a workflow step. The five host surfaces — `db`, `fetch`, `fs`, `trigger`, `modfn` — are bound only
+where this server has one, so `fs` on a server with no file stores is a `NameError` naming it
+rather than a call that fails later. They are injected into the body's globals, and `import
+saltcorn` reaches the same objects, which is what module code uses.
+
+**The surface is Python and it lowers to the same plans.** `DB_PRELUDE`'s counterpart is a small
+Python package shipped **inside the binary** (`include_str!`) and installed on `sys.modules` by a
+meta-path loader at interpreter start — no file to find, no version to skew, nothing to
+`pip install` for the surface itself. It is Python for the reason the prelude is JavaScript:
+adding a chain method touches no Rust, and the Rust side keeps seeing plans. Underneath it is one
+PyO3 extension module with six functions — `db`, `fetch`, `fs`, `trigger` and `modfn`, each
+taking a `dict`, releasing the GIL, blocking on the host's answer and raising the mapped
+exception on `Err`, plus `__sc_names(kind)`, which is not a host call and answers what this run
+may *name*. The spelling is Python's where Python has one (`.where(paid=False, due__lt=…)`,
+`.order_by`, `read_text()`, `iterdir()`, `res.text` as a **property**), a row is a plain `dict`
+rather than a model object, and a chain method is pure: a trivial host call is ~8 µs, which is
+below the cost of the query it stands in for and nowhere near the cost of a `.where()`.
+
+**The run's identity is a thread-local, not an argument.** One thread is one run, so the token
+`__scMakeDb` closes over in JavaScript is simply the state of the thread here — which is also why
+a body cannot reach another run's authority: there is no name for it in the interpreter.
+
+**A body is compiled as a function, through the AST.** `return` at the top level is a
+`SyntaxError` in Python, and wrapping the source in `def __sc_body():` with re-indentation is the
+obvious answer and a bad one — it breaks multi-line strings and moves every line number in every
+traceback. So the body is parsed with `ast.parse`, its statements are moved into an
+`ast.FunctionDef` carrying the first statement's four positions, and **the AST** is compiled. The
+author's line numbers survive exactly, a `SyntaxError` is reported with the author's own line and
+column, and a traceback is trimmed to the author's frames — the body's source is registered in
+`linecache` under the pseudo-filename it compiled with, or the rendered frame would have no text
+beside it. The compiled code object is cached per body under a content key, as `BodyCache` caches
+a JavaScript body: 35 µs to compile against 1 µs to execute a cached object. **The cache lock is
+never held across a call into Python**, which is the rule every lock in this crate follows:
+CPython hands the GIL over between bytecodes, so a thread compiling with the lock held can lose
+the GIL to a second thread that then blocks on that lock, and neither proceeds.
+
+**JSON in, JSON out.** An object is a `dict`, an array a `list`, `null` is `None`, a date is an
+ISO string because that is what the row layer put on the wire. Outbound, `datetime`, `date`,
+`time`, `Decimal` and `UUID` are converted; anything else that is not JSON-native is an error
+**naming the type and the path to it** rather than a `null` in somebody's workflow context.
+
+**The errors are a hierarchy the Rust half owns**, so nothing in the Python half can redefine
+them: `saltcorn.SaltcornError` with `DbError`, `FetchError`, `FileError`, `TriggerError` and
+`ModuleError` under it. A host refusal is an ordinary catchable exception at the call site — a
+delegated write the ownership rule refused, a missing file, a trigger that failed — so a body may
+try and fall back. `saltcorn.Timeout` derives from **`BaseException`** on purpose: a bare
+`except Exception:` in somebody's retry loop must not swallow the run's deadline.
+
+**Stopping a run, and what cannot be stopped.** V8 has `terminate_execution`; CPython has nothing
+equivalent, and pretending otherwise would be the silent failure principle 5 exists to refuse.
+Four instruments, in the order they fire:
+
+1. **The host refuses** — and this covers the call **already in flight**, not only the next one.
+   The blocking wait is on a channel this runtime owns, so it is bounded by the run's deadline and
+   the work it was waiting on is cancelled. This is the instrument that matters most (a body past
+   its deadline cannot write anything) and it is the only one that reaches a run parked in a
+   five-minute `fetch`, which no bytecode-boundary mechanism can.
+2. **`PyThreadState_SetAsyncExc`** raises `Timeout` in the run's thread, delivered between
+   bytecodes. It stops a `while True: pass` in about 5 ms. It does **not** stop a thread inside a
+   C call — `numpy.linalg.inv` on a large matrix, a C parser, or even `time.sleep` — because such
+   a thread reaches no bytecode boundary; the exception is queued on the thread state and
+   delivered whenever the call returns, which may be never.
+3. **The caller stops waiting** at the deadline plus a grace and answers the trigger with a
+   timeout error naming the trigger, whatever the thread is doing.
+4. **The thread is quarantined.** A thread that has not returned is dropped from the idle cache
+   rather than reused and counted as *stuck* on the diagnostics screen. Past `--python-max-stuck`
+   (default 8) the runtime refuses new runs with a named error rather than accumulating threads
+   that will never come back. A quarantined thread is a leak, it is reported as one, and the
+   remedy is a restart.
+
+**There is no memory bound.** A V8 isolate has a heap limit and a near-limit callback; CPython has
+neither, and `RLIMIT_AS` is process-wide, which would take the server down instead of the body.
+It is documented next to the timeout rather than discovered in production.
+
+**The import gate is hygiene, not privilege, and says so.** A body may import the standard library
+minus what reaches the process, the network and the disk (`subprocess`, `socket`, `ctypes`,
+`multiprocessing`, `signal`, `urllib.request`, `http`, `shutil`, `pty` …), plus **everything
+installed in this server's environment** — so `numpy`, `pandas` and a plugin's own library are
+importable. The allow-list is stated as its complement: `sys.path` has already been isolated from
+the host's packages, so "not standard library and not denied" *is* "installed here", one list to
+maintain instead of two, and a name nobody installed fails as CPython's own
+`ModuleNotFoundError`. `os` is a stand-in module that delegates everything but `environ` and the
+exec/spawn/fork families, raising `PermissionError` rather than `AttributeError` so that
+`from os import environ` cannot swallow the sentence explaining why.
+
+The gate is **not** a `sys.meta_path` finder, which is where the implementation departs from the
+obvious design. A finder cannot tell whose import it is answering — a body importing `requests`
+makes `urllib3` import `socket` — so it would have to refuse the installed packages the gate
+exists to allow, and, being consulted only for a module not already in `sys.modules`, would answer
+differently depending on what some earlier body happened to import. So the gate is the **body's
+own `__import__`**: a run's globals carry a copy of `builtins` whose `__import__` is the gate's.
+The author's own `import shutil` is refused; an import inside a library the author called is not.
+That is exactly the line the documentation draws, and it draws it out loud: `builtins.open`
+exists and so does `().__class__.__mro__`, a determined body escapes the gate, and the real bound
+is the one `db.sql` and installing a module already have — **authoring a trigger body is an
+administrator's capability**.
+
+#### What a Python plugin module is
+
+An ordinary Python package, `pip`-installable from PyPI or from a directory on the server's disk,
+which declares what it supplies with decorators and declares its settings in **this system's**
+field vocabulary rather than v1's:
+
+```python
+import saltcorn as sc
+
+sc.settings(sc.Field.string("api_key", label="API key", secret=True, required=True))
+
+@sc.on_load
+def load(configuration): ...            # called at load and after every configuration change
+
+@sc.action(description="Score a lead", config=[sc.Field.string("model", required=True)])
+def score_lead(row, config, user): ...  # asks for what it wants; the host inspects the signature
+
+@sc.function(description="Markdown to HTML")
+def md_to_html(text: str) -> str: ...
+
+@sc.table_provider("CSV file", config=[sc.Field.string("path", required=True)])
+class CsvTable: ...                     # fields/rows, and insert_row/update_row/delete_rows
+                                        # if it is to be writable — v1's rule, said in Python
+```
+
+**An action asks for what it wants.** The host offers `row`, `old`, `table`, `user`, `payload`,
+`config` (this action's own settings), `configuration` (the module's), `trigger` and `mode`;
+`inspect.signature` decides which are passed, `**kwargs` gets them all, and a parameter that is
+not one of the nine is refused **by name** rather than passed as `None`. This is the one place
+the Python plugin API is better than the JavaScript one rather than merely different, and it is
+free — Python has `inspect.signature` and JavaScript does not.
+
+**Module code gets the real `db`.** `sc.db`, `sc.fetch`, `sc.fs` and `sc.trigger` are the same
+five surfaces a code body has, built by the same `sc_core_actions::CodeSurfaces`, so a plugin's
+write carries the event's caller and this trigger's chain and its `fetch` is counted on the run's
+budget. §15.1's `Table`/`File`/`User` stubs exist because v1's API is v1's; a Python plugin has no
+v1 to be compatible with, so it is handed the plans directly. An **action** gets the five
+surfaces; a **function** and a **table provider** get none, and say so at the call site — the
+first is hoisted into a formula and the second is called from inside a query, and neither has a
+caller's authority to lend. Lending the admin's would make `db` inside a formula's helper a way
+around the ownership rule the formula was being evaluated *for*.
+
+The surfaces are bound by the **thread**, not by a contextvar: a contextvar is per-thread by
+default and the thread is where a run's identity already lives, so a second copy of that state
+would have to be kept in step by hand. Outside a run, `sc.db` raises the sentence saying so.
+
+**A module call is a `Task`, not a second entry point into the runtime.** The admission bound, the
+thread cache, the deadline, `SetAsyncExc` and the quarantine are shared by construction rather
+than by resemblance. `CodeCall` is not reused for it — a plugin call has no source and no
+bindings, and a call carrying two unused fields invites somebody to fill them in; what the two do
+share is `sc_expr::CodeHosts`, the five borrowed surfaces, which is the part that must not drift.
+
+**The registry is keyed by the decorated object's own `__module__`**, not by whichever plugin the
+host happens to be importing, so a plugin that registers from a submodule is still filed under its
+own package and two plugins in one interpreter cannot see each other's declarations.
+`settings()` decorates nothing, so it reads its caller's frame — the same rule, one level of
+indirection away.
+
+**One `_sc_modules`, two languages** (a module is a module to an admin, so one table, one tab and
+one set of endpoints). The row gains `language` (`javascript` | `python`, NULL reading as
+`javascript`) and `source` gains `pypi` beside `npm` and `local`; a language and a source that
+disagree are refused on save, because npm cannot fetch from PyPI and a row with the wrong pair is
+one nothing could reinstall. What the two hosts supply is merged where the catalog and the
+dispatcher already read it: **actions** into the same rebuilt `ActionRegistry` (a name claimed
+twice is reported exactly as a collision with a built-in is), **functions** through a composite
+`ModuleFnHosts`, **table providers** through a composite `TableProviderHosts`, each beside the
+trait it composes. `ModuleServices::reload` stays the one operation every module change goes
+through. A Python module answers the **same** `ModuleManifest` and the same `LoadedModule` a
+JavaScript one does, which is what lets one Modules tab, one `module_json` and one
+secret-redaction path serve both. A failing `on_load` is an **issue**, not a failed load: the
+manifest is what renders the settings form, and the settings form is where an admin fixes the API
+key that made `on_load` fail.
+
+#### Packaging, and an ABI check that must not be skipped
+
+`--python-dir` (default: beside the modules root in the platform data directory) is a **virtual
+environment** the server creates and `pip install`s into: `pypi` installs a specifier, `local`
+installs a directory as a copy, for the reason npm's `--install-links` is used for JavaScript
+locals. What was installed is read from `pip install --report`'s single `requested: true` entry,
+because "Successfully installed a-1 b-2" has no meaningful order. None of this is behind the
+`python` feature — every act in it is a subprocess (`python3 -m venv`, then the environment's own
+`python -m pip`), so a binary with no interpreter linked in still answers the Modules tab's
+`have_python()` / `have_pip()` and still lists what is installed.
+
+The trap is that `pip` runs under an **external** interpreter (`--python-bin`, default `python3`)
+while the code runs under the **embedded** one. The danger is not the case it looks like: a
+version-tagged wheel imported by the wrong interpreter is a clean `ImportError`, and a pure-Python
+package simply works. What is genuinely dangerous is an **untagged or `abi3` extension**, which
+loads without complaint and reads the wrong memory — a `PyThreadState` field at another version's
+struct offset — in silence, with a write through the same offset corrupting the interpreter. So
+the bootstrap compares `sys.version_info[:2]` of the embedded interpreter against the
+environment's own `pyvenv.cfg` (not against `--python-bin`: repointing a flag does not change what
+is on the disk, and what is on the disk is what will be imported) and, on a mismatch, leaves the
+environment **off `sys.path` entirely** and says why on the diagnostics screen. And `--python-dir`
+**isolates** `sys.path` rather than prepending to it: the embedded interpreter otherwise inherits
+the host's `~/.local/lib/python3.x/site-packages` and its `dist-packages`, and what a body may
+import would depend on what the operator happened to `apt install`.
+
+Discovery of what a package supplies is the `saltcorn.plugins` **entry point** where the
+distribution declares one — the idiomatic way a Python package advertises a plugin — else the
+top-level package by name. A load carries its `site-packages` and invalidates the import caches,
+because the interpreter fixes `sys.path` at start and an install is a subprocess that may have
+happened since, including the one that *created* the environment.
+
+#### There is no sandbox, and the screen says so
+
+`deno_permissions` gives a JavaScript module a per-worker allow-list of net, read, write and env
+(§15.1). CPython has no equivalent — not `RestrictedPython`, which is a different language, and
+not the import gate, which is hygiene by its own account. **A Python module runs with the
+server's privileges, and so, past the import gate, does a Python code body.**
+
+This is a smaller change than it looks: *installing* was never sandboxed in either language, since
+`npm install` and `pip install` both run arbitrary code as the server before any worker exists;
+the endpoints are admin-only; and a `db.sql` body is already an admission of the same kind. What
+the design owes is that the Modules tab and the documentation **say** it, in the same sentence
+that offers the Install button, rather than leaving an admin to infer a permission model that is
+not there from a screen that shows one for the other language. So a Python module's card **drops**
+the permissions form rather than disabling it, and carries that sentence where the other
+language's summary line is: a disabled form would still be a form, and a form is a claim that
+there is a permission model.
+
+#### Reloading is best-effort; a restart is the guarantee
+
+A JavaScript module is reloaded by replacing it on its worker. Python has no unload:
+`importlib.reload` re-executes a module while every object created from the old one lives on, and
+a package with a C extension cannot be re-initialised at all. So a reload drops the package's
+entries from `sys.modules` and imports it again — correct for a pure-Python package, best-effort
+for anything else. The manifest is re-read either way, `on_load(configuration)` is called again,
+and the Modules tab says that **a version change takes full effect at the next restart**. Deleting
+a module unregisters everything it supplied and leaves the import behind, which is the same
+admission said once. Per-plugin subinterpreters (3.12's per-interpreter GIL) would fix this and
+the shared-`sys.modules` caveat above too; they wait because the C-extension ecosystem's support is
+uneven and the failure mode of getting it wrong is a crash rather than an error.
+
+#### The build is the decision, and the flag is not
+
+PyO3 embeds CPython by **linking** `libpython`; there is no vendored interpreter and no way to
+make one optional once it is linked. Two levels, and only the first decides whether Python is
+possible at all:
+
+| | what it is | what it does | how it is changed |
+| --- | --- | --- | --- |
+| `python` (`sc-cli`, `sc-server`) → `sc-python/python-host` | a **Cargo feature**, off by default | links `libpython` in and compiles the runtime | a **rebuild**: `cargo build -p sc-cli --features python` |
+| `--python auto\|off` | a **CLI flag**, default `auto` | whether this process will *initialise* the interpreter it has | a restart |
+
+There is no flag that turns Python on in a binary built without it. A build without the feature
+still **registers `run_python_code`** and fails at fire time saying the server was built without
+Python support, because registering it either way is what keeps a trigger's configuration
+meaningful across deployments.
+
+**Why the feature is off by default**, which is a statement about artifacts rather than a retreat
+from in-process: a binary linked against `libpython3.x.so` fails at the **dynamic linker**, before
+`main`, on a host that has no such library — and, decisively, this project's shipped artifact is a
+`+crt-static` static-PIE binary, under which the Python link does not succeed at all (rustc
+selects a static `libpython` archive that is not PIC, and a `+crt-static` binary could not
+`dlopen` the `lib-dynload` extensions or any C-extension wheel even if it linked). Default-on
+would not degrade the release build, it would break it. **So the shipped tarball has no Python,
+and a Python-capable server is a separate dynamically-linked build.** The floor is CPython
+**3.11**, `abi3`, and `abi3` delivers what it promises: one build serves every CPython from 3.11
+up, the only obstacle being the version-specific soname in `DT_NEEDED`, which an operator
+satisfies by having the matching `libpython` present. The cost of the dependency is small — 7
+crates, 3 seconds of build, half a megabyte of binary, and ~10 ms to initialise an interpreter
+that is never initialised unless something asks for it.
+
+**Three states plus the flag, and the server says which it is in.** Not built with Python · built
+but not yet initialised · turned off with `--python off` · running, with the version. Settings →
+Development shows it beside the environment's path, the packages installed in it, the admission
+bound, the resident-run count and the quarantined-thread count, because "why does my Python
+trigger not work" has four different answers with four different remedies and an admin must not
+have to guess which one they have.
+
+#### What this adapter deliberately does not do
+
+No Python **formula** evaluator, no Python in an `only_if` and no Python ownership rule: formulas
+are one language, evaluated on the pure isolate, and a second one would be a second answer to
+"may this user read this row". No Python **database driver** (§15's own exclusion). No language
+service — the editor gets Monaco's Python grammar and four-space indentation, while completion is
+what Python does not get until a generated `saltcorn.pyi` and a `pyright` bridge exist. No entity
+types the JavaScript modules do not supply either (views, viewtemplates, types, fieldviews, event
+types, routes, headers, agent traits): they are reported in the manifest census, not loaded. And
+no permission model for Python modules, which is the no-sandbox paragraph above — the obligation is
+to say so rather than to approximate one.
 
 ---
 

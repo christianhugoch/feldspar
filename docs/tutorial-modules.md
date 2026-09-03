@@ -242,10 +242,12 @@ quietly doing nothing.
 ## What this is not, yet
 
 - **Only actions, functions and table providers.** Views, types, field views and event types are
-  named in the tab and not loaded. A table provider is **read-only**: v1's
-  `insertRow`/`updateRow`/`deleteRows` are not called yet.
-- **Only JavaScript.** The install form has a Type dropdown because Python and the rest come
-  later; today it has one language and two sources.
+  named in the tab and not loaded.
+- **Not only JavaScript any more.** The Type dropdown now offers four pairs, because a module can
+  also be a `pip`-installable **Python** distribution supplying the same three things — see
+  [tutorial-python.md](tutorial-python.md), whose step 7 writes one from an empty directory. What
+  a Python module does **not** get is step 3's permission set: CPython has no equivalent to grant,
+  so such a module runs with the server's own privileges and its card says so instead.
 - **No sandboxed install, and no store.** A module that is *running* is fenced (step 3); the
   `npm install` that put it there is not. And you type a package name — nothing browses or rates
   modules for you.
