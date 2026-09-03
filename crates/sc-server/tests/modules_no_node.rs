@@ -112,8 +112,15 @@ async fn the_server_serves_a_module_with_node_off_the_path() -> sc_error::Result
     // registry, and reload the triggers against it.
     let agents = install_agents(&catalog).await?;
     let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents).await?;
-    let modules =
-        ModuleServices::install(&catalog, &dispatcher, &agents, Some(root.clone()), 1).await?;
+    let modules = ModuleServices::install(
+        &catalog,
+        &dispatcher,
+        &agents,
+        Some(root.clone()),
+        1,
+        sc_server::default_python_adapter(),
+    )
+    .await?;
 
     let set = modules.modules();
     let loaded = set

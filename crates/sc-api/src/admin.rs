@@ -904,6 +904,15 @@ pub fn admin_endpoints() -> EndpointSet {
                 StructField::new("root", TypeSchema::text()),
                 StructField::new("npm", TypeSchema::bool()),
                 StructField::new("node", TypeSchema::bool()),
+                // The same two questions for the other language (§8): whether
+                // there is an interpreter to build the environment with and
+                // whether it has pip, asked before an admin types a
+                // distribution name. Neither is the same question as whether
+                // *this binary* has Python linked in, which is on the
+                // Development tab.
+                StructField::new("python", TypeSchema::bool()),
+                StructField::new("pip", TypeSchema::bool()),
+                StructField::new("python_dir", TypeSchema::optional(TypeSchema::text())),
             ]))
             .auth(AuthRequirement::admin()),
     );
@@ -916,6 +925,9 @@ pub fn admin_endpoints() -> EndpointSet {
             .input(TypeSchema::struct_of([
                 StructField::new("source", TypeSchema::text()),
                 StructField::new("location", TypeSchema::text()),
+                // `javascript` when it is not sent, which is what every caller
+                // written before there was a second language means (§8).
+                StructField::new("language", TypeSchema::optional(TypeSchema::text())),
             ]))
             .output(module_schema())
             .auth(AuthRequirement::admin()),
@@ -1902,6 +1914,12 @@ pub fn admin_endpoints() -> EndpointSet {
                 StructField::new("threads", TypeSchema::int()),
                 StructField::new("stuck", TypeSchema::int()),
                 StructField::new("max_stuck", TypeSchema::int()),
+                // Why the environment is not in use, where that is the case
+                // (§9): a virtual environment built by a different Python holds
+                // packages this interpreter cannot import — a C extension would
+                // crash the server rather than fail to import — so it is left
+                // off `sys.path` and this says so, naming both versions.
+                StructField::new("env_error", TypeSchema::optional(TypeSchema::text())),
             ]))
             .auth(AuthRequirement::admin()),
     );
@@ -2503,6 +2521,9 @@ fn module_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("id", TypeSchema::uuid()),
         StructField::new("name", TypeSchema::text()),
+        // `javascript` or `python`: which host loads it, which package manager
+        // installed it, and whether `permissions` applies to it at all (§10).
+        StructField::new("language", TypeSchema::text()),
         StructField::new("source", TypeSchema::text()),
         StructField::new("location", TypeSchema::text()),
         StructField::new("version", TypeSchema::optional(TypeSchema::text())),

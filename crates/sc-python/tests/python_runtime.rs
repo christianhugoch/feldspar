@@ -727,7 +727,11 @@ fn the_environment_flags_are_held_where_the_installer_will_read_them() {
 /// amendment to §9 is that this is **isolated** rather than prepended to.
 ///
 /// The standard library stays, because it is the interpreter's own and is where
-/// the import gate (phase 4.1) does its work.
+/// the import gate (phase 4.1) does its work. So does **this server's own**
+/// environment, which since phase 5 has a default rather than existing only
+/// where `--python-dir` named one: the whole point of it is that a body can
+/// import what an admin installed, and the path it sits at is the one this
+/// process would install into.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_hosts_installed_packages_are_not_on_the_path() {
     let out = PythonRuntime::new()
@@ -744,13 +748,30 @@ async fn the_hosts_installed_packages_are_not_on_the_path() {
         .iter()
         .map(|entry| entry.as_str().unwrap_or_default().to_owned())
         .collect();
+    // Everything this server would install into is its own; anything else that
+    // holds packages is the host's.
+    let ours = PythonEnv::default()
+        .directory()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .unwrap_or_default();
     for entry in &path {
+        if !ours.is_empty() && entry.starts_with(&ours) {
+            continue;
+        }
         assert!(
             !entry.ends_with("site-packages") && !entry.ends_with("dist-packages"),
             "the host's packages are on the path: {path:?}"
         );
         // Nor the directory the server happened to be started in.
         assert!(!entry.is_empty() && entry != ".", "{path:?}");
+    }
+    // And the server's own environment *is* there, which is what makes an
+    // installed Python module importable at all (§9).
+    if !ours.is_empty() {
+        assert!(
+            path.iter().any(|entry| entry.starts_with(&ours)),
+            "this server's own environment is not on the path: {path:?}"
+        );
     }
     // And the standard library is still there, which is what the body needs and
     // what the import gate is about.

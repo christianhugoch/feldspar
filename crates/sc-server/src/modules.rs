@@ -33,13 +33,18 @@ use sc_module::{
 
 use crate::agents::AgentServices;
 
-/// The module machinery a running server holds: the npm project, the worker
-/// pool modules run on, and the loaded set.
+/// The module machinery a running server holds: the npm project, the Python
+/// environment, the worker pool modules run on, and the loaded set.
 pub struct ModuleServices {
     catalog: Arc<Catalog>,
     dispatcher: Arc<TriggerDispatcher>,
     agents: AgentServices,
     installer: Installer,
+    /// The Python runtime, for the half of `_sc_modules` that pip installs
+    /// (§8, §9). The runtime rather than an environment, because the
+    /// environment cannot be built without the embedded interpreter's version
+    /// and asking the runtime for that is what makes sure there is one.
+    python: Arc<sc_python::PythonRuntime>,
     host: Arc<ModuleHost>,
     /// The loaded set, replaced whole by [`reload`](ModuleServices::reload).
     loaded: RwLock<Arc<ModuleSet>>,
@@ -55,13 +60,16 @@ impl ModuleServices {
     /// start because it could not work out where it would have put them.
     /// `workers` is how many module workers the pool runs (`--module-workers`):
     /// a module is pinned to one for its lifetime, so the reason to run a second
-    /// is blast radius rather than throughput.
+    /// is blast radius rather than throughput. `python` is the same runtime the
+    /// dispatcher took as a code adapter — one interpreter per process, so a
+    /// Python module and a Python body share it.
     pub async fn install(
         catalog: &Arc<Catalog>,
         dispatcher: &Arc<TriggerDispatcher>,
         agents: &AgentServices,
         root: Option<PathBuf>,
         workers: usize,
+        python: Arc<sc_python::PythonRuntime>,
     ) -> Result<Arc<ModuleServices>> {
         bootstrap_modules(catalog)
             .await
@@ -86,6 +94,7 @@ impl ModuleServices {
             dispatcher: Arc::clone(dispatcher),
             agents: agents.clone(),
             installer: Installer::new(&root),
+            python,
             host: Arc::new(ModuleHost::with_workers(&root, workers)),
             loaded: RwLock::new(Arc::new(ModuleSet::empty())),
         });
@@ -163,6 +172,79 @@ impl ModuleServices {
     /// The worker pool modules run on.
     pub fn host(&self) -> &Arc<ModuleHost> {
         &self.host
+    }
+
+    /// The Python runtime this server's Python modules install into and run on.
+    pub fn python(&self) -> &Arc<sc_python::PythonRuntime> {
+        &self.python
+    }
+
+    /// The Python environment, ready to install into — the virtual environment
+    /// created if it was not there and checked against this process's own
+    /// interpreter (§9).
+    ///
+    /// Fails on a server that has no interpreter to check against, with the
+    /// sentence firing a Python trigger would answer: installing packages that
+    /// nothing here could import is not a partial success.
+    pub fn python_environment(&self) -> Result<sc_python::PythonEnvironment> {
+        self.python.environment()
+    }
+
+    /// Install a module's package with whichever package manager its language
+    /// uses, and answer what it turned out to be.
+    ///
+    /// The two installers agree on the shape of the answer — the package's own
+    /// name, the version that landed, and the tool's own output — so the
+    /// endpoint above them has one path and not two.
+    pub async fn install_package(
+        &self,
+        language: sc_module::ModuleLanguage,
+        source: sc_module::ModuleSource,
+        location: &str,
+    ) -> Result<sc_module::InstalledPackage> {
+        match language {
+            sc_module::ModuleLanguage::JavaScript => self.installer.install(source, location).await,
+            sc_module::ModuleLanguage::Python => {
+                let installed = self
+                    .python_environment()?
+                    .install(python_source(source)?, location)
+                    .await?;
+                Ok(sc_module::InstalledPackage {
+                    name: installed.name,
+                    version: installed.version,
+                    log: installed.log,
+                })
+            }
+        }
+    }
+
+    /// Take a module's package off the disk again, with the same routing.
+    ///
+    /// Best effort in both languages, and for the same reason: the row is what
+    /// makes a module exist to this server, so a package the package manager
+    /// declines to remove must not leave a module nobody can delete.
+    pub async fn uninstall_package(&self, module: &sc_module::Module) -> Result<String> {
+        match module.language {
+            sc_module::ModuleLanguage::JavaScript => self.installer.uninstall(&module.name).await,
+            sc_module::ModuleLanguage::Python => {
+                self.python_environment()?.uninstall(&module.name).await
+            }
+        }
+    }
+}
+
+/// A module source as the Python environment names it.
+///
+/// `npm` never reaches here — the row's language and its source are checked
+/// against each other before it is stored (`save_module`) — so this is the
+/// wiring mistake's error rather than the admin's.
+fn python_source(source: sc_module::ModuleSource) -> Result<sc_python::PythonSource> {
+    match source {
+        sc_module::ModuleSource::Pypi => Ok(sc_python::PythonSource::Pypi),
+        sc_module::ModuleSource::Local => Ok(sc_python::PythonSource::Local),
+        sc_module::ModuleSource::Npm => Err(Error::invalid(
+            "`npm` is a JavaScript module's source; pip cannot install one",
+        )),
     }
 }
 

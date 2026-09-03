@@ -45,8 +45,12 @@ futures.workspace = true
 serde_json.workspace = true
 # The host calls are served on the caller's async runtime while the run's thread
 # blocks on the answer, so the seam between them is tokio's: a channel out, a
-# oneshot back, and the admission bound is a semaphore.
-tokio = { workspace = true }
+# oneshot back, and the admission bound is a semaphore. `process` and `fs` are
+# the **environment**'s (§9, phase 5): creating the virtual environment and
+# installing into it are `python3 -m venv` and `pip`, awaited without blocking a
+# runtime thread, and neither is behind the `python-host` feature — a build with
+# no interpreter linked in still answers the Modules tab.
+tokio = { workspace = true, features = ["process", "fs"] }
 pyo3 = { workspace = true, optional = true }
 
 [dev-dependencies]

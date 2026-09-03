@@ -43,6 +43,7 @@ function module_(overrides: Partial<Module> = {}): Module {
   return {
     id: "3f0d2c1e-0000-4000-8000-000000000001",
     name: "@saltcorn/mqtt",
+    language: "javascript",
     source: "npm",
     location: "@saltcorn/mqtt",
     version: "0.2.0",

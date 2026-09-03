@@ -141,6 +141,24 @@ async fn load_one(
     registry: &mut ActionRegistry,
 ) -> LoadedModule {
     let mut issues = Vec::new();
+    // **This loader is JavaScript's.** A Python module's package is a
+    // distribution in the server's Python environment, not a directory under
+    // `node_modules`, and it is loaded on the embedded interpreter rather than
+    // on a Deno worker — so it is carried here (the row exists, the tab lists
+    // it, `reload` still goes through one place) and nothing is read off the
+    // disk for it. What it supplies is the Python module host's answer.
+    if module.language != crate::module::ModuleLanguage::JavaScript {
+        issues.push(format!(
+            "this server does not load {} modules: its module host supplies actions, functions              and table providers for JavaScript modules only",
+            module.language.as_str()
+        ));
+        return LoadedModule {
+            module: module.clone(),
+            manifest: None,
+            config_spec: Vec::new(),
+            issues,
+        };
+    }
     let dir = installer.package_dir(&module.name);
     if !installer.is_installed(&module.name) {
         issues.push(format!(

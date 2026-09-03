@@ -76,13 +76,15 @@ pub use host::{
     TableProviderManifest, UnsupportedEntity,
 };
 pub use install::{InstalledPackage, Installer, have_node, have_npm};
-pub use module::{MODULE_SOURCES, Module, ModuleId, ModuleSource};
+pub use module::{
+    MODULE_LANGUAGES, MODULE_SOURCES, Module, ModuleId, ModuleLanguage, ModuleSource,
+};
 pub use modules::{LoadedModule, ModuleIssue, ModuleSet, redacted_configuration, unsupported_json};
 pub use paths::default_modules_root;
 pub use permissions::{ModulePermissions, PERM_ENV, PERM_NET, PERM_READ, PERM_WRITE};
 pub use spec::config_fields_to_form_fields;
 pub use store::{
-    COL_PERMISSIONS, MODULES_TABLE, bootstrap_modules, delete_module, list_modules, load_module,
-    load_module_by_name, require_module, save_module,
+    COL_LANGUAGE, COL_PERMISSIONS, MODULES_TABLE, bootstrap_modules, delete_module, list_modules,
+    load_module, load_module_by_name, require_module, save_module,
 };
 pub use table_providers::ModuleTableProviders;

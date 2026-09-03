@@ -2,6 +2,70 @@
 
 Changes in reverse chronological order.
 
+## One Python environment the server owns, and the check that keeps it importable
+
+Phase 5 of the Python code adapter: `pip`, the virtual environment it installs
+into, and `_sc_modules.language` — so a module can be a Python distribution and
+the row says which package manager put it there.
+
+- **`sc_python::env` creates the environment and installs into it.**
+  `python3 -m venv` where `--python-dir` names (or, since this phase, where the
+  platform's data directory defaults to: `~/.local/share/feldspar/python`,
+  beside the modules root), then the venv's own `python -m pip` for the installs.
+  A `pypi` source takes a specifier (`saltcorn-weather>=0.2`), a `local` one
+  takes a directory and is **copied** rather than installed editable — the
+  reason npm's `--install-links` is used for JavaScript locals, so pressing
+  Install again is how a checkout reaches the server. Uninstalling is best
+  effort, because the row is what makes a module exist and a package pip
+  declines to remove must not leave a module nobody can delete.
+- **What was installed is pip's answer, not the admin's.** A specifier may carry
+  a version or an extra and a directory says its name only in its own metadata,
+  so the name and version come from `pip install --report`'s single
+  `requested: true` entry, falling back to a diff of the environment for a pip
+  too old to write one. The version shown is then read back off the disk, which
+  is what a body will import.
+- **The ABI check of §9, in the three places it has to be.** `pip` runs under an
+  external interpreter and the code runs under the embedded one; a C extension
+  built for 3.12 and imported into 3.11 is a segfault, not an `ImportError`. So
+  the environment's own `pyvenv.cfg` is compared with the running interpreter
+  **before an install** (refused, with both versions, the directory and
+  `--python-bin` named), **at boot** (a mismatched environment never reaches
+  `sys.path`, so nothing in it can be imported at all) and **on the screen**
+  (`env_error` on Settings → Development, which is where an admin looks when
+  everything they installed is invisible).
+- **`have_python()` and `have_pip()`**, asked by the Modules tab before an admin
+  types a distribution name, exactly as `have_npm()` already is — and neither is
+  the same question as whether this binary has an interpreter linked in, which
+  stays on the Development tab. `listModules` now reports both, plus where pip
+  installs. None of this is behind the `python` feature: it is all subprocesses,
+  so a stock build answers it.
+- **A module has a language.** `_sc_modules.language` is `javascript` or
+  `python`, NULL reads as `javascript`, and `source` gains `pypi` beside `npm`
+  and `local`. A language and a source that disagree are refused when the row is
+  saved rather than at the next install, since npm cannot fetch from PyPI and
+  pip cannot fetch from npm. `installModule` takes an optional `language`, routes
+  the install to the right package manager, and `deleteModule` uninstalls with
+  the same routing; `module_json` carries it. What a Python module *supplies* is
+  still nothing — the module host for it is the next phase, and the JavaScript
+  loader says so rather than looking for the package under `node_modules`.
+- **One thing fixed on the way**: §2's crate table in the design named neither
+  `sc-python` nor `sc-server`'s dependency on it, which the repo-hygiene test
+  that compares the table with the manifests had been failing on since the crate
+  was added.
+- **12 new integration tests, and seven unit ones.** Nine are in
+  `sc-python/tests/python_env.rs` — seven run in **both** builds and two where
+  there is an interpreter to check against: an environment created, a fixture distribution installed from a
+  directory, listed with its version under any spelling of its name and removed;
+  the mismatch refused with both versions in the sentence; a pip failure carrying
+  the build backend's own words; a directory that is not a project refused before
+  a venv is built for it; and the check made against the *running* interpreter's
+  version, with a mismatched environment kept off `sys.path`. Two more in
+  `sc-module`'s store cover the language round trip, the NULL that reads as
+  JavaScript and the language/source refusal, and one through the admin API
+  covers the endpoint's reading of the field. Nothing reaches PyPI: the
+  fixture ships an in-tree PEP 517 backend that builds its wheel with `zipfile`,
+  so pip's build isolation has nothing to download.
+
 ## What a Python body may import, and what the screen says about Python
 
 Phase 4 of the Python code adapter: the import gate, and the diagnostics that

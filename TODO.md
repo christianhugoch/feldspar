@@ -1166,15 +1166,67 @@ is reported as having no environment rather than as having an empty one.
 
 ## Phase 5 — The Python environment
 
-- [ ] 5.1 `sc-python::env`: create the venv, `pip install` a `pypi` specifier or a local
+- [x] 5.1 `sc-python::env`: create the venv, `pip install` a `pypi` specifier or a local
       directory, read back the installed version, uninstall, and list what is installed.
-- [ ] 5.2 The ABI check of §9, refusing with both versions named; `have_python()` / `have_pip()`
+- [x] 5.2 The ABI check of §9, refusing with both versions named; `have_python()` / `have_pip()`
       answered for the Modules tab the way `have_npm()` already is.
-- [ ] 5.3 `_sc_modules.language` and the `pypi` source; `Module` grows the field; the store, the
+- [x] 5.3 `_sc_modules.language` and the `pypi` source; `Module` grows the field; the store, the
       endpoints and `module_json` carry it.
-- [ ] 5.4 Tests: a fixture package installed from a directory, listed with its version, removed;
+- [x] 5.4 Tests: a fixture package installed from a directory, listed with its version, removed;
       the mismatch refusal; a `pip` failure reported as an application error with pip's own last
       lines.
+
+### What phase 5 landed, and where the ABI check ended up pointing
+
+`src/env.rs` is the environment, and it is **not behind `python-host`**. Every
+act in it is a subprocess — `python3 -m venv`, then the venv's own `python -m
+pip` — so a binary with no interpreter linked in can still answer the Modules
+tab's two questions (`have_python`, `have_pip`) and still list what is installed
+in an environment. What the feature decides is only whether there is an embedded
+version to *check against*, which is the one thing `PythonEnvironment` carries
+beyond the two paths.
+
+Four decisions worth naming:
+
+1. **What was installed is read from `pip install --report`.** npm writes one
+   dependency entry per install and the installer diffs the project file for it;
+   pip's equivalent is the report's single `requested: true` entry, which carries
+   the distribution's own name and version as pip resolved them. Parsing
+   "Successfully installed a-1 b-2" would have been the obvious alternative and
+   its order means nothing, so the fallback for a pip too old to write a report
+   (< 22.2) is the package diff, and only then the specifier's own name.
+2. **The ABI check compares the embedded interpreter with the environment's own
+   `pyvenv.cfg`, not with `--python-bin`.** §9 describes the check against the
+   external interpreter, and that is nearly the same thing — a venv's `python` is
+   the interpreter that built it — but not quite: an operator who repoints
+   `--python-bin` at another version has not changed what is on the disk, and
+   what is on the disk is what will be imported. Reading `pyvenv.cfg` is also
+   what lets the **boot path** make the same check without running a subprocess,
+   which matters because that is the path where getting it wrong is a segfault:
+   a mismatched environment is left off `sys.path` entirely rather than refused
+   at import time. So the refusal appears in three places with one sentence —
+   `ensure()` before an install, the boot path silently (nothing installed is
+   importable), and `PythonStatus::env_error`, which is the panel line that says
+   why.
+3. **`--python-dir` has a default now**, beside the modules root in the platform
+   data directory, so a Python module is installable and importable on a server
+   started with no flags. That changed one existing test: the embedded
+   interpreter's `sys.path` still excludes every one of the *host's* package
+   directories, and now deliberately includes this server's own.
+4. **`_sc_modules.language` is nullable and NULL reads as `javascript`**, the
+   shape `permissions` already has. A language and a source that disagree are
+   refused in `save_module` rather than left to fail at the next install, because
+   npm cannot fetch from PyPI and pip cannot fetch from npm — a row with the
+   wrong pair is one nothing could reinstall. The JavaScript loader carries a
+   Python module in the set with a stated issue rather than looking for it under
+   `node_modules`; what it supplies is phase 6's answer.
+
+The fixture installs **offline**: `tests/fixtures/sc_fixture_pkg` declares an
+in-tree PEP 517 backend with `requires = []`, so pip's build isolation has
+nothing to download and the suite does not depend on somebody else's network —
+the same rule `sc-module`'s installer tests already follow. `py_broken` is its
+opposite, a backend that raises, and it is how "a pip failure carries pip's own
+last lines" is pinned.
 
 ## Phase 6 — Python plugin modules
 

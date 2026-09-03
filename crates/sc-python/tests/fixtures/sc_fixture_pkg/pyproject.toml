@@ -1,0 +1,11 @@
+# A Python distribution the environment tests install from a directory.
+#
+# `requires = []` with an in-tree backend (`backend-path`) is what makes this
+# **offline**: pip's default build isolation would otherwise download setuptools
+# from PyPI, and a test suite that reaches the registry is a test suite that
+# fails when somebody else's network does. The backend beside this file builds
+# the wheel with `zipfile` and nothing else.
+[build-system]
+requires = []
+build-backend = "scbuild"
+backend-path = ["."]

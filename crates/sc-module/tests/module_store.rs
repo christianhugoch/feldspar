@@ -9,8 +9,9 @@ use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_error::Result;
 use sc_module::{
-    COL_PERMISSIONS, MODULES_TABLE, Module, ModulePermissions, ModuleSource, bootstrap_modules,
-    delete_module, list_modules, load_module, load_module_by_name, save_module,
+    COL_LANGUAGE, COL_PERMISSIONS, MODULES_TABLE, Module, ModuleLanguage, ModulePermissions,
+    ModuleSource, bootstrap_modules, delete_module, list_modules, load_module, load_module_by_name,
+    save_module,
 };
 use sc_test_harness::TestDb;
 use serde_json::json;
@@ -209,4 +210,87 @@ async fn a_permission_set_round_trips_and_a_row_without_one_is_closed() {
         .unwrap();
     let err = list_modules(&cat).await.unwrap_err().to_string();
     assert!(err.contains("net"), "{err}");
+}
+
+/// Phase 5: a module's **language** is on its row, a row that predates the
+/// column reads as JavaScript, and a language that disagrees with its source is
+/// refused before it can become a row nothing could reinstall (§8).
+#[tokio::test]
+async fn a_language_round_trips_and_a_row_without_one_is_javascript() {
+    let db = TestDb::new().await.unwrap();
+    let cat = catalog(&db).await.unwrap();
+    bootstrap_modules(&cat).await.unwrap();
+
+    let mut module = Module::new(
+        "saltcorn-weather",
+        ModuleSource::Pypi,
+        "saltcorn-weather>=0.2",
+    )
+    .in_language(ModuleLanguage::Python);
+    module.version = Some("0.2.1".into());
+    save_module(&cat, &module).await.unwrap();
+
+    let read = load_module_by_name(&cat, "saltcorn-weather")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.language, ModuleLanguage::Python);
+    assert_eq!(read.source, ModuleSource::Pypi);
+
+    // A row written before there was a second language has NULL here, and NULL
+    // is `javascript` — the only language there was — rather than a row nobody
+    // can read.
+    db.client()
+        .await
+        .unwrap()
+        .execute(
+            &format!("update {MODULES_TABLE} set {COL_LANGUAGE} = null"),
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        load_module(&cat, module.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .language,
+        ModuleLanguage::JavaScript
+    );
+
+    // And a language nothing understands is reported, naming the module — the
+    // strictness the source column already has.
+    db.client()
+        .await
+        .unwrap()
+        .execute(
+            &format!("update {MODULES_TABLE} set {COL_LANGUAGE} = 'ruby'"),
+            &[],
+        )
+        .await
+        .unwrap();
+    let msg = list_modules(&cat).await.unwrap_err().to_string();
+    assert!(msg.contains("saltcorn-weather"), "{msg}");
+    assert!(msg.contains("ruby"), "{msg}");
+}
+
+#[tokio::test]
+async fn a_language_and_a_source_that_disagree_are_refused() {
+    let db = TestDb::new().await.unwrap();
+    let cat = catalog(&db).await.unwrap();
+    bootstrap_modules(&cat).await.unwrap();
+
+    // npm cannot fetch from PyPI and pip cannot fetch from npm, so neither pair
+    // is a row this server could act on.
+    let wrong = Module::new("saltcorn-weather", ModuleSource::Npm, "saltcorn-weather")
+        .in_language(ModuleLanguage::Python);
+    let msg = save_module(&cat, &wrong).await.unwrap_err().to_string();
+    assert!(msg.contains("python") && msg.contains("npm"), "{msg}");
+    assert!(msg.contains("pypi"), "it names what would work: {msg}");
+
+    let backwards = Module::new("@saltcorn/mqtt", ModuleSource::Pypi, "saltcorn-mqtt");
+    let msg = save_module(&cat, &backwards).await.unwrap_err().to_string();
+    assert!(msg.contains("javascript") && msg.contains("pypi"), "{msg}");
+
+    assert!(list_modules(&cat).await.unwrap().is_empty());
 }

@@ -34,18 +34,78 @@ impl std::fmt::Display for ModuleId {
     }
 }
 
+/// Which language a module is written in, and therefore which host loads it
+/// and which package manager installs it (§8).
+///
+/// **One table, one tab and one set of endpoints**, because a module is a module
+/// to an admin: what the language decides is whether the package comes from npm
+/// or from PyPI, whether it is loaded on a Deno worker or on the embedded
+/// interpreter, and whether the permission set on the screen means anything
+/// (§10: for Python it does not).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModuleLanguage {
+    /// A Saltcorn v1 plugin: an npm package, loaded on a module worker.
+    #[default]
+    JavaScript,
+    /// A Python plugin: a distribution in this server's Python environment,
+    /// loaded on the embedded interpreter.
+    Python,
+}
+
+impl ModuleLanguage {
+    /// The stored and posted spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModuleLanguage::JavaScript => "javascript",
+            ModuleLanguage::Python => "python",
+        }
+    }
+
+    /// Parse the stored spelling, naming the alternatives on a miss.
+    pub fn parse(s: &str) -> Result<ModuleLanguage> {
+        match s {
+            "javascript" => Ok(ModuleLanguage::JavaScript),
+            "python" => Ok(ModuleLanguage::Python),
+            other => Err(Error::invalid(format!(
+                "unknown module language `{other}`; the languages are javascript, python"
+            ))),
+        }
+    }
+
+    /// The sources a module in this language can be installed from — one
+    /// registry each, and the local directory both share.
+    pub fn sources(self) -> &'static [ModuleSource] {
+        match self {
+            ModuleLanguage::JavaScript => &[ModuleSource::Npm, ModuleSource::Local],
+            ModuleLanguage::Python => &[ModuleSource::Pypi, ModuleSource::Local],
+        }
+    }
+
+    /// Whether a module in this language can come from `source`.
+    pub fn allows(self, source: ModuleSource) -> bool {
+        self.sources().contains(&source)
+    }
+}
+
+/// Every language, in the order the admin UI offers them.
+pub const MODULE_LANGUAGES: [ModuleLanguage; 2] =
+    [ModuleLanguage::JavaScript, ModuleLanguage::Python];
+
 /// Where a module's package comes from.
 ///
-/// Two kinds, and the difference is entirely in what `location` means: a
-/// registry specifier (`@saltcorn/mqtt`, `@saltcorn/mqtt@0.2.0`) or an absolute
-/// path on this server's disk. npm installs both; a local directory is
-/// **copied** in rather than symlinked, for the two reasons
-/// [`crate::install`] gives, so a checkout's edits reach the server when it is
-/// installed again.
+/// Three kinds, and the difference is entirely in what `location` means: a
+/// registry specifier (`@saltcorn/mqtt@0.2.0` for npm, `saltcorn-mqtt>=0.2` for
+/// PyPI) or an absolute path on this server's disk. Which of the two registries
+/// applies is the module's [`ModuleLanguage`], and `local` means the same thing
+/// in both languages: a directory, **copied** in rather than linked, for the
+/// reasons [`crate::install`] gives — so a checkout's edits reach the server
+/// when it is installed again and not before.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModuleSource {
     /// A package from the npm registry.
     Npm,
+    /// A distribution from the Python Package Index.
+    Pypi,
     /// A directory on this server's disk.
     Local,
 }
@@ -55,6 +115,7 @@ impl ModuleSource {
     pub fn as_str(self) -> &'static str {
         match self {
             ModuleSource::Npm => "npm",
+            ModuleSource::Pypi => "pypi",
             ModuleSource::Local => "local",
         }
     }
@@ -65,16 +126,18 @@ impl ModuleSource {
     pub fn parse(s: &str) -> Result<ModuleSource> {
         match s {
             "npm" => Ok(ModuleSource::Npm),
+            "pypi" => Ok(ModuleSource::Pypi),
             "local" => Ok(ModuleSource::Local),
             other => Err(Error::invalid(format!(
-                "unknown module source `{other}`; the sources are npm, local"
+                "unknown module source `{other}`; the sources are npm, pypi, local"
             ))),
         }
     }
 }
 
 /// Every source, in the order the admin UI offers them.
-pub const MODULE_SOURCES: [ModuleSource; 2] = [ModuleSource::Npm, ModuleSource::Local];
+pub const MODULE_SOURCES: [ModuleSource; 3] =
+    [ModuleSource::Npm, ModuleSource::Pypi, ModuleSource::Local];
 
 /// An installed module: the row, and nothing the package could contradict.
 #[derive(Debug, Clone)]
@@ -84,6 +147,9 @@ pub struct Module {
     /// The package name — `@saltcorn/mqtt`. The key everything resolves
     /// through, and what `node_modules/<name>` is called on disk.
     pub name: String,
+    /// Which language it is written in (§8), and therefore which host loads it
+    /// and which package manager installed it.
+    pub language: ModuleLanguage,
     /// Where the package came from.
     pub source: ModuleSource,
     /// The npm specifier or the local directory, as the admin gave it. Kept so
@@ -109,6 +175,15 @@ pub struct Module {
 }
 
 impl Module {
+    /// The same module, in `language` — the one thing about a module that is
+    /// decided before its package has been read, because it decides which
+    /// package manager reads it.
+    #[must_use]
+    pub fn in_language(mut self, language: ModuleLanguage) -> Module {
+        self.language = language;
+        self
+    }
+
     /// A module about to be installed from `location`.
     ///
     /// The name is provisional for an npm install (the specifier may carry a
@@ -123,6 +198,7 @@ impl Module {
         Module {
             id: ModuleId::new(),
             name: name.into(),
+            language: ModuleLanguage::JavaScript,
             source,
             location: location.into(),
             version: None,
@@ -152,9 +228,27 @@ mod tests {
     }
 
     #[test]
+    fn a_language_round_trips_and_owns_its_registry() {
+        for language in MODULE_LANGUAGES {
+            assert_eq!(ModuleLanguage::parse(language.as_str()).unwrap(), language);
+            // Every language has the local directory, and exactly one registry.
+            assert!(language.allows(ModuleSource::Local));
+        }
+        assert!(ModuleLanguage::JavaScript.allows(ModuleSource::Npm));
+        assert!(!ModuleLanguage::JavaScript.allows(ModuleSource::Pypi));
+        assert!(ModuleLanguage::Python.allows(ModuleSource::Pypi));
+        assert!(!ModuleLanguage::Python.allows(ModuleSource::Npm));
+        let msg = ModuleLanguage::parse("ruby").unwrap_err().to_string();
+        assert!(msg.contains("ruby") && msg.contains("python"), "{msg}");
+    }
+
+    #[test]
     fn a_new_module_has_no_version_until_it_is_installed() {
         let module = Module::new("@saltcorn/mqtt", ModuleSource::Npm, "@saltcorn/mqtt");
         assert!(module.version.is_none());
+        // JavaScript unless somebody says otherwise: the language nearly every
+        // module is written in should not have to be named at every call site.
+        assert_eq!(module.language, ModuleLanguage::JavaScript);
         assert!(module.configuration.is_empty());
         // And it reaches nothing until an admin says otherwise (§2).
         assert!(module.permissions.is_closed());

@@ -1,0 +1,7 @@
+# A directory pip can start on and cannot finish: the build backend raises.
+# What the test is about is the *reporting* — pip's own last lines reaching the
+# admin — so the failure has to come from pip rather than from a path check.
+[build-system]
+requires = []
+build-backend = "scbroken"
+backend-path = ["."]

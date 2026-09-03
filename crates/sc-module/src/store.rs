@@ -18,7 +18,7 @@ use sc_query::{Assignment, Delete, Expr, Insert, Select, Source, Statement, Upda
 use sc_types::{Attrs, BasicType, TypeRef};
 use serde_json::Value as Json;
 
-use crate::module::{Module, ModuleId, ModuleSource};
+use crate::module::{Module, ModuleId, ModuleLanguage, ModuleSource};
 use crate::permissions::ModulePermissions;
 
 /// Name of the modules table in the primary database.
@@ -28,6 +28,8 @@ pub const MODULES_TABLE: &str = "_sc_modules";
 pub const COL_ID: &str = "id";
 /// The package name — the key everything resolves through.
 pub const COL_NAME: &str = "name";
+/// Which language the module is written in, as [`ModuleLanguage::as_str`] (§8).
+pub const COL_LANGUAGE: &str = "language";
 /// Where the package came from, as [`ModuleSource::as_str`].
 pub const COL_SOURCE: &str = "source";
 /// The npm specifier or local directory the module was installed from.
@@ -55,6 +57,12 @@ fn module_fields() -> Vec<DataField> {
     vec![
         DataField::plain(COL_ID, uuid()).required().primary_key(),
         DataField::plain(COL_NAME, text()).required().unique(),
+        // Not required, and NULL reads as `javascript` — the same shape
+        // `permissions` has and for the same reason: a column added after a row
+        // was written must have an answer for that row, and the honest answer
+        // for a module installed before there was a second language is the only
+        // language there was.
+        DataField::plain(COL_LANGUAGE, text()),
         DataField::plain(COL_SOURCE, text()).required(),
         DataField::plain(COL_LOCATION, text()).required(),
         DataField::plain(COL_VERSION, text()),
@@ -93,6 +101,24 @@ pub async fn save_module(catalog: &Catalog, module: &Module) -> Result<()> {
     if module.location.trim().is_empty() {
         return Err(Error::invalid(format!(
             "module `{name}` needs a location to have been installed from"
+        )));
+    }
+    // A language and a source that disagree is a row nothing could reinstall:
+    // npm cannot fetch from PyPI and pip cannot fetch from npm, so the pair is
+    // checked here rather than left to fail at the next install.
+    if !module.language.allows(module.source) {
+        return Err(Error::invalid(format!(
+            "module `{name}` is {} and cannot be installed from `{}`; a {} module comes from {}",
+            module.language.as_str(),
+            module.source.as_str(),
+            module.language.as_str(),
+            module
+                .language
+                .sources()
+                .iter()
+                .map(|source| source.as_str())
+                .collect::<Vec<_>>()
+                .join(" or ")
         )));
     }
     if let Some(other) = load_module_by_name(catalog, name).await?
@@ -177,6 +203,7 @@ fn module_columns() -> Vec<String> {
     [
         COL_ID,
         COL_NAME,
+        COL_LANGUAGE,
         COL_SOURCE,
         COL_LOCATION,
         COL_VERSION,
@@ -194,6 +221,7 @@ fn module_values(module: &Module) -> Vec<Value> {
     vec![
         Value::Uuid(module.id.0),
         Value::Text(module.name.trim().to_owned()),
+        Value::Text(module.language.as_str().to_owned()),
         Value::Text(module.source.as_str().to_owned()),
         Value::Text(module.location.trim().to_owned()),
         match &module.version {
@@ -214,6 +242,15 @@ fn module_from_row(row: &Row) -> Result<Module> {
         other => return Err(bad_column(COL_ID, "a uuid", other)),
     };
     let name = text(row, COL_NAME)?;
+    // NULL is `javascript`, and anything else is parsed strictly: a language
+    // nothing understands must not become a module some host guesses at.
+    let language = match row.get(COL_LANGUAGE) {
+        Some(Value::Text(t)) => {
+            ModuleLanguage::parse(t).map_err(|e| Error::invalid(format!("module `{name}`: {e}")))?
+        }
+        Some(Value::Null) | None => ModuleLanguage::JavaScript,
+        other => return Err(bad_column(COL_LANGUAGE, "text", other)),
+    };
     let source = ModuleSource::parse(&text(row, COL_SOURCE)?)
         .map_err(|e| Error::invalid(format!("module `{name}`: {e}")))?;
     // A NULL version is "not installed yet", not a broken row.
@@ -226,6 +263,7 @@ fn module_from_row(row: &Row) -> Result<Module> {
     Ok(Module {
         id,
         name,
+        language,
         source,
         location: text(row, COL_LOCATION)?,
         version,

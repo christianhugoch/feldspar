@@ -162,8 +162,15 @@ async fn setup(tag: &str) -> sc_error::Result<Server> {
     let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents).await?;
     let root = std::env::temp_dir().join(format!("sc-modules-api-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    let modules =
-        ModuleServices::install(&catalog, &dispatcher, &agents, Some(root.clone()), 1).await?;
+    let modules = ModuleServices::install(
+        &catalog,
+        &dispatcher,
+        &agents,
+        Some(root.clone()),
+        1,
+        sc_server::default_python_adapter(),
+    )
+    .await?;
 
     let sessions = Arc::new(SessionStore::default());
     let apps = Arc::new(
@@ -238,11 +245,20 @@ async fn a_module_is_installed_listed_configured_and_deleted() -> sc_error::Resu
     assert_eq!(body["npm"], json!(true));
     assert_eq!(body["node"], json!(true));
     assert!(body["root"].as_str().unwrap().contains("sc-modules-api"));
+    // And the other language's toolchain, asked the same way (§8): whether this
+    // machine can build the Python environment, and where that environment is.
+    // Booleans either way — a machine without python3 answers `false`, which is
+    // exactly what the tab needs to say before offering the form.
+    assert!(body["python"].is_boolean(), "{body}");
+    assert!(body["pip"].is_boolean(), "{body}");
 
     let installed = install_echo(client).await;
     assert_eq!(installed["name"], json!("@saltcorn-test/echo"));
     assert_eq!(installed["version"], json!("0.1.0"));
     assert_eq!(installed["source"], json!("local"));
+    // JavaScript unless the install said otherwise, which is what every caller
+    // written before there was a second language means.
+    assert_eq!(installed["language"], json!("javascript"));
     assert_eq!(installed["loaded"], json!(true));
     assert_eq!(installed["api_version"], json!(1));
     let id = installed["id"].as_str().unwrap().to_owned();
@@ -657,5 +673,81 @@ async fn a_runaway_module_does_not_delay_a_code_body() -> sc_error::Result<()> {
         .await?;
     assert_eq!(value["greeting"], json!("still here"));
 
+    Ok(())
+}
+
+/// Phase 5: the endpoints carry the **language**, and a language that disagrees
+/// with its source is refused in front of the form rather than by the package
+/// manager that cannot serve it (§8).
+///
+/// No package is installed here and none needs to be: what is under test is the
+/// endpoint's reading of the two fields, which is decided before either
+/// installer is reached. So this test needs neither npm nor python.
+#[tokio::test]
+async fn an_install_names_its_language_and_a_mismatched_source_is_refused() -> sc_error::Result<()>
+{
+    let mut server = setup("language").await?;
+    let client = &mut server.client;
+
+    // A JavaScript module cannot come from PyPI…
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/modules",
+            Some(json!({
+                "source": "pypi",
+                "location": "saltcorn-weather",
+                "language": "javascript",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let said = body.to_string();
+    assert!(
+        said.contains("javascript") && said.contains("pypi"),
+        "{said}"
+    );
+
+    // …nor a Python one from npm.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/modules",
+            Some(json!({
+                "source": "npm",
+                "location": "@saltcorn/mqtt",
+                "language": "python",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("python"), "{body}");
+
+    // And a language nothing understands names the two that are.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/modules",
+            Some(json!({
+                "source": "local",
+                "location": "/srv/checkout/thing",
+                "language": "ruby",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let said = body.to_string();
+    assert!(
+        said.contains("ruby") && said.contains("javascript"),
+        "{said}"
+    );
+
+    assert!(
+        client.send("GET", "/api/modules", None).await.1["modules"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "nothing was installed by a refused install"
+    );
     Ok(())
 }

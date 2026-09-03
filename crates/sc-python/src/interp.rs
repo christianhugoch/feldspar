@@ -223,21 +223,14 @@ fn embedded<'py>(
 }
 
 /// The directory an installed package lives in, under a virtual environment
-/// this server owns.
+/// this server owns — [`crate::env::site_packages`], under this module's name
+/// because this is where the version that decides it comes from.
 ///
 /// Computed from the **embedded** interpreter's version, because that is the one
 /// that will import what is there — and the version of the `python3` that built
 /// the environment may not be it, which is exactly the mismatch §9's ABI check
-/// (phase 5.2) exists to refuse.
-pub(crate) fn site_packages(dir: &std::path::Path, major: u32, minor: u32) -> std::path::PathBuf {
-    if cfg!(windows) {
-        dir.join("Lib").join("site-packages")
-    } else {
-        dir.join("lib")
-            .join(format!("python{major}.{minor}"))
-            .join("site-packages")
-    }
-}
+/// refuses.
+pub(crate) use crate::env::site_packages;
 
 /// Take the **host's** installed packages off `sys.path`, and put this server's
 /// environment on it.
@@ -273,12 +266,23 @@ fn isolate_path(py: Python<'_>, env: &PythonEnv, major: u32, minor: u32) -> PyRe
                 || trimmed.ends_with("/dist-packages"))
         })
         .collect();
-    if let Some(dir) = env.dir.as_deref() {
-        kept.push(
-            site_packages(dir, major, minor)
-                .to_string_lossy()
-                .into_owned(),
-        );
+    if let Some(dir) = env.directory() {
+        // **The ABI check, on the one path that would otherwise crash the
+        // server** (§9): an environment built by a different `python3` holds C
+        // extensions compiled for that interpreter, and importing one of those
+        // here is a segfault rather than an `ImportError`. So a mismatched
+        // environment is left off `sys.path` entirely and reported — the
+        // interpreter still runs, the standard library is still there, and
+        // Settings → Development says in one sentence why nothing installed is
+        // importable (`PythonStatus::env_error`).
+        match crate::env::venv_version(&dir) {
+            Some(built) if built != (major, minor) => {}
+            _ => kept.push(
+                site_packages(&dir, major, minor)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        }
     }
     sys.setattr("path", kept)?;
     Ok(())
@@ -550,29 +554,4 @@ fn py_error(py: Python<'_>, error: &PyErr) -> Error {
         "the Python runtime failed: {}",
         rendered(py, error, "")
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The environment's packages go where a virtual environment puts them, and
-    /// under the **embedded** interpreter's version — the one that will import
-    /// them, which is not necessarily the `python3` that built the environment.
-    #[test]
-    fn the_environment_directory_is_where_a_venv_puts_its_packages() {
-        let dir = std::path::Path::new("/srv/feldspar/python");
-        let found = site_packages(dir, 3, 13);
-        if cfg!(windows) {
-            assert!(found.ends_with("Lib/site-packages") || found.ends_with("Lib\\site-packages"));
-        } else {
-            assert_eq!(
-                found,
-                std::path::Path::new("/srv/feldspar/python/lib/python3.13/site-packages")
-            );
-        }
-        // A different embedded version is a different directory, which is the
-        // mismatch phase 5.2's ABI check refuses rather than segfaults on.
-        assert_ne!(found, site_packages(dir, 3, 14));
-    }
 }

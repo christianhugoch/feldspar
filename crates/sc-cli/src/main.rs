@@ -227,6 +227,10 @@ async fn serve_command(args: &[String]) -> Result<()> {
         &agents,
         config.modules_dir.clone(),
         config.module_workers,
+        // The same runtime the dispatcher took as a code adapter: one
+        // interpreter per process, so a Python module and a Python body share
+        // it, and one environment, which is what pip installs into.
+        python.clone(),
     )
     .await?;
 
@@ -1046,7 +1050,12 @@ fn print_usage() {
     --python-max-stuck N     runs that never returned before Python is refused
                              until a restart (default 8)
     --python-dir PATH        the virtual environment Python modules install into
-    --python-bin PATH        the interpreter pip runs under (default python3)"
+                             (default: the platform's data directory, e.g.
+                             ~/.local/share/feldspar/python)
+    --python-bin PATH        the interpreter pip runs under (default python3).
+                             It must be the same major.minor version as the one
+                             this server was built against, or the environment
+                             is refused rather than segfaulted on"
     );
     eprintln!();
     eprintln!(

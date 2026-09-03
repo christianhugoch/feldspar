@@ -104,6 +104,13 @@ use serde_json::Value as Json;
 mod bridge;
 #[cfg(feature = "python-host")]
 mod convert;
+/// The **environment**: the virtual environment this server owns, `pip`, and the
+/// ABI check between the two interpreters (§9).
+///
+/// Un-gated, and deliberately so: every act in it is a subprocess, so a build
+/// without `python-host` can still tell the Modules tab whether there is a
+/// Python toolchain and what is installed in the environment.
+pub mod env;
 #[cfg(feature = "python-host")]
 mod errors;
 #[cfg(feature = "python-host")]
@@ -118,6 +125,13 @@ mod runtime;
 /// adapter that answers to it must agree, and they agree by sharing the string
 /// rather than by both spelling it correctly.
 pub use sc_expr::PYTHON;
+
+/// The environment's surface, re-exported: a caller installing a Python module
+/// names these and has no reason to know which file they live in.
+pub use env::{
+    DEFAULT_PYTHON_BIN, InstalledDistribution, PythonEnvironment, PythonSource, default_python_dir,
+    have_pip, have_python,
+};
 
 /// How many Python runs may be resident at once — code bodies and module calls
 /// alike, because there is one interpreter and one thing being bounded.
@@ -238,8 +252,9 @@ pub struct PythonStatus {
     /// interpreter.
     pub state: PythonState,
     /// The environment this server installs Python modules into
-    /// (`--python-dir`). `None` until an operator names one: creating it, and
-    /// defaulting it beside the modules root, is phase 5.
+    /// (`--python-dir`, else the platform's data directory beside the modules
+    /// root). `None` only where neither could be determined, which is the
+    /// machine with no home directory [`env::default_python_dir`] refuses on.
     pub dir: Option<std::path::PathBuf>,
     /// Where inside it a package lands, under the **embedded** interpreter's
     /// version — so this is `None` until the interpreter has started and said
@@ -263,52 +278,16 @@ pub struct PythonStatus {
     /// How many of those are tolerated before new runs are refused
     /// (`--python-max-stuck`).
     pub max_stuck: usize,
-}
-
-/// `3.14.4` as the two numbers a `site-packages` path is built from.
-#[cfg(feature = "python-host")]
-fn version_parts(version: &str) -> Option<(u32, u32)> {
-    let mut parts = version.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    Some((major, minor))
-}
-
-/// The packages installed under one `site-packages` directory.
-///
-/// A missing or unreadable directory is an empty listing rather than an error:
-/// an environment nobody has installed into yet is the ordinary case, and a
-/// diagnostics screen that failed to render because of it would be reporting
-/// the wrong thing.
-fn packages_in(site_packages: &std::path::Path) -> Vec<PythonPackage> {
-    let Ok(entries) = std::fs::read_dir(site_packages) else {
-        return Vec::new();
-    };
-    let mut found: Vec<PythonPackage> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let stem = name
-                .strip_suffix(".dist-info")
-                .or_else(|| name.strip_suffix(".egg-info"))?;
-            // `numpy-2.1.0.dist-info`, and `-` is legal in neither half after
-            // the normalisation a distribution's metadata directory carries — so
-            // the last one is the separator.
-            Some(match stem.rsplit_once('-') {
-                Some((name, version)) => PythonPackage {
-                    name: name.to_owned(),
-                    version: Some(version.to_owned()),
-                },
-                None => PythonPackage {
-                    name: stem.to_owned(),
-                    version: None,
-                },
-            })
-        })
-        .collect();
-    found.sort_by(|a, b| a.name.cmp(&b.name));
-    found.dedup();
-    found
+    /// Why the environment is **not being used**, where that is the case (§9):
+    /// the version mismatch between this process's own interpreter and the one
+    /// the environment was built with.
+    ///
+    /// A separate line from the state, because it is a different failure with a
+    /// different remedy: the interpreter is running perfectly and the packages
+    /// beside it are the ones it cannot import. Silence here means the
+    /// environment is on `sys.path` — or that there is no environment yet,
+    /// which `packages` being empty already says.
+    pub env_error: Option<String>,
 }
 
 /// The Python runtime: one interpreter, a run per thread, one admission bound.
@@ -474,29 +453,63 @@ impl PythonRuntime {
     #[must_use]
     pub fn status(&self) -> PythonStatus {
         let state = self.state();
-        // Which directory a package is imported from depends on the version of
-        // the interpreter that will import it, so there is nothing truthful to
-        // say until it has started — which a build without the feature never
-        // does.
-        #[cfg(feature = "python-host")]
-        let site_packages = match (&state, self.env.dir.as_deref()) {
-            (PythonState::Running { version }, Some(dir)) => version_parts(version)
-                .map(|(major, minor)| interp::site_packages(dir, major, minor)),
-            _ => None,
-        };
-        #[cfg(not(feature = "python-host"))]
-        let site_packages: Option<std::path::PathBuf> = None;
+        // The version that decides which directory a package is imported *from*
+        // is the embedded interpreter's, and it is only knowable once that
+        // interpreter has started. Before then the environment's own
+        // `pyvenv.cfg` answers where its packages are, which is what the screen
+        // needs: an admin looking at an environment they have not fired
+        // anything against yet should still see what is installed in it.
+        let embedded = state.version().and_then(env::parse_version);
+        let environment = env::PythonEnvironment::new(&self.env, embedded).ok();
         PythonStatus {
             state,
-            dir: self.env.dir.clone(),
-            packages: site_packages.as_deref().map(packages_in).unwrap_or_default(),
-            site_packages,
-            bin: self.env.bin.clone(),
+            dir: environment.as_ref().map(|e| e.dir().to_path_buf()),
+            site_packages: environment
+                .as_ref()
+                .and_then(env::PythonEnvironment::site_packages),
+            bin: Some(self.env.interpreter()),
+            // Empty rather than absent when the environment cannot be imported
+            // from: `env_error` is what says why, and a listing of packages
+            // beside a sentence saying they are unusable reads as a listing of
+            // packages.
+            packages: match &environment {
+                Some(environment) if environment.check_abi().is_ok() => environment.packages(),
+                _ => Vec::new(),
+            },
             max_inflight: self.max_inflight(),
             resident: self.resident(),
             threads: self.threads(),
             stuck: self.stuck(),
             max_stuck: self.max_stuck(),
+            env_error: environment
+                .as_ref()
+                .and_then(|environment| environment.check_abi().err())
+                .map(|e| e.to_string()),
+        }
+    }
+
+    /// The environment this server installs Python **modules** into (§9).
+    ///
+    /// Starting the interpreter is part of answering, and that is the point:
+    /// the environment's one non-obvious property is the ABI check, which needs
+    /// the version of the interpreter that will import what pip puts there. A
+    /// build without the feature, or a process started with `--python off`, has
+    /// no such version and therefore cannot be trusted to install — so it
+    /// refuses with the same sentence firing a Python trigger would, rather
+    /// than installing packages nothing here can load.
+    ///
+    /// [`env::PythonEnvironment::new`] is the way to build one *without* that
+    /// guarantee, for the screen that only lists what is there.
+    pub fn environment(&self) -> Result<env::PythonEnvironment> {
+        #[cfg(feature = "python-host")]
+        {
+            self.admit()?;
+            let version = interp::ensure(&self.env)?;
+            env::PythonEnvironment::new(&self.env, env::parse_version(&version))
+        }
+        #[cfg(not(feature = "python-host"))]
+        {
+            Err(not_built())
         }
     }
 

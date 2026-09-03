@@ -346,6 +346,15 @@ impl Installer {
         self.ensure_project().await?;
 
         let spec = match source {
+            // npm has nothing to say about PyPI. The caller routes a Python
+            // module to `sc_python`'s environment, and reaching here with one
+            // is a wiring mistake rather than an admin's, so it is reported as
+            // itself instead of being passed to npm as a package name.
+            ModuleSource::Pypi => {
+                return Err(Error::invalid(
+                    "`pypi` is a Python module's source; npm cannot install one. Install it as                      a Python module.",
+                ));
+            }
             ModuleSource::Npm => {
                 let spec = location.trim();
                 if spec.is_empty() {
@@ -492,7 +501,9 @@ impl Installer {
 
         match source {
             ModuleSource::Local => local_package_name(Path::new(location.trim())),
-            ModuleSource::Npm => npm_spec_name(location.trim()),
+            // `install` refuses `pypi` before anything is run, so this arm is
+            // only reachable through the same mistake and answers the same way.
+            ModuleSource::Npm | ModuleSource::Pypi => npm_spec_name(location.trim()),
         }
     }
 }

@@ -1498,6 +1498,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let services = modules_of(&apps)?;
                 let set = services.modules();
                 let modules: Vec<Json> = set.modules().iter().map(module_json).collect();
+                let interpreter = services.python().env().interpreter();
                 Ok(HandlerResponse::ok(json!({
                     "modules": modules,
                     "root": services.installer().root().display().to_string(),
@@ -1507,6 +1508,18 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     // package name.
                     "npm": sc_module::have_npm().await,
                     "node": sc_module::have_node().await,
+                    // And the other language's, asked the same way and for the
+                    // same reason (§8): a server may have one toolchain and not
+                    // the other, and which of the two install forms can work is
+                    // not something an admin should learn by using one.
+                    "python": sc_python::have_python(&interpreter).await,
+                    "pip": sc_python::have_pip(&interpreter).await,
+                    // Where pip installs, beside where npm does. `None` only on
+                    // a machine with no data directory to default to.
+                    "python_dir": match services.python().env().directory() {
+                        Some(dir) => Json::from(dir.display().to_string()),
+                        None => Json::Null,
+                    },
                 })))
             }
         }
@@ -1523,8 +1536,27 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let obj = require_object(&ctx.body)?;
                 let source = sc_module::ModuleSource::parse(non_empty_str_field(obj, "source")?)?;
                 let location = non_empty_str_field(obj, "location")?.trim().to_owned();
+                // Absent is `javascript`: the language nearly every module is
+                // written in, and the one every existing caller means.
+                let language = match obj.get("language").filter(|v| !v.is_null()) {
+                    Some(value) => sc_module::ModuleLanguage::parse(
+                        value
+                            .as_str()
+                            .ok_or_else(|| Error::invalid("field `language` must be a string"))?,
+                    )?,
+                    None => sc_module::ModuleLanguage::JavaScript,
+                };
+                if !language.allows(source) {
+                    return Err(Error::invalid(format!(
+                        "a {} module cannot be installed from `{}`",
+                        language.as_str(),
+                        source.as_str()
+                    )));
+                }
 
-                let package = services.installer().install(source, &location).await?;
+                let package = services
+                    .install_package(language, source, &location)
+                    .await?;
                 // A package name that is already installed is an **upgrade**,
                 // not a collision: reinstalling is how a module is upgraded
                 // (TODO, out of scope: an upgrade UI), and the admin who typed
@@ -1534,6 +1566,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     Some(existing) => existing,
                     None => sc_module::Module::new(&package.name, source, &location),
                 };
+                module.language = language;
                 module.source = source;
                 module.location = location;
                 module.version = Some(package.version);
@@ -1622,7 +1655,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // module nobody can delete, so its complaint is logged rather
                 // than returned.
                 services.host().unload(&module.name).await;
-                if let Err(e) = services.installer().uninstall(&module.name).await {
+                if let Err(e) = services.uninstall_package(&module).await {
                     sc_log::log_error!(
                         "feldspar: the module `{}` was removed but its package could not be \
                          uninstalled: {}",
@@ -2750,6 +2783,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                             "threads": 0,
                             "stuck": 0,
                             "max_stuck": 0,
+                            "env_error": Json::Null,
                         })));
                     }
                 };
@@ -4762,6 +4796,10 @@ fn module_json(loaded: &sc_module::LoadedModule) -> Json {
     json!({
         "id": module.id.0,
         "name": module.name,
+        // Which language it is written in, and therefore which of the two
+        // install forms would reinstall it and whether `permissions` means
+        // anything for it (§10: a Python module has no permission model).
+        "language": module.language.as_str(),
         "source": module.source.as_str(),
         "location": module.location,
         "version": module.version,
@@ -5480,6 +5518,11 @@ fn python_status_json(status: &sc_python::PythonStatus) -> Json {
         "threads": status.threads,
         "stuck": status.stuck,
         "max_stuck": status.max_stuck,
+        // Null on the ordinary server. When it is not, it is the one thing on
+        // the panel that needs acting on: an environment built by a different
+        // Python is left off `sys.path` entirely, so everything installed in it
+        // is invisible to every body (§9).
+        "env_error": status.env_error,
     })
 }
 

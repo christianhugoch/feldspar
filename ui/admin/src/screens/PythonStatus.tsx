@@ -105,7 +105,7 @@ export function PythonStatusPanel() {
                   <Reading
                     label="Environment"
                     value={status.dir}
-                    absent="No environment directory is configured (--python-dir), so a body may import only the standard library."
+                    absent="This machine has no data directory to put one in, and none was named with --python-dir, so a body may import only the standard library."
                   />
                   <Reading label="Packages installed in" value={status.site_packages} />
                   <Reading
@@ -125,6 +125,11 @@ export function PythonStatusPanel() {
                     value={`${status.stuck} of ${status.max_stuck} tolerated (--python-max-stuck)`}
                   />
                 </dl>
+                {status.env_error && (
+                  <Alert variant="danger" className="mt-3">
+                    <AlertBody>{status.env_error}</AlertBody>
+                  </Alert>
+                )}
                 {status.stuck > 0 && (
                   <Alert variant="warning" className="mt-3">
                     <AlertBody>
@@ -140,8 +145,9 @@ export function PythonStatusPanel() {
                   <h4 className="mb-1">Installed packages</h4>
                   {status.packages.length === 0 ? (
                     <p className="text-secondary mb-0">
-                      Nothing is installed in this server's Python environment. A body may
-                      import the standard library; anything else has to be installed here.
+                      {status.env_error
+                        ? "This environment is not being used, so nothing in it is listed."
+                        : "Nothing is installed in this server's Python environment. A body may import the standard library; anything else has to be installed here."}
                     </p>
                   ) : (
                     <ul className="list-inline mb-0">

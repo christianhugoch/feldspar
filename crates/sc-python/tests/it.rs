@@ -7,6 +7,13 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+// The **environment** is a subprocess in either build (§9, phase 5), so its
+// tests run in both: what the feature decides is only whether there is an
+// embedded interpreter to check an environment's version against, and the one
+// test about that supplies a version by hand.
+#[path = "python_env.rs"]
+mod python_env;
+
 #[cfg(feature = "python-host")]
 #[path = "python_db.rs"]
 mod python_db;
