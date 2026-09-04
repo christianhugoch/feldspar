@@ -15,6 +15,10 @@
 mod python_env;
 
 #[cfg(feature = "python-host")]
+#[path = "bundled_markdown.rs"]
+mod bundled_markdown;
+
+#[cfg(feature = "python-host")]
 #[path = "python_db.rs"]
 mod python_db;
 

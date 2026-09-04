@@ -168,6 +168,7 @@ async fn setup(tag: &str) -> sc_error::Result<Server> {
         &dispatcher,
         &agents,
         Some(root.clone()),
+        None,
         1,
         sc_server::default_python_adapter(),
     )

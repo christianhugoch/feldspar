@@ -100,6 +100,13 @@ async fn serve_command(args: &[String]) -> Result<()> {
         }
     }
     config.ide_dir = ide_bundle_dir();
+    // The bundled modules, from wherever this binary was packaged to look for
+    // them. `build.rs` always records a path; whether the directory is there is
+    // a property of the artifact, and a missing one is an empty catalog rather
+    // than a failure (`sc_module::bundled`).
+    config.plugins_dir = Some(std::path::PathBuf::from(
+        option_env!("SC_PLUGINS_DIR").unwrap_or(sc_server::BUNDLED_IN_CHECKOUT),
+    ));
 
     // Which database this process is about to write to is the one fact worth
     // saying out loud before anything happens — an operator running three
@@ -226,6 +233,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
         &triggers,
         &agents,
         config.modules_dir.clone(),
+        config.plugins_dir.clone(),
         config.module_workers,
         // The same runtime the dispatcher took as a code adapter: one
         // interpreter per process, so a Python module and a Python body share

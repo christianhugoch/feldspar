@@ -81,6 +81,11 @@ fn fixture(name: &str, npx_status: i32) -> Fixture {
     )
     .expect("copy setup-host.sh");
     fs::copy(root.join("Cargo.toml"), repo.join("Cargo.toml")).unwrap();
+    // And the bundled modules, which the packaging step also puts in the
+    // artifact.
+    let plugins = repo.join("plugins/rss");
+    fs::create_dir_all(&plugins).unwrap();
+    fs::write(plugins.join("feldspar-module.json"), "{}").unwrap();
 
     let bin = dir.join("bin");
     let log = dir.join("npx.log");

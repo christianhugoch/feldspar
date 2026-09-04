@@ -19,6 +19,10 @@
 #[path = "common/mod.rs"]
 mod common;
 
+#[path = "bundled_catalog.rs"]
+mod bundled_catalog;
+#[path = "bundled_rss.rs"]
+mod bundled_rss;
 #[path = "deno_host.rs"]
 mod deno_host;
 #[path = "host.rs"]

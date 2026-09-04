@@ -167,6 +167,9 @@ async fn setup(tag: &str) -> sc_error::Result<Server> {
         &dispatcher,
         &agents,
         Some(root.clone()),
+        // The checkout's own `plugins/`, so the listing below is the catalog
+        // this repository actually ships.
+        None,
         1,
         sc_server::default_python_adapter(),
     )
@@ -749,5 +752,169 @@ async fn an_install_names_its_language_and_a_mismatched_source_is_refused() -> s
             .is_empty(),
         "nothing was installed by a refused install"
     );
+    Ok(())
+}
+
+/// The bundled catalog's entry for the RSS module, out of a `listModules` body.
+fn rss_entry(body: &Value) -> Value {
+    body["bundled"]
+        .as_array()
+        .expect("the listing carries a bundled catalog")
+        .iter()
+        .find(|entry| entry["id"] == json!("rss"))
+        .expect("the RSS module is in the catalog")
+        .clone()
+}
+
+#[tokio::test]
+async fn the_bundled_catalog_is_listed_before_anything_is_installed() -> sc_error::Result<()> {
+    // No npm and no network: the catalog is a directory in the artifact, and
+    // reading it is what the tab does before an admin has done anything at all.
+    let mut server = setup("bundled-list").await?;
+    let (status, body) = server.client.send("GET", "/api/modules", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["modules"].as_array().unwrap().is_empty());
+
+    let rss = rss_entry(&body);
+    assert_eq!(rss["name"], json!("@feldspar/rss"));
+    assert_eq!(rss["language"], json!("javascript"));
+    assert_eq!(rss["installed"], json!(false));
+    // What the card promises the click will do: fetch a dependency that is not
+    // in the release, and grant a module the network.
+    assert_eq!(rss["installs"], json!(["rss-parser"]));
+    assert_eq!(rss["permissions"]["net"], json!(["*"]));
+    assert!(!rss["description"].as_str().unwrap().is_empty());
+    assert!(!rss["supplies"].as_array().unwrap().is_empty());
+
+    // Both languages come out of one catalog and one endpoint (§8).
+    let languages: Vec<&str> = body["bundled"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["language"].as_str().unwrap())
+        .collect();
+    assert!(languages.contains(&"python"), "{languages:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_bundled_id_nothing_ships_is_refused_and_names_what_does() -> sc_error::Result<()> {
+    let mut server = setup("bundled-unknown").await?;
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            "/api/modules",
+            Some(json!({ "source": "bundled", "location": "mqtt" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let said = body.to_string();
+    // The id that was asked for, and the ids there are: the request came from a
+    // button this server drew, so the repair is a reload rather than a typo.
+    assert!(said.contains("mqtt") && said.contains("rss"), "{said}");
+
+    // Nothing was installed, and npm was never run: the catalog is consulted
+    // before the package manager.
+    assert!(
+        server.client.send("GET", "/api/modules", None).await.1["modules"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "installs a bundled module, which downloads its dependency from npm"]
+async fn a_bundled_module_installs_in_one_call_with_the_permissions_its_card_promised()
+-> sc_error::Result<()> {
+    skip_without_npm!();
+    let mut server = setup("bundled-install").await?;
+    let client = &mut server.client;
+
+    // Everything the button sends: which catalog, and which entry. No language,
+    // no path, no permission set — all three are the server's own answers.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/modules",
+            Some(json!({ "source": "bundled", "location": "rss" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["name"], json!("@feldspar/rss"));
+    assert_eq!(body["source"], json!("bundled"));
+    // The **id**, not the directory: a path would be a row that could not be
+    // reinstalled after an upgrade moved the install prefix.
+    assert_eq!(body["location"], json!("rss"));
+    assert_eq!(body["language"], json!("javascript"));
+    assert!(body["loaded"].as_bool().unwrap(), "{body}");
+    assert_eq!(body["issues"], json!([]));
+
+    // What it supplies, read from the package that was just installed.
+    assert_eq!(body["table_providers"], json!(["RSS feed"]));
+    // And the grant the card printed beside the button, on the row.
+    assert_eq!(body["permissions"]["net"], json!(["*"]));
+
+    // The catalog now says so, which is what turns the card's button into a
+    // tick.
+    let (_, listing) = client.send("GET", "/api/modules", None).await;
+    assert_eq!(rss_entry(&listing)["installed"], json!(true));
+
+    // The provider is offered to the New table screen — the whole point of
+    // installing this one.
+    let (status, providers) = client.send("GET", "/api/table-providers", None).await;
+    assert_eq!(status, StatusCode::OK, "{providers}");
+    let offered: Vec<&str> = providers
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["provider"].as_str().unwrap())
+        .collect();
+    assert!(offered.contains(&"RSS feed"), "{offered:?}");
+
+    // **The upgrade path.** A bundled module is upgraded by installing it
+    // again — the card's button says Reinstall once it is installed — and what
+    // the admin has done to it since must survive that: the settings on the
+    // row, and above all a permission set they narrowed.
+    let id = body["id"].as_str().unwrap().to_owned();
+    let (status, narrowed) = client
+        .send(
+            "PUT",
+            &format!("/api/modules/{id}"),
+            Some(json!({ "permissions": { "net": ["feeds.example"] } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{narrowed}");
+    assert_eq!(narrowed["permissions"]["net"], json!(["feeds.example"]));
+
+    let (status, again) = client
+        .send(
+            "POST",
+            "/api/modules",
+            Some(json!({ "source": "bundled", "location": "rss" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{again}");
+    // One module, not two: the same row, keyed by the package's own name.
+    assert_eq!(again["id"], json!(id));
+    // And the narrowing survived. An upgrade that quietly re-granted the card's
+    // request would undo a decision an admin made on purpose.
+    assert_eq!(
+        again["permissions"]["net"],
+        json!(["feeds.example"]),
+        "{again}"
+    );
+
+    // Removing it takes the module away and leaves the catalog entry behind:
+    // the bundled module is part of the artifact, not of what was installed.
+    let (status, _) = client
+        .send("DELETE", &format!("/api/modules/{id}"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, listing) = client.send("GET", "/api/modules", None).await;
+    assert!(listing["modules"].as_array().unwrap().is_empty());
+    assert_eq!(rss_entry(&listing)["installed"], json!(false));
     Ok(())
 }

@@ -40,11 +40,16 @@ import {
   NO_SANDBOX,
   PERMISSION_KINDS,
   PYTHON_RELOAD,
+  bundledBlocked,
+  bundledSubtitle,
+  catalogOrder,
   choiceFor,
   choiceValue,
   configValues,
+  grantSentence,
   hasPermissions,
   installBlocked,
+  installsSentence,
   isClosed,
   isConfigurable,
   locationLabel,
@@ -59,6 +64,7 @@ import {
   suppliedSummary,
   toolchainSentence,
   unsupportedSentence,
+  type BundledModule,
   type InstallForm,
   type Module,
   type ModulePermissionSet,
@@ -68,6 +74,7 @@ import { SettingField, buildConfig, initialValues, type FieldSpec } from "../set
 
 export function ModulesTab() {
   const [modules, setModules] = useState<Module[] | null>(null);
+  const [bundled, setBundled] = useState<BundledModule[]>([]);
   const [root, setRoot] = useState("");
   // Everything present until the server has answered, so the form is not
   // briefly and wrongly disabled on the way in.
@@ -82,6 +89,7 @@ export function ModulesTab() {
     try {
       const response = await api.listModules();
       setModules(response.modules);
+      setBundled(catalogOrder(response.bundled));
       setRoot(response.root);
       setTools({
         npm: response.npm,
@@ -119,6 +127,28 @@ export function ModulesTab() {
       await load();
     } catch (e) {
       setError(errorMessage(e, "The module could not be installed."));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** One click on a catalog card. The id is the whole request: the language,
+   * the directory it is installed from and the permissions it is granted are
+   * the server's answers, not this form's. */
+  const installBundled = async (entry: BundledModule) => {
+    setBusy(`Installing ${entry.id}…`);
+    setError(null);
+    setNote(null);
+    try {
+      const installed = await api.installModule({ source: "bundled", location: entry.id });
+      setNote(
+        `${installed.name} ${installed.version ?? ""} installed, supplying ${suppliedSummary(
+          installed,
+        )}.`,
+      );
+      await load();
+    } catch (e) {
+      setError(errorMessage(e, `${entry.title} could not be installed.`));
     } finally {
       setBusy(null);
     }
@@ -296,6 +326,35 @@ export function ModulesTab() {
         </div>
       </div>
 
+      {bundled.length > 0 && (
+        <div className="card mb-3">
+          <div className="card-header">
+            <h3 className="card-title">Modules that ship with Saltcorn</h3>
+          </div>
+          <div className="card-body">
+            <p className="text-secondary">
+              These are written and maintained here and travel inside Saltcorn itself, so there
+              is no package name to look up and nothing to trust beyond what you already run.
+              They are still modules: nothing below does anything until you install it. What is
+              <em> not</em> shipped is what each one depends on — installing fetches that from{" "}
+              <code>npm</code> or <code>PyPI</code>, which is the one part of the click that
+              reaches the network.
+            </p>
+            <div className="row g-3">
+              {bundled.map((entry) => (
+                <BundledCard
+                  key={entry.id}
+                  entry={entry}
+                  busy={busy}
+                  blocked={bundledBlocked(entry, tools)}
+                  onInstall={() => void installBundled(entry)}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {modules === null ? (
         <div className="text-secondary">Loading…</div>
       ) : modules.length === 0 ? (
@@ -318,6 +377,81 @@ export function ModulesTab() {
         ))
       )}
     </>
+  );
+}
+
+/** One entry in the bundled catalog: what it is, what installing it downloads,
+ * what installing it grants, and the button that does all three.
+ *
+ * The two sentences under the list are the reason a single click is allowed to
+ * grant a permission at all. A package cannot grant itself one — that is the
+ * whole permission model — but an admin can, and an admin who pressed a button
+ * with "installing lets it connect to any host" written beside it has.
+ */
+function BundledCard({
+  entry,
+  busy,
+  blocked,
+  onInstall,
+}: {
+  entry: BundledModule;
+  busy: string | null;
+  blocked: string | null;
+  onInstall: () => void;
+}) {
+  const downloads = installsSentence(entry);
+  const grant = grantSentence(entry);
+  return (
+    <div className="col-md-6">
+      <div className="card h-100">
+        <div className="card-body">
+          <h4 className="card-title mb-1">
+            {entry.title}{" "}
+            {entry.installed && <StatusBadge tone="green">Installed</StatusBadge>}
+          </h4>
+          <div className="text-secondary mb-2">{bundledSubtitle(entry)}</div>
+          <p className="mb-2">{entry.description}</p>
+          {entry.supplies.length > 0 && (
+            <ul className="text-secondary mb-2">
+              {entry.supplies.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          )}
+          {downloads && <div className="text-secondary mb-1">{downloads}</div>}
+          {grant && <div className="text-secondary mb-1">{grant}</div>}
+          {blocked && <div className="text-secondary mb-1">{blocked}</div>}
+        </div>
+        <div className="card-footer">
+          {/* Installed is **Reinstall**, not a disabled button. A bundled module
+              is upgraded by the release it ships in, so after a Saltcorn upgrade
+              the copy on disk is newer than the one installed — and reinstalling
+              is the whole of that upgrade. A card that went grey when installed
+              would leave no way to do it. */}
+          <Button
+            size="sm"
+            variant={entry.installed ? "outline-secondary" : "primary"}
+            disabled={!!busy || blocked !== null}
+            title={blocked ?? undefined}
+            onClick={onInstall}
+          >
+            {busy === `Installing ${entry.id}…`
+              ? entry.installed
+                ? "Reinstalling…"
+                : "Installing…"
+              : entry.installed
+                ? "Reinstall"
+                : "Install"}
+          </Button>
+          {entry.installed && (
+            <span className="text-secondary ms-2">
+              Reinstalling takes the version in this release, keeping its settings and
+              permissions.
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 

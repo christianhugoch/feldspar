@@ -21,6 +21,11 @@
  * has no sandbox at all. A screen that rendered the same four empty boxes for
  * both would be claiming a permission model that does not exist, so the model
  * says which module has one.
+ *
+ * The **bundled catalog** is the fourth, and it is here for one sentence: a card
+ * whose button grants a permission has to say what it grants, beside the button,
+ * before it is pressed. That is the entire basis on which a one-click install is
+ * allowed to widen anything, so the sentence is asserted rather than reviewed.
  */
 
 import { describe, expect, it } from "vitest";
@@ -32,6 +37,13 @@ import {
   INSTALL_CHOICES,
   NO_SANDBOX,
   actionNames,
+  anyHost,
+  bundledBlocked,
+  bundledPermissions,
+  bundledSubtitle,
+  catalogOrder,
+  grantSentence,
+  installsSentence,
   choiceFor,
   choiceValue,
   configValues,
@@ -55,6 +67,7 @@ import {
   toolchainMissing,
   toolchainSentence,
   unsupportedSentence,
+  type BundledModule,
   type Module,
   type Toolchains,
 } from "./modules";
@@ -92,6 +105,22 @@ function pythonModule(overrides: Partial<Module> = {}): Module {
     location: "saltcorn-mqtt",
     ...overrides,
   });
+}
+
+/** One entry of the bundled catalog, as `listModules` sends it. */
+function bundled(overrides: Partial<BundledModule> = {}): BundledModule {
+  return {
+    id: "rss",
+    name: "@feldspar/rss",
+    language: "javascript",
+    title: "RSS feeds",
+    description: "Read an RSS or Atom feed as a table.",
+    supplies: ['A table provider, "RSS feed".'],
+    installs: ["rss-parser"],
+    permissions: { net: ["*"], read: [], write: [], env: [] },
+    installed: false,
+    ...overrides,
+  };
 }
 
 /** A server with one toolchain and not the other. */
@@ -416,5 +445,93 @@ describe("a module's permissions", () => {
       permissionProblems({ net: ["https://x"], read: ["rel"], write: [], env: [] }),
     ).toHaveLength(2);
     expect(permissionProblems(CLOSED_PERMISSIONS)).toEqual([]);
+  });
+});
+
+describe("the bundled catalog", () => {
+  it("says what installing downloads, because that is the part that leaves the machine", () => {
+    // The module is already here; its dependencies are not, and a card that
+    // implied an offline install would be promising something the click cannot
+    // do.
+    expect(installsSentence(bundled())).toMatch(/rss-parser/);
+    expect(installsSentence(bundled())).toMatch(/npm/);
+    expect(installsSentence(bundled())).toMatch(/not shipped/);
+    // Python's fetches with the other tool, and is named as such.
+    const python = bundled({ language: "python", installs: ["markdown"] });
+    expect(installsSentence(python)).toMatch(/pip/);
+    // Nothing to download is nothing to say.
+    expect(installsSentence(bundled({ installs: [] }))).toBeNull();
+  });
+
+  it("says what installing grants, beside the button that grants it", () => {
+    // The whole basis of a one-click grant: a package may not grant itself a
+    // permission, and an admin who pressed a button with this sentence next to
+    // it granted one.
+    const sentence = grantSentence(bundled());
+    expect(sentence).toMatch(/any host/);
+    expect(sentence).toMatch(/change that afterwards/);
+    // A named host reads as itself rather than as a wildcard.
+    expect(grantSentence(bundled({ permissions: { net: ["a.example"], read: [], write: [], env: [] } }))).toMatch(
+      /connect to a.example/,
+    );
+    // And an entry that asks for nothing says nothing — which is every Python
+    // entry, where there is nothing to grant at all.
+    expect(grantSentence(bundled({ permissions: { net: [], read: [], write: [], env: [] } }))).toBeNull();
+    expect(grantSentence(bundled({ permissions: null }))).toBeNull();
+  });
+
+  it("reads a requested permission set the same way a granted one is read", () => {
+    expect(anyHost(bundledPermissions(bundled()))).toBe(true);
+    // Unreadable is the *closed* set, never an open one: a card that could not
+    // parse what it was sent must under-report a grant.
+    expect(bundledPermissions(bundled({ permissions: "everything" }))).toEqual(CLOSED_PERMISSIONS);
+    expect(anyHost(CLOSED_PERMISSIONS)).toBe(false);
+  });
+
+  it("blocks the card its language's toolchain is missing, and only that one", () => {
+    const js = bundled();
+    const py = bundled({ id: "markdown", language: "python" });
+    expect(bundledBlocked(js, tools())).toBeNull();
+    expect(bundledBlocked(py, tools())).toBeNull();
+    // A server with npm and no pip installs one of the two, and the card that
+    // cannot be installed says which repair it needs.
+    expect(bundledBlocked(js, tools({ pip: false }))).toBeNull();
+    expect(bundledBlocked(py, tools({ pip: false }))).toMatch(/pip/);
+    expect(bundledBlocked(js, tools({ npm: false }))).toMatch(/npm/);
+  });
+
+  it("puts what a server can still add above what it already has", () => {
+    const order = catalogOrder([
+      bundled({ id: "a", installed: true }),
+      bundled({ id: "b" }),
+      bundled({ id: "c", installed: true }),
+      bundled({ id: "d" }),
+    ]);
+    expect(order.map((entry) => entry.id)).toEqual(["b", "d", "a", "c"]);
+  });
+
+  it("names the language and the package under the heading", () => {
+    expect(bundledSubtitle(bundled())).toBe("JavaScript · @feldspar/rss");
+    expect(bundledSubtitle(bundled({ language: "python", name: "feldspar-markdown" }))).toBe(
+      "Python · feldspar-markdown",
+    );
+  });
+});
+
+describe("any host", () => {
+  it("reads as one phrase rather than as a host called *", () => {
+    // The wildcard exists for a module whose addresses are configured per table
+    // — an RSS feed's host is on the table, not the module — and "connects to *"
+    // would be the one rendering that reads as *less* than it is.
+    expect(permissionSummary({ net: ["*"], read: [], write: [], env: [] })).toMatch(
+      /connects to any host/,
+    );
+    expect(permissionSummary({ net: ["a.example"], read: [], write: [], env: [] })).toMatch(
+      /connects to a.example/,
+    );
+    // It is a grant, so it is not the closed set.
+    expect(isClosed({ net: ["*"], read: [], write: [], env: [] })).toBe(false);
+    // And the form does not refuse it on the way in.
+    expect(permissionProblem("net", "*")).toBeNull();
   });
 });

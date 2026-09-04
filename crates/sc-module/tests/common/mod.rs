@@ -39,6 +39,46 @@ macro_rules! skip_without {
     };
 }
 
+/// Serve one body over `127.0.0.1` on a port the OS chose, for as many requests
+/// as a module makes.
+///
+/// Thirty lines of HTTP/1.1 rather than a crate, on the same grounds the mqtt
+/// test writes its own subscriber: what these tests are about is a module
+/// reaching a socket it was granted, and a dependency here would be a dependency
+/// in the way of reading that.
+///
+/// The handle is returned so the caller can keep the thread alive for the length
+/// of the test; dropping it ends nothing early, but binding it documents that
+/// the server outlives the calls.
+pub fn http_server(
+    content_type: &'static str,
+    body: &'static str,
+) -> (u16, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        // A handful of requests: one per call that reaches it, plus slack for a
+        // retry. The thread ends with the listener either way.
+        for _ in 0..8 {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    (port, server)
+}
+
 /// The permission set every module has until an admin grants it something, and
 /// what most of these tests load with: the point of the fixtures is the host,
 /// not the sandbox, and the sandbox has tests of its own.

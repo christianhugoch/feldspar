@@ -956,6 +956,13 @@ pub fn admin_endpoints() -> EndpointSet {
                 StructField::new("python", TypeSchema::bool()),
                 StructField::new("pip", TypeSchema::bool()),
                 StructField::new("python_dir", TypeSchema::optional(TypeSchema::text())),
+                // The **bundled** catalog: the modules this server ships with
+                // and can install from itself, listed whether or not they are
+                // installed. It is here rather than on an endpoint of its own
+                // because the tab asks one question — "what can this server
+                // run, and what is it running" — and two requests to answer it
+                // would be two loading states for one screen.
+                StructField::new("bundled", TypeSchema::array(bundled_module_schema())),
             ]))
             .auth(AuthRequirement::admin()),
     );
@@ -963,13 +970,20 @@ pub fn admin_endpoints() -> EndpointSet {
     // **Install**: `npm install` in the modules root, then load. The body is the
     // two things an admin types — which kind of source, and the specifier — and
     // everything else about the module is discovered from the package.
+    //
+    // A **bundled** module is the same endpoint with nothing typed: `source` is
+    // `bundled` and `location` is the catalog id the listing above gave, which
+    // is what makes the Install button on a catalog card one click. The
+    // language comes from the catalog, and so do the permissions the module is
+    // granted — the card printed them beside the button.
     set.register(
         Endpoint::new("installModule", Method::Post, api().lit("modules"))
             .input(TypeSchema::struct_of([
                 StructField::new("source", TypeSchema::text()),
                 StructField::new("location", TypeSchema::text()),
                 // `javascript` when it is not sent, which is what every caller
-                // written before there was a second language means (§8).
+                // written before there was a second language means (§8) — and
+                // for a bundled module, the catalog's answer overrides it.
                 StructField::new("language", TypeSchema::optional(TypeSchema::text())),
             ]))
             .output(module_schema())
@@ -2871,6 +2885,41 @@ fn module_schema() -> TypeSchema {
         // supplies nothing and its `issues` say why.
         StructField::new("loaded", TypeSchema::bool()),
         StructField::new("api_version", TypeSchema::optional(TypeSchema::int())),
+    ])
+}
+
+/// One entry in the **bundled catalog**: a module this server ships with.
+///
+/// Not a `module_schema` with fields left empty. A bundled module that has not
+/// been installed has no row, no version, no configuration and supplies nothing
+/// — what it has is a card: a heading, a sentence, what it would give, and what
+/// installing it would download and grant. `name` is the link between the two,
+/// because that is what the installed row is keyed by: a client shows an entry
+/// as installed when a module in the same response carries the same name.
+fn bundled_module_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        // The catalog id — `rss` — which is what `installModule` is given as
+        // `location` for a `bundled` source.
+        StructField::new("id", TypeSchema::text()),
+        // The package's own name once installed — `@feldspar/rss`.
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("language", TypeSchema::text()),
+        StructField::new("title", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        // What it supplies, one sentence each, written for the card rather than
+        // read from the package: nothing has been installed, so there is no
+        // package to read.
+        StructField::new("supplies", TypeSchema::array(TypeSchema::text())),
+        // What installing it downloads — the dependencies that are deliberately
+        // not in the release, so an admin knows the click reaches a registry.
+        StructField::new("installs", TypeSchema::array(TypeSchema::text())),
+        // What it will be granted: the same `{ net, read, write, env }` shape a
+        // module's own permissions have, so one renderer draws both. Always
+        // closed for a Python module — there is nothing to enforce it (§10).
+        StructField::new("permissions", TypeSchema::json()),
+        // Whether a module with this name is already installed, which is what
+        // decides whether the card carries a button or a tick.
+        StructField::new("installed", TypeSchema::bool()),
     ])
 }
 

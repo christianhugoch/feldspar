@@ -32,7 +32,8 @@ use sc_core_actions::CodeSurfaces;
 use sc_error::{Context, Error, Result};
 use sc_expr::ModuleFnHosts;
 use sc_module::{
-    Installer, ModuleFunctions, ModuleHost, ModuleSet, ModuleTableProviders, bootstrap_modules,
+    BundledModules, Installer, ModuleFunctions, ModuleHost, ModuleSet, ModuleTableProviders,
+    bootstrap_modules,
 };
 use sc_python::pymodule::{PyModuleFunctions, PyModuleHost, PyModuleSet, PyModuleTableProviders};
 
@@ -45,6 +46,10 @@ pub struct ModuleServices {
     dispatcher: Arc<TriggerDispatcher>,
     agents: AgentServices,
     installer: Installer,
+    /// The modules this server ships with, read from `plugins/` at boot
+    /// (`sc_module::bundled`). Read once: the directory is part of the artifact,
+    /// so it changes when the binary does and not while it runs.
+    bundled: BundledModules,
     /// The Python runtime, for the half of `_sc_modules` that pip installs
     /// (§8, §9). The runtime rather than an environment, because the
     /// environment cannot be built without the embedded interpreter's version
@@ -75,11 +80,17 @@ impl ModuleServices {
     /// is blast radius rather than throughput. `python` is the same runtime the
     /// dispatcher took as a code adapter — one interpreter per process, so a
     /// Python module and a Python body share it.
+    ///
+    /// `plugins` is where the **bundled** modules are — the artifact's own
+    /// `plugins/` directory, which the binary knows the path of. `None` falls
+    /// back to the checkout's, and a directory that is not there is an empty
+    /// catalog rather than a failure to start.
     pub async fn install(
         catalog: &Arc<Catalog>,
         dispatcher: &Arc<TriggerDispatcher>,
         agents: &AgentServices,
         root: Option<PathBuf>,
+        plugins: Option<PathBuf>,
         workers: usize,
         python: Arc<sc_python::PythonRuntime>,
     ) -> Result<Arc<ModuleServices>> {
@@ -106,6 +117,7 @@ impl ModuleServices {
             dispatcher: Arc::clone(dispatcher),
             agents: agents.clone(),
             installer: Installer::new(&root),
+            bundled: BundledModules::discover(plugins),
             python_host: Arc::new(PyModuleHost::new(Arc::clone(&python))),
             python,
             surfaces: Arc::new(CodeSurfaces::new()?),
@@ -113,6 +125,9 @@ impl ModuleServices {
             loaded: RwLock::new(Arc::new(ModuleSet::empty())),
         });
         services.reload().await?;
+        for issue in services.bundled.issues() {
+            eprintln!("feldspar: a bundled module could not be read: {issue}");
+        }
         for issue in services.modules().issues() {
             eprintln!(
                 "feldspar: module `{}` is installed but not fully usable: {}",
@@ -206,6 +221,12 @@ impl ModuleServices {
     }
 
     /// The npm project modules are installed into.
+    /// The modules this server ships with — the catalog the Modules tab lists
+    /// beside the installed ones.
+    pub fn bundled(&self) -> &BundledModules {
+        &self.bundled
+    }
+
     pub fn installer(&self) -> &Installer {
         &self.installer
     }
@@ -242,12 +263,27 @@ impl ModuleServices {
     /// The two installers agree on the shape of the answer — the package's own
     /// name, the version that landed, and the tool's own output — so the
     /// endpoint above them has one path and not two.
+    /// A **bundled** module is a local install whose directory the server fills
+    /// in: the id names an entry in the catalog, and the entry names the
+    /// directory it ships in. Everything below this line then treats it as the
+    /// local directory it is.
     pub async fn install_package(
         &self,
         language: sc_module::ModuleLanguage,
         source: sc_module::ModuleSource,
         location: &str,
     ) -> Result<sc_module::InstalledPackage> {
+        let (source, location) = match source {
+            sc_module::ModuleSource::Bundled => {
+                let entry = self.bundled.require(location)?;
+                (
+                    sc_module::ModuleSource::Local,
+                    entry.directory.display().to_string(),
+                )
+            }
+            other => (other, location.to_owned()),
+        };
+        let location = location.as_str();
         match language {
             sc_module::ModuleLanguage::JavaScript => self.installer.install(source, location).await,
             sc_module::ModuleLanguage::Python => {
@@ -290,6 +326,12 @@ fn python_source(source: sc_module::ModuleSource) -> Result<sc_python::PythonSou
         sc_module::ModuleSource::Local => Ok(sc_python::PythonSource::Local),
         sc_module::ModuleSource::Npm => Err(Error::invalid(
             "`npm` is a JavaScript module's source; pip cannot install one",
+        )),
+        // `install_package` resolves a bundled id to the directory it ships in
+        // before anything is installed, so pip is never handed one.
+        sc_module::ModuleSource::Bundled => Err(Error::invalid(
+            "a bundled module's id is resolved to a directory before it is installed; pip \
+             cannot install one from its id",
         )),
     }
 }

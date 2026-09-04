@@ -43,14 +43,39 @@ opens its connection, and `@saltcorn/mqtt`'s action would have nothing to publis
 without it. Everything else — view templates, types, field views, event types — is **counted
 and named** in the tab so you can see what you are not getting, and is a later milestone.
 
-## Step 1 — Install one
+## Step 0 — The ones that came with Saltcorn
 
-Go to **Settings → Modules**. Two kinds of source:
+Before the form, look under **Modules that ship with Saltcorn**. A few modules are written and
+maintained in the Saltcorn repository and travel inside the release you are running, so there
+is no package name to look up and nothing to trust that you are not already running. Today that
+is an **RSS feed** table provider and a **Markdown** renderer.
+
+They are still modules: nothing on those cards does anything until you install it. The card
+says what it supplies, what installing downloads and what installing lets it reach, and then
+one **Install** press does all three. What is *not* shipped is what each one depends on —
+`rss-parser` for the first, `markdown` for the second — so that press is the moment npm or pip
+fetches something, and a server that installs none of them fetches nothing.
+
+Press **Install** on RSS feeds and you have a table provider; go on to
+[tutorial-table-providers.md](tutorial-table-providers.md) to point it at a feed. Everything
+below applies to it exactly as it does to a module from a registry — the settings, the
+permissions, the removal — because that is all it is.
+
+Once a card is installed its button says **Reinstall**. That is how one is upgraded: a bundled
+module's new version arrives with a new Saltcorn, and reinstalling takes it, keeping the
+module's settings and whatever permissions you have granted or withdrawn since.
+
+## Step 1 — Install one from a registry
+
+Go to **Settings → Modules**. Four kinds of source, and the third and fourth are for a module
+you are writing yourself:
 
 | Type | What you type |
 |---|---|
 | JavaScript — npm package | `@saltcorn/mqtt`, or `@saltcorn/mqtt@0.2.0` to pin a version |
 | JavaScript — local directory | `/srv/checkouts/mqtt` — an absolute path on the **server** |
+| Python — PyPI distribution | `saltcorn-weather`, or `saltcorn-weather>=0.2` |
+| Python — local directory | `/srv/checkouts/weather` |
 
 Type `@saltcorn/mqtt` and press **Install**. The server runs `npm install` into its modules
 directory (named on the screen; `--modules-dir` moves it), loads the package, and the module
@@ -114,10 +139,15 @@ never *everything*:
 Put your broker's `host:port` in the first list and save. The card now says what it may reach,
 and the module reconnects.
 
-Three things worth knowing before you use this in anger:
+Four things worth knowing before you use this in anger:
 
 - **A port is part of the permission.** `broker.example:1883` does not allow
   `broker.example:8883`. That is the point of an allow-list.
+- **`*` in the host list means any host**, and it is the only wildcard there is — there is
+  none for files and none for environment variables. It exists for the modules whose addresses
+  are not knowable when you grant them: an RSS table's feed URL is typed into the *table's*
+  settings, so a feed reader's allow-list would need editing every time somebody adds a table.
+  Wherever a permission set is shown, `*` reads back as "any host".
 - **Editing permissions restarts the module.** It moves to a worker that grants what it now
   has, which costs it whatever it was holding — an open socket, a cache — exactly as a restart
   would. Modules that were granted the same things share a worker; a module you grant something

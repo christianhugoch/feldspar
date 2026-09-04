@@ -1,0 +1,13 @@
+{
+  "name": "@feldspar/rss",
+  "language": "javascript",
+  "title": "RSS feeds",
+  "description": "Read an RSS or Atom feed as a table: one row per item, refreshed when the table is queried.",
+  "supplies": [
+    "A table provider, \"RSS feed\": pick it in New table, give it a feed URL, and the feed's items are the rows."
+  ],
+  "installs": ["rss-parser"],
+  "permissions": {
+    "net": ["*"]
+  }
+}

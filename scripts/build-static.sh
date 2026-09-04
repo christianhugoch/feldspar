@@ -45,6 +45,8 @@
 #   /opt/feldspar/bin/feldspar        the binary
 #   /opt/feldspar/ui/admin/dist       the admin SPA it serves
 #   /opt/feldspar/ui/ide/dist         the file-store IDE it serves
+#   /opt/feldspar/plugins/            the modules it ships with, installable in
+#                                     one click from Settings -> Modules
 #   /opt/feldspar/install.sh          copies the tree into place
 #   /opt/feldspar/setup-host.sh       sets the host up to run it (packages,
 #                                     database, config file, systemd unit)
@@ -397,6 +399,7 @@ build_native() {
 
     mkdir -p "${STAGE}/bin"
     cp "${REPO_ROOT}/target/${TARGET}/release/feldspar" "${STAGE}/bin/feldspar"
+    stage_plugins
     if [[ ${BUILD_UI} -eq 1 ]]; then
         for bundle in admin ide; do
             local dist="${REPO_ROOT}/ui/${bundle}/dist"
@@ -405,6 +408,27 @@ build_native() {
             cp -r "${dist}" "${STAGE}/ui/${bundle}/"
         done
     fi
+}
+
+# The **bundled modules**: source, and deliberately no dependency tree. What
+# ships is `plugins/<id>/` — an `index.js` and a `package.json`, or a
+# `pyproject.toml` and a package — and npm or pip fetches what it needs at the
+# moment an admin installs one (`crates/sc-module/src/bundled.rs`). So this is a
+# copy of a few kilobytes and not a vendored `node_modules`, which is the whole
+# point: a server that installs none of them downloads nothing.
+#
+# `--no-ui` does not turn this off. That flag means "this machine has no Node
+# toolchain to build the SPA with", and there is nothing here to build.
+stage_plugins() {
+    local plugins="${REPO_ROOT}/plugins"
+    [[ -d "${plugins}" ]] || { echo "error: ${plugins} is missing; it belongs in the artifact" >&2; exit 1; }
+    mkdir -p "${STAGE}/plugins"
+    cp -r "${plugins}/." "${STAGE}/plugins/"
+    # Nothing a package manager left behind travels: a `node_modules` from a
+    # developer running `npm install` in a plugin directory would be exactly the
+    # tree this design does not ship.
+    find "${STAGE}/plugins" -maxdepth 2 \( -name node_modules -o -name __pycache__ -o -name '*.egg-info' -o -name dist -o -name build \) \
+        -exec rm -rf {} + 2>/dev/null || true
 }
 
 case "${MODE}" in
@@ -525,6 +549,13 @@ if [ -d "\${SRC}/ui" ]; then
     mkdir -p "\${PREFIX}/ui"
     cp -r "\${SRC}/ui/." "\${PREFIX}/ui/"
 fi
+# The bundled modules. Copied over an existing tree rather than replacing it:
+# what an admin installed lives in the modules directory, not here, so this is
+# only ever the catalog this release ships.
+if [ -d "\${SRC}/plugins" ]; then
+    mkdir -p "\${PREFIX}/plugins"
+    cp -r "\${SRC}/plugins/." "\${PREFIX}/plugins/"
+fi
 chmod +x "\${PREFIX}/bin/feldspar"
 
 # Beside the tree rather than inside bin/: it is run once, by a person, and has
@@ -583,6 +614,12 @@ What is in the tarball
   bin/feldspar          the server and management CLI
   setup-host.sh         the host setup, run once from ${PREFIX} after install.sh.
                         Debian and Ubuntu; --dry-run prints what it would do.
+  plugins/              the modules this release ships with — an RSS table
+                        provider and a Markdown renderer today. They are not
+                        loaded until somebody installs one from Settings ->
+                        Modules, which is one click; what each depends on is
+                        fetched from npm or PyPI at that moment and is not in
+                        this tarball.
 $(if [[ ${BUILD_UI} -eq 1 ]]; then
 cat <<INNER
   ui/admin/dist         the admin SPA, served by \`feldspar serve\`

@@ -94,9 +94,21 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 
 # Staged separately from the build so the cache mount above is not held open
 # while the (large) copies happen.
+#
+# `plugins/` is the **bundled modules** — source only, with no dependency tree:
+# npm and pip fetch what each one needs when an admin installs it, so this is a
+# few kilobytes and not a vendored `node_modules`
+# (`crates/sc-module/src/bundled.rs`). It is copied whatever `SC_BUILD_ADMIN`
+# said, because there is nothing here to build.
 RUN set -eu; \
     if [ -d ui/admin/dist ]; then mkdir -p /out/ui/admin && cp -r ui/admin/dist /out/ui/admin/; fi; \
-    if [ -d ui/ide/dist ]; then mkdir -p /out/ui/ide && cp -r ui/ide/dist /out/ui/ide/; fi
+    if [ -d ui/ide/dist ]; then mkdir -p /out/ui/ide && cp -r ui/ide/dist /out/ui/ide/; fi; \
+    if [ ! -d plugins ]; then echo "plugins/ is missing; it belongs in the artifact" >&2; exit 1; fi; \
+    mkdir -p /out/plugins; \
+    cp -r plugins/. /out/plugins/; \
+    find /out/plugins -maxdepth 2 \
+        \( -name node_modules -o -name __pycache__ -o -name '*.egg-info' -o -name dist -o -name build \) \
+        -exec rm -rf {} + 2>/dev/null || true
 
 # Files only: `--output type=local` writes this stage's filesystem to a host
 # directory, so nothing is committed as an image.

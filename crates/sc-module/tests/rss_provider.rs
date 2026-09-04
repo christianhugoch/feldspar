@@ -185,35 +185,7 @@ async fn the_real_rss_module_is_denied_a_host_nobody_granted_it() {
     drop(server);
 }
 
-/// Serve [`FEED`] over `127.0.0.1` on a port the OS chose, for as many requests
-/// as the module makes.
-///
-/// Thirty lines of HTTP/1.1 rather than a crate, on the same grounds the mqtt
-/// test writes its own subscriber: what is being tested is the module reaching
-/// a socket it was granted, and a dependency here would be a dependency in the
-/// way of reading that.
+/// Serve [`FEED`] over `127.0.0.1` on a port the OS chose.
 fn feed_server() -> (u16, std::thread::JoinHandle<()>) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let server = std::thread::spawn(move || {
-        use std::io::{Read, Write};
-        // Two requests at most: one per test that reaches it, plus slack for a
-        // retry. The thread ends with the listener either way.
-        for _ in 0..4 {
-            let Ok((mut stream, _)) = listener.accept() else {
-                return;
-            };
-            let mut buffer = [0u8; 2048];
-            let _ = stream.read(&mut buffer);
-            let _ = stream.write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/rss+xml\r\n\
-                     content-length: {}\r\nconnection: close\r\n\r\n{FEED}",
-                    FEED.len()
-                )
-                .as_bytes(),
-            );
-        }
-    });
-    (port, server)
+    common::http_server("application/rss+xml", FEED)
 }

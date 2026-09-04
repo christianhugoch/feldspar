@@ -99,6 +99,12 @@ fn fixture(name: &str) -> Fixture {
     )
     .expect("copy setup-host.sh");
     fs::copy(root.join("Cargo.toml"), repo.join("Cargo.toml")).unwrap();
+    // And the bundled modules, which the packaging step also puts in the
+    // artifact. One entry is enough to exercise the copy; the real catalog is
+    // `sc-module`'s to assert.
+    let plugins = repo.join("plugins/rss");
+    fs::create_dir_all(&plugins).unwrap();
+    fs::write(plugins.join("feldspar-module.json"), "{}").unwrap();
 
     let bin = dir.join("bin");
     let log = dir.join("ssh.log");
@@ -273,6 +279,15 @@ fn deploy_copies_unpacks_and_installs_over_ssh() {
     assert!(
         !prefix.join("bin/setup-host.sh").exists(),
         "setup-host.sh does not belong on PATH; it is run once"
+    );
+
+    // 2a. And the bundled modules, at the path the binary was compiled to look
+    //     for them (`$SC_BUNDLE_PREFIX/plugins`). An artifact without them is a
+    //     Modules tab with an empty catalog and no way to fill it.
+    let manifest = prefix.join("plugins/rss/feldspar-module.json");
+    assert!(
+        manifest.is_file(),
+        "the artifact should install {manifest:?}\n{stdout}\n{stderr}"
     );
 
     // 3. It cleaned up after itself: the tarball, the unpacked tree and the

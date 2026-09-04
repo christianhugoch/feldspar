@@ -275,7 +275,7 @@ fn node_services(
 fn container(permissions: &ModulePermissions) -> PermissionsContainer {
     let parser = Arc::new(RuntimePermissionDescriptorParser::new(RealSys));
     let options = PermissionsOptions {
-        allow_net: some_if_any(&permissions.net),
+        allow_net: net_option(permissions),
         allow_read: some_if_any(&permissions.read),
         allow_write: some_if_any(&permissions.write),
         allow_env: some_if_any(&permissions.env),
@@ -297,6 +297,19 @@ fn container(permissions: &ModulePermissions) -> PermissionsContainer {
             PermissionsContainer::new(parser, Permissions::none_without_prompt())
         }
     }
+}
+
+/// The net allow-list, or the one place `Some(vec![])` is correct.
+///
+/// [`ModulePermissions`]' `*` entry ([`sc_module::ANY_HOST`](crate::ANY_HOST))
+/// is not a host and Deno would reject it as a descriptor, so it is translated
+/// into the thing it means: `--allow-net` with no argument. Every other entry goes over
+/// as itself, and a list that does not contain `*` cannot produce this.
+fn net_option(permissions: &ModulePermissions) -> Option<Vec<String>> {
+    if permissions.any_host() {
+        return Some(Vec::new());
+    }
+    some_if_any(&permissions.net)
 }
 
 /// An allow-list, or `None` for "nothing of this kind".

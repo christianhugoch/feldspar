@@ -2,6 +2,67 @@
 
 Changes in reverse chronological order.
 
+## Modules that ship with Saltcorn
+
+`plugins/`: modules developed in this repository, shipped **inside the release tarball**, and
+installed from Settings → Modules in one click. The short tail of the module ecosystem — an
+RSS table, a Markdown renderer, the things a third of applications want and nobody should have
+to go and find a package name for. Design §15.1a; the milestone is [TODO.md](TODO.md).
+
+- **The code ships; the dependencies do not.** `plugins/rss` is an `index.js`, a
+  `package.json` naming `rss-parser` and a manifest — kilobytes. `rss-parser` is downloaded by
+  npm at the moment somebody presses Install, and never on a server that presses nothing. The
+  card says so, because that press is the one part of it that reaches the network.
+- **They are still modules.** Nothing in `plugins/` is loaded, registered or resident until an
+  admin installs one. Installing does what installing has always done — a row, a package in
+  the modules root, a reload — and the module then runs on a worker with the permissions its
+  row carries, like every other.
+- **Two of them, one in each language.** `@feldspar/rss` is a table provider over
+  `rss-parser`: seven columns, a `guid` primary key with a fallback for feeds that omit one,
+  and a TTL cache. It is written against *this* server's reading of a table provider — no
+  `@saltcorn/*` require anywhere in it — where v1's `@saltcorn/rss` stays as the compatibility
+  test it already was. `feldspar-markdown` is a Python distribution supplying
+  `markdown_to_html` and `markdown_to_text`, so "one catalog, one button, either language" is
+  a fact rather than a claim.
+- **`ModuleSource::Bundled` stores the catalog id, not a path.** The directory is
+  `<install prefix>/plugins/<id>`, which differs between a checkout, a host running the
+  tarball, and that host after an upgrade moved the prefix; an id survives all three, so the
+  row stays reinstallable. Underneath it is the local-directory install that already existed,
+  with the path filled in by the server.
+- **The grant is made by the click, and the click is made by someone who read it.** A
+  manifest's `permissions` is a *request* — `_sc_modules.permissions` is the server's record
+  and a package that granted itself one would be no permission model at all — and the card
+  prints it beside the button in the words the permission screen uses ("Installing lets it
+  connect to any host"). Applied on a **first** install only: a reinstall is how a bundled
+  module is upgraded when a new release ships a newer copy, and an admin who has since
+  narrowed what it may reach keeps that.
+- **`net: ["*"]` — any host.** New, and the only wildcard there is. An RSS table's feed URL is
+  typed into the *table's* settings, so the hosts it connects to are not knowable when its
+  permission is granted and an allow-list would need editing every time somebody adds a table.
+  One entry, written out, printed back as "any host" everywhere a set is shown. A filesystem
+  wildcard would be a module that may read the database password file and an environment one a
+  module that may read every secret this process was started with; both are refused, the
+  second now by name rather than by silently meaning a variable nobody has.
+- **The tab.** A catalog section above the install form: a card each with what it supplies,
+  what installing downloads, what installing grants, and one button — **Reinstall** once it is
+  installed, because a bundled module's new version arrives with a new Saltcorn and
+  reinstalling is the whole of that upgrade.
+- **Packaged like the UI bundles.** `build.rs` records `SC_PLUGINS_DIR` — the checkout's
+  `plugins/` normally, `$SC_BUNDLE_PREFIX/plugins` when packaging — `build-static.sh` stages
+  the directory, `install.sh` copies it to the prefix, and the Dockerfile copies it into the
+  export stage. Not conditional on `--no-ui`: there is nothing to build. A directory that is
+  not there is an **empty catalog**, never a failure to start, and a manifest that will not
+  parse is a line in the boot log and one card missing.
+- **Tests.** `bundled_catalog` reads the real `plugins/` directory with no npm, no pip and no
+  network — every manifest parses, every `name` agrees with the package's own, every promised
+  download is a dependency the package actually declares — so a rename that touches one file
+  and not the other fails `cargo test`. Behind `--ignored`, because they install: the RSS
+  module read end to end against a feed served on `127.0.0.1` (columns, rows, the fallback
+  key, `max_items`, read-only, and the denial when the grant is withheld), the Markdown module
+  imported through its entry point and called, and the one-call install through the API
+  landing a loaded module with a provider on the New table screen — plus a reinstall that
+  keeps a narrowed permission set.
+
 ## An operations manual
 
 [`docs/OPERATIONS.md`](docs/OPERATIONS.md): the operator's document, where the

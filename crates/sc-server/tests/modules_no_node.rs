@@ -117,6 +117,7 @@ async fn the_server_serves_a_module_with_node_off_the_path() -> sc_error::Result
         &dispatcher,
         &agents,
         Some(root.clone()),
+        None,
         1,
         sc_server::default_python_adapter(),
     )

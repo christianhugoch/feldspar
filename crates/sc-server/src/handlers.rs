@@ -1498,6 +1498,16 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let services = modules_of(&apps)?;
                 let set = services.modules();
                 let modules: Vec<Json> = set.modules().iter().map(module_json).collect();
+                // Installed is by **package name**, which is what the row is
+                // keyed by: a bundled module installed from a checkout, from a
+                // tarball, or from the registry it was also published to is one
+                // module, and the card should say so however it got there.
+                let bundled: Vec<Json> = services
+                    .bundled()
+                    .modules()
+                    .iter()
+                    .map(|entry| bundled_json(entry, set.get(&entry.name).is_some()))
+                    .collect();
                 let interpreter = services.python().env().interpreter();
                 Ok(HandlerResponse::ok(json!({
                     "modules": modules,
@@ -1520,6 +1530,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         Some(dir) => Json::from(dir.display().to_string()),
                         None => Json::Null,
                     },
+                    "bundled": bundled,
                 })))
             }
         }
@@ -1546,6 +1557,20 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     )?,
                     None => sc_module::ModuleLanguage::JavaScript,
                 };
+                // A **bundled** module is described by the catalog and not by
+                // the request: the id is the only thing the button had to send,
+                // and the language and the permissions are the server's own
+                // answer. Resolved before the install so a wrong id costs
+                // nothing, and so the permission set is on the row the first
+                // time it is written — a module that has to be reloaded to be
+                // allowed to work is not one click.
+                let bundled = match source {
+                    sc_module::ModuleSource::Bundled => {
+                        Some(services.bundled().require(&location)?)
+                    }
+                    _ => None,
+                };
+                let language = bundled.map_or(language, |entry| entry.language);
                 if !language.allows(source) {
                     return Err(Error::invalid(format!(
                         "a {} module cannot be installed from `{}`",
@@ -1562,7 +1587,9 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // (TODO, out of scope: an upgrade UI), and the admin who typed
                 // `@saltcorn/mqtt@0.3.0` over a 0.2.0 install means exactly
                 // that. The row keeps its id and its configuration.
-                let mut module = match load_module_by_name(&catalog, &package.name).await? {
+                let stored = load_module_by_name(&catalog, &package.name).await?;
+                let first_install = stored.is_none();
+                let mut module = match stored {
                     Some(existing) => existing,
                     None => sc_module::Module::new(&package.name, source, &location),
                 };
@@ -1570,6 +1597,21 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 module.source = source;
                 module.location = location;
                 module.version = Some(package.version);
+                // The catalog card's permissions, granted by the click that
+                // installed it — the card printed them, which is what makes
+                // this an admin granting a permission rather than a package
+                // granting itself one (`sc_module::bundled`).
+                //
+                // **Only on a first install.** A reinstall is how a bundled
+                // module is upgraded after a new release, and an admin who has
+                // since narrowed what it may reach — to a list of feed hosts,
+                // or to nothing at all — must not have that quietly undone by
+                // an upgrade. From the second install on, the row's set wins.
+                if let Some(entry) = bundled
+                    && first_install
+                {
+                    module.permissions = entry.permissions.clone();
+                }
                 save_module(&catalog, &module).await?;
 
                 services.reload().await?;
@@ -4939,6 +4981,28 @@ fn module_json(loaded: &sc_module::LoadedModule) -> Json {
         "issues": loaded.issues,
         "loaded": loaded.is_loaded(),
         "api_version": loaded.manifest.as_ref().and_then(|m| m.api_version),
+    })
+}
+
+/// One entry of the bundled catalog as JSON (matching `bundled_module_schema`).
+///
+/// `installed` is decided by the caller against the loaded set rather than read
+/// from anything here: the catalog is a directory on disk and knows nothing
+/// about what this installation has done with it.
+fn bundled_json(entry: &sc_module::BundledModule, installed: bool) -> Json {
+    json!({
+        "id": entry.id,
+        "name": entry.name,
+        "language": entry.language.as_str(),
+        "title": entry.title,
+        "description": entry.description,
+        "supplies": entry.supplies,
+        "installs": entry.installs,
+        // What installing it grants, in the same shape a module's own
+        // permissions are reported in — so the card and the module's card draw
+        // the same object with the same code.
+        "permissions": Json::Object(entry.permissions.to_json()),
+        "installed": installed,
     })
 }
 

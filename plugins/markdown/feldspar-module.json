@@ -1,0 +1,11 @@
+{
+  "name": "feldspar-markdown",
+  "language": "python",
+  "title": "Markdown",
+  "description": "Render Markdown to HTML, and reduce it to plain text — in formulas, in code bodies and in views.",
+  "supplies": [
+    "A function, markdown_to_html(text): the Markdown in a column, as HTML.",
+    "A function, markdown_to_text(text, length): the same text with the markup taken out, cut to a length."
+  ],
+  "installs": ["markdown"]
+}

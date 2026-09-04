@@ -1,0 +1,29 @@
+# `feldspar-markdown`: a bundled Python module (`plugins/README.md`).
+#
+# An ordinary setuptools distribution, because that is what the Modules tab
+# installs it as — `pip install <this directory>`, the same command the "local
+# directory" source runs — and the only thing that makes it a *Saltcorn* plugin
+# is the `saltcorn.plugins` entry point below, which names the module whose
+# import registers what it supplies (§9 of the Python API).
+#
+# `markdown` is the point of the exercise: it is **not** in the release tarball
+# and not in this repository. pip fetches it when an admin installs this module
+# and never otherwise, which is why a Saltcorn server does not carry a Markdown
+# renderer it may never render anything with.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "feldspar-markdown"
+version = "0.1.0"
+description = "Markdown for Saltcorn: render Markdown to HTML, and summarise it as plain text."
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = ["markdown>=3.5"]
+
+[project.entry-points."saltcorn.plugins"]
+plugin = "feldspar_markdown.plugin"
+
+[tool.setuptools]
+packages = ["feldspar_markdown"]

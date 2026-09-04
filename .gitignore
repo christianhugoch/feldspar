@@ -34,6 +34,14 @@ yarn-error.log*
 pnpm-debug.log*
 .pnpm-store/
 
+# Python build leavings, which a bundled module (`plugins/`) grows when somebody
+# runs pip in its directory. `node_modules/`, `dist/` and `build/` above already
+# cover the JavaScript side; these are the same thing for the other language, and
+# `scripts/build-static.sh` strips all of them out of the release artifact anyway.
+__pycache__/
+*.egg-info/
+*.py[cod]
+
 # Local environment / editor
 .env
 .env.local

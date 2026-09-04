@@ -49,6 +49,16 @@ pub struct ServerConfig {
     /// the bundle it was built with, or from the checkout it was built in (see
     /// `sc-cli`); a test points it at a directory of its own.
     pub ide_dir: Option<PathBuf>,
+    /// Directory holding the **bundled modules** — `plugins/`, the modules this
+    /// server ships with and can install from itself (`sc_module::bundled`).
+    ///
+    /// **Not a command-line setting**, for the same reason `ide_dir` is not: it
+    /// is part of the artifact rather than a choice about this host. The binary
+    /// fills it in from the tree it was packaged into, or from the checkout it
+    /// was built in (see `sc-cli`); a test points it at a directory of its own.
+    /// `None` means the checkout's `plugins/`, and a server that finds nothing
+    /// there simply offers an empty catalog.
+    pub plugins_dir: Option<PathBuf>,
     /// Session lifetime in hours.
     pub session_ttl_hours: i64,
     /// Whether the session/CSRF cookies carry the `Secure` attribute (set behind
@@ -155,6 +165,7 @@ impl Default for ServerConfig {
                 .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 3032))),
             static_dir: None,
             ide_dir: None,
+            plugins_dir: None,
             session_ttl_hours: sc_auth::DEFAULT_TTL_HOURS,
             secure_cookies: false,
             base_domain: None,
@@ -301,6 +312,7 @@ mod tests {
         assert_eq!(cfg.addr.to_string(), "127.0.0.1:3032");
         assert!(cfg.static_dir.is_none());
         assert!(cfg.ide_dir.is_none());
+        assert!(cfg.plugins_dir.is_none());
         assert!(!cfg.secure_cookies);
         // App subdomain routing is opt-in.
         assert!(cfg.base_domain.is_none());

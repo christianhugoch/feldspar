@@ -17,6 +17,13 @@ import type { ListModulesResponse } from "./client";
 /** One installed module, as `listModules` describes it. */
 export type Module = ListModulesResponse["modules"][number];
 
+/** One module this server ships with, as the same call describes it.
+ *
+ * A different type from `Module` and not a sparse one: an entry that has not
+ * been installed has no row, no version and supplies nothing yet — what it has
+ * is a card. */
+export type BundledModule = ListModulesResponse["bundled"][number];
+
 /** Which language a module is written in, and therefore which host loads it. */
 export type ModuleLanguage = "javascript" | "python";
 
@@ -330,7 +337,7 @@ export const PERMISSION_KINDS: PermissionKindSpec[] = [
   {
     key: "net",
     label: "Hosts it may connect to",
-    help: "A host, or a host and a port — broker.example or broker.example:1883. One per line.",
+    help: "A host, or a host and a port — broker.example or broker.example:1883. One per line. A single * means any host, which is what a module whose addresses are configured per table needs.",
     placeholder: "broker.example:1883",
   },
   {
@@ -359,7 +366,15 @@ export const PERMISSION_KINDS: PermissionKindSpec[] = [
  * could not parse what it was sent must not draw a module as more restricted
  * than it is — and closed is the direction that cannot mislead. */
 export function modulePermissions(module: Module): ModulePermissionSet {
-  const raw = module.permissions;
+  return permissionSet(module.permissions);
+}
+
+/** One permission set out of the opaque JSON the wire carries it as.
+ *
+ * Shared by an installed module's granted set and a bundled entry's requested
+ * one, which are the same object and must read the same way — the card and the
+ * form are showing an admin the same four lists. */
+export function permissionSet(raw: unknown): ModulePermissionSet {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return CLOSED_PERMISSIONS;
   const source = raw as Record<string, unknown>;
   const set: ModulePermissionSet = { net: [], read: [], write: [], env: [] };
@@ -377,13 +392,22 @@ export function isClosed(set: ModulePermissionSet): boolean {
   return PERMISSION_KINDS.every(({ key }) => set[key].length === 0);
 }
 
+/** The `net` entry that means *any host* — the server's `ANY_HOST`. */
+export const ANY_HOST = "*";
+
+/** Whether the net list grants any host at all, rather than a list of them. */
+export function anyHost(set: ModulePermissionSet): boolean {
+  return set.net.includes(ANY_HOST);
+}
+
 /** The one-line summary above the form: what this module can reach, in words. */
 export function permissionSummary(set: ModulePermissionSet): string {
   if (isClosed(set)) {
     return "Reaches nothing: no host, no file, no environment variable.";
   }
   const parts: string[] = [];
-  if (set.net.length > 0) parts.push(`connects to ${set.net.join(", ")}`);
+  if (anyHost(set)) parts.push("connects to any host");
+  else if (set.net.length > 0) parts.push(`connects to ${set.net.join(", ")}`);
   if (set.read.length > 0) parts.push(`reads ${set.read.join(", ")}`);
   if (set.write.length > 0) parts.push(`writes ${set.write.join(", ")}`);
   if (set.env.length > 0) parts.push(`reads ${set.env.join(", ")}`);
@@ -441,4 +465,78 @@ export function permissionProblems(set: ModulePermissionSet): string[] {
     }
   }
   return problems;
+}
+
+// --- the bundled catalog ---------------------------------------------------
+// The modules this server ships with. They are still modules — nothing is
+// loaded until somebody installs one — and what installing does that a package
+// name in the form above does not is: the directory is the server's own, the
+// language is the catalog's answer rather than a select, and the permissions
+// are the ones printed on the card. One click, and everything the click does is
+// on the card before it is clicked.
+//
+// The dependencies are the honest part. `plugins/rss` ships without
+// `rss-parser`, so the click reaches npm; a card that promised otherwise would
+// be promising an offline install that is not there.
+
+/** Whether an entry can be installed on this server, or why not.
+ *
+ * The same toolchain question the form asks, asked per card because a card is
+ * per language: on a server with npm and no pip, the JavaScript entries have
+ * buttons and the Python ones say why they do not. */
+export function bundledBlocked(entry: BundledModule, tools: Toolchains): string | null {
+  return toolchainMissing(entry.language === "python" ? "python" : "javascript", tools);
+}
+
+/** The line under a bundled entry's heading: its language, and its package. */
+export function bundledSubtitle(entry: BundledModule): string {
+  return `${languageLabel(entry.language)} · ${entry.name}`;
+}
+
+/** What installing an entry downloads, in a sentence — or `null` when it needs
+ * nothing, in which case there is nothing to warn about.
+ *
+ * Named as a *download* because that is the part that can fail and the part
+ * that leaves this machine: the module itself is already here. */
+export function installsSentence(entry: BundledModule): string | null {
+  if (entry.installs.length === 0) return null;
+  const manager = entry.language === "python" ? "pip" : "npm";
+  const list = entry.installs.join(", ");
+  const plural = entry.installs.length === 1 ? "it" : "them";
+  return `Installing downloads ${list} — ${manager} fetches ${plural} now; ${
+    entry.installs.length === 1 ? "it is" : "they are"
+  } not shipped with Saltcorn.`;
+}
+
+/** What installing an entry grants it, in a sentence — or `null` when there is
+ * nothing to grant.
+ *
+ * Printed **beside the button**, which is the whole basis on which a one-click
+ * install is allowed to grant anything at all: the admin who clicks has read
+ * what they are granting. */
+export function grantSentence(entry: BundledModule): string | null {
+  const set = bundledPermissions(entry);
+  if (isClosed(set)) return null;
+  const parts: string[] = [];
+  if (anyHost(set)) parts.push("connect to any host");
+  else if (set.net.length > 0) parts.push(`connect to ${set.net.join(", ")}`);
+  if (set.read.length > 0) parts.push(`read ${set.read.join(", ")}`);
+  if (set.write.length > 0) parts.push(`write ${set.write.join(", ")}`);
+  if (set.env.length > 0) parts.push(`read ${set.env.join(", ")}`);
+  return `Installing lets it ${parts.join("; ")}. You can change that afterwards.`;
+}
+
+/** An entry's requested permissions, narrowed from the wire's opaque JSON.
+ *
+ * The same narrowing an installed module's set gets, and unreadable is the
+ * **closed** set for the same reason: a card that could not parse what it was
+ * sent must under-report a grant rather than over-report one. */
+export function bundledPermissions(entry: BundledModule): ModulePermissionSet {
+  return permissionSet(entry.permissions);
+}
+
+/** The catalog with the installed entries last, so what a server can add is at
+ * the top of the list rather than under what it already has. */
+export function catalogOrder(entries: BundledModule[]): BundledModule[] {
+  return [...entries].sort((a, b) => Number(a.installed) - Number(b.installed));
 }

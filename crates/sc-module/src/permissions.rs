@@ -57,6 +57,14 @@ pub const PERM_WRITE: &str = "write";
 /// Environment variables.
 pub const PERM_ENV: &str = "env";
 
+/// The [`PERM_NET`] entry meaning *any host* — see [`check_host`].
+///
+/// Only `net` has one. A filesystem wildcard would be a module that may read the
+/// database's password file, and an environment wildcard a module that may read
+/// every secret this process was started with; neither has the excuse net has,
+/// which is that the host is chosen after the grant.
+pub const ANY_HOST: &str = "*";
+
 /// What one module's worker may reach.
 ///
 /// Every list is an allow-list and every empty list means *nothing*, never
@@ -136,12 +144,20 @@ impl ModulePermissions {
         object
     }
 
+    /// Whether the net list grants *any* host — the `*` entry, which is not a
+    /// host and must not be handed to a permission parser as one.
+    pub fn any_host(&self) -> bool {
+        self.net.iter().any(|entry| entry == ANY_HOST)
+    }
+
     /// One sentence per granted capability, for a log line and for the admin's
     /// own reading. Empty when nothing is granted, so the caller says "nothing"
     /// in its own words rather than rendering an empty list.
     pub fn sentences(&self) -> Vec<String> {
         let mut lines = Vec::new();
-        if !self.net.is_empty() {
+        if self.any_host() {
+            lines.push("may connect to any host".to_owned());
+        } else if !self.net.is_empty() {
             lines.push(format!("may connect to {}", self.net.join(", ")));
         }
         if !self.read.is_empty() {
@@ -202,6 +218,16 @@ fn check_host(entry: &str) -> Result<String> {
     if entry.is_empty() {
         return Err(Error::invalid("a network permission needs a host"));
     }
+    // **Any host**, which is the one entry that is not a host at all. It exists
+    // for the modules whose hosts are not knowable when the permission is
+    // granted: an RSS table's feed is typed into the *table's* settings, not the
+    // module's, so an allow-list of feed hosts would have to be edited every
+    // time somebody adds a table. It is deliberately a thing an admin writes
+    // out — one entry, spelled `*`, printed back as "any host" wherever the set
+    // is shown — rather than a state an empty list could drift into.
+    if entry == ANY_HOST {
+        return Ok(entry.to_owned());
+    }
     // A **Unix socket**, which Deno spells `unix:/path/to/socket` and which is
     // how a client on the same machine reaches a local server: `pg` connecting
     // to a Postgres on `/var/run/postgresql` opens one, and a table provider
@@ -260,6 +286,15 @@ fn check_path(entry: &str) -> Result<String> {
 fn check_env(entry: &str) -> Result<String> {
     if entry.is_empty() {
         return Err(Error::invalid("an environment permission needs a name"));
+    }
+    // Refused by name rather than accepted as a variable nobody has: `net` has
+    // a wildcard ([`ANY_HOST`]) and this does not, and an admin who wrote `*`
+    // here meant the one they had seen work on the line above.
+    if entry == ANY_HOST {
+        return Err(Error::invalid(
+            "`*` is not an environment variable name; there is no wildcard here — name each \
+             variable the module may read",
+        ));
     }
     if entry.contains('=') || entry.contains('\0') {
         return Err(Error::invalid(format!(
@@ -481,5 +516,35 @@ mod tests {
         assert!(lines[0].contains("broker.example:1883"));
         assert_eq!(permissions.granted(), 2);
         assert!(ModulePermissions::closed().sentences().is_empty());
+    }
+
+    #[test]
+    fn any_host_is_a_net_entry_and_reads_as_one_sentence() {
+        let permissions = ModulePermissions::from_json(&json!({ "net": ["*"] })).unwrap();
+        assert!(permissions.any_host());
+        assert_eq!(permissions.net, [ANY_HOST]);
+        assert_eq!(permissions.sentences(), ["may connect to any host"]);
+        // It is a grant like any other, so it counts and it is not "closed".
+        assert_eq!(permissions.granted(), 1);
+        assert!(!permissions.is_closed());
+        // And a set without it never claims it, however many hosts it names.
+        let named =
+            ModulePermissions::from_json(&json!({ "net": ["a.example", "b.example"] })).unwrap();
+        assert!(!named.any_host());
+        assert_eq!(named.sentences(), ["may connect to a.example, b.example"]);
+    }
+
+    #[test]
+    fn the_wildcard_is_the_net_lists_alone() {
+        // A filesystem or environment wildcard has no meaning to give it: `*`
+        // is not an absolute path and not a variable name, so the existing
+        // checks refuse it without a special case.
+        for key in [PERM_READ, PERM_WRITE] {
+            let err = ModulePermissions::from_json(&json!({ key: ["*"] }))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("absolute path"), "{key}: {err}");
+        }
+        assert!(ModulePermissions::from_json(&json!({ PERM_ENV: ["*"] })).is_err());
     }
 }

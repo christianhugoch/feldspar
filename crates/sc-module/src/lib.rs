@@ -30,6 +30,7 @@
 //! ## The pieces
 //!
 //! - [`module`] — what a module is: the row, and where its package came from.
+//! - [`bundled`] — the modules this server ships with, and installs from itself.
 //! - [`store`] — `_sc_modules`, the row's schema and its lifecycle.
 //! - [`paths`] — where packages are installed.
 //! - [`install`] — npm, and what it turned out to have installed.
@@ -51,6 +52,7 @@
 
 pub mod action;
 pub mod bounds;
+pub mod bundled;
 #[cfg(feature = "deno-host")]
 pub mod deno;
 pub mod functions;
@@ -68,6 +70,7 @@ pub use action::ModuleAction;
 pub use bounds::{
     DEFAULT_CALL_TIMEOUT, DEFAULT_MODULE_JS_SLICE, DEFAULT_MODULE_MAX_HEAP, DEFAULT_MODULE_WORKERS,
 };
+pub use bundled::{BUNDLED_IN_CHECKOUT, BundledModule, BundledModules};
 #[cfg(feature = "deno-host")]
 pub use deno::{DenoModuleHost, PoolBounds};
 pub use functions::ModuleFunctions;
@@ -81,7 +84,7 @@ pub use module::{
 };
 pub use modules::{LoadedModule, ModuleIssue, ModuleSet, redacted_configuration, unsupported_json};
 pub use paths::default_modules_root;
-pub use permissions::{ModulePermissions, PERM_ENV, PERM_NET, PERM_READ, PERM_WRITE};
+pub use permissions::{ANY_HOST, ModulePermissions, PERM_ENV, PERM_NET, PERM_READ, PERM_WRITE};
 pub use spec::config_fields_to_form_fields;
 pub use store::{
     COL_LANGUAGE, COL_PERMISSIONS, MODULES_TABLE, bootstrap_modules, delete_module, list_modules,

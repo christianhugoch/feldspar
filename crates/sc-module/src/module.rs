@@ -73,11 +73,21 @@ impl ModuleLanguage {
     }
 
     /// The sources a module in this language can be installed from — one
-    /// registry each, and the local directory both share.
+    /// registry each, and the two both share: the local directory, and the
+    /// **bundled** catalog that ships in this server's own release
+    /// ([`crate::bundled`]).
     pub fn sources(self) -> &'static [ModuleSource] {
         match self {
-            ModuleLanguage::JavaScript => &[ModuleSource::Npm, ModuleSource::Local],
-            ModuleLanguage::Python => &[ModuleSource::Pypi, ModuleSource::Local],
+            ModuleLanguage::JavaScript => &[
+                ModuleSource::Npm,
+                ModuleSource::Bundled,
+                ModuleSource::Local,
+            ],
+            ModuleLanguage::Python => &[
+                ModuleSource::Pypi,
+                ModuleSource::Bundled,
+                ModuleSource::Local,
+            ],
         }
     }
 
@@ -93,19 +103,31 @@ pub const MODULE_LANGUAGES: [ModuleLanguage; 2] =
 
 /// Where a module's package comes from.
 ///
-/// Three kinds, and the difference is entirely in what `location` means: a
+/// Four kinds, and the difference is entirely in what `location` means: a
 /// registry specifier (`@saltcorn/mqtt@0.2.0` for npm, `saltcorn-mqtt>=0.2` for
-/// PyPI) or an absolute path on this server's disk. Which of the two registries
-/// applies is the module's [`ModuleLanguage`], and `local` means the same thing
-/// in both languages: a directory, **copied** in rather than linked, for the
-/// reasons [`crate::install`] gives — so a checkout's edits reach the server
-/// when it is installed again and not before.
+/// PyPI), the **id** of a module bundled with this server (`rss`), or an
+/// absolute path on this server's disk. Which of the two registries applies is
+/// the module's [`ModuleLanguage`], and `local` means the same thing in both
+/// languages: a directory, **copied** in rather than linked, for the reasons
+/// [`crate::install`] gives — so a checkout's edits reach the server when it is
+/// installed again and not before.
+///
+/// `bundled` is `local` with the path filled in by the server rather than by the
+/// admin, and that indirection is the whole reason it is its own source: the
+/// directory a bundled module is installed from is `<install prefix>/plugins/<id>`,
+/// which is a different string on a developer's checkout, on a host running the
+/// tarball, and on the same host after an upgrade that moved the prefix. Storing
+/// the id keeps the row **reinstallable**, which storing the path would not
+/// ([`crate::bundled`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModuleSource {
     /// A package from the npm registry.
     Npm,
     /// A distribution from the Python Package Index.
     Pypi,
+    /// A module that ships with this server: the id of an entry in the bundled
+    /// catalog ([`crate::bundled`]), resolved to a directory at install time.
+    Bundled,
     /// A directory on this server's disk.
     Local,
 }
@@ -116,6 +138,7 @@ impl ModuleSource {
         match self {
             ModuleSource::Npm => "npm",
             ModuleSource::Pypi => "pypi",
+            ModuleSource::Bundled => "bundled",
             ModuleSource::Local => "local",
         }
     }
@@ -127,17 +150,22 @@ impl ModuleSource {
         match s {
             "npm" => Ok(ModuleSource::Npm),
             "pypi" => Ok(ModuleSource::Pypi),
+            "bundled" => Ok(ModuleSource::Bundled),
             "local" => Ok(ModuleSource::Local),
             other => Err(Error::invalid(format!(
-                "unknown module source `{other}`; the sources are npm, pypi, local"
+                "unknown module source `{other}`; the sources are npm, pypi, bundled, local"
             ))),
         }
     }
 }
 
 /// Every source, in the order the admin UI offers them.
-pub const MODULE_SOURCES: [ModuleSource; 3] =
-    [ModuleSource::Npm, ModuleSource::Pypi, ModuleSource::Local];
+pub const MODULE_SOURCES: [ModuleSource; 4] = [
+    ModuleSource::Npm,
+    ModuleSource::Pypi,
+    ModuleSource::Bundled,
+    ModuleSource::Local,
+];
 
 /// An installed module: the row, and nothing the package could contradict.
 #[derive(Debug, Clone)]
@@ -231,8 +259,10 @@ mod tests {
     fn a_language_round_trips_and_owns_its_registry() {
         for language in MODULE_LANGUAGES {
             assert_eq!(ModuleLanguage::parse(language.as_str()).unwrap(), language);
-            // Every language has the local directory, and exactly one registry.
+            // Every language has the local directory and the bundled catalog,
+            // and exactly one registry.
             assert!(language.allows(ModuleSource::Local));
+            assert!(language.allows(ModuleSource::Bundled));
         }
         assert!(ModuleLanguage::JavaScript.allows(ModuleSource::Npm));
         assert!(!ModuleLanguage::JavaScript.allows(ModuleSource::Pypi));

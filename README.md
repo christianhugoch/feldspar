@@ -426,6 +426,15 @@ and its JSON API works, but the browser UI will be a blank bootstrap page (see �
 and §10 Troubleshooting), and **modules** — Saltcorn v1 plugins, which are npm
 packages — cannot be installed.
 
+**Some modules come with Saltcorn.** A few are written and maintained in this
+repository (`plugins/`), ship inside the release tarball, and appear on the
+Modules tab as a catalog with an Install button each — an RSS feed table provider
+and a Markdown renderer today. They are still modules: nothing is loaded until an
+admin installs one. What is *not* shipped is what they depend on, which npm or
+pip fetches at that moment — so a server that installs none of them downloads
+nothing. See [`plugins/README.md`](plugins/README.md) for what is there and how
+to add one.
+
 **`node` is not a runtime requirement.** npm is the *installer*; a module then runs
 on a JavaScript worker inside the `feldspar` process itself, on the same V8 the
 server already links for code bodies. A server whose modules are already installed

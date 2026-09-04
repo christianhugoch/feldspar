@@ -40,6 +40,56 @@ fn main() {
     let build = build_requested(std::env::var("SC_BUILD_ADMIN").ok().as_deref());
     build_bundle("ui/admin", "SC_ADMIN_BUNDLE_DIR", "admin UI", build);
     build_bundle("ui/ide", "SC_IDE_BUNDLE_DIR", "file-store IDE", build);
+    record_plugins_dir();
+}
+
+/// Record where the **bundled modules** will be — `plugins/`, the modules this
+/// server ships with and installs from itself (`sc_module::bundled`).
+///
+/// Nothing is built: a bundled module is source that a package manager installs
+/// at the moment an admin asks for it, so all this decides is which directory
+/// the binary looks in. That makes it the same problem the two bundles have and
+/// it gets the same answer — the checkout's `plugins/` normally, and
+/// `$SC_BUNDLE_PREFIX/plugins` for a binary that is being packaged, because the
+/// checkout will not exist on the machine the artifact is going to.
+///
+/// It is deliberately **not** conditional on `SC_BUILD_ADMIN`: that variable
+/// exists to say "this build has no Node toolchain", and the bundled catalog has
+/// nothing to build. A `--no-ui` artifact still ships `plugins/` and still
+/// installs from it.
+fn record_plugins_dir() {
+    let plugins = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("plugins");
+    println!("cargo:rerun-if-changed={}", plugins.display());
+    let plugins = plugins.canonicalize().unwrap_or(plugins);
+    let recorded =
+        recorded_plugins_dir(std::env::var("SC_BUNDLE_PREFIX").ok().as_deref(), &plugins);
+    println!("cargo:rustc-env=SC_PLUGINS_DIR={}", recorded.display());
+}
+
+/// The path to compile into the binary for the bundled catalog at `plugins`.
+///
+/// [`recorded_dir`]'s sibling, and the same rule: the checkout's directory
+/// without a prefix, and `<prefix>/plugins` with one. It is not the same
+/// function because there is no `dist` under it — a bundled module is source
+/// that a package manager installs, not a bundle that a build produces.
+///
+/// `pub` for the reason [`recorded_dir`] is: `tests/build_script.rs` pulls this
+/// file in as a module.
+pub fn recorded_plugins_dir(prefix: Option<&str>, plugins: &std::path::Path) -> PathBuf {
+    match prefix {
+        None => plugins.to_path_buf(),
+        Some(prefix) => {
+            let prefix = PathBuf::from(prefix);
+            assert!(
+                prefix.is_absolute(),
+                "SC_BUNDLE_PREFIX must be an absolute path, got {}",
+                prefix.display()
+            );
+            prefix.join("plugins")
+        }
+    }
 }
 
 /// Put `sc-dns`'s resolver in front of glibc's for this binary.

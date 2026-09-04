@@ -1,0 +1,240 @@
+//! The **real** bundled catalog: `plugins/`, as this repository has it.
+//!
+//! `bundled.rs`'s unit tests read manifests written by the test, which proves
+//! the parser and nothing about what is shipped. This file reads the directory
+//! the release tarball copies, so the things that actually go wrong are caught
+//! here: a manifest that will not parse, a `name` that has drifted from the
+//! package's own, a language whose package is not the shape that language
+//! installs, a permission entry that is not a permission.
+//!
+//! It needs no npm, no pip and no network — everything asserted is a file in
+//! this repository — so it runs in every `cargo test`, which is the point of
+//! writing it rather than leaving the catalog to the two `#[ignore]`d install
+//! tests that reach a registry.
+
+use std::path::Path;
+
+use sc_module::{BUNDLED_IN_CHECKOUT, BundledModules, ModuleLanguage};
+
+/// The catalog as it ships: read from the checkout, with nothing else on the
+/// path that could be standing in for it.
+fn catalog() -> BundledModules {
+    let catalog = BundledModules::discover(None);
+    assert!(
+        catalog.root().is_some(),
+        "the checkout's bundled catalog was not found at {BUNDLED_IN_CHECKOUT}"
+    );
+    catalog
+}
+
+#[test]
+fn every_bundled_manifest_reads() {
+    let catalog = catalog();
+    assert!(
+        catalog.issues().is_empty(),
+        "the bundled catalog has unreadable entries: {:?}",
+        catalog.issues()
+    );
+    assert!(
+        !catalog.modules().is_empty(),
+        "the bundled catalog is empty; plugins/ should hold at least the RSS module"
+    );
+    // Every entry says what it is for and what it gives, because a card with a
+    // heading and nothing under it is a card nobody can decide from.
+    for module in catalog.modules() {
+        assert!(!module.title.is_empty(), "{}", module.id);
+        assert!(!module.description.is_empty(), "{}", module.id);
+        assert!(
+            !module.supplies.is_empty(),
+            "{} declares nothing it supplies",
+            module.id
+        );
+    }
+}
+
+#[test]
+fn a_manifests_name_is_the_package_s_own() {
+    // The one that silently breaks everything: the row, the loaded set and the
+    // "already installed" check all key on the package's own name, so a
+    // manifest naming something else produces a module the tab offers to
+    // install over and over.
+    for module in catalog().modules() {
+        let declared = match module.language {
+            ModuleLanguage::JavaScript => package_json_name(&module.directory),
+            ModuleLanguage::Python => pyproject_name(&module.directory),
+        };
+        assert_eq!(
+            declared, module.name,
+            "{}: feldspar-module.json says `{}`, the package says `{declared}`",
+            module.id, module.name
+        );
+    }
+}
+
+#[test]
+fn a_bundled_module_is_a_package_its_manager_can_install() {
+    for module in catalog().modules() {
+        match module.language {
+            // npm reads `main` (or an `index.js`) — a directory with neither is
+            // installed happily and loads as nothing.
+            ModuleLanguage::JavaScript => {
+                assert!(
+                    module.directory.join("package.json").is_file(),
+                    "{}: no package.json",
+                    module.id
+                );
+                assert!(
+                    module.directory.join("index.js").is_file(),
+                    "{}: no index.js",
+                    module.id
+                );
+            }
+            ModuleLanguage::Python => {
+                assert!(
+                    module.directory.join("pyproject.toml").is_file(),
+                    "{}: no pyproject.toml",
+                    module.id
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn what_a_bundled_module_installs_is_what_its_package_depends_on() {
+    // `installs` is what the tab promises will be downloaded, and the promise is
+    // only worth making if it is the truth. Checked against the package's own
+    // dependency declaration, so adding a dependency without saying so on the
+    // card fails here.
+    for module in catalog().modules() {
+        let declared = match module.language {
+            ModuleLanguage::JavaScript => package_json_dependencies(&module.directory),
+            ModuleLanguage::Python => pyproject_dependencies(&module.directory),
+        };
+        for package in &module.installs {
+            assert!(
+                declared.iter().any(|d| d == package),
+                "{}: the card promises `{package}` is installed, and the package depends on \
+                 {declared:?}",
+                module.id
+            );
+        }
+        // And the other direction, which is the one that rots: a dependency
+        // added later without a line on the card is a download nobody was told
+        // about.
+        for dependency in &declared {
+            assert!(
+                module.installs.contains(dependency),
+                "{}: the package depends on `{dependency}` and the card does not say it is \
+                 downloaded",
+                module.id
+            );
+        }
+    }
+}
+
+#[test]
+fn the_rss_module_is_in_the_catalog_and_asks_for_the_network() {
+    let catalog = catalog();
+    let rss = catalog.get("rss").expect("the RSS module ships");
+    assert_eq!(rss.name, "@feldspar/rss");
+    assert_eq!(rss.language, ModuleLanguage::JavaScript);
+    assert_eq!(rss.installs, ["rss-parser"]);
+    // A feed's host is typed into the *table's* settings, so it cannot be on an
+    // allow-list granted when the module is installed. This is the case the
+    // wildcard exists for, and the card prints it as "may connect to any host"
+    // beside the button that grants it.
+    assert!(rss.permissions.any_host(), "{:?}", rss.permissions);
+    assert_eq!(rss.permissions.sentences(), ["may connect to any host"]);
+}
+
+#[test]
+fn the_python_half_of_the_catalog_ships_too() {
+    // Both hosts, from one catalog and one Install button (§8): the tab does not
+    // know which language it is installing until the manifest says.
+    let catalog = catalog();
+    let python: Vec<&str> = catalog
+        .modules()
+        .iter()
+        .filter(|m| m.language == ModuleLanguage::Python)
+        .map(|m| m.id.as_str())
+        .collect();
+    assert!(
+        python.contains(&"markdown"),
+        "the Python bundled modules are {python:?}"
+    );
+    let markdown = catalog.get("markdown").expect("the Markdown module ships");
+    assert_eq!(markdown.name, "feldspar-markdown");
+    // Nothing to grant, and the manifest reader refuses a Python module that
+    // asks (there is no sandbox to enforce it).
+    assert!(markdown.permissions.is_closed());
+}
+
+/// The names in a `package.json`'s `dependencies`.
+fn package_json_dependencies(dir: &Path) -> Vec<String> {
+    let text = read(&dir.join("package.json"));
+    let value: serde_json::Value = serde_json::from_str(&text).expect("package.json is JSON");
+    match value.get("dependencies") {
+        Some(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The names in a `pyproject.toml`'s `[project] dependencies`, with the version
+/// specifier taken off — `markdown>=3.5` is a dependency on `markdown`.
+///
+/// A line scan for the same reason [`pyproject_name`] is one: no TOML dependency
+/// in this crate, and the file is one we write.
+fn pyproject_dependencies(dir: &Path) -> Vec<String> {
+    let text = read(&dir.join("pyproject.toml"));
+    let Some(start) = text.find("dependencies = [") else {
+        return Vec::new();
+    };
+    let rest = &text[start..];
+    let end = rest.find(']').expect("the dependency list is closed");
+    rest[..end]
+        .split('"')
+        .filter(|part| !part.trim().is_empty() && !part.contains('['))
+        .map(|spec| {
+            let end = spec.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '-' && c != '.');
+            spec[..end.unwrap_or(spec.len())].to_owned()
+        })
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+fn read(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// `"name": "…"` out of a `package.json`, without a JSON dependency in a test.
+fn package_json_name(dir: &Path) -> String {
+    let text = read(&dir.join("package.json"));
+    let value: serde_json::Value = serde_json::from_str(&text).expect("package.json is JSON");
+    value["name"]
+        .as_str()
+        .expect("package.json has a name")
+        .to_owned()
+}
+
+/// `name = "…"` out of a `pyproject.toml`'s `[project]` table.
+///
+/// A line scan rather than a TOML parser: this crate has no TOML dependency,
+/// the file is one we write, and what is being checked is that two strings in
+/// this repository agree.
+fn pyproject_name(dir: &Path) -> String {
+    let text = read(&dir.join("pyproject.toml"));
+    let mut in_project = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_project = line == "[project]";
+            continue;
+        }
+        if in_project && let Some(rest) = line.strip_prefix("name") {
+            let value = rest.trim_start_matches([' ', '=']).trim();
+            return value.trim_matches('"').to_owned();
+        }
+    }
+    panic!("{}/pyproject.toml has no [project] name", dir.display());
+}

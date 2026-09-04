@@ -111,7 +111,8 @@ feldspar/
 │  │                              #    the workflow editor: React Flow + dagre, §10.3)
 │  ├─ builder/                    # React + Craft.js + react-flow drag-and-drop builder
 │  └─ form-runtime/               # React dynamic-form framework (conditional/repeated/dynamic)
-├─ plugins/                       # first-party plugins (may be JS or Rust)
+├─ plugins/                       # the bundled modules (§15.1a): first-party plugins that
+│                                #    ship in the release and install in one click
 └─ tests/                         # cross-crate integration tests (real Postgres)
 ```
 
@@ -5236,6 +5237,69 @@ has a sandbox:
 - **Installing a module is not.** `npm install` runs install scripts as the server, before any
   worker exists, and nothing in this design changes that. The endpoints are admin-only, and the
   screen says so rather than implying the permission set covers it.
+
+### 15.1a Bundled modules: the catalog a release ships with (`sc-module::bundled`)
+
+A module comes from a registry, and a registry is a name an admin has to know. That is the
+right shape for the long tail and the wrong one for the short: an RSS table, a Markdown
+renderer — things a third of applications want, that no server should carry unasked, and that
+nobody should have to go and find. The **bundled catalog** is the short tail. The modules in
+`plugins/` are developed in this repository, travel **inside the release tarball**, and appear
+on the Modules tab as a card each with an Install button.
+
+**They are still modules.** Nothing in `plugins/` is loaded, registered or resident until an
+admin installs one; a server that installs none runs exactly the code it ran before. What
+installing does is what installing has always done — a row in `_sc_modules`, a package in the
+modules root, a reload — and the module then loads on a worker with the permissions its row
+carries, like every other.
+
+**The code ships; the dependencies do not.** `plugins/rss` is an `index.js`, a `package.json`
+naming `rss-parser`, and a manifest — a few kilobytes. `rss-parser` is downloaded by npm at the
+moment somebody clicks Install, and never on a server that clicks nothing. That is the trade
+the whole design is for: what makes it *this server's* module travels with the server, and the
+tree underneath it stays where package managers keep trees. Vendoring the trees instead would
+put a Markdown renderer, an XML parser and everything they depend on into every artifact,
+downloaded by every installation, to be used by some.
+
+**A bundled install is a local install with the path filled in by the server.** The fourth
+`ModuleSource` is `bundled`, and its `location` is the catalog **id** — `rss` — not a path. The
+directory is `<install prefix>/plugins/<id>`, which is a different string on a developer's
+checkout, on a host running the tarball, and on that host after an upgrade moved the prefix; an
+id survives all three, so the row stays reinstallable. `ModuleServices::install_package`
+resolves the id against the catalog and hands npm or pip the directory, and everything below
+that line is the "local directory" install that already existed.
+
+**The path into the binary is the bundle path.** `crates/sc-cli/build.rs` records
+`SC_PLUGINS_DIR` the way it records the two UI bundles: the checkout's `plugins/` normally,
+`$SC_BUNDLE_PREFIX/plugins` for a binary being packaged. Nothing is built — there is nothing to
+build — so `SC_BUILD_ADMIN=0` does not turn it off, and a `--no-ui` artifact still ships the
+catalog. A directory that is not there is an **empty catalog**, never a failure to start, and a
+manifest that will not parse is an issue on the boot log rather than a module list that fails.
+
+**One manifest per directory**, `feldspar-module.json`: the package's own name (which is what
+the row is keyed by, so it is how the card knows it is already installed), the language, the
+card's words, what installing downloads, and what installing grants.
+
+**The grant is the one thing worth arguing about.** `_sc_modules.permissions` is deliberately
+the *server's* record and not the package's: what a package declares is a request, and a
+request that granted itself would be no permission model at all. A bundled manifest's
+`permissions` is such a request — and it is granted by the install, because the Modules tab
+prints it beside the button in the words the permission screen uses ("Installing lets it
+connect to any host"). That is a person granting a permission after reading it, which is the
+rule; it is not a package granting itself one. It applies on a **first** install only: a
+reinstall is how a bundled module is upgraded when a new release ships a newer copy, and an
+admin who has since narrowed what it may reach must not have that undone by an upgrade.
+
+`net: ["*"]` — **any host** — exists for this catalog's first member and for the shape it
+stands for. An RSS table's feed URL is typed into the *table's* settings, not the module's, so
+the hosts a feed reader connects to are not knowable when its permission is granted, and an
+allow-list would have to be edited every time somebody adds a table. It is one entry, spelled
+out, printed back as "any host" wherever a permission set is shown, and it is the **only**
+wildcard: a filesystem one would be a module that may read the database password file and an
+environment one a module that may read every secret this process was started with, and neither
+has the excuse this one has. Python modules request nothing at all, and the manifest reader
+refuses one that tries — there is no sandbox in the interpreter to enforce it (§15.2), and a
+grant nothing enforces is worse than no grant.
 
 ### 15.2 Python: one interpreter, code bodies and plugin modules (`sc-python`)
 

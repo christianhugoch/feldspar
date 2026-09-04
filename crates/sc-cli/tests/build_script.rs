@@ -76,6 +76,29 @@ fn a_prefix_re_roots_each_bundle_under_the_install_directory() {
     }
 }
 
+use self::build_rs::recorded_plugins_dir;
+
+#[test]
+fn the_bundled_catalog_follows_the_same_prefix_rule() {
+    // The modules that ship with the release (`plugins/`) travel beside the two
+    // bundles and are found the same way — the checkout's directory for a binary
+    // run from its own tree, the install prefix for one being packaged. There is
+    // no `dist` under it: what ships is source that npm or pip installs, not
+    // something this build produced.
+    let plugins = Path::new("/home/dev/feldspar/plugins");
+    assert_eq!(recorded_plugins_dir(None, plugins), plugins.to_path_buf());
+    assert_eq!(
+        recorded_plugins_dir(Some("/opt/feldspar"), plugins),
+        PathBuf::from("/opt/feldspar/plugins")
+    );
+}
+
+#[test]
+#[should_panic(expected = "SC_BUNDLE_PREFIX must be an absolute path")]
+fn a_relative_plugins_prefix_fails_the_build_too() {
+    recorded_plugins_dir(Some("opt/feldspar"), Path::new("/src/plugins"));
+}
+
 #[test]
 #[should_panic(expected = "SC_BUNDLE_PREFIX must be an absolute path")]
 fn a_relative_prefix_fails_the_build() {

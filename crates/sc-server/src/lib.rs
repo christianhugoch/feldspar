@@ -121,6 +121,9 @@ pub use router::{
 /// [`install_triggers_with_adapters`] a set of adapters needs to name it, and
 /// `sc-expr` is not otherwise its dependency.
 pub use sc_expr::CodeAdapter;
+/// Where the bundled modules are in the checkout, re-exported: `sc-cli` needs to
+/// name the fallback and `sc-module` is not otherwise its dependency.
+pub use sc_module::BUNDLED_IN_CHECKOUT;
 pub use security::IDE_CONTENT_SECURITY_POLICY;
 pub use security::{CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
 pub use serve::serve;

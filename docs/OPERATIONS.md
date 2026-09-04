@@ -105,6 +105,7 @@ What lands where:
 /opt/feldspar/bin/feldspar        the binary (symlinked to /usr/local/bin/feldspar)
 /opt/feldspar/ui/admin/dist       the admin SPA it serves
 /opt/feldspar/ui/ide/dist         the file-store IDE it serves
+/opt/feldspar/plugins/            the modules it ships with, one click to install
 /opt/feldspar/install.sh          copies the tree into place
 /opt/feldspar/setup-host.sh       the host setup, run once
 ```
@@ -564,8 +565,8 @@ effect.**
 | Variable | Effect |
 |---|---|
 | `SC_BUILD_ADMIN` | set to `0`, `false`, `False` or `FALSE` to skip building the two front-end bundles, leaving a Rust-only build that needs no JS toolchain. Any other value, and leaving it unset, builds them |
-| `SC_BUNDLE_PREFIX` | absolute path the artifact will be *installed* at. The recorded bundle paths become `$SC_BUNDLE_PREFIX/ui/admin/dist` and `.../ui/ide/dist`, so they describe the target machine rather than the build machine. This is what `build-static.sh --prefix` sets |
-| `SC_ADMIN_BUNDLE_DIR`, `SC_IDE_BUNDLE_DIR` | the compile-time paths the two bundles are recorded at, set by the build script |
+| `SC_BUNDLE_PREFIX` | absolute path the artifact will be *installed* at. The recorded bundle paths become `$SC_BUNDLE_PREFIX/ui/admin/dist`, `.../ui/ide/dist` and `.../plugins`, so they describe the target machine rather than the build machine. This is what `build-static.sh --prefix` sets |
+| `SC_ADMIN_BUNDLE_DIR`, `SC_IDE_BUNDLE_DIR`, `SC_PLUGINS_DIR` | the compile-time paths the two bundles and the bundled-module catalog are recorded at, set by the build script |
 
 If the browser shows *"The Saltcorn admin UI is not built"*, the binary was built
 with `SC_BUILD_ADMIN=0`. Either restart with `--static-dir ui/admin/dist` (after

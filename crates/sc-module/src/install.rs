@@ -355,6 +355,18 @@ impl Installer {
                     "`pypi` is a Python module's source; npm cannot install one. Install it as                      a Python module.",
                 ));
             }
+            // A bundled module is installed from the directory it ships in, and
+            // resolving its id to that directory is the caller's job
+            // ([`crate::bundled`]) — it needs the catalog, which is the
+            // server's, and it also needs the module's *language*, which
+            // decides whether npm is the installer at all. Reaching here with
+            // one is that wiring gone missing.
+            ModuleSource::Bundled => {
+                return Err(Error::invalid(
+                    "a bundled module's id is resolved to the directory it ships in before it \
+                     is installed; npm cannot install one from its id",
+                ));
+            }
             ModuleSource::Npm => {
                 let spec = location.trim();
                 if spec.is_empty() {
@@ -501,9 +513,12 @@ impl Installer {
 
         match source {
             ModuleSource::Local => local_package_name(Path::new(location.trim())),
-            // `install` refuses `pypi` before anything is run, so this arm is
-            // only reachable through the same mistake and answers the same way.
-            ModuleSource::Npm | ModuleSource::Pypi => npm_spec_name(location.trim()),
+            // `install` refuses `pypi` and `bundled` before anything is run, so
+            // these arms are only reachable through the same mistake and answer
+            // the same way.
+            ModuleSource::Npm | ModuleSource::Pypi | ModuleSource::Bundled => {
+                npm_spec_name(location.trim())
+            }
         }
     }
 }
