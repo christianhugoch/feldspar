@@ -387,8 +387,15 @@ impl Host {
         let url = deno_core::resolve_path(script.to_string_lossy().as_ref(), &cwd)
             .map_err(|e| Error::config(format!("{}: {e}", script.display())))?;
 
-        let mut worker =
-            super::wiring::build_worker(&config.root, &url, config.max_heap, &config.permissions);
+        let mut worker = super::wiring::try_build_worker(
+            &config.root,
+            &url,
+            config.max_heap,
+            &config.permissions,
+        )
+        .map_err(|reason| {
+            Error::config(format!("the module runtime could not be started: {reason}"))
+        })?;
         let op_state = worker.js_runtime.op_state();
         let handle = worker.js_runtime.v8_isolate().thread_safe_handle();
 

@@ -246,6 +246,28 @@ if [[ ! " ${SUPPORTED_TARGETS[*]} " == *" ${TARGET} "* ]]; then
     exit 2
 fi
 
+# The module runtime's V8 startup snapshot is produced by sc-module's build
+# script, which runs on the *host*, and a snapshot is tied to the architecture
+# that serialised it. So a build for another architecture is refused here rather
+# than half an hour later inside cargo — or, worse, shipped.
+host_arch="$(uname -m)"
+[[ "${host_arch}" == "arm64" ]] && host_arch="aarch64"
+if [[ "${TARGET%%-*}" != "${host_arch}" ]]; then
+    cat >&2 <<EOF
+error: cannot build ${TARGET} on ${host_arch}.
+
+  The module runtime starts from a V8 startup snapshot, built by
+  crates/sc-module/build.rs so that the binary carries its own JavaScript
+  instead of reading it from this machine's cargo registry. V8 serialises a
+  snapshot for the architecture that made it, and a build script runs on the
+  build host — so a ${TARGET} binary made here would carry a ${host_arch}
+  snapshot and fail at its first module.
+
+  Build on a ${TARGET%%-*} machine, or use --docker with a matching --platform.
+EOF
+    exit 2
+fi
+
 [[ "${PREFIX}" = /* ]] || { echo "error: --prefix must be absolute, got ${PREFIX}" >&2; exit 2; }
 
 # Everything about --deploy that can be known before the build is checked before

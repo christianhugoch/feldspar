@@ -504,6 +504,25 @@ impl ModuleHost {
     }
 }
 
+/// Establish V8's process-wide read-only heap from the module runtime's startup
+/// snapshot, before anything else builds an isolate.
+///
+/// **Call this once, early, in any process that runs both modules and
+/// JavaScript** — a server, and any test that touches the two. The order is not
+/// a preference: a snapshot-backed worker built after a bare `deno_core`
+/// isolate aborts the process inside V8, with no error to catch. See
+/// [`crate::deno::prime`] for why, and `sc_expr::set_isolate_prime` for the hook
+/// that spares callers from having to sequence it by hand.
+///
+/// Does nothing in a build without the `deno-host` feature, which has no module
+/// runtime to prime.
+pub fn prime_v8() {
+    #[cfg(feature = "deno-host")]
+    {
+        crate::deno::prime();
+    }
+}
+
 /// What a build with no module runtime answers, rather than a silence or a
 /// timeout.
 #[cfg(not(feature = "deno-host"))]

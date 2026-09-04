@@ -227,6 +227,33 @@ still install from npm, list what it has, and say what is wrong.
       and the wildcard in the permissions step.
 - [x] 6.3 README §3, and the CHANGELOG.
 
+## Phase 7 — Found in production, after the milestone
+
+Installing the bundled RSS module on `feldspar-dev` — the first time any module was installed
+from a **release tarball** rather than from a checkout — failed with `it did not load: the
+module host stopped before answering this call`, beside the green
+`@feldspar/rss 0.1.0 installed, supplying nothing this version of Saltcorn loads`. Not an RSS
+problem and not a bundled-modules problem: no JavaScript module could load on any deployed
+tarball, because `deno_core` reads its extensions' JavaScript from the absolute paths they had
+on the **build machine**.
+
+- [x] 7.1 `crates/sc-module/build.rs` builds the V8 startup snapshot, and embeds the
+      `lazy_loaded_*` sources the snapshot does not consume. `wiring.rs` starts every worker
+      from it. `deno_runtime`'s `transpile` feature goes with it — the snapshot holds the
+      transpiled form — taking `deno_ast` out of the server's link.
+- [x] 7.2 `sc_module::prime_v8`, and `sc_expr::set_isolate_prime` for the hook it is
+      registered through: V8 shares one read-only heap per process, so the snapshot-backed
+      isolate has to be built first and **held**. `sc_server::js_evaluator` wires the two.
+- [x] 7.3 `wiring::try_build_worker`: `JsRuntime::new` panics rather than returning, and a
+      panicking worker thread drops its call table instead of failing the calls in it — which
+      is why the one sentence naming the cause went only to stderr. The Modules tab now shows
+      it.
+- [x] 7.4 `scripts/build-static.sh` refuses a cross-architecture build, and `build.rs` refuses
+      it again: a snapshot belongs to the architecture that serialised it.
+- [x] 7.5 `sc-module`'s `two_pools` test: the pool ordering, and a worker started inside a
+      mount namespace with the cargo registry hidden behind a tmpfs — the deployment host,
+      reproduced.
+
 ---
 
 ## Explicitly OUT of scope for this milestone

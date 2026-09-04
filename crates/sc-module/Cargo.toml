@@ -75,8 +75,27 @@ deno_path_util = { workspace = true, optional = true }
 deno_error = { workspace = true, optional = true }
 sys_traits = { workspace = true, optional = true }
 
+# `deno-host` only, and the reason the module runtime is portable at all: this
+# builds the V8 startup snapshot the worker starts from, so that the extension
+# JavaScript `deno_core` would otherwise read from the *build machine's* cargo
+# registry at every worker start is carried inside the binary. See `build.rs`.
+#
+# It is the same package as the dependency above — `dep:deno_runtime` turns on
+# both — with `snapshot` added. Cargo's v3 resolver does not unify
+# build-dependency features with ordinary ones, so this is a second compilation
+# of the deno tree: the price of a snapshot, and what Deno's own build pays.
+[build-dependencies]
+deno_runtime = { version = "0.263", features = [
+    "snapshot",
+    "transpile",
+], optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# `eval` for the tests alone: `tests/two_pools.rs` has to build one of
+# `sc_expr`'s bare isolates to assert that a module worker can still start
+# afterwards, which is the ordering the whole process depends on.
+sc-expr = { workspace = true, features = ["eval"] }
 sc-db.workspace = true
 sc-db-postgres.workspace = true
 sc-test-harness.workspace = true

@@ -76,7 +76,7 @@ pub use deno::{DenoModuleHost, PoolBounds};
 pub use functions::ModuleFunctions;
 pub use host::{
     ActionManifest, FunctionArg, FunctionManifest, ModuleHost, ModuleManifest,
-    TableProviderManifest, UnsupportedEntity,
+    TableProviderManifest, UnsupportedEntity, prime_v8,
 };
 pub use install::{
     InstalledPackage, Installer, MIN_NPM_VERSION, have_node, have_npm, npm_too_old, npm_version,

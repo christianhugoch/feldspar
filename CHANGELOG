@@ -2,6 +2,50 @@
 
 Changes in reverse chronological order.
 
+## The module runtime carries its own JavaScript
+
+Installing a module on a server built from a **release tarball** failed with `it did not load:
+the module host stopped before answering this call`, and — from the same response, in green —
+`@feldspar/rss 0.1.0 installed, supplying nothing this version of Saltcorn loads`. Nothing in
+either sentence is about RSS, or about bundled modules: **no JavaScript module could load on
+any deployed tarball**. It worked in every test and on every checkout, which is exactly what
+the bug was made of.
+
+- **What it was.** `deno_core` does not embed the JavaScript its extensions are made of. An
+  `include_js_files!` entry records the absolute path the file had **on the build machine**,
+  and with no V8 startup snapshot to hold the bytes they are read back from that path at every
+  worker start. `deno_runtime` and the twenty-odd `deno_*` extension crates all declare their
+  sources that way. A tarball ships a binary and no cargo registry, so there was nothing to
+  read: `JsRuntime::new` panicked, and the worker thread died with the load in flight.
+- **Why the error said "Permission denied".** The unit file's `ProtectHome=true` masks `/home`
+  for the service, so the lookup failed at the traversal rather than at the missing file. The
+  build machine's `/home/tomn/.cargo/…` was never going to be there either way.
+- **`crates/sc-module/build.rs` builds the snapshot**, and `wiring.rs` starts every worker
+  from it, along with the `lazy_loaded_*` sources the snapshot does not consume (embedded by
+  the same script, transpiled where they are TypeScript). About 8 MB of binary. Startup gets
+  faster rather than slower — this crate's `bundled_rss` suite went from 2.2 s to 0.6 s — and
+  `deno_runtime`'s `transpile` feature is no longer needed at runtime, which takes `deno_ast`
+  out of the server's link.
+- **The two isolate pools now have an order, and it is kept for you.** V8 shares one read-only
+  heap across a process and the first isolate establishes it; a snapshot-backed worker built
+  after one of `sc-expr`'s bare isolates aborts the process inside V8. `sc_module::prime_v8`
+  builds one snapshot isolate and **holds** it — the heap does not outlive the isolates using
+  it, so a prime that dropped its isolate would be undone by the next bare one — and
+  `sc_expr::set_isolate_prime` is the hook `sc_server::js_evaluator` registers it through, so
+  neither pool has to know which of them woke first.
+- **A worker that cannot start now says so where an admin is looking.** `JsRuntime::new`
+  panics rather than returning an error and `deno_runtime` offers no `try_` constructor, so
+  `wiring::try_build_worker` unwinds it: the Modules tab shows `the module runtime could not
+  be started: …` instead of the dropped-channel sentence, whose cause only ever reached
+  stderr.
+- **Cross-architecture builds are refused**, by `scripts/build-static.sh` before the build and
+  by `build.rs` during it. A snapshot belongs to the architecture that serialised it, and a
+  build script runs on the host.
+- **Tested against the host that broke.** `sc-module`'s `two_pools` starts a worker inside a
+  mount namespace with the cargo registry hidden behind a tmpfs — no build tree, at all — and
+  asserts the ordering by running a code body before the first module. Without the prime that
+  test does not fail; it aborts the test binary.
+
 ## npm 9.3.0 is the floor, and setup-host installs Node from NodeSource
 
 Clicking **Install** on a bundled module on a host set up from Debian's or Ubuntu's own

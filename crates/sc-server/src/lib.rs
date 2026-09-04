@@ -66,6 +66,16 @@ pub fn default_js_evaluator() -> std::sync::Arc<dyn sc_expr::JsEvaluator> {
 /// first use, so a server that never fires a `run_js_code` trigger pays for
 /// neither knob.
 pub fn js_evaluator(config: &ServerConfig) -> std::sync::Arc<dyn sc_expr::JsEvaluator> {
+    // **The V8 ordering, kept once for the whole process.** A module worker
+    // deserialises a startup snapshot, and V8's read-only heap belongs to
+    // whichever isolate is built first — so a module loaded after a formula has
+    // run would abort the process rather than fail. Registering the module
+    // runtime's prime here, rather than calling it here, is what makes the order
+    // hold no matter which pool wakes first: `sc_expr` runs it before building
+    // an isolate of its own, and a module worker needs no prime because it *is*
+    // a snapshot isolate. Every server and every test that asks for an evaluator
+    // gets it, and nothing has to be sequenced by hand.
+    sc_expr::set_isolate_prime(sc_module::prime_v8);
     std::sync::Arc::new(
         sc_expr::DenoEvaluator::new()
             .with_code_workers(config.code_workers)

@@ -34,31 +34,52 @@
 //! What is never granted, because there is no allow-list for it: subprocesses,
 //! FFI, and `import` off the disk.
 //!
-//! ## And no startup snapshot, which is not the bargain phase 0 struck
+//! ## The startup snapshot, and why it is not optional
 //!
-//! Phase 0 measured a build-time snapshot at 150 ms and ~5 MB per worker start
-//! and its gate withdrew "the first version may go without one". Phase 2 has to
-//! put it back, because of something the spike's process could not show:
+//! `deno_core` does not embed the JavaScript its extensions are made of. An
+//! `include_js_files!` entry records **the absolute path the file had on the
+//! build machine**, and the bytes are read either while a snapshot is being
+//! created or, with no snapshot, from that path at every worker start.
+//! `deno_runtime` declares its own `esm` and `lazy_loaded_js` that way, and so
+//! do the twenty-odd `deno_*` extension crates under it.
 //!
-//! **V8 shares one read-only heap across every isolate in a process, and the
-//! first isolate built decides it.** A `deno_runtime` worker built from a custom
-//! startup snapshot *after* a bare `deno_core` isolate exists aborts the process
-//! in V8's own deserializer — `vector[] index out of bounds`, not an error a
-//! `Result` can carry. `sc_expr`'s code isolates are bare `deno_core` and carry
-//! no snapshot, so in the server the two pools cannot both have their way.
+//! A release tarball carries a binary and no cargo registry, so a server built
+//! on one machine and run on another has nothing to read. What that looked like
+//! in production: the worker thread panicking in `JsRuntime::new` with
+//! `Permission denied (os error 13)` — the unit's `ProtectHome=true` masking a
+//! `/home` that did not have the build user on it either, so a missing file
+//! could not even be reported as missing — and every module install answering
+//! "installed, supplying nothing this version of Saltcorn loads". No JavaScript
+//! module could load on any deployed tarball.
 //!
-//! The reverse order happens to work (a custom snapshot's read-only heap is the
-//! embedded one's, so a later bare isolate is content), and **that is not a
-//! fix**: both pools are lazy by design — a deployment with no modules never
-//! builds a module isolate, and a deployment with no code bodies never builds a
-//! code one — so "the module pool must go first" is an invariant nothing could
-//! keep. What is given up is 150 ms on the first module call after a start, once
-//! per worker, on a path that already waits on npm and somebody else's network.
+//! So `build.rs` builds a V8 startup snapshot, [`RUNTIME_SNAPSHOT`] carries it
+//! inside the binary, and `RESIDUAL_LAZY_JS`/`RESIDUAL_LAZY_ESM` carry the
+//! lazy-loaded sources the snapshot did not swallow. About 8 MB of binary, and
+//! it buys the runtime's portability outright. A worker also starts markedly
+//! faster with the sources already parsed — this crate's `bundled_rss` suite
+//! went from 2.2 s to 0.6 s — and, since the snapshot holds them *transpiled*,
+//! `deno_runtime`'s `transpile` feature is not needed at runtime any more, so
+//! `deno_ast` leaves the server's link altogether.
 //!
-//! `deno_runtime`'s `transpile` feature is what makes going without one possible
-//! at all: the runtime's extension sources are TypeScript, and with no snapshot
-//! to hold the transpiled form there has to be a transpiler in the worker.
-
+//! ## Which means the two isolate pools have an order, and it is kept
+//!
+//! **V8 shares one read-only heap across every isolate in a process.** A
+//! `deno_runtime` worker deserialising a custom snapshot against a heap
+//! somebody else established aborts the process in V8's own deserialiser —
+//! `vector[] index out of bounds`, a `SIGABRT`, not an error a `Result` can
+//! carry — and `sc_expr`'s formula and code isolates are bare `deno_core` ones
+//! carrying the embedded snapshot. Establish it from *ours* first and a later
+//! bare isolate is content.
+//!
+//! [`super::prime`] does that, and holds the isolate it built for the life of
+//! the process: the heap does not outlive the isolates using it, so a prime that
+//! dropped its isolate would be undone by the next bare one. `sc_expr` runs
+//! whatever `sc_expr::set_isolate_prime` was given before it builds an isolate
+//! of its own, and `sc_server::js_evaluator` is where the two are wired
+//! together — one line at boot, and no caller has to sequence anything.
+//! `tests/two_pools.rs` is the assertion; without the prime it does not fail, it
+//! aborts the test binary.
+//!
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -88,6 +109,22 @@ use crate::permissions::ModulePermissions;
 /// The real filesystem and the real environment: this is a server, not a test
 /// harness for Deno.
 type Sys = RealSys;
+
+/// The V8 startup snapshot every module worker starts from, built by
+/// `build.rs` and carried inside the binary.
+///
+/// This is the whole of the portability fix: without it `deno_core` reads each
+/// extension's JavaScript from the absolute path it had **on the build
+/// machine**, at every worker start, and a release tarball has no such paths.
+static RUNTIME_SNAPSHOT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/MODULE_RUNTIME_SNAPSHOT.bin"));
+
+// `RESIDUAL_LAZY_JS` and `RESIDUAL_LAZY_ESM`: the `lazy_loaded_*` sources the
+// snapshot did not consume, embedded by the same build script. A file missing
+// from here is one `core.loadExtScript()` away from the failure the snapshot
+// exists to prevent, which is why `build.rs` derives the set rather than
+// listing it.
+include!(concat!(env!("OUT_DIR"), "/residual_lazy_sources.rs"));
 
 // ---------------------------------------------------------------------------
 // Wiring 1: the module loader
@@ -344,6 +381,39 @@ fn some_if_any(list: &[String]) -> Option<Vec<String>> {
 /// on those descriptors now — the calls are V8 function calls and the log goes
 /// to `sc-log` by name ([`super::worker`]) — so a module that writes to stdout
 /// writes to the server's stdout, and nothing is at risk if it does.
+/// [`build_worker`], with the one panic it can raise turned into an error.
+///
+/// `MainWorker::bootstrap_from_options` goes through `JsRuntime::new`, which
+/// **panics** rather than returning when the runtime cannot be initialised, and
+/// `deno_runtime` exposes no `try_` constructor to call instead. Unwound here so
+/// that a worker which cannot start says why *in the Modules tab*: the failure
+/// this whole milestone is about — extension sources unreadable on the
+/// deployment host — reached an admin as `the module host stopped before
+/// answering this call`, because a panicking worker thread drops its call table
+/// instead of failing the calls in it, while the sentence naming the cause went
+/// only to stderr.
+///
+/// Catching it is safe in the one way that matters: the worker is abandoned
+/// whatever happens, so nothing observes the half-built isolate. What the caller
+/// gets back is the panic's own message, which is where V8's reason lives.
+pub(super) fn try_build_worker(
+    root: &Path,
+    host: &ModuleSpecifier,
+    max_heap: usize,
+    permissions: &ModulePermissions,
+) -> Result<MainWorker, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        build_worker(root, host, max_heap, permissions)
+    }))
+    .map_err(|payload| {
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+            .unwrap_or_else(|| "the module runtime panicked without a message".to_owned())
+    })
+}
+
 pub(super) fn build_worker(
     root: &Path,
     host: &ModuleSpecifier,
@@ -371,9 +441,11 @@ pub(super) fn build_worker(
         bundle_provider: None,
     };
     let options = WorkerOptions {
-        // **No startup snapshot**, and that is a constraint rather than a
-        // choice — see this module's own doc.
-        startup_snapshot: None,
+        // **The startup snapshot**, which is what makes a release tarball
+        // portable — see this module's own doc and `build.rs`.
+        startup_snapshot: Some(RUNTIME_SNAPSHOT),
+        residual_lazy_js_sources: RESIDUAL_LAZY_JS,
+        residual_lazy_esm_sources: RESIDUAL_LAZY_ESM,
         // The heap this worker's modules share. Without a limit the isolate is
         // bounded only by the machine, and the failure mode of that is the
         // *server's* process rather than one module's worker.

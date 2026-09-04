@@ -3647,6 +3647,38 @@ pub struct CodeRuntime {
     default_timeout: Duration,
 }
 
+/// What to run once, before this process builds its **first** V8 isolate.
+///
+/// The one caller that matters is `sc_module`, whose module workers deserialise
+/// a V8 startup snapshot. V8 shares one read-only heap across a process and the
+/// first isolate built establishes it, so a snapshot-backed isolate created
+/// after one of the bare ones below aborts the process inside V8's deserialiser
+/// — not an error anything here could return. Establishing it from the snapshot
+/// first is the whole fix, and the reverse order is fine.
+///
+/// A hook rather than a call, because the dependency runs the other way: this
+/// crate is underneath the module runtime and cannot name it. A server wires the
+/// two together once at boot (`sc_server::js_evaluator`); a process with no
+/// module runtime sets nothing and pays nothing.
+static ISOLATE_PRIME: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// Register [`ISOLATE_PRIME`]. The first registration wins, and it has to happen
+/// before any isolate is built to be worth anything.
+pub fn set_isolate_prime(prime: fn()) {
+    let _ = ISOLATE_PRIME.set(prime);
+}
+
+/// Run the registered prime, once per process.
+#[cfg(feature = "eval")]
+fn prime_isolates() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if let Some(prime) = ISOLATE_PRIME.get() {
+            prime();
+        }
+    });
+}
+
 /// Build a `JsRuntime` **inside a tokio context**, which `deno_core` requires:
 /// it registers each isolate against the runtime that was current when the
 /// isolate was created, and if V8 later posts a delayed foreground task (its GC
@@ -3661,6 +3693,10 @@ pub(crate) fn build_isolate(
     anchor: Option<&tokio::runtime::Handle>,
     options: deno_core::RuntimeOptions,
 ) -> (deno_core::JsRuntime, Option<tokio::runtime::Runtime>) {
+    // Before the isolate, and before anything else in this function: whoever
+    // gets here first is the process's first isolate unless the prime is what
+    // beat them to it.
+    prime_isolates();
     let owned = match anchor {
         Some(_) => None,
         None => tokio::runtime::Builder::new_current_thread()

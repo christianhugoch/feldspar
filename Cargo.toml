@@ -231,20 +231,29 @@ pyo3 = { version = "0.29.2", features = ["abi3-py311"] }
 # every `deno_runtime` release bumps its `deno_core`, so `sc-expr` and
 # `sc-module` upgrade in one step or not at all.
 #
-# `transpile` is not optional: the runtime's own extension sources are
-# TypeScript and a module worker carries **no startup snapshot** to hold the
-# transpiled form, so the transpiler has to be in the worker. There is no
-# snapshot because V8 shares one read-only heap per process and the first
-# isolate decides it — a snapshot-backed worker built after one of `sc-expr`'s
-# bare `deno_core` isolates aborts the process. `crates/sc-module/src/deno/wiring.rs`
-# has the measurement and the reasoning.
+# **No features here, and a second copy of this crate in `sc-module`'s
+# `[build-dependencies]` with `snapshot` on.** `deno_core` does not embed its
+# extensions' JavaScript: it records the absolute path each file had on the build
+# machine and reads it at every worker start unless a V8 startup snapshot holds
+# it — so a server built on one machine and run from a tarball on another could
+# not start a module worker at all. `sc-module`'s `build.rs` makes that snapshot,
+# and with the extension sources arriving pre-transpiled the runtime no longer
+# needs `transpile` (which is `deno_ast`, i.e. swc, out of the link).
+#
+# The snapshot buys the portability and costs an ordering: V8 shares one
+# read-only heap per process and the first isolate establishes it, so the
+# snapshot-backed isolate has to be built before `sc-expr`'s bare ones.
+# `crates/sc-module/src/deno/wiring.rs` has the measurement and the reasoning,
+# and `sc_module::prime_v8` is the fix.
 #
 # It is a large dependency and the phase 0 gate measured it: +4.5 minutes of
 # clean build and +78 MB of stripped binary, and adding it here took this
 # workspace's lock file from 561 packages to 1005. Plus **`libclang` as a new
 # build-time requirement**, because four of the runtime's unconditional
-# extensions reach `rusqlite/session` → `buildtime_bindgen`.
-deno_runtime = { version = "0.263", features = ["transpile"] }
+# extensions reach `rusqlite/session` → `buildtime_bindgen`. The snapshot build
+# adds a second compilation of the same tree for the host, because cargo's v3
+# resolver does not unify build-dependency features with ordinary ones.
+deno_runtime = { version = "0.263" }
 # The three resolver crates `deno_runtime`'s node compatibility layer is wired
 # from. `ByonmNpmResolver` — "bring your own node_modules" — is the whole reason
 # the installer does not change: npm puts the directory there and this only

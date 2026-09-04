@@ -37,3 +37,5 @@ mod module_store;
 mod pg_provider;
 #[path = "rss_provider.rs"]
 mod rss_provider;
+#[path = "two_pools.rs"]
+mod two_pools;

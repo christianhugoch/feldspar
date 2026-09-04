@@ -97,6 +97,94 @@ use crate::permissions::ModulePermissions;
 
 pub use worker::{Control, Job, LoadRequest, WorkerConfig};
 
+/// Build one snapshot-backed isolate and **keep it**, so that V8's process-wide
+/// read-only heap is the module runtime's.
+///
+/// V8 shares one read-only heap across every isolate in a process. A
+/// `deno_runtime` worker deserialising a custom startup snapshot against a heap
+/// somebody else established aborts the process inside V8 — `vector[] index out
+/// of bounds`, a `SIGABRT`, and no error a `Result` could carry — and
+/// `sc_expr`'s formula and code isolates are bare `deno_core` ones carrying the
+/// embedded snapshot instead. Establish it from *our* snapshot first and a later
+/// bare isolate is content.
+///
+/// **Held for the life of the process, and that is the part that is not
+/// obvious.** The heap does not outlive the isolates using it: prime, drop the
+/// isolate, build a bare one, and the bare one re-establishes the heap from the
+/// embedded snapshot — after which the next module worker aborts exactly as if
+/// nothing had been primed. Measured, not assumed; `tests/two_pools.rs` is the
+/// assertion. So the primed isolate is never dropped. It costs one parked
+/// thread and a few MB for as long as the server runs, which is the price of the
+/// module runtime working at all in a process that also evaluates JavaScript.
+///
+/// Idempotent, and what has to happen is that it happens **early** — before any
+/// formula, code body or module has run. `sc_expr`'s isolate builders call
+/// whatever was handed to `sc_expr::set_isolate_prime`, which is how a server
+/// keeps the ordering without every caller having to know about it
+/// (`sc_server::js_evaluator`).
+pub fn prime() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let (built, ready) = std::sync::mpsc::channel::<()>();
+        // Its own thread with its own current-thread runtime, for the reason
+        // `worker_thread` has one: `deno_core` registers an isolate against
+        // whatever runtime is current when it is built, and an isolate that
+        // outlives that registration aborts the process. This isolate outlives
+        // everything, so the thread and its runtime have to as well — it is
+        // never joined, and it parks rather than returning.
+        let spawned = std::thread::Builder::new()
+            .name("sc-module-prime".into())
+            .spawn(move || {
+                let Ok(local) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    let _ = built.send(());
+                    return;
+                };
+                local.block_on(async move {
+                    // Never resolved or read: `bootstrap_from_options` does not
+                    // touch the main module, and this worker never runs one.
+                    let url = match deno_core::ModuleSpecifier::parse("file:///feldspar/prime.js") {
+                        Ok(url) => url,
+                        Err(_) => {
+                            let _ = built.send(());
+                            return;
+                        }
+                    };
+                    match wiring::try_build_worker(
+                        &std::env::temp_dir(),
+                        &url,
+                        DEFAULT_MODULE_MAX_HEAP,
+                        &ModulePermissions::closed(),
+                    ) {
+                        Ok(worker) => {
+                            let _hold = worker;
+                            let _ = built.send(());
+                            // The read-only heap lives as long as this does.
+                            std::future::pending::<()>().await;
+                        }
+                        // Reported and not fatal: the module runtime is broken
+                        // in this process and every module will say so with the
+                        // same sentence, but a server whose modules cannot start
+                        // still serves everything else.
+                        Err(reason) => {
+                            sc_log::log_error!(
+                                "feldspar: the module runtime could not be started: {reason}. \
+                                 Modules will not load in this process"
+                            );
+                            let _ = built.send(());
+                        }
+                    }
+                });
+            });
+        // Waited for, so that the caller's next isolate is genuinely second.
+        if spawned.is_ok() {
+            let _ = ready.recv();
+        }
+    });
+}
+
 /// The bounds every worker in a pool is built with.
 #[derive(Debug, Clone, Copy)]
 pub struct PoolBounds {
