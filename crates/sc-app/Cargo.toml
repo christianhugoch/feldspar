@@ -30,6 +30,9 @@ sc-auth.workspace = true
 sc-action.workspace = true
 # The `JsEvaluator` seam threaded into providers (§7.3); no engine linked here.
 sc-expr.workspace = true
+# The build tools' own output is the only place a type error exists, so parsing
+# the file/line/message out of it (`diagnostics`) is part of reporting a build.
+regex-lite.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 serde_json.workspace = true

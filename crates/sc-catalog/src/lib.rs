@@ -72,7 +72,7 @@ pub use file_stores::{
     connect_file_store_def, delete_file_store, file_store_field_references, list_file_stores,
     load_file_store, load_file_store_by_name, resolve_options, save_file_store,
 };
-pub use observer::{SchemaChanged, SchemaObserver};
+pub use observer::{ReprojectedApp, SchemaChanged, SchemaObserver};
 pub use origin::PublicOrigin;
 pub use prefetch::prefetch_bindings;
 pub use projection::SchemaProjection;

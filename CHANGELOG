@@ -2,6 +2,60 @@
 
 Changes in reverse chronological order.
 
+## Reload, rebuild, and the end of the loop
+
+Phase 5 of the administration MCP server, and the half of "an edit takes effect
+with no restart" that was invisible from the outside: an agent could move a
+schema and had no way of learning what its change had just done to the running
+applications.
+
+- **A schema edit's result names the applications it moved.** `SchemaObserver`
+  now *answers* — with the id, subdomain and whether the framework has a build
+  step, for each mounted application it re-projected — and `schema_edit::apply`
+  collects those across the batch. An application is named **once** however many
+  of its tables the batch touched: the caller is being told what to rebuild, and
+  a name repeated three times is not three things to rebuild. `edit_schema`'s
+  result carries the list, plus the sentence that says what to do about it —
+  which application, and `buildApplication` with the id beside it. The structured
+  list is what happened; the sentence is what a model acts on, and neither is the
+  other.
+- **The gap §13.2 left open, closed where it was left.** Re-projection runs no
+  bundler, on purpose — an access change alters who may reach an app's data, not
+  a byte it serves — but a *schema* change rewrites the generated TypeScript
+  client, and a code framework serves a built bundle. So a re-projected
+  application with a build is now serving one generated against the previous
+  schema, and saying so is the difference between a change and a half-finished
+  state.
+- **A mounted framework keeps its build step.** `build_and_mount` was dropping it
+  — `CodeFramework::new` without the `with_build` that `build_code_framework`
+  beside it always did — so `Framework::build()` answered `None` for every
+  application the server actually mounts. Nothing consumed the answer until now;
+  the report above would have inherited it and told every admin their app had
+  nothing to rebuild.
+- **A failed build is a result, not a refusal.** `buildApplication`'s tag now says
+  its failure is *news about the application*: the tool answers `built: false`
+  with the build tools' whole output and the file/line/message diagnostics indexed
+  out of it, rather than an `isError` sentence. The same decision
+  `build_application` made for the chat copilot, for the same reason — a model
+  told only "the build failed" cannot fix anything — and the tag declares it
+  because only a person knows which of an endpoint's failures is news:
+  `deleteAgent` failing is not, and turning that into a cheerful result would hide
+  it.
+- **One diagnostics parser, moved down.** The regexes that understand what `tsc`,
+  esbuild and rolldown say about a file and a line now live in `sc_app::
+  build_diagnostics`, beside the build itself, with both callers reaching it —
+  the agent trait and the MCP projection. Two copies would have been two answers
+  to "what did the compiler say?".
+- **Tests.** Two integration tests against a real database and a mounted
+  application: an `edit_schema` batch creating two connected tables, then a second
+  touching both of them, which re-projects the app against the reloaded catalog
+  (its tightened role floor is the endpoint's auth requirement on the spot),
+  rewrites its generated client on disk, and names it once with `wants_build`;
+  and a batch whose third operation is an ungranted `drop_table`, refused whole —
+  the first two tables do not exist afterwards — naming the operation, its index
+  and `allow_drop`. A third drives a build that does not compile and reads the
+  diagnostics back out of the tool result.
+
 ## The protocol: `POST /mcp`, and the tools the endpoints already were
 
 Phase 4 of the administration MCP server. The route exists, it speaks

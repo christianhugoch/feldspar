@@ -4930,6 +4930,21 @@ TypeScript client, and a code framework serves a built bundle. Therefore:
   them have a build and therefore want one. A result that silently leaves an application
   serving a stale bundle is the half-finished state the batch's transaction exists to avoid.
 
+The report travels back along the seam that carried the change out: `SchemaObserver` answers
+with the applications it re-projected — id, subdomain, and whether the framework has a build
+step — and the editor collects them across the batch, naming each **once** however many of its
+tables moved. Beside the structured list the result carries the sentence that says what to do
+about it, naming the build tool: a list is what happened, and an instruction is what a model
+acts on.
+
+The build tool's own failure is likewise a **result rather than a refusal**, which is what the
+tier-2 tag's build flag declares. A build that did not compile is news about the application —
+`built: false`, the tools' whole output, and the file/line/message diagnostics indexed out of
+it — and a model told only that the build failed can fix nothing. Only a person knows which of
+an endpoint's failures is news and which is a refusal, so the tag says it rather than the
+projection guessing; the diagnostics parser is the one `build_application` already uses (§11.3),
+because two answers to "what did `tsc` say?" would be two answers.
+
 #### Transport, audit, and what a refusal reads like
 
 **One route, streamable HTTP, no server-initiated stream.** It sits beside the upload, backup

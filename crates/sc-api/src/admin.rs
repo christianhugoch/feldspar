@@ -1473,15 +1473,22 @@ pub fn admin_endpoints() -> EndpointSet {
              client from the current schema, runs its framework's build, and \
              serves the result on its subdomain with no restart. Run this after \
              a schema change that `edit_schema` reported as affecting an \
-             application with a build. A failed build leaves the previous \
-                 version serving and comes back with the bundler's own \
-                 diagnostics.",
+             application with a build. A failed build is a result rather than a \
+                 refusal: `built` is false, `log` is what the build tools said \
+                 and `diagnostics` lists the file, line and message of each \
+                 error to fix. The previously built version keeps serving until \
+                 one succeeds.",
             )
             .in_area(Area::Applications)
             // Building writes an application's generated client and replaces
             // what its subdomain serves. That is a change to what is there,
             // which is `allow_edit` — not a create, whatever the method says.
-            .needs(Grant::Edit),
+            .needs(Grant::Edit)
+            // And a build that did not compile is news about the application,
+            // not a refusal of the call: the tool result carries the tools'
+            // output with its diagnostics parsed out, which is what an agent
+            // that just changed a schema has to read to fix what it broke.
+            .is_a_build(),
         )
         .auth(AuthRequirement::admin()),
     );
@@ -3652,6 +3659,21 @@ mod tests {
                 "listWorkflowRuns",
             ]
         );
+    }
+
+    /// A build is the one kind of failure that is *news about the thing* rather
+    /// than a refusal of the call, so exactly one endpoint says so. A second one
+    /// would be a second endpoint whose errors stop looking like errors, and that
+    /// is a decision to argue for here rather than to acquire.
+    #[test]
+    fn only_the_build_reports_its_failure_as_a_result() {
+        let set = admin_endpoints();
+        let builds: Vec<&str> = set
+            .iter()
+            .filter(|e| e.mcp.as_ref().is_some_and(|tag| tag.build_result))
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(builds, ["buildApplication"]);
     }
 
     /// Tier 3 is a list of things that are *absent*, which no compiler checks.

@@ -322,6 +322,11 @@ fn edit_description(grants: &Grants, rls_available: bool) -> String {
          `references: <table name>` — its storage type comes from that table's \
          primary key and must not be given.\n\n\
          {permitted} {access}{rls}\n\n\
+         The change takes effect with no restart, and the result lists any \
+         `applications` it moved: a mounted application serving one of these \
+         tables is re-projected at once and its generated client rewritten, but \
+         **no bundler is run** — so one with `wants_build` is serving a bundle \
+         built against the old schema until you rebuild it.\n\n\
          Call `{TOOL_DESCRIBE}` first if you are changing something that already \
          exists; `{ARG_DRY_RUN}` validates a batch and applies none of it."
     )
@@ -540,6 +545,8 @@ async fn edit(catalog: &Catalog, grants: &Grants, args: &Json) -> Result<Json> {
         },
     )
     .await?;
+    let mut notes = applied.notes.clone();
+    notes.extend(rebuild_notes(&applied.applications));
     Ok(json!({
         "applied": !applied.dry_run,
         "dry_run": applied.dry_run,
@@ -549,8 +556,54 @@ async fn edit(catalog: &Catalog, grants: &Grants, args: &Json) -> Result<Json> {
         "fields_added": applied.fields_added,
         "fields_altered": applied.fields_altered,
         "fields_dropped": applied.fields_dropped,
-        "notes": applied.notes,
+        "applications": applied
+            .applications
+            .iter()
+            .map(|app| {
+                json!({
+                    "id": app.id,
+                    "subdomain": app.subdomain,
+                    "wants_build": app.wants_build,
+                })
+            })
+            .collect::<Vec<Json>>(),
+        "notes": notes,
     }))
+}
+
+/// The sentence the applications half of the result needs, or none.
+///
+/// The structured list says *what happened*; this says **what to do about it**,
+/// which is the difference between a report and an instruction. Re-projection
+/// took effect at once and ran no bundler, so an application served from a built
+/// bundle is now serving one generated against the previous schema — and a model
+/// that is not told will not guess. It is a note rather than prose in the
+/// description because it is true only of the batch that just ran.
+fn rebuild_notes(applications: &[sc_catalog::ReprojectedApp]) -> Vec<String> {
+    let names = |apps: &[&sc_catalog::ReprojectedApp]| {
+        apps.iter()
+            .map(|a| format!("`{}`", a.subdomain))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let (built, unbuilt): (Vec<_>, Vec<_>) = applications.iter().partition(|a| a.wants_build);
+    let mut notes = Vec::new();
+    if !built.is_empty() {
+        notes.push(format!(
+            "Re-projected, with the generated client rewritten: {}. No bundler was \
+             run and these are served from a built bundle, so call \
+             `buildApplication` with the `id` above to rebuild each against the \
+             schema this batch left.",
+            names(&built)
+        ));
+    }
+    if !unbuilt.is_empty() {
+        notes.push(format!(
+            "Re-projected, with nothing to build: {}.",
+            names(&unbuilt)
+        ));
+    }
+    notes
 }
 
 /// Turn one wire item into an [`Operation`], naming the field the operation is
@@ -819,5 +872,35 @@ mod tests {
         // A database that cannot enforce RLS says so once, in the description,
         // rather than refusing it once per conversation.
         assert!(text.contains("cannot enforce row-level security"), "{text}");
+    }
+
+    #[test]
+    fn the_result_tells_the_caller_which_applications_now_want_a_rebuild() {
+        // §13.6's one gap: re-projection took effect at once and ran no bundler,
+        // so an application served from a built bundle is now serving one
+        // generated against the previous schema. The note has to say so, name
+        // it, and name the tool that fixes it.
+        let apps = [
+            sc_catalog::ReprojectedApp {
+                id: "11111111-2222-3333-4444-555555555555".to_owned(),
+                subdomain: "shop".to_owned(),
+                wants_build: true,
+            },
+            sc_catalog::ReprojectedApp {
+                id: "66666666-7777-8888-9999-aaaaaaaaaaaa".to_owned(),
+                subdomain: "docs".to_owned(),
+                wants_build: false,
+            },
+        ];
+        let notes = rebuild_notes(&apps).join("\n");
+        assert!(notes.contains("`shop`"), "{notes}");
+        assert!(notes.contains("buildApplication"), "{notes}");
+        // The one with nothing to build is named too, and told so — an
+        // application missing from the report reads as one that did not move.
+        assert!(notes.contains("`docs`"), "{notes}");
+        assert!(notes.contains("nothing to build"), "{notes}");
+        // A batch that moved no application says nothing at all rather than
+        // saying nothing happened.
+        assert!(rebuild_notes(&[]).is_empty());
     }
 }

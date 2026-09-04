@@ -94,6 +94,10 @@ pub async fn forget(catalog: &Catalog, table: &str) -> Result<bool> {
     }
     let deleted = sc_catalog::delete_table_meta(catalog, meta.id).await?;
     catalog.reload().await?;
+    // The applications the observer re-projected are of no interest here: this
+    // is a table *definition* being forgotten from a screen that shows the
+    // outcome itself. Only `schema_edit::apply` reports them, because only its
+    // caller may be a model that has to be told to rebuild what it changed.
     catalog.notify_schema_changed(&sc_catalog::SchemaChanged::TableChanged(table.to_owned()))?;
     Ok(deleted)
 }

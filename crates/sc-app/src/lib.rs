@@ -47,6 +47,7 @@ mod application;
 mod applications;
 mod build;
 mod builder_agent;
+mod diagnostics;
 mod framework;
 // The application third of the administrative tool surface (§13.6), and the one
 // constructor of the whole nine-tool set.
@@ -78,6 +79,7 @@ pub use builder_agent::{
     TRAIT_CFG_MAY_EDIT, TRAIT_CFG_MAY_RUN_SCRIPTS, TRAIT_CFG_ROOT, TRAIT_CFG_STORE, TRAIT_CODING,
     builder_agent_name, framework_builder_agent,
 };
+pub use diagnostics::build_diagnostics;
 pub use framework::{
     AppRequest, AppResponse, Asset, AssetBundle, BuildSpec, CFG_CLIENT, CFG_COMMAND, CFG_OUTPUT,
     CFG_SOURCE, CFG_STORE, CODE_FRAMEWORK, CodeFramework, Framework, FrameworkInfo, InstallSpec,

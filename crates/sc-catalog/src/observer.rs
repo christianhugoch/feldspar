@@ -47,17 +47,52 @@ impl SchemaChanged {
     }
 }
 
+/// One mounted application the observer re-projected because of a change.
+///
+/// The seam carries this for the same reason it carries [`SchemaChanged`]: the
+/// mount registry is `sc-server`'s and the schema editor is `sc-api`'s, neither
+/// can name the other, and what the editor has to report is *what the reaction
+/// did*. Without it a schema edit is a change with an invisible consequence —
+/// which is exactly the half-finished state §13.6 spends its report avoiding: an
+/// application whose generated client was just rewritten and whose **bundle was
+/// not**.
+///
+/// So [`wants_build`](ReprojectedApp::wants_build) is the load-bearing field.
+/// Re-projection deliberately runs no bundler — an access change alters who may
+/// reach an app's data, not a byte it serves — but a *schema* change alters the
+/// generated TypeScript client, and a code framework serves a built bundle. An
+/// app whose framework declares a build step is therefore one the caller must be
+/// told to rebuild.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReprojectedApp {
+    /// The application's id — what a rebuild names it by.
+    pub id: String,
+    /// The subdomain it is served on: what an admin and an agent both call it.
+    pub subdomain: String,
+    /// Whether its framework has a build step, and therefore wants one run.
+    pub wants_build: bool,
+}
+
 /// What it means to observe schema changes. `sc-server`'s mount registry is the
 /// implementation; the catalog holds it as `dyn`.
 pub trait SchemaObserver: Send + Sync {
-    /// React to a change that has already been applied.
+    /// React to a change that has already been applied, and say which
+    /// applications reacted.
     ///
     /// Called **after** the DDL committed and the catalog reloaded, so an
     /// observer reads the new schema simply by asking the catalog. An `Err` here
     /// means the *reaction* failed, never the change: the caller reports it
     /// beside the successful result rather than pretending the schema did not
     /// move.
-    fn schema_changed(&self, catalog: &Catalog, change: &SchemaChanged) -> sc_error::Result<()>;
+    ///
+    /// The returned list is the reaction's own report, and the caller passes it
+    /// on: a schema edit that silently leaves an application serving a stale
+    /// bundle is a change whose consequence nobody can see.
+    fn schema_changed(
+        &self,
+        catalog: &Catalog,
+        change: &SchemaChanged,
+    ) -> sc_error::Result<Vec<ReprojectedApp>>;
 }
 
 #[cfg(test)]

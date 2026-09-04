@@ -324,6 +324,20 @@ pub struct McpTag {
     /// the four grants are about what a caller may *change*.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant: Option<Grant>,
+    /// This endpoint runs build tools, so its **failure is news about the
+    /// application** rather than a refusal of the call: the projection reports it
+    /// as a tool result with the tools' output and the file/line/message
+    /// diagnostics parsed out of it.
+    ///
+    /// The same decision `sc_core_traits::build_application` already made, for
+    /// the same reason — a model told only "the build failed" cannot fix
+    /// anything, and a failed build is the most useful answer this tool ever
+    /// returns. It is declared here rather than inferred because only a person
+    /// knows whether an endpoint's error is *about the thing* or *about the
+    /// request*: `deleteAgent` failing is the latter, and turning that into a
+    /// cheerful result would hide it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub build_result: bool,
 }
 
 impl McpTag {
@@ -333,6 +347,7 @@ impl McpTag {
             description: prose.into(),
             area: None,
             grant: None,
+            build_result: false,
         }
     }
 
@@ -345,6 +360,13 @@ impl McpTag {
     /// Require a grant of the caller before it runs.
     pub fn needs(mut self, grant: Grant) -> McpTag {
         self.grant = Some(grant);
+        self
+    }
+
+    /// Report this endpoint's failure as a build result rather than as a refusal
+    /// (see [`build_result`](McpTag::build_result)).
+    pub fn is_a_build(mut self) -> McpTag {
+        self.build_result = true;
         self
     }
 }

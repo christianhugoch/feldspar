@@ -58,10 +58,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sc_catalog::{
     ATTR_OWNERSHIP_FORMULA, Attrs, Catalog, ConstraintKind, DataField, DataFieldKind, DbId,
-    FIELD_META_TABLE, FieldId, FieldMeta, SchemaChanged, SchemaProjection, SchemaStep, Table,
-    TableConstraint, TableId, TableMeta, create_constraint_steps, disable_rls_sql,
-    drop_constraint_steps, enable_rls_sql, formula_fields, load_field_meta_by_field,
-    load_table_meta_by_name, save_field_meta_row, save_table_meta_row, validate_formula,
+    FIELD_META_TABLE, FieldId, FieldMeta, ReprojectedApp, SchemaChanged, SchemaProjection,
+    SchemaStep, Table, TableConstraint, TableId, TableMeta, create_constraint_steps,
+    disable_rls_sql, drop_constraint_steps, enable_rls_sql, formula_fields,
+    load_field_meta_by_field, load_table_meta_by_name, save_field_meta_row, save_table_meta_row,
+    validate_formula,
 };
 use sc_db::{ColumnGenerator, SchemaChange};
 use sc_error::{Error, Result};
@@ -457,6 +458,17 @@ pub struct Applied {
     /// Things the caller has to be told in words, because they are not visible
     /// in the schema afterwards — chiefly that a table stopped enforcing RLS.
     pub notes: Vec<String>,
+    /// The mounted applications this batch re-projected, each named once
+    /// however many of its tables the batch touched (§13.6).
+    ///
+    /// Re-projection runs no bundler, deliberately — but a schema change
+    /// rewrites an application's generated TypeScript client, and a code
+    /// framework serves a *built* bundle. So an application here whose
+    /// [`wants_build`](ReprojectedApp::wants_build) is set is one whose bundle
+    /// is now behind its client, and a caller that does not say so leaves it
+    /// serving a stale one. That is the half-finished state this module spends
+    /// its transaction avoiding, one layer up.
+    pub applications: Vec<ReprojectedApp>,
 }
 
 // --- applying -----------------------------------------------------------------
@@ -523,12 +535,22 @@ pub async fn apply(
 
     let mut applied = plan.applied;
     for change in &plan.changes {
-        if let Err(e) = catalog.notify_schema_changed(change) {
-            applied.notes.push(format!(
+        match catalog.notify_schema_changed(change) {
+            // One application, however many of its tables this batch touched:
+            // the caller is being told what to rebuild, and a name repeated
+            // three times is not three things to rebuild.
+            Ok(reprojected) => {
+                for app in reprojected {
+                    if !applied.applications.contains(&app) {
+                        applied.applications.push(app);
+                    }
+                }
+            }
+            Err(e) => applied.notes.push(format!(
                 "the schema changed, but re-projecting `{}` for the running \
                  applications failed: {e}",
                 change.table()
-            ));
+            )),
         }
     }
     Ok(applied)

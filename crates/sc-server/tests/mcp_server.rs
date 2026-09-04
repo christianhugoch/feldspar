@@ -20,23 +20,36 @@
 //!    correct.
 //! 4. **A tier-2 tool really dispatches through the handler registry**, as the
 //!    token's user, and comes back with what the endpoint returns.
+//! 5. **The reload/rebuild loop closes** (Phase 5): an `edit_schema` batch made
+//!    over MCP re-projects the mounted applications that serve the tables it
+//!    touched, rewrites their generated clients on disk, and *names them in the
+//!    result* — with the ones that have a build marked as wanting one, because a
+//!    re-projection deliberately runs no bundler.
+//! 6. **A batch is refused whole.** An ungranted `drop_table` third in a list of
+//!    three leaves the first two tables uncreated, and says which operation and
+//!    which flag.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode, header};
+use sc_app::{
+    ApiConfig, Application, AssetBundle, BuildSpec, CodeFramework, FrameworkRef, save_application,
+};
 use sc_auth::SessionStore;
-use sc_catalog::Catalog;
+use sc_catalog::{Catalog, FileStoreId, TableId};
 use sc_config::{MCP_ENABLED, MCP_LOOPBACK_ONLY, set_config};
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
+use sc_files::LocalFileStore;
 use sc_server::{
-    AppMounts, CSRF_COOKIE, CSRF_HEADER, MCP_PROTOCOL_VERSION, MCP_ROUTE, ServerConfig,
+    AppMounts, CSRF_COOKIE, CSRF_HEADER, MCP_PROTOCOL_VERSION, MCP_ROUTE, MountedApp, ServerConfig,
     admin_handlers, build_router_with_apps,
 };
 use sc_test_harness::TestDb;
@@ -166,9 +179,20 @@ impl McpRequest {
     }
 }
 
+/// Everything one test needs to drive the server: the admin's cookie-jar client,
+/// the router an MCP request goes to, the catalog behind both, and the live
+/// mount registry — which the Phase 5 tests read to see what re-projected.
+struct Harness {
+    client: Client,
+    router: Router,
+    catalog: Arc<Catalog>,
+    apps: Arc<AppMounts>,
+    _db: TestDb,
+}
+
 /// A router over a real database with the platform tables bootstrapped, an admin
 /// signed in and the MCP server switched **on**.
-async fn setup() -> sc_error::Result<(Client, Router, Arc<Catalog>, TestDb)> {
+async fn setup() -> sc_error::Result<Harness> {
     let db = TestDb::new().await?;
     db.client()
         .await?
@@ -217,7 +241,7 @@ async fn setup() -> sc_error::Result<(Client, Router, Arc<Catalog>, TestDb)> {
         admin_handlers(catalog.clone(), apps.clone()),
         sessions,
         &ServerConfig::default(),
-        apps,
+        apps.clone(),
     )?;
 
     let mut client = Client {
@@ -234,7 +258,13 @@ async fn setup() -> sc_error::Result<(Client, Router, Arc<Catalog>, TestDb)> {
         .await;
     assert_eq!(status, StatusCode::OK);
 
-    Ok((client, router, catalog, db))
+    Ok(Harness {
+        client,
+        router,
+        catalog,
+        apps,
+        _db: db,
+    })
 }
 
 /// Turn the server on, with the loopback switch as given.
@@ -277,7 +307,13 @@ fn tool_names(listed: &Value) -> Vec<String> {
 #[tokio::test]
 async fn a_disabled_server_is_a_404_and_a_valid_token_does_not_change_that() -> sc_error::Result<()>
 {
-    let (mut client, router, catalog, _db) = setup().await?;
+    let Harness {
+        mut client,
+        router,
+        catalog,
+        _db,
+        ..
+    } = setup().await?;
     let token = mint(&mut client, "claude-code on my laptop", json!({})).await;
 
     let (status, body) = McpRequest::new(
@@ -308,7 +344,13 @@ async fn a_disabled_server_is_a_404_and_a_valid_token_does_not_change_that() -> 
 /// very admin*, with a CSRF token the SPA would send, reaches nothing.
 #[tokio::test]
 async fn a_session_cookie_and_a_csrf_token_are_not_a_credential_here() -> sc_error::Result<()> {
-    let (client, router, catalog, _db) = setup().await?;
+    let Harness {
+        client,
+        router,
+        catalog,
+        _db,
+        ..
+    } = setup().await?;
     enable_mcp(&catalog, true).await?;
     // The admin's live session and CSRF token, exactly as the SPA holds them.
     let session = client
@@ -345,7 +387,13 @@ async fn a_session_cookie_and_a_csrf_token_are_not_a_credential_here() -> sc_err
 /// the exemption of §13.6 every POST here would be a `403` before the route ran.
 #[tokio::test]
 async fn a_bearer_request_is_exempt_from_the_csrf_check() -> sc_error::Result<()> {
-    let (mut client, router, catalog, _db) = setup().await?;
+    let Harness {
+        mut client,
+        router,
+        catalog,
+        _db,
+        ..
+    } = setup().await?;
     enable_mcp(&catalog, true).await?;
     let token = mint(&mut client, "laptop", json!({})).await;
 
@@ -364,7 +412,13 @@ async fn a_bearer_request_is_exempt_from_the_csrf_check() -> sc_error::Result<()
 /// validated against a list.
 #[tokio::test]
 async fn a_request_carrying_an_origin_is_refused() -> sc_error::Result<()> {
-    let (mut client, router, catalog, _db) = setup().await?;
+    let Harness {
+        mut client,
+        router,
+        catalog,
+        _db,
+        ..
+    } = setup().await?;
     enable_mcp(&catalog, true).await?;
     let token = mint(&mut client, "laptop", json!({})).await;
 
@@ -382,7 +436,13 @@ async fn a_request_carrying_an_origin_is_refused() -> sc_error::Result<()> {
 /// The loopback switch, and what an unknown peer counts as.
 #[tokio::test]
 async fn a_remote_peer_is_refused_while_the_loopback_switch_is_on() -> sc_error::Result<()> {
-    let (mut client, router, catalog, _db) = setup().await?;
+    let Harness {
+        mut client,
+        router,
+        catalog,
+        _db,
+        ..
+    } = setup().await?;
     enable_mcp(&catalog, true).await?;
     let token = mint(&mut client, "laptop", json!({})).await;
     let ping = json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" });
@@ -413,7 +473,13 @@ async fn a_remote_peer_is_refused_while_the_loopback_switch_is_on() -> sc_error:
 /// next call because the lookup reads the row rather than a cached copy.
 #[tokio::test]
 async fn a_revoked_token_stops_working_on_the_next_call() -> sc_error::Result<()> {
-    let (mut client, router, catalog, _db) = setup().await?;
+    let Harness {
+        mut client,
+        router,
+        catalog,
+        _db,
+        ..
+    } = setup().await?;
     enable_mcp(&catalog, true).await?;
     let token = mint(&mut client, "the laptop I lost", json!({})).await;
     let ping = json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" });
@@ -463,7 +529,13 @@ async fn a_revoked_token_stops_working_on_the_next_call() -> sc_error::Result<()
 /// The handshake and the pinned revision.
 #[tokio::test]
 async fn initialize_answers_with_the_one_revision_this_server_speaks() -> sc_error::Result<()> {
-    let (mut client, router, catalog, _db) = setup().await?;
+    let Harness {
+        mut client,
+        router,
+        catalog,
+        _db,
+        ..
+    } = setup().await?;
     enable_mcp(&catalog, true).await?;
     let token = mint(&mut client, "laptop", json!({})).await;
 
@@ -528,7 +600,13 @@ async fn initialize_answers_with_the_one_revision_this_server_speaks() -> sc_err
 /// vocabulary.
 #[tokio::test]
 async fn a_token_without_the_trigger_area_is_offered_no_trigger_tools() -> sc_error::Result<()> {
-    let (mut client, router, catalog, _db) = setup().await?;
+    let Harness {
+        mut client,
+        router,
+        catalog,
+        _db,
+        ..
+    } = setup().await?;
     enable_mcp(&catalog, true).await?;
 
     let full = mint(&mut client, "everything", json!({})).await;
@@ -623,7 +701,13 @@ async fn a_token_without_the_trigger_area_is_offered_no_trigger_tools() -> sc_er
 /// the endpoint's handler returns, for the token's user.
 #[tokio::test]
 async fn a_tagged_endpoint_is_dispatched_through_the_handler_registry() -> sc_error::Result<()> {
-    let (mut client, router, catalog, _db) = setup().await?;
+    let Harness {
+        mut client,
+        router,
+        catalog,
+        _db,
+        ..
+    } = setup().await?;
     enable_mcp(&catalog, true).await?;
     let token = mint(&mut client, "laptop", json!({})).await;
 
@@ -687,7 +771,13 @@ async fn a_tagged_endpoint_is_dispatched_through_the_handler_registry() -> sc_er
 #[tokio::test]
 async fn an_unknown_tool_is_a_protocol_error_and_a_refused_grant_is_a_result()
 -> sc_error::Result<()> {
-    let (mut client, router, catalog, _db) = setup().await?;
+    let Harness {
+        mut client,
+        router,
+        catalog,
+        _db,
+        ..
+    } = setup().await?;
     enable_mcp(&catalog, true).await?;
     // Create and edit, not drop — the milestone's own example.
     let token = mint(
@@ -763,5 +853,353 @@ async fn an_unknown_tool_is_a_protocol_error_and_a_refused_grant_is_a_result()
     .send(&router)
     .await;
     assert_eq!(body["error"]["code"], json!(-32601), "{body}");
+    Ok(())
+}
+
+// --- reload and rebuild -----------------------------------------------------
+
+/// A directory a mounted application's source and generated client live in.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(tag: &str) -> TempDir {
+        let dir = std::env::temp_dir().join(format!(
+            "sc-mcp-{}-{tag}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        TempDir(dir)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+/// Mount an application over `tables`, served from a **built bundle** — which is
+/// what makes it one that `wants_build` when the schema under it moves.
+async fn mount_shop(
+    catalog: &Arc<Catalog>,
+    apps: &AppMounts,
+    tables: &[&str],
+) -> sc_error::Result<Application> {
+    let framework_ref = FrameworkRef::new("code")
+        .with("store", "apps")
+        .with("source", "web")
+        .with("output", "web/dist")
+        .with("command", "sh build.sh")
+        .with("client", "web/src/client.ts");
+    let mut app = Application::new("Shop", "shop", framework_ref)
+        .with_file_store(FileStoreId("apps".to_owned()))
+        .with_api(ApiConfig::new("rest", "/api"));
+    for table in tables {
+        app = app.with_table(TableId((*table).to_owned()));
+    }
+    save_application(catalog, &app).await?;
+    // A framework with a build step, because that is the whole question the
+    // report answers: re-projection kept this bundle and did not rebuild it.
+    let framework = Arc::new(CodeFramework::new("code", AssetBundle::new()).with_build(
+        BuildSpec {
+            command: "sh".to_owned(),
+            args: vec!["build.sh".to_owned()],
+            source_dir: "web".to_owned(),
+            output_dir: "web/dist".to_owned(),
+            install: None,
+        },
+    ));
+    apps.remount(MountedApp::new(app.clone(), framework, catalog)?);
+    Ok(app)
+}
+
+/// One `tools/call edit_schema` over MCP, as the result the model reads.
+async fn edit_schema(router: &Router, token: &str, operations: Value) -> Value {
+    let (status, body) = McpRequest::new(
+        token,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "edit_schema", "arguments": { "operations": operations } },
+        }),
+    )
+    .send(router)
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body["result"].clone()
+}
+
+/// The generated client re-emitted after a re-projection is written by a spawned
+/// task (it is file I/O on somebody's admin request), so read it with a bound
+/// rather than assuming it has landed.
+async fn await_client(path: &std::path::Path, needle: &str) -> String {
+    for _ in 0..100 {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && text.contains(needle)
+        {
+            return text;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let found = std::fs::read_to_string(path).unwrap_or_else(|e| format!("<unreadable: {e}>"));
+    panic!("the generated client never came to mention `{needle}`; it says:\n{found}");
+}
+
+/// The whole loop of §13.6's "reload and rebuild": a batch made over MCP moves
+/// the schema, the catalog reloads **once** at the end of it, the applications
+/// serving the tables it touched re-project against the reloaded catalog, their
+/// generated clients are rewritten on disk — and the result *names* them, saying
+/// which have a build and are therefore now serving a bundle that is behind.
+#[tokio::test]
+async fn an_edit_schema_batch_reprojects_the_mounted_app_and_names_it() -> sc_error::Result<()> {
+    let Harness {
+        mut client,
+        router,
+        catalog,
+        apps,
+        _db,
+    } = setup().await?;
+    enable_mcp(&catalog, true).await?;
+    let dir = TempDir::new("reload");
+    catalog.connect_file_store(Arc::new(LocalFileStore::new("apps", &dir.0)?))?;
+    // Everything, including the access rules: the batch below tightens one, and
+    // the tightening is what proves the providers were rebuilt rather than kept.
+    let token = mint(
+        &mut client,
+        "claude-code on my laptop",
+        json!({ "allow_access_changes": true }),
+    )
+    .await;
+
+    // Two connected tables in **one** batch — the milestone's own example.
+    let result = edit_schema(
+        &router,
+        &token,
+        json!([
+            {
+                "op": "create_table",
+                "table": "customers",
+                "fields": [
+                    { "name": "id", "type": "int", "primary_key": true },
+                    { "name": "name", "type": "text" },
+                ],
+            },
+            {
+                "op": "create_table",
+                "table": "orders",
+                "fields": [
+                    { "name": "id", "type": "int", "primary_key": true },
+                    { "name": "customer", "type": "int", "references": "customers" },
+                ],
+            },
+        ]),
+    )
+    .await;
+    assert_eq!(result["isError"], json!(false), "{result}");
+    let applied = &result["structuredContent"];
+    assert_eq!(applied["tables_created"], json!(["customers", "orders"]));
+    // Nothing is mounted yet, so the report names nothing. An application list
+    // that were merely decorative would say something here.
+    assert_eq!(applied["applications"], json!([]), "{applied}");
+    catalog.reload().await?;
+    assert!(catalog.get("customers")?.is_some() && catalog.get("orders")?.is_some());
+
+    // Now an application serving both of them, from a built bundle.
+    let app = mount_shop(&catalog, &apps, &["customers", "orders"]).await?;
+    let client_file = dir.0.join("web/src/client.ts");
+
+    // A second batch touching **both** tables: a field on one, a tightened role
+    // floor on the other.
+    let result = edit_schema(
+        &router,
+        &token,
+        json!([
+            { "op": "add_field", "table": "orders", "type": "bool", "field": "shipped" },
+            { "op": "alter_table", "table": "customers", "min_role_read": 80 },
+        ]),
+    )
+    .await;
+    assert_eq!(result["isError"], json!(false), "{result}");
+    let applied = &result["structuredContent"];
+
+    // The report: one application, named once though two of its tables moved,
+    // carrying the id `buildApplication` takes and the fact that it wants one.
+    assert_eq!(
+        applied["applications"],
+        json!([{
+            "id": app.id.0.to_string(),
+            "subdomain": "shop",
+            "wants_build": true,
+        }]),
+        "{applied}"
+    );
+    // …and the sentence that says what to do about it, which is the half a
+    // structured list cannot carry.
+    let notes = applied["notes"].to_string();
+    assert!(notes.contains("buildApplication"), "{notes}");
+    assert!(notes.contains("shop"), "{notes}");
+
+    // The providers really were rebuilt, against the **reloaded** catalog: the
+    // tightened floor is the endpoint's auth requirement now, not at the next
+    // restart. This is the assertion that the reload happened before the
+    // notification rather than after it.
+    let mounted = apps.get("shop").expect("the app is still mounted");
+    let endpoints = mounted
+        .providers
+        .first()
+        .expect("the rest provider")
+        .endpoints();
+    let listing = endpoints
+        .find("listCustomers")
+        .expect("the customers listing");
+    assert_eq!(
+        listing.auth,
+        sc_api::AuthRequirement::MinRole(80),
+        "the re-projection read the new access rules"
+    );
+
+    // And the generated client on disk describes the same API the projection
+    // does — including the field this batch added.
+    let text = await_client(&client_file, "shipped").await;
+    assert!(text.contains("listOrders"), "{text}");
+    assert!(text.contains("listCustomers"), "{text}");
+    Ok(())
+}
+
+/// A batch is all or nothing, and the refusal is a **result** the model reads:
+/// an ungranted `drop_table` third in a list of three leaves the first two
+/// tables uncreated, and names both the operation and the flag.
+#[tokio::test]
+async fn an_ungranted_drop_refuses_the_whole_batch_and_names_it() -> sc_error::Result<()> {
+    let Harness {
+        mut client,
+        router,
+        catalog,
+        _db,
+        ..
+    } = setup().await?;
+    enable_mcp(&catalog, true).await?;
+    // Create and edit, not drop — the milestone's own token.
+    let token = mint(
+        &mut client,
+        "claude-code on my laptop",
+        json!({ "allow_create": true, "allow_edit": true, "allow_drop": false }),
+    )
+    .await;
+
+    // A table for the third operation to aim at, so the refusal is about the
+    // grant and not about a table that was never there.
+    let result = edit_schema(
+        &router,
+        &token,
+        json!([{
+            "op": "create_table",
+            "table": "invoices",
+            "fields": [{ "name": "id", "type": "int", "primary_key": true }],
+        }]),
+    )
+    .await;
+    assert_eq!(result["isError"], json!(false), "{result}");
+
+    let result = edit_schema(
+        &router,
+        &token,
+        json!([
+            {
+                "op": "create_table",
+                "table": "suppliers",
+                "fields": [{ "name": "id", "type": "int", "primary_key": true }],
+            },
+            {
+                "op": "create_table",
+                "table": "deliveries",
+                "fields": [{ "name": "id", "type": "int", "primary_key": true }],
+            },
+            { "op": "drop_table", "table": "invoices" },
+        ]),
+    )
+    .await;
+    // A refusal is the result, not a transport error: the model is the one who
+    // has to act on it.
+    assert_eq!(result["isError"], json!(true), "{result}");
+    let text = result["content"][0]["text"].as_str().unwrap_or_default();
+    // Which operation, by index and by name…
+    assert!(text.contains("operation 2"), "{text}");
+    assert!(text.contains("drop_table"), "{text}");
+    assert!(text.contains("invoices"), "{text}");
+    // …and the flag that would have allowed it.
+    assert!(text.contains("allow_drop"), "{text}");
+
+    // Whole, not partly: the two tables before it do not exist, and the one it
+    // aimed at still does.
+    catalog.reload().await?;
+    assert!(catalog.get("suppliers")?.is_none(), "the batch was applied");
+    assert!(
+        catalog.get("deliveries")?.is_none(),
+        "the batch was applied"
+    );
+    assert!(catalog.get("invoices")?.is_some());
+    Ok(())
+}
+
+/// A build that did not compile is the **result**, not a refusal: `built: false`
+/// with the tools' own output and the file/line/message diagnostics parsed out of
+/// it — the same decision `build_application` made for the chat copilot, because
+/// a model told only "the build failed" cannot fix anything.
+#[tokio::test]
+async fn a_failed_build_comes_back_as_a_result_with_its_diagnostics() -> sc_error::Result<()> {
+    let Harness {
+        mut client,
+        router,
+        catalog,
+        apps,
+        _db,
+    } = setup().await?;
+    enable_mcp(&catalog, true).await?;
+    let dir = TempDir::new("build");
+    catalog.connect_file_store(Arc::new(LocalFileStore::new("apps", &dir.0)?))?;
+    let token = mint(&mut client, "claude-code on my laptop", json!({})).await;
+
+    // A source tree whose "bundler" reports a type error and fails, which is the
+    // interesting half of building.
+    std::fs::create_dir_all(dir.0.join("web/src"))?;
+    std::fs::write(
+        dir.0.join("web/build.sh"),
+        "echo \"src/App.tsx(12,5): error TS2322: Type 'number' is not assignable to type 'string'.\"\nexit 2\n",
+    )?;
+    let app = mount_shop(&catalog, &apps, &[]).await?;
+
+    let (status, body) = McpRequest::new(
+        &token,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "buildApplication",
+                "arguments": { "id": app.id.0.to_string() },
+            },
+        }),
+    )
+    .send(&router)
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // Not `isError`: nothing is wrong with the call, and the model is being told
+    // what the build tools said.
+    assert_eq!(body["result"]["isError"], json!(false), "{body}");
+    let built = &body["result"]["structuredContent"];
+    assert_eq!(built["built"], json!(false), "{built}");
+    assert!(
+        built["log"].as_str().unwrap_or_default().contains("TS2322"),
+        "{built}"
+    );
+    assert_eq!(built["diagnostics"][0]["file"], json!("src/App.tsx"));
+    assert_eq!(built["diagnostics"][0]["line"], json!(12));
+    // The application that was serving before is still the one mounted: a failed
+    // build changes nothing.
+    assert!(apps.get("shop").is_some());
     Ok(())
 }

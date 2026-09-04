@@ -129,6 +129,16 @@ impl Projection {
         self.endpoint.mcp.as_ref().and_then(|tag| tag.grant)
     }
 
+    /// Whether this endpoint's failure is a **build result** the model reads
+    /// rather than a refusal of the call
+    /// ([`McpTag::build_result`](crate::McpTag::build_result)).
+    pub fn is_a_build(&self) -> bool {
+        self.endpoint
+            .mcp
+            .as_ref()
+            .is_some_and(|tag| tag.build_result)
+    }
+
     /// The authorization the endpoint itself requires — enforced by whoever
     /// dispatches, because §13.6's whole argument is that a tool call is
     /// authorized by the code that authorizes a request.

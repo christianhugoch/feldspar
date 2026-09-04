@@ -813,12 +813,18 @@ impl Catalog {
         }
     }
 
-    /// Tell the installed observer, if any, that the schema moved.
+    /// Tell the installed observer, if any, that the schema moved, and hand back
+    /// the applications it re-projected.
     ///
     /// Called **after** the DDL committed and the cache reloaded. An `Err` is the
     /// *reaction* failing, never the change; the caller reports it beside the
-    /// result rather than pretending the schema stayed put.
-    pub fn notify_schema_changed(&self, change: &crate::observer::SchemaChanged) -> Result<()> {
+    /// result rather than pretending the schema stayed put. A process with no
+    /// observer — a build tool, a test — re-projects nothing and says so with an
+    /// empty list.
+    pub fn notify_schema_changed(
+        &self,
+        change: &crate::observer::SchemaChanged,
+    ) -> Result<Vec<crate::observer::ReprojectedApp>> {
         let observer = {
             let guard = self
                 .schema_observer
@@ -828,7 +834,7 @@ impl Catalog {
         };
         match observer {
             Some(observer) => observer.schema_changed(self, change),
-            None => Ok(()),
+            None => Ok(Vec::new()),
         }
     }
 

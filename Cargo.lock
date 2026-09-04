@@ -7980,6 +7980,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "regex-lite",
  "sc-action",
  "sc-api",
  "sc-auth",
@@ -8131,7 +8132,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
- "regex-lite",
  "sc-action",
  "sc-agent",
  "sc-api",

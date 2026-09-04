@@ -61,6 +61,13 @@
 //! result. JSON-RPC errors are reserved for what is wrong with the *call*: an
 //! unknown method, an unknown tool, an unsupported revision, a refused
 //! credential.
+//!
+//! One kind of failure is not even that: a **build that did not compile** is
+//! news about the application rather than about the call, so an endpoint tagged
+//! as a build answers `built: false` with the tools' own output and the
+//! diagnostics parsed out of it. The same decision `build_application` made for
+//! the chat copilot, and for the same reason — a model told only "the build
+//! failed" cannot fix anything.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -76,6 +83,7 @@ use sc_api::mcp::{
 };
 use sc_api::schema_edit::Grants;
 use sc_api::{Endpoint, EndpointSet, HandlerRef};
+use sc_app::build_diagnostics;
 use sc_auth::{ApiCaller, authenticate_api_token};
 use sc_catalog::Catalog;
 use sc_config::mcp_settings;
@@ -520,7 +528,7 @@ impl AdminTool for EndpointTool {
         check_caller(&self.projection, ctx, grants)?;
         let call = self.projection.split(args)?;
         let handler = resolve(&self.handlers, self.projection.endpoint())?;
-        let response = handler(HandlerCtx {
+        let outcome = handler(HandlerCtx {
             path_params: call.path_params,
             query: call.request.query,
             body: call.request.body,
@@ -529,9 +537,48 @@ impl AdminTool for EndpointTool {
             // tier 3, and a JSON arguments object has no shape for them.
             raw_body: None,
         })
-        .await?;
-        Ok(response.body)
+        .await;
+        match (outcome, self.projection.is_a_build()) {
+            (Ok(response), false) => Ok(response.body),
+            (Ok(response), true) => Ok(with_diagnostics(response.body)),
+            (Err(e), false) => Err(e),
+            // A build that did not compile is the result, not the refusal
+            // (§13.6): the endpoint reports it as an error because a screen
+            // wants a red box, and a model wants the lines to fix.
+            (Err(e), true) => Ok(build_failure(&e)),
+        }
     }
+}
+
+/// A successful build, with the diagnostics its log names added.
+///
+/// Kept on success too, because that is where a bundler puts its **warnings** —
+/// a model told only "built" would never see them — and because a shape that
+/// changes between success and failure is one the model has to learn twice.
+fn with_diagnostics(mut body: Json) -> Json {
+    let log = body
+        .get("log")
+        .and_then(Json::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if let Some(object) = body.as_object_mut() {
+        object.insert("diagnostics".to_owned(), json!(build_diagnostics(&log)));
+    }
+    body
+}
+
+/// A failed build as the result the model reads: the same three keys a
+/// successful one has, so there is one shape rather than two.
+fn build_failure(e: &Error) -> Json {
+    // The bundler's own output *is* the error message here — `build_and_mount`
+    // carries it through §16 — so it is both the log and what the diagnostics
+    // are parsed out of.
+    let log = e.to_string();
+    json!({
+        "built": false,
+        "log": log,
+        "diagnostics": build_diagnostics(&log),
+    })
 }
 
 /// The code behind a tagged endpoint, or the configuration error that says this
@@ -680,5 +727,38 @@ mod tests {
         // The body is checked in the integration suite, which can read it; what
         // is asserted here is that the constant is the only revision named.
         assert_eq!(MCP_PROTOCOL_VERSION, "2025-06-18");
+    }
+
+    #[test]
+    fn a_build_that_did_not_compile_is_a_result_with_the_lines_to_fix() {
+        // The decision `build_application` already made, kept here: a model told
+        // only "the build failed" cannot fix anything, so the tools' own output
+        // travels whole and the diagnostics are indexed out of it.
+        let failed = build_failure(&Error::config(
+            "build command `npm run build` failed in /srv/web with exit status: 2\n\
+             src/App.tsx(12,5): error TS2322: Type 'number' is not assignable to type 'string'.",
+        ));
+        assert_eq!(failed["built"], json!(false));
+        assert!(
+            failed["log"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("TS2322"),
+            "{failed}"
+        );
+        assert_eq!(failed["diagnostics"][0]["file"], json!("src/App.tsx"));
+        assert_eq!(failed["diagnostics"][0]["line"], json!(12));
+
+        // And a build that succeeded keeps the endpoint's own body, with the
+        // same `diagnostics` key — where a bundler's warnings live. One shape,
+        // not two for the model to learn.
+        let ok = with_diagnostics(json!({
+            "built": true,
+            "git_repo": false,
+            "log": "src/App.tsx(3,1): warning TS6133: 'x' is declared but never read.",
+        }));
+        assert_eq!(ok["built"], json!(true));
+        assert_eq!(ok["git_repo"], json!(false));
+        assert_eq!(ok["diagnostics"][0]["line"], json!(3));
     }
 }

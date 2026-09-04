@@ -22,7 +22,7 @@ use sc_app::{
     Application, CodeFramework, Framework, app_source_from_config, build_application,
     list_applications,
 };
-use sc_catalog::{Catalog, SchemaChanged, SchemaObserver};
+use sc_catalog::{Catalog, ReprojectedApp, SchemaChanged, SchemaObserver};
 use sc_error::{Error, Result};
 
 /// One application served by this process: its record, its UI framework, and its
@@ -284,7 +284,7 @@ impl AppMounts {
     /// error, rather than tearing a working app down over a change to an
     /// unrelated one — the same "one bad app must not take the others with it"
     /// rule [`mount_all`] follows.
-    pub fn refresh_table(&self, table: &str) -> Result<()> {
+    pub fn refresh_table(&self, table: &str) -> Result<Vec<ReprojectedApp>> {
         self.reproject(|app| app.tables.iter().any(|t| t.0 == table))
     }
 
@@ -305,7 +305,7 @@ impl AppMounts {
     /// a delete) knows which row it touched, but a *rename* changes two names at
     /// once, and re-projecting an app whose endpoints turn out identical costs a
     /// walk of its tables.
-    pub fn refresh_triggers(&self) -> Result<()> {
+    pub fn refresh_triggers(&self) -> Result<Vec<ReprojectedApp>> {
         self.reproject(|app| !app.triggers.is_empty())
     }
 
@@ -313,9 +313,14 @@ impl AppMounts {
     /// each app's built framework as it is — and rewrite those apps' generated
     /// files, so the projection in memory and the client on disk describe the
     /// same API.
-    fn reproject(&self, select: impl Fn(&Application) -> bool) -> Result<()> {
+    ///
+    /// Returns what it did, because the caller may be a model rather than a
+    /// screen: an `edit_schema` batch reports the applications it moved, and
+    /// which of them are served from a bundle this **kept** rather than rebuilt
+    /// (see [`ReprojectedApp`] and §13.6).
+    fn reproject(&self, select: impl Fn(&Application) -> bool) -> Result<Vec<ReprojectedApp>> {
         let Some(catalog) = self.catalog() else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         // Snapshot the affected mounts under the read lock, then rebuild outside
         // it: `MountedApp::new` touches the catalog, and holding the registry
@@ -327,6 +332,17 @@ impl AppMounts {
             .cloned()
             .collect();
         let apps: Vec<Application> = affected.iter().map(|m| m.app.clone()).collect();
+        // Read off the mount rather than the record: whether an application is
+        // served from a built bundle is its *framework's* answer, and only the
+        // mounted instance has one.
+        let report: Vec<ReprojectedApp> = affected
+            .iter()
+            .map(|m| ReprojectedApp {
+                id: m.app.id.0.to_string(),
+                subdomain: m.app.subdomain.clone(),
+                wants_build: m.framework.build().is_some(),
+            })
+            .collect();
         for mounted in affected {
             let refreshed = MountedApp::new_with(
                 mounted.app.clone(),
@@ -338,7 +354,7 @@ impl AppMounts {
             self.remount(refreshed);
         }
         self.reemit_clients(apps);
-        Ok(())
+        Ok(report)
     }
 
     /// Rewrite the generated files (`src/feldspar/**`) of each of `apps`, in the
@@ -440,7 +456,11 @@ impl AppMounts {
 /// mount is the right outcome — the admin sees the error and fixes the app's
 /// table subset.
 impl SchemaObserver for AppMounts {
-    fn schema_changed(&self, _catalog: &Catalog, change: &SchemaChanged) -> Result<()> {
+    fn schema_changed(
+        &self,
+        _catalog: &Catalog,
+        change: &SchemaChanged,
+    ) -> Result<Vec<ReprojectedApp>> {
         self.refresh_table(change.table())
     }
 }
@@ -453,7 +473,10 @@ impl SchemaObserver for AppMounts {
 /// server installs into it at boot.
 impl sc_action::TriggerObserver for AppMounts {
     fn triggers_changed(&self, _catalog: &Catalog) -> Result<()> {
-        self.refresh_triggers()
+        // The report is dropped here and only here: a trigger's `min_role` moving
+        // changes an endpoint's auth requirement, not a line of the generated
+        // client, so there is no stale bundle for anybody to be told about.
+        self.refresh_triggers().map(|_| ())
     }
 }
 
@@ -473,10 +496,15 @@ pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_ap
     })?;
     let source = app_source_from_config(&app.framework)?;
     let report = build_application(catalog, &app, &source, apps.triggers()).await?;
-    let framework = Arc::new(CodeFramework::new(
-        app.framework.name.clone(),
-        report.bundle.clone(),
-    ));
+    // The build step travels onto the mounted framework, as
+    // [`sc_app::build_code_framework`] already does it: `Framework::build()` is
+    // how the rest of the process asks "is this application served from a bundle
+    // somebody has to rebuild?", and a mount that dropped the answer would make
+    // every re-projection report say no (§13.6).
+    let framework = Arc::new(
+        CodeFramework::new(app.framework.name.clone(), report.bundle.clone())
+            .with_build(source.build.clone()),
+    );
     let mounted = MountedApp::new_with(app, framework, catalog, apps.evaluator(), apps.triggers())?;
     apps.remount(mounted);
     Ok(report)

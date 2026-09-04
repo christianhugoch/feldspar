@@ -430,18 +430,44 @@ unknown tool, a bad revision, a refused credential.
 
 ## Phase 5 — Reload, rebuild, and the end-to-end proof
 
-- [ ] 5.1 `edit_schema`'s result gains the affected-applications report of §8: which were
+- [x] 5.1 `edit_schema`'s result gains the affected-applications report of §8: which were
       re-projected, and which of those have a build and want one.
-- [ ] 5.2 `buildApplication` as a tier-2 tool, with the build's diagnostics as the result —
+      The report comes back **along the seam that carried the change out**: `SchemaObserver`
+      answers with what it re-projected rather than with `()`, and `schema_edit::apply`
+      collects it across the batch, naming an application once however many of its tables
+      moved. Beside the structured list the tool result carries the sentence naming
+      `buildApplication` and the id to call it with — a list is what happened, an instruction
+      is what a model acts on. **One bug fell out of it**: `build_and_mount` was mounting a
+      `CodeFramework` with no build step, so `Framework::build()` — which §8 makes the test of
+      "does this want a rebuild?" — answered `None` for every application the server actually
+      mounts. Nothing had consumed the answer before.
+- [x] 5.2 `buildApplication` as a tier-2 tool, with the build's diagnostics as the result —
       the same decision [`build_application.rs`](./crates/sc-core-traits/src/build_application.rs)
       already made, for the same reason.
-- [ ] 5.3 Integration test against a real database and a mounted application: `tools/call
+      Tagged in 4.2; what this phase added is the **result shape**. The endpoint reports a
+      failed build as an error, because a screen wants a red box — so the tag says
+      `is_a_build()` and the projection turns it into `built: false` with the tools' output and
+      the diagnostics indexed out of it. Declared rather than inferred: only a person knows
+      which of an endpoint's failures is news about the thing and which is a refusal of the
+      call, and `deleteAgent` failing is the second. The parser moved down to
+      `sc_app::build_diagnostics`, so the agent trait and the MCP tool give one answer to
+      "what did `tsc` say?".
+- [x] 5.3 Integration test against a real database and a mounted application: `tools/call
       edit_schema` creating two connected tables in one batch; assert the catalog reloaded once,
       the app's providers re-projected, its generated client on disk mentions the new table,
       and the result named the app.
-- [ ] 5.4 Integration test: a batch whose third operation is an ungranted `drop_table` is
+      **In two batches, because an application cannot declare a table that does not exist yet**:
+      the first creates the two connected tables, the second — a field on one and a tightened
+      role floor on the other — is what the mounted app re-projects for. The floor is the
+      assertion that carries the "reloaded *once*, and before the notification" half: it is the
+      endpoint's auth requirement in the live projection on the spot, which is only true if the
+      providers were rebuilt from the reloaded catalog. Plus a third test for 5.2: a build that
+      does not compile, read back as a result.
+- [x] 5.4 Integration test: a batch whose third operation is an ungranted `drop_table` is
       refused whole — the first two tables do not exist afterwards — and the message names the
-      operation and the grant.
+      operation and the grant. The message names the operation by **index as well as name**
+      (`operation 2 (drop_table on \`invoices\`)`), which is what a twelve-operation batch needs
+      and what `schema_edit::at` was written for.
 
 ## Phase 6 — Documentation
 
