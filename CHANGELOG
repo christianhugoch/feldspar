@@ -2,6 +2,51 @@
 
 Changes in reverse chronological order.
 
+## An operations manual
+
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md): the operator's document, where the
+README is the reference. What was previously spread across README §2, §4.1, §7,
+§10, `scripts/build-static.sh`, `scripts/setup-host.sh` and
+`docs/tutorial-mcp.md` is now one ordered account of running an installation.
+
+- **Both installation modes side by side**, with a table of what differs — the
+  static artifact downloaded from `feldspar-latest-static.saltcorn.com` against a
+  build from source. The two things that decide the choice are said once, up
+  front: a static binary cannot have Python triggers (linking `libpython` is what
+  the feature *is*) and does not consult `/etc/nsswitch.conf`, because it resolves
+  names itself.
+- **Three upgrade paths**, each ending where it should. Redownload the version-less
+  tarball and restart; `git pull && cargo build && systemctl restart`; or build on
+  one machine and `build-static.sh --deploy` to the rest — which is the whole
+  update for a host already running, since `--deploy` stops and starts the unit
+  around the install. With a loop for pushing one artifact to several hosts, and
+  `--release` for publishing to the bucket the first path downloads from.
+- **The configuration file as a format**, not as an example: the search paths, every
+  key an environment may hold with its type, and the precedence chain — including
+  the inversion that makes naming an environment outrank an ambient `DATABASE_URL`,
+  which is why the generated systemd unit names one.
+- **Every environment variable**, in four tables by who reads them: at run time, by
+  the server from systemd (`NOTIFY_SOCKET` and the watchdog pair), at build time
+  only (`SC_BUILD_ADMIN` and `SC_BUNDLE_PREFIX`, with the reminder that putting
+  them on the run command does nothing), and by the test harness.
+- **The reload signal**, with what it does and does not reload, and four ways to
+  send it: `pkill -HUP feldspar`, by `MainPID`, `systemctl kill -s HUP
+  --kill-whom=main` (main only, so an `npm install` in the same cgroup is not
+  signalled), and an `ExecReload` drop-in that makes `systemctl reload` mean it.
+  Plus the boot line to look for before sending it to production, since `SIGHUP`'s
+  default disposition is to terminate.
+- **Claude Code over the MCP server**, operationally: the two settings, minting a
+  token and what the six grants each allow, the registration line and why it is a
+  header rather than a cookie, creating a four-table data model in one
+  `edit_schema` batch, and the React application loop — the generated
+  `src/feldspar/SKILL.md` copied to `.claude/skills/`, a session from `feldspar
+  auth token` for the agent's own screenshots, and `npm run build && pkill -HUP
+  feldspar` between them.
+- A troubleshooting table keyed by symptom, including the two that only come up
+  during an upgrade (`ETXTBSY`, and an application that 404s because it failed to
+  build at boot and was skipped rather than taking the server with it).
+- README §2 links to it.
+
 ## A download URL for the release artifact
 
 The bucket `--release` publishes to is served at a public hostname, so the

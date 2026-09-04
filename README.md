@@ -48,6 +48,10 @@ it properly — read those when something does not fit your box. If you only wan
 
 Everything below assumes a `sudo`-capable login, and uses `example.com` as the
 domain applications will be served under.
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md) is the same ground as an operator's
+manual — the two installation modes side by side, the upgrade path for each, the
+configuration file and every environment variable, the reload signal, and running
+a coding agent against the installation.
 
 **The short way: download the built binary.** There is a prebuilt, statically
 linked artifact of the latest build. It needs no Rust, no C toolchain and no
