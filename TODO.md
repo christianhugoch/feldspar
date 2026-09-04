@@ -377,22 +377,56 @@ unknown tool, a bad revision, a refused credential.
 
 ## Phase 4 — The protocol
 
-- [~] 4.1 `TypeSchema → JSON Schema`, beside `ts_type`. Struct → `object` with `required`,
+- [x] 4.1 `TypeSchema → JSON Schema`, beside `ts_type`. Struct → `object` with `required`,
       `Optional` → not required and nullable, `Array` → `items`, `Value` → the scalar mapping.
-- [ ] 4.2 `.mcp(description)` on `Endpoint`, and the tier-2 tags of §6.
-- [ ] 4.3 The tier-2 projection: an endpoint's path parameters, query parameters and input
+      `sc_api::mcp::json_schema`. A struct is **closed** (`additionalProperties: false`), because
+      the hand-written tools' `arguments` already refuses an undeclared key and an open schema
+      would advertise a latitude the call does not have; and `Value(Json)` is the empty schema
+      `{}`, which is JSON Schema for *anything* and is the honest rendering of the escape hatch.
+- [x] 4.2 `.mcp(description)` on `Endpoint`, and the tier-2 tags of §6.
+      **The tag carries a `Grant` as well as an `Area`.** §6 asks only for a description and a
+      half of the surface, but a tier-2 tool that writes (`createAgent`, `saveWorkflow`) would
+      then be refused by nothing while `create_table` beside it honours `allow_create` — the six
+      flags would mean two different things depending on which tier you reached them through.
+      `McpTag::needs(Grant::Create)` puts one meaning back. Seventeen endpoints are tagged, each
+      with the comment that argues for it, and the census is a **test**: adding a tag means
+      editing the expected list, so "few" stays a design constraint rather than an outcome.
+- [x] 4.3 The tier-2 projection: an endpoint's path parameters, query parameters and input
       schema merged into one arguments object; a tool call rendered back into an `ApiRequest`
       and dispatched through the existing `HandlerRegistry` as the token's user.
-- [ ] 4.4 `POST /mcp` in the router: bearer extraction, the cookie-ignoring rule of §4, the
+      **Split across the seam §13.6 predicted**: the value transcription (`sc_api::mcp::
+      Projection`) needs only the `Endpoint`, the dispatch (`sc_server::mcp::EndpointTool`)
+      needs the `HandlerRegistry`, and `AdminTool` joins them — the same trait object that lets
+      `sc-app` contribute its three. The tool keeps the endpoint's own camelCase name
+      (`listRuns` beside `edit_schema`): an agent holding both the repo and the server should
+      read one word for one thing, not two conventions for the same call. Path parameters travel
+      *beside* the rendered path rather than being re-parsed out of it, because a text parameter
+      may legally contain a `/`.
+- [x] 4.4 `POST /mcp` in the router: bearer extraction, the cookie-ignoring rule of §4, the
       `Origin` refusal, the `404` when disabled, the loopback check.
-- [ ] 4.5 The CSRF exemption, written as *bearer-authenticated* rather than as a path.
-- [ ] 4.6 `initialize` / `tools/list` / `tools/call`, the pinned revision constant, and the
-      `isError` mapping of §11.
-- [ ] 4.7 The audit line of §10.
-- [ ] 4.8 Tests: `tools/list` under a token with `allow_triggers` off omits the trigger tools;
+      The handler takes the whole `Request` rather than extractors, because `ConnectInfo` has to
+      be read as an *option* — a router with no peer address recorded is an unknown peer, and an
+      unknown peer is remote. `serve.rs` and `tls.rs` therefore mount with
+      `into_make_service_with_connect_info`. **A router built by `build_router` carries no
+      catalog** (it constructs `AppMounts::none()`) and so answers 404 here; `serve()` and the
+      tests both go through `build_router_with_apps`.
+- [x] 4.5 The CSRF exemption, written as *bearer-authenticated* rather than as a path.
+      `is_bearer_authenticated(&request)` in `security.rs`, so the exemption is a property of the
+      credential and a second bearer route inherits it without anyone remembering to.
+- [x] 4.6 `initialize` / `tools/list` / `tools/call`, the pinned revision constant, and the
+      `isError` mapping of §11. `MCP_PROTOCOL_VERSION = "2025-06-18"`, refused by naming both
+      revisions. A message with no `id` is a notification and answers `202` with no body; a batch
+      is refused, because this revision removed them.
+- [x] 4.7 The audit line of §10. One `Info` line per call — label, tool, outcome, duration —
+      and the arguments at `Verbose`.
+- [x] 4.8 Tests: `tools/list` under a token with `allow_triggers` off omits the trigger tools;
       a cookie-and-CSRF request with no bearer is refused; a request with an `Origin` is
       refused; a disabled server answers 404 without touching the token table; an unknown tool
       is a JSON-RPC error and a refused grant is an `isError` result.
+      All five, plus five more in `crates/sc-server/tests/mcp_server.rs`: a bearer request is
+      exempt from CSRF, a remote peer is refused under the loopback switch, a revoked token
+      stops on the next call, `initialize` answers with the one revision, and a tagged endpoint
+      really does come back through the `HandlerRegistry`.
 
 ## Phase 5 — Reload, rebuild, and the end-to-end proof
 

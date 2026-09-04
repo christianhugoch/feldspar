@@ -2,6 +2,75 @@
 
 Changes in reverse chronological order.
 
+## The protocol: `POST /mcp`, and the tools the endpoints already were
+
+Phase 4 of the administration MCP server. The route exists, it speaks
+`2025-06-18`, and it serves two kinds of tool over one set: the nine
+hand-written ones phase 1 unified, and seventeen more projected straight out of
+the admin `EndpointSet`.
+
+- **`TypeSchema → JSON Schema`, the deliberate sibling of `ts_type`.** The same
+  four-variant walk rendered in the vocabulary its consumer reads — `tsc` for one,
+  a model choosing arguments for the other. Three decisions a reader might
+  otherwise take for slips: an `Optional` is absent from `required` *and*
+  nullable, because a model will send `null` anyway and a schema that rejects it
+  has spent a turn on a distinction the wire does not make; a struct is **closed**,
+  because the hand-written tools already refuse an undeclared key and an open
+  schema would advertise a latitude the call does not have; and `Value(Json)` is
+  the empty schema, which is JSON Schema for *anything* and the honest rendering
+  of an escape hatch.
+- **`.mcp()` on `Endpoint`, and seventeen tags.** Prose, the half of the surface
+  it belongs to, and — beyond what §6 asked for — **the grant it needs**. Without
+  that last part `createAgent` would be refused by nothing while `create_table`
+  beside it honours `allow_create`, and the six flags would mean two different
+  things depending on which tier you reached them through. The count is enforced:
+  a test names all seventeen in order and names the tier-3 surfaces that stayed
+  out (rows, files, backups, users, and the token endpoints themselves), so a new
+  tag means editing the list rather than watching a number drift.
+- **The projection is split at the seam §13.6 predicted.** `sc_api::mcp::
+  Projection` merges an endpoint's path parameters, query parameters and input
+  schema into one arguments object and splits a call back apart; `sc_server::mcp::
+  EndpointTool` dispatches the result through the `HandlerRegistry` as the token's
+  user. The first needs only the `Endpoint` value, the second needs the registry,
+  and `AdminTool` — the trait object that already lets `sc-app` contribute three
+  tools to `sc-api`'s set — joins them without either crate learning about the
+  other. The tool keeps the endpoint's own camelCase name: `listRuns` sits beside
+  `edit_schema` because an agent holding both the repository and the server should
+  read one word for one thing.
+- **`POST /mcp`, and four ways to be turned away before the token table is
+  touched.** Disabled is a 404, not a 403 — a server that is off should not
+  confirm it exists. An `Origin` header is a browser, and a browser reaching this
+  route is a confused deputy, so it is refused whatever it carries. A non-loopback
+  peer is refused while the loopback switch is on, and a peer the router never
+  recorded counts as remote. Only then is the bearer read, and a cookie is never a
+  credential here.
+- **The CSRF exemption is written as a property of the credential.** Not "the
+  `/mcp` path is exempt" but "a bearer-authenticated request is" — so the double
+  submit cookie stops guarding a request that never trusted a cookie in the first
+  place, and the next bearer route inherits the same reasoning without anyone
+  remembering to add it.
+- **One revision, refused by name.** `initialize` checks the client's
+  `protocolVersion` against the single pinned constant and, when they differ, says
+  both — the one thing worse than refusing an unsupported revision is negotiating
+  one by accident. Batches are refused because this revision removed them; a
+  message with no `id` is a notification and gets `202` and no body.
+- **A tool failure is a result, not a transport error.** `isError: true` with the
+  refusal in the text, which is what the model actually reads; JSON-RPC errors
+  stay reserved for what is wrong with the *call* — an unknown method, an unknown
+  tool, a bad revision, a refused credential.
+- **One `Info` line per call**: the token's label, the tool, the outcome and the
+  duration; the arguments at `Verbose`, on the rung the verbosity ladder already
+  puts LLM tool-call arguments on. This is the half of §13.6's argument that makes
+  a ninety-day credential defensible.
+- Tests: ten of them, against a real database and a real router. The five §4.8
+  asked for — a token without `allow_triggers` is offered no trigger tools, a
+  cookie-and-CSRF request with no bearer is refused, an `Origin` is refused, a
+  disabled server answers 404, and an unknown tool is a protocol error while a
+  refused grant is an `isError` result — plus a bearer request passing the CSRF
+  middleware, a remote peer refused under the loopback switch, a revoked token
+  stopping on the very next call, `initialize` naming its one revision, and a
+  tagged endpoint coming back with the payload its handler really produced.
+
 ## The switch and the screen: turning the MCP server on, and minting a token at it
 
 Phase 3 of the administration MCP server. Still no MCP server — phase 4 builds
