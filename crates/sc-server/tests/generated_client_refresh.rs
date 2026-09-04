@@ -338,8 +338,8 @@ async fn the_update_client_endpoint_regenerates_and_rescaffolds() -> sc_error::R
     let mut h = setup("button").await?;
     let path = format!("/api/applications/{}/client", h.app.id);
 
-    // A populated project is regenerated, and says so — the four generated files
-    // and not one thing outside them.
+    // A populated project is regenerated, and says so — the generated files and
+    // not one thing outside them.
     let mine = "// mine\n";
     std::fs::write(h.project.join("src/App.tsx"), mine)?;
     let (status, body) = h.client.send("POST", &path, None).await;
@@ -355,6 +355,7 @@ async fn the_update_client_endpoint_regenerates_and_rescaffolds() -> sc_error::R
             "todo/src/feldspar/store.ts",
             "todo/src/feldspar/schema.sql",
             "todo/src/feldspar/README.md",
+            "todo/src/feldspar/SKILL.md",
         ],
         "{body}"
     );

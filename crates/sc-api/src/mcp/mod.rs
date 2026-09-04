@@ -403,6 +403,15 @@ impl ToolSet {
         &self.areas
     }
 
+    /// Every tool in the set, area or no area.
+    ///
+    /// For a caller that wants to **document** the surface rather than offer it
+    /// — the generated `SKILL.md` (§13.6) lists all of it, because a repository
+    /// is worked on with more than one token and each is granted its own areas.
+    pub fn tools(&self) -> &[Arc<dyn AdminTool>] {
+        &self.tools
+    }
+
     /// Every tool this set could offer, area or no area — the answer to "what
     /// will this be called?" that an agent's collision check (§11.2) wants
     /// before a configuration exists to filter by.

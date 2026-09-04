@@ -99,10 +99,20 @@ pub const MCP_ROUTE: &str = "/mcp";
 
 /// The one MCP protocol revision this server speaks.
 ///
-/// Pinned in a single constant and checked against the client's, because the one
-/// thing worse than refusing an unsupported revision is negotiating one by
+/// Pinned in a single constant and **answered with**, never echoed. The
+/// specification's lifecycle is that a server which does not support the
+/// revision the client asked for replies with one it does, and the client then
+/// decides whether it can proceed — so the handshake states this constant
+/// whatever arrived, and every later request is served under it. Echoing the
+/// client's revision back is the thing that would be negotiating one by
 /// accident: a client and a server that disagree about the shape of a tool
 /// result fail on the call that matters rather than on the handshake.
+///
+/// Refusing the handshake outright was tried and was wrong, which a real client
+/// found within a minute: Claude Code asks for a later revision than this, and a
+/// server that answers `initialize` with an error is a server that cannot be
+/// connected to at all — by any client newer than its constant, forever. The
+/// check that matters is the one below, not an error.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// The name this server introduces itself by in `initialize`.
@@ -319,19 +329,16 @@ async fn dispatch_rpc(
 
 /// The handshake, and the revision check that is the whole of it.
 fn initialize(id: &Json, params: &Json) -> Response {
-    let asked = params.get("protocolVersion").and_then(Json::as_str);
-    if let Some(asked) = asked
+    // What the client asked for is logged and **not** answered with: the reply
+    // is always this server's own revision, which is what tells a client that
+    // asked for a later one what it is actually talking to. A client that cannot
+    // work with the answer closes the connection, which is its decision to make
+    // and not one this server can make for it.
+    if let Some(asked) = params.get("protocolVersion").and_then(Json::as_str)
         && asked != MCP_PROTOCOL_VERSION
     {
-        return json_rpc_error(
-            StatusCode::OK,
-            id.clone(),
-            INVALID_PARAMS,
-            format!(
-                "this server speaks MCP {MCP_PROTOCOL_VERSION} and the client asked \
-                 for {asked}; negotiating a revision by accident is worse than \
-                 refusing one"
-            ),
+        sc_log::log_verbose!(
+            "MCP: client asked for protocol {asked}; answering with {MCP_PROTOCOL_VERSION}"
         );
     }
     json_rpc_result(
@@ -438,18 +445,23 @@ fn tool_result(outcome: Result<Json>) -> Json {
                 Json::String(s) => s.clone(),
                 other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
             };
-            json!({
+            let mut result = json!({
                 "content": [{ "type": "text", "text": text }],
-                // The same value again, machine-readable, for a client that
-                // prefers it. Only for an object: `structuredContent` is defined
-                // as one, and wrapping a list in a key nobody declared would be
-                // inventing a shape.
-                "structuredContent": match value {
-                    Json::Object(map) => Json::Object(map),
-                    _ => Json::Null,
-                },
                 "isError": false,
-            })
+            });
+            // The same value again, machine-readable, for a client that prefers
+            // it — and **only when it is an object**, because that is what
+            // `structuredContent` is defined as. The key is left out rather than
+            // set to `null` for a list: a client that validates the field reads
+            // `null` as a malformed result and fails the call, which is what a
+            // real one did to every `list…` tool here (they all answer arrays).
+            // Wrapping a list in a key nobody declared would be inventing a
+            // shape; omitting the field says the truthful thing, that this
+            // result's structure is the text.
+            if let Json::Object(map) = value {
+                result["structuredContent"] = Json::Object(map);
+            }
+            result
         }
         Err(e) => json!({
             "content": [{ "type": "text", "text": e.to_string() }],
@@ -718,11 +730,26 @@ mod tests {
         assert_eq!(ok["isError"], json!(false));
         assert_eq!(ok["structuredContent"], json!({ "tables": ["tasks"] }));
         assert!(ok["content"][0]["text"].as_str().unwrap().contains("tasks"));
+
+        // A tool that answers a **list** — which every `list…` tool here does —
+        // carries no `structuredContent` at all rather than a null one. A client
+        // that validates the field against the object it is defined to be reads
+        // a null as a malformed result and fails the call.
+        let list = tool_result(Ok(json!([{ "name": "copilot" }])));
+        assert_eq!(list["isError"], json!(false));
+        assert!(list.get("structuredContent").is_none(), "{list}");
+        assert!(
+            list["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("copilot"),
+            "{list}"
+        );
     }
 
     #[test]
-    fn a_client_asking_for_another_revision_is_refused_rather_than_negotiated_with() {
-        let response = initialize(&json!(1), &json!({ "protocolVersion": "1999-01-01" }));
+    fn a_client_asking_for_another_revision_is_answered_with_this_ones() {
+        let response = initialize(&json!(1), &json!({ "protocolVersion": "2999-01-01" }));
         assert_eq!(response.status(), StatusCode::OK);
         // The body is checked in the integration suite, which can read it; what
         // is asserted here is that the constant is the only revision named.

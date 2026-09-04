@@ -2,6 +2,90 @@
 
 Changes in reverse chronological order.
 
+## The generated SKILL.md, and the documentation
+
+Phase 6 of the administration MCP server: the half of the milestone that is not
+code paths but the reason anybody would find them.
+
+- **`docs/tutorial-mcp.md`.** Turning the server on, minting a token, the one
+  `claude mcp add` line, and then a real session — an agent adding a field,
+  saving a trigger and rebuilding the application whose generated client that
+  field just changed. It ends on the two sentences an admin has to read before
+  minting one: **this token is an administrator**, and **revoking it is the only
+  way to take it back**. In between: what a batch refusal reads like and why it
+  names the operation by index as well as by name, why an area that is off
+  *removes* tools rather than refusing them, and the audit line the token's label
+  appears in.
+- **A generated `SKILL.md`, beside the generated client** (GOALS: "generate a
+  SKILL.md file if they want to use an external coding agent"). An application is
+  half code in the repository and half configuration in the database, and an
+  agent holding only the first half will write a feature's whole front end
+  against a schema it never changed and report it done. So the file says which
+  half is which, names the tools that reach the second one, and names — as
+  loudly — the ones that deliberately do not exist: no tool writes this
+  repository's source, and none reads a row.
+- **The tool listing is derived, not written.** It is read from the two places
+  the server itself projects from — `sc_app::mcp::tool_set` for the composite
+  tools and the `.mcp()` tags of `admin_endpoints()` for the generated ones — and
+  grouped by the **area flag** that decides whether a token is offered them at
+  all, so an agent whose `tools/list` is short can see which checkbox is off. A
+  tool added or tagged tomorrow is in the next `SKILL.md` with nobody editing
+  prose.
+- **One line per tool, and it is the tool's own line.** The summary is the
+  *first clause* of the description the model is given, cut at the first
+  sentence, colon or dash — because these descriptions are written that way, and
+  because a second sentence describing each tool would be a second description to
+  keep in step. The real one arrives with the tool; this file is the map, not the
+  manual. Written with **every** grant and both areas on, since a repository is
+  not a token and may be worked on with two of them.
+- **Written where the client is written**, by `emit_client` for a `code`
+  application and by the React runtime generator for a `react` one — on the same
+  schedule, because it describes the same application. A scaffolded project's
+  root `AGENTS.md` now points at it, which is the file an agent opening the
+  project actually reads first.
+- **`README.md`** gains the feature, the two settings, and the fact that it is
+  off by default — with `mcp_enabled` and `mcp_loopback_only` given as `set-cfg`
+  lines, since the terminal is where a server that is not yet reachable gets
+  turned on.
+- `ToolSet::tools()` exposes the set for a caller that wants to **document** the
+  surface rather than offer it, which is the one thing the listing needed that
+  `all_names()` could not give: each tool's area.
+
+**And then the definition of done was run by hand, against a running server
+driven by an actual Claude Code session rather than by a test harness — which
+found two protocol bugs a test harness structurally could not.** Both were the
+same mistake: a decision that reads correctly in the specification's prose and
+does not survive contact with a real client.
+
+- **`initialize` answered an unsupported revision with an error, so no current
+  client could connect at all.** Claude Code asks for `2025-11-25`; this server
+  speaks `2025-06-18` and refused the handshake, in the name of not negotiating a
+  revision by accident. But the specification's lifecycle is that a server
+  answers with a revision *it* supports and the client decides whether to
+  proceed — so the refusal did not prevent a mismatch, it prevented every
+  session. The handshake now always answers with this server's own constant and
+  logs the difference at `verbose`. What must never happen — echoing the
+  client's revision back — never did and still cannot.
+- **A tool answering a list carried `"structuredContent": null`, which a
+  validating client reads as a malformed result.** The intent was already right
+  ("only for an object"), and the null was the bug: `listAgents`, and with it
+  every other `list…` tool in tier 2, failed on the client side before the model
+  ever saw the rows. The field is now **omitted** when the value is not an
+  object. The text content carries the JSON either way, so nothing is lost, and
+  wrapping a list in a key nobody declared would have invented a shape.
+- What the same session confirmed, over the wire and with nothing stubbed: four
+  connected tables created in **one** `edit_schema` batch; `describe_action`
+  followed by a `save_trigger` on `tasks`; the tier-2 reads; and a `drop_table`
+  slipped into a later batch **refused whole**, naming the operation by index and
+  the grant that would allow it, with the field beside it not added either. Also
+  by hand: a request carrying a valid session cookie and a valid CSRF token and
+  no bearer is refused (`401`, naming the header it wants); the route answers
+  `404` while the switch is off; the audit line names the token's *label*; and a
+  revoked token's next call fails, saying when it was revoked. Not exercised
+  live, and left to the integration tests that already cover them: reading an
+  agent's runs (this installation has no LLM provider configured) and the
+  application rebuild (which needs an `npm` project on disk).
+
 ## Reload, rebuild, and the end of the loop
 
 Phase 5 of the administration MCP server, and the half of "an edit takes effect

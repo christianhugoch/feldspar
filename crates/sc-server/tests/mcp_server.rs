@@ -565,23 +565,43 @@ async fn initialize_answers_with_the_one_revision_this_server_speaks() -> sc_err
     );
     assert!(body["result"]["serverInfo"]["name"].is_string(), "{body}");
 
-    // A different revision is refused rather than negotiated by accident, and
-    // the refusal names both.
+    // A client asking for a **later** revision is answered with this server's
+    // own, not refused: that is the specification's lifecycle, and it is what
+    // keeps a server usable by clients newer than its constant — every real one
+    // is. What must never happen is the client's revision being echoed back,
+    // which would be agreeing to a protocol nobody here implements.
     let (status, body) = McpRequest::new(
         &token,
         json!({
             "jsonrpc": "2.0",
             "id": 2,
             "method": "initialize",
-            "params": { "protocolVersion": "1999-01-01" },
+            "params": { "protocolVersion": "2999-01-01" },
         }),
     )
     .send(&router)
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let message = body["error"]["message"].as_str().unwrap();
-    assert!(message.contains(MCP_PROTOCOL_VERSION), "{body}");
-    assert!(message.contains("1999-01-01"), "{body}");
+    assert!(body.get("error").is_none(), "{body}");
+    assert_eq!(
+        body["result"]["protocolVersion"],
+        json!(MCP_PROTOCOL_VERSION),
+        "{body}"
+    );
+
+    // ...and the tools work under it, which is the whole reason the handshake
+    // must not be a refusal.
+    let (status, body) = McpRequest::new(
+        &token,
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }),
+    )
+    .send(&router)
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !body["result"]["tools"].as_array().unwrap().is_empty(),
+        "{body}"
+    );
 
     // The notification that follows takes no answer at all.
     let (status, _) = McpRequest::new(
@@ -764,6 +784,32 @@ async fn a_tagged_endpoint_is_dispatched_through_the_handler_registry() -> sc_er
     let (_, agents) = client.send("GET", "/api/agents", None).await;
     assert_eq!(agents.as_array().unwrap().len(), 1, "{agents}");
     assert_eq!(agents[0]["name"], json!("helper"));
+
+    // ...and reading them back is the shape that matters: an endpoint answering
+    // a **list** — which most of tier 2 does — carries its result as text and
+    // **no `structuredContent` key at all**, because that field is defined as an
+    // object. A null there is a malformed result to a client that validates it,
+    // and a client that validates it refuses the call: `listAgents` was
+    // unusable from a real one until this was true.
+    let (status, body) = McpRequest::new(
+        &token,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": { "name": "listAgents", "arguments": {} },
+        }),
+    )
+    .send(&router)
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["result"]["isError"], json!(false), "{body}");
+    assert!(
+        body["result"].get("structuredContent").is_none(),
+        "a list must not carry a structuredContent: {body}"
+    );
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("helper"), "{text}");
     Ok(())
 }
 

@@ -332,7 +332,7 @@ pub async fn build_application(
     source: &AppSource,
     dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
 ) -> Result<BuildReport> {
-    let client_path = emit_client(cat, source, &app_endpoints_with(app, cat, dispatcher)?)
+    let client_path = emit_client(cat, app, source, &app_endpoints_with(app, cat, dispatcher)?)
         .await?
         .into_iter()
         .next();
@@ -351,13 +351,21 @@ pub async fn build_application(
 }
 
 /// Write `endpoints` as a generated TypeScript client into the app's source
-/// tree, at [`AppSource::client_path`] — **and its helper beside it**.
+/// tree, at [`AppSource::client_path`] — **and its helper and its `SKILL.md`
+/// beside it**.
 ///
-/// Two files: the client is this application's endpoints and tables, and it
+/// Three files. The client is this application's endpoints and tables, and it
 /// imports the half that is the same in every application (how a request is
 /// made, how a failure is reported, the types a read is expressed in) from a
 /// `helper.ts` in the same directory. One without the other does not compile, so
 /// nothing writes one without the other.
+///
+/// The third is [`SKILL_FILE`](crate::SKILL_FILE): what a coding agent reading
+/// this repository has to know about the half of the application that is *not*
+/// in it, and the administration MCP tools that reach that half (§13.6). It is
+/// written on the same schedule as the client for the same reason — it describes
+/// the same application — and is what makes the generated directory
+/// self-explanatory to the agent that finds it.
 ///
 /// Returns the paths written, in that order, or nothing when the app declares no
 /// client path. Written through the [`FileStore`](sc_files::FileStore), not the
@@ -365,6 +373,7 @@ pub async fn build_application(
 /// reaches it (and the store's own traversal sandboxing applies).
 pub async fn emit_client(
     cat: &Catalog,
+    app: &Application,
     source: &AppSource,
     endpoints: &EndpointSet,
 ) -> Result<Vec<String>> {
@@ -378,7 +387,15 @@ pub async fn emit_client(
     store
         .write(&helper, Bytes::from(sc_api::client_helper().into_bytes()))
         .await?;
-    Ok(vec![path.clone(), helper])
+    let skill = sibling(path, crate::SKILL_FILE);
+    let client_file = path.rsplit('/').next().unwrap_or(path.as_str()).to_owned();
+    store
+        .write(
+            &skill,
+            Bytes::from(crate::generate_skill(cat, app, &client_file).into_bytes()),
+        )
+        .await?;
+    Ok(vec![path.clone(), helper, skill])
 }
 
 /// A path beside `path`: same directory, given file name.
@@ -418,7 +435,7 @@ pub async fn emit_app_client(
         return emit_react_runtime(cat, app, &source, dispatcher).await;
     }
     let endpoints = app_endpoints_with(app, cat, dispatcher)?;
-    emit_client(cat, &source, &endpoints).await
+    emit_client(cat, app, &source, &endpoints).await
 }
 
 /// Build an application and return a [`CodeFramework`] serving the result, with

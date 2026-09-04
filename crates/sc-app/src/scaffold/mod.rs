@@ -98,6 +98,7 @@ pub async fn scaffold_app(
     // session: `feldspar auth token --role NAME` takes a name, and nothing inside
     // a project directory knows what this server calls its roles.
     let roles = documented_roles(cat).await?;
+    let skill = crate::generate_skill(cat, app, crate::REACT_CLIENT_FILE);
     let generated = files::project_files(&files::ProjectContext {
         project: &project,
         app,
@@ -109,6 +110,7 @@ pub async fn scaffold_app(
         // names the URL to open. `None` when nobody told this process.
         origin: cat.public_origin(),
         roles: &roles,
+        skill: &skill,
     });
 
     let mut written = Vec::with_capacity(generated.len());
@@ -292,6 +294,10 @@ pub async fn emit_react_runtime(
     // are: an admin who adds a role gets a README that names it at the next
     // build, with nobody re-scaffolding anything.
     let roles = documented_roles(cat).await?;
+    // The map of the half of the application this project cannot see (§13.6),
+    // rewritten with the rest of the generated directory because the tool
+    // surface it names is the one this server is currently offering.
+    let skill = crate::generate_skill(cat, app, crate::REACT_CLIENT_FILE);
 
     let mut written = Vec::new();
     for file in files::runtime_files(&files::ProjectContext {
@@ -303,6 +309,7 @@ pub async fn emit_react_runtime(
         schema_sql: &schema_sql,
         origin: cat.public_origin(),
         roles: &roles,
+        skill: &skill,
     }) {
         let path = project_path(project, &file.path);
         store

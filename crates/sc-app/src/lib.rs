@@ -54,6 +54,7 @@ mod framework;
 pub mod mcp;
 mod react;
 mod scaffold;
+mod skill;
 mod store;
 
 pub use api::{
@@ -97,6 +98,7 @@ pub use scaffold::{
     ClientUpdate, GeneratedFile, ScaffoldReport, emit_react_runtime, require_api_provider,
     require_scaffoldable, scaffold_app, update_app_client,
 };
+pub use skill::{SKILL_FILE, generate_skill};
 pub use store::{
     applications_using_file_store, delete_application, list_applications, load_application,
     load_application_by_subdomain, save_application,

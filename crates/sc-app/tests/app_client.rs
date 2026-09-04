@@ -326,7 +326,7 @@ async fn emit_client_is_a_no_op_without_a_client_path() -> Result<()> {
         .with("command", "sh build.sh");
     let source = app_source_from_config(&no_client)?;
     assert_eq!(source.client_path, None);
-    let written = emit_client(&cat, &source, &app_endpoints(&blog(), &cat)?).await?;
+    let written = emit_client(&cat, &blog(), &source, &app_endpoints(&blog(), &cat)?).await?;
     assert!(written.is_empty());
 
     // Nothing was written to the store.

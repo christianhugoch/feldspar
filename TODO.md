@@ -478,17 +478,43 @@ unknown tool, a bad revision, a refused credential.
       §9.2 names `_sc_api_tokens` as specified-but-not-yet-created. Written before the code
       rather than after it, because §1's argument — one authorization model — is the thing the
       phases below are held to.
-- [ ] 6.2 `docs/tutorial-mcp.md`: turning it on, minting a token, the one `claude mcp add`
+- [x] 6.2 `docs/tutorial-mcp.md`: turning it on, minting a token, the one `claude mcp add`
       line, then a real session — an agent adding a field, saving a trigger and rebuilding the
       app — and ending with the two sentences an admin must read: this token is an
       administrator, and revoking it is the only way to take it back.
-- [ ] 6.3 The generated **SKILL.md** GOALS asks for, emitted beside the typed client, naming
+      Plus the two paragraphs the session itself asks for: what a batch refusal reads like and
+      why it names the operation by index as well as by name, and why an area that is off
+      *removes* tools rather than refusing them.
+- [x] 6.3 The generated **SKILL.md** GOALS asks for, emitted beside the typed client, naming
       the tools this server exposes and the ones it does not — so an agent with both the
       repository and the MCP server knows which half of the application each one is for.
-- [ ] 6.4 `README.md`: the feature, the switch, and the fact that it is off by default.
-- [ ] 6.5 CHANGELOG entry.
-- [ ] 6.6 The definition of done, by hand, against a running server driven by an actual
+      **The listing is derived, not written**: the composite tools from
+      `sc_app::mcp::tool_set` and the generated ones from the `.mcp()` tags of
+      `admin_endpoints()`, grouped by the **area flag** that decides whether a token is offered
+      them at all — so an agent whose `tools/list` is short can see which checkbox is off. One
+      line per tool, and it is the tool's own line: the *first clause* of the description the
+      model is given, because a second sentence per tool would be a second description to keep
+      in step. Written where the client is written, by `emit_client` and by the React runtime
+      generator, and pointed at from the scaffold's root `AGENTS.md`.
+- [x] 6.4 `README.md`: the feature, the switch, and the fact that it is off by default.
+      With both settings as `set-cfg` lines, since the terminal is where a server that is not
+      yet reachable gets turned on.
+- [x] 6.5 CHANGELOG entry.
+- [x] 6.6 The definition of done, by hand, against a running server driven by an actual
       Claude Code session rather than by a test harness.
+      **It found two protocol bugs no in-process test could.** `initialize` refused any
+      revision but its own, so Claude Code — which asks for a later one — could not connect at
+      all; the specification's lifecycle is that a server *answers* with a revision it supports
+      and the client decides, so the handshake now does that and never echoes the client's.
+      And a tool answering a **list** carried `"structuredContent": null`, which a validating
+      client reads as a malformed result: every `list…` tool in tier 2 failed on the client
+      side before the model saw a row. The field is now omitted when the value is not an
+      object. Confirmed live afterwards: four connected tables in one batch, `describe_action`
+      then `save_trigger`, the tier-2 reads, a `drop_table` refused whole naming the operation
+      and the grant, a cookie-and-CSRF request refused, the audit line naming the token's
+      label, and a revoked token's next call failing. Not exercised live: an agent's runs (no
+      LLM provider configured here) and the application rebuild (needs an `npm` project), both
+      covered by the phase-4 and phase-5 integration tests.
 
 ---
 
@@ -520,6 +546,14 @@ unknown tool, a bad revision, a refused credential.
 - **Bus-carried token revocation**, so a revoked token dies on every node immediately rather
   than within the lookup's freshness window — the same seam `SessionStore::invalidate` is
   waiting on, and it should be done for both at once or not at all.
+- **The doubled error prefix in a refusal a model reads.** `edit_schema`'s refusal arrives as
+  *"invalid: operation 1 (drop_table on `task_comments`): invalid: not permitted to drop a
+  table…"* — `Error`'s `Display` writes its kind, and `schema_edit::at` embeds an error that
+  has already written its own. Harmless (a real session relayed it correctly) and still noise
+  in the one string §11 says must read as an instruction. The fix is an `Error::message()`
+  that answers without the kind prefix, used by `schema_edit::at` and by the MCP layer's
+  result and log line; it touches a core type, so it is its own change rather than a rider on
+  this milestone.
 - **Tier-2 tags for the file-store IDE routes**, if it turns out an agent wants to read an
   application's source through the server rather than through the filesystem — which it will
   only want when the server and the repository are on different machines.

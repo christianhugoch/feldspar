@@ -127,11 +127,14 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
         "src/feldspar/store.ts",
         "src/feldspar/schema.sql",
         "src/feldspar/README.md",
+        "src/feldspar/SKILL.md",
     ] {
         assert!(project.join(expected).is_file(), "missing {expected}");
     }
-    // 12 project files + one page for the app's one table + the six-file runtime.
-    assert_eq!(report.files.len(), 19);
+    // 12 project files + one page for the app's one table + the seven-file
+    // runtime (the client, its helper, the hooks, the store, the schema, and the
+    // two documents — one for a person, one for a coding agent).
+    assert_eq!(report.files.len(), 20);
 
     // What a coding agent opening this project finds: a root file pointing at the
     // generated directory, and in it a README and a `schema.sql` describing the
@@ -144,6 +147,15 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
     assert!(schema.contains(r#"CREATE TABLE "tasks""#), "{schema}");
     assert!(schema.contains(r#""title" text NOT NULL"#), "{schema}");
     assert!(schema.contains(r#"PRIMARY KEY ("id")"#), "{schema}");
+    // ...and beside that README, the map of the half of the application that is
+    // *not* in this project (§13.6): the administration MCP tools, named from the
+    // live surface rather than from prose, and the root file pointing at it.
+    assert!(agents.contains("src/feldspar/SKILL.md"), "{agents}");
+    let skill = std::fs::read_to_string(project.join("src/feldspar/SKILL.md"))?;
+    assert!(skill.contains("- `edit_schema` — "), "{skill}");
+    assert!(skill.contains("- `save_trigger` — "), "{skill}");
+    assert!(skill.contains("- `buildApplication` — "), "{skill}");
+    assert!(skill.contains("`client.ts`"), "{skill}");
     let readme = std::fs::read_to_string(project.join("src/feldspar/README.md"))?;
     assert!(readme.contains("feldspar api add-query"), "{readme}");
     assert!(readme.contains("--app todo"), "{readme}");
@@ -308,6 +320,7 @@ async fn a_blank_project_directory_scaffolds_into_the_store_root() -> sc_error::
             "src/feldspar/store.ts",
             "src/feldspar/schema.sql",
             "src/feldspar/README.md",
+            "src/feldspar/SKILL.md",
         ]
     );
 
@@ -381,6 +394,7 @@ async fn the_generated_runtime_is_rewritten_on_build_and_nothing_else_is() -> sc
             "todo/src/feldspar/store.ts",
             "todo/src/feldspar/schema.sql",
             "todo/src/feldspar/README.md",
+            "todo/src/feldspar/SKILL.md",
         ]
     );
 
@@ -444,6 +458,7 @@ async fn the_update_button_rescaffolds_an_empty_directory_and_re_emits_a_populat
             "todo/src/feldspar/store.ts",
             "todo/src/feldspar/schema.sql",
             "todo/src/feldspar/README.md",
+            "todo/src/feldspar/SKILL.md",
         ]
     );
     assert_eq!(std::fs::read_to_string(project.join("src/App.tsx"))?, mine);

@@ -4699,9 +4699,6 @@ the corresponding lifecycle transitions by the same helper.
 
 ### 13.6 The administration MCP server, and the API token
 
-*Not yet built; this section is the design the twentieth milestone implements
-([TODO.md](../TODO.md)).*
-
 An application built here is half **code in a git repository** and half **configuration in the
 database**: the tables and their fields, the access rules, the triggers, the workflows, the
 agents. An external coding agent has the first half through the filesystem and, until this
@@ -4950,9 +4947,22 @@ because two answers to "what did `tsc` say?" would be two answers.
 **One route, streamable HTTP, no server-initiated stream.** It sits beside the upload, backup
 and WebSocket routes and **outside** the `EndpointSet` for the reason they do: JSON-RPC over a
 raw body is not a shape `TypeSchema` describes. Every tool here is request/response and there
-is nothing to push, so an SSE channel would be a connection kept alive for no traffic. The
-protocol revision is pinned in **one constant** and checked against the client's — the only
-thing worse than refusing an unsupported revision is negotiating one by accident.
+is nothing to push, so an SSE channel would be a connection kept alive for no traffic.
+
+The protocol revision is pinned in **one constant** and **answered with, never echoed**: the
+specification's lifecycle is that a server which does not speak the revision the client asked
+for replies with one it does, and the client decides whether it can proceed. Refusing the
+handshake instead was tried and was wrong, and a real client found it in a minute — Claude Code
+asks for a later revision than this one, so a server that answers `initialize` with an error is
+a server no current client can connect to *at all*. What must never happen is the client's
+revision being echoed back, which would be agreeing to a protocol nobody here implements.
+
+**A tool result carries `structuredContent` only when it is an object**, and leaves the field
+out otherwise rather than setting it to `null`. That field is defined as an object; a client
+that validates it reads a null as a malformed result and fails the call — which made every
+`list…` tool in tier 2 unusable, since they all answer arrays. The text content carries the
+JSON either way, so omitting the field costs the model nothing and says the truthful thing.
+Wrapping a list in a key nobody declared would be inventing a shape.
 
 **Every call is logged**: one line at `Info` through `sc-log` carrying the token's *label*
 (never the token and never its hash), the tool, the outcome and the duration; the arguments at

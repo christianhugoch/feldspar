@@ -27,6 +27,10 @@ own, for every other kind of box. (Design and planning docs live under
   JavaScript half is in every build; **Python needs a build that has it** (§3), and the
   shipped tarball does not. See [`docs/tutorial-triggers.md`](docs/tutorial-triggers.md)
   and [`docs/tutorial-python.md`](docs/tutorial-python.md).
+- **An external coding agent can administer the installation**, over an MCP server this
+  binary serves on one route — the schema, the triggers, the applications, under a
+  bearer token an admin mints and can revoke. It is **off by default**; see
+  [`docs/tutorial-mcp.md`](docs/tutorial-mcp.md).
 
 The MVP is deliberately scoped: one database, basic column types only, no
 workflows/agents/models, no file stores or applications yet. See the "Out of MVP
@@ -898,6 +902,46 @@ feldspar get-cfg                                     # every setting, key=value
 - **Nothing is restarted.** When a setting takes effect is the setting's own business:
   the logging switches are immediate, the SMTP transport is read per message, and the
   TLS settings are read at boot.
+
+### The administration MCP server
+
+An external coding agent — Claude Code or anything else that speaks MCP over streamable
+HTTP — can read and change this installation's **configuration half**: the tables and
+their fields, the access rules, the triggers, the workflows, the agents, and the
+applications with their custom SQL queries. It is served by this same process on
+`POST /mcp`, and it projects the same administrative surface the admin SPA uses, under
+the same authorization: a token names a **user**, and every call is authorized exactly as
+that person's own admin session would be.
+
+**It is off by default, and off means absent** — the route answers `404` and does not so
+much as read the token table. Two settings turn it on, both in **Settings → Development**
+and both effective on the next request, with no restart:
+
+```bash
+feldspar set-cfg mcp_enabled true          # serve POST /mcp at all
+feldspar set-cfg mcp_loopback_only false   # accept a peer that is not on this machine
+```
+
+`mcp_loopback_only` defaults to **on**: the usual arrangement is an agent running beside
+the server or reaching it down a tunnel the developer made, and an installation that will
+never be administered from elsewhere should be able to say so in a checkbox rather than in
+a reverse proxy.
+
+The credential is minted in the same Settings → Development screen — a label, an expiry,
+and six grants (create, change, drop, access changes, and whether the token may work on
+triggers and on applications) — and it is shown **once**, with the `claude mcp add` line
+built around it. The server keeps only a SHA-256 hash, so a lost token is revoked rather
+than recovered. Two things worth knowing before minting one: **a token is an
+administrator**, bounded only by the grants ticked when it was made, and **revoking it is
+the only way to take it back**.
+
+`Authorization: Bearer` is the only credential the route accepts — a session cookie on it
+is ignored, not honoured, which is why no page an admin visits can reach this surface
+through the session they are logged into.
+
+[`docs/tutorial-mcp.md`](docs/tutorial-mcp.md) walks the whole of it: turning it on,
+minting a token, the one registration line, and a session that adds a field, saves a
+trigger and rebuilds the application the schema change affected.
 
 ### Examples
 
