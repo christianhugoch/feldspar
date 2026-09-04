@@ -46,6 +46,11 @@
 #   /opt/feldspar/ui/admin/dist       the admin SPA it serves
 #   /opt/feldspar/ui/ide/dist         the file-store IDE it serves
 #   /opt/feldspar/install.sh          copies the tree into place
+#   /opt/feldspar/setup-host.sh       sets the host up to run it (packages,
+#                                     database, config file, systemd unit)
+#
+# so that a machine with nothing on it needs three commands and no checkout:
+# unpack, `./install.sh`, `/opt/feldspar/setup-host.sh`.
 #
 # The prefix is not cosmetic: `crates/sc-cli/build.rs` compiles the two bundle
 # paths into the binary, and the IDE's has no run-time flag to override it. This
@@ -62,6 +67,7 @@
 #   scripts/build-static.sh --prefix /usr/local/feldspar
 #   scripts/build-static.sh --no-ui                  # no Node toolchain needed
 #   scripts/build-static.sh --deploy root@vm         # ...and install it there over ssh
+#   scripts/build-static.sh --release                # ...and publish it to the R2 bucket
 #
 set -euo pipefail
 
@@ -88,6 +94,18 @@ NODE_VERSION="22.14.0"
 DEPLOY_HOST=""
 REMOTE_TMP="/tmp"
 SSH_OPTS=()
+RELEASE=0
+# The bucket the published artifact lives in. The objects inside it are named
+# without a version — `feldspar.tar.gz` — because they are the *latest* build:
+# whatever fetches them wants the current one and has no version to ask for.
+readonly DEFAULT_R2_BUCKET="feldspar-latest-static"
+R2_BUCKET="${DEFAULT_R2_BUCKET}"
+R2_OBJECT="feldspar.tar.gz"
+# What that bucket is served as, and what the README tells an operator to
+# download. Printed after a publish so that what was uploaded and what people
+# fetch are visibly the same thing. A --bucket somewhere else has no such URL and
+# is not given one.
+readonly R2_PUBLIC_BASE="https://feldspar-latest-static.saltcorn.com"
 
 # The targets that have a prebuilt V8 archive and a glibc to link statically.
 readonly SUPPORTED_TARGETS=(
@@ -154,6 +172,19 @@ Deployment
                         value together (-p2222, not -p 2222).
       --remote-tmp DIR  Directory on the remote to copy and unpack into
                         (default ${REMOTE_TMP}). Removed again afterwards.
+
+Publishing
+      --release         After packaging, upload the tarball and its .sha256 to the
+                        Cloudflare R2 bucket ${R2_BUCKET}, as
+                        ${R2_OBJECT} and ${R2_OBJECT}.sha256 — the object names
+                        carry no version, so each release overwrites the last and
+                        the download URL never changes:
+                          ${R2_PUBLIC_BASE}/${R2_OBJECT}
+                          ${R2_PUBLIC_BASE}/${R2_OBJECT}.sha256
+                        Runs
+                        \`npx wrangler r2 object put --remote\`, so it needs npx on
+                        PATH and a wrangler login with access to the bucket.
+      --bucket NAME     Upload to this bucket instead (default ${R2_BUCKET}).
   -h, --help            This message.
 EOF
 }
@@ -182,6 +213,8 @@ while [[ $# -gt 0 ]]; do
         --deploy)          need_value "$@"; DEPLOY_HOST="$2"; shift 2 ;;
         --ssh-opt)         need_value "$@"; SSH_OPTS+=("$2"); shift 2 ;;
         --remote-tmp)      need_value "$@"; REMOTE_TMP="$2"; shift 2 ;;
+        --release)         RELEASE=1; shift ;;
+        --bucket)          need_value "$@"; R2_BUCKET="$2"; shift 2 ;;
         -h|--help)         usage; exit 0 ;;
         *)                 echo "error: unknown option $1" >&2; echo >&2; usage >&2; exit 2 ;;
     esac
@@ -222,6 +255,17 @@ if [[ -n "${DEPLOY_HOST}" ]]; then
         { echo "error: --remote-tmp must be absolute, got ${REMOTE_TMP}" >&2; exit 2; }
     command -v ssh >/dev/null ||
         { echo "error: --deploy needs ssh, which is not on PATH" >&2; exit 1; }
+fi
+
+# Likewise for --release: an absent npx, or a wrangler that cannot see the bucket,
+# is worth finding out now and not after the compile. The bucket listing is a
+# warning rather than an error — it costs a network round trip that can fail for
+# reasons that have nothing to do with the upload — but a missing npx cannot work
+# at all.
+if [[ ${RELEASE} -eq 1 ]]; then
+    [[ -n "${R2_BUCKET}" ]] || { echo "error: --bucket must not be empty" >&2; exit 2; }
+    command -v npx >/dev/null ||
+        { echo "error: --release needs npx (node), which is not on PATH" >&2; exit 1; }
 fi
 
 # A container build needs both docker and its buildx plugin; `docker build` alone
@@ -445,6 +489,17 @@ fi
 # Package
 # ---------------------------------------------------------------------------
 
+# The host-side installer travels inside the artifact. A machine that has just
+# downloaded a tarball has no checkout to fetch it from, and it is the second of
+# the two commands a new host needs — `install.sh` puts the tree at ${PREFIX},
+# `setup-host.sh` gives it a database, a service account and a unit. It is not
+# put on PATH: it is run once.
+readonly SETUP_HOST="${REPO_ROOT}/scripts/setup-host.sh"
+[[ -f "${SETUP_HOST}" ]] ||
+    { echo "error: ${SETUP_HOST} is missing; it belongs in the artifact" >&2; exit 1; }
+cp "${SETUP_HOST}" "${STAGE}/setup-host.sh"
+chmod +x "${STAGE}/setup-host.sh"
+
 cat > "${STAGE}/install.sh" <<EOF
 #!/usr/bin/env sh
 # Install this artifact at the prefix it was built for.
@@ -472,8 +527,22 @@ if [ -d "\${SRC}/ui" ]; then
 fi
 chmod +x "\${PREFIX}/bin/feldspar"
 
+# Beside the tree rather than inside bin/: it is run once, by a person, and has
+# no business on PATH. Run from there it knows it is looking at an installed
+# artifact and does not offer to build one from source.
+cp "\${SRC}/setup-host.sh" "\${PREFIX}/setup-host.sh"
+chmod +x "\${PREFIX}/setup-host.sh"
+
 echo "installed \${PREFIX}/bin/feldspar"
-echo "add it to PATH:  ln -sf \${PREFIX}/bin/feldspar /usr/local/bin/feldspar"
+echo
+echo "next, set this host up to run it — packages, PostgreSQL, a service account,"
+echo "/etc/feldspar/feldspar.toml and a systemd unit:"
+echo "  sudo \${PREFIX}/setup-host.sh --domain example.com"
+echo "  sudo \${PREFIX}/setup-host.sh --help       # every option"
+echo "  sudo \${PREFIX}/setup-host.sh --dry-run    # what it would do, doing nothing"
+echo
+echo "that also puts feldspar on PATH. On a host that is already set up, only the"
+echo "service needs restarting:  sudo systemctl restart feldspar"
 EOF
 chmod +x "${STAGE}/install.sh"
 
@@ -485,8 +554,23 @@ interpreter, so it runs on glibc distributions (Debian, Ubuntu, RHEL) and on mus
 ones (Alpine) without anything installed alongside it.
 
 Install
-  sudo ./install.sh          # copies this tree to ${PREFIX}
-  ${PREFIX}/bin/feldspar     # prints the available commands
+  sudo ./install.sh
+      copies this tree to ${PREFIX}
+  sudo ${PREFIX}/setup-host.sh --domain example.com
+      sets this host up to run it: packages, PostgreSQL, the feldspar service
+      account, /etc/feldspar/feldspar.toml and a systemd unit. Once, on a new
+      host; --dry-run first if you would rather read it than run it.
+  ${PREFIX}/bin/feldspar
+      prints the available commands
+
+On a host that already has a database, a service account and a unit, the first
+command is the whole upgrade — restart the service afterwards.
+
+Where a newer one comes from
+  ${R2_PUBLIC_BASE}/${R2_OBJECT}
+  ${R2_PUBLIC_BASE}/${R2_OBJECT}.sha256
+  That URL is always the latest build; it carries no version, so there is nothing
+  to look up. \`sha256sum -c ${R2_OBJECT}.sha256\` checks a download.
 
 Run
   feldspar serve --database-url postgres://user:pass@host/db
@@ -497,6 +581,8 @@ Run
 
 What is in the tarball
   bin/feldspar          the server and management CLI
+  setup-host.sh         the host setup, run once from ${PREFIX} after install.sh.
+                        Debian and Ubuntu; --dry-run prints what it would do.
 $(if [[ ${BUILD_UI} -eq 1 ]]; then
 cat <<INNER
   ui/admin/dist         the admin SPA, served by \`feldspar serve\`
@@ -540,6 +626,52 @@ tar -czf "${TARBALL}" -C "${STAGE}" --transform "s,^\.,${NAME}," .
 (cd "${OUTPUT_DIR}" && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
 
 log "wrote ${TARBALL} ($(du -h "${TARBALL}" | cut -f1))"
+
+# ---------------------------------------------------------------------------
+# Publish
+# ---------------------------------------------------------------------------
+
+# Copy the artifact to the R2 bucket under a fixed, version-less name, so that an
+# installer can always fetch the same URL and get the newest build.
+publish_to_r2() {
+    if [[ "${GIT_DESC}" == *-dirty ]]; then
+        log "warning: publishing a build from a dirty checkout (${GIT_DESC})"
+    fi
+
+    # The checksum file written next to the tarball names the versioned file it
+    # was computed over, which is not the name it has in the bucket — a
+    # `sha256sum -c` after downloading would look for a file that is not there.
+    # The published copy therefore names the published object.
+    local published_sha="${STAGE}/${R2_OBJECT}.sha256"
+    printf '%s  %s\n' \
+        "$(cut -d' ' -f1 < "${TARBALL}.sha256")" "${R2_OBJECT}" > "${published_sha}"
+
+    log "uploading $(du -h "${TARBALL}" | cut -f1) to r2://${R2_BUCKET}/${R2_OBJECT}"
+    (cd "${REPO_ROOT}" && npx wrangler r2 object put \
+        "${R2_BUCKET}/${R2_OBJECT}" -f "${TARBALL}" --remote)
+
+    log "uploading r2://${R2_BUCKET}/${R2_OBJECT}.sha256"
+    (cd "${REPO_ROOT}" && npx wrangler r2 object put \
+        "${R2_BUCKET}/${R2_OBJECT}.sha256" -f "${published_sha}" --remote)
+
+    log "published ${NAME}.tar.gz as ${R2_BUCKET}/${R2_OBJECT}"
+    if [[ "${R2_BUCKET}" == "${DEFAULT_R2_BUCKET}" ]]; then
+        cat <<EOF
+
+It is now what a new host downloads:
+
+  curl -fLO ${R2_PUBLIC_BASE}/${R2_OBJECT}
+  curl -fLO ${R2_PUBLIC_BASE}/${R2_OBJECT}.sha256
+  sha256sum -c ${R2_OBJECT}.sha256
+  tar -xzf ${R2_OBJECT} && sudo feldspar-*/install.sh
+  sudo ${PREFIX}/setup-host.sh --domain example.com
+EOF
+    fi
+}
+
+if [[ ${RELEASE} -eq 1 ]]; then
+    publish_to_r2
+fi
 
 # ---------------------------------------------------------------------------
 # Deploy
@@ -632,7 +764,12 @@ if [[ -n "${DEPLOY_HOST}" ]]; then
     deploy_to_host
     cat <<EOF
 
-Installed on ${DEPLOY_HOST}. Run it there with:
+Installed on ${DEPLOY_HOST}. If this is a host that has never run feldspar, give
+it a database, a service account and a unit — once:
+
+  ssh -t ${DEPLOY_HOST} 'sudo ${PREFIX}/setup-host.sh --domain example.com'
+
+Otherwise it is already running the new binary, or run it by hand with:
 
   ssh ${DEPLOY_HOST} '${PREFIX}/bin/feldspar serve --environment prod'
 EOF
@@ -643,7 +780,7 @@ Install it on the target VM with:
 
   scp ${TARBALL} vm:/tmp/
   ssh vm 'tar -xzf /tmp/${NAME}.tar.gz -C /tmp && sudo /tmp/${NAME}/install.sh'
-  ssh vm '${PREFIX}/bin/feldspar'
+  ssh vm 'sudo ${PREFIX}/setup-host.sh --domain example.com'   # first time only
 
 or have this script do it next time:
 

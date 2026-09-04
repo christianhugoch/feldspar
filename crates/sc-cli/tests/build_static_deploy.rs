@@ -91,6 +91,13 @@ fn fixture(name: &str) -> Fixture {
         repo.join("scripts/build-static.sh"),
     )
     .expect("copy build-static.sh");
+    // The packaging step puts this in the artifact, so the throwaway repository
+    // has to have one.
+    fs::copy(
+        root.join("scripts/setup-host.sh"),
+        repo.join("scripts/setup-host.sh"),
+    )
+    .expect("copy setup-host.sh");
     fs::copy(root.join("Cargo.toml"), repo.join("Cargo.toml")).unwrap();
 
     let bin = dir.join("bin");
@@ -246,7 +253,29 @@ fn deploy_copies_unpacks_and_installs_over_ssh() {
         "the installed binary is not executable"
     );
 
-    // 2. It cleaned up after itself: the tarball, the unpacked tree and the
+    // 2. The host installer came with it, executable, beside the tree rather than
+    //    on PATH: `sudo /opt/feldspar/setup-host.sh` is the next thing a new host
+    //    runs, and it has no checkout to get it from.
+    let setup = prefix.join("setup-host.sh");
+    assert!(
+        setup.is_file(),
+        "the artifact should install {setup:?}\n{stdout}\n{stderr}"
+    );
+    assert!(
+        fs::metadata(&setup).unwrap().permissions().mode() & 0o111 != 0,
+        "the installed setup-host.sh is not executable"
+    );
+    assert_eq!(
+        fs::read_to_string(&setup).unwrap(),
+        fs::read_to_string(workspace_root().join("scripts/setup-host.sh")).unwrap(),
+        "the installed setup-host.sh should be this repository's",
+    );
+    assert!(
+        !prefix.join("bin/setup-host.sh").exists(),
+        "setup-host.sh does not belong on PATH; it is run once"
+    );
+
+    // 3. It cleaned up after itself: the tarball, the unpacked tree and the
     //    generated remote script are all gone from the staging directory.
     let leftovers: Vec<String> = fs::read_dir(remote_tmp)
         .expect("the remote staging directory should still exist")
@@ -257,7 +286,7 @@ fn deploy_copies_unpacks_and_installs_over_ssh() {
         "the deploy left {leftovers:?} in {remote_tmp:?}"
     );
 
-    // 3. The artifact is still written locally — a deploy is in addition to the
+    // 4. The artifact is still written locally — a deploy is in addition to the
     //    tarball, not instead of it.
     let tarballs: Vec<String> = fs::read_dir(dir.join("dist"))
         .expect("dist")
@@ -266,7 +295,7 @@ fn deploy_copies_unpacks_and_installs_over_ssh() {
         .collect();
     assert_eq!(tarballs.len(), 1, "expected one tarball, got {tarballs:?}");
 
-    // 4. What went over the wire, in order: the reachability probe before the
+    // 5. What went over the wire, in order: the reachability probe before the
     //    build, the tarball, the remote script, and the run of that script. And
     //    --ssh-opt reached every one of them.
     let sent = fs::read_to_string(log).expect("the ssh stub should have logged");
@@ -301,7 +330,7 @@ fn deploy_copies_unpacks_and_installs_over_ssh() {
         "the script should report where it installed:\n{stdout}"
     );
 
-    // 5. A service that was not running is not touched: no stop, and above all
+    // 6. A service that was not running is not touched: no stop, and above all
     //    no start of something the operator had deliberately left down.
     assert!(
         f.systemctl_calls().is_empty(),

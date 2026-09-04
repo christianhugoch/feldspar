@@ -387,6 +387,74 @@ fn an_existing_config_and_unit_are_kept_unless_forced() {
 /// The header is the interface for someone who has never seen the repository:
 /// it has to carry a working `curl … | sh` line with the raw URL in it, and
 /// --help has to list the flag that makes the two-step install two steps.
+/// Run from inside an installed artifact — `/opt/feldspar/setup-host.sh`, beside
+/// the binary the tarball's install.sh put there — the script must not offer to
+/// install rustup and build a second copy. Its own location picks `--static`, and
+/// the prefix follows it, so the tarball workflow (unpack, install.sh,
+/// setup-host.sh) needs no flags at all.
+#[test]
+fn a_copy_beside_an_installed_binary_defaults_to_static() {
+    let dir = scratch("in-prefix");
+    let prefix = dir.join("opt/feldspar");
+    write_executable(&prefix.join("bin/feldspar"), "#!/bin/sh\necho feldspar\n");
+    let installed = prefix.join("setup-host.sh");
+    fs::copy(script(), &installed).unwrap();
+    fs::set_permissions(&installed, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = Command::new("sh")
+        .arg(&installed)
+        .args(["--dry-run", "--domain", "example.com"])
+        .output()
+        .expect("run the installed setup-host.sh");
+    let plan = stdout_of(&out);
+    assert!(out.status.success(), "{plan}");
+
+    assert!(
+        plan.contains("static install"),
+        "a copy inside the prefix should default to --static:\n{plan}"
+    );
+    // The prefix followed the script, so the unit points at the binary beside it
+    // even though this artifact is not at /opt/feldspar.
+    assert!(
+        plan.contains(&format!("binary {}", prefix.join("bin/feldspar").display())),
+        "the prefix should follow the script's own location:\n{plan}"
+    );
+    assert!(
+        !plan.contains("rustup") && !plan.contains("git clone") && !plan.contains("cargo build"),
+        "nothing is built when the binary is already here:\n{plan}"
+    );
+    assert!(
+        !plan.contains("libclang-dev"),
+        "a static install needs no build dependencies:\n{plan}"
+    );
+
+    // And the choice is a default, not a decision: --from-source still wins.
+    let out = Command::new("sh")
+        .arg(&installed)
+        .args(["--dry-run", "--from-source"])
+        .output()
+        .unwrap();
+    let plan = stdout_of(&out);
+    assert!(
+        plan.contains("source install") && plan.contains("libclang-dev"),
+        "--from-source must override the location:\n{plan}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// The same file *outside* an installed tree — a checkout, or piped from curl —
+/// keeps building from source as the default.
+#[test]
+fn a_checkout_copy_still_defaults_to_source() {
+    let out = run_plain(&["--dry-run", "--domain", "example.com"]);
+    let plan = stdout_of(&out);
+    assert!(
+        plan.contains("source install"),
+        "the repository's own copy should still default to a source build:\n{plan}"
+    );
+}
+
 #[test]
 fn the_header_documents_the_curl_and_wget_invocations() {
     let text = fs::read_to_string(script()).expect("read setup-host.sh");

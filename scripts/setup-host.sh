@@ -7,19 +7,30 @@
 #
 # The two ways to get a binary onto the host
 # ------------------------------------------
-# 1. **Static artifact — two steps, and no toolchain on the host.** From your
-#    workstation, in a checkout of this repository:
+# 1. **Static artifact — no toolchain on the host.** The release tarball carries
+#    a copy of *this script*, so a host with nothing on it needs no checkout and
+#    no curl-into-a-shell:
+#
+#        tar -xzf feldspar.tar.gz
+#        sudo feldspar-*/install.sh                      # the tree at /opt/feldspar
+#        sudo /opt/feldspar/setup-host.sh --domain example.com
+#
+#    Run from ${PREFIX} like that, the script sees the binary beside it and takes
+#    --static as the default; there is nothing to build.
+#
+#    The same artifact can be pushed from a workstation instead, in a checkout of
+#    this repository:
 #
 #        scripts/build-static.sh --deploy root@host      # builds, copies, installs
 #
-#    and on the host itself, once:
+#    and then, on the host, `sudo /opt/feldspar/setup-host.sh --domain example.com`.
+#    Either order works: with --static this script never starts a server whose
+#    binary is not there yet — it enables the unit and leaves it stopped, so an
+#    earlier setup is followed by `systemctl start feldspar`. Downloaded on its
+#    own rather than out of a tarball, it still needs the flag:
 #
 #        curl -fsSL https://raw.githubusercontent.com/saltcorn/feldspar/main/scripts/setup-host.sh \
 #          | sh -s -- --static --domain example.com
-#
-#    That is the whole installation. Either order works: with --static this script
-#    never starts a server whose binary is not there yet — it enables the unit and
-#    leaves it stopped, so the deploy is followed by `systemctl start feldspar`.
 #
 # 2. **From source on the host — one step, but the host does the building.** The
 #    default: rustup, a clone and a release build, which wants a C toolchain,
@@ -51,10 +62,30 @@ set -eu
 # Defaults
 # ---------------------------------------------------------------------------
 
-MODE="source"           # or "static": a binary that build-static.sh --deploy puts there
+MODE="source"           # or "static": a binary the release tarball put there
 DOMAIN=""               # base_domain; without one only the admin UI is served
 BIND="0.0.0.0:80"
 PREFIX="/opt/feldspar"  # must match build-static.sh --prefix
+
+# Run out of an installed artifact — /opt/feldspar/setup-host.sh, beside the
+# bin/feldspar that install.sh just put there — a *source* install is not what
+# anybody means: the binary is already here, and building a second one would need
+# the toolchain the static artifact exists to avoid. So the location of this file
+# picks the default, and the prefix follows it, which is also what makes an
+# artifact installed somewhere other than /opt/feldspar work with no flags.
+# --from-source and --prefix still override; a script arriving on stdin down a
+# pipe has no location and changes nothing here.
+case "$0" in
+    */*)
+        if [ -f "$0" ]; then
+            SELF_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+            if [ -x "${SELF_DIR}/bin/feldspar" ]; then
+                MODE="static"
+                PREFIX="${SELF_DIR}"
+            fi
+        fi
+        ;;
+esac
 SERVICE_USER="feldspar"
 DB_NAME="feldspar"
 DB_USER="feldspar"
@@ -80,12 +111,16 @@ Usage: setup-host.sh [options]
 
 How the binary gets here
       --static          Do not install a Rust toolchain, clone or build. The binary
-                        is expected at ${PREFIX}/bin/feldspar, where
-                        \`scripts/build-static.sh --deploy this-host\` puts it. The
-                        deploy may happen before or after this script; the unit is
-                        only started once the binary is actually there.
-      --from-source     Install rustup, clone the repository and build it here
-                        (the default). Needs a C toolchain, libclang and RAM.
+                        is expected at ${PREFIX}/bin/feldspar, where the release
+                        tarball's install.sh — and \`build-static.sh --deploy\` —
+                        put it. Already the default when this script is run from
+                        that tree (${PREFIX}/setup-host.sh), which is where the
+                        tarball installs a copy of it. The binary may arrive
+                        before or after this script; the unit is only started once
+                        it is actually there.
+      --from-source     Install rustup, clone the repository and build it here.
+                        The default when this script is *not* run from an
+                        installed artifact. Needs a C toolchain, libclang and RAM.
       --repo URL        Repository to clone (default ${REPO}).
       --branch NAME     Branch to check out (default ${BRANCH}).
       --src DIR         Where to clone it (default ${SRC_DIR}).
@@ -362,7 +397,7 @@ else
     if [ -x "${BINARY}" ]; then
         note "found the deployed binary at ${BINARY}"
     else
-        note "no binary at ${BINARY} yet — deploy one with build-static.sh --deploy"
+        note "no binary at ${BINARY} yet — unpack a release tarball and run its install.sh"
         START=0
     fi
     # On PATH under its own name, for `feldspar build-app` and friends. A symlink
@@ -497,7 +532,8 @@ if [ "${START}" -eq 1 ]; then
 else
     log "the unit is enabled but not running"
     if [ "${MODE}" = "static" ] && [ ! -x "${BINARY}" ]; then
-        note "put a binary there from a checkout on your workstation:"
+        note "put a binary there: unpack a release tarball and run its install.sh,"
+        note "or from a checkout on your workstation:"
         note "  scripts/build-static.sh --deploy $(id -un)@$(uname -n)"
     fi
     note "then: ${SUDO:+sudo }systemctl start ${UNIT_NAME}"

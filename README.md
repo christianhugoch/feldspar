@@ -49,6 +49,32 @@ it properly — read those when something does not fit your box. If you only wan
 Everything below assumes a `sudo`-capable login, and uses `example.com` as the
 domain applications will be served under.
 
+**The short way: download the built binary.** There is a prebuilt, statically
+linked artifact of the latest build. It needs no Rust, no C toolchain and no
+checkout: it is all of §2 with the build taken out.
+
+```bash
+curl -fLO https://feldspar-latest-static.saltcorn.com/feldspar.tar.gz
+curl -fLO https://feldspar-latest-static.saltcorn.com/feldspar.tar.gz.sha256
+sha256sum -c feldspar.tar.gz.sha256                     # optional, and quick
+tar -xzf feldspar.tar.gz
+sudo feldspar-*/install.sh                              # the tree at /opt/feldspar
+sudo /opt/feldspar/setup-host.sh --domain example.com   # packages, database, unit
+```
+
+The tarball carries `setup-host.sh`, so the second command puts it at
+`/opt/feldspar/setup-host.sh` and the third runs it from there — it finds the binary
+beside it, and does everything §2.1–§2.6 does except build (PostgreSQL, the
+`feldspar` service account, the role and database, `/etc/feldspar/feldspar.toml`,
+the systemd unit, and `feldspar` on `PATH`). `--dry-run` prints all of it without
+doing any of it, and `--help` lists the options. Then continue at §2.7, which is DNS,
+the first admin user and TLS.
+
+Those URLs carry no version: they are always the *latest* build, which is also how a
+host is upgraded (§2.8). Two things the artifact does not have: **Python triggers**,
+which need a dynamically linked build (§3), and support for native Node addons in
+modules (§4.1). Everything else in this README applies to it unchanged.
+
 **Or run it as a script.** `scripts/setup-host.sh` is this section — packages, the
 service account, the role and database, `feldspar.toml`, the unit — and it can be
 fetched and run on a bare host:
@@ -58,14 +84,17 @@ curl -fsSL https://raw.githubusercontent.com/saltcorn/feldspar/main/scripts/setu
   | sh -s -- --domain example.com            # builds from source here, as §2.4 does
 ```
 
-With a binary built elsewhere (§4.1) an installation is two commands and the host
-never sees a toolchain — from your workstation:
+That is the from-source route. The download above skips it: run from inside an
+installed artifact, `setup-host.sh` finds the binary beside it and takes `--static`
+as its default, so there is nothing to build and no flag to remember. The same
+artifact can be built and pushed from a workstation instead of downloaded (§4.1) —
 
 ```bash
 scripts/build-static.sh --deploy root@host   # build, copy, unpack, install
 ```
 
-and on the host:
+— and then `sudo /opt/feldspar/setup-host.sh --domain example.com` on the host.
+Fetched on its own rather than out of a tarball, the script still needs the flag:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/saltcorn/feldspar/main/scripts/setup-host.sh \
@@ -336,8 +365,22 @@ sudo install -m 0755 target/release/feldspar /usr/local/bin/feldspar
 sudo systemctl restart feldspar
 ```
 
-A host installed from a static artifact is updated from the workstation instead —
-the deploy replaces the binary in place, and nothing on the host restarts by itself:
+A host installed from a static artifact is updated by installing a newer one. Only
+the binary and the bundles change — `setup-host.sh` is not run again, the database,
+`feldspar.toml` and the unit are left alone — and nothing restarts by itself. On the
+host, from the same version-less URL as the install:
+
+```bash
+curl -fLO https://feldspar-latest-static.saltcorn.com/feldspar.tar.gz
+tar -xzf feldspar.tar.gz
+sudo feldspar-*/install.sh          # over the running install; ETXTBSY if it is up
+sudo systemctl restart feldspar
+```
+
+`install.sh` copies over `/opt/feldspar/bin/feldspar`, and the kernel refuses to write
+the executable of a live process, so stop the service first (`sudo systemctl stop
+feldspar`) if that is where it fails. Or push a build from the workstation, which
+stops and starts the unit around the install for you:
 
 ```bash
 scripts/build-static.sh --deploy root@host
@@ -467,6 +510,7 @@ packaged artifact instead:
 ```bash
 scripts/build-static.sh                    # dist/feldspar-<version>-<target>.tar.gz
 scripts/build-static.sh --deploy root@vm   # ...and install it on that machine
+scripts/build-static.sh --release          # ...and publish it to the R2 bucket
 scripts/build-static.sh --help             # targets, install prefix, options
 ```
 
@@ -475,9 +519,12 @@ dependencies and no interpreter: the same tarball runs on Debian, Ubuntu, RHEL a
 on Alpine. **That is also why it has no Python** — embedding CPython means linking
 `libpython`, which a static binary cannot do (and could not `dlopen` a C-extension wheel
 even if it did), so a Python-capable server is the separate dynamically-linked build of
-§3 rather than this artifact. It carries the admin SPA and the IDE beside it, and an `install.sh` that
+§3 rather than this artifact. It carries the admin SPA and the IDE beside it, an `install.sh` that
 puts the tree at `/opt/feldspar` — the prefix compiled into the binary, which
-`--prefix` changes at build time.
+`--prefix` changes at build time — and a copy of `setup-host.sh`, installed at
+`/opt/feldspar/setup-host.sh`. So a machine with nothing on it takes three commands
+and no checkout: unpack, `install.sh`, `setup-host.sh` (§2.2). The last of those is
+run once and is deliberately not on `PATH`.
 
 The destination then needs no Rust, no `libclang` and no C toolchain. It still needs
 a database, and it still needs `npm` if applications will be *built* on it (§7).
@@ -494,6 +541,23 @@ you restart the unit (`sudo systemctl restart feldspar`, §2.6).
 The host still needs a database, a service account and a unit, which is the other
 half of the two-step install: `scripts/setup-host.sh --static` on the host, in
 either order with the deploy (§2).
+
+`--release` publishes instead of deploying: the tarball and its `.sha256` go to the
+Cloudflare R2 bucket `feldspar-latest-static` (`--bucket` for another) through
+`npx wrangler r2 object put --remote`, as `feldspar.tar.gz` and
+`feldspar.tar.gz.sha256`. That bucket is what §2 downloads:
+
+```
+https://feldspar-latest-static.saltcorn.com/feldspar.tar.gz
+https://feldspar-latest-static.saltcorn.com/feldspar.tar.gz.sha256
+```
+
+The object names carry no version — this is the *latest*
+build, and a machine fetching it has no version to ask for — so each release
+overwrites the last and the download URL never changes. The published checksum file
+names `feldspar.tar.gz` rather than the versioned file it was computed over, so
+`sha256sum -c` works on what was downloaded. It needs a `wrangler` login with access
+to the bucket; that `npx` is on `PATH` is checked before the build starts.
 
 **Name resolution does not go through glibc.** A statically linked binary that calls
 `getaddrinfo` gets glibc's NSS machinery, which `dlopen`s a shared object for every

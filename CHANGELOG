@@ -2,6 +2,94 @@
 
 Changes in reverse chronological order.
 
+## A download URL for the release artifact
+
+The bucket `--release` publishes to is served at a public hostname, so the
+quick start no longer begins with a checkout and a compiler. README §2 now opens
+with the download, and it is the whole of §2 with the build taken out:
+
+    curl -fLO https://feldspar-latest-static.saltcorn.com/feldspar.tar.gz
+    curl -fLO https://feldspar-latest-static.saltcorn.com/feldspar.tar.gz.sha256
+    sha256sum -c feldspar.tar.gz.sha256
+    tar -xzf feldspar.tar.gz
+    sudo feldspar-*/install.sh
+    sudo /opt/feldspar/setup-host.sh --domain example.com
+
+- **The URL carries no version**, like the object behind it, so it is also the
+  upgrade: §2.8 fetches the same URL, re-runs `install.sh` and restarts the unit
+  — and says why that copy fails with `ETXTBSY` while the server is running.
+- **A publish prints the URL.** `--release` ends with the six commands above, so
+  what was uploaded and what an operator is told to fetch are visibly the same
+  artifact. A `--bucket` somewhere else is *not* served there and is given no
+  URL — printing one would point at the previous release.
+- The artifact's own README gained a "where a newer one comes from" section, and
+  §4.1 names the bucket's public URLs beside the upload it describes.
+- **Tests**: a publish must print the public URL *and* that URL must appear in
+  README.md, so the two cannot drift apart unnoticed; a `--bucket` run must not
+  mention the domain at all.
+
+## The release tarball carries the host installer
+
+A new machine had to reach back to the repository for `scripts/setup-host.sh` —
+a `curl … | sh` off GitHub, on a host that had just been handed a self-contained
+artifact precisely so it would need nothing else. The artifact now carries the
+script, and `install.sh` puts it at `${PREFIX}/setup-host.sh`. The workflow on a
+bare host is three commands and no checkout:
+
+    tar -xzf feldspar.tar.gz
+    sudo feldspar-*/install.sh
+    sudo /opt/feldspar/setup-host.sh --domain example.com
+
+- **Beside the tree, not on `PATH`.** It is run once, by a person, and `PATH`
+  is for the binary.
+- **Its own location picks `--static`.** Run from inside an installed artifact —
+  a `bin/feldspar` sitting next to it — `setup-host.sh` defaults to the static
+  install and takes the prefix from where it found itself, so an artifact
+  installed somewhere other than `/opt/feldspar` also needs no flags. A copy in a
+  checkout, or one piped in from `curl` (which has no location at all), still
+  defaults to building from source, and `--from-source` and `--prefix` override
+  either way. Without this the documented three-command workflow would have
+  installed rustup and built a second binary on a host chosen for having no
+  toolchain.
+- `install.sh` now ends by naming the next command rather than a `ln -s`, and the
+  tarball's README, the deploy's closing message and README §2.2/§2.8/§4.1 all
+  describe the tarball route.
+- **Tests**: the deploy test asserts the installed tree has an executable
+  `setup-host.sh` identical to this repository's and nothing in `bin/`; the
+  release test asserts the published tarball contains it; and two new
+  `setup_host.rs` tests cover the location-derived default — a copy beside a
+  binary plans a static install at its own prefix and never mentions rustup, and
+  the repository's own copy still plans a source build.
+
+## `build-static.sh --release`: publishing the artifact
+
+`scripts/build-static.sh` could build a tarball and it could install one on a
+host over ssh; there was no way to put one where anything else could fetch it.
+`--release` uploads the tarball and its checksum to a Cloudflare R2 bucket
+(`feldspar-latest-static` by default, `--bucket` for another) with
+`npx wrangler r2 object put --remote`.
+
+- **The objects carry no version.** They are `feldspar.tar.gz` and
+  `feldspar.tar.gz.sha256`, so each release overwrites the last and whatever
+  fetches the newest build asks for the same URL every time — the bucket holds
+  *latest*, not a history, and a fetcher that has no version to ask for does not
+  need one.
+- **The published checksum names the published object.** `sha256sum` writes the
+  versioned filename it hashed, which is not the name the file has in the bucket,
+  so a `sha256sum -c` after downloading would look for a file that is not there.
+  The uploaded copy is rewritten to name `feldspar.tar.gz`; the local
+  `dist/*.sha256` is untouched.
+- **A missing `npx` is a failure before the build, not after it** — the same rule
+  `--deploy` already followed, for the same reason: finding out at the end of a V8
+  compile that the artifact has nowhere to go is finding out too late. An empty
+  `--bucket` is refused there too, and publishing from a dirty checkout warns.
+- **Tests** (`crates/sc-cli/tests/build_static_release.rs`) drive the script in a
+  throwaway repository with stub `cargo`/`rustup`/`npx` on `PATH` — the `npx` stub
+  records its argv and keeps a copy of every file it was handed, so the assertions
+  are about what would have landed in the bucket rather than about the script's
+  text: the two object names, the tarball byte for byte, the rewritten checksum,
+  `--bucket`, a failed upload failing the run, and the pre-build refusal.
+
 ## The generated SKILL.md, and the documentation
 
 Phase 6 of the administration MCP server: the half of the milestone that is not

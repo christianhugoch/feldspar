@@ -21,6 +21,8 @@ mod build_app;
 mod build_script;
 #[path = "build_static_deploy.rs"]
 mod build_static_deploy;
+#[path = "build_static_release.rs"]
+mod build_static_release;
 #[path = "config_file.rs"]
 mod config_file;
 #[path = "config_values.rs"]

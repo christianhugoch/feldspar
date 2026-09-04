@@ -25,6 +25,7 @@ node_modules/
 # Build output from bundlers (kept out of the repo; assets are built in CI/at runtime)
 dist/
 build/
+.wrangler/
 
 # Dependency / debug logs
 npm-debug.log*
