@@ -32,6 +32,12 @@
 //! the project's `dependencies` across the install, which is the one answer that
 //! is right for all three.
 //!
+//! **npm 9.3.0 is the floor**, and it is checked before an install rather than
+//! discovered during one: the `file:` dependency and the override above are a
+//! pair that npm 9.2.0 — which is what Debian 12, Debian 13 and Ubuntu 24.04
+//! package — cannot resolve, and its own diagnosis of that is a semver error about a
+//! comparator. See [`check_npm_version`].
+//!
 //! A failure carries **npm's own output** (§16): "npm exited 1" is not a
 //! diagnosis, while the registry 404, the unreachable proxy or the ENOSPC
 //! underneath it tells the admin what to do.
@@ -66,6 +72,85 @@ async fn version_of(program: &str) -> bool {
         .status()
         .await
         .is_ok_and(|status| status.success())
+}
+
+/// The oldest npm that can install a module here, as an admin would write it.
+pub const MIN_NPM_VERSION: &str = "9.3.0";
+
+/// The same, to compare against.
+const MIN_NPM: (u64, u64, u64) = (9, 3, 0);
+
+/// What npm on this server's PATH says it is (`11.12.1`), or `None` when there
+/// is no npm to ask.
+///
+/// Asked by the Modules tab beside [`have_npm`], because "there is an npm" is
+/// no longer the whole question: see [`check_npm_version`].
+pub async fn npm_version() -> Option<String> {
+    let output = Command::new("npm").arg("--version").output().await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!version.is_empty()).then_some(version)
+}
+
+/// Whether an npm that reports itself as `version` is too old to install a
+/// module. See [`check_npm_version`] for what breaks and why.
+pub fn npm_too_old(version: &str) -> bool {
+    parse_version(version).is_some_and(|v| v < MIN_NPM)
+}
+
+/// `9.2.0` → `(9, 2, 0)`; `None` for anything that is not three numbers.
+///
+/// Prerelease and build metadata (`10.0.0-pre.3`) are cut off rather than
+/// ordered, because the only question here is which side of 9.3.0 a version is
+/// on and no prerelease of a later major is on the wrong one.
+fn parse_version(version: &str) -> Option<(u64, u64, u64)> {
+    let core = version.trim().split(['-', '+']).next()?;
+    let mut parts = core.split('.');
+    let mut next = || parts.next()?.parse::<u64>().ok();
+    let version = (next()?, next()?, next()?);
+    Some(version)
+}
+
+/// Refuse an npm that cannot install a module in this project, saying which
+/// npm would.
+///
+/// The modules root depends on the v1 API stubs at a `file:` path **and**
+/// overrides the same package names ([`Installer::write_overrides`]), and npm
+/// before 9.3.0 cannot resolve that pair. Arborist 6.1.5's
+/// `OverrideSet.getEdgeRule` hands the dependent edge's specifier straight to
+/// semver — `semver.intersects(edge.spec, rule.keySpec)` — and a `file:` path
+/// is not a version range, so the install dies with `Invalid comparator:
+/// file:/…/v1-api-stub/saltcorn-data`. It dies whatever was being installed:
+/// the edge it chokes on is the project's own, so a module with no
+/// `@saltcorn/*` dependency at all fails the same way. Arborist 6.1.6 — npm
+/// 9.3.0 — parses the specifier first and accepts a file, directory or tag one
+/// as a match, which is the fix.
+///
+/// This is a live problem rather than a historical one: Debian 12, Debian 13
+/// and Ubuntu 24.04 all package npm **9.2.0**, so a host given Node from the
+/// distribution's own repository is on the wrong side of it, and every Install
+/// click on it failed with a semver error that named nothing an admin could
+/// act on. `scripts/setup-host.sh` installs Node from NodeSource for this
+/// reason; a host set up by hand gets the sentence below instead.
+///
+/// An npm that cannot be asked its version, or answers something unparseable,
+/// is let through: the check exists to explain a known failure, and refusing an
+/// install over an unrecognised version string would invent a new one.
+fn check_npm_version(version: Option<&str>) -> Result<()> {
+    let Some(version) = version.filter(|v| npm_too_old(v)) else {
+        return Ok(());
+    };
+    Err(Error::config(format!(
+        "npm {version} is too old to install a module: it cannot resolve the local \
+         @saltcorn/* stub packages this server's modules directory depends on, and every \
+         install fails with `Invalid comparator: file:…` whatever is being installed. \
+         npm {MIN_NPM_VERSION} or newer is needed. Debian and Ubuntu package npm 9.2.0, so \
+         this is what `apt install npm` gives: install Node.js from NodeSource (which is \
+         what scripts/setup-host.sh does), or upgrade npm alone with \
+         `sudo npm install -g npm@latest`."
+    )))
 }
 
 /// The name of the npm project file this crate writes into the modules root.
@@ -343,6 +428,10 @@ impl Installer {
     /// one would be resolved against the modules root rather than against
     /// wherever the admin was standing.
     pub async fn install(&self, source: ModuleSource, location: &str) -> Result<InstalledPackage> {
+        // Before the project is written, because what this refuses is npm's
+        // ability to resolve the project at all — and a message naming the npm
+        // that would work is worth more than the semver error underneath it.
+        check_npm_version(npm_version().await.as_deref())?;
         self.ensure_project().await?;
 
         let spec = match source {
@@ -657,6 +746,48 @@ mod tests {
             .installed_name(&deps, &deps, ModuleSource::Npm, "@saltcorn/mqtt@0.2.0")
             .unwrap();
         assert_eq!(name, "@saltcorn/mqtt");
+    }
+
+    #[test]
+    fn a_version_is_three_numbers_and_nothing_after_them() {
+        assert_eq!(parse_version("9.2.0"), Some((9, 2, 0)));
+        assert_eq!(parse_version("11.12.1\n"), Some((11, 12, 1)));
+        assert_eq!(parse_version("10.0.0-pre.3"), Some((10, 0, 0)));
+        assert_eq!(parse_version("not a version"), None);
+        assert_eq!(parse_version("9.2"), None);
+    }
+
+    #[test]
+    fn npm_9_2_0_is_refused_and_9_3_0_is_not() {
+        // The two sides of the arborist 6.1.5/6.1.6 boundary, which is the
+        // whole of the rule: 9.2.0 is what Debian and Ubuntu package.
+        assert!(npm_too_old("9.2.0"));
+        assert!(npm_too_old("8.19.4"));
+        assert!(!npm_too_old("9.3.0"));
+        assert!(!npm_too_old("10.9.3"));
+        assert!(!npm_too_old("11.12.1"));
+        // Nothing to compare is nothing to refuse.
+        assert!(!npm_too_old("bundled with node"));
+    }
+
+    #[test]
+    fn a_too_old_npm_is_refused_by_name_before_anything_is_installed() {
+        let err = check_npm_version(Some("9.2.0")).unwrap_err();
+        let message = err.to_string();
+        // What it is, what would work, and what to do about it — an admin
+        // reading `Invalid comparator: file:…` has none of the three.
+        assert!(message.contains("npm 9.2.0"), "{message}");
+        assert!(message.contains(MIN_NPM_VERSION), "{message}");
+        assert!(message.contains("NodeSource"), "{message}");
+        assert!(message.contains("Invalid comparator"), "{message}");
+
+        // A new enough npm, an npm that cannot be asked, and an npm that
+        // answers something this does not recognise all pass: the check exists
+        // to explain one known failure, not to invent others.
+        check_npm_version(Some("9.3.0")).unwrap();
+        check_npm_version(Some("11.12.1")).unwrap();
+        check_npm_version(None).unwrap();
+        check_npm_version(Some("")).unwrap();
     }
 
     #[test]

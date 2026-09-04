@@ -43,9 +43,18 @@ export type InstallForm = {
  * Four booleans rather than two, because the two languages fail differently: an
  * interpreter with no `pip` is a different repair from no interpreter at all,
  * and `node` without `npm` is worth saying because a module *runs* without
- * either. */
+ * either. And one field that is not a boolean, for the toolchain that is
+ * present and still cannot do the job. */
 export type Toolchains = {
   npm: boolean;
+  /** The npm that is here and the npm that would work, when the one on the
+   * server is too old to install anything — and `null` when it is not.
+   *
+   * Its own field rather than `npm: false`, because the two are different
+   * repairs: no npm is "install Node.js", and an npm from Debian's or Ubuntu's
+   * own packages is "install a newer one", which is not a conclusion an admin
+   * would reach from a message saying npm is missing. */
+  npmTooOld: { version: string; minimum: string } | null;
   node: boolean;
   python: boolean;
   pip: boolean;
@@ -53,7 +62,13 @@ export type Toolchains = {
 
 /** Everything present, which is what a form assumes until `listModules` has
  * answered — the alternative is a form that is briefly and wrongly disabled. */
-export const ALL_TOOLCHAINS: Toolchains = { npm: true, node: true, python: true, pip: true };
+export const ALL_TOOLCHAINS: Toolchains = {
+  npm: true,
+  npmTooOld: null,
+  node: true,
+  python: true,
+  pip: true,
+};
 
 /** A blank install form. JavaScript from npm first, because that is where a
  * module normally comes from; a local directory is the developer's case, and
@@ -135,9 +150,14 @@ export function distributionName(spec: string): string | null {
  * because a server with one toolchain and not the other is ordinary. */
 export function toolchainMissing(language: ModuleLanguage, tools: Toolchains): string | null {
   if (language === "javascript") {
-    return tools.npm
-      ? null
-      : "This server has no npm on its PATH, so it cannot install a JavaScript module. Install Node.js and restart Saltcorn.";
+    if (!tools.npm)
+      return "This server has no npm on its PATH, so it cannot install a JavaScript module. Install Node.js and restart Saltcorn.";
+    // An npm too old to resolve the modules directory's own dependencies fails
+    // every install, whatever is being installed, with a semver error about a
+    // `file:` path. Said here, in the two versions an admin can act on.
+    if (tools.npmTooOld)
+      return `This server's npm is ${tools.npmTooOld.version}, which cannot install a module: npm ${tools.npmTooOld.minimum} or newer is needed. Debian and Ubuntu package npm 9.2.0, so this is what apt install npm gives — install Node.js from NodeSource, or upgrade npm alone with sudo npm install -g npm@latest.`;
+    return null;
   }
   if (!tools.python) {
     return "This server has no Python interpreter on its PATH, so it cannot install a Python module. Install Python 3.11 or newer — or name one with --python-bin — and restart Saltcorn.";
@@ -150,9 +170,11 @@ export function toolchainMissing(language: ModuleLanguage, tools: Toolchains): s
 
 /** What this server can install, in one sentence, whichever half is missing. */
 export function toolchainSentence(tools: Toolchains): string {
-  const js = tools.npm
-    ? "npm installs a JavaScript module"
-    : "there is no npm, so no JavaScript module can be installed";
+  const js = !tools.npm
+    ? "there is no npm, so no JavaScript module can be installed"
+    : tools.npmTooOld
+      ? `npm is ${tools.npmTooOld.version}, which is too old to install a JavaScript module (${tools.npmTooOld.minimum} or newer is needed)`
+      : "npm installs a JavaScript module";
   const py = !tools.python
     ? "there is no Python interpreter, so no Python module can be installed"
     : tools.pip

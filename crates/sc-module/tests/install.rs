@@ -170,3 +170,23 @@ async fn the_v1_api_stubs_are_a_dependency_and_the_overrides_reference_it() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The npm this suite runs against is one that can actually install a module.
+///
+/// Not a tautology: npm 9.2.0 — Debian 12's and Ubuntu 24.04's — cannot, and
+/// every install here would fail with a semver error about a comparator rather
+/// than anything to do with the test. Asserting it once says which of the two
+/// is wrong when the rest of this file goes red.
+#[tokio::test]
+async fn the_npm_on_this_machine_is_new_enough_to_install_a_module() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let version = sc_module::npm_version()
+        .await
+        .expect("an npm that answers --version");
+    assert!(
+        !sc_module::npm_too_old(&version),
+        "npm {version} cannot install a module here; \
+         npm {} or newer is needed (see Installer::install)",
+        sc_module::MIN_NPM_VERSION
+    );
+}

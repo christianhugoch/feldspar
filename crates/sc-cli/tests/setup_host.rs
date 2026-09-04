@@ -88,6 +88,13 @@ fn stub_dir(dir: &Path) -> (PathBuf, PathBuf) {
     };
     record("apt-get", "exit 0\n");
     record("adduser", "exit 0\n");
+    // The npm the script asks its version, answered by a stub rather than by
+    // whatever this machine happens to have: the answer decides whether Node is
+    // installed from NodeSource, and a test that installs an apt repository on
+    // the machine it runs on — or does not, depending on the developer's npm —
+    // is no test at all. A new enough one here; §1b's other branch is
+    // `an_npm_too_old_to_install_a_module_is_replaced_from_nodesource`.
+    record("npm", "echo 11.12.1\n");
     record("systemctl", "exit 0\n");
     record("chown", "exit 0\n");
     record("ln", "exit 0\n");
@@ -186,7 +193,7 @@ fn a_static_install_writes_the_config_and_a_unit_pointing_at_the_deployed_binary
         .lines()
         .find(|l| l.starts_with("apt-get") && l.contains("install"))
         .unwrap_or_else(|| panic!("no apt-get install in:\n{commands}"));
-    for package in ["nodejs", "npm", "ca-certificates"] {
+    for package in ["ca-certificates", "curl"] {
         assert!(
             install.contains(package),
             "{package} should be installed: {install}"
@@ -198,6 +205,17 @@ fn a_static_install_writes_the_config_and_a_unit_pointing_at_the_deployed_binary
             "a --static install with a remote database should not install {package}: {install}"
         );
     }
+    // Node is not an apt package here: this machine's npm — the stub's 11.12.1
+    // — is new enough, so §1b leaves the toolchain alone rather than adding an
+    // apt repository to a host that does not need one.
+    assert!(
+        !commands.contains("deb.nodesource.com"),
+        "a host with a new enough npm should not get the NodeSource repository:\n{commands}"
+    );
+    assert!(
+        stdout.contains("leaving Node alone"),
+        "it should say the npm that is there is kept:\n{stdout}"
+    );
     assert!(commands.contains("systemctl daemon-reload"), "{commands}");
     assert!(
         commands.contains("systemctl enable --now feldspar.service"),
@@ -264,6 +282,74 @@ fn a_static_install_without_a_binary_yet_enables_but_does_not_start() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// §1b: an npm that cannot install a module is replaced, and the distribution's
+/// packages are not how Node gets here.
+///
+/// Debian 12, Debian 13 and Ubuntu 24.04 all package npm 9.2.0, which fails *every*
+/// module install with `Invalid comparator: file:…` — the modules directory
+/// depends on the v1 API stubs at a `file:` path and overrides the same names,
+/// and npm before 9.3.0 hands that path to semver. A host set up by this script
+/// must not land there, so `nodejs`/`npm` are not in the apt package list and
+/// NodeSource is added instead. Checked as a plan, because adding an apt
+/// repository is not something a test may do to the machine it runs on.
+#[test]
+fn an_npm_too_old_to_install_a_module_is_replaced_from_nodesource() {
+    let dir = scratch("nodesource");
+    let (bin, _log) = stub_dir(&dir);
+    // Debian 12's and Ubuntu 24.04's npm, in front of whatever this machine has.
+    write_executable(&bin.join("npm"), "#!/bin/sh\necho 9.2.0\n");
+    let config = dir.join("feldspar.toml");
+    let unit = dir.join("feldspar.service");
+
+    let out = Command::new("sh")
+        .arg(script())
+        .args(["--dry-run", "--static", "--domain", "example.com"])
+        .arg("--config")
+        .arg(&config)
+        .arg("--unit")
+        .arg(&unit)
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .output()
+        .expect("run setup-host.sh");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let plan = stdout_of(&out);
+
+    // Why, in the version the admin has and the one that is needed.
+    assert!(plan.contains("npm 9.2.0 is too old"), "{plan}");
+    assert!(plan.contains("9.3.0"), "{plan}");
+    // And how: the key, the repository, the pin that keeps a distribution
+    // package from taking it back, and the install.
+    for step in [
+        "deb.nodesource.com/gpgkey/nodesource-repo.gpg.key",
+        "signed-by=/etc/apt/keyrings/nodesource.asc",
+        "https://deb.nodesource.com/node_26.x nodistro main",
+        "Pin-Priority: 600",
+        "apt-get install -y nodejs",
+    ] {
+        assert!(
+            plan.contains(step),
+            "the plan should include `{step}`:\n{plan}"
+        );
+    }
+    // Not from the distribution, whose npm is the whole problem. NodeSource's
+    // `nodejs` carries its own and conflicts with the `npm` package.
+    let packages = plan
+        .lines()
+        .find(|line| line.contains("installing packages:"))
+        .unwrap_or_else(|| panic!("no package list in:\n{plan}"));
+    assert!(!packages.contains("nodejs"), "{packages}");
+    assert!(!packages.contains("npm"), "{packages}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// What a test user cannot run — installing PostgreSQL, creating a role,
 /// rustup and a release build — is checked as a plan.
 #[test]
@@ -314,9 +400,15 @@ fn the_plan_differs_between_a_source_install_and_a_static_one() {
             "--static must not plan `{absent}`:\n{statically}"
         );
     }
-    // It still installs npm, which is a *run-time* dependency: the server shells
-    // out to it to build an application or install a module.
-    assert!(statically.contains("npm"), "{statically}");
+    // It still accounts for npm, which is a *run-time* dependency: the server
+    // shells out to it to build an application or install a module. Which of
+    // §1b's two branches this is depends on the machine the test runs on — the
+    // npm here is kept, or NodeSource's replaces it — and the plan has to say
+    // one of them either way.
+    assert!(
+        statically.contains("leaving Node alone") || statically.contains("from NodeSource"),
+        "the plan should account for the Node toolchain:\n{statically}"
+    );
     assert!(
         statically.contains("ExecStart=/opt/feldspar/bin/feldspar"),
         "the unit should point at the deployed artifact:\n{statically}"

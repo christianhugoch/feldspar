@@ -284,7 +284,8 @@ if ! command -v apt-get >/dev/null; then
 error: this script installs packages with apt-get, and there is none here.
 
   It is written for Debian and Ubuntu. On another distribution install the
-  equivalents of: postgresql, nodejs, npm, ca-certificates, curl${EXTRA}
+  equivalents of: postgresql, ca-certificates, curl${EXTRA}, and Node.js with
+  an npm of 9.3.0 or newer — an older npm cannot install a module (§1b below)
   and then follow README §2.3 onwards, which is what the rest of this does.
 EOF
     exit 1
@@ -303,10 +304,11 @@ log "feldspar host setup: ${MODE} install, service user ${SERVICE_USER}, binary 
 # 1. Packages
 # ---------------------------------------------------------------------------
 
-# `npm` is here in *both* modes and is not a build dependency: the server shells
-# out to npm whenever an application is built or a module installed, from the
-# admin UI's Build button as much as from the command line.
-PACKAGES="ca-certificates curl nodejs npm"
+# Node.js is **not** in this list, and that is the point of §1b below: it comes
+# from NodeSource rather than from the distribution, because Debian's and
+# Ubuntu's npm is too old to install a module. `curl` and `ca-certificates` are
+# here partly to fetch its signing key.
+PACKAGES="ca-certificates curl"
 [ -n "${DATABASE_URL}" ] || PACKAGES="${PACKAGES} postgresql postgresql-client"
 if [ "${MODE}" = "source" ]; then
     # libclang is a build-time requirement of the module runtime (deno_runtime
@@ -318,6 +320,79 @@ log "installing packages: ${PACKAGES}"
 run_root apt-get update
 # shellcheck disable=SC2086  # a word list, deliberately split
 run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y ${PACKAGES}
+
+# ---------------------------------------------------------------------------
+# 1b. Node.js, from NodeSource
+# ---------------------------------------------------------------------------
+#
+# npm is a **run-time** dependency in both modes and not a build one: the server
+# shells out to it whenever an application is built or a module installed, from
+# the admin UI's Build button as much as from the command line.
+#
+# It comes from NodeSource rather than from `apt install nodejs npm`, and that
+# is a correctness requirement rather than a preference for something newer.
+# Debian 12, Debian 13 and Ubuntu 24.04 all package **npm 9.2.0**, which cannot install a
+# module at all: the modules directory depends on the v1 API stub packages at a
+# `file:` path *and* overrides the same names, and npm before 9.3.0 hands that
+# path to semver, so every install — of any module, whatever it depends on —
+# dies with `Invalid comparator: file:/…/v1-api-stub/saltcorn-data`. npm 9.3.0
+# (arborist 6.1.6) parses the specifier before comparing it, and is the floor
+# `sc-module`'s installer enforces.
+#
+# A machine that already has a new enough npm keeps it: an operator who
+# installed Node themselves — nvm, fnm, a newer distribution, a corporate
+# mirror — has made a decision, and this script is not the place to overrule it.
+NODE_MAJOR=26
+MIN_NPM="9.3.0"
+NODE_KEYRING="/etc/apt/keyrings/nodesource.asc"
+NODE_LIST="/etc/apt/sources.list.d/nodesource.list"
+NODE_PIN="/etc/apt/preferences.d/nodesource"
+
+# Whether the npm already on this machine is one the server can install with:
+# ${MIN_NPM} or newer. Never a dry run — the answer decides what is installed,
+# and asking a program its version changes nothing.
+npm_new_enough() {
+    command -v npm >/dev/null 2>&1 || return 1
+    _npm="$(npm --version 2>/dev/null)" || return 1
+    _major="${_npm%%.*}"
+    _rest="${_npm#*.}"
+    _minor="${_rest%%.*}"
+    case "${_major}:${_minor}" in
+        ''|*[!0-9]*:*|*:*[!0-9]*) return 1 ;;   # not two numbers: assume not
+    esac
+    if [ "${_major}" -gt 9 ]; then return 0; fi
+    if [ "${_major}" -eq 9 ] && [ "${_minor}" -ge 3 ]; then return 0; fi
+    return 1
+}
+
+if npm_new_enough; then
+    note "npm $(npm --version) is already here and new enough (${MIN_NPM}+); leaving Node alone"
+else
+    if command -v npm >/dev/null 2>&1; then
+        note "npm $(npm --version) is too old to install a module (${MIN_NPM}+ is needed)"
+    fi
+    log "installing Node.js ${NODE_MAJOR}.x from NodeSource"
+    run_root install -d -m 0755 /etc/apt/keyrings
+    # The armoured key straight to a file rather than through `gpg --dearmor`:
+    # apt reads an ASCII-armoured keyring given a `.asc` name, which is one
+    # fewer package to install and one fewer pipeline to get right under sudo.
+    run_root curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        -o "${NODE_KEYRING}"
+    run_root chmod 0644 "${NODE_KEYRING}"
+    printf 'deb [signed-by=%s] https://deb.nodesource.com/node_%s.x nodistro main\n' \
+        "${NODE_KEYRING}" "${NODE_MAJOR}" | write_root_file "${NODE_LIST}" 0644
+    # Pinned, so that a distribution which later ships a `nodejs` of its own
+    # with a higher version string cannot quietly replace this one and put the
+    # host back where it started.
+    printf 'Package: nodejs\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' |
+        write_root_file "${NODE_PIN}" 0644
+    run_root apt-get update
+    # NodeSource's `nodejs` carries its own npm and Conflicts/Provides the
+    # distribution's `npm` package, which is why that is not in ${PACKAGES} —
+    # and why apt removes a distribution npm already installed here rather than
+    # ending up with two.
+    run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+fi
 
 # ---------------------------------------------------------------------------
 # 2. The service account

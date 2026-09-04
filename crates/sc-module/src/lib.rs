@@ -78,7 +78,9 @@ pub use host::{
     ActionManifest, FunctionArg, FunctionManifest, ModuleHost, ModuleManifest,
     TableProviderManifest, UnsupportedEntity,
 };
-pub use install::{InstalledPackage, Installer, have_node, have_npm};
+pub use install::{
+    InstalledPackage, Installer, MIN_NPM_VERSION, have_node, have_npm, npm_too_old, npm_version,
+};
 pub use module::{
     MODULE_LANGUAGES, MODULE_SOURCES, Module, ModuleId, ModuleLanguage, ModuleSource,
 };

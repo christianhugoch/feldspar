@@ -247,6 +247,15 @@ async fn a_module_is_installed_listed_configured_and_deleted() -> sc_error::Resu
     assert!(body["modules"].as_array().unwrap().is_empty());
     assert_eq!(body["npm"], json!(true));
     assert_eq!(body["node"], json!(true));
+    // Null unless the npm that is there is too old to install anything — in
+    // which case every install below is going to fail with a semver error, and
+    // this is the assertion that says why.
+    assert_eq!(
+        body["npm_too_old"],
+        json!(null),
+        "this machine's npm cannot install a module: {}",
+        body["npm_too_old"]
+    );
     assert!(body["root"].as_str().unwrap().contains("sc-modules-api"));
     // And the other language's toolchain, asked the same way (§8): whether this
     // machine can build the Python environment, and where that environment is.

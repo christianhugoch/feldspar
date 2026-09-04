@@ -93,6 +93,7 @@ export function ModulesTab() {
       setRoot(response.root);
       setTools({
         npm: response.npm,
+        npmTooOld: response.npm_too_old ?? null,
         node: response.node,
         python: response.python,
         pip: response.pip,
@@ -233,6 +234,19 @@ export function ModulesTab() {
       {note && (
         <Alert variant="success" dismissible onClose={() => setNote(null)}>
           <AlertBody>{note}</AlertBody>
+        </Alert>
+      )}
+      {tools.npmTooOld && (
+        <Alert variant="warning">
+          <AlertBody>
+            This server&apos;s <code>npm</code> is {tools.npmTooOld.version}, which cannot install
+            a module: it cannot resolve the local <code>@saltcorn/*</code> packages the modules
+            directory depends on, so every install fails with{" "}
+            <code>Invalid comparator: file:…</code> whatever is being installed. npm{" "}
+            {tools.npmTooOld.minimum} or newer is needed. Debian and Ubuntu package npm 9.2.0, so
+            this is what <code>apt install npm</code> gives — install Node.js from NodeSource, or
+            upgrade npm alone with <code>sudo npm install -g npm@latest</code>.
+          </AlertBody>
         </Alert>
       )}
       {!tools.node && (

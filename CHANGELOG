@@ -2,6 +2,37 @@
 
 Changes in reverse chronological order.
 
+## npm 9.3.0 is the floor, and setup-host installs Node from NodeSource
+
+Clicking **Install** on a bundled module on a host set up from Debian's or Ubuntu's own
+packages failed with `configuration error: npm install … failed … npm ERR! Invalid comparator:
+file:/var/lib/feldspar/.local/share/feldspar/modules/v1-api-stub/saltcorn-data`. Nothing in
+that sentence is about the module, and it happened for every module, including one with no
+`@saltcorn/*` dependency at all.
+
+- **What it was.** The modules root takes each v1 API stub on as a direct dependency at a
+  `file:` path *and* overrides the same package name. npm before 9.3.0 — arborist 6.1.5 —
+  resolves an override by handing the dependent edge's specifier to semver
+  (`semver.intersects(edge.spec, rule.keySpec)`), and a `file:` path is not a version range,
+  so the resolution dies before anything is fetched. Arborist 6.1.6 parses the specifier first
+  and accepts a file, directory or tag one; that is npm 9.3.0, and every npm since works.
+- **Why it reached a deployment at all.** Debian 12, Debian 13 and Ubuntu 24.04 all package
+  **npm 9.2.0**, and `scripts/setup-host.sh` installed `nodejs npm` from the distribution. A
+  workstation with a current npm never sees it.
+- **The installer checks first.** `Installer::install` asks npm its version and refuses an
+  older one with a sentence naming the version that is there, the version that is needed and
+  the two ways to get it — instead of npm's semver error, which names neither.
+- **The Modules tab says it before the click.** `listModules` reports `npm_too_old` beside
+  `npm`, and the tab carries a warning and blocks the Install button with the same sentence.
+  A present-but-too-old toolchain is a different repair from a missing one ("install Node.js"
+  is unhelpful advice to a host that has it), so it is a separate field rather than
+  `npm: false`.
+- **`scripts/setup-host.sh` installs Node from NodeSource** (§1b): the key, the repository, a
+  pin so a distribution package cannot take it back, and `apt install nodejs`. A host whose
+  npm is already 9.3.0 or newer keeps it — an operator's own nvm or fnm install is a decision,
+  not a problem to fix. README §2.1 and §3, `docs/OPERATIONS.md` §1 and the modules tutorial
+  say the same thing for a host set up by hand.
+
 ## Modules that ship with Saltcorn
 
 `plugins/`: modules developed in this repository, shipped **inside the release tarball**, and

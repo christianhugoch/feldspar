@@ -1509,6 +1509,19 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     .map(|entry| bundled_json(entry, set.get(&entry.name).is_some()))
                     .collect();
                 let interpreter = services.python().env().interpreter();
+                // Asked once and used twice: whether there is an npm at all,
+                // and whether it is one that can install a module. An npm too
+                // old for the modules root's overrides fails every install with
+                // a semver error, so the tab says so before the admin picks a
+                // package rather than after (see `sc_module`'s installer).
+                let npm_version = sc_module::npm_version().await;
+                let npm_too_old = match &npm_version {
+                    Some(version) if sc_module::npm_too_old(version) => json!({
+                        "version": version,
+                        "minimum": sc_module::MIN_NPM_VERSION,
+                    }),
+                    _ => Json::Null,
+                };
                 Ok(HandlerResponse::ok(json!({
                     "modules": modules,
                     "root": services.installer().root().display().to_string(),
@@ -1516,7 +1529,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     // Node toolchain can do everything else and nothing on this
                     // tab — and the tab should say so before the admin types a
                     // package name.
-                    "npm": sc_module::have_npm().await,
+                    "npm": npm_version.is_some(),
+                    // Null when npm can install a module, and the two versions
+                    // the sentence needs when it cannot.
+                    "npm_too_old": npm_too_old,
                     "node": sc_module::have_node().await,
                     // And the other language's, asked the same way and for the
                     // same reason (§8): a server may have one toolchain and not

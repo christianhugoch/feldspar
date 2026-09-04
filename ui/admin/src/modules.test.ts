@@ -229,6 +229,28 @@ describe("the install form", () => {
     );
   });
 
+  it("blocks JavaScript on an npm that is present and too old, and says which", () => {
+    // A different repair from no npm at all: the toolchain is there, and the
+    // sentence has to say that a *newer* one is what is wanted — an admin told
+    // to install Node.js would find it already installed.
+    const old = tools({ npmTooOld: { version: "9.2.0", minimum: "9.3.0" } });
+    const blocked = installBlocked(
+      { language: "javascript", source: "npm", location: "@saltcorn/mqtt" },
+      old,
+    );
+    expect(blocked).toMatch(/9\.2\.0/);
+    expect(blocked).toMatch(/9\.3\.0/);
+    expect(blocked).toMatch(/NodeSource/);
+    expect(blocked).not.toMatch(/no npm/i);
+    // Only JavaScript: pip is unaffected by npm's age.
+    expect(toolchainMissing("python", old)).toBeNull();
+    expect(toolchainSentence(old)).toMatch(/too old/);
+    // And the bundled cards, which are the click this was reported from: the
+    // RSS card cannot be installed either, for the same stated reason.
+    expect(bundledBlocked(bundled(), old)).toMatch(/9\.3\.0/);
+    expect(bundledBlocked(bundled({ language: "python" }), old)).toBeNull();
+  });
+
   it("says what this server can install with, before a name is typed", () => {
     expect(toolchainSentence(ALL_TOOLCHAINS)).toBe(
       "On this server, npm installs a JavaScript module; pip installs a Python one.",

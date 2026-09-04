@@ -61,6 +61,15 @@ much as from `feldspar build-app`. It never runs `node` — a module runs on a
 JavaScript worker inside the `feldspar` process, on the V8 the server already
 links.
 
+That npm has to be **9.3.0 or newer** to install a module. Debian 12, Debian 13
+and Ubuntu 24.04 all package npm 9.2.0, which cannot: the modules directory
+depends on the v1 API stub packages at a `file:` path and overrides the same
+names, and npm before 9.3.0 (arborist 6.1.6) hands the path to semver, so every
+install fails with `Invalid comparator: file:/…/v1-api-stub/saltcorn-data`
+whatever is being installed. The server checks before it runs npm and says so;
+`scripts/setup-host.sh` installs Node from NodeSource for this reason, and
+`sudo npm install -g npm@latest` fixes a host that already has the old one.
+
 ---
 
 ## 2. Installing

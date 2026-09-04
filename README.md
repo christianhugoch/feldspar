@@ -115,7 +115,16 @@ already there). Read on to know what it did.
 ```bash
 sudo apt update
 sudo apt install -y build-essential pkg-config git curl ca-certificates \
-                    libclang-dev postgresql postgresql-client nodejs npm
+                    libclang-dev postgresql postgresql-client
+
+# Node.js from NodeSource, *not* from Debian — see the note below
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+  -o /etc/apt/keyrings/nodesource.asc
+echo "deb [signed-by=/etc/apt/keyrings/nodesource.asc] \
+https://deb.nodesource.com/node_26.x nodistro main" \
+  | sudo tee /etc/apt/sources.list.d/nodesource.list
+sudo apt update && sudo apt install -y nodejs
 ```
 
 - **`build-essential` / `pkg-config`** — a C toolchain and linker for the Rust build.
@@ -126,13 +135,21 @@ sudo apt install -y build-essential pkg-config git curl ca-certificates \
   and it is needed only to build: the binary it produces does not use libclang.
 - **`postgresql`** on trixie is PostgreSQL 17; the package starts the server and
   enables it at boot for you.
-- **`nodejs` / `npm`** — trixie's packages are new enough (§3 asks for Node 18+).
-  They are needed **twice**: once at build time, for the two front-end bundles (§6),
-  and again at run time — the server itself runs `npm` whenever an application is
-  installed or built, from the admin UI's **Build** button or from
+- **`nodejs` / `npm`** — needed **twice**: once at build time, for the two front-end
+  bundles (§6), and again at run time — the server itself runs `npm` whenever an
+  application is installed or built, from the admin UI's **Build** button or from
   `feldspar build-app` (§7), and whenever a module is installed. It never runs
   `node`: an application's bundle is built by npm, and a module runs on a
   JavaScript worker inside the `feldspar` process.
+
+  **From NodeSource rather than from Debian**, because `apt install npm` is npm
+  **9.2.0** on bookworm, trixie and Ubuntu 24.04 alike, and npm before 9.3.0 cannot
+  install a *module*: the modules directory depends on the v1 API stub packages at a
+  `file:` path and overrides the same names, and an npm that old hands the path to
+  semver and fails the install — any install, whatever it depends on — with
+  `Invalid comparator: file:/…/v1-api-stub/saltcorn-data`. `scripts/setup-host.sh`
+  does the same thing, and leaves an existing npm alone when it is 9.3.0 or newer.
+  Upgrading npm on its own (`sudo npm install -g npm@latest`) works too.
 
 The build needs outbound network for cargo's crates and a prebuilt V8, but nothing
 listens on the internet until §2.7.
@@ -411,7 +428,7 @@ database (§7).
 | **Rust** (with `cargo`) | 1.85+ (edition 2024) | building the `feldspar` binary |
 | **PostgreSQL** | 13 or newer (16 recommended) | the primary data store — *or* SQLite, see §5 Option C |
 | **libclang** (`libclang-dev`) | any recent | building the module runtime (`deno_runtime` → `bindgen`); build time only |
-| **npm** (and the Node.js it ships with) | Node 18+ | building the admin UI bundle (optional; see §6), **and** *installing* modules (Settings → Modules) |
+| **npm** (and the Node.js it ships with) | **npm 9.3.0+** (Node 18+) | building the admin UI bundle (optional; see §6), **and** *installing* modules (Settings → Modules). Debian's and Ubuntu's own package is npm 9.2.0, which cannot install a module at all — install Node from NodeSource (§2.1) or `npm install -g npm@latest` |
 | **CPython** + `pip`, and `python3-dev` to build against | 3.11+ | **only** for a server that runs Python trigger bodies or installs Python modules — and only in a build that has the `python` feature (below) |
 
 Install Rust via [rustup](https://rustup.rs/):

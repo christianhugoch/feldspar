@@ -946,6 +946,19 @@ pub fn admin_endpoints() -> EndpointSet {
                 // a property of any module.
                 StructField::new("root", TypeSchema::text()),
                 StructField::new("npm", TypeSchema::bool()),
+                // Present but useless is its own answer: an npm older than the
+                // installer's floor cannot resolve the modules root at all, and
+                // fails every install with a semver error about a `file:`
+                // specifier. Null when npm can install a module; the version
+                // that is there and the version that would work when it cannot,
+                // because the sentence the tab shows names both.
+                StructField::new(
+                    "npm_too_old",
+                    TypeSchema::optional(TypeSchema::struct_of([
+                        StructField::new("version", TypeSchema::text()),
+                        StructField::new("minimum", TypeSchema::text()),
+                    ])),
+                ),
                 StructField::new("node", TypeSchema::bool()),
                 // The same two questions for the other language (§8): whether
                 // there is an interpreter to build the environment with and
