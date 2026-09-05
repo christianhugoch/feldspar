@@ -11,5 +11,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "fit_job.rs"]
+mod fit_job;
+
 #[path = "model_store.rs"]
 mod model_store;

@@ -13,8 +13,11 @@
 //! validation and test ([`Split`]). Phase 2 is the **vocabulary and the
 //! store**: what a model provider is ([`ModelProvider`]), how the built-ins and
 //! a module's are assembled into one set ([`ModelRegistry`]), and what a
-//! [`Model`] and a [`ModelInstance`] are as rows. The encoding, the metrics and
-//! the fit follow in Phase 3.
+//! [`Model`] and a [`ModelInstance`] are as rows. Phase 3 is the **work**: what
+//! turns a frame into numbers ([`Encoding`]), what scores the result
+//! ([`Metrics`]), the order the two go in ([`run_fit`]), and how a fitted
+//! instance is applied to a row it has never seen ([`predict_rows`]). The
+//! algorithms themselves — the providers — follow in Phase 4.
 //!
 //! ## Layering: why this is at layer 6 and not above the row layer
 //!
@@ -33,7 +36,7 @@
 //! calculated fields, ownership and row-level security, and that could not read
 //! a provided table at all.
 //!
-//! ## The three decisions Phase 1 fixes
+//! ## The decisions this crate fixes
 //!
 //! - **A dataset is a list of formulas, and that is the whole of it.** There is
 //!   no second vocabulary of "field / joinfield / aggregation" with three shapes
@@ -46,16 +49,29 @@
 //!   metric of instance 7 is comparable with the test metric of instance 3 —
 //!   which is the entire reason anybody looks at two instances of one model.
 //!   See [`Split`].
+//! - **The encoding belongs to the instance.** Fitted once, on the training rows
+//!   only, and stored — so a prediction is encoded the way its fit was, or it
+//!   fails by name. Re-deriving the one-hot column order at predict time would
+//!   put every coefficient against the wrong column and return confident
+//!   nonsense. See [`Encoding`].
+//! - **Metrics are the host's; parameters are the provider's.** The same code
+//!   scores every provider on the same rows, so two instances' numbers mean one
+//!   thing — and a provider in another language does not have to reimplement R²
+//!   to be a citizen here. See [`Metrics`].
 //! - **The frame is columnar, and it is bounded.** Every consumer wants a
 //!   column, and a dataset is a `SELECT` an admin wrote that the server has to
 //!   hold in memory — so [`DatasetSource::materialise`] takes a cap and refuses
 //!   by name rather than by the OOM killer. See [`DEFAULT_MAX_ROWS`].
 
 mod dataset;
+mod encode;
+mod fit;
 mod frame;
 mod instance;
 mod instance_store;
+mod metrics;
 mod model;
+mod predict;
 mod provider;
 mod registry;
 mod source;
@@ -64,6 +80,14 @@ mod store;
 mod validate;
 
 pub use dataset::{Dataset, DatasetColumn, DatasetColumnShape, DatasetShape, validate_dataset};
+pub use encode::{
+    ColumnEncoding, Encoded, Encoding, Matrix, TargetEncoding, apply_encoding,
+    apply_encoding_dropping, fit_encoding,
+};
+pub use fit::{
+    ATTR_OUTCOME, ATTR_ROWS, ATTR_SEARCH, Fit, GridPoint, MAX_GRID_POINTS, RowCounts, fit_model,
+    grid, run_fit,
+};
 pub use frame::{Column, ColumnType, Frame, canonical_key};
 pub use instance::{ATTR_ERROR, FitStatus, InstanceId, ModelInstance, RESTARTED};
 pub use instance_store::{
@@ -71,7 +95,9 @@ pub use instance_store::{
     delete_model_instances, fitted, list_model_instances, load_model_instance,
     reap_fitting_instances, require_model_instance, save_model_instance,
 };
+pub use metrics::{ClassMetrics, Metrics, SplitMetrics};
 pub use model::{Model, ModelId};
+pub use predict::{name_classes, predict_rows, prediction_values};
 pub use provider::{
     CATEGORICAL_COLUMNS_QUERY, COLUMNS_QUERY, FitResult, HostProvider, ModelProvider,
     ModelProviderHost, ModelProviderKind, NUMERIC_COLUMNS_QUERY, Outcome, OutcomeSpec,

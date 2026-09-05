@@ -2,6 +2,81 @@
 
 Changes in reverse chronological order.
 
+## The encoding belongs to the instance, and the metrics belong to the host
+
+The third phase of predictive models: what turns a frame of strings and dates into numbers,
+what scores the result, the order the two go in, and how a fitted instance is applied to a row
+it has never seen. Nothing here implements an algorithm — the built-in providers are next — but
+everything a provider will be handed and everything it will be judged by is now settled.
+
+- **The encoding is fitted once and stored on the instance.** This is the load-bearing decision
+  of the milestone, because the failure it prevents is silent: if prediction re-derived the
+  one-hot column order from whatever categories happen to be in the rows being predicted, a
+  model fitted when `region` had four values and applied to a batch containing three would put
+  every coefficient against the wrong column and return confident nonsense. So `Encoding`
+  carries the fitted category lists, the standardisation constants and the label map, it is a
+  JSON column on `_sc_model_instances`, and a prediction is encoded the way its fit was or it
+  fails.
+- **And it fails loudly.** A category at predict time that the fit never saw is an error naming
+  the column and the value — not a row of zeros, which is the industry's usual answer and is a
+  prediction from a model that was never shown this input. A null in a feature is a *dropped row
+  at fit time*, counted and reported on the instance, and an *error at predict time*: at fit
+  time dropping is a defensible sample restriction we report, and at predict time it would mean
+  answering a question about a row we cannot represent. The two are separate functions
+  (`apply_encoding` and `apply_encoding_dropping`) rather than a flag somebody could get wrong.
+- **The encoding is fitted on the training rows only.** Category lists and standardisation
+  constants computed over everything would leak the held-out rows into the fit, quietly, in the
+  one place nobody looks — so a category that appears only in the test rows is *unseen*, and the
+  test metric reflects that rather than hiding it.
+- **One-hot is reference-coded, and the whole list is still stored.** A categorical column with
+  *k* values becomes *k* − 1 columns with the first as the baseline, because a column per
+  category makes the design matrix rank-deficient the moment an intercept sits beside it — and
+  `(XᵀX)⁻¹` is exactly what the standard errors, *t* and *p* of the next phase come from. The
+  stored list still includes the baseline, so "was this value seen at fit time" stays
+  answerable and the baseline is not a hole to fall into.
+- **Metrics are computed by the host, from predictions and truth.** R², RMSE and MAE for a
+  regression; accuracy, per-class precision/recall/F1 and the confusion matrix for a
+  classification; cluster sizes and within-cluster sum of squares for a clustering; explained
+  variance per component for a projection; nothing for a hypothesis test, whose parameters are
+  the answer. Scoring providers with one piece of code is what makes an RMSE of 12 400 beside an
+  RMSE of 11 900 a comparison rather than a coincidence of two implementations' conventions —
+  and it means a provider written in Python does not have to reimplement R² to be a citizen
+  here. A metric with no value (R² over a constant label) is `null` on the wire and NaN in
+  memory, never 0, which is a number somebody could compare.
+- **The primary metric always points up.** A hyperparameter search maximises, so R² and accuracy
+  are used as they are and the within-cluster sum of squares is negated. A search that silently
+  minimised where it meant to maximise would pick the worst point of the grid and report it as
+  the winner — the kind of wrong answer that looks exactly like a right one.
+- **The fit is one ordered pass, and the order is the design.** Materialise, resolve the outcome,
+  split, fit the encoding on train, search the grid on validation, fit the winner, score every
+  split, write the instance. With no lists declared there is no search and there is exactly one
+  fit: the common case does not pay for the uncommon one. A grid point that fails is recorded
+  with its sentence rather than skipped, because "I tried `k = 12` and it could not be fitted" is
+  the answer to "why did it pick `k = 8`"; a search where *every* point failed reports the first
+  failure rather than "nothing could be scored".
+- **A hypothesis test takes no split, no encoding and no metrics.** Its configuration names *this*
+  column as the value and *that* one as the group, and a one-hot would leave neither
+  addressable; there is nothing to hold out from a test statistic; and its parameters are the
+  result. Saying so once, where the outcome is resolved, beats five `if`s further down.
+- **A fit that fails is `Ok`.** `fit_model` is the body of the job §8 describes — the row already
+  exists saying `fitting` and the id has already been returned — so its contract is to *record*
+  what happened: a failed optimiser is a `failed` instance carrying the sentence, and an `Err`
+  means the failure could not be written down. A caller that treated "did not converge" and "the
+  database is gone" alike would leave rows saying `fitting` for ever, which is the state boot has
+  to reap.
+- **A class index never leaves the host.** A provider answers `Prediction::ClassIndex` because
+  that is what the target encoding handed it; `predict_rows` maps it back through the *instance's
+  own* class list into `Prediction::Class`, and an index outside that list is caught rather than
+  translated into a plausible-looking name. Nobody's row wants to hold a `2`.
+- **A split that holds nothing out needs no primary key.** The hash-of-the-key rule is the
+  split's restriction, not the dataset's, so an unsupervised fit over a table with a composite or
+  absent primary key is still allowed — it just cannot hold anything back.
+- **Standardisation is declared, not done privately.** A provider says whether it wants scaled
+  features (`ModelProvider::standardise`, carried on `ModelProviderKind` so a module can declare
+  it too) and the host does it, because the constants have to be stored on the instance and
+  applied identically at predict time. A provider that standardised for itself would be a
+  second, unrecorded encoding.
+
 ## A provider is a trait, a model is a row, a fit is a row that finishes
 
 The second phase of predictive models: the vocabulary a provider speaks, the registry that

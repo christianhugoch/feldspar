@@ -451,20 +451,20 @@ bytes stores base64, because a system table with a `bytea` column would be the o
 
 ## Phase 3 — Encoding, fitting and prediction
 
-- [ ] 3.1 `sc_model::encode`: `Encoding`, `ColumnEncoding` (passthrough, standardised, one-hot
+- [x] 3.1 `sc_model::encode`: `Encoding`, `ColumnEncoding` (passthrough, standardised, one-hot
       with its fitted category list, date-to-epoch), `TargetEncoding` (label map), `fit_encoding`
       and `apply_encoding` → a `Matrix` (row-major `Vec<f64>` plus width, which is what every
       provider wants). Unknown category and null refused by name at apply time (§6).
-- [ ] 3.2 `sc_model::metrics`: the five metric sets of §7, computed from predictions and truth,
+- [x] 3.2 `sc_model::metrics`: the five metric sets of §7, computed from predictions and truth,
       as a `Metrics` value that serialises to the instance's column.
-- [ ] 3.3 `sc_model::fit`: the orchestration — materialise, split, fit the encoding on train,
+- [x] 3.3 `sc_model::fit`: the orchestration — materialise, split, fit the encoding on train,
       run the hyperparameter grid scoring on validation (§11), fit the winner, score every
       split, write the instance. One function, taking the `DatasetSource` and the registry.
-- [ ] 3.4 `sc_model::predict`: load an instance, apply its encoding to a frame, call the
+- [x] 3.4 `sc_model::predict`: load an instance, apply its encoding to a frame, call the
       provider, and map the raw output back through the target encoding into `Prediction`s —
       a class *name* and not a class index, because the index is an implementation detail of
       the encoding and nobody's row wants to hold a 2.
-- [ ] 3.5 Unit tests against a stub provider (a deterministic "predict the mean"): the grid
+- [x] 3.5 Unit tests against a stub provider (a deterministic "predict the mean"): the grid
       picking the point it should, the encoding fitted on train only and applied to test, the
       unknown-category refusal, and the class round-trip.
 

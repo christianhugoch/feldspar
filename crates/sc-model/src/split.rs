@@ -149,6 +149,15 @@ impl Split {
         Ok(())
     }
 
+    /// Whether this split holds anything back at all.
+    ///
+    /// A split that is all train holds nothing out, so there is nothing to
+    /// assign and **no primary key is needed** — which is what lets an
+    /// unsupervised fit run over a table with a composite or absent one (§5).
+    pub fn holds_out(&self) -> bool {
+        self.validation > 0.0 || self.test > 0.0
+    }
+
     /// Which side `key` — a row's [`canonical_key`](crate::canonical_key) — is
     /// on.
     ///
@@ -194,6 +203,20 @@ impl Frame {
     /// avoid.
     pub fn split(&self, split: &Split) -> Result<Splits> {
         split.validate()?;
+        if !split.holds_out() {
+            // Nothing is held out, so nothing has to be assigned — and a table
+            // with no single primary key can still be fitted over (§5).
+            return Ok(Splits {
+                counts: SplitCounts {
+                    train: self.rows,
+                    validation: 0,
+                    test: 0,
+                },
+                train: self.clone(),
+                validation: self.take_rows(&[])?,
+                test: self.take_rows(&[])?,
+            });
+        }
         if self.rows > 0 && self.keys.len() != self.rows {
             return Err(Error::invalid(
                 "this dataset's rows have no primary key, so they cannot be assigned to a \
@@ -303,6 +326,23 @@ mod tests {
         let splits = frame(0..200).split(&Split::default()).expect("split");
         assert_eq!(splits.counts.validation, 0);
         assert_eq!(splits.validation.rows, 0);
+    }
+
+    #[test]
+    fn a_split_that_holds_nothing_out_needs_no_primary_key() {
+        // §5's parenthetical: the restriction is the *split's*, so an
+        // unsupervised fit over a keyless table is still allowed.
+        let frame = Frame::new(
+            vec![("x".to_owned(), Column::Int(vec![Some(1), Some(2)]))],
+            Vec::new(),
+        )
+        .expect("frame");
+        let all_train = Split::new(1.0, 0.0, 0.0, 0);
+        assert!(!all_train.holds_out());
+        let splits = frame.split(&all_train).expect("split");
+        assert_eq!(splits.counts.train, 2);
+        assert_eq!(splits.test.rows, 0);
+        assert_eq!(splits.test.names(), vec!["x"]);
     }
 
     #[test]

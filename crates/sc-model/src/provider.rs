@@ -575,6 +575,17 @@ pub struct ModelProviderKind {
     pub hyperparameters: Vec<FormField>,
     /// What a fit of it produces, as a declaration.
     pub outcome: OutcomeSpec,
+    /// Whether the host should **standardise** the numeric features before
+    /// handing them over (§6).
+    ///
+    /// A declaration rather than something the provider does itself, because the
+    /// constants have to be stored on the instance and applied identically at
+    /// predict time — and a provider that standardised privately would be a
+    /// second, unrecorded encoding. A k-means or a PCA says yes (an unscaled fit
+    /// is dominated by whichever column happens to be measured in larger units);
+    /// a regression says no, because a coefficient in the data's own units is
+    /// what somebody is reading it for.
+    pub standardise: bool,
 }
 
 impl ModelProviderKind {
@@ -591,6 +602,7 @@ impl ModelProviderKind {
             config_spec: Vec::new(),
             hyperparameters: Vec::new(),
             outcome,
+            standardise: false,
         }
     }
 
@@ -603,6 +615,12 @@ impl ModelProviderKind {
     /// The hyperparameters it takes.
     pub fn hyperparameters(mut self, spec: Vec<FormField>) -> ModelProviderKind {
         self.hyperparameters = spec;
+        self
+    }
+
+    /// Ask the host to standardise the numeric features.
+    pub fn standardised(mut self) -> ModelProviderKind {
+        self.standardise = true;
         self
     }
 
@@ -667,6 +685,12 @@ pub trait ModelProvider: Send + Sync {
     /// What a fit of this provider produces, as a declaration.
     fn outcome_spec(&self) -> OutcomeSpec;
 
+    /// Whether the host should standardise the numeric features before handing
+    /// them over — see [`ModelProviderKind::standardise`].
+    fn standardise(&self) -> bool {
+        false
+    }
+
     /// What a fit of *this configuration* over *this dataset* will produce.
     ///
     /// Not a constant: a random forest is a regressor or a classifier depending
@@ -699,6 +723,7 @@ pub trait ModelProvider: Send + Sync {
             config_spec: self.config_declaration(),
             hyperparameters: self.hyperparameters(),
             outcome: self.outcome_spec(),
+            standardise: self.standardise(),
         }
     }
 
@@ -805,6 +830,10 @@ impl ModelProvider for HostProvider {
 
     fn outcome_spec(&self) -> OutcomeSpec {
         self.kind.outcome.clone()
+    }
+
+    fn standardise(&self) -> bool {
+        self.kind.standardise
     }
 
     fn kind(&self) -> ModelProviderKind {
