@@ -8303,14 +8303,20 @@ name = "sc-model"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
+ "sc-catalog",
+ "sc-db",
  "sc-db-postgres",
  "sc-error",
  "sc-expr",
  "sc-query",
+ "sc-test-harness",
  "sc-types",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

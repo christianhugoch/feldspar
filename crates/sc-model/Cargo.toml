@@ -33,6 +33,16 @@ sc-query.workspace = true
 # assignment moved under a toolchain upgrade would make two instances of one
 # model incomparable — which is the whole reason the split is a hash.
 sha2.workspace = true
+# `_sc_models` and `_sc_model_instances` are stored metadata, so this crate
+# speaks the query language, reads rows back out of the driver and bootstraps
+# its two tables through the catalog (§9's storage pattern, as `_sc_triggers`
+# and `_sc_agents` do). The catalog is also what fixes the crate above layer 4.
+sc-catalog.workspace = true
+sc-db.workspace = true
+uuid.workspace = true
+# An instance records when its fit was started: UTC, no timezone database, as
+# everywhere else.
+chrono.workspace = true
 async-trait.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
@@ -40,8 +50,16 @@ serde_json.workspace = true
 [dev-dependencies]
 # The dataset's `Select` is asserted as rendered SQL rather than as a tree: the
 # question a test asks is "did the filter fold into the WHERE", and the answer
-# reads as SQL.
+# reads as SQL. The stores are pinned against a real Postgres (principle 4),
+# because what a save writes and a load reads back is the whole of whether a
+# configured model survives a restart.
 sc-db-postgres.workspace = true
+sc-test-harness.workspace = true
+tokio = { workspace = true }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it.rs"

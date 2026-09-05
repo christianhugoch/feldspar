@@ -8,10 +8,13 @@
 //! coefficients, the test statistic) and applied (a predicted price on a row a
 //! trigger just inserted).
 //!
-//! Phase 1 is the data half of that: what a dataset is, what it becomes as SQL,
-//! what comes back ([`Frame`]), and how the rows divide into train, validation
-//! and test ([`Split`]). The provider trait, the registry, the stores, the
-//! encoding and the fit follow in later phases.
+//! Phase 1 was the data half of that: what a dataset is, what it becomes as
+//! SQL, what comes back ([`Frame`]), and how the rows divide into train,
+//! validation and test ([`Split`]). Phase 2 is the **vocabulary and the
+//! store**: what a model provider is ([`ModelProvider`]), how the built-ins and
+//! a module's are assembled into one set ([`ModelRegistry`]), and what a
+//! [`Model`] and a [`ModelInstance`] are as rows. The encoding, the metrics and
+//! the fit follow in Phase 3.
 //!
 //! ## Layering: why this is at layer 6 and not above the row layer
 //!
@@ -50,10 +53,36 @@
 
 mod dataset;
 mod frame;
+mod instance;
+mod instance_store;
+mod model;
+mod provider;
+mod registry;
 mod source;
 mod split;
+mod store;
+mod validate;
 
 pub use dataset::{Dataset, DatasetColumn, DatasetColumnShape, DatasetShape, validate_dataset};
 pub use frame::{Column, ColumnType, Frame, canonical_key};
+pub use instance::{ATTR_ERROR, FitStatus, InstanceId, ModelInstance, RESTARTED};
+pub use instance_store::{
+    INSTANCES_TABLE, active_model_instance, bootstrap_model_instances, delete_model_instance,
+    delete_model_instances, fitted, list_model_instances, load_model_instance,
+    reap_fitting_instances, require_model_instance, save_model_instance,
+};
+pub use model::{Model, ModelId};
+pub use provider::{
+    CATEGORICAL_COLUMNS_QUERY, COLUMNS_QUERY, FitResult, HostProvider, ModelProvider,
+    ModelProviderHost, ModelProviderKind, NUMERIC_COLUMNS_QUERY, Outcome, OutcomeSpec,
+    ParameterBlock, ParameterRow, Prediction, categorical_column_field, column_field,
+    is_column_query, numeric_column_field, resolve_column_options,
+};
+pub use registry::ModelRegistry;
 pub use source::{DEFAULT_MAX_ROWS, DatasetSource, SPLIT_KEY};
 pub use split::{Part, Split, SplitCounts, Splits};
+pub use store::{
+    MODELS_TABLE, bootstrap_models, delete_model, list_models, load_model, load_model_by_name,
+    models_for_table, require_model, save_model,
+};
+pub use validate::{ModelIssue, Models, validate_model};

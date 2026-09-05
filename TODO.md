@@ -432,21 +432,21 @@ bytes stores base64, because a system table with a `bytea` column would be the o
 
 ## Phase 2 — The seam, the registry and the store
 
-- [ ] 2.1 `ModelProvider`, `Outcome`, `FitResult`, `ParameterBlock`, `Prediction` (§7, §10) —
+- [x] 2.1 `ModelProvider`, `Outcome`, `FitResult`, `ParameterBlock`, `Prediction` (§7, §10) —
       the trait and the vocabulary, with no implementation behind them yet.
-- [ ] 2.2 `ModelRegistry`: the built-ins plus `ModelProviderHost`'s, assembled the way
+- [x] 2.2 `ModelRegistry`: the built-ins plus `ModelProviderHost`'s, assembled the way
       `ActionRegistry` is, rebuilt on every module change, a duplicate name refused naming both
       sources, and `kinds()` for the picker.
-- [ ] 2.3 `_sc_models`: the fields, `bootstrap_models`, the `Model` ⇄ row mapping read strictly
+- [x] 2.3 `_sc_models`: the fields, `bootstrap_models`, the `Model` ⇄ row mapping read strictly
       (a missing or misshapen column is an error naming the model and the column, never a
       default), and `save_model` / `delete_model` / `models`.
-- [ ] 2.4 `_sc_model_instances`: the same, plus `active` enforced at most one per model on save,
+- [x] 2.4 `_sc_model_instances`: the same, plus `active` enforced at most one per model on save,
       and `reap_fitting_instances` marking every `fitting` row failed at boot (§8).
-- [ ] 2.5 `validate_model`, run on save **and** on load: the dataset validates, the provider
+- [x] 2.5 `validate_model`, run on save **and** on load: the dataset validates, the provider
       exists, the configuration validates against `config_spec(shape)` and the provider's own
       `validate`, the hyperparameters are known names, the split fractions sum to 1. A model
       that fails on load is listed with its reason and stays editable — the agent rule.
-- [ ] 2.6 Unit tests: the round-trip through both tables, the strict read refusing each way a
+- [x] 2.6 Unit tests: the round-trip through both tables, the strict read refusing each way a
       row can be wrong, `active` uniqueness, and the boot reap.
 
 ## Phase 3 — Encoding, fitting and prediction

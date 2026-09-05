@@ -14,8 +14,10 @@
 //! not read a table a module provides at all — three ways for a fit to be
 //! computed over rows that are not the rows the application has.
 //!
-//! Later phases put the registry and the fit runner beside this; Phase 1 is the
-//! read.
+//! Phase 2 adds [`install_models`], which is the other half a server owes this
+//! crate: the two tables exist, and a fit that was running when the process died
+//! is failed rather than left saying `fitting` for ever. The registry and the fit
+//! runner join them in later phases.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -24,7 +26,10 @@ use async_trait::async_trait;
 use sc_api::rows::{RowQuery, count_rows_where, list_row_values};
 use sc_catalog::Catalog;
 use sc_error::{Context, Error, Result};
-use sc_model::{Column, Dataset, DatasetSource, Frame, SPLIT_KEY, canonical_key};
+use sc_model::{
+    Column, Dataset, DatasetSource, Frame, SPLIT_KEY, bootstrap_model_instances, bootstrap_models,
+    canonical_key, reap_fitting_instances,
+};
 use sc_query::{Expr, Projection, Value};
 
 /// The [`DatasetSource`] a running server has: the catalog, read through
@@ -141,6 +146,40 @@ impl DatasetSource for CatalogDatasetSource {
         };
         Frame::new(columns, keys)
     }
+}
+
+/// Ensure the two model tables exist, and **reap every fit that was running
+/// when this process last stopped** (TODO §8).
+///
+/// A fit is a job whose registry is its row: `fitModel` writes the instance
+/// first, returns its id, and runs the work on a spawned task. Nothing survives
+/// a restart, so an instance still saying `fitting` at boot is one nothing will
+/// ever finish — and leaving it that way would show an admin a fit in progress
+/// that is not. It is failed by name instead, with the sentence saying what
+/// happened. Making a fit durable is the workflow engine's job and would mean
+/// expressing a fit as a workflow, which is a bigger claim than this milestone
+/// makes.
+///
+/// Runs before anything can read an instance, for that reason. It carries no
+/// registry yet: there is nothing to fit with until the built-in providers land
+/// (Phase 4) and nothing to fit from until the API does (Phase 5).
+pub async fn install_models(catalog: &Arc<Catalog>) -> Result<()> {
+    bootstrap_models(catalog)
+        .await
+        .context("ensuring the models table exists")?;
+    bootstrap_model_instances(catalog)
+        .await
+        .context("ensuring the model instances table exists")?;
+    let reaped = reap_fitting_instances(catalog)
+        .await
+        .context("failing the fits that were running at the last shutdown")?;
+    if reaped > 0 {
+        eprintln!(
+            "feldspar: {reaped} model fit(s) were running when the server last stopped and \
+             have been marked failed"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -2,6 +2,82 @@
 
 Changes in reverse chronological order.
 
+## A provider is a trait, a model is a row, a fit is a row that finishes
+
+The second phase of predictive models: the vocabulary a provider speaks, the registry that
+assembles them, and the two tables a model and its fits live in. Nothing fits anything yet —
+what lands here is what fitting will be expressed in.
+
+- **Metrics are the host's; parameters are the provider's.** A `ModelProvider` returns a
+  `FitResult` — its serialised state and its parameters — and **no metrics**; `sc-model` will
+  compute those itself by scoring the fitted state back over each split. It makes providers
+  comparable, so the smartcore regression and the scikit-learn one are scored by the same code
+  on the same rows and the number on the screen means one thing, and it means a provider in
+  another language does not have to reimplement R² to be a citizen here. What a provider does
+  own is its parameters, and those are structured for display (`ParameterBlock::Scalar`,
+  `Table`, `Text`) rather than free JSON: a coefficient table renders as a table without the
+  admin UI knowing what a coefficient is, and a ragged one is refused where it is built rather
+  than rendered with a standard error under *p*.
+- **The outcome is a function of the configuration.** A random forest is a regressor or a
+  classifier depending on the type of the column its configuration names as the label, so
+  `outcome(shape, config)` answers an `Outcome` rather than a constant — which is what the UI
+  renders against, what the metric set will be chosen by, and what `predict_row` will check
+  before writing a number into a text column. Providers declare it as an `OutcomeSpec`
+  (`Supervised`, `Regression`, `Classification`, `Cluster`, `Embedding`, `Test`) rather than
+  computing it in code, because a provider supplied by a module sends data across the seam and
+  not a closure — and one mechanism for the question beats two that must be kept in step.
+- **A label picker is `OptionsSource::ServerQuery`, not a new vocabulary.** `config_spec` takes
+  the dataset's shape so a provider naming a label can offer *these* columns; a provider
+  declares the field with the `dataset_columns` query (or its numeric and categorical siblings)
+  and the default `config_spec` resolves it. So a provider written in JavaScript or Python,
+  which cannot run Rust code to build a form, still gets a picker over the dataset's own
+  columns.
+- **A class index and a class name are different variants.** A provider works in class indices
+  because that is what the target encoding hands it; a caller wants the name, because the index
+  is an implementation detail of an encoding and nobody's row wants to hold a `2`. So
+  `Prediction::ClassIndex` is what a provider answers and `Prediction::Class` is what leaves the
+  host, and an index that escaped the mapping is caught rather than written. One variant doing
+  both jobs would make "is this a name or an index" a question about where you are in the call
+  stack.
+- **The registry takes a host, and refuses a duplicate naming both sources.** `ModelRegistry` is
+  `ActionRegistry`'s and `AgentRegistry`'s third sibling — a `BTreeMap`, ordered by name,
+  duplicates refused — with one addition: what arrives from a module is a `ModelProviderKind`
+  (data) rather than code, so `register_host` wraps each in a `HostProvider` that routes `fit`
+  and `predict` back by the `(module, provider)` pair, and the map holds one kind of thing.
+  "Two providers are called `random_forest`" is not actionable; "the module `@saltcorn/sklearn`
+  supplies `random_forest`, which is also a built-in" is.
+- **`_sc_models` and `_sc_model_instances`, read strictly.** A missing or misshapen column is an
+  error naming the model and the column, never a default — because a model read with half a
+  dataset would still be *fitted*, and a fit that quietly dropped a feature produces a number
+  that looks exactly like the right one. `table_name` is a column even though the dataset
+  carries it (two things ask "which models are on this table" and neither should read every
+  dataset), but it is derived on the way out and checked on the way in, so the duplication
+  cannot drift. Deleting a model takes its instances with it — the opposite of what deleting an
+  agent does to its runs, because a run is a transcript of something that happened and an
+  instance is a fitted object whose parameters mean nothing without the dataset they were
+  fitted over.
+- **`active` is a column, and activating one instance deactivates the others.** At most one
+  instance per model is the one a trigger naming the *model* predicts with; the uniqueness is
+  enforced on save rather than by refusing, because refusing would make activation a two-step
+  dance with a window in which a model has no active instance at all. An instance that is still
+  `fitting`, or that failed, cannot be active: it has nothing to predict with.
+- **A fit does not survive a restart, and the boot says so.** The row is the job registry, so a
+  process that dies mid-fit leaves an instance saying `fitting` that nothing will finish.
+  `reap_fitting_instances` fails every one of them at boot with the sentence saying what
+  happened, wired into the server's startup beside the agent and trigger installs. Making a fit
+  durable is the workflow engine's job and would mean expressing a fit as a workflow, which is a
+  bigger claim than this milestone makes.
+- **Validation runs on save and on load, and the shape is optional.** A provider's form is a
+  function of the dataset's columns *and their types*, and those are only known from a read — so
+  the half of validation that needs them takes a `DatasetShape` and the parameter may be absent.
+  A save that has previewed the dataset passes one; the load path does not and must not, because
+  listing forty models would otherwise mean forty dataset reads at a moment nobody asked for any
+  of them. Everything else — the dataset resolves, the provider exists, the hyperparameters are
+  names the provider declares (each list element checked like a scalar, an empty list refused as
+  a search over nothing), the split fractions sum to 1, the table has a primary key to hash —
+  runs either way. A model that stops validating is listed with its reason and stays editable,
+  which is the agent rule.
+
 ## A dataset is a list of formulas
 
 The first phase of predictive models: `crates/sc-model`, and the half of it that is about

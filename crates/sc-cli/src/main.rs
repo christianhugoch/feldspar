@@ -197,6 +197,13 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // may name (§11.5), and it needs the assembled trait set.
     let agents = sc_server::install_agents(&catalog).await?;
 
+    // Models: the two tables a model and its fits live in, and the reap of any
+    // fit that was running when this process last stopped (§8). A fit's registry
+    // is its row, so nothing survives a restart and an instance still saying
+    // `fitting` at boot is one nothing will finish — it is failed by name here,
+    // before anything can read it.
+    sc_server::install_models(&catalog).await?;
+
     // Triggers: the built-in actions plus `run_agent`, the stored trigger set,
     // and the dispatcher installed into the catalog — after which a row write
     // raises an event. Before it, nothing observes writes, which is what keeps
