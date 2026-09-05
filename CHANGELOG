@@ -2,6 +2,72 @@
 
 Changes in reverse chronological order.
 
+## A dataset is a list of formulas
+
+The first phase of predictive models: `crates/sc-model`, and the half of it that is about
+**data** rather than about fitting — what a model is fitted against, what comes back, and how
+the rows divide.
+
+- **`sc-model` sits at layer 6, beside `sc-action`,** and not above the row layer its data
+  comes from. A module supplies model providers the way it supplies actions and table
+  providers, and `sc-module` (layer 6) can only implement a trait declared below it — the same
+  argument `sc-action` already carries. The price is that the crate cannot read a row, and it
+  does not pretend to: `DatasetSource` is a seam, and `sc_server::models::CatalogDatasetSource`
+  fills it in over `sc_api::rows`. Going around the row layer would have meant a dataset that
+  saw no non-stored calculated field, ignored ownership and row-level security, and could not
+  read a provided table at all.
+- **A dataset is a table, a list of formulas and one filter — and that is the whole of it.**
+  GOALS asks for "table fields and derived fields such as calculations, joinfields and
+  aggregations, and any inclusion/exclusion criteria"; this system already has one language
+  that is exactly those four things, so a dataset column *is* an `sc-expr` formula, validated
+  against the same `SchemaShape` as a calculated field and translated by the same
+  `translate_value`. There is no second vocabulary with three shapes in the JSON and three code
+  paths behind it. `user` and the operation flags are refused by name, for the reason a calc
+  field refuses them: a dataset has no caller, and a fit that meant something different
+  depending on who pressed the button would be indefensible.
+- **A column that does not translate to SQL is not an error; a filter that does not is.** The
+  columns are the ones the row layer falls back to the reified evaluator for, which is the
+  arrangement calc fields already have. A filter has no such fallback — there is nothing in
+  front of a `SELECT` — so an untranslatable one is refused rather than silently becoming
+  "every row". A dataset read that comes back missing a column says which column and why.
+- **The frame is columnar and typed from the data.** Every consumer wants a column, and a
+  numeric matrix is built column-major anyway. Two shapes are wider than the sketch in the
+  plan and both are deliberate: `Column::Date` is its own variant (a date that arrived as an
+  integer would be standardised or one-hot encoded by whatever rule integers get — a silent
+  difference between fit and predict), and `Column::Null` carries its length so an all-null
+  column keeps the frame rectangular. `DatasetShape` — the column types a provider's
+  `config_spec` will be handed — is built from a materialised frame rather than from the
+  schema, because a `SchemaShape` carries no types and the type of `price / area`, of a join
+  path or of an aggregation is not derivable from one.
+- **The frame is bounded, and the bound is asked for first.** A dataset is a `SELECT` an admin
+  wrote that the server has to hold in memory, so `--model-max-rows` (default 200 000) is the
+  ceiling and the count is a `COUNT(*)` *before* the rows: exceeding it costs one count and a
+  sentence naming the flag, rather than the OOM killer. A flag rather than a stored setting for
+  the reason `--code-workers` is one — it is a property of this process's machine.
+- **The split is a hash of the primary key, not a shuffle.** SHA-256 of the seed and the row's
+  canonical key, taken as a fraction. It costs the same as a seeded shuffle and buys three
+  things: it does not depend on row order, so a dataset read with a different `ORDER BY` or off
+  a table provider that answers in feed order splits identically; **a refit after new rows
+  arrive keeps every old row on the side it was on**, which is what makes the test metric of
+  instance 7 comparable with instance 3's; and it is reproducible from the row rather than from
+  the run. The price is that the fractions are approximate on small datasets, so the split
+  reports the counts it actually got. A stable hash on purpose — `DefaultHasher` is explicitly
+  not stable across Rust releases, and an assignment that moved under a toolchain upgrade would
+  undo all three.
+- **A table with no single primary key reads fine and cannot be split.** The restriction is the
+  fit's, not the dataset's: there is nothing stable to hash, and the refusal says so. An
+  unsupervised fit with no split is unaffected. The split key travels as a reserved projection
+  (`_sc_split_key`) rather than under the primary-key column's own name, because a dataset
+  column may legitimately be *called* `id` while computing something else.
+
+Tests: 27 unit tests in `sc-model` (a formula per column translating to the projection it
+should, the filter folding into the `WHERE`, `user` refused in a column and in the filter,
+duplicate and empty names, the seam JSON round-tripping, the split stable across a reordered
+and an appended frame, and the primary-key refusal) and five in
+`crates/sc-server/tests/model_dataset.rs` against a real database — a field, an arithmetic expression, a Ⱶ-join and a
+Ↄ-aggregation all coming back as columns of one frame, the filter restricting the rows, the row
+cap refused by name, and a keyless table that reads but will not split.
+
 ## The module runtime carries its own JavaScript
 
 Installing a module on a server built from a **release tarball** failed with `it did not load:

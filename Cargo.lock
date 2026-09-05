@@ -8299,6 +8299,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sc-model"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "sc-db-postgres",
+ "sc-error",
+ "sc-expr",
+ "sc-query",
+ "sc-types",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "sc-module"
 version = "0.1.0"
 dependencies = [
@@ -8401,6 +8416,7 @@ dependencies = [
  "sc-files",
  "sc-llm",
  "sc-log",
+ "sc-model",
  "sc-module",
  "sc-python",
  "sc-query",

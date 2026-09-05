@@ -145,6 +145,19 @@ pub struct ServerConfig {
     /// `None` in either is the default: the platform data directory beside the
     /// modules root, and `python3` on the path.
     pub python_env: sc_python::PythonEnv,
+    /// The ceiling on the rows one **dataset** may materialise for a model fit
+    /// (`--model-max-rows`, default [`sc_model::DEFAULT_MAX_ROWS`]).
+    ///
+    /// A dataset is a `SELECT` an admin wrote and the fit has to hold the answer
+    /// in memory columnar, so there has to be a bound; the count is asked for
+    /// before the rows, so exceeding it costs one `COUNT(*)` and is refused by
+    /// name rather than by the OOM killer.
+    ///
+    /// A flag rather than a stored setting for the reason `--code-workers` is
+    /// one: what a materialisation costs is a property of *this process's*
+    /// memory, and a node with more of it should be able to say so without every
+    /// other node against the same database hearing it.
+    pub model_max_rows: u64,
     /// How this server obtains the certificate it serves HTTPS with (§13.5).
     ///
     /// **Not a command-line setting**, deliberately: certificates are edited in
@@ -177,6 +190,7 @@ impl Default for ServerConfig {
             python_max_inflight: sc_python::DEFAULT_MAX_INFLIGHT,
             python_max_stuck: sc_python::DEFAULT_MAX_STUCK,
             python_env: sc_python::PythonEnv::default(),
+            model_max_rows: sc_model::DEFAULT_MAX_ROWS,
             tls: TlsSettings::Off,
         }
     }
@@ -190,7 +204,8 @@ impl ServerConfig {
     /// `--code-workers <n>`, `--code-max-inflight <n>`, `--module-workers <n>`,
     /// `--modules-dir <path>`, `--python <auto|off>`,
     /// `--python-max-inflight <n>`, `--python-max-stuck <n>`,
-    /// `--python-dir <path>` and `--python-bin <path>`. Unknown flags are an
+    /// `--python-dir <path>`, `--python-bin <path>` and
+    /// `--model-max-rows <n>`. Unknown flags are an
     /// [`Error::Config`], so a typo fails loudly rather than being ignored.
     pub fn from_args<I, S>(args: I) -> Result<ServerConfig>
     where
@@ -267,6 +282,22 @@ impl ServerConfig {
                 "--python-bin" => {
                     cfg.python_env.bin = Some(PathBuf::from(next_value(&mut it, "--python-bin")?));
                 }
+                "--model-max-rows" => {
+                    let raw = next_value(&mut it, "--model-max-rows")?;
+                    cfg.model_max_rows = match raw.parse::<u64>() {
+                        Ok(n) if n > 0 => n,
+                        // Zero would make every dataset refuse, which reads as a
+                        // broken server rather than as a bound.
+                        Ok(_) => {
+                            return Err(Error::config("--model-max-rows must be at least 1"));
+                        }
+                        Err(e) => {
+                            return Err(Error::config(format!(
+                                "invalid --model-max-rows `{raw}`: {e}"
+                            )));
+                        }
+                    };
+                }
                 "--secure-cookies" => cfg.secure_cookies = true,
                 "--base-domain" => {
                     cfg.base_domain = Some(next_value(&mut it, "--base-domain")?);
@@ -331,6 +362,8 @@ mod tests {
         assert_eq!(cfg.python_max_inflight, sc_python::DEFAULT_MAX_INFLIGHT);
         assert_eq!(cfg.python_max_stuck, sc_python::DEFAULT_MAX_STUCK);
         assert_eq!(cfg.python_env, sc_python::PythonEnv::default());
+        // A dataset is bounded by the engine's own default (TODO §9).
+        assert_eq!(cfg.model_max_rows, sc_model::DEFAULT_MAX_ROWS);
     }
 
     #[test]
@@ -363,6 +396,8 @@ mod tests {
             "/srv/python",
             "--python-bin",
             "/usr/bin/python3.12",
+            "--model-max-rows",
+            "5000",
         ])
         .expect("parse");
         assert_eq!(cfg.addr.to_string(), "0.0.0.0:8080");
@@ -383,6 +418,7 @@ mod tests {
         assert_eq!(cfg.python, PythonMode::Off);
         assert_eq!(cfg.python_max_inflight, 8);
         assert_eq!(cfg.python_max_stuck, 2);
+        assert_eq!(cfg.model_max_rows, 5000);
         assert_eq!(
             cfg.python_env.dir.as_deref(),
             Some(std::path::Path::new("/srv/python"))
@@ -415,6 +451,16 @@ mod tests {
         // would; the runtime clamps it, so a `0` here is refused.
         assert!(ServerConfig::from_args(["--python-max-inflight", "0"]).is_err());
         assert!(ServerConfig::from_args(["--python-max-stuck", "lots"]).is_err());
+    }
+
+    /// A dataset ceiling of zero would make every fit refuse, which reads as a
+    /// broken server rather than as a bound — so it is refused on the command
+    /// line, where an operator can still see what they typed.
+    #[test]
+    fn rejects_a_zero_or_unparseable_dataset_ceiling() {
+        assert!(ServerConfig::from_args(["--model-max-rows", "0"]).is_err());
+        assert!(ServerConfig::from_args(["--model-max-rows", "many"]).is_err());
+        assert!(ServerConfig::from_args(["--model-max-rows"]).is_err());
     }
 
     /// Both code-pool counts are clamped to at least one by the pool itself, so

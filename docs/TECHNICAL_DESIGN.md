@@ -89,7 +89,12 @@ feldspar/
 │  │                              #    that advances a run of it (§10.3)
 │  ├─ sc-agent/                   # 7. Agent record + AgentTrait trait + registry + inference
 │  │                              #    loop + `_sc_agents`/`_sc_runs` storage (§11.2)
-│  ├─ sc-model/                   # 7. ModelProvider trait, model instances, inference
+│  ├─ sc-model/                   # 6. Predictive models: the dataset (formulas over a table),
+│  │                              #    the columnar Frame, the primary-key-hash split, the
+│  │                              #    DatasetSource + ModelProvider seams, `_sc_models` /
+│  │                              #    `_sc_model_instances`. Beside sc-action rather than
+│  │                              #    above the row layer it reads through, because a module
+│  │                              #    supplies model providers (TODO "Predictive models" §4)
 │  ├─ sc-fieldview/               # 6. FieldView trait, built-in fieldviews (React components)
 │  ├─ sc-viewpattern/             # 8. ViewPattern trait (v1-style views: Show/List/Edit/Filter…)
 │  ├─ sc-api/                     # 8. Endpoint model (typed Rust values) + API providers

@@ -1,0 +1,47 @@
+[package]
+name = "sc-model"
+description = "Predictive models: the dataset, the frame, the split and the provider seam (layer 6)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# One integration-test binary per crate rather than one per file: every test
+# target in this workspace statically links V8, so ~400 MB of binary and a
+# multi-second link were being paid per *file*.
+autotests = false
+
+[dependencies]
+sc-error.workspace = true
+# `FormField` for a provider's declared configuration and `Attrs` for the values
+# — the one vocabulary every configurable extension point speaks (§6.2). Phase 1
+# uses it only for the column-type vocabulary a later phase's `config_spec` is
+# handed; the trait itself lands in Phase 2.
+sc-types.workspace = true
+# The formula language a dataset column *is* (§2): one `Formula` per column,
+# validated against the same `SchemaShape` and translated by the same
+# `translate_value` a calculated field goes through. The `eval` feature is
+# deliberately not enabled — this crate parses and translates, it does not run
+# an engine.
+sc-expr.workspace = true
+# A dataset becomes a `Select`: the projections and the filter this crate builds
+# are handed to the row layer, which is what actually reads (see `DatasetSource`).
+sc-query.workspace = true
+# The split's hash (§5). A *stable* hash, on purpose: `DefaultHasher` is
+# explicitly not stable across Rust releases, and an instance whose train/test
+# assignment moved under a toolchain upgrade would make two instances of one
+# model incomparable — which is the whole reason the split is a hash.
+sha2.workspace = true
+async-trait.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+
+[dev-dependencies]
+# The dataset's `Select` is asserted as rendered SQL rather than as a tree: the
+# question a test asks is "did the filter fold into the WHERE", and the answer
+# reads as SQL.
+sc-db-postgres.workspace = true
+
+[lints]
+workspace = true

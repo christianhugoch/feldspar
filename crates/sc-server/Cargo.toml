@@ -68,6 +68,11 @@ sc-agent.workspace = true
 # and a run's trace live in, bootstrapped beside `_sc_triggers`, and — from the
 # next phase — the engine this server installs on the dispatcher.
 sc-workflow.workspace = true
+# Predictive models (TODO "Predictive models"). This crate supplies the
+# `DatasetSource` seam `sc-model` declares but cannot implement: reading a
+# dataset's rows is `sc_api::rows`' job, and `sc-model` sits below it so a module
+# can supply a model provider.
+sc-model.workspace = true
 sc-core-traits.workspace = true
 sc-db.workspace = true
 sc-db-postgres.workspace = true

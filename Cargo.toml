@@ -31,6 +31,13 @@ members = [
     "crates/sc-config",
     # Layer 6 — actions & triggers, the LLM provider seam and the mail transport
     "crates/sc-action",
+    # Predictive models: the dataset, the frame, the split, the provider seam
+    # and the fit. Beside the actions rather than above the row layer its data
+    # comes from, because a module supplies model providers the way it supplies
+    # actions and table providers, and `sc-module` (layer 6) can only implement
+    # a trait declared below it. The cost is that this crate cannot read a row:
+    # it declares `DatasetSource` and `sc-server` fills it in (TODO §4).
+    "crates/sc-model",
     # Modules: Saltcorn v1 JavaScript plugins. Beside the actions rather than
     # above them, because what a module supplies *is* an `Action` (§15).
     "crates/sc-module",
@@ -99,6 +106,7 @@ sc-auth = { path = "crates/sc-auth" }
 sc-files = { path = "crates/sc-files" }
 sc-config = { path = "crates/sc-config" }
 sc-action = { path = "crates/sc-action" }
+sc-model = { path = "crates/sc-model" }
 sc-module = { path = "crates/sc-module" }
 sc-llm = { path = "crates/sc-llm" }
 sc-email = { path = "crates/sc-email" }
