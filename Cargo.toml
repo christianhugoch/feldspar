@@ -505,6 +505,35 @@ rig-core = { version = "0.41", default-features = false, features = [
     "rustls",
 ] }
 
+# --- The built-in model providers (TODO "Predictive models" §13) --------------
+#
+# The five machine-learning built-ins — `linear_regression`, `logistic_regression`,
+# `random_forest`, `kmeans` and `pca` — are smartcore's algorithms behind
+# `sc-model`'s own provider seam. It is a **pure-Rust, dependency-light** library
+# (num, ordered-float, rand and nothing else): no BLAS, no LAPACK, no system
+# library, so the server still builds and links the way it did. GOALS asks for
+# exactly this set and asks for it behind a feature flag, which is `sc-model`'s
+# `smartcore` feature (default on).
+#
+# The `serde` feature is what makes a fit *survivable*: a fitted instance is a
+# JSON column, so a random forest is stored by serialising smartcore's own model
+# and read back by deserialising it. Without it a fit could not be applied after
+# a restart, which is the whole point of storing one. It pulls `typetag` on
+# non-wasm targets (smartcore's SVM kernels are trait objects); nothing here uses
+# the SVMs, but the feature is not divisible.
+smartcore = { version = "0.6", default-features = false, features = ["serde"] }
+# The distribution functions the two hypothesis tests need: Student's *t* for the
+# t-test and for a regression coefficient's *p*, Fisher–Snedecor's *F* for the
+# ANOVA. **Not** behind the `smartcore` feature — §13's rule — because a build
+# with the machine learning compiled out should still be able to answer whether
+# two groups differ, and because a CDF is arithmetic rather than a model.
+#
+# `default-features = false` with `std` alone drops `nalgebra` (the multivariate
+# distributions) and `rand` (sampling): what is wanted here is two CDFs, and the
+# linear-algebra dependency of a statistics crate is not a cost this workspace
+# should pay for them.
+statrs = { version = "0.19", default-features = false, features = ["std"] }
+
 # Workspace-wide lints. Principle 5 (no silent failures): library code must not
 # `unwrap()`/`expect()` on fallible paths — return a `sc-error::Result` instead.
 # Member crates opt in with `[lints]` + `workspace = true`. Test code is exempted

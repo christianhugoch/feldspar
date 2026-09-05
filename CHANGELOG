@@ -2,6 +2,64 @@
 
 Changes in reverse chronological order.
 
+## Seven built-in providers, and the numbers beside the coefficients
+
+The fourth phase of predictive models, and the first one that fits anything. `sc-model` now
+carries seven providers behind the seam Phase 2 declared: `linear_regression`,
+`logistic_regression`, `random_forest`, `kmeans` and `pca` over smartcore, and `t_test` and
+`anova` over `statrs`. A model saved against any of them goes through the same materialise →
+split → encode → search → fit → score → store pass the previous phase built, and comes back as
+an instance with parameters somebody can read.
+
+- **The machine learning is a feature, and it is on by default.** GOALS asks for the smartcore
+  providers behind "a cargo feature flag so it can be disabled", so `sc-model`'s `smartcore`
+  feature is it and `--no-default-features` is the opt-out — nothing a packager has to remember
+  to switch on. What survives the opt-out is the two hypothesis tests: they need a distribution
+  function and nothing else, and a build with the machine learning compiled out should still be
+  able to answer whether two groups differ. A registry holding only those two is a *state*, not
+  an empty list, so `BUILTINS_COMPILED_OUT` is the sentence the screen shows instead, and it
+  names the flag because the person reading it is usually the person who can rebuild.
+- **smartcore fits; it does not explain — so everything a fitted model is read for is ours.**
+  The regression computes a **standard error, *t* and *p* for every coefficient** from the
+  residual variance and `(XᵀX)⁻¹`, because "a regression model where we are more interested in
+  the slope coefficient values" (GOALS) is a number with no way to tell whether it means
+  anything otherwise. The logistic regression adds **odds ratios** — e^0.41 = 1.51 is
+  "multiplies the odds by half again", which is the sentence somebody wanted — and the
+  **predicted probability**, which rides along on the prediction so that "spam, 0.51" and
+  "spam, 0.99" are different answers. The forest reports **permutation importances**, the
+  clustering its **centres and sizes**, and the projection its **explained variance ratio**.
+- **The intercept is a setting, not an assumption.** smartcore always fits one; here it is a
+  checkbox, because "the line goes through the origin" is a real modelling claim and a model
+  that silently added a constant would answer a different question from the one asked. It
+  changes what R² means — centred with an intercept, uncentred without — and that is stated
+  rather than hidden.
+- **`random_forest` is the `Outcome` demonstration, and the branch is taken from two sides.**
+  Before the fit, `outcome` reads the dataset's column types: `price` is a float, so this is a
+  regression, and that is what the form renders and what `predict_row` will check a target
+  field against. During the fit, the provider reads the frame's label column — because the seam
+  carries a frame, a configuration and a hyperparameter point, and not a resolved outcome. To
+  make that readable, an encoded classification's label now crosses as an **integer** column
+  and a regression's as a float: a class index is not a measurement, and this is the one fact a
+  provider needs that the encoded numbers otherwise hide.
+- **`(XᵀX)⁻¹` is inverted here rather than by the library.** smartcore's LU inverse *panics* on
+  a singular matrix, and two dataset columns carrying the same information is not a bug in this
+  server — it is a dataset an admin can fix. So the Gram matrix is inverted by Gauss–Jordan with
+  a conditioning test, and a rank-deficient design comes back as a sentence naming the usual
+  cause instead of killing the fit job.
+- **A hypothesis test refuses to predict.** `t_test` (one-sample, two-sample, Welch's and
+  paired) and `anova` (one-way) declare `Outcome::Test`, so the fit takes no split, no encoding
+  and no metrics, and `predict` is an error rather than an empty vector — a caller that reached
+  it has a bug, and a silent empty answer would hide it. Which of the other settings each test
+  needs is checked by the provider on save, because no form can say "required, but only when
+  `test` is `paired`".
+- **The numbers are asserted against other people's implementations.** The regression's
+  coefficients, standard errors, *t*s, *p*s, R² and adjusted R² are `statsmodels`' output for
+  the same ten rows, pasted into the test as constants; every t-test and the ANOVA are
+  `scipy.stats`' answers for theirs. An OLS that agrees with itself proves nothing. Beside them:
+  a two-class logistic separation with its probabilities, three obvious k-means blobs, a PCA of
+  a rotated line, a forest that finds the column its label was built from, and an end-to-end fit
+  through the encoding that checks the coefficient table says `region=north` rather than `x2`.
+
 ## The encoding belongs to the instance, and the metrics belong to the host
 
 The third phase of predictive models: what turns a frame of strings and dates into numbers,

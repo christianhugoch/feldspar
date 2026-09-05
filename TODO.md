@@ -470,27 +470,27 @@ bytes stores base64, because a system table with a `bytea` column would be the o
 
 ## Phase 4 — The built-in providers
 
-- [ ] 4.1 The `smartcore` feature (default on) and the `statrs` dependency; the two
+- [x] 4.1 The `smartcore` feature (default on) and the `statrs` dependency; the two
       distribution-only providers built either way (§13).
-- [ ] 4.2 `linear_regression`: OLS through smartcore, plus standard errors, *t* and *p* from
+- [x] 4.2 `linear_regression`: OLS through smartcore, plus standard errors, *t* and *p* from
       the residual variance and `(XᵀX)⁻¹`, as a `ParameterBlock::Table`. Intercept optional.
-- [ ] 4.3 `logistic_regression`: coefficients, odds ratios, and predicted class with the
+- [x] 4.3 `logistic_regression`: coefficients, odds ratios, and predicted class with the
       predicted probability as the `Prediction`'s uncertainty.
-- [ ] 4.4 `random_forest`: regressor or classifier by the label's type — the `Outcome`
+- [x] 4.4 `random_forest`: regressor or classifier by the label's type — the `Outcome`
       demonstration — with `n_trees`, `max_depth` and `min_samples_leaf` as hyperparameters and
       feature importances as parameters.
-- [ ] 4.5 `kmeans`: `k` as a hyperparameter, cluster centres and sizes as parameters, the
+- [x] 4.5 `kmeans`: `k` as a hyperparameter, cluster centres and sizes as parameters, the
       cluster number as the per-row prediction.
-- [ ] 4.6 `pca`: components, explained variance ratio, and the projected vector per row.
-- [ ] 4.7 `t_test` and `anova`: configuration is which column is the value and which the group
+- [x] 4.6 `pca`: components, explained variance ratio, and the projected vector per row.
+- [x] 4.7 `t_test` and `anova`: configuration is which column is the value and which the group
       (or the two columns, or the constant, per test type); parameters are the statistic, the
       degrees of freedom, the p-value, the group means and the confidence interval. `Outcome`
       is `Test`, so nothing asks them to predict.
-- [ ] 4.8 Unit tests with hand-checked numbers: a regression whose coefficients, standard errors
+- [x] 4.8 Unit tests with hand-checked numbers: a regression whose coefficients, standard errors
       and p-values are asserted against values computed independently (R/`statsmodels` output
       pasted into the test as constants), a two-class logistic separation, k-means on three
       obvious blobs, PCA on a rotated line, and each test statistic against a textbook example.
-- [ ] 4.9 A build with `--no-default-features` compiles, lists two providers, and says on the
+- [x] 4.9 A build with `--no-default-features` compiles, lists two providers, and says on the
       screen that the rest were compiled out.
 
 ## Phase 5 — The API and the action

@@ -16,8 +16,11 @@
 //! [`Model`] and a [`ModelInstance`] are as rows. Phase 3 is the **work**: what
 //! turns a frame into numbers ([`Encoding`]), what scores the result
 //! ([`Metrics`]), the order the two go in ([`run_fit`]), and how a fitted
-//! instance is applied to a row it has never seen ([`predict_rows`]). The
-//! algorithms themselves — the providers — follow in Phase 4.
+//! instance is applied to a row it has never seen ([`predict_rows`]). Phase 4
+//! is the **algorithms**: the seven built-in providers
+//! ([`builtin_providers`]), five of them smartcore's behind the `smartcore`
+//! feature and two of them hypothesis tests that are there either way (see
+//! [`BUILTINS_COMPILED_OUT`]).
 //!
 //! ## Layering: why this is at layer 6 and not above the row layer
 //!
@@ -73,6 +76,7 @@ mod metrics;
 mod model;
 mod predict;
 mod provider;
+mod providers;
 mod registry;
 mod source;
 mod split;
@@ -104,6 +108,7 @@ pub use provider::{
     ParameterBlock, ParameterRow, Prediction, categorical_column_field, column_field,
     is_column_query, numeric_column_field, resolve_column_options,
 };
+pub use providers::{BUILTINS_COMPILED_OUT, SMARTCORE, builtin_providers, builtin_registry};
 pub use registry::ModelRegistry;
 pub use source::{DEFAULT_MAX_ROWS, DatasetSource, SPLIT_KEY};
 pub use split::{Part, Split, SplitCounts, Splits};

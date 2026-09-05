@@ -12,6 +12,22 @@ rust-version.workspace = true
 # multi-second link were being paid per *file*.
 autotests = false
 
+# The machine-learning built-ins are a **feature**, and it is on by default so
+# that `--no-default-features` is the opt-out rather than something a packager
+# has to remember (TODO §13). GOALS asks for the flag directly: "the core rust
+# code supplies model providers for regression, classification, clustering and
+# dimensionality reduction based on smartcore. this needs to be a cargo feature
+# flag so it can be disabled."
+#
+# What survives the opt-out is `t_test` and `anova`: they are arithmetic over a
+# distribution function, not machine learning, and a build with no smartcore
+# should still be able to answer whether two groups differ. A registry holding
+# only those two is a real state and not an empty list — see
+# `BUILTINS_COMPILED_OUT`.
+[features]
+default = ["smartcore"]
+smartcore = ["dep:smartcore"]
+
 [dependencies]
 sc-error.workspace = true
 # `FormField` for a provider's declared configuration and `Attrs` for the values
@@ -46,6 +62,14 @@ chrono.workspace = true
 async-trait.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
+# The five machine-learning built-ins (§13), behind the feature above. The
+# library supplies the estimators; the standard errors, the odds ratios, the
+# feature importances and every metric are this crate's, because they are what
+# makes a fitted model readable and smartcore does not give them.
+smartcore = { workspace = true, optional = true }
+# Student's *t* and Fisher–Snedecor's *F*, for `t_test`, `anova` and a
+# regression coefficient's *p*. Not optional: see the feature comment above.
+statrs.workspace = true
 
 [dev-dependencies]
 # The dataset's `Select` is asserted as rendered SQL rather than as a tree: the

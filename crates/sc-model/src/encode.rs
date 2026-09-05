@@ -453,6 +453,13 @@ pub struct Encoded {
     /// The name the target column is known by — the dataset column's own, so a
     /// provider's configuration still addresses it.
     pub target_name: Option<String>,
+    /// Whether the target is a **class index** rather than a measurement.
+    ///
+    /// It is what makes the target column of [`frame`](Encoded::frame) an
+    /// integer column, which is how a provider whose outcome depends on its
+    /// label's type — `random_forest` is the case the design names — tells a
+    /// classification from a regression. See that method.
+    pub classified: bool,
     /// Which rows of the source frame are in here, in order. Shorter than the
     /// source when nulls were dropped.
     pub rows: Vec<usize>,
@@ -481,13 +488,25 @@ impl Encoded {
     }
 
     /// The features **and** the target, as the frame a provider **fits** from.
+    ///
+    /// The target column is an **integer** column for a classification and a
+    /// float column for a regression, and that is load-bearing rather than
+    /// cosmetic: [`ModelProvider::fit`](crate::ModelProvider::fit) is handed a
+    /// frame, a configuration and a hyperparameter point and *not* the resolved
+    /// [`Outcome`], so a provider that is a regressor or a classifier depending
+    /// on its label — `random_forest` — reads the label's type off this column.
+    /// It is also simply true: a class index is not a measurement, and encoding
+    /// it as one would be the only place in this crate where a category is
+    /// spelled as a float.
     pub fn frame(&self) -> Frame {
         let mut frame = self.features.to_frame();
         if let (Some(name), Some(target)) = (&self.target_name, &self.target) {
-            frame.columns.push((
-                name.clone(),
-                Column::Float(target.iter().copied().map(Some).collect()),
-            ));
+            let column = if self.classified {
+                Column::Int(target.iter().map(|v| Some(*v as i64)).collect())
+            } else {
+                Column::Float(target.iter().copied().map(Some).collect())
+            };
+            frame.columns.push((name.clone(), column));
         }
         frame
     }
@@ -699,6 +718,10 @@ fn apply(encoding: &Encoding, frame: &Frame, drop: bool) -> Result<Encoded> {
         features: Matrix::new(encoding.feature_names(), values)?,
         target: encoding.target.as_ref().map(|_| target_values),
         target_name: encoding.target.as_ref().map(|t| t.column.clone()),
+        classified: encoding
+            .target
+            .as_ref()
+            .is_some_and(|t| t.classes.is_some()),
         rows,
         dropped,
     })
@@ -773,7 +796,7 @@ fn require_column<'a>(frame: &'a Frame, name: &str) -> Result<&'a Column> {
 /// A column's value at row `i` as a number, where it has one. `Bool` counts:
 /// `true` is 1 and `false` is 0, which is the encoding everybody expects and the
 /// only one that keeps a boolean feature usable without a one-hot.
-fn number_at(column: &Column, i: usize) -> Option<f64> {
+pub(crate) fn number_at(column: &Column, i: usize) -> Option<f64> {
     match column {
         Column::Float(v) => v.get(i).copied().flatten(),
         Column::Int(v) => v.get(i).copied().flatten().map(|x| x as f64),
@@ -792,7 +815,7 @@ fn number_at(column: &Column, i: usize) -> Option<f64> {
 /// Every non-null value has one, because a category is a *label* and not a
 /// reading: `true`, `3` and `north` are all perfectly good class names, and a
 /// classification over an integer column is a thing people do.
-fn category_at(column: &Column, i: usize) -> Option<String> {
+pub(crate) fn category_at(column: &Column, i: usize) -> Option<String> {
     match column {
         Column::Str(v) => v.get(i).cloned().flatten(),
         Column::Int(v) => v.get(i).copied().flatten().map(|x| x.to_string()),
