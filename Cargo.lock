@@ -8241,11 +8241,13 @@ dependencies = [
  "sc-error",
  "sc-expr",
  "sc-files",
+ "sc-model",
  "sc-query",
  "sc-test-harness",
  "sc-types",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

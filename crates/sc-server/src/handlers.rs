@@ -2408,26 +2408,41 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     .query_get("table")
                     .map(str::trim)
                     .filter(|table| !table.is_empty());
-                let out: Vec<Json> = dispatcher
-                    .registry()
-                    .all()
-                    .map(|action| {
-                        let spec = action.config_spec_for(&catalog, channel);
-                        json!({
-                            "name": action.name(),
-                            "description": action.description(),
-                            "config_spec": spec
-                                .iter()
-                                .map(form_field_json)
-                                .collect::<Vec<_>>(),
-                            // Whether the step palette may offer it here (§10.3,
-                            // phase 5.4). Decided from the declaration this same
-                            // call is answering with, so the flag and the form
-                            // the client would render cannot disagree.
-                            "workflow_step": sc_workflow::usable_as_step(&spec),
-                        })
-                    })
-                    .collect();
+                // The models over this table, for the one declaration that asks
+                // for them: `predict_row`'s picker (§12). Read once rather than
+                // per action, and **only when the request named a table** — with
+                // no channel there is no "this table's models" to answer with,
+                // and answering with an empty list would be claiming there are
+                // none rather than that the question was not asked.
+                let models = match channel {
+                    Some(table) if catalog.get(sc_model::MODELS_TABLE)?.is_some() => Some(
+                        sc_model::models_for_table(&catalog, table)
+                            .await?
+                            .into_iter()
+                            .map(|m| m.name)
+                            .collect::<Vec<_>>(),
+                    ),
+                    Some(_) => Some(Vec::new()),
+                    None => None,
+                };
+                let mut out = Vec::new();
+                for action in dispatcher.registry().all() {
+                    let spec =
+                        resolve_model_options(action.config_spec_for(&catalog, channel), &models);
+                    out.push(json!({
+                        "name": action.name(),
+                        "description": action.description(),
+                        "config_spec": spec
+                            .iter()
+                            .map(form_field_json)
+                            .collect::<Vec<_>>(),
+                        // Whether the step palette may offer it here (§10.3,
+                        // phase 5.4). Decided from the declaration this same
+                        // call is answering with, so the flag and the form
+                        // the client would render cannot disagree.
+                        "workflow_step": sc_workflow::usable_as_step(&spec),
+                    }));
+                }
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
         }
@@ -2685,6 +2700,420 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 Ok(HandlerResponse::ok(
                     run_json_with_workflow(&catalog, &run).await?,
                 ))
+            }
+        }
+    });
+
+    // --- predictive models --------------------------------------------------
+    // The row ⇄ live-set path once more (TODO "Predictive models", 2.5): every
+    // save is validated against the same registry a fit runs with, and a stored
+    // model that no longer validates stays listed with its reason, because
+    // editing it is the repair.
+    //
+    // Two things happen *here* rather than in `sc-model`, and both are the
+    // layering: a dataset can only be read through the row layer (§4), and a fit
+    // is a spawned job (§8) — so the handler that starts one answers as soon as
+    // the row exists and the screen polls it.
+
+    reg.register("listModelProviders", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let models = models_of(&apps)?;
+                let registry = models.registry();
+                // The dataset, if the caller has one: a provider naming a label
+                // has to offer *these* columns as its options (§10), and the
+                // only way to know their types is to have read some rows — a
+                // `SchemaShape` carries no types at all.
+                let shape = match query_json(&ctx, "dataset")? {
+                    Some(value) => {
+                        let dataset = dataset_from_json(&value)?;
+                        let frame = models
+                            .source()
+                            .read(
+                                &dataset,
+                                &sc_model::Read::all(models.max_rows()).first(DATASET_PREVIEW_ROWS),
+                            )
+                            .await?;
+                        Some(sc_model::DatasetShape::of_frame(&dataset.table, &frame))
+                    }
+                    None => None,
+                };
+                let configuration = match query_json(&ctx, "configuration")? {
+                    Some(Json::Object(map)) => map,
+                    Some(Json::Null) | None => Attrs::new(),
+                    Some(_) => {
+                        return Err(Error::invalid("`configuration` must be a JSON object"));
+                    }
+                };
+                let mut providers = Vec::with_capacity(registry.len());
+                for provider in registry.all() {
+                    let kind = provider.kind();
+                    let spec = match &shape {
+                        Some(shape) => provider.config_spec(shape),
+                        None => provider.config_declaration(),
+                    };
+                    // Resolved like every other spec the admin UI renders, so a
+                    // setting whose options come from the catalog arrives as a
+                    // picker rather than a text box.
+                    let spec = resolve_options(&catalog, spec).await?;
+                    let (outcome, outcome_error) = match &shape {
+                        Some(shape) => match provider.outcome(shape, &configuration) {
+                            Ok(outcome) => (serde_json::to_value(&outcome).ok(), None),
+                            // Not an error for the request: "no column is named
+                            // as the label" is what the form is waiting to be
+                            // told, and every other provider still answers.
+                            Err(e) => (None, Some(e.to_string())),
+                        },
+                        None => (None, None),
+                    };
+                    providers.push(json!({
+                        "name": kind.name,
+                        "description": kind.description,
+                        "module": kind.module,
+                        "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                        "hyperparameters": provider
+                            .hyperparameters()
+                            .iter()
+                            .map(form_field_json)
+                            .collect::<Vec<_>>(),
+                        "outcome_spec": serde_json::to_value(&kind.outcome)
+                            .unwrap_or(Json::Null),
+                        "outcome": outcome,
+                        "outcome_error": outcome_error,
+                        "standardise": kind.standardise,
+                    }));
+                }
+                // An empty picker reads like a bug; the sentence reads like the
+                // decision it is (§13).
+                Ok(HandlerResponse::ok(json!({
+                    "providers": providers,
+                    "builtins_compiled_out": !sc_model::SMARTCORE,
+                    "notice": if sc_model::SMARTCORE {
+                        Json::Null
+                    } else {
+                        Json::String(sc_model::BUILTINS_COMPILED_OUT.to_owned())
+                    },
+                })))
+            }
+        }
+    });
+
+    reg.register("previewDataset", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let models = models_of(&apps)?;
+                let body = rows::require_object(&ctx.body)?;
+                let dataset = dataset_from_json(
+                    body.get("dataset")
+                        .ok_or_else(|| Error::invalid("`dataset` is required"))?,
+                )?;
+                // Validated before it is read, so a formula that does not
+                // resolve is one message rather than a database error with a
+                // column name in it.
+                let schema = catalog.schema_shape()?;
+                sc_model::validate_dataset(&dataset, &schema)?;
+                let limit = body
+                    .get("limit")
+                    .and_then(Json::as_u64)
+                    .unwrap_or(DATASET_PREVIEW_ROWS)
+                    .clamp(1, DATASET_PREVIEW_MAX);
+                let frame = models
+                    .source()
+                    .read(
+                        &dataset,
+                        &sc_model::Read::all(models.max_rows()).first(limit),
+                    )
+                    .await?;
+                let shape = sc_model::DatasetShape::of_frame(&dataset.table, &frame);
+                // The split's refusal, reported while the dataset is still being
+                // built: a table with a composite or absent primary key reads
+                // perfectly well and cannot be fitted (§5).
+                let (primary_key, split_error) = match dataset.primary_key(&schema) {
+                    Ok(pk) => (Json::String(pk), Json::Null),
+                    Err(e) => (Json::Null, Json::String(e.to_string())),
+                };
+                Ok(HandlerResponse::ok(json!({
+                    "columns": shape
+                        .columns
+                        .iter()
+                        .map(|c| json!({ "name": c.name, "type": c.ty.name() }))
+                        .collect::<Vec<_>>(),
+                    "rows": frame.to_rows(),
+                    "primary_key": primary_key,
+                    "split_error": split_error,
+                })))
+            }
+        }
+    });
+
+    reg.register("listModels", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let models = models_of(&apps)?;
+                let table = ctx.query_get("table").map(str::to_owned);
+                // The **stored** rows, with the live set consulted only for its
+                // issues: a model that fails validation would otherwise vanish
+                // from the screen that exists to repair it.
+                let stored = match &table {
+                    Some(table) => sc_model::models_for_table(&catalog, table).await?,
+                    None => sc_model::list_models(&catalog).await?,
+                };
+                let live = sc_model::Models::load(&catalog, &models.registry()).await?;
+                let mut out = Vec::with_capacity(stored.len());
+                for model in &stored {
+                    let problem = live
+                        .issues()
+                        .iter()
+                        .find(|i| i.model == model.name)
+                        .map(|i| i.problem.clone());
+                    out.push(model_json(&catalog, model, problem).await?);
+                }
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("getModel", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let models = models_of(&apps)?;
+                let id = sc_model::ModelId(parse_uuid(ctx.path_param("id")?, "model")?);
+                let model = sc_model::load_model(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no model with id {id}")))?;
+                let problem = sc_model::validate_model(&catalog, &models.registry(), &model, None)
+                    .await
+                    .err()
+                    .map(|e| e.to_string());
+                Ok(HandlerResponse::ok(
+                    model_json(&catalog, &model, problem).await?,
+                ))
+            }
+        }
+    });
+
+    reg.register("saveModel", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let models = models_of(&apps)?;
+                let body = rows::require_object(&ctx.body)?;
+                let created = body.get("id").is_none_or(Json::is_null);
+                let model = model_from_body(body)?;
+                // Validated against the same registry a fit runs with, and with
+                // the dataset's **shape** where it can be read: the provider's
+                // form is over the dataset's columns, so checking the
+                // configuration without them would push half the checking to fit
+                // time and the guessing to the admin.
+                let shape = dataset_shape(&models, &model.dataset).await;
+                sc_model::save_model(&catalog, &models.registry(), &model, shape.as_ref()).await?;
+                let response = HandlerResponse::ok(model_json(&catalog, &model, None).await?);
+                Ok(if created {
+                    response.with_status(201)
+                } else {
+                    response
+                })
+            }
+        }
+    });
+
+    reg.register("deleteModel", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = sc_model::ModelId(parse_uuid(ctx.path_param("id")?, "model")?);
+                // `delete_model` takes its instances with it, which is the
+                // difference from an agent's runs: an instance is not a record
+                // of what happened, it is a fit *of this model*, and its
+                // coefficients mean nothing without the dataset they were fitted
+                // over.
+                if !sc_model::delete_model(&catalog, id).await? {
+                    return Err(Error::not_found(format!("no model with id {id}")));
+                }
+                Ok(HandlerResponse::ok(json!({ "deleted": true })))
+            }
+        }
+    });
+
+    reg.register("fitModel", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let models = models_of(&apps)?;
+                let id = sc_model::ModelId(parse_uuid(ctx.path_param("id")?, "model")?);
+                let model = sc_model::load_model(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no model with id {id}")))?;
+                // Checked before the row exists: discovering a bad provider or
+                // an unresolvable column *inside* the job would mean an instance
+                // id that was already returned and a fit that failed a second
+                // later, and the admin is standing in front of the button.
+                sc_model::validate_model(&catalog, &models.registry(), &model, None).await?;
+                let mut instance = sc_model::ModelInstance::starting(model.id);
+                if let Json::Object(body) = &ctx.body {
+                    instance.name = optional_str(body, "name");
+                    instance.description = optional_str(body, "description");
+                }
+                let instance = models.start_fit(&model, instance).await?;
+                Ok(HandlerResponse::ok(model_instance_json(&instance)).with_status(201))
+            }
+        }
+    });
+
+    reg.register("listModelInstances", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = sc_model::ModelId(parse_uuid(ctx.path_param("id")?, "model")?);
+                let out: Vec<Json> = sc_model::list_model_instances(&catalog, id)
+                    .await?
+                    .iter()
+                    .map(model_instance_json)
+                    .collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("getModelInstance", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = sc_model::InstanceId(parse_uuid(ctx.path_param("id")?, "model instance")?);
+                let instance = sc_model::require_model_instance(&catalog, id).await?;
+                Ok(HandlerResponse::ok(model_instance_detail_json(&instance)))
+            }
+        }
+    });
+
+    reg.register("deleteModelInstance", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = sc_model::InstanceId(parse_uuid(ctx.path_param("id")?, "model instance")?);
+                if !sc_model::delete_model_instance(&catalog, id).await? {
+                    return Err(Error::not_found(format!("no model instance with id {id}")));
+                }
+                Ok(HandlerResponse::ok(json!({ "deleted": true })))
+            }
+        }
+    });
+
+    reg.register("activateModelInstance", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = sc_model::InstanceId(parse_uuid(ctx.path_param("id")?, "model instance")?);
+                let mut instance = sc_model::require_model_instance(&catalog, id).await?;
+                if !instance.is_usable() {
+                    return Err(Error::invalid(format!(
+                        "instance {id} is `{}`, so it cannot be made active: only a fit that \
+                         finished can answer a prediction",
+                        instance.status
+                    )));
+                }
+                instance.active = true;
+                // The store enforces at most one active instance per model, so
+                // activating this one is what deactivates whichever was.
+                sc_model::save_model_instance(&catalog, &instance).await?;
+                Ok(HandlerResponse::ok(model_instance_json(&instance)))
+            }
+        }
+    });
+
+    reg.register("predictRows", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let models = models_of(&apps)?;
+                let body = rows::require_object(&ctx.body)?;
+                let (model, instance) = prediction_target(&catalog, body).await?;
+                let literal = match body.get("rows") {
+                    None | Some(Json::Null) => None,
+                    Some(Json::Array(rows)) => Some(rows.clone()),
+                    Some(_) => return Err(Error::invalid("`rows` must be an array of objects")),
+                };
+                let filter = body
+                    .get("filter")
+                    .and_then(Json::as_str)
+                    .map(str::trim)
+                    .filter(|f| !f.is_empty());
+                if literal.is_some() && filter.is_some() {
+                    return Err(Error::invalid(
+                        "give either `rows` or `filter`: literal rows are not rows of the table, \
+                         so a filter over them means nothing",
+                    ));
+                }
+                // The filter is translated here rather than inside the seam,
+                // because it is the *same* translation a dataset's own filter
+                // goes through and a second set of rules about what a filter may
+                // say would be a second thing to keep in step.
+                let restrict = match filter {
+                    Some(formula) => Some(sc_model::translate_filter(
+                        model.table(),
+                        formula,
+                        &catalog.schema_shape()?,
+                    )?),
+                    None => None,
+                };
+                let subject = match &literal {
+                    Some(rows) => sc_model::Subject::Rows(rows),
+                    None => sc_model::Subject::Dataset(restrict.as_ref()),
+                };
+                let answer = sc_model::predict_subject(
+                    &models.registry(),
+                    models.source().as_ref(),
+                    &model,
+                    &instance,
+                    subject,
+                    models.max_rows(),
+                )
+                .await?;
+                let mut predictions = Vec::with_capacity(answer.predictions.len());
+                for (i, prediction) in answer.predictions.iter().enumerate() {
+                    predictions.push(json!({
+                        "prediction": serde_json::to_value(prediction)
+                            .unwrap_or(Json::Null),
+                        "value": prediction.to_json()?,
+                        "key": answer.keys.get(i).cloned(),
+                    }));
+                }
+                Ok(HandlerResponse::ok(json!({
+                    "instance": instance.id.0,
+                    "outcome": serde_json::to_value(instance.outcome()?)
+                        .unwrap_or(Json::Null),
+                    "predictions": predictions,
+                })))
             }
         }
     });
@@ -5771,6 +6200,267 @@ fn backup_filename() -> String {
 
 /// A [`FormField`] as the API returns it (matching `form_field_schema`): enough
 /// for the admin UI to render and label a control for it.
+/// How many rows a dataset preview reads by default, and the most it will read.
+///
+/// A preview is a **limited** read rather than a capped one (§9's cap is the
+/// fit's bound): previewing is exactly what an admin does to a dataset that
+/// turns out to be too big to fit, so refusing to show it would refuse the
+/// answer they came for. The default is what a table on a screen shows; the
+/// maximum is what a column's *type* can be decided from without the read
+/// becoming the thing it was protecting against.
+const DATASET_PREVIEW_ROWS: u64 = 20;
+/// The ceiling on a preview's `limit` — see [`DATASET_PREVIEW_ROWS`].
+const DATASET_PREVIEW_MAX: u64 = 500;
+
+/// Fill in the options of every field declaring
+/// [`MODELS_QUERY`](sc_model::MODELS_QUERY).
+///
+/// A `config_spec_for` is **synchronous** and the models are rows, so an action
+/// that wants "the models over this table" as a pick-list can only declare that
+/// it wants them; the list is filled in where the declaration is served, which
+/// is here. The same arrangement a File field's file-store picker already has
+/// (`sc_catalog::resolve_options`), and the reason the query vocabulary exists.
+///
+/// `None` means the caller named no table, and the field is then **left
+/// unresolved** rather than resolved to nothing. The difference matters: an
+/// empty option list on a required field is what "this action cannot be
+/// configured here" is spelled as (`sc_workflow::usable_as_step`), and a
+/// channel-less workflow has not been told there are no models — it has not
+/// asked.
+fn resolve_model_options(spec: Vec<FormField>, models: &Option<Vec<String>>) -> Vec<FormField> {
+    let Some(models) = models else {
+        return spec;
+    };
+    spec.into_iter()
+        .map(|field| match field.query() {
+            Some(q) if q == sc_model::MODELS_QUERY => field.with_resolved_options(models.clone()),
+            _ => field,
+        })
+        .collect()
+}
+
+/// The model services this server was built with, or a configuration error
+/// saying it has none — the same shape [`agents_of`] and [`modules_of`] have,
+/// and for the same reason: a test or an admin-only server may have booted
+/// without them, and the Models tab should say so rather than appear to work.
+pub(crate) fn models_of(apps: &AppMounts) -> Result<crate::ModelServices> {
+    apps.models().cloned().ok_or_else(|| {
+        Error::config("this server has no model support installed, so models cannot be managed")
+    })
+}
+
+/// One query parameter read as JSON.
+///
+/// A dataset in a query string is unusual and deliberate: `listModelProviders`
+/// answers what a provider's form looks like *for this dataset*, and the dataset
+/// being asked about does not exist anywhere yet — there is no id to name it by.
+fn query_json(ctx: &crate::handler::HandlerCtx, name: &str) -> Result<Option<Json>> {
+    let Some(raw) = ctx.query_get(name).map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    serde_json::from_str(raw)
+        .map(Some)
+        .map_err(|e| Error::invalid(format!("`{name}` is not valid JSON: {e}")))
+}
+
+/// A [`Dataset`](sc_model::Dataset) off the wire.
+fn dataset_from_json(value: &Json) -> Result<sc_model::Dataset> {
+    serde_json::from_value(value.clone())
+        .map_err(|e| Error::invalid(format!("`dataset` is not a dataset: {e}")))
+}
+
+/// The dataset's columns and their types, read from the data, or `None` when it
+/// cannot be read.
+///
+/// **`None` is not an error**, and that is the point (task 2.5): the half of
+/// validation that needs the shape is the half only a read knows, and a save of
+/// a model whose table is momentarily unreadable should still be checked for
+/// everything else and still be storable — because editing it is the repair.
+async fn dataset_shape(
+    models: &crate::ModelServices,
+    dataset: &sc_model::Dataset,
+) -> Option<sc_model::DatasetShape> {
+    let frame = models
+        .source()
+        .read(
+            dataset,
+            &sc_model::Read::all(models.max_rows()).first(DATASET_PREVIEW_ROWS),
+        )
+        .await
+        .ok()?;
+    Some(sc_model::DatasetShape::of_frame(&dataset.table, &frame))
+}
+
+/// One stored model as JSON (matching `model_schema`), with the reason it cannot
+/// be fitted when there is one.
+///
+/// The instance summary rides along because that is what the list is read for:
+/// which models have been fitted, when, and whether the last one worked.
+async fn model_json(
+    catalog: &Catalog,
+    model: &sc_model::Model,
+    problem: Option<String>,
+) -> Result<Json> {
+    let instances = sc_model::list_model_instances(catalog, model.id).await?;
+    // Newest first is the store's order, so the head is the last fit.
+    let last_fit = instances.first().map(model_instance_json);
+    let active = instances.iter().find(|i| i.active).map(model_instance_json);
+    Ok(json!({
+        "id": model.id.0,
+        "name": model.name,
+        "description": model.description,
+        "provider": model.provider,
+        "table_name": model.table(),
+        "dataset": serde_json::to_value(&model.dataset)
+            .map_err(|e| Error::msg(format!("dataset: {e}")))?,
+        "configuration": Json::Object(model.configuration.clone()),
+        "hyperparameters": Json::Object(model.hyperparameters.clone()),
+        "split": serde_json::to_value(model.split)
+            .map_err(|e| Error::msg(format!("split: {e}")))?,
+        "attributes": Json::Object(model.attributes.clone()),
+        "error": problem,
+        "instances": instances.len(),
+        "last_fit": last_fit,
+        "active_instance": active,
+    }))
+}
+
+/// A [`Model`](sc_model::Model) from a `saveModel` body.
+///
+/// The id in the body is what says create or replace, and it is the only place
+/// an id is read from a payload here: there is no path-addressed update, because
+/// the form always sends the whole definition and two endpoints would be one
+/// behaviour under two names.
+fn model_from_body(body: &Map<String, Json>) -> Result<sc_model::Model> {
+    let id = match body.get("id") {
+        None | Some(Json::Null) => sc_model::ModelId::new(),
+        Some(Json::String(raw)) => sc_model::ModelId(parse_uuid(raw, "model")?),
+        Some(_) => return Err(Error::invalid("`id` must be a model id")),
+    };
+    let dataset = dataset_from_json(
+        body.get("dataset")
+            .ok_or_else(|| Error::invalid("`dataset` is required"))?,
+    )?;
+    let mut model = sc_model::Model::with_id(
+        id,
+        non_empty_str_field(body, "name")?,
+        non_empty_str_field(body, "provider")?,
+        dataset,
+    );
+    model.description = optional_str(body, "description");
+    model.configuration = optional_attrs(body, "configuration")?;
+    model.hyperparameters = optional_attrs(body, "hyperparameters")?;
+    model.attributes = optional_attrs(body, "attributes")?;
+    if let Some(split) = body.get("split").filter(|v| !v.is_null()) {
+        model.split = serde_json::from_value(split.clone())
+            .map_err(|e| Error::invalid(format!("`split` is not a split: {e}")))?;
+    }
+    Ok(model)
+}
+
+/// An optional JSON-object field, empty when absent or null.
+fn optional_attrs(body: &Map<String, Json>, key: &str) -> Result<Attrs> {
+    match body.get(key) {
+        None | Some(Json::Null) => Ok(Attrs::new()),
+        Some(Json::Object(map)) => Ok(map.clone()),
+        Some(_) => Err(Error::invalid(format!("`{key}` must be a JSON object"))),
+    }
+}
+
+/// One fit as a list entry (matching `model_instance_schema`): everything except
+/// the parameters, the encoding and the search, which a list of forty fits must
+/// not carry.
+fn model_instance_json(instance: &sc_model::ModelInstance) -> Json {
+    json!({
+        "id": instance.id.0,
+        "model": instance.model.0,
+        "name": instance.name,
+        "description": instance.description,
+        "status": instance.status.as_str(),
+        "created": instance.created,
+        "active": instance.active,
+        // Present only on the rows that failed, which is why it is an attribute
+        // in the row and a nullable field here (§15).
+        "error": instance.error(),
+        "hyperparameters": Json::Object(instance.hyperparameters.clone()),
+        "outcome": instance.attributes.get(sc_model::ATTR_OUTCOME),
+        "metrics": instance.metrics,
+        "rows": instance.attributes.get(sc_model::ATTR_ROWS),
+    })
+}
+
+/// One fit in full (matching `model_instance_detail_schema`): the list's fields
+/// plus what the instance screen renders.
+///
+/// The provider's serialised state is deliberately **not** here: it is opaque to
+/// everything but the provider and it is the big column — a random forest's is
+/// every tree.
+fn model_instance_detail_json(instance: &sc_model::ModelInstance) -> Json {
+    let mut out = model_instance_json(instance);
+    if let Json::Object(map) = &mut out {
+        map.insert(
+            "parameters".to_owned(),
+            serde_json::to_value(&instance.parameters).unwrap_or(Json::Array(Vec::new())),
+        );
+        map.insert("encoding".to_owned(), instance.encoding.clone());
+        map.insert(
+            "search".to_owned(),
+            instance
+                .attributes
+                .get(sc_model::ATTR_SEARCH)
+                .cloned()
+                .unwrap_or(Json::Array(Vec::new())),
+        );
+    }
+    out
+}
+
+/// Which model and which fit a `predictRows` is about.
+///
+/// Naming a **model** means its active instance, and that is the whole reason
+/// `active` exists: the admin refits, activates, and every caller that named the
+/// model follows without being edited. Naming an **instance** is how you compare
+/// two fits, or predict with one you have not activated.
+async fn prediction_target(
+    catalog: &Catalog,
+    body: &Map<String, Json>,
+) -> Result<(sc_model::Model, sc_model::ModelInstance)> {
+    let instance = match body.get("instance").filter(|v| !v.is_null()) {
+        Some(Json::String(raw)) => {
+            let id = sc_model::InstanceId(parse_uuid(raw, "model instance")?);
+            Some(sc_model::require_model_instance(catalog, id).await?)
+        }
+        Some(_) => return Err(Error::invalid("`instance` must be a model instance id")),
+        None => None,
+    };
+    let model_id = match (&instance, body.get("model").filter(|v| !v.is_null())) {
+        (Some(instance), _) => instance.model,
+        (None, Some(Json::String(raw))) => sc_model::ModelId(parse_uuid(raw, "model")?),
+        (None, Some(_)) => return Err(Error::invalid("`model` must be a model id")),
+        (None, None) => {
+            return Err(Error::invalid(
+                "name either a `model`, meaning its active instance, or an `instance`",
+            ));
+        }
+    };
+    let model = sc_model::load_model(catalog, model_id)
+        .await?
+        .ok_or_else(|| Error::not_found(format!("no model with id {model_id}")))?;
+    let instance = match instance {
+        Some(instance) => instance,
+        None => sc_model::active_model_instance(catalog, model_id)
+            .await?
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "model `{}` has no active instance: fit it and mark a fit active, or name \
+                     an `instance` directly",
+                    model.name
+                ))
+            })?,
+    };
+    Ok((model, instance))
+}
+
 fn form_field_json(field: &FormField) -> Json {
     let type_name = field
         .base

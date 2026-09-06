@@ -2,6 +2,83 @@
 
 Changes in reverse chronological order.
 
+## Models over HTTP, and a trigger that writes a prediction
+
+The fifth phase of predictive models: everything Phases 1–4 built is now reachable — twelve
+admin endpoints, and one action. An admin can preview a dataset, pick a provider whose form is
+built against that dataset's own columns, save a model, fit it, watch the fit finish, activate
+it, ask it about a row, and put a trigger on a table that writes the answer onto every row it
+inserts. Nothing on the screen knows how any of it is computed.
+
+- **A fit is a job, and the row is the registry.** `fitModel` writes the instance saying
+  `fitting`, answers it, and spawns the work; the screen polls `getModelInstance`. A fit reads
+  every row of a dataset and runs an optimiser over it — seconds at best, minutes at worst — and
+  making it an HTTP request would mean a proxy timing out halfway through while the work carried
+  on invisibly. Two consequences follow and both are stated rather than discovered: nothing
+  survives a restart (boot already reaps every row still `fitting`), and there is no cancel. The
+  bound that exists is the row cap. A fit that *fails* therefore leaves its sentence **on the
+  row** — the request that started it returned long before — and the sentence is now the whole
+  error chain, because "counting the rows of dataset table `houses`" without its cause is not an
+  answer anybody can act on.
+- **A dataset is previewed before it is fitted against.** `previewDataset` validates the
+  formulas, reads the first rows and answers their **types** — which is what a provider's form is
+  built against, and what no `SchemaShape` carries: the type of `price / area`, of a join path or
+  of an aggregation is only knowable by reading. It also reports the split's refusal while the
+  dataset is still being built, because a table with a composite or absent primary key reads
+  perfectly well and cannot be fitted. The preview is a **`LIMIT`, not the cap**: previewing is
+  exactly what an admin does to a dataset that turns out to be too big to fit, so refusing to
+  show it would refuse the answer they came for.
+- **`listModelProviders` takes a dataset in the query, and that is not an accident.** The dataset
+  being asked about does not exist anywhere yet — there is no id to name it by — and a provider
+  naming a label has to offer *these* columns as its options rather than a free-text box. With a
+  dataset the config spec comes back resolved and the outcome says what a fit would produce; with
+  a configuration too, `random_forest` says whether it would be a regressor or a classifier. An
+  outcome that cannot be resolved is a **sentence beside that provider**, not a failed request:
+  "no column is named as the label" is what the form is waiting to be told. The response is an
+  object rather than an array because the empty list is a real state with a sentence attached —
+  a build made with `--no-default-features` has the two hypothesis tests and nothing else.
+- **`saveModel` is one endpoint, not a `POST`/`PUT` pair.** A model is edited and refitted
+  continuously and the form always sends the whole definition; there is no partial edit to
+  express, so two endpoints would be one behaviour under two names. The id in the body says
+  create or replace. Every save is validated against the same registry a fit runs with, **with
+  the dataset's shape where it can be read** — so a label that is not a column of this dataset is
+  refused while the admin is looking at the form, rather than inside a job that has already
+  returned an id. A model that stops validating stays listed with its reason, because editing it
+  is the repair.
+- **`predictRows` has two subjects and they are not variations on one thing.** *Literal rows* are
+  whatever the caller typed — the instance screen's "try a row" box, and a what-if about a row
+  that is not in the table at all — read with the types **the fit saw** rather than the ones that
+  arrived, so a `bedrooms` typed as `"3"` is the number and not a new category. *Dataset rows* are
+  read through the dataset, restricted by a filter formula translated by the same code a
+  dataset's own filter goes through, so a join path and an aggregation are the row layer's answer
+  exactly as they were at fit time. Naming a **model** means its active instance; naming an
+  **instance** is how you compare two fits.
+- **A prediction no longer demands the label.** The encoding is applied features-only at predict
+  time, because the label is the thing being predicted: it is usually absent and always unknown,
+  and demanding it would have made a fitted model unusable on exactly the rows it exists to
+  answer about. The label still matters on the way back, where a class index is mapped through
+  the target encoding into a name.
+- **`predict_row`, and the definition of done.** An ordinary action, registered beside
+  `run_agent` because it needs services assembled first: the provider registry a fit ran with and
+  the dataset seam. It names a *model* and predicts with that model's **active** instance, which
+  is the whole reason `active` exists — the admin refits, activates, and the trigger follows
+  without being edited. The target is checked against what the model produces: on save against
+  the provider's declaration (sometimes two possibilities wide, and that is honest), at fire time
+  against the outcome the instance actually recorded, so a class name never lands in a numeric
+  column. It writes to a field or to the workflow context, exactly one, and naming neither is
+  refused on the form — an action that computed a prediction and put it nowhere is a trigger that
+  appears to do nothing.
+- **The seam grew a third question.** `DatasetSource` now takes a `Read` — the cap, an optional
+  extra `WHERE`, and an optional `LIMIT` — because a fit, a prediction about one row and a
+  preview are three different reads of the same dataset. The restriction goes *into* the read
+  rather than being applied to what comes back, since materialising a whole table to answer about
+  one row of it is not an implementation detail anybody would accept.
+- **`--model-max-rows` reaches the code it bounds.** The flag existed; `ModelServices` now
+  carries it, along with the provider registry (replaced whole on a module change, so a running
+  fit keeps the registry it started with) and the source. It rides on `AppMounts` beside the
+  agents, the modules and the dispatcher, because those are the handles the admin handlers and
+  the action registry already hold.
+
 ## Seven built-in providers, and the numbers beside the coefficients
 
 The fourth phase of predictive models, and the first one that fits anything. `sc-model` now

@@ -45,6 +45,11 @@ pub struct ModuleServices {
     catalog: Arc<Catalog>,
     dispatcher: Arc<TriggerDispatcher>,
     agents: AgentServices,
+    /// The model machinery, for the two things a module change does to it: the
+    /// rebuilt action set carries `predict_row` over the *current* provider
+    /// registry, and (Phase 7) a module supplying model providers replaces that
+    /// registry.
+    models: crate::models::ModelServices,
     installer: Installer,
     /// The modules this server ships with, read from `plugins/` at boot
     /// (`sc_module::bundled`). Read once: the directory is part of the artifact,
@@ -85,10 +90,15 @@ impl ModuleServices {
     /// `plugins/` directory, which the binary knows the path of. `None` falls
     /// back to the checkout's, and a directory that is not there is an empty
     /// catalog rather than a failure to start.
+    // Eight, because eight things a server assembled before this one have to
+    // reach it: three services, two directories, a worker count and a runtime.
+    // Grouping them would invent a struct whose only purpose is this call.
+    #[allow(clippy::too_many_arguments)]
     pub async fn install(
         catalog: &Arc<Catalog>,
         dispatcher: &Arc<TriggerDispatcher>,
         agents: &AgentServices,
+        models: &crate::models::ModelServices,
         root: Option<PathBuf>,
         plugins: Option<PathBuf>,
         workers: usize,
@@ -116,6 +126,7 @@ impl ModuleServices {
             catalog: Arc::clone(catalog),
             dispatcher: Arc::clone(dispatcher),
             agents: agents.clone(),
+            models: models.clone(),
             installer: Installer::new(&root),
             bundled: BundledModules::discover(plugins),
             python_host: Arc::new(PyModuleHost::new(Arc::clone(&python))),
@@ -144,7 +155,7 @@ impl ModuleServices {
     /// delete, and the Reload button — so there is one answer to "what happens
     /// to the live server", and no caller has to remember the four steps.
     pub async fn reload(&self) -> Result<()> {
-        let mut registry = crate::triggers::base_action_registry(&self.agents)?;
+        let mut registry = crate::triggers::base_action_registry(&self.agents, &self.models)?;
         let set =
             ModuleSet::load(&self.catalog, &self.host, &self.installer, &mut registry).await?;
         // And the other language's, into the **same** registry: the two share

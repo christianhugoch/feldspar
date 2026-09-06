@@ -202,7 +202,10 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // is its row, so nothing survives a restart and an instance still saying
     // `fitting` at boot is one nothing will finish — it is failed by name here,
     // before anything can read it.
-    sc_server::install_models(&catalog).await?;
+    // It is also what carries the provider registry and the dataset seam into
+    // the action set below: `predict_row` needs both, so the models come up
+    // before the triggers do.
+    let models = sc_server::install_models(&catalog, config.model_max_rows).await?;
 
     // Triggers: the built-in actions plus `run_agent`, the stored trigger set,
     // and the dispatcher installed into the catalog — after which a row write
@@ -224,6 +227,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
         &catalog,
         evaluator.clone(),
         &agents,
+        &models,
         [python.clone() as Arc<dyn sc_server::CodeAdapter>],
     )
     .await?;
@@ -239,6 +243,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
         &catalog,
         &triggers,
         &agents,
+        &models,
         config.modules_dir.clone(),
         config.plugins_dir.clone(),
         config.module_workers,
@@ -255,6 +260,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
             .with_evaluator(evaluator)
             .with_triggers(triggers.clone())
             .with_agents(agents)
+            .with_models(models)
             .with_modules(modules)
             .with_python(python),
     );

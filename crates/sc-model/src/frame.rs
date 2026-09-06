@@ -27,6 +27,7 @@
 //! numbers, and the question "was this row in the training set" is the host's to
 //! answer.
 
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use sc_error::{Error, Result};
 use sc_query::Value;
 use serde_json::{Map, Number, Value as Json};
@@ -246,6 +247,56 @@ impl Column {
         }
     }
 
+    /// One column of a [`Frame::from_rows`] read: the same types as the wire
+    /// path, read the way a **form** produces them.
+    ///
+    /// Two lenienecs, and no others. A text column takes any scalar, because a
+    /// category whose values happen to look like numbers is still a category and
+    /// a form has no way to say so. A date column takes an ISO-8601 string,
+    /// because epoch seconds is the frame's *internal* spelling and nobody types
+    /// one. Everything else is refused by name — a string where the fit saw a
+    /// number is a prediction about a different column.
+    fn from_row_json(name: &str, ty: ColumnType, values: &[Json]) -> Result<Column> {
+        let refuse = |i: usize, v: &Json, want: &str| {
+            Error::invalid(format!(
+                "`{name}` is {want} in this model, but row {} has {v}",
+                i + 1
+            ))
+        };
+        Ok(match ty {
+            ColumnType::Str => Column::Str(
+                values
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| match v {
+                        Json::Null => Ok(None),
+                        Json::String(s) => Ok(Some(s.clone())),
+                        Json::Bool(b) => Ok(Some(b.to_string())),
+                        Json::Number(n) => Ok(Some(n.to_string())),
+                        other => Err(refuse(i, other, "a category")),
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            ColumnType::Date => Column::Date(
+                values
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| match v {
+                        Json::Null => Ok(None),
+                        Json::Number(n) => {
+                            n.as_i64().map(Some).ok_or_else(|| refuse(i, v, "a date"))
+                        }
+                        Json::String(s) => parse_epoch(s)
+                            .map(Some)
+                            .ok_or_else(|| refuse(i, v, "a date")),
+                        other => Err(refuse(i, other, "a date")),
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            _ => Column::from_json(name, ty, values)?,
+        })
+    }
+
     /// One column back off the wire, of the type its `type` field names.
     fn from_json(name: &str, ty: ColumnType, values: &[Json]) -> Result<Column> {
         fn map<T>(
@@ -401,6 +452,60 @@ impl Frame {
         Json::Object(obj)
     }
 
+    /// The frame as **rows**: one JSON object per row, keyed by column name.
+    ///
+    /// The inverse of [`from_rows`](Frame::from_rows), and the shape a screen
+    /// wants — the dataset preview shows a table of rows, not a table of
+    /// columns. Everything inside this crate reads columns, which is why this is
+    /// a rendering rather than the representation.
+    pub fn to_rows(&self) -> Vec<Json> {
+        let columns: Vec<(&str, Json)> = self
+            .columns
+            .iter()
+            .map(|(name, column)| (name.as_str(), column.to_json()))
+            .collect();
+        (0..self.rows)
+            .map(|i| {
+                let mut row = Map::with_capacity(columns.len());
+                for (name, values) in &columns {
+                    let cell = values.get(i).cloned().unwrap_or(Json::Null);
+                    row.insert((*name).to_owned(), cell);
+                }
+                Json::Object(row)
+            })
+            .collect()
+    }
+
+    /// A frame built from **rows** — one JSON object per row, keyed by column
+    /// name — of the columns and types given.
+    ///
+    /// The other direction from every frame in this crate, and it exists for one
+    /// caller: `predictRows` with literal rows, which is the admin screen's "try
+    /// a row" box and an API caller asking about a row that is not in the table
+    /// at all. Everything else materialises a dataset, where the columns arrive
+    /// as columns and their types are the data's.
+    ///
+    /// The types are therefore **not** inferred from what arrived: they are the
+    /// ones the instance was fitted with, so a `bedrooms` typed by hand as
+    /// `"3"` is read as the number the fit saw rather than as a new category.
+    /// Conversion is deliberately forgiving in the two directions a form makes
+    /// unavoidable — a number written for a text column, a date written as a
+    /// string — and refuses everything else by naming the row and the column.
+    pub fn from_rows(rows: &[Json], columns: &[(String, ColumnType)]) -> Result<Frame> {
+        let mut out = Vec::with_capacity(columns.len());
+        for (name, ty) in columns {
+            let mut values = Vec::with_capacity(rows.len());
+            for (i, row) in rows.iter().enumerate() {
+                let cell = row.get(name).ok_or_else(|| {
+                    Error::invalid(format!("row {} has no value for `{name}`", i + 1))
+                })?;
+                values.push(cell.clone());
+            }
+            out.push((name.clone(), Column::from_row_json(name, *ty, &values)?));
+        }
+        Frame::new(out, Vec::new())
+    }
+
     /// A frame back off the wire — [`to_json`](Frame::to_json)'s inverse, and
     /// what a provider's prediction request is read from on the other side.
     pub fn from_json(json: &Json) -> Result<Frame> {
@@ -495,6 +600,27 @@ fn as_epoch(value: Value) -> Option<i64> {
         Value::Date(d) => Some(d.and_hms_opt(0, 0, 0)?.and_utc().timestamp()),
         _ => None,
     }
+}
+
+/// An ISO-8601 date or timestamp as epoch seconds — how a date arrives from a
+/// form, since epoch seconds is the frame's internal spelling and nobody types
+/// one.
+///
+/// A bare date is midnight UTC, which is the reading `Column::from_values` gives
+/// a `Value::Date` — the two paths have to agree or a date fitted from the table
+/// and a date typed into the box would encode to different numbers.
+fn parse_epoch(text: &str) -> Option<i64> {
+    let text = text.trim();
+    if let Ok(t) = text.parse::<DateTime<Utc>>() {
+        return Some(t.timestamp());
+    }
+    if let Ok(t) = NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S") {
+        return Some(t.and_utc().timestamp());
+    }
+    if let Ok(d) = text.parse::<NaiveDate>() {
+        return Some(d.and_hms_opt(0, 0, 0)?.and_utc().timestamp());
+    }
+    None
 }
 
 /// A value rendered as text — the reading a mixed or non-numeric column takes.
@@ -602,6 +728,89 @@ mod tests {
         });
         let err = Frame::from_json(&json).expect_err("wrong type");
         assert!(err.to_string().contains("`price` is `float`"), "{err}");
+    }
+
+    #[test]
+    fn a_literal_row_is_read_with_the_types_the_fit_saw_and_not_the_ones_typed() {
+        // Task 5.4: the "try a row" box. `bedrooms` typed as a string would be a
+        // new category if the types were inferred; they are the instance's, so
+        // it is the number the fit saw.
+        let frame = Frame::from_rows(
+            &[serde_json::json!({
+                "area": 100,
+                "region": 3,
+                "sold_on": "2024-01-02",
+            })],
+            &[
+                ("area".to_owned(), ColumnType::Float),
+                ("region".to_owned(), ColumnType::Str),
+                ("sold_on".to_owned(), ColumnType::Date),
+            ],
+        )
+        .expect("frame");
+        assert_eq!(frame.rows, 1);
+        assert_eq!(
+            frame.column("area"),
+            Some(&Column::Float(vec![Some(100.0)]))
+        );
+        // A number written for a category is the category it renders as: a form
+        // has no way to say "this 3 is a label".
+        assert_eq!(
+            frame.column("region"),
+            Some(&Column::Str(vec![Some("3".to_owned())]))
+        );
+        // And a date is typed, not epoch seconds — which is the frame's internal
+        // spelling and nobody types one.
+        assert_eq!(
+            frame.column("sold_on"),
+            Some(&Column::Date(vec![Some(1_704_153_600)]))
+        );
+    }
+
+    #[test]
+    fn a_literal_row_missing_a_feature_says_which_one_and_which_row() {
+        let err = Frame::from_rows(
+            &[serde_json::json!({ "area": 1.0 })],
+            &[
+                ("area".to_owned(), ColumnType::Float),
+                ("region".to_owned(), ColumnType::Str),
+            ],
+        )
+        .expect_err("missing");
+        assert!(err.to_string().contains("`region`"), "{err}");
+        assert!(err.to_string().contains("row 1"), "{err}");
+    }
+
+    #[test]
+    fn a_string_where_the_fit_saw_a_number_is_refused_rather_than_reinterpreted() {
+        let err = Frame::from_rows(
+            &[serde_json::json!({ "area": "biggish" })],
+            &[("area".to_owned(), ColumnType::Float)],
+        )
+        .expect_err("not a number");
+        assert!(err.to_string().contains("`area`"), "{err}");
+    }
+
+    #[test]
+    fn rows_and_columns_are_the_same_frame_read_two_ways() {
+        let frame = Frame::new(
+            vec![
+                ("price".to_owned(), Column::Float(vec![Some(1.0), None])),
+                (
+                    "region".to_owned(),
+                    Column::Str(vec![Some("north".into()), Some("south".into())]),
+                ),
+            ],
+            Vec::new(),
+        )
+        .expect("frame");
+        assert_eq!(
+            frame.to_rows(),
+            vec![
+                serde_json::json!({ "price": 1.0, "region": "north" }),
+                serde_json::json!({ "price": null, "region": "south" }),
+            ]
+        );
     }
 
     #[test]

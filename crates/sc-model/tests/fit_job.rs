@@ -16,7 +16,7 @@ use sc_db_postgres::PgDriver;
 use sc_error::{Error, Result};
 use sc_model::{
     ATTR_ROWS, Column, Dataset, DatasetSource, FitResult, FitStatus, Frame, Model, ModelInstance,
-    ModelProvider, ModelRegistry, Outcome, OutcomeSpec, ParameterBlock, Prediction, Split,
+    ModelProvider, ModelRegistry, Outcome, OutcomeSpec, ParameterBlock, Prediction, Read, Split,
     bootstrap_model_instances, bootstrap_models, fit_model, numeric_column_field, predict_rows,
     require_model_instance, save_model_instance,
 };
@@ -128,7 +128,7 @@ struct Houses(usize);
 
 #[async_trait::async_trait]
 impl DatasetSource for Houses {
-    async fn materialise(&self, _ds: &Dataset, _cap: u64) -> Result<Frame> {
+    async fn read(&self, _ds: &Dataset, _how: &Read<'_>) -> Result<Frame> {
         let n = self.0;
         Frame::new(
             vec![

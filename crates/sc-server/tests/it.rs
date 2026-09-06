@@ -73,6 +73,8 @@ mod live_mounting;
 mod llm_provider_admin_api;
 #[path = "mcp_server.rs"]
 mod mcp_server;
+#[path = "model_admin_api.rs"]
+mod model_admin_api;
 #[path = "model_dataset.rs"]
 mod model_dataset;
 #[path = "modules_api.rs"]

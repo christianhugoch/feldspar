@@ -111,11 +111,13 @@ async fn the_server_serves_a_module_with_node_off_the_path() -> sc_error::Result
     // table, load every stored module onto the pool, put its actions in the
     // registry, and reload the triggers against it.
     let agents = install_agents(&catalog).await?;
-    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents).await?;
+    let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
+    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents, &models).await?;
     let modules = ModuleServices::install(
         &catalog,
         &dispatcher,
         &agents,
+        &models,
         Some(root.clone()),
         None,
         1,

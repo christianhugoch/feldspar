@@ -276,6 +276,34 @@ impl OutcomeSpec {
             OutcomeSpec::Test => Ok(Outcome::Test),
         }
     }
+
+    /// The prediction types a fit of this declaration could produce, **without a
+    /// dataset to resolve it against**.
+    ///
+    /// One entry for every declaration but [`Supervised`](OutcomeSpec::Supervised),
+    /// which has two because that is the whole reason it exists: a random forest
+    /// is a regressor or a classifier depending on the type of the column its
+    /// configuration names, and no amount of reading the configuration decides
+    /// which without the data.
+    ///
+    /// It exists for `predict_row`'s save-time check (§12): the target field has
+    /// to be able to hold what the model will produce, and refusing that on the
+    /// form is worth an answer that is sometimes two possibilities wide. The
+    /// definitive check is still made at fire time, against the outcome the
+    /// instance actually recorded.
+    ///
+    /// Empty for [`Test`](OutcomeSpec::Test), which produces nothing per row —
+    /// so a target of any type is wrong, and the caller says so in those words.
+    pub fn possible_prediction_types(&self) -> Vec<BasicType> {
+        match self {
+            OutcomeSpec::Supervised { .. } => vec![BasicType::Float, BasicType::Text],
+            OutcomeSpec::Regression { .. } => vec![BasicType::Float],
+            OutcomeSpec::Classification { .. } => vec![BasicType::Text],
+            OutcomeSpec::Cluster => vec![BasicType::Int],
+            OutcomeSpec::Embedding { .. } => vec![BasicType::Json],
+            OutcomeSpec::Test => Vec::new(),
+        }
+    }
 }
 
 /// The dataset column a configuration key names, and its type.

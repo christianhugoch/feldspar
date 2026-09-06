@@ -495,21 +495,21 @@ bytes stores base64, because a system table with a `bytea` column would be the o
 
 ## Phase 5 — The API and the action
 
-- [ ] 5.1 `sc-api::admin` endpoints: `listModelProviders` (name, description, hyperparameter
+- [x] 5.1 `sc-api::admin` endpoints: `listModelProviders` (name, description, hyperparameter
       spec, and — given a dataset in the query — the config spec and the outcome),
       `listModels`, `getModel`, `saveModel`, `deleteModel`.
-- [ ] 5.2 `previewDataset`: validate a dataset and return its column types and the first rows —
+- [x] 5.2 `previewDataset`: validate a dataset and return its column types and the first rows —
       what makes the dataset builder a thing you can see the answer of before you fit it.
-- [ ] 5.3 `fitModel` (creates the instance, returns its id, spawns the job — §8),
+- [x] 5.3 `fitModel` (creates the instance, returns its id, spawns the job — §8),
       `listModelInstances`, `getModelInstance`, `deleteModelInstance`, `activateModelInstance`.
-- [ ] 5.4 `predictRows`: an instance (or a model, meaning its active instance) plus either
+- [x] 5.4 `predictRows`: an instance (or a model, meaning its active instance) plus either
       literal rows or a filter over the model's table; answers predictions in row order. Admin
       only, like everything else on this API.
-- [ ] 5.5 `predict_row` in `sc-core-actions` (§12): `config_spec_for` offering this table's
+- [x] 5.5 `predict_row` in `sc-core-actions` (§12): `config_spec_for` offering this table's
       models, the target checked against the outcome's type, writing to a field or to the
       workflow context.
-- [ ] 5.6 `--model-max-rows` in `ServerConfig` and the CLI.
-- [ ] 5.7 API tests: the full model lifecycle over HTTP, a fit polled to completion, a fit that
+- [x] 5.6 `--model-max-rows` in `ServerConfig` and the CLI.
+- [x] 5.7 API tests: the full model lifecycle over HTTP, a fit polled to completion, a fit that
       fails leaving the sentence on the instance, and the action writing a prediction onto a row
       through a trigger.
 

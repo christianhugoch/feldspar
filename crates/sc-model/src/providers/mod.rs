@@ -484,14 +484,14 @@ mod tests {
         use crate::frame::{Column, Frame};
         use crate::model::Model;
         use crate::provider::ParameterBlock;
-        use crate::source::DatasetSource;
+        use crate::source::{DatasetSource, Read};
         use crate::split::Split;
 
         /// The seam, stubbed: one fixed frame, as `fit`'s own tests do it.
         struct Fixed(Frame);
         #[async_trait::async_trait]
         impl DatasetSource for Fixed {
-            async fn materialise(&self, _dataset: &Dataset, _cap: u64) -> Result<Frame> {
+            async fn read(&self, _dataset: &Dataset, _how: &Read<'_>) -> Result<Frame> {
                 Ok(self.0.clone())
             }
         }

@@ -188,10 +188,12 @@ async fn setup(config: &ServerConfig) -> sc_error::Result<Server> {
     // itself — which is how `serve` builds it, and what lets the diagnostics
     // endpoint report the same interpreter a trigger runs on.
     let python = python_adapter(config);
+    let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
     let dispatcher = install_triggers_with_adapters(
         &catalog,
         default_js_evaluator(),
         &agents,
+        &models,
         [python.clone() as Arc<dyn sc_server::CodeAdapter>],
     )
     .await?;

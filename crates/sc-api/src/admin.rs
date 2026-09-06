@@ -2115,6 +2115,253 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- predictive models --------------------------------------------------
+    // Five nouns and three screens (TODO "Predictive models"): a **model
+    // provider** is code that can fit something, a **dataset** is which rows and
+    // which derived values, a **model** is a dataset plus a provider plus its
+    // settings, a **model instance** is one fit of it, and a **prediction** is
+    // that fit applied to rows.
+    //
+    // The dataset has no endpoints of its own, on purpose (§3): it is a JSON
+    // column on the model, because a shared named dataset would need a lifecycle
+    // — what happens to the four models fitted against it when somebody adds a
+    // column — bought for a saving that a Duplicate button answers instead. What
+    // it does have is `previewDataset`, which is not a store: it reads the first
+    // rows and answers their types, so the builder is a thing you can see the
+    // answer of before you fit against it.
+
+    // The providers this build carries, each with the settings and
+    // hyperparameters it declares — the same "settings as data" move the trigger
+    // form, the file-store picker and the agent-trait form make, so the model
+    // form renders a provider it has never heard of.
+    //
+    // `?dataset=` is the JSON of the dataset being built, and it is what turns a
+    // declaration into a form: a provider naming a label has to offer *these*
+    // columns as its options (§10), and it cannot know them when it is written.
+    // With it, `config_spec` comes back resolved against the dataset's own
+    // columns and `outcome` says what a fit would produce; without it the answer
+    // is the unresolved declaration, which is what the picker shows before a
+    // dataset exists. `?configuration=` is the settings so far, because the
+    // outcome is a *function of the configuration* — a random forest is a
+    // regressor or a classifier depending on the type of the column its
+    // configuration names.
+    //
+    // An object rather than an array, because the empty list is a real state
+    // with a sentence attached: a build made with `--no-default-features` has
+    // the two hypothesis tests and nothing else (§13), and an empty picker reads
+    // like a bug where "this build was made without them" reads like the
+    // decision it is.
+    set.register(
+        Endpoint::new(
+            "listModelProviders",
+            Method::Get,
+            api().lit("model-providers"),
+        )
+        // **Text**, holding JSON, rather than a `Json` parameter: a query string
+        // carries text, and typing it as JSON would generate a client that
+        // stringifies an object with `String()` and sends `[object Object]`.
+        // The caller serialises, which is what it is actually doing.
+        .query([
+            QueryParam::new("dataset", ValueType::Text),
+            QueryParam::new("configuration", ValueType::Text),
+        ])
+        .output(TypeSchema::struct_of([
+            StructField::new("providers", TypeSchema::array(model_provider_schema())),
+            StructField::new("builtins_compiled_out", TypeSchema::bool()),
+            StructField::new("notice", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Validate a dataset and show what it answers: the column types, and the
+    // first rows. A `POST` because the dataset is a document rather than an
+    // identifier, and it does not exist anywhere yet — this is the builder
+    // asking "is this what I meant?" before there is a model to save.
+    //
+    // The read is **limited** rather than capped, which is the one place the row
+    // bound does not apply: previewing is exactly what an admin does to a
+    // dataset that turns out to be too big to fit, and refusing to show it would
+    // refuse the answer they came for.
+    set.register(
+        Endpoint::new(
+            "previewDataset",
+            Method::Post,
+            api().lit("model-datasets").lit("preview"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("dataset", TypeSchema::json()),
+            StructField::new("limit", TypeSchema::optional(TypeSchema::int())),
+        ]))
+        .output(TypeSchema::struct_of([
+            StructField::new("columns", TypeSchema::array(dataset_column_schema())),
+            StructField::new("rows", TypeSchema::array(TypeSchema::json())),
+            StructField::new("primary_key", TypeSchema::optional(TypeSchema::text())),
+            // Why this dataset cannot be split — a table with a composite or
+            // absent primary key reads perfectly well and cannot be fitted (§5),
+            // and the builder should say so while it is still being built.
+            StructField::new("split_error", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new("listModels", Method::Get, api().lit("models"))
+            .query([QueryParam::new("table", ValueType::Text)])
+            .output(TypeSchema::array(model_schema()))
+            .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "getModel",
+            Method::Get,
+            api().lit("models").param("id", ValueType::Uuid),
+        )
+        .output(model_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // One endpoint for create and replace, rather than the `POST`/`PUT` pair the
+    // other records have. A model is edited and refitted continuously and the
+    // form always sends the whole definition — there is no partial edit to
+    // express — so two endpoints would be one behaviour under two names. The id
+    // in the body is what says which: absent is a new model, present is that one
+    // replaced.
+    set.register(
+        Endpoint::new("saveModel", Method::Post, api().lit("models"))
+            .input(model_input_schema())
+            .output(model_schema())
+            .auth(AuthRequirement::admin()),
+    );
+
+    // Deleting a model takes its instances with it, and that is the difference
+    // from an agent (whose runs outlive it): an instance is not a record of what
+    // happened, it is a fit *of this model* — its coefficients are meaningless
+    // without the dataset they were fitted over.
+    set.register(
+        Endpoint::new(
+            "deleteModel",
+            Method::Delete,
+            api().lit("models").param("id", ValueType::Uuid),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // **Start** a fit (§8). It answers the instance as soon as the row exists,
+    // saying `fitting`, and the work runs on a spawned task — because a fit
+    // reads every row of a dataset and runs an optimiser over it, which is
+    // seconds at best and minutes at worst, and must not be a request a proxy
+    // times out halfway through while the work carries on invisibly. The screen
+    // polls `getModelInstance`.
+    //
+    // There is no cancel, and the row cap is the bound that exists instead:
+    // stopping a fit means stopping a `smartcore` or a Python call mid-flight.
+    set.register(
+        Endpoint::new(
+            "fitModel",
+            Method::Post,
+            api().lit("models").param("id", ValueType::Uuid).lit("fit"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("name", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("description", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .output(model_instance_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "listModelInstances",
+            Method::Get,
+            api()
+                .lit("models")
+                .param("id", ValueType::Uuid)
+                .lit("instances"),
+        )
+        .output(TypeSchema::array(model_instance_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // The instance in full: the parameter blocks, the metrics per split, the
+    // grid's scores and the row counts. Separate from the list because the
+    // parameters of forty fits are not something a list should carry.
+    set.register(
+        Endpoint::new(
+            "getModelInstance",
+            Method::Get,
+            api().lit("model-instances").param("id", ValueType::Uuid),
+        )
+        .output(model_instance_detail_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "deleteModelInstance",
+            Method::Delete,
+            api().lit("model-instances").param("id", ValueType::Uuid),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // At most one instance per model is **active**, and that is what lets a
+    // trigger name a model rather than a fit: the admin refits, activates the
+    // new instance, and every `predict_row` action follows without being edited.
+    // Activating one deactivates whichever was.
+    set.register(
+        Endpoint::new(
+            "activateModelInstance",
+            Method::Post,
+            api()
+                .lit("model-instances")
+                .param("id", ValueType::Uuid)
+                .lit("activate"),
+        )
+        .output(model_instance_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Apply a fit to rows, in row order. Either a named `instance` or a `model`
+    // (meaning its active instance), and either `rows` typed by the caller — the
+    // instance screen's "try a row" box, and a what-if about a row that is not
+    // in the table at all — or the model's own dataset, optionally restricted by
+    // a `filter` formula.
+    //
+    // The two are not variations on one thing. Literal rows are whatever the
+    // caller typed, because there is nothing to derive them from; dataset rows
+    // are read **through the dataset**, so a join path and an aggregation are
+    // computed by the row layer exactly as they were at fit time.
+    //
+    // Admin only, like everything else on this API: an application-facing
+    // prediction endpoint is named under *Carried past this milestone*.
+    set.register(
+        Endpoint::new("predictRows", Method::Post, api().lit("model-predictions"))
+            .input(TypeSchema::struct_of([
+                StructField::new("model", TypeSchema::optional(TypeSchema::uuid())),
+                StructField::new("instance", TypeSchema::optional(TypeSchema::uuid())),
+                StructField::new(
+                    "rows",
+                    TypeSchema::optional(TypeSchema::array(TypeSchema::json())),
+                ),
+                StructField::new("filter", TypeSchema::optional(TypeSchema::text())),
+            ]))
+            .output(TypeSchema::struct_of([
+                StructField::new("instance", TypeSchema::uuid()),
+                StructField::new("outcome", TypeSchema::json()),
+                StructField::new("predictions", TypeSchema::array(prediction_schema())),
+            ]))
+            .auth(AuthRequirement::admin()),
+    );
+
     // --- settings -----------------------------------------------------------
     // The `_sc_config` values an admin edits (§9, §13.5). Two endpoints, and
     // both carry the **declarations** alongside the values, for the same reason
@@ -3660,6 +3907,171 @@ fn settings_field_schema() -> TypeSchema {
 
 /// One settings field of a framework's `config_spec`: enough for the admin UI to
 /// render and label an input control for it.
+/// One model provider the picker offers (TODO §10).
+///
+/// `config_spec` and `hyperparameters` are the ordinary
+/// [`form_field_schema`] vocabulary — the same one a file-store backend, an
+/// agent trait and an action declare their settings in — so the model form
+/// renders a provider it has never heard of, whether it is a built-in or one a
+/// module supplied.
+///
+/// `outcome` is what a fit of *this configuration* would produce, and it is
+/// present only when the request carried a dataset and a configuration that
+/// resolve to one; `outcome_error` is the sentence saying why it does not,
+/// which is usually "no column is named as the label" and is what the form is
+/// waiting to be told.
+fn model_provider_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        // The module supplying it, or null for a built-in — what the picker
+        // renders "built in" against.
+        StructField::new("module", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("config_spec", TypeSchema::array(form_field_schema())),
+        StructField::new("hyperparameters", TypeSchema::array(form_field_schema())),
+        // The declaration: which configuration key holds the label, and what
+        // happens to it. What the form switches on before a dataset exists.
+        StructField::new("outcome_spec", TypeSchema::json()),
+        StructField::new("outcome", TypeSchema::optional(TypeSchema::json())),
+        StructField::new("outcome_error", TypeSchema::optional(TypeSchema::text())),
+        // Whether the host standardises the numeric features before handing
+        // them over — a k-means says yes, a regression says no because a
+        // coefficient in the data's own units is what somebody reads it for.
+        StructField::new("standardise", TypeSchema::bool()),
+    ])
+}
+
+/// One column of a previewed dataset: its name and the type its values came
+/// back as.
+///
+/// The type is the **data's**, not the schema's, and that is not a shortcut: a
+/// `SchemaShape` carries no types at all, and the type of `price / area`, of a
+/// join path or of an aggregation is not derivable from one.
+fn dataset_column_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("type", TypeSchema::text()),
+    ])
+}
+
+/// One stored model, as the list and the form see it (TODO §15).
+///
+/// `error` is the twin of an agent's and a trigger's: a model that stopped
+/// validating — a dataset column whose formula no longer resolves, a provider
+/// whose module was uninstalled — is **still listed and still editable**,
+/// because editing it is the repair.
+///
+/// `last_fit` rides along because that is what the list is read for: which
+/// models have been fitted, when, and whether the last one worked.
+fn model_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("id", TypeSchema::uuid()),
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("provider", TypeSchema::text()),
+        StructField::new("table_name", TypeSchema::text()),
+        StructField::new("dataset", TypeSchema::json()),
+        StructField::new("configuration", TypeSchema::json()),
+        StructField::new("hyperparameters", TypeSchema::json()),
+        StructField::new("split", TypeSchema::json()),
+        StructField::new("attributes", TypeSchema::json()),
+        StructField::new("error", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("instances", TypeSchema::int()),
+        StructField::new("last_fit", TypeSchema::optional(model_instance_schema())),
+        StructField::new(
+            "active_instance",
+            TypeSchema::optional(model_instance_schema()),
+        ),
+    ])
+}
+
+/// What a `saveModel` sends. The id is what says create or replace.
+fn model_input_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("id", TypeSchema::optional(TypeSchema::uuid())),
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("provider", TypeSchema::text()),
+        StructField::new("dataset", TypeSchema::json()),
+        StructField::new("configuration", TypeSchema::optional(TypeSchema::json())),
+        // Per hyperparameter either a value or a **list** of values, and a fit
+        // runs the grid of the lists (§11). One field rather than two, because a
+        // list of one and a scalar are the same search.
+        StructField::new("hyperparameters", TypeSchema::optional(TypeSchema::json())),
+        StructField::new("split", TypeSchema::optional(TypeSchema::json())),
+        StructField::new("attributes", TypeSchema::optional(TypeSchema::json())),
+    ])
+}
+
+/// One fit, as a list sees it: everything except the parameters, the metrics and
+/// the encoding, which a list of forty fits must not carry.
+fn model_instance_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("id", TypeSchema::uuid()),
+        StructField::new("model", TypeSchema::uuid()),
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        // `fitting` | `fitted` | `failed`. A column rather than an attribute
+        // because every row has one and it is what the list filters on; the
+        // failure **sentence** is the other way round, present only on the rows
+        // that failed, which is why it is `error` here and an attribute in the
+        // row (§15).
+        StructField::new("status", TypeSchema::text()),
+        StructField::new("created", TypeSchema::timestamp()),
+        StructField::new("active", TypeSchema::bool()),
+        StructField::new("error", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("hyperparameters", TypeSchema::json()),
+        StructField::new("outcome", TypeSchema::optional(TypeSchema::json())),
+        StructField::new("metrics", TypeSchema::json()),
+        StructField::new("rows", TypeSchema::optional(TypeSchema::json())),
+    ])
+}
+
+/// One fit in full, which is the instance screen: the list's fields plus the
+/// parameter blocks, the encoding and every grid point that was tried.
+///
+/// The state is deliberately **not** here. It is the provider's serialised fit,
+/// opaque to everything but the provider, and it is the big column: a random
+/// forest's is every tree.
+fn model_instance_detail_schema() -> TypeSchema {
+    let TypeSchema::Struct(summary) = model_instance_schema() else {
+        // `model_instance_schema` is a struct literal above; this arm cannot be
+        // reached and returning the summary is the harmless reading if it were.
+        return model_instance_schema();
+    };
+    TypeSchema::Struct(
+        summary
+            .into_iter()
+            .chain([
+                // Scalar, table or text — three renderings, and the admin UI
+                // never has to know what a coefficient, a cluster centre or an
+                // explained-variance ratio is (§7).
+                StructField::new("parameters", TypeSchema::array(TypeSchema::json())),
+                StructField::new("encoding", TypeSchema::json()),
+                // Every hyperparameter point tried and what it scored, so the
+                // search is inspectable and not a number that appeared (§11).
+                StructField::new("search", TypeSchema::array(TypeSchema::json())),
+            ])
+            .collect(),
+    )
+}
+
+/// One prediction, and which row it is for.
+///
+/// `value` is what the prediction **writes into a row** (§12) — the number, the
+/// class name, the cluster index or the vector — beside the structured
+/// `prediction` the screen renders, which also carries the probability where the
+/// provider gave one.
+fn prediction_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("prediction", TypeSchema::json()),
+        StructField::new("value", TypeSchema::json()),
+        // The row's primary key, for a prediction over the dataset; null for a
+        // literal row, which has none.
+        StructField::new("key", TypeSchema::optional(TypeSchema::text())),
+    ])
+}
+
 fn form_field_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("name", TypeSchema::text()),

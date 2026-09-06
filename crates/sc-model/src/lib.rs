@@ -83,7 +83,9 @@ mod split;
 mod store;
 mod validate;
 
-pub use dataset::{Dataset, DatasetColumn, DatasetColumnShape, DatasetShape, validate_dataset};
+pub use dataset::{
+    Dataset, DatasetColumn, DatasetColumnShape, DatasetShape, translate_filter, validate_dataset,
+};
 pub use encode::{
     ColumnEncoding, Encoded, Encoding, Matrix, TargetEncoding, apply_encoding,
     apply_encoding_dropping, fit_encoding,
@@ -101,7 +103,9 @@ pub use instance_store::{
 };
 pub use metrics::{ClassMetrics, Metrics, SplitMetrics};
 pub use model::{Model, ModelId};
-pub use predict::{name_classes, predict_rows, prediction_values};
+pub use predict::{
+    Predictions, Subject, name_classes, predict_rows, predict_subject, prediction_values,
+};
 pub use provider::{
     CATEGORICAL_COLUMNS_QUERY, COLUMNS_QUERY, FitResult, HostProvider, ModelProvider,
     ModelProviderHost, ModelProviderKind, NUMERIC_COLUMNS_QUERY, Outcome, OutcomeSpec,
@@ -110,10 +114,10 @@ pub use provider::{
 };
 pub use providers::{BUILTINS_COMPILED_OUT, SMARTCORE, builtin_providers, builtin_registry};
 pub use registry::ModelRegistry;
-pub use source::{DEFAULT_MAX_ROWS, DatasetSource, SPLIT_KEY};
+pub use source::{DEFAULT_MAX_ROWS, DatasetSource, Read, SPLIT_KEY};
 pub use split::{Part, Split, SplitCounts, Splits};
 pub use store::{
-    MODELS_TABLE, bootstrap_models, delete_model, list_models, load_model, load_model_by_name,
-    models_for_table, require_model, save_model,
+    MODELS_QUERY, MODELS_TABLE, bootstrap_models, delete_model, list_models, load_model,
+    load_model_by_name, models_for_table, require_model, save_model,
 };
 pub use validate::{ModelIssue, Models, validate_model};

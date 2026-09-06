@@ -222,8 +222,14 @@ async fn setup() -> sc_error::Result<Harness> {
         &sc_llm::LlmProviderDef::anthropic("house", "sk-ant-test", "claude-sonnet-4-5"),
     )
     .await?;
-    let triggers =
-        sc_server::install_triggers(&catalog, sc_server::default_js_evaluator(), &agents).await?;
+    let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
+    let triggers = sc_server::install_triggers(
+        &catalog,
+        sc_server::default_js_evaluator(),
+        &agents,
+        &models,
+    )
+    .await?;
 
     let sessions = Arc::new(SessionStore::default());
     let apps = Arc::new(

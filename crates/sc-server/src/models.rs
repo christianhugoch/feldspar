@@ -1,5 +1,5 @@
-//! Predictive models: the pieces `sc-model` declares but cannot supply
-//! (TODO "Predictive models", §4).
+//! Predictive models: the pieces `sc-model` declares but cannot supply, and the
+//! services a running server holds them in (TODO "Predictive models", §4, §8).
 //!
 //! `sc-model` is at layer 6 so a module can supply a model provider — the same
 //! placement argument `sc-action` carries — and the price is that it cannot read
@@ -14,21 +14,32 @@
 //! not read a table a module provides at all — three ways for a fit to be
 //! computed over rows that are not the rows the application has.
 //!
-//! Phase 2 adds [`install_models`], which is the other half a server owes this
-//! crate: the two tables exist, and a fit that was running when the process died
-//! is failed rather than left saying `fitting` for ever. The registry and the fit
-//! runner join them in later phases.
+//! [`ModelServices`] is the assembly [`AgentServices`](crate::AgentServices) and
+//! the trigger dispatcher already are: the registry of providers, the source, the
+//! row cap this process was started with, and the one method that **starts a
+//! fit** ([`ModelServices::start_fit`]). It rides on
+//! [`AppMounts`](crate::AppMounts) with the other four for the reason they do —
+//! the admin handlers and the action registry both already hold that handle.
+//!
+//! ## A fit is a job, and the row is the registry (§8)
+//!
+//! [`start_fit`](ModelServices::start_fit) writes the instance row saying
+//! `fitting`, returns it, and spawns the work. There is no in-memory job
+//! registry, so nothing survives a restart — which is why
+//! [`install_models`] reaps every row still `fitting` at boot rather than
+//! leaving an admin looking at a fit in progress that is not.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use sc_api::rows::{RowQuery, count_rows_where, list_row_values};
 use sc_catalog::Catalog;
 use sc_error::{Context, Error, Result};
 use sc_model::{
-    Column, Dataset, DatasetSource, Frame, SPLIT_KEY, bootstrap_model_instances, bootstrap_models,
-    canonical_key, reap_fitting_instances,
+    Column, Dataset, DatasetSource, Frame, InstanceId, Model, ModelInstance, ModelRegistry, Read,
+    SPLIT_KEY, bootstrap_model_instances, bootstrap_models, builtin_registry, canonical_key,
+    fit_model, reap_fitting_instances, save_model_instance,
 };
 use sc_query::{Expr, Projection, Value};
 
@@ -47,23 +58,40 @@ impl CatalogDatasetSource {
 
 #[async_trait]
 impl DatasetSource for CatalogDatasetSource {
-    async fn materialise(&self, ds: &Dataset, cap: u64) -> Result<Frame> {
+    async fn read(&self, ds: &Dataset, how: &Read<'_>) -> Result<Frame> {
         let table = self.catalog.require(&ds.table)?;
         let shape = self.catalog.schema_shape()?;
-        let filter = ds.filter_expr(&shape)?;
+        // The dataset's own filter, and the caller's restriction anded onto it:
+        // a prediction about one row is that row's primary key in the `WHERE`,
+        // not a full read filtered afterwards, because "afterwards" would mean
+        // materialising the whole table to answer about one row of it.
+        let filter = match (ds.filter_expr(&shape)?, how.restrict) {
+            (Some(own), Some(extra)) => Some(own.and(extra.clone())),
+            (Some(own), None) => Some(own),
+            (None, Some(extra)) => Some(extra.clone()),
+            (None, None) => None,
+        };
 
         // The count first, and on purpose: a dataset is a `SELECT` an admin
         // wrote and the server has to hold the answer in memory, so the refusal
         // costs one `COUNT(*)` rather than a partial read that has already
         // allocated most of what it would have refused.
-        let count = count_rows_where(&self.catalog, &table, filter.clone(), None)
-            .await
-            .with_context(|| format!("counting the rows of dataset table `{}`", ds.table))?;
-        if count > 0 && cap < count as u64 {
-            return Err(Error::invalid(format!(
-                "the dataset selects more than {cap} rows (it selects {count}); \
-                 add a filter or raise `--model-max-rows`"
-            )));
+        //
+        // A **limited** read skips it, because it is bounded by construction:
+        // the preview screen exists to show an admin the dataset that is too
+        // big to fit, and refusing it for being too big would refuse the one
+        // answer they came for.
+        if how.limit.is_none() {
+            let count = count_rows_where(&self.catalog, &table, filter.clone(), None)
+                .await
+                .with_context(|| format!("counting the rows of dataset table `{}`", ds.table))?;
+            if count > 0 && how.cap < count as u64 {
+                return Err(Error::invalid(format!(
+                    "the dataset selects more than {} rows (it selects {count}); \
+                     add a filter or raise `--model-max-rows`",
+                    how.cap
+                )));
+            }
         }
 
         // The split key rides along as a reserved projection rather than as the
@@ -81,7 +109,13 @@ impl DatasetSource for CatalogDatasetSource {
             ));
         }
 
-        let query = RowQuery::new().where_(filter).projecting(projections);
+        let mut query = RowQuery::new().where_(filter).projecting(projections);
+        if how.limit.is_some() {
+            // Never above the cap, even when the caller asked for more: the cap
+            // is what this process can hold, and a limit is what this caller
+            // wants.
+            query = query.limit(how.ceiling());
+        }
         let rows = list_row_values(&self.catalog, &table, &query, None)
             .await
             .with_context(|| format!("reading dataset table `{}`", ds.table))?;
@@ -148,8 +182,106 @@ impl DatasetSource for CatalogDatasetSource {
     }
 }
 
-/// Ensure the two model tables exist, and **reap every fit that was running
-/// when this process last stopped** (TODO §8).
+/// The model machinery a running server holds: the provider registry, the
+/// dataset seam, and the bound a read must stay under.
+///
+/// Cloneable and cheap, like [`AgentServices`](crate::AgentServices), because
+/// four places need the same one: the admin handlers, the `predict_row` action
+/// in the trigger registry, the module reload that rebuilds the registry, and
+/// the spawned fit itself.
+#[derive(Clone)]
+pub struct ModelServices {
+    catalog: Arc<Catalog>,
+    /// The providers, **replaced whole** rather than mutated when the module set
+    /// changes — so a fit that is running keeps the registry it started with,
+    /// which is the same rule the action registry follows.
+    registry: Arc<RwLock<Arc<ModelRegistry>>>,
+    source: Arc<dyn DatasetSource>,
+    max_rows: u64,
+}
+
+impl ModelServices {
+    /// The services over `catalog`, with the built-in providers and the catalog
+    /// as the dataset source.
+    pub fn new(catalog: &Arc<Catalog>, max_rows: u64) -> Result<ModelServices> {
+        Ok(ModelServices {
+            catalog: Arc::clone(catalog),
+            registry: Arc::new(RwLock::new(Arc::new(
+                builtin_registry().context("registering the built-in model providers")?,
+            ))),
+            source: Arc::new(CatalogDatasetSource::new(Arc::clone(catalog))),
+            max_rows,
+        })
+    }
+
+    /// The provider registry as it stands.
+    pub fn registry(&self) -> Arc<ModelRegistry> {
+        match self.registry.read() {
+            Ok(guard) => Arc::clone(&guard),
+            // A poisoned lock means a panic while a *read* was in progress,
+            // which cannot have left the value half-written: the registry is
+            // replaced whole. Recovering is therefore correct and refusing
+            // would take the models tab down for the life of the process.
+            Err(poisoned) => Arc::clone(&poisoned.into_inner()),
+        }
+    }
+
+    /// Replace the provider registry — what a module change does (Phase 7).
+    pub fn set_registry(&self, registry: Arc<ModelRegistry>) {
+        match self.registry.write() {
+            Ok(mut guard) => *guard = registry,
+            Err(poisoned) => *poisoned.into_inner() = registry,
+        }
+    }
+
+    /// How a dataset becomes rows here.
+    pub fn source(&self) -> Arc<dyn DatasetSource> {
+        Arc::clone(&self.source)
+    }
+
+    /// The ceiling on one dataset read (`--model-max-rows`).
+    pub fn max_rows(&self) -> u64 {
+        self.max_rows
+    }
+
+    /// **Start a fit** (§8): write the instance row saying `fitting`, and spawn
+    /// the work.
+    ///
+    /// Returns as soon as the row exists, because that is the contract the whole
+    /// milestone is built on — a fit reads every row of a dataset and runs an
+    /// optimiser over it, which is seconds at best and minutes at worst, and it
+    /// must not be an HTTP request a proxy times out halfway through while the
+    /// work carries on invisibly. The screen polls the row.
+    ///
+    /// The spawned task's only failure mode worth handling is "the failure could
+    /// not be recorded", which [`fit_model`] reports as `Err`; a fit that simply
+    /// did not work is `Ok` carrying a failed instance. So the task logs the
+    /// former and nothing else: there is nobody left to return it to.
+    pub async fn start_fit(&self, model: &Model, instance: ModelInstance) -> Result<ModelInstance> {
+        save_model_instance(&self.catalog, &instance)
+            .await
+            .context("recording the start of the fit")?;
+        let id: InstanceId = instance.id;
+        let catalog = Arc::clone(&self.catalog);
+        let registry = self.registry();
+        let source = Arc::clone(&self.source);
+        let model = model.clone();
+        let cap = self.max_rows;
+        tokio::spawn(async move {
+            if let Err(e) = fit_model(&catalog, &registry, source.as_ref(), &model, id, cap).await {
+                eprintln!(
+                    "feldspar: the fit of model `{}` could not be recorded: {}",
+                    model.name,
+                    sc_error::format_chain(&e)
+                );
+            }
+        });
+        Ok(instance)
+    }
+}
+
+/// Ensure the two model tables exist, **reap every fit that was running when
+/// this process last stopped** (§8), and assemble the services.
 ///
 /// A fit is a job whose registry is its row: `fitModel` writes the instance
 /// first, returns its id, and runs the work on a spawned task. Nothing survives
@@ -160,10 +292,8 @@ impl DatasetSource for CatalogDatasetSource {
 /// expressing a fit as a workflow, which is a bigger claim than this milestone
 /// makes.
 ///
-/// Runs before anything can read an instance, for that reason. It carries no
-/// registry yet: there is nothing to fit with until the built-in providers land
-/// (Phase 4) and nothing to fit from until the API does (Phase 5).
-pub async fn install_models(catalog: &Arc<Catalog>) -> Result<()> {
+/// Runs before anything can read an instance, for that reason.
+pub async fn install_models(catalog: &Arc<Catalog>, max_rows: u64) -> Result<ModelServices> {
     bootstrap_models(catalog)
         .await
         .context("ensuring the models table exists")?;
@@ -179,7 +309,7 @@ pub async fn install_models(catalog: &Arc<Catalog>) -> Result<()> {
              have been marked failed"
         );
     }
-    Ok(())
+    ModelServices::new(catalog, max_rows)
 }
 
 #[cfg(test)]

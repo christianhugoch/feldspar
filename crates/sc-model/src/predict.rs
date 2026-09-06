@@ -23,14 +23,17 @@
 //! pass score 50 000 rows in one call rather than in 50 000.
 
 use sc_error::{Error, Result};
+use sc_query::Expr;
 use serde_json::Value as Json;
 
 use crate::encode::{Encoding, apply_encoding};
 use crate::fit::ATTR_OUTCOME;
 use crate::frame::Frame;
 use crate::instance::ModelInstance;
+use crate::model::Model;
 use crate::provider::{Outcome, Prediction};
 use crate::registry::ModelRegistry;
+use crate::source::{DatasetSource, Read};
 
 impl ModelInstance {
     /// The [`Outcome`] this fit produces, as it was recorded at fit time.
@@ -99,10 +102,14 @@ pub async fn predict_rows(
         )));
     }
     let encoding = instance.encoding()?;
-    // Strict: at predict time a row we cannot represent is an error, not a
-    // dropped row. Dropping would answer fewer predictions than there were rows,
-    // and the caller lines them up against the rows it asked about.
-    let encoded = apply_encoding(&encoding, frame)?;
+    // Strict, and **features only**: at predict time a row we cannot represent
+    // is an error rather than a dropped row, because dropping would answer fewer
+    // predictions than there were rows and the caller lines them up against the
+    // rows it asked about — but the label is not one of the things the row has
+    // to be able to represent. A prediction is asked about a row whose label is
+    // unknown; demanding one would make a fitted model unusable on exactly the
+    // rows it exists to answer about. See [`Encoding::features_only`].
+    let encoded = apply_encoding(&encoding.features_only(), frame)?;
     let provider = registry.require(provider.trim())?;
     let raw = provider
         .predict(&instance.state, &encoded.features_frame())
@@ -116,6 +123,74 @@ pub async fn predict_rows(
         )));
     }
     name_classes(raw, &encoding)
+}
+
+/// What a prediction is asked **about** (task 5.4, §12).
+///
+/// The two are not variations on one thing, and the split is the whole reason
+/// this enum exists rather than an `Option<Expr>` and an `Option<Vec<Json>>`
+/// that could both be `Some`:
+///
+/// - [`Rows`](Subject::Rows) is a row that may not be in the table at all — the
+///   admin screen's "try a row" box, and an API caller asking a what-if. Its
+///   derived columns are whatever the caller typed, because there is nothing to
+///   derive them from.
+/// - [`Dataset`](Subject::Dataset) is rows of the model's own table, read
+///   **through the dataset**, so a join path and an aggregation are computed by
+///   the row layer exactly as they were at fit time. This is what a trigger's
+///   `predict_row` uses, and it is why the restriction goes into the read rather
+///   than being applied to what came back.
+#[derive(Debug, Clone, Copy)]
+pub enum Subject<'a> {
+    /// Literal rows: one JSON object per row, keyed by dataset column name.
+    Rows(&'a [Json]),
+    /// The dataset's rows, restricted by this extra `WHERE` — `None` for all of
+    /// them, bounded by the row cap.
+    Dataset(Option<&'a Expr>),
+}
+
+/// Predictions, and which rows they are for.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Predictions {
+    /// One per row, in row order.
+    pub predictions: Vec<Prediction>,
+    /// The canonical primary key of each row, where the read supplied them —
+    /// empty for literal rows, which have none.
+    pub keys: Vec<String>,
+}
+
+/// Apply `instance` to whatever `subject` names, answering in row order.
+///
+/// The one path both callers of Phase 5 go through — the `predictRows` endpoint
+/// and the `predict_row` action — because "read the rows, encode them the way
+/// the fit was, ask the provider, name the classes" must not be written twice
+/// and drift.
+pub async fn predict_subject(
+    registry: &ModelRegistry,
+    source: &dyn DatasetSource,
+    model: &Model,
+    instance: &ModelInstance,
+    subject: Subject<'_>,
+    cap: u64,
+) -> Result<Predictions> {
+    let frame = match subject {
+        Subject::Rows(rows) => {
+            let types = instance.encoding()?.feature_types();
+            Frame::from_rows(rows, &types)?
+        }
+        Subject::Dataset(restrict) => {
+            let mut how = Read::all(cap);
+            if let Some(expr) = restrict {
+                how = how.restricted_to(expr);
+            }
+            source.read(&model.dataset, &how).await?
+        }
+    };
+    let predictions = predict_rows(registry, &model.provider, instance, &frame).await?;
+    Ok(Predictions {
+        predictions,
+        keys: frame.keys,
+    })
 }
 
 /// Turn every class index into the class name the fit's encoding gave it.
@@ -158,6 +233,7 @@ mod tests {
     use crate::instance::ModelInstance;
     use crate::model::ModelId;
     use crate::provider::{FitResult, ModelProvider, OutcomeSpec};
+    use crate::source::Read;
     use sc_types::{Attrs, FormField};
 
     /// A provider that answers the class index its state names, for every row.
@@ -259,6 +335,95 @@ mod tests {
             prediction_values(&predictions).expect("values"),
             vec![Json::from("yes")]
         );
+    }
+
+    #[tokio::test]
+    async fn a_row_with_no_label_at_all_is_what_a_prediction_is_asked_about() {
+        // The label is the thing being predicted, so it is usually not there —
+        // and demanding it would make a fitted model unusable on exactly the
+        // rows it exists to answer about. See `Encoding::features_only`.
+        let rows = Frame::new(
+            vec![
+                ("region".to_owned(), Column::Str(vec![Some("south".into())])),
+                ("area".to_owned(), Column::Float(vec![Some(3.0)])),
+            ],
+            Vec::new(),
+        )
+        .expect("frame");
+        let predictions = predict_rows(&registry(), "fixed_class", &instance(), &rows)
+            .await
+            .expect("predict");
+        assert_eq!(predictions, vec![Prediction::class("yes", Some(0.75))]);
+
+        // And a null one is fine for the same reason, where a *fit* would have
+        // dropped the row.
+        let rows = Frame::new(
+            vec![
+                ("region".to_owned(), Column::Str(vec![Some("south".into())])),
+                ("area".to_owned(), Column::Float(vec![Some(3.0)])),
+                ("sold".to_owned(), Column::Str(vec![None])),
+            ],
+            Vec::new(),
+        )
+        .expect("frame");
+        assert_eq!(
+            predict_rows(&registry(), "fixed_class", &instance(), &rows)
+                .await
+                .expect("predict"),
+            vec![Prediction::class("yes", Some(0.75))]
+        );
+    }
+
+    #[tokio::test]
+    async fn literal_rows_and_dataset_rows_are_the_two_subjects_and_agree() {
+        /// The seam, stubbed: the training frame, whatever is asked.
+        struct Fixed;
+        #[async_trait]
+        impl crate::source::DatasetSource for Fixed {
+            async fn read(&self, _ds: &crate::Dataset, _how: &Read<'_>) -> Result<Frame> {
+                Ok(training())
+            }
+        }
+        let model = crate::Model::new(
+            "sold",
+            "fixed_class",
+            crate::Dataset::new("houses").column("sold", "sold"),
+        );
+        let instance = instance();
+
+        // Over the dataset: two rows, and their keys come back so a caller can
+        // line the answers up against the rows it asked about.
+        let over_dataset = predict_subject(
+            &registry(),
+            &Fixed,
+            &model,
+            &instance,
+            crate::Subject::Dataset(None),
+            1000,
+        )
+        .await
+        .expect("dataset");
+        assert_eq!(over_dataset.predictions.len(), 2);
+        assert_eq!(over_dataset.keys, vec!["int:1", "int:2"]);
+
+        // Over a literal row: the same answer, and no key, because a row that is
+        // not in the table has none.
+        let literal = [serde_json::json!({ "region": "north", "area": 1.0 })];
+        let over_rows = predict_subject(
+            &registry(),
+            &Fixed,
+            &model,
+            &instance,
+            crate::Subject::Rows(&literal),
+            1000,
+        )
+        .await
+        .expect("rows");
+        assert_eq!(
+            over_rows.predictions,
+            vec![Prediction::class("yes", Some(0.75))]
+        );
+        assert!(over_rows.keys.is_empty());
     }
 
     #[tokio::test]

@@ -182,7 +182,11 @@ pub async fn fit_model(
             // broke rather than pretending the optimiser was at fault.
             Err(e) => row.failed(format!("the fit finished but could not be recorded: {e}")),
         },
-        Err(e) => row.failed(e.to_string()),
+        // The **chain**, not just the outermost sentence: a fit fails at the
+        // bottom of a stack of contexts ("counting the rows of dataset table
+        // `houses`"), and the row is the only place the reason will ever be
+        // read — so it carries the cause the context was wrapped around.
+        Err(e) => row.failed(sc_error::format_chain(&e)),
     };
     save_model_instance(catalog, &finished).await?;
     Ok(finished)
@@ -539,12 +543,14 @@ mod tests {
         }
     }
 
+    use crate::source::Read;
+
     /// A source that answers one fixed frame — the seam, stubbed.
     struct Fixed(Frame);
 
     #[async_trait]
     impl DatasetSource for Fixed {
-        async fn materialise(&self, _ds: &Dataset, _cap: u64) -> Result<Frame> {
+        async fn read(&self, _ds: &Dataset, _how: &Read<'_>) -> Result<Frame> {
             Ok(self.0.clone())
         }
     }

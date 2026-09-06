@@ -159,13 +159,15 @@ async fn setup(tag: &str) -> sc_error::Result<Server> {
     sc_catalog::bootstrap_file_stores(&catalog).await?;
 
     let agents = install_agents(&catalog).await?;
-    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents).await?;
+    let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
+    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents, &models).await?;
     let root = std::env::temp_dir().join(format!("sc-modules-api-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let modules = ModuleServices::install(
         &catalog,
         &dispatcher,
         &agents,
+        &models,
         Some(root.clone()),
         // The checkout's own `plugins/`, so the listing below is the catalog
         // this repository actually ships.

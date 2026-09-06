@@ -292,7 +292,8 @@ async fn setup() -> sc_error::Result<Server> {
         .with_providers(Arc::new(Scripted));
     sc_agent::save_agent(&catalog, agents.registry(), &summariser()).await?;
 
-    let dispatcher = install_triggers(&catalog, evaluator.clone(), &agents).await?;
+    let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
+    let dispatcher = install_triggers(&catalog, evaluator.clone(), &agents, &models).await?;
 
     // Four triggers: one an editor may call, one nobody has decided the access
     // of (so: admins), one the application does not expose at all, and one whose

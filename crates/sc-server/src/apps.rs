@@ -131,6 +131,13 @@ pub struct AppMounts {
     /// *same* dispatcher a firing trigger runs from. `None` is a process with no
     /// modules installed, where the Modules tab says so rather than pretending.
     modules: Option<Arc<crate::modules::ModuleServices>>,
+    /// The model machinery (TODO "Predictive models"): the provider registry,
+    /// the dataset seam and the row cap. Here for the reason the four above are
+    /// — the admin handlers already hold this handle, and the `predict_row`
+    /// action in the trigger registry has to predict with the *same* registry a
+    /// fit was run with. `None` is a process with no models installed, where the
+    /// Models tab says so rather than pretending.
+    models: Option<crate::models::ModelServices>,
     /// The Python runtime this process built from its own flags (§15), for the
     /// **one** thing that needs the runtime rather than the adapter: the
     /// diagnostics on Settings → Development, which report which of §7's states
@@ -158,6 +165,7 @@ impl AppMounts {
             triggers: None,
             agents: None,
             modules: None,
+            models: None,
             python: None,
             by_subdomain: RwLock::new(HashMap::new()),
         }
@@ -210,6 +218,18 @@ impl AppMounts {
     /// The module services, if this server has them.
     pub fn modules(&self) -> Option<&Arc<crate::modules::ModuleServices>> {
         self.modules.as_ref()
+    }
+
+    /// Attach the model services, so the Models tab can define, fit and predict
+    /// with models on the running server.
+    pub fn with_models(mut self, models: crate::models::ModelServices) -> AppMounts {
+        self.models = Some(models);
+        self
+    }
+
+    /// The model services, if this server has them.
+    pub fn models(&self) -> Option<&crate::models::ModelServices> {
+        self.models.as_ref()
     }
 
     /// Attach the Python runtime, so the diagnostics screen can say which of

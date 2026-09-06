@@ -296,7 +296,8 @@ async fn setup() -> sc_error::Result<Server> {
     let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
     sc_auth::bootstrap(&catalog).await?;
     let agents = sc_server::install_agents(&catalog).await?;
-    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents).await?;
+    let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
+    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents, &models).await?;
     // The tutorial's reader is running `serve`, which is the only thing that
     // starts the engine (§10.3, phase 3.3).
     let (engine, _handle) = start_workflow_engine(&catalog, &dispatcher);

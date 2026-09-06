@@ -188,22 +188,9 @@ impl Dataset {
         let Some(source) = &self.filter else {
             return Ok(None);
         };
-        let user = UserEnv::Inline(None);
-        let formula = Formula::parse(source).map_err(|e| self.on_filter(&e))?;
-        translate(
-            &formula,
-            sc_expr::Operation::Read,
-            &Env::new(&user),
-            shape,
-            &self.table,
-        )
-        .map(Some)
-        .map_err(|e| match e {
-            TranslateError::Untranslatable(what) => self.on_filter(&Error::invalid(format!(
-                "a dataset filter must become a `WHERE`, and this one {what}"
-            ))),
-            TranslateError::Error(e) => self.on_filter(&e),
-        })
+        translate_filter(&self.table, source, shape)
+            .map(Some)
+            .map_err(|e| self.on_filter(&e))
     }
 
     /// The `Select` this dataset is — its columns projected, its filter folded
@@ -266,6 +253,35 @@ impl Dataset {
     fn on_filter(&self, e: &Error) -> Error {
         Error::invalid(format!("dataset filter on `{}`: {e}", self.table))
     }
+}
+
+/// The `WHERE` one boolean formula over `table` becomes.
+///
+/// [`Dataset::filter_expr`] is this applied to the dataset's own filter, and it
+/// is public for the other caller Phase 5 added: a prediction over "the rows
+/// matching this formula" restricts the *same* read the same way, and a second
+/// translation path would be a second set of rules about what a filter may say.
+///
+/// Untranslatable is an **error** rather than a fallback, for the reason a
+/// dataset's own filter is: there is no reified evaluator in front of a
+/// `SELECT`, so an untranslatable filter would mean reading every row of the
+/// table and calling the result a restricted sample.
+pub fn translate_filter(table: &str, formula: &str, shape: &SchemaShape) -> Result<Expr> {
+    let user = UserEnv::Inline(None);
+    let parsed = Formula::parse(formula)?;
+    translate(
+        &parsed,
+        sc_expr::Operation::Read,
+        &Env::new(&user),
+        shape,
+        table,
+    )
+    .map_err(|e| match e {
+        TranslateError::Untranslatable(what) => Error::invalid(format!(
+            "a filter must become a `WHERE`, and this one {what}"
+        )),
+        TranslateError::Error(e) => e,
+    })
 }
 
 /// Validate `dataset` against `shape`: every column's formula parses and

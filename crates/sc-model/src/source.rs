@@ -15,9 +15,27 @@
 //! filter or raise `--model-max-rows`" — rather than by the OOM killer. The
 //! count is asked for **before** the rows, so the refusal costs one `COUNT(*)`
 //! and not a partial read.
+//!
+//! ## Why a read is three things and not one
+//!
+//! A fit reads the whole dataset, and that was the only reader Phase 3 had. Two
+//! more arrived with the API (Phase 5) and neither is that read:
+//!
+//! - **A prediction** wants the dataset's derived columns for *some* rows — the
+//!   row a trigger just wrote, or the rows a filter selects. It cannot compute
+//!   them itself: a join path and an aggregation are the row layer's answer, so
+//!   the restriction has to go *into* the read rather than be applied to what
+//!   comes back. Hence [`Read::restricted_to`], which the source ands into the
+//!   `WHERE` beside the dataset's own filter.
+//! - **A preview** wants the first few rows and their types, on a table that may
+//!   be far over the cap — that is the whole point of previewing before fitting.
+//!   Hence [`Read::first`], which is a `LIMIT` and therefore needs no count: the
+//!   answer is bounded by construction, so refusing it for being over the cap
+//!   would refuse the one screen that exists to say "your dataset is too big".
 
 use async_trait::async_trait;
 use sc_error::Result;
+use sc_query::Expr;
 
 use crate::dataset::Dataset;
 use crate::frame::Frame;
@@ -33,16 +51,74 @@ pub const DEFAULT_MAX_ROWS: u64 = 200_000;
 /// a split that hashed that would be a split over the wrong thing.
 pub const SPLIT_KEY: &str = "_sc_split_key";
 
+/// What one read of a dataset asks for: the bound it must stay under, the rows
+/// it is restricted to, and how many of them it wants.
+///
+/// An options value rather than three parameters because two of the three are
+/// absent in the common case, and `materialise(ds, None, None, cap)` at every
+/// call site would say nothing about which `None` was which.
+#[derive(Debug, Clone, Copy)]
+pub struct Read<'a> {
+    /// The ceiling on the rows this read may return — `--model-max-rows`.
+    pub cap: u64,
+    /// An extra predicate, anded with the dataset's own filter.
+    ///
+    /// A `sc_query::Expr` rather than a formula, because the two callers build
+    /// it differently and both already have what they need: a prediction over
+    /// one row has the primary key's *value*, and a prediction over a filter has
+    /// a formula it translated with
+    /// [`translate_filter`](crate::translate_filter).
+    pub restrict: Option<&'a Expr>,
+    /// At most this many rows, and **no count**: a limited read is bounded by
+    /// construction.
+    pub limit: Option<u64>,
+}
+
+impl<'a> Read<'a> {
+    /// Every row the dataset selects, up to `cap`.
+    pub fn all(cap: u64) -> Read<'a> {
+        Read {
+            cap,
+            restrict: None,
+            limit: None,
+        }
+    }
+
+    /// The same read, restricted to the rows `expr` selects.
+    pub fn restricted_to(mut self, expr: &'a Expr) -> Read<'a> {
+        self.restrict = Some(expr);
+        self
+    }
+
+    /// The same read, stopping after `limit` rows.
+    pub fn first(mut self, limit: u64) -> Read<'a> {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// How many rows this read may return at most — the limit where there is
+    /// one, and the cap otherwise.
+    pub fn ceiling(&self) -> u64 {
+        self.limit.map_or(self.cap, |n| n.min(self.cap))
+    }
+}
+
 /// How a [`Dataset`] becomes a [`Frame`]. Implemented in `sc-server` over
 /// `sc_api::rows`.
 #[async_trait]
 pub trait DatasetSource: Send + Sync {
-    /// Read `ds` into a frame, refusing by name if it selects more than `cap`
-    /// rows.
+    /// Read `ds` as `how` asks, refusing by name if an unlimited read would
+    /// exceed [`Read::cap`].
     ///
     /// The frame's [`keys`](Frame::keys) are filled in when the dataset's table
     /// has a single primary key and left empty when it does not: reading is
     /// unaffected by that, and only [`Frame::split`](crate::Frame::split)
     /// refuses.
-    async fn materialise(&self, ds: &Dataset, cap: u64) -> Result<Frame>;
+    async fn read(&self, ds: &Dataset, how: &Read<'_>) -> Result<Frame>;
+
+    /// Read every row of `ds`, refusing by name if it selects more than `cap` —
+    /// what a fit does.
+    async fn materialise(&self, ds: &Dataset, cap: u64) -> Result<Frame> {
+        self.read(ds, &Read::all(cap)).await
+    }
 }

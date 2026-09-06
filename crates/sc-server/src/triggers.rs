@@ -49,11 +49,13 @@ pub async fn install_triggers(
     catalog: &Arc<Catalog>,
     evaluator: Arc<dyn JsEvaluator>,
     agents: &AgentServices,
+    models: &crate::ModelServices,
 ) -> Result<Arc<TriggerDispatcher>> {
     install_triggers_with_adapters(
         catalog,
         evaluator,
         agents,
+        models,
         [crate::default_python_adapter() as Arc<dyn sc_expr::CodeAdapter>],
     )
     .await
@@ -74,6 +76,7 @@ pub async fn install_triggers_with_adapters(
     catalog: &Arc<Catalog>,
     evaluator: Arc<dyn JsEvaluator>,
     agents: &AgentServices,
+    models: &crate::ModelServices,
     adapters: impl IntoIterator<Item = Arc<dyn sc_expr::CodeAdapter>>,
 ) -> Result<Arc<TriggerDispatcher>> {
     bootstrap_triggers(catalog)
@@ -89,7 +92,7 @@ pub async fn install_triggers_with_adapters(
     sc_workflow::bootstrap_run_traces(catalog)
         .await
         .context("ensuring the run traces table exists")?;
-    let registry = base_action_registry(agents)?;
+    let registry = base_action_registry(agents, models)?;
     // The mail transport is the **settings-backed** one, not a transport built
     // here from the settings as they are now: an admin who fixes an SMTP
     // password gets it on the next message, which is what the Email section's
@@ -123,7 +126,7 @@ pub async fn install_triggers_with_adapters(
 }
 
 /// The action set a server runs with **before its modules**: the built-ins plus
-/// `run_agent`.
+/// `run_agent` and `predict_row`.
 ///
 /// Its own function because it is assembled twice — once at boot, here, and
 /// again every time a module is installed, configured or removed
@@ -131,7 +134,10 @@ pub async fn install_triggers_with_adapters(
 /// the whole set from this base rather than mutating the live one. Two copies of
 /// the assembly would be two chances for a module reload to quietly lose
 /// `run_agent`.
-pub fn base_action_registry(agents: &AgentServices) -> Result<sc_action::ActionRegistry> {
+pub fn base_action_registry(
+    agents: &AgentServices,
+    models: &crate::ModelServices,
+) -> Result<sc_action::ActionRegistry> {
     let mut registry = builtin_actions().context("registering the built-in actions")?;
     sc_core_traits::register_agent_actions(
         &mut registry,
@@ -139,6 +145,19 @@ pub fn base_action_registry(agents: &AgentServices) -> Result<sc_action::ActionR
         Arc::clone(agents.providers()),
     )
     .context("registering the agent action")?;
+    // And `predict_row`, for the same reason and in the same place: it needs
+    // the model provider registry a fit ran with and the dataset seam, neither
+    // of which exists until a server has assembled them. Rebuilding the base set
+    // on a module change is therefore what gives the action the *new* registry —
+    // which is how a model fitted by a module's provider keeps predicting after
+    // that module is reinstalled.
+    sc_core_actions::register_model_actions(
+        &mut registry,
+        models.registry(),
+        models.source(),
+        models.max_rows(),
+    )
+    .context("registering the prediction action")?;
     Ok(registry)
 }
 

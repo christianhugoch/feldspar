@@ -43,6 +43,15 @@ use crate::split::Split;
 /// Name of the models table in the primary database.
 pub const MODELS_TABLE: &str = "_sc_models";
 
+/// The [`OptionsSource::ServerQuery`](sc_types::OptionsSource) name meaning "the
+/// models over this table" — what `predict_row`'s model picker declares (§12).
+///
+/// A query name rather than a resolved list, because the answer is *rows*: a
+/// `config_spec_for` is synchronous and cannot read them, so the declaration
+/// says what it wants and the endpoint that serves it fills the list in. The
+/// same arrangement a File field's file-store picker already has.
+pub const MODELS_QUERY: &str = "models_for_table";
+
 /// The UUID primary-key column (§9).
 pub const COL_ID: &str = "id";
 /// The model's unique name — what `predict_row` and the admin screen address.

@@ -166,7 +166,8 @@ async fn setup() -> sc_error::Result<Server> {
     sc_catalog::bootstrap_file_stores(&catalog).await?;
     sc_llm::bootstrap_llm_providers(&catalog).await?;
     let agents = install_agents(&catalog).await?;
-    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents).await?;
+    let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
+    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents, &models).await?;
 
     let apps = Arc::new(
         AppMounts::new(catalog.clone())

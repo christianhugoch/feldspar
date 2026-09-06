@@ -172,7 +172,8 @@ async fn setup() -> sc_error::Result<Server> {
     // The **default** evaluator, deliberately: the claim is about the pool an
     // operator gets without configuring anything (2 isolates, 256 resident runs
     // each), not about a pool sized for this test.
-    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents).await?;
+    let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
+    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents, &models).await?;
 
     let apps = Arc::new(AppMounts::new(catalog.clone()).with_triggers(dispatcher.clone()));
     let router = build_router_with_apps(

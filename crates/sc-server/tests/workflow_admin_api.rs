@@ -121,7 +121,8 @@ async fn setup() -> sc_error::Result<Server> {
     let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
     sc_auth::bootstrap(&catalog).await?;
     let agents = sc_server::install_agents(&catalog).await?;
-    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents).await?;
+    let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
+    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents, &models).await?;
     // Only `serve` starts the engine (§10.3, phase 3.3), and this test is
     // standing in for `serve`: without it a workflow trigger refuses by name
     // rather than starting a run, which is a different test.

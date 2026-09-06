@@ -142,6 +142,8 @@ graph TD
   coretraits --> app["sc-app"]
   coreact --> api["sc-api"]
   server --> module["sc-module"]
+  server --> model["sc-model"]
+  coreact --> model
   server --> python["sc-python"]
   python --> module
   python --> coreact
@@ -199,15 +201,16 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-auth` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-llm` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
 | `sc-action` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-query` `sc-types` |
+| `sc-model` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-module` | `sc-action` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
 | `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-module` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
 | `sc-workflow` | `sc-action` `sc-agent` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
 | `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
 | `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
-| `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
+| `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-model` `sc-query` `sc-types` |
 | `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
-| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-module` `sc-python` `sc-query` `sc-types` `sc-workflow` |
+| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-types` `sc-workflow` |
 | `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-types` |
 
 Three things the graph is worth reading for:
@@ -1177,8 +1180,8 @@ a sparse value goes into `attributes`.**
 | `_sc_config` | configuration | key + JSON value, one row per setting. Every key is **declared** as a `FormField` in `sc-config` (§6.2's vocabulary), which is what types it: a write is validated against the declaration and an undeclared key is refused, so the admin UI renders the settings screen from the declarations and knows nothing about any particular setting. Per-application scope is not built yet — today's keys are all installation-wide (§13.5). `feldspar get-cfg` / `set-cfg` read and write the same rows from a terminal — the value a terminal supplies is a string, so the declaration is what types it — for the reason `feldspar api` exists: a setting reachable only from a browser is unreachable from a deploy script |
 | `_sc_acme_cache` | ACME account + issued certificates | not configuration and not admin-visible: opaque bytes keyed by the digest of the domain list and the CA directory URL (§13.5), in the database so a renewal survives a restart and a second node does not order its own |
 | `_sc_applications` | applications | framework + its config, subdomain, table/store subset, API config, static dirs, CSP; **not an overlay** — the row is the app's only definition (§13.2), so this table is needed as soon as apps are (MVP) |
-| `_sc_models` | model definitions | provider + config fields |
-| `_sc_model_instances` | fitted model instances | parameters, hyperparameters, fit metadata |
+| `_sc_models` | model definitions | **not an overlay** — the row is the model's only definition (§14.2): the provider, the `dataset` (which rows and which derived values, as a list of `sc-expr` formulas), the provider's configuration, the hyperparameter *space* (per key a value or a list to search over) and the split's fractions and seed. `table_name` is derived from the dataset on the way out and checked against it on the way in, so the list can be filtered by table without reading every dataset |
+| `_sc_model_instances` | one fit each | the provider's serialised `state`, its `parameters` (structured for display), the **host's** `metrics` per split, and the `encoding` the fit was made with — which is the load-bearing one: a prediction is encoded the way its fit was, or it fails. `status` is a column because every row has one and it is what the list filters on; the failure **sentence** is in `attributes`, because it is present only on the rows that failed. `active` is a column and at most one row per model carries it |
 | `_sc_roles` | roles | **not an overlay** — a role is a row carrying a name and role-specific settings; `users.role` is a foreign key onto it (§7.4). Two built-ins (admin, public) seeded at bootstrap |
 | `_sc_sessions` | live sessions | **`UNLOGGED`** where the backend allows it (§7.2): the SHA-256 of the token, the user it names, and when it lapses. Shared by every node, cached per node behind an LRU + freshness TTL. `user_id` is deliberately **not** a foreign key — the schema layer renders no `ON DELETE` action, so one would block deleting a signed-in user; a session resolves by reading the user, so a deleted one's session resolves to nobody |
 | `users` | users | UUID PK (not `_sc_`-prefixed; it is user-facing and extensible) |
@@ -1352,6 +1355,33 @@ erDiagram
     int min_role
     json attributes
   }
+  MODELS["_sc_models"] {
+    uuid id PK
+    text name UK
+    text description
+    text table_name "derived from the dataset, never edited beside it"
+    text provider "-> a registered model provider"
+    json dataset "which rows and which derived values (a list of formulas)"
+    json configuration
+    json hyperparameters "per key a value, or a list to search over"
+    json split "train/validation/test fractions + the hash seed"
+    json attributes
+  }
+  INSTANCES["_sc_model_instances"] {
+    uuid id PK
+    uuid model FK "-> _sc_models.id"
+    text name
+    text description
+    text status "fitting | fitted | failed"
+    timestamp created
+    bool active "at most one per model, enforced on save"
+    json state "the provider's serialised fit, opaque to everything else"
+    json parameters "scalar | table | text blocks, for display"
+    json metrics "the host's, per split"
+    json encoding "fitted on the training rows only, and applied unchanged"
+    json hyperparameters "the point this fit used -- never a list"
+    json attributes "the failure sentence, the outcome, the row counts, the search"
+  }
   LLM["_sc_llm_providers"] {
     uuid id PK
     text name UK
@@ -1518,8 +1548,7 @@ is no per-file table: file metadata lives in xattrs on disk. And `_sc_config`/`_
 deliberately relationship-free key/value stores — every `_sc_config` key gets its meaning from a
 `FormField` declaration in `sc-config`, not from a row pointing anywhere.
 
-Tables named in §9 that are **not yet created**: `_sc_errors`, `_sc_models`,
-`_sc_model_instances`.
+Tables named in §9 that are **not yet created**: `_sc_errors`.
 
 ---
 

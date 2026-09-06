@@ -174,7 +174,8 @@ async fn setup() -> sc_error::Result<Server> {
     let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
     sc_auth::bootstrap(&catalog).await?;
     let agents = sc_server::install_agents(&catalog).await?;
-    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents).await?;
+    let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
+    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents, &models).await?;
 
     let apps = Arc::new(AppMounts::new(catalog.clone()).with_triggers(dispatcher.clone()));
     let router = build_router_with_apps(

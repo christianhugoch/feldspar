@@ -439,6 +439,47 @@ impl Encoding {
     pub fn classes(&self) -> Option<&[String]> {
         self.target.as_ref().and_then(|t| t.classes.as_deref())
     }
+
+    /// This encoding with its label **dropped** — what a prediction applies.
+    ///
+    /// A prediction is asked about a row whose label is not known, and usually
+    /// is not there at all: that is what a prediction *is*. Encoding the target
+    /// would demand a value the caller cannot have, and refusing the row for not
+    /// having one would make a fitted model unusable on exactly the rows it was
+    /// fitted to answer about. The label matters again on the way *back*, where
+    /// [`name_classes`](crate::name_classes) maps a class index through the
+    /// target this drops — so this is a narrowing of the apply step and not of
+    /// the instance.
+    pub fn features_only(&self) -> Encoding {
+        Encoding {
+            columns: self.columns.clone(),
+            target: None,
+        }
+    }
+
+    /// The dataset columns this encoding reads and the type each was fitted as
+    /// — what [`Frame::from_rows`](crate::Frame::from_rows) needs to read a
+    /// literal row the way the fit read the table.
+    ///
+    /// The type is the encoding's own claim rather than a recorded copy of the
+    /// dataset's shape, which is the point: a one-hot column *is* a category and
+    /// an epoch column *is* a date, whatever the row being predicted happens to
+    /// look like.
+    pub fn feature_types(&self) -> Vec<(String, ColumnType)> {
+        self.columns
+            .iter()
+            .map(|column| {
+                let ty = match column {
+                    ColumnEncoding::Passthrough { .. } | ColumnEncoding::Standardised { .. } => {
+                        ColumnType::Float
+                    }
+                    ColumnEncoding::OneHot { .. } => ColumnType::Str,
+                    ColumnEncoding::Epoch { .. } => ColumnType::Date,
+                };
+                (column.column().to_owned(), ty)
+            })
+            .collect()
+    }
 }
 
 /// An encoded frame: the same numbers as a matrix and as a frame, plus which

@@ -162,7 +162,8 @@ async fn setup() -> sc_error::Result<Server> {
     // dispatcher installed into the catalog. Before this call nothing observes a
     // write — which is exactly what every other test in this suite relies on.
     let agents = sc_server::install_agents(&catalog).await?;
-    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents).await?;
+    let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
+    let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents, &models).await?;
 
     let apps = Arc::new(AppMounts::new(catalog.clone()));
     let router = build_router(
