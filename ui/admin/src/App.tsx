@@ -20,6 +20,7 @@ import type { AuthStatusResponse } from "./client";
 import {
   IconApps,
   IconBolt,
+  IconChartHistogram,
   IconChevronLeft,
   IconChevronRight,
   IconFolder,
@@ -47,6 +48,9 @@ import { GraphqlExplorer } from "./screens/GraphqlExplorer";
 import { LlmProviders } from "./screens/LlmProviders";
 import { LlmProviderForm } from "./screens/LlmProviderForm";
 import { Login } from "./screens/Login";
+import { ModelForm } from "./screens/ModelForm";
+import { ModelInstance } from "./screens/ModelInstance";
+import { Models } from "./screens/Models";
 import { Roles } from "./screens/Roles";
 import { Settings } from "./screens/Settings";
 import { Tables } from "./screens/Tables";
@@ -170,6 +174,17 @@ export const NAV: NavItem[] = [
     label: "Files",
     icon: <IconFolder />,
     matches: ["/file-stores", "/files"],
+  },
+  {
+    href: "#/models",
+    label: "Models",
+    icon: <IconChartHistogram />,
+    // Beside Agents rather than under Tables: a model is a question asked *of*
+    // a table, and the section it belongs to is the one about answering
+    // questions rather than the one about storing rows. A dataset has no entry
+    // of its own on purpose — it belongs to its model and has no life without
+    // one (§3).
+    matches: ["/models", "/model-instances"],
   },
   {
     href: "#/agents",
@@ -486,6 +501,30 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
   }
   if (route.startsWith("/db-connections")) {
     return <DbConnections />;
+  }
+  if (route === "/models/new") {
+    return <ModelForm />;
+  }
+  // A fit is addressed by its own id, as `getModelInstance` is: which model it
+  // is of is the server's answer, not the URL's.
+  const instanceMatch = route.match(/^\/model-instances\/([^/]+)$/);
+  if (instanceMatch) {
+    const instanceId = decodeURIComponent(instanceMatch[1]);
+    // Keyed, so moving from one fit to another **remounts** rather than
+    // re-rendering: the screen holds a fit's own answers (the "try a row" box's
+    // reply, most of all), and one fit's answer shown under another fit's
+    // coefficients is exactly the confident-wrong-answer this milestone is most
+    // careful about.
+    return <ModelInstance key={instanceId} instanceId={instanceId} />;
+  }
+  // The model *is* its form: a model is edited and refitted continuously, so
+  // there is no read-only screen it would be opened into first.
+  const modelMatch = route.match(/^\/models\/([^/]+)$/);
+  if (modelMatch) {
+    return <ModelForm modelId={decodeURIComponent(modelMatch[1])} />;
+  }
+  if (route.startsWith("/models")) {
+    return <Models />;
   }
   // A run is addressed by its own id, as `getRun` is: which workflow it is of is
   // the server's answer, not the URL's.

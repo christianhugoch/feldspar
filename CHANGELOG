@@ -2,6 +2,62 @@
 
 Changes in reverse chronological order.
 
+## Three screens for a model, and one for a fit
+
+The sixth phase of predictive models: the Models tab, the dataset builder, the model form and
+the instance screen — so everything Phases 1–5 built is now something an admin does rather than
+something a test asserts. A **Models** entry joins the sidebar; a dataset still has no tab of
+its own, because it belongs to its model and has no life without one.
+
+- **The dataset builder is a column list, and the picker writes formulas.** Each row is a name
+  and a formula; the picker offers three groups — the table's fields, one `Ⱶ` join path per
+  column of each table a key points at, and one `Ↄ` aggregation per incoming key (a count, and
+  a sum/avg/max per numeric column) — and what it writes into the row is an **expression in the
+  language the calc-field editor already speaks**. There is no second vocabulary with three
+  shapes in the JSON: an admin who wants `log(price)` types it over what the picker wrote. The
+  suggested column name follows the formula while it is still the suggestion and is left alone
+  once it has been typed over.
+- **The preview is what makes a dataset a thing you can see the answer of.** It debounces,
+  reads the first rows through `previewDataset`, and shows the **types the data came back as** —
+  which is what the provider's form below it is built from, and what no schema carries. A
+  dataset that will not read shows its sentence, and the provider form falls back to the
+  unresolved declaration and says so: the label picker becomes a text box rather than an empty
+  select, so the form still works while the formula above it is being fixed.
+- **Fitting saves first.** A fit of what is on the screen and a save of what is on the screen
+  are the same intention; the alternative is a button that silently fits the last saved version
+  of a form the admin has been editing. The instance list then polls while anything says
+  `fitting` and stops when nothing does — the row is the registry, so there is nothing to await.
+  A fit that failed carries its sentence in the list, because the request that started it
+  returned long before it failed.
+- **The instance screen renders three parameter variants and nothing else.** A scalar, a table
+  and a block of text — so a scikit-learn estimator from a bundled module will render beside a
+  smartcore regression with no change here. The metrics are the other way round and are shown
+  per split, because "R² 0.94" is not a claim about anything until you know whether it was
+  measured on the rows the fit was computed from. A classification also gets its per-class table
+  with **support** beside precision and recall, and the confusion matrix beside it.
+- **A p-value does not print as `1.2e-16`.** A column of those is unreadable, and the question
+  asked of a p-value is almost always which side of a threshold it falls: below 0.001 it prints
+  as `< 0.001`, above it to three decimals so `0.049` and `0.051` still differ, and the
+  conventional stars go in a column of their own. A NaN metric prints as an em dash rather than
+  a zero — an R² over one row is undefined, not nil.
+- **"Try a row" asks for what the encoding names.** The boxes are the fit's own feature columns,
+  never the label (it is the thing being predicted, and demanding it would make a fitted model
+  unusable on exactly the rows it exists to answer about), and each is typed the way the fit's
+  frame is: a numeric feature sends a number, because the server refuses `"100"` in a float
+  column **by name** and it is right to. A one-hot column becomes a **select of the categories
+  the fit was shown**, since any other value is refused rather than encoded as a row of zeros.
+- **The instance screen is keyed by its instance.** Moving from one fit to another remounts it
+  rather than re-rendering, so the previous fit's answer cannot sit under this fit's
+  coefficients — found by driving the screens on a real server, which is also where the split's
+  hash, the grid's two points and the coefficient table's stars were checked.
+- **`models.ts` is the vocabulary the screens share**, with tests: the JSON blobs the API
+  carries as `unknown` written out as the unions they serialise to and read through narrowing
+  functions that answer `null` rather than throwing; the hyperparameter grid's parse and print,
+  which hold up to §11's own equivalence — a list of one and a scalar are the same search, so
+  that is what comes back; the outcome-to-metric-set mapping, which is a mapping and not a merge
+  (a regression has no row where an accuracy would go); and the instance ordering — the active
+  fit first, because that is what everything outside the screen means by "the model".
+
 ## Models over HTTP, and a trigger that writes a prediction
 
 The fifth phase of predictive models: everything Phases 1–4 built is now reachable — twelve

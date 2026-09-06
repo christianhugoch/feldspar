@@ -515,21 +515,21 @@ bytes stores base64, because a system table with a `bytea` column would be the o
 
 ## Phase 6 — The admin UI
 
-- [ ] 6.1 The **Models** tab: the models with their table, provider, outcome and last fit; the
+- [x] 6.1 The **Models** tab: the models with their table, provider, outcome and last fit; the
       compiled-out notice when there are no built-ins; a model that failed validation listed
       with its reason.
-- [ ] 6.2 The **dataset builder**: a column list where each row is a name and a formula, with
+- [x] 6.2 The **dataset builder**: a column list where each row is a name and a formula, with
       the field / join-path / aggregation picker writing formulas into it (§2), the filter
       formula beside it, and a live preview from `previewDataset` — types and the first rows.
-- [ ] 6.3 The **model form**: provider picker, the provider's config form rendered from
+- [x] 6.3 The **model form**: provider picker, the provider's config form rendered from
       `config_spec` against the dataset's shape, the hyperparameter grid (a value or a list per
       hyperparameter), and the split.
-- [ ] 6.4 The **fit** button and the instance list: status, the poll while `fitting`, the
+- [x] 6.4 The **fit** button and the instance list: status, the poll while `fitting`, the
       failure sentence, Activate, and Delete.
-- [ ] 6.5 The **instance screen**: the parameter blocks rendered per variant (scalar, table,
+- [x] 6.5 The **instance screen**: the parameter blocks rendered per variant (scalar, table,
       text), the metrics per split, the search results when there was a grid, the row counts and
       what was dropped, and a "try a row" box that calls `predictRows`.
-- [ ] 6.6 `models.ts` helpers and their tests: the hyperparameter grid's parse and print, the
+- [x] 6.6 `models.ts` helpers and their tests: the hyperparameter grid's parse and print, the
       outcome-to-metric-set mapping, the parameter-table formatting (significance stars and
       p-values that do not print as `1.2e-16` in a table), and the instance ordering.
 

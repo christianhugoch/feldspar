@@ -299,6 +299,20 @@ export function IconDots(props: IconProps) {
   );
 }
 
+/** The Models section: a fitted curve over a histogram of the data under it. */
+export function IconChartHistogram(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M3 3v18h18" />
+      <path d="M20 18v3" />
+      <path d="M16 16v5" />
+      <path d="M12 13v8" />
+      <path d="M8 16v5" />
+      <path d="M3 11c6 0 5 -5 9 -5s3 5 9 5" />
+    </Svg>
+  );
+}
+
 /** A tool call, in the transcript. */
 export function IconTool(props: IconProps) {
   return (
