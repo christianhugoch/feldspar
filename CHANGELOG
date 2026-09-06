@@ -2,6 +2,48 @@
 
 Changes in reverse chronological order.
 
+## The predictive-models milestone, written down
+
+The eighth and last phase of predictive models: the design document says what was built rather
+than what was sketched, there is a tutorial that walks the whole of it end to end, and the two
+operational facts a model adds to a server — a bound and a restart — are where an operator will
+look for them.
+
+- **`docs/TECHNICAL_DESIGN.md` §14.2 is rewritten from the four-method sketch it was.** The five
+  nouns and where each lives; the dataset as a list of `sc-expr` formulas with no second
+  vocabulary; layer 6 and the two seams (`DatasetSource` down to the row layer, `ModelProviderHost`
+  up to a module) that put the crate there; the columnar, bounded frame; the primary-key-hash
+  split and the three things it buys; the encoding on the instance and the silent failure it
+  prevents; `ModelProvider` and the outcome as a function of the configuration; metrics the
+  host's and parameters the provider's; the grid; fitting as a job whose row *is* the registry;
+  the `smartcore` feature; providers from modules; `predict_row` and the calculated field there
+  deliberately is not; and both storage tables with §9's judgements made out loud. `sc-model` is
+  struck from the list of crates "not yet created", which it has not been since Phase 1.
+- **`docs/tutorial-models.md`** is the definition of done as a walk-through: two tables and some
+  houses, a dataset mixing a field, a join path and an aggregation under a `sold` filter, a
+  linear regression whose coefficient table has standard errors and *p* values, **Activate**, a
+  trigger writing `estimated_price` on every insert, and then the same dataset fitted by
+  `sklearn_gradient_boosting` from the bundled Python module — with a hyperparameter grid, and
+  its RMSE beside the regression's, computed by the same host code over the same held-out rows.
+- **Running the definition of done by hand found a real bug, and it is fixed.** `predict_row`
+  read its row *through the dataset including the dataset's filter*, so the trigger of the
+  definition of done — a model fitted on `sold` houses, asked about the unsold one that was just
+  inserted — answered "the dataset of model `House prices` does not select this row" instead of a
+  price. A dataset's filter says which rows a model is fitted **from**, not which rows it may be
+  asked about, and reusing the sample restriction as an access rule made every model of that
+  shape unable to answer the only question anybody asks it. `Read::unfiltered` now carries the
+  distinction and `predict_subject` asks for it; the columns still come through the dataset and
+  the row layer, so a join path and an aggregation are computed exactly as they were at fit time.
+  The API test that covers the trigger gained a filter on its dataset — one without a filter
+  could never have caught this — and the whole run, with the numbers it produced and the three
+  smaller things it turned up, is written down under Phase 8.4 of `TODO.md`.
+- **The operational half.** README §1 stops claiming there are no models and §3 says the
+  built-in providers are a default-on cargo feature rather than a run-time setting;
+  `--model-max-rows` joins the server-options table. `docs/OPERATIONS.md` gains the feature in
+  the two-artifacts table, the bound and the absence of a cancel as §8.3, and — under "what a
+  restart costs" — what a `fitting` instance means afterwards: boot reaps it as failed, the
+  model is untouched, and the active fit a `predict_row` trigger reads is unaffected.
+
 ## A model provider from a module, in either language
 
 The seventh phase of predictive models, and the one that turns the provider registry from a

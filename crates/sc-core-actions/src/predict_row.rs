@@ -203,8 +203,9 @@ impl Action for PredictRow {
             [one] => one.clone(),
             [] => {
                 return Err(named(Error::invalid(format!(
-                    "the dataset of model `{name}` does not select this row, so there is nothing \
-                     to predict: its filter excludes it"
+                    "the dataset of model `{name}` does not read this row, so there is nothing \
+                     to predict: it has been deleted, or the ownership rule on its table hides \
+                     it"
                 ))));
             }
             many => {

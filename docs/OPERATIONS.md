@@ -39,6 +39,7 @@ document is the same for both.
 | Installed at | `/opt/feldspar` (the prefix is compiled in) | `/usr/local/bin/feldspar`, with the checkout kept where it was built |
 | **Python triggers** | **no** — embedding CPython means linking `libpython`, which a static binary cannot do | yes, with `--features python` |
 | Native Node addons in modules | no — a static binary cannot `dlopen` | yes |
+| **Built-in model providers** | yes — five smartcore providers plus two hypothesis tests | the same, unless built `--no-default-features` |
 | Name resolution | in-process (`sc-dns`), **not** glibc NSS | glibc |
 
 Two consequences of the static build are worth knowing before you choose it:
@@ -48,6 +49,14 @@ Two consequences of the static build are worth knowing before you choose it:
   tarball is not one. A trigger with a Python body on such a server fails at fire
   time with a message saying so, rather than at configuration time — so a
   trigger's configuration keeps its meaning across deployments.
+- **The machine-learning built-ins are a default-on cargo feature.** `sc-model`'s
+  `smartcore` feature carries `linear_regression`, `logistic_regression`,
+  `random_forest`, `kmeans` and `pca`; a build with `--no-default-features` leaves
+  only `t_test` and `anova`, which need a distribution function and nothing else. That
+  is a supported build, not a broken one — the Models tab says on the screen that the
+  machine-learning built-ins were compiled out, and a module can still supply
+  providers. Like `--features python`, it is decided at build time and no run-time flag
+  substitutes for it.
 - **`/etc/nsswitch.conf` does not apply to the static binary.** It resolves names
   itself, reading `/etc/resolv.conf` and `/etc/hosts` and nothing else. mDNS
   (`.local`), `myhostname`'s synthesis of the local hostname, and LDAP/sssd hosts
@@ -398,6 +407,15 @@ Two things a restart also does, and a reload does not (§6): it **invalidates ev
 session**, because sessions are held in the server's memory, and it is when the
 ACME order is built, so a newly added application gets its certificate name at
 the next restart and not before.
+
+**A model fit in flight does not survive it.** Fitting is a spawned job whose only
+record is its `_sc_model_instances` row, so a process that stops mid-fit would leave a
+row saying `fitting` for ever. Boot therefore **reaps** them: every instance still
+`fitting` at startup is marked `failed` with *"the server restarted while this fit was
+running"*. Nothing is lost but the compute — the model is untouched, and pressing
+**Fit** again starts a new instance. An instance that was already `fitted` is
+unaffected, including the **active** one a `predict_row` trigger reads, so predictions
+resume with the restart.
 
 ---
 
@@ -1008,13 +1026,33 @@ setting takes effect is the setting's own business: the logging switches are
 immediate, the SMTP transport is read per message, and the TLS settings are read
 at boot.
 
-### 8.3 Stopping
+### 8.3 The bound on a model dataset
+
+A model's dataset is a `SELECT` an administrator wrote, and a fit holds the whole
+answer in memory. `--model-max-rows` (default **200 000**) is the ceiling:
+
+```bash
+feldspar serve --model-max-rows 500000
+```
+
+The count is asked for **before** the rows, so a dataset over the bound is refused for
+the cost of one `COUNT(*)` — *"the dataset selects more than 200 000 rows; add a filter
+or raise `--model-max-rows`"* — rather than by the OOM killer after a partial read. The
+message goes onto the failed instance, where the admin will look for it.
+
+It is the only bound a fit has. **There is no cancel**: stopping a fit means stopping a
+smartcore call or a CPython call mid-flight, and neither can be interrupted safely
+(the technical design's §15.2 says why for Python). Size the flag for the memory the
+process has, and remember that each column is materialised as a boxed vector before the
+numeric matrix is built.
+
+### 8.4 Stopping
 
 `SIGTERM` — what `systemctl stop` and an orchestrator send — shuts down
 gracefully, and the unit is `deactivating` for the length of the drain rather than
 looking hung. Ctrl-C does the same interactively.
 
-### 8.4 Common failures
+### 8.5 Common failures
 
 | Symptom | Cause and fix |
 |---|---|
@@ -1028,3 +1066,6 @@ looking hung. Ctrl-C does the same interactively.
 | an application 404s after an update | it failed to build at boot and was skipped rather than taking the server down. `feldspar build-app <subdomain> --environment production` prints the bundler's own diagnostics |
 | `POST /mcp` answers 404 with a valid token | `mcp_enabled` is off, and off means absent (§7.1) |
 | MCP calls refused from another machine | `mcp_loopback_only` is on, which is its default |
+| a model fit says "the server restarted while this fit was running" | it did. A fit is a spawned job whose only record is its instance row, so boot marks a `fitting` row failed rather than leaving it running for ever (§3.5). Press **Fit** again |
+| a fit fails with "the dataset selects more than … rows" | the dataset is over `--model-max-rows` (§8.3). Add a filter to the dataset, or raise the flag |
+| the Models tab lists only `t_test` and `anova` | the binary was built `--no-default-features`, so the smartcore providers were compiled out (§1). It is a build, not a setting |

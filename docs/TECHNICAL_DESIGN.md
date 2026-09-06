@@ -230,7 +230,7 @@ Three things the graph is worth reading for:
   AST it compiles into and nothing about tables.
 
 Crates planned in the tree above but **not yet created**: `sc-bus`,
-`sc-fieldview`, `sc-viewpattern`, `sc-model`, `sc-copilot`. `sc-test-harness`
+`sc-fieldview`, `sc-viewpattern`, `sc-copilot`. `sc-test-harness`
 (under `tests/`) is a dev-dependency of most crates and depends only on `sc-config-file` and
 `sc-error`; it is left out of the graph because a dev-only edge is not part of the layering.
 
@@ -5051,24 +5051,412 @@ render a plugin backend's status at all. A caller that needs structure — the I
 — reads the **optional** `data` beside it, which a backend fills only if it has something to say,
 and which is null everywhere else.
 
-### 14.2 Predictive models
+### 14.2 Predictive models (`sc-model`)
+
+Everything else in this system **retrieves**: a query answers what is in the tables, an
+expression computes what follows from a row, an agent asks a model about text. `sc-model` is the
+half that answers **what the data implies** — about a row nobody has seen yet ("what will this
+house sell for"), and about the data as a whole ("is the coefficient on price negative, do the
+two groups differ, how many clusters are there"). Both halves are first class: an instance you
+*inspect* and an instance you *apply*.
+
+Five nouns, fixed here because the words are overloaded everywhere else in the industry:
+
+| noun | what it is | where it lives |
+|---|---|---|
+| **model provider** | code that can fit something — `linear_regression`, `kmeans`, a module's `sklearn_ridge` | a registry, like actions |
+| **dataset** | which table, which derived columns, which rows | a JSON column *on the model* |
+| **model** | a dataset + a provider + its configuration + its hyperparameter space | `_sc_models` |
+| **model instance** | one fit: parameters, metrics, encoding, serialised state | `_sc_model_instances` |
+| **prediction** | applying an instance to rows | the `predict_row` action, and `predictRows` |
+
+A model is edited and refitted; each fit leaves an instance behind, so the instances of a model
+are its history and are **comparable** — same dataset, same split, different settings. At most
+one instance per model is **active**, which is what lets a trigger name a model rather than a fit.
+
+#### A dataset is a list of formulas, and that is the whole of it
+
+```rust
+pub struct Dataset {
+    pub table: String,
+    pub columns: Vec<DatasetColumn>,   // { name, expr }
+    pub filter: Option<String>,        // one boolean formula, or none
+}
+```
+
+`expr` is an `sc-expr` formula — `price`, `price / area`, `neighbourhoodⱵaverage_income`,
+`viewingsↃcount` — validated against the same `SchemaShape` as a calculated field (§7.3), with
+the same errors, and translated by the same `translate_value` into one `Projection::expr_as` per
+column. The filter translates the same way, in boolean position. A column that will not
+translate is **not** an error: it is one the row layer falls back to the reified evaluator for,
+which is the arrangement calculated fields already have.
+
+That language is already exactly what GOALS asks a dataset for — "table fields and derived
+fields such as calculations, joinfields and aggregations, and any inclusion/exclusion criteria
+on the rows" — so there is **no second vocabulary** of "field / joinfield / aggregation" with
+three shapes in the JSON and three code paths behind it. The admin UI still offers a picker
+(click a field, a join path, an aggregation); what the picker *writes* is a formula, and an
+admin who wants `log(price)` types it over what the picker wrote.
+
+`user` and the operation flags are refused in a dataset formula for the same reason they are
+refused in a calculated field: a dataset has no caller, and a fit that meant something different
+depending on who pressed the button would be indefensible.
+
+**The dataset has no tab, and no store.** It is a JSON column on `_sc_models`. A shared, named
+dataset would need a lifecycle — what happens to the four models fitted against it when somebody
+adds a column, whether an instance fitted against version 1 is still readable, whether deleting
+it is allowed — and that is a versioning problem bought for a saving (retyping a column list)
+that a **Duplicate model** button answers instead.
+
+#### Layer 6, and the two seams that put it there
+
+`sc-model` sits beside `sc-action` and **below `sc-module`**, not above the row layer its data
+comes from. One reason: a module supplies model providers the way it supplies actions and table
+providers, and `sc-module` (layer 6) can only implement a trait declared *below* it.
+`TableProviderHost` — declared in `sc-catalog` at layer 4, implemented in `sc-module` at layer 6
+— is the same shape.
+
+The price is that the crate cannot read a row, and it does not pretend otherwise. Both
+directions are **seams** somebody else fills in:
+
+```rust
+/// How a dataset becomes rows. Implemented in `sc-server` over `sc_api::rows`.
+#[async_trait]
+pub trait DatasetSource: Send + Sync {
+    async fn materialise(&self, read: &Read) -> Result<Frame>;
+}
+
+/// The model providers a module supplies. Implemented in `sc-module` and `sc-python`.
+#[async_trait]
+pub trait ModelProviderHost: Send + Sync {
+    fn providers(&self) -> Vec<ModelProviderKind>;
+    async fn fit(&self, m: &str, p: &str, f: &Frame, cfg: &Attrs, hp: &Attrs) -> Result<FitResult>;
+    async fn predict(&self, m: &str, p: &str, state: &Json, f: &Frame) -> Result<Vec<Prediction>>;
+}
+```
+
+Reading *through* `sc-api::rows` rather than around it is what makes a dataset see non-stored
+calculated fields, ownership and row-level security, and what lets it be built over a **provided**
+table (§8.3) at all. `ModelServices` in `sc-server/src/models.rs` assembles the pieces the way
+`AgentServices` and the trigger dispatcher already are: the registry, the `DatasetSource`, and
+the fit job runner. `ModelProviderHost` routes by the `(module, provider)` pair rather than by
+the provider name alone, because one host serves every module of its language and two of them may
+well supply a `random_forest`.
+
+#### The frame is columnar, and it is bounded
+
+```rust
+pub enum Column { Float(Vec<Option<f64>>), Int(…), Bool(…), Str(…), Null }
+pub struct Frame { pub columns: Vec<(String, Column)>, pub rows: usize }
+```
+
+Columnar because every consumer wants a column: the encoder standardises one, the splitter
+indexes rows across all of them, a numeric matrix is built column-major anyway, and the frame
+crosses a module seam as *twelve JSON arrays* rather than as 50 000 objects with the same twelve
+keys repeated — which is the difference between a Python provider being usable and being a
+curiosity. On the Python side it lands as something `numpy.asarray` takes directly.
+
+**Bounded** because a dataset is a `SELECT` an admin wrote and the server has to hold the answer
+in memory. `--model-max-rows` (default 200 000) is the ceiling; the count is asked for **before**
+the rows, so a materialisation that would exceed it is refused by name — "the dataset selects
+more than 200 000 rows; add a filter or raise `--model-max-rows`" — for the cost of one
+`COUNT(*)` rather than by the OOM killer after a partial read.
+
+#### The split is a hash of the primary key, not a shuffle
+
+A fit divides its rows into **train**, **validation** and **test**. The obvious implementation
+shuffles a vector with a seeded RNG. This one assigns each row by hashing its primary key with
+the fit's seed and taking the fraction, which costs the same and buys three things:
+
+- **It does not depend on row order**, so a dataset materialised with a different `ORDER BY` or a
+  different `LIMIT`, or read off a table provider that answers in feed order, splits identically.
+- **A refit after new rows arrive keeps every old row on the side it was on.** The test metric of
+  instance 7 is therefore comparable with the test metric of instance 3 — the entire reason
+  anybody looks at two instances of one model.
+- **It is reproducible from the row, not from the run.** An instance records its seed and
+  fractions, so "was this row in the training set" is answerable afterwards without storing a
+  list of ids.
+
+The price is that the fractions are approximate on small datasets (200 rows at 20% test is
+whatever the hash gives, not exactly 40), so the instance records the counts it actually got. A
+dataset whose table has **no single primary key** cannot be split this way and a fit of it is
+refused by name: there is nothing stable to hash. Reads are unaffected — the restriction is the
+fit's, not the dataset's.
+
+#### The encoding belongs to the instance
+
+A provider wants numbers; a dataset column is a string, a boolean, a date or a float. The
+translation happens once, in `sc-model`, and **the result is stored on the instance**:
+
+```rust
+pub struct Encoding { pub columns: Vec<ColumnEncoding>, pub target: Option<TargetEncoding> }
+
+pub enum ColumnEncoding {
+    Passthrough  { column: String },
+    Standardised { column: String, mean: f64, sd: f64 },
+    OneHot       { column: String, categories: Vec<String> },  // reference-coded
+    Epoch        { column: String },                           // a date, as epoch seconds
+}
+```
+
+This is the most load-bearing decision in the design of this crate, because the failure it
+prevents is **silent**. If prediction re-derived the one-hot column order from whatever
+categories happen to be in the rows being predicted, a model fitted when `region` had four values
+and applied to a batch containing three would put every coefficient against the wrong column and
+return confident nonsense. Fitting the encoding **on the training rows only**, once, and carrying
+it means a prediction is encoded the way its fit was — or it fails.
+
+And it fails loudly. A category at predict time that was not present at fit time is an error
+naming the column and the value, not a row of zeros: a row of zeros is a prediction from a model
+that was never shown this input. A null in a feature is a **dropped row at fit time** (counted,
+and reported on the instance) and an **error at predict time** — at fit time dropping is a
+defensible sample restriction we report, at predict time it would mean answering a question about
+a row we cannot represent.
+
+Whether the numeric features are standardised is the *provider's declaration*
+(`ModelProviderKind::standardise`) rather than something the provider does privately, because the
+constants have to be stored on the instance and applied identically at predict time. A k-means or
+a PCA says yes (an unscaled fit is dominated by whichever column happens to be measured in larger
+units); a regression says no, because a coefficient in the data's own units is what somebody is
+reading it for.
+
+#### What a provider is, and what its outcome is
 
 ```rust
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
-    fn name(&self) -> &str;                       // scikit-learn | mc-stan | …
-    fn config_spec(&self) -> Vec<FormField>;
-    fn hyperparameters(&self) -> Vec<FormField>;
-    /// Fit against a subset of a table's rows → a model instance (parameters inspectable).
-    async fn fit(&self, data: RowStream, cfg: &Attrs, hp: &Attrs) -> Result<ModelInstance>;
-    /// Apply a fitted instance to a new row → an outcome defined by the provider/config.
-    async fn predict(&self, inst: &ModelInstance, row: &Row) -> Result<Value>;
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    /// The settings, before a dataset exists to resolve the column pickers against.
+    fn config_declaration(&self) -> Vec<FormField>;
+    /// The form, given the dataset's columns.
+    fn config_spec(&self, shape: &DatasetShape) -> Vec<FormField> { … }
+    fn hyperparameters(&self) -> Vec<FormField> { Vec::new() }
+    fn outcome_spec(&self) -> OutcomeSpec;
+    fn standardise(&self) -> bool { false }
+    /// What a fit of *this* configuration over *this* dataset will produce.
+    fn outcome(&self, shape: &DatasetShape, cfg: &Attrs) -> Result<Outcome> { … }
+    fn validate(&self, shape: &DatasetShape, cfg: &Attrs) -> Result<()> { Ok(()) }
+    async fn fit(&self, frame: &Frame, cfg: &Attrs, hp: &Attrs) -> Result<FitResult>;
+    async fn predict(&self, state: &Json, frame: &Frame) -> Result<Vec<Prediction>>;
 }
 ```
 
-A model is configured against a table; fitting produces a `ModelInstance` (stored in
-`_sc_model_instances`) whose parameters may themselves be the point of interest, or which is
-applied to new rows for prediction.
+`config_spec` takes the dataset's shape for the reason `Action::config_spec_for` takes the
+catalog and the channel: a label picker that was a free-text field would push the checking to fit
+time and the guessing to the admin. A field meaning "a column of this dataset" declares an
+`OptionsSource::ServerQuery` of `dataset_columns` (or its numeric/categorical siblings) and the
+default `config_spec` fills the list in — which is what lets a provider declared in JavaScript or
+Python, which cannot run Rust to build a form, still offer a real picker.
+
+The **outcome is a function of the configuration**, because GOALS says it is and because the
+alternative is four providers where there is one algorithm:
+
+```rust
+pub enum Outcome {
+    Regression { label: String },
+    Classification { label: String, classes: Option<Vec<String>> },
+    Cluster,                         // a cluster number per row
+    Embedding { dimensions: usize }, // a vector per row
+    Test,                            // no per-row output; the parameters are the result
+}
+```
+
+A random forest is a regressor or a classifier according to the type of the column its
+configuration names as the label. `Outcome` is what the UI renders against, what the metric set
+is chosen by, and what `predict_row` checks before it writes a number into a text column;
+`Test` has no per-row output at all, so nothing asks a t-test to predict. Because the seam
+carries data and not closures, a provider *declares* an `OutcomeSpec` (`Supervised { label }`,
+`Regression { … }`, `Cluster`, `Embedding { components }`, `Test`) naming which configuration key
+holds the label, and `resolve` turns it into an `Outcome` against a shape. The built-ins use the
+same declaration rather than computing it in Rust, because a second mechanism for one question
+would be two things to keep in step.
+
+**Prediction takes a frame, not a row.** A single row is a frame of one. Batching is what makes a
+Python provider usable at all — the call is the cost, not the arithmetic — and it is what lets
+the metric pass score 50 000 rows in one call rather than in 50 000.
+
+#### Metrics are the host's; parameters are the provider's
+
+A provider returns `FitResult { state, parameters }` and **no metrics**. `sc-model` computes
+those itself, by running the fitted state back over each split and scoring the predictions:
+
+| outcome | metrics |
+|---|---|
+| regression | R², RMSE, MAE per split |
+| classification | accuracy, per-class precision/recall/F₁, and the confusion matrix |
+| clustering | cluster sizes and within-cluster sum of squares |
+| dimensionality reduction | explained variance per component |
+| hypothesis test | nothing — the parameters *are* the answer |
+
+Two reasons. It makes providers **comparable**: the smartcore regression and the scikit-learn one
+are scored by the same code on the same rows, so the number on the screen means one thing. And a
+provider written in another language does not have to reimplement R² to be a citizen here.
+
+What a provider *does* own is its parameters — where providers genuinely differ — and those are
+structured for display rather than free JSON, so the admin UI has exactly three renderings to
+write and never has to know what a coefficient is:
+
+```rust
+pub enum ParameterBlock {
+    Scalar { name: String, value: f64 },
+    Table  { name: String, columns: Vec<String>, rows: Vec<ParameterRow> },
+    Text   { name: String, body: String },
+}
+```
+
+`Table` is a coefficient table (estimate, std. error, *t*, *p*), a set of cluster centres, a
+column of feature importances; a row that is not as wide as the headings is refused when the
+block is built rather than rendered against the wrong column. `Text` is for a provider whose own
+output is a summary nobody should reformat — statsmodels' `summary()` is the case — and it means
+a fourth kind of parameter can arrive without a schema change.
+
+A `Prediction` is `Number`, `Class`, `Cluster`, `Vector` — or `ClassIndex`, which is the same
+answer earlier in its journey. A provider works in class *indices*, because that is what the
+target encoding handed it; a caller wants the *name*, because the index is an implementation
+detail of an encoding and nobody's row wants to hold a `2`. `sc_model::predict` maps one to the
+other, and `ClassIndex::to_json` is an error rather than a number.
+
+#### Hyperparameters, and the search over them
+
+A provider declares its hyperparameters as form fields. A **model** stores, per hyperparameter,
+either a value or a **list** of values; a fit runs the grid of the lists, scores each point on the
+**validation** split by the outcome's primary metric (R² for a regression, accuracy for a
+classification), fits the winner, and reports the **test** metrics for it. The instance records
+the chosen point *and the score of every point tried*, so the search is inspectable and not a
+number that appeared. With no lists declared there is no search, the validation split is empty,
+and a fit is a fit — the common case, which must not pay for the uncommon one.
+
+A grid and a fixed three-way split rather than k-fold cross-validation is a deliberate stopping
+point: k-fold is *k* times the fits for a variance estimate that matters at hundreds of rows and
+not at hundreds of thousands, and it changes nothing about the seam.
+
+#### Fitting is a job, not a request
+
+A fit reads every row of a dataset and runs an optimiser over it: seconds at best and minutes at
+worst, which must not be an HTTP request a proxy times out halfway through while the work carries
+on invisibly. So `fitModel` **creates the instance row first**, with `status = "fitting"`, returns
+its id, and runs the fit on a spawned task that writes `fitted` (with parameters and metrics) or
+`failed` (with the sentence, including the whole error chain) when it finishes. The screen polls.
+There is no in-memory job registry, because **the row is the registry**.
+
+Two consequences, stated rather than discovered:
+
+- **A fit does not survive a restart.** A process that dies mid-fit would leave an instance saying
+  `fitting` forever, so boot **reaps** them: any instance still `fitting` at startup becomes
+  `failed` with "the server restarted while this fit was running". Making a fit durable is the
+  workflow engine's job (§10.3) and would mean expressing a fit as steps, which is a bigger claim
+  than this design makes.
+- **There is no cancel.** Stopping a fit means stopping a smartcore call or a Python call
+  mid-flight, and §15.2 has already said what CPython can and cannot be interrupted at. The bound
+  that exists is the row cap, and it is the honest one.
+
+#### The built-ins, and the `smartcore` feature
+
+`sc-model`'s `smartcore` feature is **default on**, so `--no-default-features` is the opt-out, and
+it carries five providers: `linear_regression`, `logistic_regression`, `random_forest` (regressor
+or classifier by its label's type — the case `Outcome` exists for), `kmeans` and `pca`.
+
+Two more are **not** behind it, because they are arithmetic and not machine learning: `t_test`
+(one-sample, two-sample, paired, Welch) and `anova` (one-way). They are GOALS' "statistical
+hypothesis testing" category, they need a distribution function and nothing else (`statrs`), and
+a build with no smartcore should still be able to answer whether two groups differ.
+
+The regression provider computes **standard errors, *t* and *p* for every coefficient**, from the
+residual variance and `(XᵀX)⁻¹`. smartcore does not give them, and without them "a regression
+model where we are more interested in the slope coefficients" (GOALS) is a number with no way to
+tell whether it means anything. A build without the feature lists the providers it has and says
+on the screen that the built-in model providers were **compiled out**, rather than showing an
+empty list that reads like a bug.
+
+#### Providers from modules, in both languages
+
+The third source, and the one that makes this an extension point rather than a fixed menu. A
+JavaScript module exports `modelproviders` beside its `actions` and `table_providers`; a Python
+plugin decorates a class with `@sc.model_provider`. Both flatten to the same `ModelProviderKind`
+on the module's manifest and route to the worker or interpreter that loaded them, exactly as a
+table provider does (§15.1, §15.2). `ModelRegistry` composes all three sources — the built-ins
+plus one entry per module-supplied provider — and is rebuilt on every module change; a duplicate
+name is refused naming **both** sources, and a model whose provider has gone away is still listed
+and still editable, with the sentence saying what went missing.
+
+A module with one mis-declared provider still supplies the others: the bad one is reported on the
+module's card and skipped, because a module that refused to load over a typo would take four
+working estimators down with the fifth.
+
+`plugins/sklearn` (`feldspar-sklearn`, §15.1a) is the proof and the useful thing: a bundled Python
+module wrapping five scikit-learn estimators — ridge, gradient boosting, an SVM, DBSCAN and t-SNE
+— installed in one click from the Modules tab and appearing on the model form beside the
+built-ins, with nothing above the seam knowing which language answered.
+
+#### Prediction: the action, and the calculated field there is not
+
+**A prediction reads past the dataset's filter, and that is deliberate.** The filter says which
+rows the model was *fitted from*; the rows it may be asked about are the caller's, and they are
+usually the ones the filter excludes — a model of what houses sell for is fitted on the `sold`
+ones and asked about the unsold one a trigger just inserted. So `Read::unfiltered` is what
+`predict_subject` asks for, while the columns still come *through* the dataset and the row layer,
+so a join path and an aggregation are computed exactly as they were at fit time. Reusing the
+sample restriction as an access rule would make every model of this shape unable to answer the
+only question anybody asks it.
+
+`predict_row` is an ordinary action (`sc-core-actions`, layer 9 with the others that write rows):
+configure a model — or a named instance — and where the answer goes, either a field on the row or
+a key in the workflow context. Its `config_spec_for` offers the models on *this* table when the
+trigger has one, and it checks at save time that the target field's type can hold what the model's
+outcome produces, using `possible_prediction_types` (two wide for a `Supervised` declaration,
+empty for a `Test`, which is a target that is wrong whatever its type). The definitive check is
+made again at fire time, against the outcome the instance actually recorded.
+
+**There is no calculated field that predicts**, and the reason is not effort. A calculated field
+is an `sc-expr` formula with two evaluators that must agree (§7.3), and a prediction is
+translatable to neither SQL nor the reified evaluator; a *stored* one would have to be recomputed
+on every write to every row the model reads, which for a model with an aggregation in its dataset
+is every row of two tables. An action, fired by a trigger the admin wrote, puts the recomputation
+where somebody chose it.
+
+#### Storage
+
+`_sc_models`: `id` (uuid pk), `name` (unique), `description`, `table_name`, `provider`, `dataset`
+(JSON), `configuration` (JSON), `hyperparameters` (JSON — values or lists), `split` (JSON —
+fractions and seed), `attributes` (JSON).
+
+`_sc_model_instances`: `id` (uuid pk), `model` (uuid), `name`, `description`, `status`
+(`fitting` | `fitted` | `failed`), `created`, `active` (bool), `state` (JSON — the provider's
+serialised fit), `parameters` (JSON), `metrics` (JSON), `encoding` (JSON), `hyperparameters`
+(JSON — the chosen point), `attributes` (JSON).
+
+The judgements §9 asks for, made out loud. `status` is a column because every row has one and it
+is what the list filters on, while the failure **sentence** is in `attributes`, because it is
+present only on the rows that failed. `active` is a column because at most one row per model
+carries it and the uniqueness is enforced on save — a nullable column would be a second way to
+say the same thing. `state` is a column and it is the big one; a provider that wants to store
+bytes stores base64, because a system table with a `bytea` column would be the only one.
+
+Both tables are read **strictly**: a missing or misshapen column is an error naming the model and
+the column, never a default. `validate_model` runs on save *and* on load — the dataset validates,
+the provider exists, the configuration validates against `config_spec(shape)` and the provider's
+own `validate`, the hyperparameter names are known, the split fractions sum to 1 — and a model
+that fails on load is **listed with its reason and stays editable**, which is the rule the agents
+milestone already established for a record whose world changed underneath it.
+
+#### The API, and the screens
+
+`sc-api::admin` carries the lot, admin-only like everything else there: `listModelProviders`
+(with the config spec and the outcome resolved against a dataset, when the query names one),
+`previewDataset` (the column types and the first rows — what makes a dataset a thing you can see
+the answer of before you fit it), `listModels` / `getModel` / `saveModel` / `deleteModel`,
+`fitModel` / `listModelInstances` / `getModelInstance` / `activateModelInstance` /
+`deleteModelInstance`, and `predictRows` — an instance, or a model meaning its active instance,
+plus either literal rows or a filter over the model's table.
+
+The admin UI is a **Models** tab (§12): the model form with the dataset builder beside its live
+preview, the provider's own form rendered from `config_spec`, the hyperparameter grid and the
+split; then the instance list, which polls while anything says `fitting`; then the instance
+screen, which renders the three parameter variants, the metrics per split, the search results,
+the row counts and what was dropped, and a "try a row" box over `predictRows`. An
+application-facing prediction endpoint is deliberately not here: which application, which
+permission and what shape are application-API questions, and this API is the admin's.
 
 ---
 

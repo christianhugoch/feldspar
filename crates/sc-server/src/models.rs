@@ -65,7 +65,17 @@ impl DatasetSource for CatalogDatasetSource {
         // a prediction about one row is that row's primary key in the `WHERE`,
         // not a full read filtered afterwards, because "afterwards" would mean
         // materialising the whole table to answer about one row of it.
-        let filter = match (ds.filter_expr(&shape)?, how.restrict) {
+        //
+        // A prediction reads `unfiltered`, and that is deliberate: the dataset's
+        // filter says which rows the model was *fitted from*, not which rows it
+        // may be asked about. A model of what houses sell for is fitted on the
+        // sold ones and asked about the unsold one a trigger just inserted.
+        let own = if how.filtered {
+            ds.filter_expr(&shape)?
+        } else {
+            None
+        };
+        let filter = match (own, how.restrict) {
             (Some(own), Some(extra)) => Some(own.and(extra.clone())),
             (Some(own), None) => Some(own),
             (None, Some(extra)) => Some(extra.clone()),

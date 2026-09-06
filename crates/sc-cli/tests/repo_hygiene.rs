@@ -346,6 +346,21 @@ fn tutorials_are_cross_linked() {
         triggers.contains("tutorial-workflows.md"),
         "the triggers tutorial should point at the workflows tutorial as a next step"
     );
+    assert!(
+        triggers.contains("tutorial-models.md"),
+        "the triggers tutorial should point at the models tutorial, whose `predict_row` is \
+         one more action a trigger fires"
+    );
+    let models = read(&root, "docs/tutorial-models.md");
+    assert!(
+        models.contains("tutorial-triggers.md"),
+        "the models tutorial builds on the triggers tutorial and should link it"
+    );
+    assert!(
+        models.contains("tutorial-python.md"),
+        "the models tutorial's second provider comes from a Python module, so it should link \
+         the Python tutorial"
+    );
     let workflows = read(&root, "docs/tutorial-workflows.md");
     assert!(
         workflows.contains("tutorial-triggers.md"),
@@ -1166,6 +1181,106 @@ fn the_design_crate_diagram_matches_the_workspace_manifests() {
         assert!(
             labels.iter().any(|(_, label)| label == name),
             "the crate diagram is missing `{name}`"
+        );
+    }
+}
+
+/// The predictive-models milestone, held to what it built (§14.2): the five
+/// nouns, the two seams, the split, the encoding, the job and the storage
+/// tables. The section it replaced was a four-method sketch of a trait that was
+/// never written that way, which is the failure this test exists to catch —
+/// a design document that describes a plan rather than the code.
+#[test]
+fn the_design_records_what_the_models_milestone_actually_built() {
+    let root = workspace_root();
+    let design = read(&root, "docs/TECHNICAL_DESIGN.md");
+    for fragment in [
+        // The five nouns, and where each lives.
+        "model provider",
+        "model instance",
+        "`_sc_models`",
+        "`_sc_model_instances`",
+        // The dataset, and the vocabulary there deliberately is not.
+        "no second vocabulary",
+        "neighbourhoodⱵaverage_income",
+        // The two seams, and why the crate is at layer 6 rather than above the
+        // row layer its data comes from.
+        "DatasetSource",
+        "ModelProviderHost",
+        "`sc-module` (layer 6) can only implement a trait declared *below* it",
+        // The split.
+        "hash of the primary key",
+        "no single primary key",
+        // The encoding, and the silent failure it exists to prevent.
+        "The encoding belongs to the instance",
+        "on the training rows only",
+        "not a row of zeros",
+        // The outcome as a function of the configuration, and the two halves of
+        // a fit result.
+        "outcome is a function of the configuration",
+        "Metrics are the host's; parameters are the provider's",
+        "ParameterBlock",
+        // The job, and the two consequences it is honest about.
+        "Fitting is a job, not a request",
+        "the row is the registry",
+        "the server restarted while this fit was running",
+        "There is no cancel",
+        // The grid, the feature, and the third source of providers.
+        "validation",
+        "`smartcore` feature",
+        "feldspar-sklearn",
+        // Prediction, and the calculated field there is not.
+        "predict_row",
+        "There is no calculated field that predicts",
+        // The storage judgements §9 asks for.
+        "the failure **sentence** is in `attributes`",
+        "`bytea` column would be the only one",
+    ] {
+        assert!(
+            design.contains(fragment),
+            "the design should record `{fragment}`"
+        );
+    }
+    assert!(
+        !design.contains("Crates planned in the tree above but **not yet created**: `sc-bus`,\n`sc-fieldview`, `sc-viewpattern`, `sc-model`"),
+        "sc-model exists and must not be listed as not yet created"
+    );
+}
+
+/// The models tutorial has to reach every screen the milestone's definition of
+/// done names, because each one is a place an admin has to be able to find —
+/// and a tutorial that quietly lost one would still read fine.
+#[test]
+fn the_models_tutorial_walks_the_definition_of_done() {
+    let root = workspace_root();
+    let tutorial = read(&root, "docs/tutorial-models.md");
+    for fragment in [
+        // The dataset: a field, a join path, an aggregation and the filter.
+        "neighbourhoodⱵaverage_income",
+        "viewingsↃhouse.length",
+        "Filter",
+        // The provider, its label picker and the outcome it resolves to.
+        "linear_regression",
+        "Regression on price",
+        // The split, and why it is not a shuffle.
+        "hash of its primary key",
+        // The fit, and the numbers that make a regression worth reading.
+        "std. error",
+        "Dropped",
+        "Activate",
+        // The trigger that applies it.
+        "predict_row",
+        "estimated_price",
+        // The second provider, from a bundled module, and the grid.
+        "sklearn_gradient_boosting",
+        "Hyperparameter search",
+        // …and the two operational facts a reader will meet in production.
+        "--model-max-rows",
+        "compiled out",
+    ] {
+        assert!(
+            tutorial.contains(fragment),
+            "the models tutorial should cover `{fragment}`"
         );
     }
 }

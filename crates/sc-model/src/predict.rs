@@ -179,7 +179,14 @@ pub async fn predict_subject(
             Frame::from_rows(rows, &types)?
         }
         Subject::Dataset(restrict) => {
-            let mut how = Read::all(cap);
+            // **Unfiltered**: the dataset's own filter chose the rows the fit
+            // was computed from, and a prediction is about rows the caller
+            // chose. Keeping it would make a model fitted on `sold` houses
+            // unable to answer about the unsold one a trigger just inserted,
+            // which is the only question anybody asks it. The derived columns
+            // still come from the dataset, through the row layer, so a join path
+            // and an aggregation are computed exactly as they were at fit time.
+            let mut how = Read::all(cap).unfiltered();
             if let Some(expr) = restrict {
                 how = how.restricted_to(expr);
             }
@@ -371,6 +378,60 @@ mod tests {
                 .await
                 .expect("predict"),
             vec![Prediction::class("yes", Some(0.75))]
+        );
+    }
+
+    /// A prediction reads the dataset **without** its filter, and this is the
+    /// case the whole arrangement exists for: a model of what houses sell for is
+    /// fitted on `sold` ones and asked about the unsold one a trigger just
+    /// inserted. Keeping the filter would answer "the dataset does not select
+    /// this row" for every row anybody wants a prediction for, which is what
+    /// running the milestone's definition of done by hand actually did.
+    #[tokio::test]
+    async fn a_prediction_reads_past_the_datasets_own_filter() {
+        use std::sync::Mutex;
+
+        /// The seam, stubbed, recording how it was asked.
+        struct Recording(Mutex<Vec<bool>>);
+        #[async_trait]
+        impl crate::source::DatasetSource for Recording {
+            async fn read(&self, _ds: &crate::Dataset, how: &Read<'_>) -> Result<Frame> {
+                self.0.lock().expect("lock").push(how.filtered);
+                Ok(training())
+            }
+        }
+
+        let source = Recording(Mutex::new(Vec::new()));
+        let model = crate::Model::new(
+            "sold",
+            "fixed_class",
+            crate::Dataset::new("houses")
+                .column("sold", "sold")
+                .filtered("sold === true"),
+        );
+
+        // A fit reads the sample the model is about: the filter applies.
+        source
+            .materialise(&model.dataset, 1000)
+            .await
+            .expect("materialise");
+
+        // A prediction reads rows the caller named: it does not.
+        predict_subject(
+            &registry(),
+            &source,
+            &model,
+            &instance(),
+            crate::Subject::Dataset(None),
+            1000,
+        )
+        .await
+        .expect("dataset");
+
+        assert_eq!(
+            *source.0.lock().expect("lock"),
+            vec![true, false],
+            "the fit reads filtered and the prediction reads unfiltered"
         );
     }
 

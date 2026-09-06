@@ -551,16 +551,49 @@ bytes stores base64, because a system table with a `bytea` column would be the o
 
 ## Phase 8 — Documentation and the definition of done
 
-- [ ] 8.1 `docs/TECHNICAL_DESIGN.md` §14.2 rewritten from the sketch it is now: the five nouns,
+- [x] 8.1 `docs/TECHNICAL_DESIGN.md` §14.2 rewritten from the sketch it is now: the five nouns,
       the two seams, the split, the encoding, the job, and the storage tables. §2's crate table
       and the layer diagram gain `sc-model`.
-- [ ] 8.2 `docs/tutorial-models.md`: the house-prices walk-through of the definition of done,
+- [x] 8.2 `docs/tutorial-models.md`: the house-prices walk-through of the definition of done,
       end to end, including the trigger that writes the prediction and the second provider from
       a bundled module.
-- [ ] 8.3 README §3, `docs/OPERATIONS.md` (the `--model-max-rows` bound, the `smartcore` feature
+- [x] 8.3 README §3, `docs/OPERATIONS.md` (the `--model-max-rows` bound, the `smartcore` feature
       in the build-time table, and what a `fitting` instance means after a restart), and the
       CHANGELOG.
-- [ ] 8.4 The definition of done, run by hand on a real server, and what it found written down.
+- [x] 8.4 The definition of done, run by hand on a real server, and what it found written down.
+
+### What running it by hand found
+
+Run on 2026-09-06 against a real PostgreSQL, on a debug build serving `houses` (60 rows, 50 of
+them sold), `neighbourhoods` (3) and `viewings` (154), with a dataset of `price`, `area`,
+`bedrooms`, `neighbourhoodⱵaverage_income` and `viewingsↃhouse.length` under a `sold` filter.
+Everything the definition of done names happened — a fit in under a second, a coefficient table
+recovering the generating coefficients (1769 ± 60 against a true 1800; 7472 ± 1355 against 9000;
+1.07 ± 0.18 against 0.9; `viewings_count` correctly *p* = 0.89), R² 0.969 on the held-out rows,
+**Activate**, a trigger writing `estimated_price`, and the same dataset fitted by
+`sklearn_gradient_boosting` from `feldspar-sklearn` with a three-point grid over `n_estimators`,
+both fits holding out the **same twelve rows** so their test RMSEs (15 195 against 26 254) are a
+real comparison. Four things it found:
+
+1. **The filter blocked every prediction, which was a real bug and is fixed.** `predict_row`
+   read the row *through the dataset including its filter*, so a model fitted on `sold === true`
+   answered "the dataset of model `House prices` does not select this row" for the unsold house
+   the trigger had just inserted — the exact row the definition of done asks it about. The
+   filter says which rows a model is fitted **from**, not which rows it may be asked about.
+   `Read::unfiltered` now carries that distinction and `predict_subject` uses it; the API test
+   that covers the trigger gained a filter, because a dataset without one could never have
+   caught this.
+2. **A bare boolean is not a filter.** The definition of done writes the filter as `sold`;
+   `sc-expr` refuses a bare value in boolean position and asks for `sold === true`. The message
+   says exactly that and names the fix, and the rule is the one every other boolean formula in
+   the system already follows, so this is a documentation correction (the tutorial says it) and
+   not a change.
+3. **`predictRows` takes a model *id* and `predict_row` takes a model *name*.** Both are right
+   for their caller — the screen has an id in hand, an admin writing a trigger has a name — but
+   the asymmetry is worth knowing before reaching for the endpoint from a script.
+4. **A *p* of 4×10⁻²⁰ prints as `0` in the raw API.** The admin UI's formatter handles it (6.6),
+   but a caller reading `parameters` off the endpoint sees the underflow. Left alone: the value
+   is a `f64` and rounding it in the API would be the wrong place.
 
 ---
 

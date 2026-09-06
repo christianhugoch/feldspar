@@ -31,10 +31,15 @@ own, for every other kind of box. (Design and planning docs live under
   binary serves on one route — the schema, the triggers, the applications, under a
   bearer token an admin mints and can revoke. It is **off by default**; see
   [`docs/tutorial-mcp.md`](docs/tutorial-mcp.md).
+- **Predictive models** over your own tables: a dataset built out of the same formula
+  language as calculated fields, fitted by a built-in provider (regression, classification,
+  clustering, dimensionality reduction, hypothesis tests) or by one a module supplies, with
+  the coefficients and metrics on a screen and a `predict_row` action to apply a fit to a
+  row. The built-in providers are a **default-on cargo feature** (§3). See
+  [`docs/tutorial-models.md`](docs/tutorial-models.md).
 
-The MVP is deliberately scoped: one database, basic column types only, no
-workflows/agents/models, no file stores or applications yet. See the "Out of MVP
-scope" section of [`TODO.md`](TODO.md).
+What is still out of scope, and what each milestone since the MVP added, is in
+[`TODO.md`](TODO.md) and the archived lists it links.
 
 ---
 
@@ -430,6 +435,16 @@ database (§7).
 | **libclang** (`libclang-dev`) | any recent | building the module runtime (`deno_runtime` → `bindgen`); build time only |
 | **npm** (and the Node.js it ships with) | **npm 9.3.0+** (Node 18+) | building the admin UI bundle (optional; see §6), **and** *installing* modules (Settings → Modules). Debian's and Ubuntu's own package is npm 9.2.0, which cannot install a module at all — install Node from NodeSource (§2.1) or `npm install -g npm@latest` |
 | **CPython** + `pip`, and `python3-dev` to build against | 3.11+ | **only** for a server that runs Python trigger bodies or installs Python modules — and only in a build that has the `python` feature (below) |
+
+**The built-in model providers are a cargo feature, and it is on.** `sc-model`'s
+`smartcore` feature (default) carries `linear_regression`, `logistic_regression`,
+`random_forest`, `kmeans` and `pca`; `cargo build --release -p sc-cli
+--no-default-features` is the opt-out, and it is a supported build rather than a broken
+one — `t_test` and `anova` are not behind the feature (they need a distribution function
+and nothing else), so such a server can still answer whether two groups differ, and the
+Models tab says on the screen that the machine-learning built-ins were compiled out
+rather than showing an empty list that reads like a bug. A module can supply more
+providers either way: `feldspar-sklearn` is bundled, and needs the Python build below.
 
 Install Rust via [rustup](https://rustup.rs/):
 
@@ -881,6 +896,7 @@ other users can read it.
 | `--python-max-stuck <n>` | runs that never returned before Python is refused until a restart | `8` |
 | `--python-dir <dir>` | the virtual environment Python modules install into | the platform's data directory |
 | `--python-bin <path>` | the interpreter `pip` runs under | `python3` |
+| `--model-max-rows <n>` | ceiling on the rows one model dataset may select | `200000` |
 
 Unknown flags in either group are rejected with a clear error rather than ignored.
 

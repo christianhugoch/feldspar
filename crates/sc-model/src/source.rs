@@ -26,7 +26,13 @@
 //!   them itself: a join path and an aggregation are the row layer's answer, so
 //!   the restriction has to go *into* the read rather than be applied to what
 //!   comes back. Hence [`Read::restricted_to`], which the source ands into the
-//!   `WHERE` beside the dataset's own filter.
+//!   `WHERE`. A prediction also reads [`unfiltered`](Read::unfiltered), and that
+//!   is the point of the flag: a dataset's filter says which rows the model was
+//!   **fitted from**, not which rows it may be asked about. `sold` is the
+//!   motivating case — a model of what houses sell for is fitted on the sold
+//!   ones and asked about the unsold one a trigger just inserted, and a read
+//!   that kept the filter would answer "this row is not in the dataset" for
+//!   every row anybody actually wants a prediction for.
 //! - **A preview** wants the first few rows and their types, on a table that may
 //!   be far over the cap — that is the whole point of previewing before fitting.
 //!   Hence [`Read::first`], which is a `LIMIT` and therefore needs no count: the
@@ -72,6 +78,15 @@ pub struct Read<'a> {
     /// At most this many rows, and **no count**: a limited read is bounded by
     /// construction.
     pub limit: Option<u64>,
+    /// Whether the dataset's **own** filter applies.
+    ///
+    /// True for a fit and a preview, which are looking at the sample the model
+    /// is *about*. False for a prediction, which is looking at rows the caller
+    /// named: the filter is a statement about what was fitted, and reusing it to
+    /// decide what may be predicted would make a model fitted on `sold` houses
+    /// unable to answer about an unsold one — which is the only question anybody
+    /// asks it.
+    pub filtered: bool,
 }
 
 impl<'a> Read<'a> {
@@ -81,7 +96,15 @@ impl<'a> Read<'a> {
             cap,
             restrict: None,
             limit: None,
+            filtered: true,
         }
+    }
+
+    /// The same read, **without** the dataset's own filter — what a prediction
+    /// does. See [`filtered`](Read::filtered).
+    pub fn unfiltered(mut self) -> Read<'a> {
+        self.filtered = false;
+        self
     }
 
     /// The same read, restricted to the rows `expr` selects.

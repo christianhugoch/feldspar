@@ -615,3 +615,9 @@ And [tutorial-agents.md](tutorial-agents.md), which adds one more action to the 
 `run_agent`, whose configuration is an agent's name and a prompt formula over the same event. An
 agent is a configured LLM loop that can read your tables, run the triggers you built here, and
 edit your app's source — and hanging one off a trigger is how it runs when nobody is watching.
+
+And [tutorial-models.md](tutorial-models.md), which adds a different kind of action:
+`predict_row`, whose configuration is a **model** and where the answer goes. A model is a saved
+question about a table — a dataset built out of this same formula language, fitted by a
+regression, a random forest or a scikit-learn estimator from a module — and a trigger like the
+ones above is what turns a fitted model into a column that fills itself in.

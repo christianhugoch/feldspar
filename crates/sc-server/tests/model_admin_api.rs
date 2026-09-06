@@ -526,11 +526,15 @@ async fn a_fit_that_fails_leaves_the_sentence_on_the_instance() -> sc_error::Res
 async fn a_trigger_writes_a_prediction_onto_the_row_it_fired_on() -> sc_error::Result<()> {
     let mut server = setup().await?;
 
-    // A fitted, active model over `houses`.
-    let (_, saved) = server
-        .client
-        .send("POST", "/api/models", Some(model_body("house prices")))
-        .await;
+    // A fitted, active model over `houses` — **with a filter**, which is the
+    // shape of every real model of this kind and the one the definition of done
+    // names: it is fitted on the houses that have a price, and asked about the
+    // one that does not. A dataset's filter says which rows the fit was computed
+    // from, not which rows may be predicted, so a prediction reads past it.
+    let mut body = model_body("house prices");
+    body["dataset"]["filter"] = json!("price !== null");
+    let (status, saved) = server.client.send("POST", "/api/models", Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "{saved}");
     let id = saved["id"].as_str().unwrap().to_owned();
     let (_, started) = server
         .client
