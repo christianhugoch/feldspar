@@ -1,0 +1,30 @@
+# `feldspar-sklearn`: a bundled Python module (`plugins/README.md`), and the
+# proof that a **model provider** is an extension point rather than a fixed menu.
+#
+# An ordinary setuptools distribution, because that is what the Modules tab
+# installs it as — `pip install <this directory>`, the same command the "local
+# directory" source runs — and the only thing that makes it a *Saltcorn* plugin
+# is the `saltcorn.plugins` entry point below, which names the module whose
+# import registers what it supplies (§9 of the Python API).
+#
+# `scikit-learn` is the point of the exercise: it is **not** in the release
+# tarball and not in this repository. pip fetches it (and numpy, and scipy) when
+# an admin installs this module and never otherwise, which is why a Saltcorn
+# server does not carry a machine-learning stack it may never fit anything with.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "feldspar-sklearn"
+version = "0.1.0"
+description = "scikit-learn for Saltcorn: five estimators as model providers."
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = ["scikit-learn>=1.3", "numpy>=1.23"]
+
+[project.entry-points."saltcorn.plugins"]
+plugin = "feldspar_sklearn.plugin"
+
+[tool.setuptools]
+packages = ["feldspar_sklearn"]

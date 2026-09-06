@@ -111,6 +111,13 @@ fn config_field(field: &Json, owner: &str) -> Result<(FormField, Option<String>)
     } else if is_textarea(field) {
         form_field = form_field.multiline();
     }
+    // A field restricted to the **dataset's columns**, which is what a model
+    // provider's label picker is. v1 has no such thing — a `modelproviders`
+    // export is this system's key, not v1's — so this is the one place where a
+    // module's field declaration says something v1 could not.
+    if let Some(query) = field.get("server_query").and_then(Json::as_str) {
+        form_field = form_field.server_query(query);
+    }
     // `sublabel` — v1's sentence under the control — has nowhere to go:
     // `FormField` carries no help text (a `ConfigDef` does, and that is a
     // settings-screen type). Dropped deliberately rather than folded into the

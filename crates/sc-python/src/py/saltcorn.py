@@ -47,7 +47,7 @@ than a trigger that failed.
 
 The same package is what an installed **plugin** declares itself with —
 ``sc.settings``, ``@sc.on_load``, ``@sc.action``, ``@sc.function``,
-``@sc.table_provider`` and ``sc.Field`` — and a plugin's code reaches the five
+``@sc.table_provider``, ``@sc.model_provider`` and ``sc.Field`` — and a plugin's code reaches the five
 handles above exactly as a body does, bound for the duration of a call and
 raising outside one. That half lives in ``plugin.py`` and is re-exported here,
 so an author writes ``sc.`` and never names it.
@@ -84,8 +84,13 @@ from __sc import (
 # is what everything above is for, never touches it.
 from __sc_plugin import (
     Field,
+    Frame,
+    Outcome,
+    Parameter,
+    Prediction,
     action,
     function,
+    model_provider,
     on_load,
     settings,
     table_provider,
@@ -99,11 +104,15 @@ __all__ = [
     "Field",
     "File",
     "FileError",
+    "Frame",
     "Fs",
     "Headers",
     "ModFns",
     "ModuleError",
     "ModuleFunctions",
+    "Outcome",
+    "Parameter",
+    "Prediction",
     "Query",
     "Response",
     "SaltcornError",
@@ -119,6 +128,7 @@ __all__ = [
     "fs",
     "function",
     "modfn",
+    "model_provider",
     "not_",
     "on_load",
     "or_",

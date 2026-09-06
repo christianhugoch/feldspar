@@ -58,6 +58,7 @@ pub mod deno;
 pub mod functions;
 pub mod host;
 pub mod install;
+pub mod model_providers;
 pub mod module;
 pub mod modules;
 pub mod paths;
@@ -75,12 +76,13 @@ pub use bundled::{BUNDLED_IN_CHECKOUT, BundledModule, BundledModules};
 pub use deno::{DenoModuleHost, PoolBounds};
 pub use functions::ModuleFunctions;
 pub use host::{
-    ActionManifest, FunctionArg, FunctionManifest, ModuleHost, ModuleManifest,
-    TableProviderManifest, UnsupportedEntity, prime_v8,
+    ActionManifest, FunctionArg, FunctionManifest, ModelProviderManifest, ModuleHost,
+    ModuleManifest, TableProviderManifest, UnsupportedEntity, prime_v8,
 };
 pub use install::{
     InstalledPackage, Installer, MIN_NPM_VERSION, have_node, have_npm, npm_too_old, npm_version,
 };
+pub use model_providers::ModuleModelProviders;
 pub use module::{
     MODULE_LANGUAGES, MODULE_SOURCES, Module, ModuleId, ModuleLanguage, ModuleSource,
 };

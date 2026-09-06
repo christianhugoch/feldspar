@@ -3130,6 +3130,10 @@ fn module_schema() -> TypeSchema {
         // provider *asks for* belongs to the table being created and is on
         // `listTableProviders`.
         StructField::new("table_providers", TypeSchema::array(TypeSchema::text())),
+        // The model providers it supplies — names only, for the same reason:
+        // what a provider *asks for* belongs to the model being fitted and is
+        // on `listModelProviders`.
+        StructField::new("model_providers", TypeSchema::array(TypeSchema::text())),
         // What it also supplies and this version does not load: `{key, count}`,
         // so the tab can say "also supplies 1 table provider (not yet
         // supported)".

@@ -1,0 +1,14 @@
+{
+  "name": "feldspar-sklearn",
+  "language": "python",
+  "title": "scikit-learn",
+  "description": "Five scikit-learn estimators as model providers: ridge regression, gradient boosting, support vector machines, DBSCAN clustering and t-SNE.",
+  "supplies": [
+    "A model provider, sklearn_ridge: linear regression with an L2 penalty, over standardised features.",
+    "A model provider, sklearn_gradient_boosting: boosted trees, a regressor or a classifier according to the label.",
+    "A model provider, sklearn_svm: a support vector machine, likewise.",
+    "A model provider, sklearn_dbscan: density clustering, which finds its own number of clusters and labels outliers.",
+    "A model provider, sklearn_tsne: a two- or three-dimensional embedding for plotting."
+  ],
+  "installs": ["scikit-learn", "numpy"]
+}

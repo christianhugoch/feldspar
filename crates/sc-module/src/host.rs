@@ -127,6 +127,59 @@ pub struct TableProviderManifest {
     pub config_fields: Vec<Json>,
 }
 
+/// One **model provider** a module supplies (TODO "Predictive models" §14).
+///
+/// A module exports `modelproviders` beside its `actions` and `table_providers`:
+///
+/// ```js
+/// modelproviders: {
+///   ridge: {
+///     description: "Linear regression with an L2 penalty",
+///     configuration_workflow,                     // or `config_fields: [...]`
+///     hyperparameters: [{ name: "alpha", type: "Float", default: 1 }],
+///     outcome: { kind: "regression", label: "label" },
+///     standardise: true,
+///     fit: async ({ frame, configuration, hyperparameters }) => ({ state, parameters }),
+///     predict: async ({ state, frame }) => [1.2, 3.4],
+///   },
+/// }
+/// ```
+///
+/// What crosses is the **declaration**: the name, the two field sets and what a
+/// fit of it produces. `fit` and `predict` stay in the worker, and reach it
+/// again through [`ModuleHost::model_fit`] and [`ModuleHost::model_predict`].
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ModelProviderManifest {
+    /// The name it is registered and stored under — `ridge`. The module it came
+    /// from is what disambiguates two of them.
+    pub name: String,
+    /// One line for the provider picker.
+    #[serde(default)]
+    pub description: String,
+    /// Its settings, as v1 `configFields` — translated by [`crate::spec`], never
+    /// interpreted here.
+    #[serde(default)]
+    pub config_fields: Vec<Json>,
+    /// Its hyperparameters, in the same shape. A model stores a value or a
+    /// **list** of values per hyperparameter, and a fit runs the grid.
+    #[serde(default)]
+    pub hyperparameters: Vec<Json>,
+    /// What a fit of it produces, as `sc_model::OutcomeSpec`'s JSON.
+    ///
+    /// Carried as JSON rather than as the typed value so that a module with one
+    /// mis-declared provider is a module with one mis-declared provider: it is
+    /// read (and reported, by the host script that loaded it) where the provider
+    /// set is built, not while the manifest is being parsed — which would lose
+    /// the module's actions to somebody's typo.
+    #[serde(default)]
+    pub outcome: Json,
+    /// Whether the host should standardise the numeric features before handing
+    /// them over. A declaration, because the constants are stored on the
+    /// instance and applied again at predict time.
+    #[serde(default)]
+    pub standardise: bool,
+}
+
 /// An entity type the module exports and this version does not load.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UnsupportedEntity {
@@ -160,6 +213,10 @@ pub struct ModuleManifest {
     /// offers as a source beside a database.
     #[serde(default)]
     pub table_providers: Vec<TableProviderManifest>,
+    /// The model providers it supplies — what the model form offers beside the
+    /// built-in regressions.
+    #[serde(default)]
+    pub model_providers: Vec<ModelProviderManifest>,
     /// The fields of its `configuration_workflow`'s forms, flattened (§5).
     #[serde(default)]
     pub config_fields: Vec<Json>,
@@ -464,6 +521,56 @@ impl ModuleHost {
         #[cfg(not(feature = "deno-host"))]
         {
             let _ = (module, provider, configuration, table, filter);
+            Err(no_runtime())
+        }
+    }
+
+    /// **Fit** one of a module's model providers.
+    ///
+    /// The frame crosses as **columns, not rows of objects**: a 50 000 × 12
+    /// dataset is twelve JSON arrays and not 50 000 objects with the same twelve
+    /// keys repeated. Routed like [`run`](ModuleHost::run), because `fit` is a
+    /// closure the module built at load time.
+    pub async fn model_fit(
+        &self,
+        module: &str,
+        provider: &str,
+        frame: &Json,
+        configuration: &Json,
+        hyperparameters: &Json,
+    ) -> Result<Json> {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool
+                .model_fit(module, provider, frame, configuration, hyperparameters)
+                .await
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = (module, provider, frame, configuration, hyperparameters);
+            Err(no_runtime())
+        }
+    }
+
+    /// **Predict** with one, over a frame of any height — a single row is a
+    /// frame of one, and batching is what makes a call across this seam worth
+    /// its cost.
+    pub async fn model_predict(
+        &self,
+        module: &str,
+        provider: &str,
+        state: &Json,
+        frame: &Json,
+    ) -> Result<Json> {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool
+                .model_predict(module, provider, state, frame)
+                .await
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = (module, provider, state, frame);
             Err(no_runtime())
         }
     }

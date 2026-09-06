@@ -55,6 +55,11 @@ sc-action.workspace = true
 # The fifth host surface's trait (`ModuleFnHost`) lives in sc-expr, and
 # `functions.rs` implements it: the seam is defined where the guest is.
 sc-expr.workspace = true
+# A module also supplies **model providers**, and `ModelProviderHost` — the seam
+# for them — is declared in `sc-model` beside this crate at layer 6, for exactly
+# the reason `TableProviderHost` is declared in `sc-catalog` below it: a trait a
+# module implements has to be declared somewhere a module can see.
+sc-model.workspace = true
 async-trait.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true

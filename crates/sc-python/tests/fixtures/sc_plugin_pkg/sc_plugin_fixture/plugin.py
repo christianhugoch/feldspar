@@ -135,3 +135,63 @@ class FixtureRows:
         else:
             keys = [wanted]
         ROWS[:] = [row for row in ROWS if row["id"] not in keys]
+
+
+@sc.model_provider(
+    "fixture_mean",
+    description="Predict the mean of the label",
+    config=[sc.Field.numeric_column("label", label="Label", required=True)],
+    hyperparameters=[sc.Field.float("shift", label="Shift", default=0.0)],
+    outcome=sc.Outcome.regression("label"),
+)
+class FixtureMean:
+    """A model provider that is arithmetic rather than machine learning.
+
+    What it is here to prove is the **seam**: a declaration reaching the
+    manifest with its label picker unresolved, a columnar frame reaching `fit`,
+    a state and its parameters coming back, and one prediction per row. A real
+    estimator would need numpy, and this fixture is installed with no network.
+    """
+
+    def fit(self, frame, configuration, hyperparameters):
+        values = [float(v) for v in frame[configuration["label"]]]
+        mean = sum(values) / (len(values) or 1)
+        return {
+            "state": {"mean": mean + float(hyperparameters.get("shift") or 0)},
+            "parameters": [
+                sc.Parameter.scalar("Mean", mean),
+                sc.Parameter.table(
+                    "Rows seen",
+                    ["Column", "Rows"],
+                    [[configuration["label"], len(values)]],
+                ),
+            ],
+        }
+
+    def predict(self, state, frame):
+        # Bare numbers: the host reads one as a regression's answer rather than
+        # asking for `{"prediction": "number", ...}` fifty thousand times.
+        return [state["mean"]] * len(frame)
+
+
+@sc.model_provider(
+    "fixture_sign",
+    description="Cluster rows by the sign of a column",
+    config=[sc.Field.column("on", label="Column", required=True)],
+    outcome=sc.Outcome.cluster(),
+    standardise=True,
+)
+class FixtureSign:
+    """The other direction: a cluster number is not a number a regression
+    predicts, so it is written out in full."""
+
+    def fit(self, frame, configuration, hyperparameters):
+        return {
+            "state": {"on": configuration["on"]},
+            "parameters": [sc.Parameter.text("Rule", "negative is 0, otherwise 1")],
+        }
+
+    def predict(self, state, frame):
+        return [
+            sc.Prediction.cluster(0 if float(v) < 0 else 1) for v in frame[state["on"]]
+        ]

@@ -26,6 +26,9 @@ supplies with decorators::
     @sc.table_provider("CSV file", config=[sc.Field.string("path", required=True)])
     class CsvTable: ...
 
+    @sc.model_provider("ridge", outcome=sc.Outcome.regression("label"))
+    class Ridge: ...
+
 Everything above is re-exported from ``saltcorn`` so an author writes ``sc.``
 and never names this module; the host imports *this* one, because the ops below
 are its side of the same conversation.
@@ -82,6 +85,16 @@ ACTION_PARAMETERS = (
     "mode",
 )
 
+#: What a field may be restricted to the **dataset's columns** by — the server
+#: queries `sc_model::provider` resolves against the dataset a model is over
+#: (§10). A model provider naming a label declares one of these rather than a
+#: free-text box, so the admin picks a column that exists.
+COLUMN_QUERIES = (
+    "dataset_columns",
+    "dataset_numeric_columns",
+    "dataset_categorical_columns",
+)
+
 #: The types [`Field`] offers, in **this system's** vocabulary rather than v1's
 #: (§2: "it declares its settings in this system's field vocabulary").
 FIELD_TYPES = ("string", "int", "float", "bool", "date", "json")
@@ -124,6 +137,7 @@ class Field:
         "multiline",
         "primary_key",
         "unique",
+        "server_query",
     )
 
     def __init__(
@@ -138,6 +152,7 @@ class Field:
         multiline=False,
         primary_key=False,
         unique=False,
+        server_query=None,
     ):
         if not isinstance(name, str) or not name.strip():
             raise ValueError("a field needs a name")
@@ -155,6 +170,12 @@ class Field:
         self.multiline = bool(multiline)
         self.primary_key = bool(primary_key)
         self.unique = bool(unique)
+        if server_query is not None and server_query not in COLUMN_QUERIES:
+            raise ValueError(
+                f"`{server_query}` is not a server query; they are "
+                + ", ".join(COLUMN_QUERIES)
+            )
+        self.server_query = server_query
 
     @classmethod
     def string(cls, name, **kwargs):
@@ -180,6 +201,26 @@ class Field:
     def json(cls, name, **kwargs):
         return cls(name, "json", **kwargs)
 
+    @classmethod
+    def column(cls, name, **kwargs):
+        """A field restricted to the **dataset's columns** — a label picker.
+
+        The options are filled in by the server against the dataset the model is
+        over, which is why they are not listed here: a provider declares its form
+        once and every model has a different dataset.
+        """
+        return cls(name, "string", server_query="dataset_columns", **kwargs)
+
+    @classmethod
+    def numeric_column(cls, name, **kwargs):
+        """The same, restricted to the columns a number can be read from."""
+        return cls(name, "string", server_query="dataset_numeric_columns", **kwargs)
+
+    @classmethod
+    def categorical_column(cls, name, **kwargs):
+        """The same, restricted to the columns that are categories."""
+        return cls(name, "string", server_query="dataset_categorical_columns", **kwargs)
+
     def to_json(self):
         """The declaration as it crosses the seam, for the host to translate."""
         declared = {
@@ -199,6 +240,8 @@ class Field:
             declared["primary_key"] = True
         if self.unique:
             declared["unique"] = True
+        if self.server_query is not None:
+            declared["server_query"] = self.server_query
         return declared
 
     def __repr__(self):
@@ -263,6 +306,222 @@ class _Provider:
         return self._instance
 
 
+class Frame:
+    """A materialised dataset, **column by column** (TODO §9, §14).
+
+    Columnar because every consumer wants a column and because the wire is: a
+    50 000 × 12 dataset crosses as twelve JSON arrays and not as 50 000 objects
+    with the same twelve keys repeated. It lands here as lists, which is what
+    ``numpy.asarray`` takes directly::
+
+        import numpy as np
+        X = np.asarray([frame[name] for name in frame.features(config["label"])]).T
+        y = np.asarray(frame[config["label"]])
+
+    A missing value is ``None``. The host drops rows with one before a fit and
+    refuses one at predict time, so a provider that is handed a ``None`` is
+    being handed a column the host was told to keep — it is the provider's
+    question what to do with it.
+    """
+
+    __slots__ = ("rows", "types", "_columns", "_order")
+
+    def __init__(self, payload):
+        payload = payload or {}
+        self._columns = {}
+        self._order = []
+        self.types = {}
+        for column in payload.get("columns") or ():
+            name = column.get("name")
+            self._order.append(name)
+            self._columns[name] = list(column.get("values") or ())
+            self.types[name] = column.get("type")
+        self.rows = int(payload.get("rows") or 0)
+
+    @property
+    def names(self):
+        """Every column name, in the dataset's own order."""
+        return list(self._order)
+
+    def features(self, *excluding):
+        """Every column but the ones named — the usual "everything but the label"."""
+        skip = {name for name in excluding if name}
+        return [name for name in self._order if name not in skip]
+
+    def column(self, name):
+        """One column as a list, or a `KeyError` naming what there is instead."""
+        if name not in self._columns:
+            raise KeyError(
+                f"the frame has no column `{name}`; it has "
+                + (", ".join(f"`{n}`" for n in self._order) or "none")
+            )
+        return self._columns[name]
+
+    def __getitem__(self, name):
+        return self.column(name)
+
+    def __contains__(self, name):
+        return name in self._columns
+
+    def __len__(self):
+        return self.rows
+
+    def matrix(self, names=None):
+        """The named columns as a row-major list of lists — one list per row."""
+        chosen = list(names) if names is not None else self.names
+        columns = [self.column(name) for name in chosen]
+        return [[column[i] for column in columns] for i in range(self.rows)]
+
+    def __repr__(self):
+        return f"Frame({self.rows} rows, {len(self._order)} columns)"
+
+
+class Outcome:
+    """What a fit of a model provider produces, as a declaration (TODO §10).
+
+    A *function of the configuration*, which is why it is a declaration and not
+    a constant: a random forest is a regressor or a classifier depending on the
+    type of the column its configuration names. So what is declared here is
+    **which configuration key** holds the label, and the host resolves it
+    against the dataset.
+    """
+
+    @staticmethod
+    def supervised(label="label"):
+        """A regression when the labelled column is numeric, else a classification."""
+        return {"kind": "supervised", "label": label}
+
+    @staticmethod
+    def regression(label="label"):
+        return {"kind": "regression", "label": label}
+
+    @staticmethod
+    def classification(label="label"):
+        return {"kind": "classification", "label": label}
+
+    @staticmethod
+    def cluster():
+        return {"kind": "cluster"}
+
+    @staticmethod
+    def embedding(components="components"):
+        """A vector per row, as long as the named configuration key says."""
+        return {"kind": "embedding", "components": components}
+
+    @staticmethod
+    def test():
+        """A hypothesis test: no per-row output, and the parameters are the answer."""
+        return {"kind": "test"}
+
+
+class Parameter:
+    """One fitted parameter, in the shape the instance screen renders it in (§7).
+
+    Three variants and no more, so the screen has three renderings to write and
+    never has to know what a coefficient or an explained-variance ratio is.
+    """
+
+    @staticmethod
+    def scalar(name, value):
+        return {"block": "scalar", "name": name, "value": float(value)}
+
+    @staticmethod
+    def table(name, columns, rows):
+        """A coefficient table, cluster centres, feature importances.
+
+        Every row must be as wide as ``columns``: the host refuses a ragged one
+        rather than rendering a standard error under *p*.
+        """
+        return {
+            "block": "table",
+            "name": name,
+            "columns": [str(column) for column in columns],
+            "rows": [{"cells": list(row)} for row in rows],
+        }
+
+    @staticmethod
+    def text(name, body):
+        """Text the provider produced and nobody should reformat."""
+        return {"block": "text", "name": name, "body": str(body)}
+
+
+class Prediction:
+    """What a fitted provider answers for one row.
+
+    A ``predict`` may also answer the bare values — a number, a class name, or a
+    list for a vector — which is what a provider written over numpy naturally
+    produces. These exist for the two answers a bare value cannot carry: a
+    cluster **number** (which is not the number a regression predicts) and a
+    class with its probability.
+    """
+
+    @staticmethod
+    def number(value):
+        return {"prediction": "number", "value": float(value)}
+
+    @staticmethod
+    def cluster(index):
+        return {"prediction": "cluster", "cluster": int(index)}
+
+    @staticmethod
+    def class_index(index, probability=None):
+        """A classification's answer as an **index** into the fitted encoding.
+
+        What a provider answers, because a class index is what the target
+        encoding handed it and what its arithmetic produced. The host maps it
+        back to the class name; a provider that answered the name itself would be
+        guessing at an encoding it does not hold.
+        """
+        out = {"prediction": "class_index", "index": int(index)}
+        if probability is not None:
+            out["probability"] = float(probability)
+        return out
+
+    @staticmethod
+    def class_(name, probability=None):
+        out = {"prediction": "class", "class": str(name)}
+        if probability is not None:
+            out["probability"] = float(probability)
+        return out
+
+    @staticmethod
+    def vector(values):
+        return {"prediction": "vector", "values": [float(v) for v in values]}
+
+
+class _ModelProvider:
+    __slots__ = (
+        "name",
+        "cls",
+        "description",
+        "config",
+        "hyperparameters",
+        "outcome",
+        "standardise",
+        "_instance",
+    )
+
+    def __init__(
+        self, name, cls, description, config, hyperparameters, outcome, standardise
+    ):
+        self.name = name
+        self.cls = cls
+        self.description = description
+        self.config = config
+        self.hyperparameters = hyperparameters
+        self.outcome = outcome
+        self.standardise = standardise
+        self._instance = None
+
+    def instance(self):
+        """The provider object, built once — as a table provider's is, and for
+        the same reason: a module that would not construct must still be able to
+        show its form."""
+        if self._instance is None:
+            self._instance = self.cls()
+        return self._instance
+
+
 class Registry:
     """What one package declared. One per package, kept apart by name."""
 
@@ -275,6 +534,7 @@ class Registry:
         self.actions = {}
         self.functions = {}
         self.providers = {}
+        self.model_providers = {}
         self.issues = []
         #: The module's own configuration, as the last load was given it.
         self.configuration = {}
@@ -421,6 +681,88 @@ def table_provider(name, *, config=()):
     return register
 
 
+#: The outcome kinds a model provider may declare, and the key each needs.
+_OUTCOME_KINDS = {
+    "supervised": "label",
+    "regression": "label",
+    "classification": "label",
+    "cluster": None,
+    "embedding": "components",
+    "test": None,
+}
+
+
+def _outcome(declared, what):
+    """One ``outcome=`` declaration, checked here rather than at fit time."""
+    if not isinstance(declared, dict):
+        raise TypeError(
+            f"{what} must declare an outcome, such as "
+            f"`outcome=saltcorn.Outcome.regression(\"label\")`"
+        )
+    kind = declared.get("kind")
+    if kind not in _OUTCOME_KINDS:
+        raise ValueError(
+            f"{what} declares the outcome kind {kind!r}, which is not one of "
+            + ", ".join(_OUTCOME_KINDS)
+        )
+    key = _OUTCOME_KINDS[kind]
+    if key and not isinstance(declared.get(key), str):
+        raise ValueError(
+            f"{what} declares a {kind} outcome, which needs a string `{key}` naming "
+            f"the configuration key that holds it"
+        )
+    return {"kind": kind, key: declared[key]} if key else {"kind": kind}
+
+
+def model_provider(
+    name,
+    *,
+    description="",
+    config=(),
+    hyperparameters=(),
+    outcome=None,
+    standardise=False,
+):
+    """Register a **model provider**: code that can fit something (TODO §10, §14).
+
+    The class answers ``fit(frame, configuration, hyperparameters)`` — returning
+    ``{"state": ..., "parameters": [...]}``, or just the state — and
+    ``predict(state, frame)``, returning one answer per row::
+
+        @sc.model_provider(
+            "ridge",
+            description="Linear regression with an L2 penalty",
+            config=[sc.Field.string("label", label="Label", required=True)],
+            hyperparameters=[sc.Field.float("alpha", label="Alpha", default=1.0)],
+            outcome=sc.Outcome.regression("label"),
+            standardise=True,
+        )
+        class Ridge:
+            def fit(self, frame, configuration, hyperparameters): ...
+            def predict(self, state, frame): ...
+
+    It declares **no metrics**, and cannot: R², RMSE, accuracy and the confusion
+    matrix are computed by the host over the same splits with the same code for
+    every provider, which is what makes this estimator's number comparable with
+    a built-in regression's.
+    """
+
+    def register(cls):
+        what = f"the model provider `{name}`"
+        _registry_of(cls).model_providers[name] = _ModelProvider(
+            name,
+            cls,
+            description,
+            _fields(config, what),
+            _fields(hyperparameters, what),
+            _outcome(outcome, what),
+            bool(standardise),
+        )
+        return cls
+
+    return register
+
+
 # --- discovery --------------------------------------------------------------
 
 
@@ -546,6 +888,19 @@ def manifest(distribution, registry):
             }
             for provider in registry.providers.values()
         ],
+        "model_providers": [
+            {
+                "name": provider.name,
+                "description": provider.description,
+                "config_fields": [field.to_json() for field in provider.config],
+                "hyperparameters": [
+                    field.to_json() for field in provider.hyperparameters
+                ],
+                "outcome": provider.outcome,
+                "standardise": provider.standardise,
+            }
+            for provider in registry.model_providers.values()
+        ],
         "config_fields": [field.to_json() for field in registry.settings],
         # Every entity type this version does not load is one a Python plugin
         # has no way to declare in the first place: there is no decorator for a
@@ -654,7 +1009,8 @@ def op_load(payload):
         registry.issues.append(
             f"`{getattr(module, '__name__', name)}` declared nothing: a Saltcorn Python "
             f"plugin registers what it supplies with the `saltcorn` decorators "
-            f"(`@saltcorn.action`, `@saltcorn.function`, `@saltcorn.table_provider`)"
+            f"(`@saltcorn.action`, `@saltcorn.function`, `@saltcorn.table_provider`, "
+            f"`@saltcorn.model_provider`)"
         )
     registry.distribution = distribution
     registry.configuration = configuration
@@ -790,6 +1146,99 @@ def op_provider_delete(payload):
     return None
 
 
+def _model_provider(payload):
+    registry = _require(payload["module"])
+    name = payload["provider"]
+    provider = registry.model_providers.get(name)
+    if provider is None:
+        raise LookupError(
+            f"the Python module `{registry.distribution}` supplies no model provider "
+            f"`{name}`"
+        )
+    return provider
+
+
+def _model_call(payload, method, arguments):
+    provider = _model_provider(payload)
+    fn = getattr(provider.instance(), method, None)
+    if fn is None:
+        raise TypeError(
+            f"the model provider `{provider.name}` has no `{method}`, which every "
+            f"model provider must answer"
+        )
+    return fn(**_selected(fn, arguments, f"the model provider `{provider.name}`"))
+
+
+def op_model_fit(payload):
+    """Fit one model provider over a columnar frame.
+
+    A provider that answers a bare value rather than the pair is read as having
+    answered its state: ``state`` is the half without which nothing can predict,
+    and ``parameters`` is the half a screen shows.
+    """
+    result = _model_call(
+        payload,
+        "fit",
+        {
+            "frame": Frame(payload.get("frame")),
+            "configuration": payload.get("configuration") or {},
+            "hyperparameters": payload.get("hyperparameters") or {},
+        },
+    )
+    if isinstance(result, dict) and "state" in result:
+        return {
+            "state": result.get("state"),
+            "parameters": list(result.get("parameters") or ()),
+        }
+    return {"state": result, "parameters": []}
+
+
+def op_model_predict(payload):
+    """Predict with one, over a frame of any height — a row is a frame of one."""
+    answer = _model_call(
+        payload,
+        "predict",
+        {"state": payload.get("state"), "frame": Frame(payload.get("frame"))},
+    )
+    if answer is None:
+        return []
+    # A numpy array is not a list and is not JSON; `tolist()` is what makes it
+    # one, and a provider should not have to remember to call it.
+    tolist = getattr(answer, "tolist", None)
+    if callable(tolist):
+        answer = tolist()
+    return [_prediction(value) for value in answer]
+
+
+def _prediction(value):
+    """One prediction, as JSON the host reads.
+
+    Bare numbers, strings and lists pass through — the host reads those as a
+    regression's answer, a class and a vector — and anything numpy-shaped is
+    reduced to one of them first, so a provider does not have to.
+    """
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        return value
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return _prediction(item())
+        except (ValueError, TypeError):
+            pass
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        return _prediction(tolist())
+    if isinstance(value, (list, tuple)):
+        return [float(v) for v in value]
+    raise TypeError(f"a model provider answered a prediction this host cannot read: {value!r}")
+
+
 _OPS = {
     "load": op_load,
     "unload": op_unload,
@@ -801,6 +1250,8 @@ _OPS = {
     "provider_insert": op_provider_insert,
     "provider_update": op_provider_update,
     "provider_delete": op_provider_delete,
+    "model_fit": op_model_fit,
+    "model_predict": op_model_predict,
 }
 
 

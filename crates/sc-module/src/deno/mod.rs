@@ -558,6 +558,60 @@ impl DenoModuleHost {
         .await
     }
 
+    /// **Fit** one of a module's model providers, over a columnar frame.
+    ///
+    /// Routed like [`run`](DenoModuleHost::run): `fit` is a closure the module
+    /// built at load time, and a fit that ran on another isolate would be a fit
+    /// against another copy of whatever the module set up.
+    pub async fn model_fit(
+        &self,
+        module: &str,
+        provider: &str,
+        frame: &Json,
+        configuration: &Json,
+        hyperparameters: &Json,
+    ) -> Result<Json> {
+        let index = self.worker_for(module).await;
+        self.send(
+            index,
+            json!({
+                "op": "model_fit",
+                "module": module,
+                "provider": provider,
+                "frame": frame,
+                "configuration": configuration,
+                "hyperparameters": hyperparameters,
+            }),
+            None,
+        )
+        .await
+        .map_err(|e| denial(module, e))
+    }
+
+    /// **Predict** with one, over a frame of any height.
+    pub async fn model_predict(
+        &self,
+        module: &str,
+        provider: &str,
+        state: &Json,
+        frame: &Json,
+    ) -> Result<Json> {
+        let index = self.worker_for(module).await;
+        self.send(
+            index,
+            json!({
+                "op": "model_predict",
+                "module": module,
+                "provider": provider,
+                "state": state,
+                "frame": frame,
+            }),
+            None,
+        )
+        .await
+        .map_err(|e| denial(module, e))
+    }
+
     /// One provider request, on the worker its module is loaded on, with a
     /// denial translated into the sentence an admin can act on.
     async fn provider_op(&self, module: &str, provider: &str, request: Json) -> Result<Json> {

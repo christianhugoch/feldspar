@@ -248,9 +248,13 @@ export function moduleStatus(module: Module): {
   const parts: string[] = [];
   const actions = module.actions.length;
   const providers = module.table_providers.length;
+  const models = module.model_providers.length;
   if (actions > 0) parts.push(actions === 1 ? "1 action" : `${actions} actions`);
   if (providers > 0) {
     parts.push(providers === 1 ? "1 table provider" : `${providers} table providers`);
+  }
+  if (models > 0) {
+    parts.push(models === 1 ? "1 model provider" : `${models} model providers`);
   }
   return {
     label: parts.length === 0 ? "Loaded" : parts.join(", "),
@@ -269,6 +273,7 @@ export function suppliedSummary(module: Module): string {
     [module.actions.length, "action", "actions"],
     [module.functions.length, "function", "functions"],
     [module.table_providers.length, "table provider", "table providers"],
+    [module.model_providers.length, "model provider", "model providers"],
   ];
   const parts = counts
     .filter(([count]) => count > 0)

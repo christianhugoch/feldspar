@@ -1,0 +1,8 @@
+{
+  "name": "@saltcorn-test/model",
+  "version": "0.1.0",
+  "description": "A module supplying model providers, for the model-provider seam's tests: it fits the mean of a column, clusters by sign, and declares two providers that are deliberately broken.",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT"
+}

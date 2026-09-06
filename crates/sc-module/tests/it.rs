@@ -29,6 +29,8 @@ mod deno_host;
 mod host;
 #[path = "install.rs"]
 mod install;
+#[path = "model_providers.rs"]
+mod model_providers;
 #[path = "module_actions.rs"]
 mod module_actions;
 #[path = "module_store.rs"]

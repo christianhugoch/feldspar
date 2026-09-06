@@ -2,6 +2,52 @@
 
 Changes in reverse chronological order.
 
+## A model provider from a module, in either language
+
+The seventh phase of predictive models, and the one that turns the provider registry from a
+fixed menu into an **extension point**: a JavaScript module exports `modelproviders` beside its
+`actions` and `table_providers`, a Python plugin decorates a class with `@sc.model_provider`,
+and both arrive on the model form beside the built-in regressions with nothing above the seam
+knowing which language answered.
+
+- **`plugins/sklearn` is the third bundled module**, and the useful half of the phase: five
+  scikit-learn estimators — ridge, gradient boosting, an SVM, DBSCAN and t-SNE — installed with
+  one click from the Modules tab. The code ships in the tarball and **scikit-learn does not**;
+  pip fetches it at the moment somebody installs the module and never on a server that installs
+  nothing. Gradient boosting and the SVM are each a regressor *or* a classifier according to
+  their label's type, which is the case `Outcome` exists for and is decided by the type of the
+  target column the host encoded.
+- **The frame crosses as columns, not as rows of objects.** A 50 000 × 12 dataset is twelve JSON
+  arrays and not 50 000 objects with the same twelve keys repeated — the difference between a
+  Python provider being usable and being a curiosity — and on the Python side it lands as
+  something `numpy.asarray` takes directly. Prediction takes a frame for the same reason: a
+  single row is a frame of one, and the call is the cost rather than the arithmetic.
+- **Metrics stay the host's, and a module provider could not send one if it wanted to.** R²,
+  RMSE, accuracy and the confusion matrix are computed by `sc-model` over the same splits with
+  the same code for every provider, which is what makes a scikit-learn RMSE comparable with a
+  smartcore regression's on the same screen. What crosses back is a state and its parameters, in
+  the three blocks the instance screen already renders.
+- **A module with one mis-declared provider supplies the others.** A provider with no `fit`, one
+  whose outcome kind is not a kind, and one whose supervised outcome names no configuration key
+  are each reported on the module's card and skipped — because a module that refused to load
+  over a typo would take four working estimators down with the fifth. The registry refuses a
+  **duplicate name** naming both sources ("the module `X` supplies `random_forest`, which is
+  also a built-in"), and a model whose provider has gone away is still listed, still editable,
+  with the sentence saying what went missing.
+- **A prediction may be written bare.** A number is a regression's answer, a string is a class
+  and a list is a vector; only a cluster number and a class probability need the tagged form,
+  because those carry something a bare value cannot. The **count** is checked either way: a
+  provider that answered 49 999 predictions for 50 000 rows would otherwise put every row after
+  the missing one against its neighbour's answer.
+- **A label picker is a picker.** A module's field declaration may now name a `server_query`, so
+  a provider's "which column is the label" is filled in from *the dataset the model is over*
+  rather than being a free-text box that pushes the checking to fit time. `sc.Field.column`,
+  `sc.Field.numeric_column` and `sc.Field.categorical_column` write it in Python; a JavaScript
+  provider puts `server_query` on the field.
+- **The Modules tab counts them.** Installing `feldspar-sklearn` says "5 model providers" rather
+  than "nothing this version of Saltcorn loads", which is what an admin needs the sentence after
+  an install to tell them.
+
 ## Three screens for a model, and one for a fit
 
 The sixth phase of predictive models: the Models tab, the dataset builder, the model form and

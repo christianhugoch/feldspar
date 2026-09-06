@@ -19,6 +19,10 @@ mod python_env;
 mod bundled_markdown;
 
 #[cfg(feature = "python-host")]
+#[path = "bundled_sklearn.rs"]
+mod bundled_sklearn;
+
+#[cfg(feature = "python-host")]
 #[path = "python_db.rs"]
 mod python_db;
 

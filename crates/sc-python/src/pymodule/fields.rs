@@ -56,6 +56,14 @@ pub(crate) fn form_field(declared: &Json) -> Option<FormField> {
     if flag(declared, "multiline") {
         field = field.multiline();
     }
+    // A field restricted to the **dataset's columns**: what a model provider's
+    // label picker is. The options are not in the declaration and cannot be —
+    // a provider declares its form once and every model has a different dataset
+    // — so what crosses is the query name, resolved by
+    // `sc_model::resolve_column_options` when a dataset is at hand.
+    if let Some(query) = declared.get("server_query").and_then(Json::as_str) {
+        field = field.server_query(query);
+    }
     Some(field)
 }
 

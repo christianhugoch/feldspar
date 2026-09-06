@@ -38,6 +38,7 @@
 //! - [`action`] — a module's action as an ordinary `Action`.
 //! - [`functions`] — its functions, as the fifth host surface.
 //! - [`providers`] — its table providers, as the catalog's seam.
+//! - [`model_providers`] — its model providers, as `sc-model`'s seam.
 //! - [`fields`] — its field declarations, in this system's own vocabulary.
 //!
 //! # What a plugin may reach, and what nobody pretends
@@ -53,11 +54,13 @@ pub mod action;
 pub mod fields;
 pub mod functions;
 pub mod host;
+pub mod model_providers;
 pub mod providers;
 pub mod set;
 
 pub use action::PyModuleAction;
 pub use functions::PyModuleFunctions;
 pub use host::{DEFAULT_CALL_TIMEOUT, PyModuleHost};
+pub use model_providers::PyModuleModelProviders;
 pub use providers::PyModuleTableProviders;
 pub use set::PyModuleSet;

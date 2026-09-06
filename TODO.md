@@ -535,17 +535,17 @@ bytes stores base64, because a system table with a `bytea` column would be the o
 
 ## Phase 7 — Providers from modules
 
-- [ ] 7.1 `ModelProviderHost` implemented in `sc-module`: the `modelproviders` export read into
+- [x] 7.1 `ModelProviderHost` implemented in `sc-module`: the `modelproviders` export read into
       the manifest as `ModelProviderKind`, `fit`/`predict` routed to the module's worker, the
       frame crossing columnar (§14).
-- [ ] 7.2 The same in `sc-python`: `@sc.model_provider` in `plugin.py`, the class's
+- [x] 7.2 The same in `sc-python`: `@sc.model_provider` in `plugin.py`, the class's
       `fit`/`predict` called with the frame as columns, and the entry on the module's manifest.
-- [ ] 7.3 `plugins/sklearn` — a bundled Python module over scikit-learn, with its
+- [x] 7.3 `plugins/sklearn` — a bundled Python module over scikit-learn, with its
       `feldspar-module.json` (card, `installs`, no permissions), a curated estimator list
       (ridge, gradient boosting, SVM, DBSCAN, t-SNE) and its parameters as blocks.
-- [ ] 7.4 The registry composing all three sources, a module change rebuilding it, and a model
+- [x] 7.4 The registry composing all three sources, a module change rebuilding it, and a model
       whose provider has gone away listed with the sentence rather than dropped.
-- [ ] 7.5 Tests: `sc-module`'s provider seam against a fixture module (no network); `sc-python`'s
+- [x] 7.5 Tests: `sc-module`'s provider seam against a fixture module (no network); `sc-python`'s
       `bundled_sklearn` (ignored; pip) fitting and predicting through the real package; and the
       catalog test extended to the third bundled module.
 

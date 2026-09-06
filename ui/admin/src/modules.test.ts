@@ -87,6 +87,7 @@ function module_(overrides: Partial<Module> = {}): Module {
     actions: [{ name: "mqtt_publish", description: "Publish a message", config_spec: [] }],
     functions: [],
     table_providers: [],
+    model_providers: [],
     unsupported: [],
     issues: [],
     loaded: true,
@@ -315,6 +316,20 @@ describe("how an installed module reads", () => {
     // And a module that loaded and supplies nothing this version reads still
     // says it loaded, rather than claiming a count of nothing.
     expect(moduleStatus(module_({ actions: [] })).label).toBe("Loaded");
+  });
+
+  it("counts the model providers it supplies", () => {
+    // `feldspar-sklearn` is five estimators and nothing else, and the tab is
+    // where an admin finds out that installing it got them a longer list on the
+    // model form.
+    const sklearn = module_({
+      actions: [],
+      model_providers: ["sklearn_ridge", "sklearn_dbscan"],
+    });
+    expect(moduleStatus(sklearn)).toEqual({ label: "2 model providers", tone: "green" });
+    expect(
+      suppliedSummary(module_({ actions: [], model_providers: ["sklearn_ridge"] })),
+    ).toBe("1 model provider");
   });
 
   it("marks a module that did not load, and one that loaded with a complaint", () => {

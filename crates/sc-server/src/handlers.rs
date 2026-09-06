@@ -5422,6 +5422,10 @@ fn module_json(loaded: &sc_module::LoadedModule) -> Json {
         // offers, listed here too because the Modules tab is where an admin
         // finds out what installing a module got them.
         "table_providers": loaded.table_provider_names(),
+        // And the model providers, for the same reason: installing
+        // `feldspar-sklearn` gets an admin five estimators on the model form,
+        // and the tab is where they find that out.
+        "model_providers": loaded.model_provider_names(),
         "unsupported": sc_module::unsupported_json(loaded),
         "issues": loaded.issues,
         "loaded": loaded.is_loaded(),

@@ -160,7 +160,7 @@ fn the_python_half_of_the_catalog_ships_too() {
         .map(|m| m.id.as_str())
         .collect();
     assert!(
-        python.contains(&"markdown"),
+        python.contains(&"markdown") && python.contains(&"sklearn"),
         "the Python bundled modules are {python:?}"
     );
     let markdown = catalog.get("markdown").expect("the Markdown module ships");
@@ -168,6 +168,37 @@ fn the_python_half_of_the_catalog_ships_too() {
     // Nothing to grant, and the manifest reader refuses a Python module that
     // asks (there is no sandbox to enforce it).
     assert!(markdown.permissions.is_closed());
+}
+
+#[test]
+fn the_sklearn_module_ships_and_promises_the_download_it_makes() {
+    // The third bundled module, and the one that proves a **model provider** is
+    // an extension point: five scikit-learn estimators appear on the model form
+    // beside the built-in regressions, and nothing above the seam knows they are
+    // Python.
+    let catalog = catalog();
+    let sklearn = catalog
+        .get("sklearn")
+        .expect("the scikit-learn module ships");
+    assert_eq!(sklearn.name, "feldspar-sklearn");
+    assert_eq!(sklearn.language, ModuleLanguage::Python);
+    // The whole point of a bundled module: the code is in the tarball and the
+    // stack it wraps is not, so a server that never installs it downloads
+    // neither scikit-learn nor numpy.
+    assert!(sklearn.installs.contains(&"scikit-learn".to_owned()));
+    assert!(sklearn.installs.contains(&"numpy".to_owned()));
+    assert!(sklearn.permissions.is_closed());
+    // Five cards' worth of "what you get", one per provider, so the Install
+    // button is pressed by somebody who knows what appears afterwards.
+    assert_eq!(sklearn.supplies.len(), 5, "{:?}", sklearn.supplies);
+    assert!(
+        sklearn
+            .supplies
+            .iter()
+            .all(|line| line.contains("model provider")),
+        "{:?}",
+        sklearn.supplies
+    );
 }
 
 /// The names in a `package.json`'s `dependencies`.

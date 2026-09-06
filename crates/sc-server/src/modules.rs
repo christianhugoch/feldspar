@@ -31,11 +31,14 @@ use sc_catalog::{Catalog, TableProviderHosts};
 use sc_core_actions::CodeSurfaces;
 use sc_error::{Context, Error, Result};
 use sc_expr::ModuleFnHosts;
+use sc_model::builtin_registry;
 use sc_module::{
-    BundledModules, Installer, ModuleFunctions, ModuleHost, ModuleSet, ModuleTableProviders,
-    bootstrap_modules,
+    BundledModules, Installer, ModuleFunctions, ModuleHost, ModuleModelProviders, ModuleSet,
+    ModuleTableProviders, bootstrap_modules,
 };
-use sc_python::pymodule::{PyModuleFunctions, PyModuleHost, PyModuleSet, PyModuleTableProviders};
+use sc_python::pymodule::{
+    PyModuleFunctions, PyModuleHost, PyModuleModelProviders, PyModuleSet, PyModuleTableProviders,
+};
 
 use crate::agents::AgentServices;
 
@@ -197,6 +200,49 @@ impl ModuleServices {
                     python.modules(),
                 )),
             ])))?;
+        // And the **model providers**, which is the third source the model
+        // registry composes: the built-ins, whatever the JavaScript modules
+        // supply, and whatever the Python ones do. Rebuilt from the built-ins
+        // rather than mutated, and swapped in whole — so a fit that is already
+        // running keeps the registry it started with, which is the rule the
+        // action registry follows for the same reason.
+        //
+        // A module whose provider cannot be registered — the one real case is a
+        // name a built-in or another module already has — is **reported and the
+        // rest kept**: the registry refuses the duplicate naming both sources,
+        // and a server that dropped every other estimator over one clash would
+        // be answering a name collision with an outage.
+        match builtin_registry() {
+            Ok(mut providers) => {
+                for (what, outcome) in [
+                    (
+                        "a JavaScript module",
+                        providers
+                            .register_host(Arc::new(ModuleModelProviders::new(&self.host, &set))),
+                    ),
+                    (
+                        "a Python module",
+                        providers.register_host(Arc::new(PyModuleModelProviders::new(
+                            &self.python_host,
+                            python.modules(),
+                        ))),
+                    ),
+                ] {
+                    if let Err(e) = outcome {
+                        eprintln!(
+                            "feldspar: {what}'s model providers are not all available: {}",
+                            sc_error::format_chain(&e)
+                        );
+                    }
+                }
+                self.models.set_registry(Arc::new(providers));
+            }
+            Err(e) => eprintln!(
+                "feldspar: the built-in model providers could not be registered, so the model \
+                 provider set was left as it was: {}",
+                sc_error::format_chain(&e)
+            ),
+        }
         // Then reload the catalog, because that is what *applies* the line
         // above: a provided table's columns are the module's answer, so
         // installing, configuring or deleting a module can change them — and a

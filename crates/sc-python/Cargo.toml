@@ -40,6 +40,9 @@ sc-error.workspace = true
 # because `sc-module` does not need an interpreter and this crate has one; there
 # is no cycle, and `sc-server` is where the two sets are merged.
 sc-module.workspace = true
+# And `sc-model`'s: a Python plugin supplies model providers the way a
+# JavaScript one does, through the seam declared beside `sc-module` at layer 6.
+sc-model.workspace = true
 sc-action.workspace = true
 sc-catalog.workspace = true
 sc-types.workspace = true

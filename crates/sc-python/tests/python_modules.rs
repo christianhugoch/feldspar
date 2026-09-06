@@ -48,7 +48,9 @@ use sc_module::{
     LoadedModule, Module, ModuleLanguage, ModuleSource, bootstrap_modules, redacted_configuration,
     save_module,
 };
-use sc_python::pymodule::{PyModuleFunctions, PyModuleHost, PyModuleSet, PyModuleTableProviders};
+use sc_python::pymodule::{
+    PyModuleFunctions, PyModuleHost, PyModuleModelProviders, PyModuleSet, PyModuleTableProviders,
+};
 use sc_python::{PythonEnv, PythonEnvironment, PythonRuntime, PythonSource};
 use sc_query::{
     Assignment, BinOp, Delete, Expr, Insert, Projection, Select, Source, Statement, Update, Value,
@@ -684,4 +686,130 @@ async fn a_table_backed_by_a_python_provider_is_read_filtered_and_written() -> R
         .collect();
     assert_eq!(names, ["edited", "gamma"]);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 7.2 — the model provider, over a columnar frame
+// ---------------------------------------------------------------------------
+
+/// `@sc.model_provider` in the fixture's `plugin.py`, read into the manifest and
+/// then fitted and predicted with — the Python half of the seam `sc-module`
+/// implements for the other language.
+///
+/// The two providers are arithmetic rather than machine learning on purpose:
+/// this fixture is installed with no network, and what is under test is the
+/// seam. The real thing is `plugins/sklearn`, in `bundled_sklearn.rs`.
+#[tokio::test]
+async fn a_python_model_provider_declares_itself_and_then_fits_and_predicts() -> Result<()> {
+    let _guard = ONE_AT_A_TIME.lock().await;
+    skip_without!(
+        have_toolchain().await,
+        "python3 with pip is not on the PATH"
+    );
+    skip_without!(
+        cfg!(feature = "python-host"),
+        "built without an interpreter"
+    );
+    let dir = shared_environment().await;
+
+    let db = TestDb::new().await?;
+    let catalog = catalog_of(&db).await?;
+    install_row(&catalog, json!({ "api_key": "k" })).await?;
+
+    let host = host(dir);
+    let mut registry = ActionRegistry::new();
+    let loaded = load_set(&catalog, &host, &mut registry).await?;
+    let providers: Arc<dyn sc_model::ModelProviderHost> =
+        Arc::new(PyModuleModelProviders::new(&host, &loaded));
+
+    // The declaration crossed whole: the module it came from, the label picker
+    // as a *query* over the dataset's numeric columns rather than an empty
+    // option list, the hyperparameter, and the standardisation request.
+    let mut kinds = providers.providers();
+    kinds.sort_by(|a, b| a.name.cmp(&b.name));
+    let names: Vec<&str> = kinds.iter().map(|k| k.name.as_str()).collect();
+    assert_eq!(names, ["fixture_mean", "fixture_sign"]);
+    assert_eq!(kinds[0].module.as_deref(), Some(PACKAGE));
+    assert_eq!(kinds[0].description, "Predict the mean of the label");
+    assert_eq!(
+        kinds[0].config_spec[0].query(),
+        Some(sc_model::NUMERIC_COLUMNS_QUERY)
+    );
+    assert_eq!(kinds[0].hyperparameters[0].name(), "shift");
+    assert!(!kinds[0].standardise);
+    assert!(kinds[1].standardise);
+
+    // Through the registry, because that is how a fit reaches one.
+    let mut models = sc_model::ModelRegistry::new();
+    models.register_host(Arc::clone(&providers))?;
+
+    let frame = sc_model::Frame::new(
+        vec![
+            (
+                "area".to_owned(),
+                sc_model::Column::Float(vec![Some(-2.0), Some(-1.0), Some(1.0), Some(3.0)]),
+            ),
+            (
+                "price".to_owned(),
+                sc_model::Column::Float(vec![Some(10.0), Some(20.0), Some(30.0), Some(40.0)]),
+            ),
+        ],
+        Vec::new(),
+    )?;
+
+    let mean = models.require("fixture_mean")?;
+    let fitted = mean
+        .fit(
+            &frame,
+            &attrs_of(json!({ "label": "price" })),
+            &attrs_of(json!({ "shift": 5 })),
+        )
+        .await?;
+    // The hyperparameter arrived as a number: 25 + 5.
+    assert_eq!(fitted.state["mean"].as_f64(), Some(30.0));
+    assert_eq!(
+        fitted.parameters[0],
+        sc_model::ParameterBlock::scalar("Mean", 25.0)
+    );
+    match &fitted.parameters[1] {
+        sc_model::ParameterBlock::Table { name, rows, .. } => {
+            assert_eq!(name, "Rows seen");
+            assert_eq!(rows[0].cells, vec![json!("price"), json!(4)]);
+        }
+        other => panic!("expected a table, got {other:?}"),
+    }
+    assert_eq!(
+        mean.predict(&fitted.state, &frame).await?,
+        vec![sc_model::Prediction::number(30.0); 4]
+    );
+
+    // And the tagged direction: a cluster number is not a number a regression
+    // predicts, so it crosses written out in full.
+    let sign = models.require("fixture_sign")?;
+    let fitted = sign
+        .fit(
+            &frame,
+            &attrs_of(json!({ "on": "area" })),
+            &sc_types::Attrs::new(),
+        )
+        .await?;
+    assert_eq!(
+        fitted.parameters[0],
+        sc_model::ParameterBlock::text("Rule", "negative is 0, otherwise 1")
+    );
+    assert_eq!(
+        sign.predict(&fitted.state, &frame).await?,
+        vec![
+            sc_model::Prediction::Cluster { cluster: 0 },
+            sc_model::Prediction::Cluster { cluster: 0 },
+            sc_model::Prediction::Cluster { cluster: 1 },
+            sc_model::Prediction::Cluster { cluster: 1 },
+        ]
+    );
+    Ok(())
+}
+
+/// The attributes of a JSON object, for a configuration written inline.
+fn attrs_of(value: Json) -> sc_types::Attrs {
+    value.as_object().expect("an object").clone()
 }

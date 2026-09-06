@@ -6,8 +6,8 @@ installs one from Settings → Modules, where they appear as a short catalog wit
 an Install button each.
 
 That is the whole idea. A Saltcorn server should not carry an RSS parser, a
-Markdown renderer and a dozen other libraries on the chance that an application
-wants one — but an admin who wants one should not have to know a package name,
+Markdown renderer, scikit-learn and a dozen other libraries on the chance that
+an application wants one — but an admin who wants one should not have to know a package name,
 find it on a registry, or trust it. So the *code* travels with the server and
 the **dependencies do not**: `plugins/rss` is two files and a `package.json`
 naming `rss-parser`, and `rss-parser` is downloaded by npm at the moment the
@@ -20,6 +20,7 @@ runs nothing extra.
 |---|---|---|---|
 | `rss/` | `@feldspar/rss` | JavaScript | a table provider: an RSS or Atom feed as a read-only table |
 | `markdown/` | `feldspar-markdown` | Python | two functions: Markdown to HTML, and a plain-text summary |
+| `sklearn/` | `feldspar-sklearn` | Python | five model providers: ridge, gradient boosting, SVM, DBSCAN and t-SNE |
 
 ## The shape of one
 

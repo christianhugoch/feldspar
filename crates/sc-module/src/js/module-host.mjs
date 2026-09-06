@@ -255,6 +255,7 @@ const supportedKeys = new Set([
   "configuration_workflow",
   "functions",
   "table_providers",
+  "modelproviders",
 ]);
 
 /** Keys that are metadata rather than an entity type — including `onLoad`,
@@ -378,6 +379,162 @@ async function evalTableProviders(plugin, configuration) {
     providers.push({ name: providerName, config_fields: fields });
   }
   return { providers, set, issues };
+}
+
+/** The outcome declarations a model provider may make, and what each needs.
+ *
+ * `sc_model::OutcomeSpec`'s JSON, checked here rather than on the Rust side so
+ * that a module with one mis-declared provider is reported on its own card and
+ * still supplies everything else it has. */
+const OUTCOME_KINDS = {
+  supervised: "label",
+  regression: "label",
+  classification: "label",
+  cluster: null,
+  embedding: "components",
+  test: null,
+};
+
+/** One provider's `outcome`, or a sentence saying what is wrong with it. */
+function readOutcome(declared) {
+  if (!declared || typeof declared !== "object")
+    return { error: `its outcome must be an object such as { kind: "regression", label: "label" }` };
+  const kind = declared.kind;
+  if (!Object.prototype.hasOwnProperty.call(OUTCOME_KINDS, kind))
+    return {
+      error: `its outcome kind ${JSON.stringify(kind)} is not one of ${Object.keys(
+        OUTCOME_KINDS,
+      ).join(", ")}`,
+    };
+  const key = OUTCOME_KINDS[kind];
+  if (key && typeof declared[key] !== "string")
+    return { error: `its outcome is "${kind}", which needs a string "${key}" naming the configuration key that holds it` };
+  return { outcome: key ? { kind, [key]: declared[key] } : { kind } };
+}
+
+/** v1 has no `modelproviders`; this is **this** system's key (TODO §14).
+ *
+ * ```js
+ * modelproviders: {
+ *   ridge: {
+ *     description: "Linear regression with an L2 penalty",
+ *     config_fields: [{ name: "label", type: "String", required: true }],
+ *     hyperparameters: [{ name: "alpha", type: "Float", default: 1 }],
+ *     outcome: { kind: "regression", label: "label" },
+ *     standardise: true,
+ *     fit: async ({ frame, configuration, hyperparameters }) => ({ state, parameters }),
+ *     predict: async ({ state, frame }) => [1.2, 3.4],
+ *   },
+ * }
+ * ```
+ *
+ * Read the two ways every other facility key is read — a plain object, and a
+ * function of the module's own configuration — because that is v1's `withCfg`
+ * rule and a plugin author should not have to learn a third.
+ *
+ * A provider missing `fit`, missing `predict`, or declaring an outcome nothing
+ * can read is **reported and skipped**: a provider that cannot be fitted is not
+ * one to put on the model form, and an admin who can see why can fix it.
+ *
+ * Settings may be declared either as a v1 `configuration_workflow` (which is
+ * what a plugin that already has one will reach for) or as a plain
+ * `config_fields` array, which is what a provider whose settings are one label
+ * picker actually wants to write.
+ */
+async function evalModelProviders(plugin, configuration) {
+  const exported = plugin.modelproviders;
+  let raw = {};
+  const issues = [];
+  if (typeof exported === "function") {
+    try {
+      raw = (await exported(configuration || {})) || {};
+    } catch (e) {
+      issues.push(`its model providers could not be built: ${e.message}`);
+      raw = {};
+    }
+  } else if (exported && typeof exported === "object") {
+    raw = exported;
+  }
+
+  const providers = [];
+  const set = {};
+  for (const [providerName, value] of Object.entries(raw)) {
+    const impl = value || {};
+    let broken = null;
+    if (typeof impl.fit !== "function") broken = "it has no fit function";
+    else if (typeof impl.predict !== "function") broken = "it has no predict function";
+    const read = broken ? { error: broken } : readOutcome(impl.outcome);
+    if (read.error) {
+      issues.push(`the model provider "${providerName}" is not available: ${read.error}`);
+      continue;
+    }
+    const { fields, issues: workflowIssues } = await workflowFields(
+      impl.configuration_workflow,
+      `the model provider "${providerName}"'s`,
+    );
+    issues.push(...workflowIssues);
+    set[providerName] = impl;
+    providers.push({
+      name: providerName,
+      description: impl.description || "",
+      config_fields: [...fields, ...(Array.isArray(impl.config_fields) ? impl.config_fields : [])],
+      hyperparameters: Array.isArray(impl.hyperparameters) ? impl.hyperparameters : [],
+      outcome: read.outcome,
+      standardise: !!impl.standardise,
+    });
+  }
+  return { providers, set, issues };
+}
+
+/** The loaded model provider, or a sentence naming what is missing. */
+function requireModelProvider(name, providerName) {
+  const entry = loaded.get(name);
+  if (!entry) throw new Error(`the module ${name} is not loaded in this host`);
+  const impl = entry.modelProviders && entry.modelProviders[providerName];
+  if (!impl) throw new Error(`the module ${name} has no model provider ${providerName}`);
+  return impl;
+}
+
+/** Fit one model provider over a columnar frame.
+ *
+ * What comes back is `sc_model::FitResult` — `{ state, parameters }` — and a
+ * provider that answers only its state is read as having no parameters rather
+ * than as having failed: `state` is the half without which nothing can predict,
+ * and `parameters` is the half a screen shows. */
+async function modelFit({ module: name, provider: providerName, frame, configuration, hyperparameters }) {
+  const impl = requireModelProvider(name, providerName);
+  const result = await impl.fit({
+    frame: frame || { rows: 0, columns: [] },
+    configuration: configuration || {},
+    hyperparameters: hyperparameters || {},
+  });
+  if (result === undefined || result === null)
+    throw new Error(
+      `the model provider ${providerName} of module ${name} fitted nothing: it must answer ` +
+        `{ state, parameters }`,
+    );
+  // A provider that answers a bare state rather than the pair — which is what
+  // one whose fit *is* its state will write — is read as meaning it.
+  const pair =
+    typeof result === "object" && !Array.isArray(result) && "state" in result
+      ? result
+      : { state: result };
+  return { state: pair.state === undefined ? null : pair.state, parameters: pair.parameters || [] };
+}
+
+/** Predict with one, over a frame of any height. Always a list, one per row. */
+async function modelPredict({ module: name, provider: providerName, state, frame }) {
+  const impl = requireModelProvider(name, providerName);
+  const answer = await impl.predict({
+    state: state === undefined ? null : state,
+    frame: frame || { rows: 0, columns: [] },
+  });
+  if (!Array.isArray(answer))
+    throw new Error(
+      `the model provider ${providerName} of module ${name} answered its predictions with ` +
+        `${JSON.stringify(answer)}, which is not a list`,
+    );
+  return answer;
 }
 
 /** The fields one provider presents for one configuration.
@@ -660,6 +817,13 @@ async function loadModule({ module: name, dir, configuration }) {
   } = await evalTableProviders(plugin, configuration);
   issues.push(...providerIssues);
 
+  const {
+    providers: modelProviders,
+    set: modelProviderSet,
+    issues: modelProviderIssues,
+  } = await evalModelProviders(plugin, configuration);
+  issues.push(...modelProviderIssues);
+
   const unsupported = [];
   for (const [key, value] of Object.entries(plugin)) {
     if (supportedKeys.has(key) || metadataKeys.has(key)) continue;
@@ -671,6 +835,7 @@ async function loadModule({ module: name, dir, configuration }) {
     actions: actionSet,
     functions: functionSet,
     providers: providerSet,
+    modelProviders: modelProviderSet,
     configuration: configuration || {},
   });
 
@@ -681,6 +846,7 @@ async function loadModule({ module: name, dir, configuration }) {
     actions,
     functions,
     table_providers: providers,
+    model_providers: modelProviders,
     config_fields: configFields,
     unsupported,
     issues,
@@ -779,6 +945,16 @@ async function handle(request) {
       const pending = loading.get(request.module);
       if (pending) await pending;
       return await providerDelete(request);
+    }
+    case "model_fit": {
+      const pending = loading.get(request.module);
+      if (pending) await pending;
+      return await modelFit(request);
+    }
+    case "model_predict": {
+      const pending = loading.get(request.module);
+      if (pending) await pending;
+      return await modelPredict(request);
     }
     default:
       throw new Error(`unknown module-host operation ${request.op}`);

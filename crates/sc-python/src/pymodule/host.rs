@@ -288,6 +288,49 @@ impl PyModuleHost {
         .await
     }
 
+    /// **Fit** one of a module's model providers, over a columnar frame.
+    ///
+    /// The frame crosses as columns, which is what lets it land on the Python
+    /// side as something `numpy.asarray` takes directly — and what keeps a
+    /// 50 000 × 12 dataset twelve arrays rather than 50 000 objects with the
+    /// same twelve keys repeated.
+    pub async fn model_fit(
+        &self,
+        module: &str,
+        provider: &str,
+        frame: &Json,
+        configuration: &Json,
+        hyperparameters: &Json,
+    ) -> Result<Json> {
+        self.call_op(
+            "model_fit",
+            json!({
+                "module": module, "provider": provider, "frame": frame,
+                "configuration": configuration, "hyperparameters": hyperparameters
+            }),
+            CodeHosts::default(),
+        )
+        .await
+    }
+
+    /// **Predict** with one, over a frame of any height.
+    pub async fn model_predict(
+        &self,
+        module: &str,
+        provider: &str,
+        state: &Json,
+        frame: &Json,
+    ) -> Result<Json> {
+        self.call_op(
+            "model_predict",
+            json!({
+                "module": module, "provider": provider, "state": state, "frame": frame
+            }),
+            CodeHosts::default(),
+        )
+        .await
+    }
+
     /// One op, as a run.
     async fn call_op(&self, op: &'static str, payload: Json, hosts: CodeHosts<'_>) -> Result<Json> {
         self.python
