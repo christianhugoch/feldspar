@@ -1,4 +1,4 @@
-//! `_sc_llm_providers` against a **real Postgres** (principle 4): the row is the
+//! `_fd_llm_providers` against a **real Postgres** (principle 4): the row is the
 //! provider's definition, so what a save writes and a load reads back is the
 //! whole of whether a configured provider survives a restart.
 //!

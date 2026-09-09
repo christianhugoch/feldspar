@@ -1,4 +1,4 @@
-//! `_sc_modules` against a real database: the round trip, the uniqueness of a
+//! `_fd_modules` against a real database: the round trip, the uniqueness of a
 //! package name, and what a row nobody can read says.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]

@@ -128,7 +128,7 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
-    // Set a table's configuration: the `_sc_tables` overlay fields, and only
+    // Set a table's configuration: the `_fd_tables` overlay fields, and only
     // those (§9). A `PUT` on the table's own path rather than a nested
     // `…/settings` resource, because from the admin's side there is one table
     // with settings, not a table plus a settings object hanging off it — and
@@ -276,7 +276,7 @@ pub fn admin_endpoints() -> EndpointSet {
     );
 
     // --- roles --------------------------------------------------------------
-    // A role is a row in `_sc_roles` (§7.1, §9), not a bare integer: it carries
+    // A role is a row in `_fd_roles` (§7.1, §9), not a bare integer: it carries
     // a name and, in `attributes`, whatever role-specific settings arrive later.
     // `users.role` is a foreign key onto it, so creating a role is a
     // prerequisite for assigning a user to it — which is why creating and
@@ -363,7 +363,7 @@ pub fn admin_endpoints() -> EndpointSet {
     );
 
     // Drop a field: the column, its data and its overlay row. Refused by name
-    // when it is a primary key, a built-in column of `users`/`_sc_roles`, the
+    // when it is a primary key, a built-in column of `users`/`_fd_roles`, the
     // target of another table's key, or read by a calculated field — each of
     // which the database would otherwise refuse with an error nobody can act on.
     set.register(
@@ -1157,7 +1157,7 @@ pub fn admin_endpoints() -> EndpointSet {
     // --- runs ---------------------------------------------------------------
     // A chat session **is** a run (§11.4), so the history the chat panel shows
     // and the record a triggered run leaves behind are one list. Runs are keyed
-    // by the agent's *name*, which is what `_sc_runs.subject` holds — a run
+    // by the agent's *name*, which is what `_fd_runs.subject` holds — a run
     // outlives the agent it was of, deliberately.
 
     set.register(
@@ -1828,7 +1828,7 @@ pub fn admin_endpoints() -> EndpointSet {
 
     // --- triggers -----------------------------------------------------------
     // A trigger is one event bound to one configured action (§10.2), stored in
-    // `_sc_triggers`. These endpoints are the row ⇄ live-set path the SPA
+    // `_fd_triggers`. These endpoints are the row ⇄ live-set path the SPA
     // drives: every save is validated and the live set is reloaded, so what the
     // list shows is what will fire.
 
@@ -2363,7 +2363,7 @@ pub fn admin_endpoints() -> EndpointSet {
     );
 
     // --- settings -----------------------------------------------------------
-    // The `_sc_config` values an admin edits (§9, §13.5). Two endpoints, and
+    // The `_fd_config` values an admin edits (§9, §13.5). Two endpoints, and
     // both carry the **declarations** alongside the values, for the same reason
     // the file-store and LLM-provider screens are handed a `config_spec`: the
     // settings screen renders whatever the server declares and knows nothing
@@ -2398,7 +2398,7 @@ pub fn admin_endpoints() -> EndpointSet {
     // tell a wrong password from a wrong template.
     //
     // It tests what is **saved**, not what is typed — the transport is built
-    // from `_sc_config` — so the answer is about the configuration this
+    // from `_fd_config` — so the answer is about the configuration this
     // installation will actually send with. `to` defaults to the signed-in
     // admin's own address, because the admin pressing the button is the one
     // person guaranteed to be able to check whether it arrived.
@@ -2629,7 +2629,7 @@ fn api() -> PathSpec {
     PathSpec::root().lit(ADMIN_API_PREFIX)
 }
 
-/// A table in the catalog: its name, plus the `_sc_tables` overlay merged onto
+/// A table in the catalog: its name, plus the `_fd_tables` overlay merged onto
 /// it (§9).
 ///
 /// The access roles are in the *list* response, not only in a detail one,
@@ -2752,7 +2752,7 @@ fn orphan_table_settings_schema() -> TypeSchema {
 /// between meant whatever an installation's users made them mean. That stops
 /// working the moment a role has to *carry* something — a name to show in a
 /// pick-list, settings that apply to everyone holding it — because a row can
-/// carry those and an integer cannot. So `_sc_roles` holds them, `users.role`
+/// carry those and an integer cannot. So `_fd_roles` holds them, `users.role`
 /// references it, and this endpoint reports what is there rather than what a
 /// constant asserts.
 ///
@@ -2789,7 +2789,7 @@ fn user_input_schema() -> TypeSchema {
     ])
 }
 
-/// A field (column) of a table, with the `_sc_fields` overlay merged onto it
+/// A field (column) of a table, with the `_fd_fields` overlay merged onto it
 /// (§3.2): the introspected `sql_type`/`nullable`/`unique`, plus the overlay's
 /// `type` (a rich type's name, or the basic type's), `kind` (with its
 /// parameters), `label`, `description` and `attributes`.
@@ -3236,7 +3236,7 @@ fn agent_fields() -> Vec<StructField> {
     vec![
         StructField::new("name", TypeSchema::text()),
         StructField::new("description", TypeSchema::text()),
-        // The `_sc_llm_providers` **name** this agent calls through, not its id:
+        // The `_fd_llm_providers` **name** this agent calls through, not its id:
         // that is what the stored row holds, so that is what round-trips.
         StructField::new("provider", TypeSchema::text()),
         // Null means "the provider's own default model", which is the common
@@ -3360,7 +3360,7 @@ fn run_schema() -> TypeSchema {
     TypeSchema::Struct(fields)
 }
 
-/// One `_sc_run_traces` row: one attempt at one step, and the context after it
+/// One `_fd_run_traces` row: one attempt at one step, and the context after it
 /// (§9, §10.3).
 ///
 /// This is what the run detail draws its timeline from — and what the read-only

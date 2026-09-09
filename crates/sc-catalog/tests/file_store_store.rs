@@ -1,5 +1,5 @@
 //! Phase 1.1 integration test: a file-store definition round-tripping through
-//! its `_sc_file_stores` row, against a real database (design §9, §14.1).
+//! its `_fd_file_stores` row, against a real database (design §9, §14.1).
 //!
 //! A file store, like an application, exists *only* as stored configuration —
 //! there is nothing to introspect it from. So the things asserted here are the
@@ -178,7 +178,7 @@ async fn deleting_removes_the_definition_and_reports_whether_one_existed() -> Re
 
 /// The successor to the milestone's tripwire. Its ancestor asserted that a
 /// `File` field's store reference was *inert* — modelled but stored nowhere, so
-/// the catalog-level delete check found nothing. The `_sc_fields` overlay (§3.1)
+/// the catalog-level delete check found nothing. The `_fd_fields` overlay (§3.1)
 /// and its merge (§3.2) landed, so the reference is now real, and this asserts
 /// the opposite: the catalog-level check **finds** it and the delete is refused,
 /// naming the field.
@@ -262,7 +262,7 @@ async fn field_references_are_scoped_to_the_named_store() -> Result<()> {
     .await?;
 
     // No File fields anywhere, so no store is referenced — including the
-    // `_sc_file_stores` table's own columns, which must not be mistaken for one.
+    // `_fd_file_stores` table's own columns, which must not be mistaken for one.
     assert!(file_store_field_references(&cat, "uploads")?.is_empty());
     assert!(file_store_field_references(&cat, "docs")?.is_empty());
     Ok(())

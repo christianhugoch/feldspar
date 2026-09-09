@@ -54,7 +54,7 @@ pub struct FileStoreId(pub String);
 
 impl DbId {
     /// The single primary database of the MVP: the one that additionally hosts
-    /// the `users` and (post-MVP) `_sc_*` metadata tables.
+    /// the `users` and (post-MVP) `_fd_*` metadata tables.
     pub fn primary() -> DbId {
         DbId("primary".to_owned())
     }

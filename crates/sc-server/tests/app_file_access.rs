@@ -263,8 +263,8 @@ async fn setup(
     sc_auth::bootstrap(&catalog).await?;
     // The overlays and the store-definition table have to exist for the admin
     // to configure through, just as `connect_catalog` bootstraps them on the
-    // real boot path: `_sc_tables` for the roles, `_sc_fields` for the `File`
-    // field, `_sc_file_stores` for the store's own access floor.
+    // real boot path: `_fd_tables` for the roles, `_fd_fields` for the `File`
+    // field, `_fd_file_stores` for the store's own access floor.
     sc_catalog::bootstrap_table_meta(&catalog).await?;
     sc_catalog::bootstrap_field_meta(&catalog).await?;
     sc_catalog::bootstrap_file_stores(&catalog).await?;

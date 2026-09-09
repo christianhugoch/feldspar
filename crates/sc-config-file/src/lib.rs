@@ -80,7 +80,7 @@
 //! `sc-cli`: a `cargo test` on a developer's machine should need no environment
 //! variables that a `feldspar serve` on the same machine does not.
 //!
-//! Not to be confused with `sc-config`, which is the `_sc_config` **table** —
+//! Not to be confused with `sc-config`, which is the `_fd_config` **table** —
 //! the settings an admin edits in the running server. This crate is the file on
 //! disk that says which database those settings live in.
 

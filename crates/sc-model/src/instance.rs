@@ -31,7 +31,7 @@ use uuid::Uuid;
 use crate::model::ModelId;
 use crate::provider::ParameterBlock;
 
-/// Identifies one fit: the UUID primary key of its `_sc_model_instances` row.
+/// Identifies one fit: the UUID primary key of its `_fd_model_instances` row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct InstanceId(pub Uuid);
 
@@ -117,7 +117,7 @@ impl std::fmt::Display for FitStatus {
 /// One fit of one model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelInstance {
-    /// Stable identity: the UUID of its `_sc_model_instances` row.
+    /// Stable identity: the UUID of its `_fd_model_instances` row.
     pub id: InstanceId,
     /// The model this is a fit of.
     pub model: ModelId,

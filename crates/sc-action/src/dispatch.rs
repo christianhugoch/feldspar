@@ -282,7 +282,7 @@ impl TriggerDispatcher {
     }
 
     /// Load and validate every stored trigger into the live set — at boot, and
-    /// after any change to `_sc_triggers`.
+    /// after any change to `_fd_triggers`.
     ///
     /// Every writer of a trigger calls this afterwards, which is what makes it
     /// the place the [`TriggerObserver`](crate::TriggerObserver) is notified: an

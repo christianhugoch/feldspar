@@ -259,7 +259,7 @@ async fn a_tables_rules_govern_the_app_api_and_an_admin_change_takes_effect_live
     let (router, catalog, _db) = setup(&tmp).await?;
 
     // Three roles. 40 and 80 have to exist before anyone can hold them —
-    // `users.role` is a foreign key onto `_sc_roles` now (§7.4).
+    // `users.role` is a foreign key onto `_fd_roles` now (§7.4).
     create_user(&catalog, "admin@example.com", "admin-pw", ROLE_ADMIN).await?;
     save_role(&catalog, &Role::new(80, "Reader")).await?;
     save_role(&catalog, &Role::new(40, "Editor")).await?;

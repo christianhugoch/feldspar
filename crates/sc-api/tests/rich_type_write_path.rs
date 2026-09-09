@@ -3,7 +3,7 @@
 //! naming the field, with the row not written (design §6.1, §2.3).
 //!
 //! Rich fields cannot yet be *created* through the admin API — that is §3, the
-//! `_sc_fields` overlay — so this drives the write path one seam below HTTP:
+//! `_fd_fields` overlay — so this drives the write path one seam below HTTP:
 //! [`rows::create_row`], the exact function an application's REST POST funnels
 //! into ([`RestProvider`](sc_api::RestProvider) calls it). A `people` table is
 //! created for real in Postgres, then a catalog view of it is given rich fields
@@ -56,7 +56,7 @@ fn attrs(pairs: &[(&str, serde_json::Value)]) -> Attrs {
     bag
 }
 
-/// The catalog's `people` table re-typed as it would be with a `_sc_fields`
+/// The catalog's `people` table re-typed as it would be with a `_fd_fields`
 /// overlay: `name` a `String` (≤ 5 letters, alphabetic), `age` an `Integer`
 /// (0–120). This is the view §3.2 will produce; here it is assembled directly.
 fn people_with_rich_fields(mut table: Table) -> Table {

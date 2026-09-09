@@ -377,7 +377,7 @@ mod tests {
                 ColumnDef::new("id", "uuid").not_null(),
                 ColumnDef::new("role", "int8")
                     .not_null()
-                    .references("_sc_roles", "role"),
+                    .references("_fd_roles", "role"),
             ],
             primary_key: vec!["id".into()],
             unlogged: false,
@@ -385,7 +385,7 @@ mod tests {
         assert_eq!(
             render_ok(&change),
             "CREATE TABLE \"users\" (\"id\" uuid NOT NULL, \
-             \"role\" int8 NOT NULL REFERENCES \"_sc_roles\" (\"role\") \
+             \"role\" int8 NOT NULL REFERENCES \"_fd_roles\" (\"role\") \
              DEFERRABLE INITIALLY IMMEDIATE, PRIMARY KEY (\"id\"))"
         );
     }

@@ -86,7 +86,7 @@ pub struct Catalog {
     /// `sc-action` (layer 6) both already have: the write cannot name the
     /// dispatcher without inverting the layering, and this is the inversion.
     table_events: RwLock<Option<Arc<dyn crate::events::TableEvents>>>,
-    /// The `_sc_fields` overlay rows that did not cleanly merge on the last
+    /// The `_fd_fields` overlay rows that did not cleanly merge on the last
     /// [`reload`](Self::reload) (design §3.2) — a dangling row, a rich type that
     /// does not fit its column, a `Key` with no foreign key behind it. Rebuilt
     /// every reload from scratch, so it always reflects the current schema and
@@ -191,7 +191,7 @@ pub struct ProvidedTableIssue {
 }
 
 /// The configuration a provided table's provider is called with — the
-/// `provider_config` attribute the `_sc_tables` row carries, as the JSON object
+/// `provider_config` attribute the `_fd_tables` row carries, as the JSON object
 /// v1 hands to `fields(cfg)` and `get_table(cfg)`.
 fn provided_config(table: &Table) -> serde_json::Value {
     match table
@@ -260,12 +260,12 @@ impl Catalog {
     }
 
     /// Re-introspect the primary database and rebuild the table cache, applying
-    /// the `_sc_tables` overlay on top. Called after every schema change the
+    /// the `_fd_tables` overlay on top. Called after every schema change the
     /// catalog applies, and after every overlay change, so the cache never
     /// drifts from either source.
     ///
     /// **Introspection is still what makes a table exist.** The overlay only
-    /// adds to a table already found, so a database with no `_sc_tables` table
+    /// adds to a table already found, so a database with no `_fd_tables` table
     /// — or one whose rows describe tables that are not there — behaves exactly
     /// as it did before the overlay existed. That is the zero-setup promise of
     /// §9 in one line of code: the loop below can only ever modify entries the
@@ -282,7 +282,7 @@ impl Catalog {
         // what makes a table exist here too, so a connected database needs no
         // registration step and a disconnected one contributes nothing.
         //
-        // **The primary wins every name.** It hosts `users` and the `_sc_*`
+        // **The primary wins every name.** It hosts `users` and the `_fd_*`
         // tables, and a foreign table quietly taking one of those names would
         // repoint authentication at somebody else's database. So the insert is
         // conditional and the losers are recorded (see `shadowed_tables`).
@@ -324,7 +324,7 @@ impl Catalog {
         // Only query the overlay when the database has one. Asking first is not
         // defensiveness — it is required: `bootstrap_table_meta` creates the
         // table *through* `create_table`, which reloads, so this runs at least
-        // once on a database where `_sc_tables` genuinely does not exist yet.
+        // once on a database where `_fd_tables` genuinely does not exist yet.
         // Selecting from it there would make bootstrapping impossible.
         let mut provided_issues: Vec<ProvidedTableIssue> = Vec::new();
         if map.contains_key(&TableId(TABLE_META_TABLE.to_owned())) {
@@ -394,7 +394,7 @@ impl Catalog {
         }
         self.set_provided_table_issues(provided_issues)?;
 
-        // Then the `_sc_fields` overlay, onto the fields the table now has. Same
+        // Then the `_fd_fields` overlay, onto the fields the table now has. Same
         // "only when the table exists" guard and same bootstrapping reason as
         // above. The merge reports rather than fails, so its issues are collected
         // here and stored beside the cache.
@@ -533,7 +533,7 @@ impl Catalog {
         }
     }
 
-    /// The `_sc_fields` overlay rows that did not cleanly merge on the last
+    /// The `_fd_fields` overlay rows that did not cleanly merge on the last
     /// [`reload`](Self::reload), for the admin UI to surface (design §3.2). Empty
     /// when every stored field overlay applied cleanly, which is the ordinary
     /// case.
@@ -615,7 +615,7 @@ impl Catalog {
             .ok_or_else(|| Error::not_found(format!("table `{name}` is not in the catalog")))
     }
 
-    /// All cached tables, sorted by name. Includes system (`_sc_*`) tables; use
+    /// All cached tables, sorted by name. Includes system (`_fd_*`) tables; use
     /// [`Table::is_system`] to filter.
     pub fn tables(&self) -> Result<Vec<Table>> {
         let guard = self
@@ -769,7 +769,7 @@ impl Catalog {
     /// or an admin can act on.
     pub async fn drop_table(&self, name: &str) -> Result<()> {
         // The driver is resolved *before* the overlay is forgotten: after it,
-        // `_sc_tables` no longer says which database the table is in, and the
+        // `_fd_tables` no longer says which database the table is in, and the
         // cache lookup this needs would be gone with it.
         let driver = self.driver_for_table(name)?;
         self.forget_table_meta(name).await?;
@@ -782,7 +782,7 @@ impl Catalog {
         self.reload().await
     }
 
-    /// Drop a column and its `_sc_fields` overlay row, then reload.
+    /// Drop a column and its `_fd_fields` overlay row, then reload.
     ///
     /// A **calculated** field has no column, so this deletes only the overlay
     /// that introduces it — dropping the column that is not there would be an
@@ -807,7 +807,7 @@ impl Catalog {
         self.require(table)
     }
 
-    /// Delete the `_sc_tables` row for `name` and every `_sc_fields` row for its
+    /// Delete the `_fd_tables` row for `name` and every `_fd_fields` row for its
     /// fields, without touching the table. The overlay half of
     /// [`drop_table`](Self::drop_table), split out so a batch can do it after its
     /// own DDL has committed.
@@ -825,7 +825,7 @@ impl Catalog {
         Ok(())
     }
 
-    /// Delete the `_sc_fields` row for one field, without touching the column.
+    /// Delete the `_fd_fields` row for one field, without touching the column.
     pub async fn forget_field_meta(&self, table: &str, field: &str) -> Result<()> {
         if self.get(FIELD_META_TABLE)?.is_some()
             && let Some(meta) =
@@ -951,8 +951,8 @@ impl Catalog {
     /// Ensure a system metadata table exists with (at least) `fields`, creating
     /// it if absent and **additively reconciling** it if it is already there.
     ///
-    /// This is the one-time bootstrap every `_sc_*` table performs
-    /// (`_sc_applications`, `_sc_triggers`, `_sc_file_stores`), factored here so
+    /// This is the one-time bootstrap every `_fd_*` table performs
+    /// (`_fd_applications`, `_fd_triggers`, `_fd_file_stores`), factored here so
     /// there is one answer to "what happens when a release adds a column".
     ///
     /// The design bans a migration framework for now, and without one an existing

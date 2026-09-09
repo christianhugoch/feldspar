@@ -19,7 +19,7 @@ use crate::field_meta::FieldMeta;
 use crate::provider::ProvidedWrites;
 use crate::table_meta::{TableMeta, TableMetaId};
 
-/// A way in which a stored `_sc_fields` overlay row did **not** cleanly apply to
+/// A way in which a stored `_fd_fields` overlay row did **not** cleanly apply to
 /// the introspected field it names (design §3.2).
 ///
 /// The merge never fails and never silently downgrades: a row that cannot be
@@ -45,7 +45,7 @@ pub enum TableSource {
     Database,
     /// Served by a **table provider** a module supplies: the rows come from
     /// JavaScript rather than from a database, and the table exists because a
-    /// `_sc_tables` row says so rather than because introspection found it
+    /// `_fd_tables` row says so rather than because introspection found it
     /// (see [`ProvidedTableDef`](crate::ProvidedTableDef)).
     ///
     /// Both names are carried because a call has to reach the worker that
@@ -102,7 +102,7 @@ pub struct AccessRules {
 impl Default for AccessRules {
     /// Admin-only, matching the MVP admin UI: only role 1 (admin) may read or
     /// write. An introspected table carries no overlay metadata, so this default
-    /// applies until `_sc_tables` overlays arrive (post-MVP).
+    /// applies until `_fd_tables` overlays arrive (post-MVP).
     fn default() -> Self {
         AccessRules {
             min_role_read: 1,
@@ -257,7 +257,7 @@ impl Table {
     /// rather than from a database (§8.3).
     ///
     /// There is no `from_physical` for one of these, because there is no
-    /// physical table — the `_sc_tables` row *is* the table, and the fields are
+    /// physical table — the `_fd_tables` row *is* the table, and the fields are
     /// whatever the provider answered when it was asked. `database` is still
     /// the primary: a provided table is not in any database, but every
     /// [`DbId`](crate::DbId) in the system names a connection an admin
@@ -324,14 +324,14 @@ impl Table {
     /// — and the overlay is the authority on everything *it* knows — access
     /// rules, label, description, attributes. The two sets do not intersect, so
     /// there is no contested value and no conflict semantics to get wrong. That
-    /// is a constraint on what may ever be added to `_sc_tables`, not merely a
+    /// is a constraint on what may ever be added to `_fd_tables`, not merely a
     /// description of what it holds today: a `nullable` column there would break
     /// this method's correctness, which is why `table_meta`'s column list is
     /// asserted in full by a test rather than spot-checked.
     ///
     /// A **system table never takes an overlay**. `save_table_meta` refuses to
     /// write one, so this only fires on a row inserted behind the API's back —
-    /// and the answer there is to ignore it, because `_sc_*` tables are hidden
+    /// and the answer there is to ignore it, because `_fd_*` tables are hidden
     /// from users (§9) and their access is not configurable by anyone.
     ///
     /// An empty label or description in the row means "none given", so the
@@ -517,11 +517,11 @@ impl Table {
         }
     }
 
-    /// Whether this is a system table (`_sc_*`), hidden from users (technical
+    /// Whether this is a system table (`_fd_*`), hidden from users (technical
     /// design §9). No such tables exist in the MVP, but the check is defined so
     /// callers can filter consistently.
     pub fn is_system(&self) -> bool {
-        self.name.starts_with("_sc_")
+        self.name.starts_with("_fd_")
     }
 
     /// The field with the given name, if present.
@@ -795,8 +795,8 @@ mod tests {
     #[test]
     fn a_system_table_ignores_a_field_overlay() {
         let mut table = books();
-        table.name = "_sc_secret".into();
-        let meta = FieldMeta::new("_sc_secret", "title").rich_type("string");
+        table.name = "_fd_secret".into();
+        let meta = FieldMeta::new("_fd_secret", "title").rich_type("string");
         assert!(table.apply_field_overlay(&meta).is_empty());
         assert_eq!(
             table.field("title").unwrap().base.type_,

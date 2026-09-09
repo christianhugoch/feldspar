@@ -10,7 +10,7 @@
 //! - Passwords are stored hashed with argon2id in [`password_hash`](COL_PASSWORD_HASH).
 //! - [`role`](COL_ROLE) is an integer **1–100**; `1` = admin (full access),
 //!   `100` = public (not logged in). Admins MAY add arbitrary fields. It is a
-//!   **foreign key onto [`_sc_roles`](crate::ROLES_TABLE)** — a role is a row
+//!   **foreign key onto [`_fd_roles`](crate::ROLES_TABLE)** — a role is a row
 //!   that can carry a name and role-specific settings, and a user whose role
 //!   names nothing would be a user whose privileges cannot be described.
 //!
@@ -57,7 +57,7 @@ pub fn role_in_range(role: u8) -> bool {
 
 /// The fields of the users table, in declaration order.
 ///
-/// `role` is a foreign key onto [`_sc_roles`](crate::ROLES_TABLE) (see
+/// `role` is a foreign key onto [`_fd_roles`](crate::ROLES_TABLE) (see
 /// [`user_role_field`](crate::roles::user_role_field)); the 1–100 bound is
 /// enforced in application code (see [`role_in_range`]) rather than as a
 /// database `CHECK`, which the MVP schema layer does not yet render — but the
@@ -97,14 +97,14 @@ pub fn is_system_user_column(column: &str) -> bool {
 /// absent, and return the users table.
 ///
 /// **Roles first, and that order is load-bearing**: `users.role` references
-/// `_sc_roles`, and a foreign key onto a table that does not exist is not a
+/// `_fd_roles`, and a foreign key onto a table that does not exist is not a
 /// constraint any database will accept. It also means the two built-in roles
 /// exist before the first user can be created with one.
 ///
 /// Idempotent: if a `users` table is already present in the catalog it is
 /// returned unchanged (the MVP performs no schema reconciliation on an existing
 /// table). A database that predates the roles table therefore **gains
-/// `_sc_roles` but keeps its unconstrained `role` column** — per GOALS, early
+/// `_fd_roles` but keeps its unconstrained `role` column** — per GOALS, early
 /// development evolves the initial setup rather than running migrations, so the
 /// constraint arrives with the next database rather than being retrofitted onto
 /// this one. Call this once at startup after the [`Catalog`] is initialised.

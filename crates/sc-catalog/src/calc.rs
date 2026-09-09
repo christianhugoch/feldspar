@@ -1,7 +1,7 @@
 //! Non-stored calculated fields: catalog-wide validation and dependency
 //! ordering (TODO Phase 8).
 //!
-//! A calc field is a virtual [`DataField`](crate::DataField) the `_sc_fields`
+//! A calc field is a virtual [`DataField`](crate::DataField) the `_fd_fields`
 //! overlay introduces (there is no column) whose value is an `sc-expr`
 //! expression computed on read. This module runs once per
 //! [`Catalog::reload`](crate::Catalog::reload), after every overlay has merged,

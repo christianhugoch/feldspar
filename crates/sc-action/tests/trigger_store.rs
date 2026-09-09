@@ -1,4 +1,4 @@
-//! Phase 2 integration test: a trigger round-tripping through `_sc_triggers`,
+//! Phase 2 integration test: a trigger round-tripping through `_fd_triggers`,
 //! every way it can be refused on save, and the cached live set.
 //!
 //! Against a real database, because all three are about storage: the round trip
@@ -26,7 +26,7 @@ use sc_test_harness::TestDb;
 use sc_types::{BasicType, FormField, TypeRef};
 use serde_json::Value as Json;
 
-/// A catalog over a per-test database, with `_sc_triggers` and a `books` table.
+/// A catalog over a per-test database, with `_fd_triggers` and a `books` table.
 async fn setup(db: &TestDb) -> Result<Catalog> {
     let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
     let cat = Catalog::init(driver as Arc<dyn DatabaseDriver>).await?;

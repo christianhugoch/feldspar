@@ -1,4 +1,4 @@
-//! `_sc_agents` against a **real Postgres** (principle 4): the row is the
+//! `_fd_agents` against a **real Postgres** (principle 4): the row is the
 //! agent's definition, so what a save writes and a load reads back is the whole
 //! of whether a configured agent survives a restart.
 //!

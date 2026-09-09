@@ -16,7 +16,7 @@
 //! ## Why this shape
 //!
 //! Because the whole state is a value, it is `Serialize + Deserialize`, and *the
-//! state is what `_sc_runs` stores*. A run persisted after every step is
+//! state is what `_fd_runs` stores*. A run persisted after every step is
 //! therefore a run that resumes: load it, ask for the next step, carry on. An
 //! `async fn` holding the same state on its stack could do the work but not the
 //! resuming, and §10.3's durable engine would then need a second mechanism to do
@@ -162,7 +162,7 @@ enum Phase {
 /// The conversation, the budget, and which side is next: everything one run is.
 ///
 /// `Serialize + Deserialize`, and that is not incidental — this value *is*
-/// `_sc_runs.context`.
+/// `_fd_runs.context`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentLoop {
     /// The conversation so far, oldest first.
@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn the_whole_state_round_trips_through_json() {
-        // `_sc_runs.context` is exactly this value, so a run that cannot survive
+        // `_fd_runs.context` is exactly this value, so a run that cannot survive
         // serialisation is a run that cannot resume.
         let mut run = AgentLoop::new(5);
         run.push_user("how many books?").unwrap();

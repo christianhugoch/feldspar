@@ -58,7 +58,7 @@ pub struct ModuleServices {
     /// (`sc_module::bundled`). Read once: the directory is part of the artifact,
     /// so it changes when the binary does and not while it runs.
     bundled: BundledModules,
-    /// The Python runtime, for the half of `_sc_modules` that pip installs
+    /// The Python runtime, for the half of `_fd_modules` that pip installs
     /// (§8, §9). The runtime rather than an environment, because the
     /// environment cannot be built without the embedded interpreter's version
     /// and asking the runtime for that is what makes sure there is one.
@@ -190,7 +190,7 @@ impl ModuleServices {
             ])))?;
         // And the **table providers** (§8.3), on the same catalog and for the
         // same kind of reason: what needs them is `Catalog::reload`, which builds
-        // a provided table out of its `_sc_tables` row, and `Catalog::provider`,
+        // a provided table out of its `_fd_tables` row, and `Catalog::provider`,
         // which serves its rows.
         self.catalog
             .set_table_providers(Arc::new(TableProviderHosts::new(vec![

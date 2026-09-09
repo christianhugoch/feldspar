@@ -161,7 +161,7 @@ pub struct ServerConfig {
     /// How this server obtains the certificate it serves HTTPS with (§13.5).
     ///
     /// **Not a command-line setting**, deliberately: certificates are edited in
-    /// the admin UI and stored in `_sc_config`, so every node against one
+    /// the admin UI and stored in `_fd_config`, so every node against one
     /// database serves the same thing and a renewal is not a deploy. The boot
     /// path reads the settings and fills this in
     /// ([`TlsSettings::from_ssl`](crate::tls::TlsSettings::from_ssl)); the

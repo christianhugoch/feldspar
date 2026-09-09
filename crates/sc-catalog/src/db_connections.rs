@@ -1,4 +1,4 @@
-//! The `_sc_db_connections` table: its schema, bootstrap, and the
+//! The `_fd_db_connections` table: its schema, bootstrap, and the
 //! [`DbConnectionDef`] ⇄ row mapping — the *other* databases an admin has
 //! connected (design §5, §9).
 //!
@@ -57,7 +57,7 @@ use crate::field::DataField;
 use crate::table::Table;
 
 /// Name of the database-connections table in the primary database.
-pub const DB_CONNECTIONS_TABLE: &str = "_sc_db_connections";
+pub const DB_CONNECTIONS_TABLE: &str = "_fd_db_connections";
 
 /// The UUID primary-key column (§9).
 pub const COL_ID: &str = "id";
@@ -238,7 +238,7 @@ impl DbConnectionDef {
     }
 }
 
-/// The fields of the `_sc_db_connections` table, in declaration order.
+/// The fields of the `_fd_db_connections` table, in declaration order.
 fn db_connection_fields() -> Vec<DataField> {
     let text = || TypeRef::Basic(BasicType::Text);
     let json = || TypeRef::Basic(BasicType::Json);
@@ -266,7 +266,7 @@ fn db_connection_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure the `_sc_db_connections` table exists, creating it if absent, and
+/// Ensure the `_fd_db_connections` table exists, creating it if absent, and
 /// return it. Idempotent; call once at startup, before connecting stored
 /// connections.
 pub async fn bootstrap_db_connections(catalog: &Catalog) -> Result<Table> {
@@ -591,7 +591,7 @@ fn connection_values(def: &DbConnectionDef) -> Vec<Value> {
     ]
 }
 
-/// Rebuild a [`DbConnectionDef`] from its `_sc_db_connections` row.
+/// Rebuild a [`DbConnectionDef`] from its `_fd_db_connections` row.
 fn connection_from_row(row: &Row) -> Result<DbConnectionDef> {
     let id = match row.get(COL_ID) {
         Some(Value::Uuid(u)) => DbConnectionId(*u),
@@ -720,7 +720,7 @@ mod tests {
 
     #[test]
     fn the_table_is_a_hidden_system_table() {
-        assert!(DB_CONNECTIONS_TABLE.starts_with("_sc_"));
+        assert!(DB_CONNECTIONS_TABLE.starts_with("_fd_"));
     }
 
     #[test]

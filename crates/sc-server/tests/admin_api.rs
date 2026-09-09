@@ -264,7 +264,7 @@ async fn full_admin_api_story() -> sc_error::Result<()> {
     assert_eq!(body.as_array().unwrap().len(), 0);
 
     // --- roles & users -----------------------------------------------------
-    // A user's role references `_sc_roles`, so the role has to exist before a
+    // A user's role references `_fd_roles`, so the role has to exist before a
     // user can hold it. The two built-ins are seeded at bootstrap; role 40 is
     // created here, which is the ordinary flow (make the role, then the users).
     let (status, role) = client

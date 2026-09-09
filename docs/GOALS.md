@@ -202,21 +202,21 @@ We are targeting Linux, MacOS, Windows and FreeBSD
 
 We are not using the same storage format as saltcorn v1, but it is similar
 
-All metadata and users are stored in the primary database. Any table in the primary table called `_sc_*` is regarded as a system system metadata table and not visible to the user. Any system metadata table must have: name, id (uuid), description, attributes (JSON field, always an object) and any other fields. Fields that has a value for many rows should be their own field, fields that have a sparse value can be set in the attributes. This is a value judgement and key part of the design.
+All metadata and users are stored in the primary database. Any table in the primary table called `_fd_*` is regarded as a system system metadata table and not visible to the user. Any system metadata table must have: name, id (uuid), description, attributes (JSON field, always an object) and any other fields. Fields that has a value for many rows should be their own field, fields that have a sparse value can be set in the attributes. This is a value judgement and key part of the design.
 
 Files are on-disk, there is no database reppresentation per file. any per-file metadata must be stored as xattrs, we need a cross platform library to access this
 
-Tables and fields : all tables and fields work out of the box when a database driver is connected. So no metadata is strictly necessary for the tables. But both tables and fields may need to have metadata added to them - access rules, attributes. The primary database contains a table for metadata called `_sc_tables` and `_sc_fields` that stores an "overlay" on the existing tables with any additional information and also details on any provided tables. 
+Tables and fields : all tables and fields work out of the box when a database driver is connected. So no metadata is strictly necessary for the tables. But both tables and fields may need to have metadata added to them - access rules, attributes. The primary database contains a table for metadata called `_fd_tables` and `_fd_fields` that stores an "overlay" on the existing tables with any additional information and also details on any provided tables. 
 
-Triggers, agents and workflows: Stored in the `_sc_triggers` table. Workflows must be versioned so a suspended run can finish with its version of the workflow.
+Triggers, agents and workflows: Stored in the `_fd_triggers` table. Workflows must be versioned so a suspended run can finish with its version of the workflow.
 
-Workflow and agent runs: stored in the `_sc_runs` table which stored the current context and state (updated after each step). When enabled for a specific workflow, runs can write the centext and timing of each step to the `_sc_run_traces` table. 
+Workflow and agent runs: stored in the `_fd_runs` table which stored the current context and state (updated after each step). When enabled for a specific workflow, runs can write the centext and timing of each step to the `_fd_run_traces` table. 
 
-Configuration: stored in a `_sc_config` table. Configurations can apply to the setup as a whole or each application, and specific frameworks will have different configuration values. for each permissible key, there must be a restriction on the types of values this can take, but all values are stored as JSON values.
+Configuration: stored in a `_fd_config` table. Configurations can apply to the setup as a whole or each application, and specific frameworks will have different configuration values. for each permissible key, there must be a restriction on the types of values this can take, but all values are stored as JSON values.
 
-Applications: applications are stored in a `_sc_applications` table. 
+Applications: applications are stored in a `_fd_applications` table. 
 
-Models and model instances: stored in `_sc_models` and `_sc_model_instances` tables
+Models and model instances: stored in `_fd_models` and `_fd_model_instances` tables
 
 Users: users are stored in a database table called `users` in the primary database. Passwords are stored encrypted according to best practices. The user primary key should be UUID, for importing legacy saltcorn applications where the user id was autoincrementing integers, a legacy_id field can be created as needed. Initially every user has an email, but this field can be deleted by the admin and a different field can be introduced. Code should never assume the user has any other field than the id (which must not be deletable). Admin can add any field to the user table.
 

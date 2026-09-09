@@ -1208,11 +1208,11 @@ mod tests {
                 distinct: false,
                 args: Vec::new(),
             },
-            "_sc_count",
+            "_fd_count",
         )];
         let out = run(&select);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].get("_sc_count"), Some(&Value::Int(3)));
+        assert_eq!(out[0].get("_fd_count"), Some(&Value::Int(3)));
 
         // And with a filter, over what the filter left.
         select.filter = Some(Expr::binary(
@@ -1221,7 +1221,7 @@ mod tests {
             Expr::lit("beta"),
         ));
         let out = run(&select);
-        assert_eq!(out[0].get("_sc_count"), Some(&Value::Int(1)));
+        assert_eq!(out[0].get("_fd_count"), Some(&Value::Int(1)));
     }
 
     #[test]

@@ -42,8 +42,8 @@ sc-log.workspace = true
 # `configFields`; `Attrs` for the values; `redact_attrs`/`merge_secrets` for a
 # module's own password settings (§6.2, §11.1).
 sc-types.workspace = true
-# `_sc_modules` is stored metadata, so this crate speaks the query language and
-# reads rows back out of the driver, exactly as `_sc_llm_providers` does (§9's
+# `_fd_modules` is stored metadata, so this crate speaks the query language and
+# reads rows back out of the driver, exactly as `_fd_llm_providers` does (§9's
 # storage pattern). Needing a `Catalog` is what fixes this crate above layer 4.
 sc-catalog.workspace = true
 sc-query.workspace = true

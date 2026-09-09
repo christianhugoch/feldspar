@@ -1,6 +1,6 @@
 //! A **provided** table, end to end inside the catalog (design §8.3).
 //!
-//! A `_sc_tables` row carrying a provider is not an overlay — it is the table's
+//! A `_fd_tables` row carrying a provider is not an overlay — it is the table's
 //! only definition — so what this asserts is the whole of that claim against a
 //! real database: the row makes a table appear, its columns are the host's
 //! answer, `Catalog::provider` serves its rows, and nothing above the trait knows
@@ -150,7 +150,7 @@ impl TableProviderHost for FakeFeed {
     }
 }
 
-/// A catalog over a throwaway database with `_sc_tables` bootstrapped.
+/// A catalog over a throwaway database with `_fd_tables` bootstrapped.
 async fn catalog(db: &TestDb) -> Result<Catalog> {
     let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
     let catalog = Catalog::init(driver).await?;

@@ -177,7 +177,7 @@ pub struct Models {
 }
 
 impl Models {
-    /// An empty set — a catalog with no `_sc_models` table, and the starting
+    /// An empty set — a catalog with no `_fd_models` table, and the starting
     /// point for a test.
     pub fn empty() -> Models {
         Models::default()
@@ -185,7 +185,7 @@ impl Models {
 
     /// Load and validate every stored model.
     ///
-    /// A catalog with no `_sc_models` table yields an empty set rather than an
+    /// A catalog with no `_fd_models` table yields an empty set rather than an
     /// error: that table's absence *means* "no models have ever been defined".
     ///
     /// No dataset is read here (see the module docs), so what is checked is the

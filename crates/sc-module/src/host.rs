@@ -9,7 +9,7 @@
 //! of that: the same four calls, the same manifest, and none of the change.
 //!
 //! **Sandboxed**: a module's worker is built with the permission set on its
-//! `_sc_modules` row — closed unless an admin granted something — and modules
+//! `_fd_modules` row — closed unless an admin granted something — and modules
 //! are pinned to workers by that set, because a `PermissionsContainer` belongs
 //! to an isolate (§2).
 //!

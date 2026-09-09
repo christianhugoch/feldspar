@@ -166,14 +166,14 @@ becomes one column on the departments query:
 
 ```sql
 SELECT "departments".*,
-       (SELECT count(*) FROM "employees" AS "_sc_g1"
-         WHERE "_sc_g1"."department" = "departments"."id"
-           AND "_sc_g1"."salary" < $1) AS "employees_aggregate.count"
+       (SELECT count(*) FROM "employees" AS "_fd_g1"
+         WHERE "_fd_g1"."department" = "departments"."id"
+           AND "_fd_g1"."salary" < $1) AS "employees_aggregate.count"
 FROM "departments"
 ```
 
 which is byte-for-byte the shape `employeesↃdepartment.filter(r => r.salary < 50000).length`
-already translates to (the aliases are `_sc_g…` rather than the translator's own `_sc_a…`, so a
+already translates to (the aliases are `_fd_g…` rather than the translator's own `_fd_a…`, so a
 GraphQL aggregate and a calculated field in the same statement cannot collide). One query, one implementation of the semantics (`sum` coalesces to 0,
 `avg`/`min`/`max` on no rows are null, null keys are ignored, `count(DISTINCT …)`), and
 aggregates that behave identically wherever they are asked for — in a calculated field, in

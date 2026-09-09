@@ -47,7 +47,7 @@ use crate::{Attrs, FormField};
 /// `fieldviews()` (§6.1) is deferred with the rest of §6.3 — see the module docs.
 pub trait RichType: Send + Sync {
     /// The registry key and the name a field's [`TypeRef`](crate::TypeRef)
-    /// stores. Stable — it is what the `_sc_fields` overlay persists (§3.2).
+    /// stores. Stable — it is what the `_fd_fields` overlay persists (§3.2).
     fn name(&self) -> &str;
 
     /// The type's attributes, as the form the admin UI renders to configure a
@@ -137,7 +137,7 @@ fn unknown_rich_type(name: &str) -> Error {
 /// [`RichType`], carried by [`TypeRef::Rich`](crate::TypeRef::Rich).
 ///
 /// Like a `FrameworkRef` names its framework, a field is *stored* as a rich
-/// type's name (in the `_sc_fields` overlay, §3.2); a `RichTypeRef` is that name
+/// type's name (in the `_fd_fields` overlay, §3.2); a `RichTypeRef` is that name
 /// already resolved against the registry, so [`sql_type`](RichTypeRef::sql_type),
 /// [`name`](RichTypeRef::name) and [`validate`](RichTypeRef::validate) can
 /// delegate to the type without a lookup each time. Build one with

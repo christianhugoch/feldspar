@@ -6,7 +6,7 @@
 //! understands, with typed attributes and validation (§6.1, [`crate::rich`]).
 //!
 //! **A rich type is never guessed from the database.** [`from_sql_type`] always
-//! returns a basic type: a column is rich only because the `_sc_fields` overlay
+//! returns a basic type: a column is rich only because the `_fd_fields` overlay
 //! says so (§3.2). Inferring "this `text` column is an `Email`" from the schema
 //! is exactly the kind of magic that makes a legacy database behave surprisingly,
 //! so it is deliberately not done — the mapping runs the other way, from an
@@ -32,7 +32,7 @@ impl TypeRef {
     /// Resolve a backend SQL type name to a **basic** type reference.
     ///
     /// Always basic: introspection never yields a rich type (see the module
-    /// docs). A column becomes rich only when the `_sc_fields` overlay names a
+    /// docs). A column becomes rich only when the `_fd_fields` overlay names a
     /// rich type for it (§3.2), which resolves through
     /// [`RichTypeRef::resolve`](crate::RichTypeRef::resolve), not here.
     pub fn from_sql_type(sql_type: &str) -> TypeRef {

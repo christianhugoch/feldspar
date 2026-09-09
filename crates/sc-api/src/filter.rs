@@ -69,7 +69,7 @@ const NOT: &str = "not";
 ///
 /// `col` is the column *expression* rather than the column name, because the
 /// same comparison is built against a bare column (`"due"`) at the root of a
-/// query and against a qualified one (`"_sc_a1"."due"`) inside a correlated
+/// query and against a qualified one (`"_fd_a1"."due"`) inside a correlated
 /// subquery. `column` is still the catalog name the operand is coerced against.
 ///
 /// The operand is JSON: it is what a GraphQL input value converts to and what a

@@ -129,7 +129,7 @@ async fn setup() -> sc_error::Result<(Client, Arc<dyn FileStore>, TestDb)> {
     sc_auth::bootstrap(&catalog).await?;
     // `listFileStores` reads the stored definitions as well as the connected
     // registry (§1.4), so the table has to exist — the real boot path bootstraps
-    // it in `connect_catalog` alongside `users` and `_sc_applications`.
+    // it in `connect_catalog` alongside `users` and `_fd_applications`.
     sc_catalog::bootstrap_file_stores(&catalog).await?;
 
     // Connect a local file store to the catalog, by name.

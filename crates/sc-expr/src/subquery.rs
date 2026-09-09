@@ -10,9 +10,9 @@
 //! [`sc_query::Expr`]:
 //!
 //! ```sql
-//! (SELECT count(*) FROM "employees" "_sc_a1"
-//!    WHERE "_sc_a1"."department" = "departments"."id"
-//!      AND "_sc_a1"."salary" < $1)
+//! (SELECT count(*) FROM "employees" "_fd_a1"
+//!    WHERE "_fd_a1"."department" = "departments"."id"
+//!      AND "_fd_a1"."salary" < $1)
 //! ```
 //!
 //! The reason this is a module rather than a private helper is drift. The empty
@@ -257,7 +257,7 @@ mod tests {
             key_field: "department".into(),
             parent: "departments".into(),
             parent_field: "id".into(),
-            alias: "_sc_a1".into(),
+            alias: "_fd_a1".into(),
             func,
             distinct: false,
             value,
@@ -282,7 +282,7 @@ mod tests {
     }
 
     fn salary_below(n: i64) -> Expr {
-        Expr::binary(BinOp::Lt, Expr::qcol("_sc_a1", "salary"), Expr::lit(n))
+        Expr::binary(BinOp::Lt, Expr::qcol("_fd_a1", "salary"), Expr::lit(n))
     }
 
     #[test]
@@ -290,19 +290,19 @@ mod tests {
         let (sql, binds) = projected(spec(AggFunc::Count, None, None));
         assert_eq!(
             sql,
-            "(SELECT count(*) FROM \"employees\" AS \"_sc_a1\" \
-             WHERE (\"_sc_a1\".\"department\" = \"departments\".\"id\"))"
+            "(SELECT count(*) FROM \"employees\" AS \"_fd_a1\" \
+             WHERE (\"_fd_a1\".\"department\" = \"departments\".\"id\"))"
         );
         assert!(binds.is_empty(), "a bare count binds nothing: {binds:?}");
     }
 
     #[test]
     fn count_distinct_takes_the_value_and_refuses_without_one() {
-        let mut s = spec(AggFunc::Count, Some(Expr::qcol("_sc_a1", "manager")), None);
+        let mut s = spec(AggFunc::Count, Some(Expr::qcol("_fd_a1", "manager")), None);
         s.distinct = true;
         let (sql, _) = projected(s);
         assert!(
-            sql.contains("count(DISTINCT \"_sc_a1\".\"manager\")"),
+            sql.contains("count(DISTINCT \"_fd_a1\".\"manager\")"),
             "got: {sql}"
         );
 
@@ -319,24 +319,24 @@ mod tests {
         // avg/min/max over no rows are null.
         let (sql, binds) = projected(spec(
             AggFunc::Sum,
-            Some(Expr::qcol("_sc_a1", "salary")),
+            Some(Expr::qcol("_fd_a1", "salary")),
             None,
         ));
         assert_eq!(
             sql,
-            "COALESCE((SELECT sum(\"_sc_a1\".\"salary\") FROM \"employees\" AS \"_sc_a1\" \
-             WHERE (\"_sc_a1\".\"department\" = \"departments\".\"id\")), $1)"
+            "COALESCE((SELECT sum(\"_fd_a1\".\"salary\") FROM \"employees\" AS \"_fd_a1\" \
+             WHERE (\"_fd_a1\".\"department\" = \"departments\".\"id\")), $1)"
         );
         assert_eq!(binds, vec![Value::Int(0)]);
 
         for func in [AggFunc::Avg, AggFunc::Min, AggFunc::Max] {
             let name = func.name();
-            let (sql, binds) = projected(spec(func, Some(Expr::qcol("_sc_a1", "salary")), None));
+            let (sql, binds) = projected(spec(func, Some(Expr::qcol("_fd_a1", "salary")), None));
             assert_eq!(
                 sql,
                 format!(
-                    "(SELECT {name}(\"_sc_a1\".\"salary\") FROM \"employees\" AS \"_sc_a1\" \
-                     WHERE (\"_sc_a1\".\"department\" = \"departments\".\"id\"))"
+                    "(SELECT {name}(\"_fd_a1\".\"salary\") FROM \"employees\" AS \"_fd_a1\" \
+                     WHERE (\"_fd_a1\".\"department\" = \"departments\".\"id\"))"
                 )
             );
             assert!(binds.is_empty(), "{name} should not coalesce: {sql}");
@@ -349,11 +349,11 @@ mod tests {
             AggFunc::StringAgg {
                 separator: Expr::lit(", "),
             },
-            Some(Expr::qcol("_sc_a1", "name")),
+            Some(Expr::qcol("_fd_a1", "name")),
             None,
         ));
         assert!(
-            sql.starts_with("COALESCE((SELECT string_agg(\"_sc_a1\".\"name\", $1)"),
+            sql.starts_with("COALESCE((SELECT string_agg(\"_fd_a1\".\"name\", $1)"),
             "got: {sql}"
         );
         assert_eq!(
@@ -389,9 +389,9 @@ mod tests {
         let (sql, binds) = projected(spec(AggFunc::Count, None, Some(salary_below(50_000))));
         assert_eq!(
             sql,
-            "(SELECT count(*) FROM \"employees\" AS \"_sc_a1\" \
-             WHERE ((\"_sc_a1\".\"department\" = \"departments\".\"id\") AND \
-             (\"_sc_a1\".\"salary\" < $1)))"
+            "(SELECT count(*) FROM \"employees\" AS \"_fd_a1\" \
+             WHERE ((\"_fd_a1\".\"department\" = \"departments\".\"id\") AND \
+             (\"_fd_a1\".\"salary\" < $1)))"
         );
         assert_eq!(binds, vec![Value::Int(50_000)]);
         assert!(
@@ -403,11 +403,11 @@ mod tests {
         // Every function carries the predicate, not just count.
         let (sql, _) = projected(spec(
             AggFunc::Avg,
-            Some(Expr::qcol("_sc_a1", "salary")),
+            Some(Expr::qcol("_fd_a1", "salary")),
             Some(salary_below(50_000)),
         ));
         assert!(
-            sql.contains("AND (\"_sc_a1\".\"salary\" < $1)"),
+            sql.contains("AND (\"_fd_a1\".\"salary\" < $1)"),
             "got: {sql}"
         );
     }
@@ -475,7 +475,7 @@ mod tests {
             .into();
         let (sql, _) = Pg.render(&stmt).unwrap();
         assert!(
-            sql.contains("\"_sc_a1\".\"department\" = \"d\".\"id\""),
+            sql.contains("\"_fd_a1\".\"department\" = \"d\".\"id\""),
             "got: {sql}"
         );
     }

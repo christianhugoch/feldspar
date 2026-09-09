@@ -15,7 +15,7 @@
 //! `--role NAME` — and start a session for them.
 //!
 //! **It writes the session itself, and needs no server at all.** A session is a
-//! row in [`_sc_sessions`](sc_auth::SESSIONS_TABLE) (§7.2) — that is what lets
+//! row in [`_fd_sessions`](sc_auth::SESSIONS_TABLE) (§7.2) — that is what lets
 //! two application servers share one — so the authority that can write that
 //! table can start a session, and this command is holding exactly that
 //! authority. It used to have to ask a *running* server, through a one-time

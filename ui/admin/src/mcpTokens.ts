@@ -30,7 +30,7 @@ import type { FieldSpec } from "./settings";
  * its plaintext, because the table holds neither in a readable form. */
 export type ApiToken = ListApiTokensResponse[number];
 
-/** The `_sc_config` key that decides whether `POST /mcp` exists
+/** The `_fd_config` key that decides whether `POST /mcp` exists
  * (`sc_config::MCP_ENABLED`).
  *
  * Spelled here rather than imported because it is a *protocol* constant — it

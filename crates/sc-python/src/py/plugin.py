@@ -1,7 +1,7 @@
 """What a Python **plugin module** declares, and how this server reads it.
 
 Specification §2 of the Python API ("A plugin module"), §8 (two module
-languages, one ``_sc_modules``) and §11 (a reload is best-effort).
+languages, one ``_fd_modules``) and §11 (a reload is best-effort).
 
 A plugin is an ordinary ``pip``-installable distribution that says what it
 supplies with decorators::
@@ -544,7 +544,7 @@ class Registry:
 _REGISTRIES = {}
 
 #: The registries the host has loaded, by normalised distribution name — the
-#: name `_sc_modules` holds and every host call arrives under.
+#: name `_fd_modules` holds and every host call arrives under.
 _BY_DISTRIBUTION = {}
 
 

@@ -251,7 +251,7 @@ async fn furnish(server: &mut Server) -> sc_error::Result<()> {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
-    // A rule the table's rows are kept to. Not stored in any `_sc_*` table
+    // A rule the table's rows are kept to. Not stored in any `_fd_*` table
     // (§5.1), so a backup that carried the columns and not this would hand back
     // a table that accepts what the original refused.
     let (status, body) = server

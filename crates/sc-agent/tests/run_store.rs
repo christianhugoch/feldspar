@@ -1,4 +1,4 @@
-//! `_sc_runs`' **workflow** columns against a real Postgres (§10.3, phase 1.5).
+//! `_fd_runs`' **workflow** columns against a real Postgres (§10.3, phase 1.5).
 //!
 //! The agent half of this table is exercised by `agent_loop.rs`, which is where
 //! the loop writes it. What is here is the four columns the durable engine

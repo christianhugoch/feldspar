@@ -9,7 +9,7 @@
 //!
 //! ## What is here
 //!
-//! - The **record** ([`agent`], [`store`], [`validate`]): [`Agent`], `_sc_agents`,
+//! - The **record** ([`agent`], [`store`], [`validate`]): [`Agent`], `_fd_agents`,
 //!   and one validation function run on save *and* on load. An agent that fails
 //!   is dropped from the live set ([`Agents`]) with its reason kept, and stays
 //!   stored, listed and editable — editing it is the repair.
@@ -19,8 +19,8 @@
 //!   machine that decides and does no IO.
 //! - The **driver** ([`driver`]): [`Runner`], the one thing that does IO for it —
 //!   streams the provider, dispatches tools as the run's caller, and writes
-//!   `_sc_runs` after every step.
-//! - The **run** ([`run`], [`run_store`]): [`Run`] and `_sc_runs`, in the shape
+//!   `_fd_runs` after every step.
+//! - The **run** ([`run`], [`run_store`]): [`Run`] and `_fd_runs`, in the shape
 //!   §10.3's workflow engine will also use.
 //! - **Delegation** ([`delegate`]): [`Delegator`], the capability a run offers a
 //!   trait that names *another agent* — a child run, under the same authority,
@@ -31,7 +31,7 @@
 //! ## The two decisions worth knowing before reading
 //!
 //! **The loop is a machine, not an `async fn`.** The state is a value, so it is
-//! what `_sc_runs` stores and a resumed run is a loaded one. See [`machine`].
+//! what `_fd_runs` stores and a resumed run is a loaded one. See [`machine`].
 //!
 //! **A tool runs as the caller, not as the server.** [`RunCaller`] travels with
 //! the run and there is no default: a chat turn carries the person and a

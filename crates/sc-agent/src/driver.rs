@@ -3,7 +3,7 @@
 //! The machine decides; this drives. It builds each request from the agent's
 //! definition, streams it through the [`LlmProvider`], dispatches tool calls to
 //! the traits that declared them, and — after **every** step — writes the run to
-//! `_sc_runs`. Splitting it this way is what makes the decisions testable without
+//! `_fd_runs`. Splitting it this way is what makes the decisions testable without
 //! a provider and the persistence uniform: there is exactly one place a step
 //! ends, so there is exactly one place a step is saved.
 //!
@@ -565,7 +565,7 @@ impl Delegator for Runner<'_> {
 /// How a run gets the provider it talks to.
 ///
 /// In a deployment this is [`StoredProviders`], which is [`connect`]: the agent
-/// names an `_sc_llm_providers` record, that record is loaded and connected, and
+/// names an `_fd_llm_providers` record, that record is loaded and connected, and
 /// the agent's `model` overrides the provider's default. It is a **trait** rather
 /// than that function called directly because everything built on top of a run —
 /// the chat socket's deltas and aborts (§11.4), the `run_agent` action a trigger

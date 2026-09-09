@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use uuid::Uuid;
 
-/// Identifies an agent: the UUID primary key of its `_sc_agents` row (§9).
+/// Identifies an agent: the UUID primary key of its `_fd_agents` row (§9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AgentId(pub Uuid);
 
@@ -107,7 +107,7 @@ impl EnabledTrait {
 /// enabled traits.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Agent {
-    /// Stable identity: the UUID of its `_sc_agents` row.
+    /// Stable identity: the UUID of its `_fd_agents` row.
     pub id: AgentId,
     /// The unique, human-facing name — what a trigger's `run_agent` and the chat
     /// panel address it by, so renaming one breaks those references deliberately
@@ -116,7 +116,7 @@ pub struct Agent {
     /// Human-readable description (§9 requires one on every metadata row; the
     /// empty string means "none given").
     pub description: String,
-    /// The name of an `_sc_llm_providers` record.
+    /// The name of an `_fd_llm_providers` record.
     pub provider: String,
     /// The model to call, overriding the provider's default. `None` means the
     /// provider's own — which is the common case, and why this is not required.
@@ -281,7 +281,7 @@ mod tests {
     #[test]
     fn an_enabled_trait_serialises_its_name_as_trait() {
         // The stored shape should not have to know that `trait` is a Rust
-        // keyword: `_sc_agents.traits` holds `{"trait": ..., "config": ...}`.
+        // keyword: `_fd_agents.traits` holds `{"trait": ..., "config": ...}`.
         let enabled = EnabledTrait::new("run_trigger").config("trigger", "reindex");
         let text = serde_json::to_value(&enabled).unwrap();
         assert_eq!(

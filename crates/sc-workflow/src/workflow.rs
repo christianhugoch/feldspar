@@ -1,7 +1,7 @@
 //! The [`Workflow`]: a program a trigger body can be (design §10.3).
 //!
 //! Pure data, and **the stored JSON is the API shape and the editor's shape**.
-//! There is no second spelling: what `_sc_workflow_versions.steps` holds is what
+//! There is no second spelling: what `_fd_workflow_versions.steps` holds is what
 //! `getWorkflow` answers and what the canvas round-trips, so a step the engine
 //! understands and a step the editor draws cannot drift apart.
 //!
@@ -74,7 +74,7 @@ pub struct Workflow {
     /// What happens to a step that fails and has no policy of its own.
     #[serde(default)]
     pub error_policy: ErrorPolicy,
-    /// Whether every step writes a `_sc_run_traces` row (§9): the context after
+    /// Whether every step writes a `_fd_run_traces` row (§9): the context after
     /// it, its timing and its outcome.
     ///
     /// Off by default, because a trace is a copy of the whole context per step

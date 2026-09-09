@@ -409,7 +409,7 @@ ACME order is built, so a newly added application gets its certificate name at
 the next restart and not before.
 
 **A model fit in flight does not survive it.** Fitting is a spawned job whose only
-record is its `_sc_model_instances` row, so a process that stops mid-fit would leave a
+record is its `_fd_model_instances` row, so a process that stops mid-fit would leave a
 row saying `fitting` for ever. Boot therefore **reaps** them: every instance still
 `fitting` at startup is marked `failed` with *"the server restarted while this fit was
 running"*. Nothing is lost but the compute — the model is untouched, and pressing

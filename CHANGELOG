@@ -2,6 +2,42 @@
 
 Changes in reverse chronological order.
 
+## The metadata namespace is `_fd_`, so v1 can share the schema
+
+Every metadata table this server owns is renamed from the `_sc_` prefix to `_fd_`:
+`_fd_tables`, `_fd_fields`, `_fd_triggers`, `_fd_workflow_versions`, `_fd_agents`,
+`_fd_llm_providers`, `_fd_runs`, `_fd_run_traces`, `_fd_config`, `_fd_acme_cache`,
+`_fd_applications`, `_fd_models`, `_fd_model_instances`, `_fd_modules`, `_fd_roles`,
+`_fd_sessions`, `_fd_api_tokens`, `_fd_db_connections`, `_fd_file_stores` and the SQLite
+driver's `_fd_object_comments`.
+
+Saltcorn v1 keeps its own metadata in `_sc_*`, and a transition project runs v1 and this
+server side by side. The prefix was never decoration — it is what `Table::is_system` reads
+to decide whether a table is the server's own — so sharing it would have been sharing an
+identity: a bootstrap of `_sc_config` here would write into v1's row store, and `is_system`
+would hide v1's tables from the very admin who came to look at them. `_sc_*` is now an
+ordinary name here, and a v1 table found in the primary is a table this server can be
+pointed at like any other.
+
+- **The query builder's aliases move with it** (`_fd_a1`, `_fd_j1`, `_fd_g1`, `_fd_rn`,
+  `_fd_count`, `_fd_part`, `_fd_split_key`). These are not tables, but they are the *same*
+  prefix on purpose: an alias is only guaranteed not to shadow a real table because §9
+  forbids a user table from starting with the reserved one. Two prefixes would be two
+  things to keep in step, and the day they drifted a user could name a table `_sc_a1` and
+  watch a correlated column reference resolve to the wrong row.
+- **`TABLES_RENAME.sql`** carries the migration for an existing installation, to be applied
+  by hand — there is no compatibility code anywhere in the tree. It renames the tables and,
+  on Postgres, the indexes, constraints, sequences and triggers that carry the old prefix in
+  their *own* names, which a table rename leaves alone: `_fd_config` indexed by
+  `_sc_config_pkey` is exactly the collision this whole change is about. Its comments also
+  record what the rename does **not** solve — `users` is unprefixed in both systems and is
+  not the same shape, and application tables collide by name, so one of the two servers
+  still has to live in its own schema.
+- **A hygiene test holds the line** (`the_metadata_namespace_is_fd_and_only_v1_is_still_called_sc`):
+  no live source or document may start an identifier with `_sc_` unless the same line says it
+  is talking about v1's. The historical records (`docs/TODO-*.md`, this file) are left as they
+  were written, as they are for the `feldspar` rename.
+
 ## v1's `Table` and `Field`, in the one JavaScript both hosts compile
 
 The second phase of the v1 `Table` API: the surface itself. `crates/sc-expr/src/js/v1_api.js`

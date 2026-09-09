@@ -429,7 +429,7 @@ pub(super) fn build_worker(
         module_loader: Rc::new(HostModuleLoader(FsModuleLoader)),
         node_services: Some(node_services(root)),
         npm_process_state_provider: None,
-        // Built from the `_sc_modules` rows of the modules pinned to this
+        // Built from the `_fd_modules` rows of the modules pinned to this
         // worker — which all share one set, because that is what the pool pins
         // by. Closed unless an admin granted something.
         permissions: container(permissions),

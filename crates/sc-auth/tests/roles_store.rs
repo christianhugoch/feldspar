@@ -1,4 +1,4 @@
-//! Integration test: roles as rows in `_sc_roles`, with `users.role` a foreign
+//! Integration test: roles as rows in `_fd_roles`, with `users.role` a foreign
 //! key onto them (design §7.1, §9), against a real database.
 //!
 //! The point of making a role a row rather than a bare integer is that the row

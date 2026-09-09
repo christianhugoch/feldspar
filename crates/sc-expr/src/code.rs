@@ -8651,7 +8651,7 @@ mod tests {
                 ],
             },
             {
-                "id": "_sc_modules", "name": "_sc_modules", "label": "_sc_modules",
+                "id": "_fd_modules", "name": "_fd_modules", "label": "_fd_modules",
                 "description": null, "primary_key": ["id"],
                 "min_role_read": 1, "min_role_write": 1,
                 "ownership_formula": null, "ownership_field_id": null,

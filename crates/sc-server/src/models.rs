@@ -330,7 +330,7 @@ mod tests {
     fn the_split_key_is_a_reserved_alias_and_not_a_dataset_column_name() {
         // A dataset column called `id` computes whatever its formula says; the
         // key is projected separately so the two cannot be confused.
-        assert!(SPLIT_KEY.starts_with("_sc_"));
+        assert!(SPLIT_KEY.starts_with("_fd_"));
         let ds = Dataset::new("houses").column("id", "bedrooms");
         assert!(ds.columns.iter().all(|c| c.name != SPLIT_KEY));
     }

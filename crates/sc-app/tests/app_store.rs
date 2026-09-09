@@ -1,5 +1,5 @@
 //! Phase 10 integration test: an application round-tripping through its
-//! `_sc_applications` row, against a real database (design §9, §13.2).
+//! `_fd_applications` row, against a real database (design §9, §13.2).
 //!
 //! An application is created in the admin UI and exists *only* as stored
 //! configuration — its row is its whole definition, with nothing to introspect
@@ -231,7 +231,7 @@ async fn a_duplicate_subdomain_is_rejected() -> Result<()> {
         .client()
         .await?
         .execute(
-            "INSERT INTO _sc_applications \
+            "INSERT INTO _fd_applications \
              (id, name, subdomain, framework, extra_frameworks, tables, file_stores, \
               apis, static_dirs, csp, attributes) \
              VALUES ($1, 'Sneaky', 'blog', '{}', '[]', '[]', '[]', '[]', '[]', '{}', '{}')",
@@ -280,14 +280,14 @@ async fn applications_are_listed_and_deleted() -> Result<()> {
 #[tokio::test]
 async fn a_legacy_database_with_no_applications_table_bootstraps_cleanly() -> Result<()> {
     let db = TestDb::new().await?;
-    // A database that has never seen Saltcorn: ordinary tables, no `_sc_*`.
+    // A database that has never seen Saltcorn: ordinary tables, no `_fd_*`.
     let cat = catalog(&db).await?;
-    assert!(cat.get("_sc_applications")?.is_none());
+    assert!(cat.get("_fd_applications")?.is_none());
     assert!(cat.get("posts")?.is_some());
 
     let table = bootstrap(&cat).await?;
-    assert_eq!(table.name, "_sc_applications");
-    // An `_sc_*` table is hidden from users (§9).
+    assert_eq!(table.name, "_fd_applications");
+    // An `_fd_*` table is hidden from users (§9).
     assert!(table.is_system());
     // It bootstraps empty — no migration, nothing to introspect an app from.
     assert!(list_applications(&cat).await?.is_empty());
@@ -296,7 +296,7 @@ async fn a_legacy_database_with_no_applications_table_bootstraps_cleanly() -> Re
     // and the apps already saved survive it.
     save_application(&cat, &blog()).await?;
     let again = bootstrap(&cat).await?;
-    assert_eq!(again.name, "_sc_applications");
+    assert_eq!(again.name, "_fd_applications");
     assert_eq!(list_applications(&cat).await?.len(), 1);
 
     // The introspected tables of the legacy database are untouched by any of it.
@@ -309,7 +309,7 @@ async fn a_legacy_database_with_no_applications_table_bootstraps_cleanly() -> Re
 /// Phase 7: a column a release adds reaches a database that already has
 /// applications in it, without a migration framework.
 ///
-/// The situation is the real one: `_sc_applications` exists, it has rows, and
+/// The situation is the real one: `_fd_applications` exists, it has rows, and
 /// then `triggers` is declared. Nothing may be lost and nothing may break — a row
 /// written before the column existed reads back as an app that exposes no
 /// triggers, which is exactly what it was.
@@ -323,13 +323,13 @@ async fn a_column_added_by_a_release_is_reconciled_onto_an_existing_table() -> R
     // `triggers` was declared, holding an application saved by that release.
     let client = db.client().await?;
     client
-        .batch_execute("ALTER TABLE _sc_applications DROP COLUMN triggers")
+        .batch_execute("ALTER TABLE _fd_applications DROP COLUMN triggers")
         .await
         .map_err(|e| sc_error::Error::database(e.to_string()))?;
     let old_id = uuid::Uuid::new_v4();
     client
         .execute(
-            "INSERT INTO _sc_applications \
+            "INSERT INTO _fd_applications \
              (id, name, description, subdomain, framework, extra_frameworks, tables, \
               file_stores, apis, static_dirs, csp, attributes) \
              VALUES ($1, 'Old Blog', '', 'old', '{\"name\": \"code\", \"config\": {}}', \
@@ -339,12 +339,12 @@ async fn a_column_added_by_a_release_is_reconciled_onto_an_existing_table() -> R
         .await
         .map_err(|e| sc_error::Error::database(e.to_string()))?;
     cat.reload().await?;
-    assert!(cat.require("_sc_applications")?.field("triggers").is_none());
+    assert!(cat.require("_fd_applications")?.field("triggers").is_none());
 
     // Booting the new release: the declared column the table does not have is
     // created, and nothing else is touched.
     bootstrap(&cat).await?;
-    assert!(cat.require("_sc_applications")?.field("triggers").is_some());
+    assert!(cat.require("_fd_applications")?.field("triggers").is_some());
 
     // The row written by the old release still reads, as the app it was.
     let old = load_application(&cat, sc_app::AppId(old_id))
@@ -369,7 +369,7 @@ async fn a_column_added_by_a_release_is_reconciled_onto_an_existing_table() -> R
 /// Phase 1.1: the application-level half of the file-store reference check.
 ///
 /// This is the half that actually protects a store today — the catalog-level
-/// `File`-field scan is inert until the `_sc_fields` overlay exists — so all
+/// `File`-field scan is inert until the `_fd_fields` overlay exists — so all
 /// three ways an application can reference a store need to be caught.
 #[tokio::test]
 async fn applications_are_found_by_every_way_they_reference_a_store() -> Result<()> {

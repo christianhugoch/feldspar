@@ -27,7 +27,7 @@ fn self_signed() -> (String, String) {
     (key.cert.pem(), key.key_pair.serialize_pem())
 }
 
-/// Stored settings in `custom` mode, as `_sc_config` would yield them.
+/// Stored settings in `custom` mode, as `_fd_config` would yield them.
 fn custom_settings(certificate: String, private_key: String, port: u16) -> SslSettings {
     SslSettings {
         mode: SslMode::Custom,

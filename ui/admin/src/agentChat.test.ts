@@ -266,7 +266,7 @@ describe("the session's side of the protocol", () => {
 });
 
 describe("reopening a stored run", () => {
-  /** A run's context as `_sc_runs` holds it: the loop's own state. */
+  /** A run's context as `_fd_runs` holds it: the loop's own state. */
   const context = {
     messages: [
       { role: "user", content: "how many books?" },

@@ -750,7 +750,7 @@
       return api;
     }
 
-    // `_sc_*` is where this server keeps its own rows, and a `Table.find()`
+    // `_fd_*` is where this server keeps its own rows, and a `Table.find()`
     // that listed them would put them in front of a plugin that only ever
     // wanted the application's tables.
     const specs = snapshot.tables.filter((t) => !t.is_system);
@@ -816,7 +816,8 @@
     }, "Table.");
 
     // Every field of every table, which is what v1's `Field.find` reads out of
-    // `_sc_fields` — a table this server does not have, and a snapshot it does.
+    // v1's `_sc_fields` — a table this server does not have, and a snapshot it
+    // does.
     const allFields = () => {
       const out = [];
       for (const spec of specs) {

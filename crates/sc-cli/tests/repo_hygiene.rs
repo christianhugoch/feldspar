@@ -754,7 +754,7 @@ fn the_design_records_what_the_graphql_milestone_actually_built() {
         "<child>_by_<key>",
         "omitted with",
         // The load-bearing decision: the provider does not aggregate.
-        "_sc_g1",
+        "_fd_g1",
         "count(distinct: Column)",
         "row_number() OVER (PARTITION BY …)",
         // The four authorization rules.
@@ -787,7 +787,7 @@ fn the_graphql_tutorial_reaches_the_motivating_query_and_its_rules() {
     let tutorial = read(&root, "docs/tutorial-graphql.md");
     for fragment in [
         "employees_aggregate(where:", // the query the milestone exists for
-        "_sc_g1",                     // …and the correlated subquery it becomes
+        "_fd_g1",                     // …and the correlated subquery it becomes
         "row_number()",               // a nested `limit` is per parent
         "DataLoader",                 // …and a child list is one statement per level
         "insert_employees",           // the write path
@@ -909,7 +909,7 @@ fn the_design_records_what_the_workflow_milestone_actually_built() {
     for fragment in [
         // A workflow is a trigger body, and its steps are versioned rows.
         "TriggerBody",
-        "_sc_workflow_versions",
+        "_fd_workflow_versions",
         "append-only",
         "subject_version",
         // Control flow is data, and the step set is five.
@@ -953,7 +953,7 @@ fn the_design_records_what_the_constraints_milestone_actually_built() {
     let design = read(&root, "docs/TECHNICAL_DESIGN.md");
     for fragment in [
         // Where a constraint lives, and why there is no table for it.
-        "no `_sc_constraints`",
+        "no `_fd_constraints`",
         "saltcorn_constraint",
         "AddUniqueConstraint",
         // What enforces a row constraint, and the shape of the generated body.
@@ -1198,8 +1198,8 @@ fn the_design_records_what_the_models_milestone_actually_built() {
         // The five nouns, and where each lives.
         "model provider",
         "model instance",
-        "`_sc_models`",
-        "`_sc_model_instances`",
+        "`_fd_models`",
+        "`_fd_model_instances`",
         // The dataset, and the vocabulary there deliberately is not.
         "no second vocabulary",
         "neighbourhoodⱵaverage_income",
@@ -1285,7 +1285,7 @@ fn the_models_tutorial_walks_the_definition_of_done() {
     }
 }
 
-/// Every `_sc_*` table (and `users`) that some crate bootstraps must appear in
+/// Every `_fd_*` table (and `users`) that some crate bootstraps must appear in
 /// §9.2's entity-relationship diagram. A metadata table nobody drew is one an
 /// admin discovers in `psql`, which is the failure §9 exists to prevent.
 #[test]
@@ -1305,7 +1305,7 @@ fn the_er_diagram_names_every_metadata_table() {
         let text = fs::read_to_string(path).unwrap_or_default();
         for line in text.lines() {
             // `const SOMETHING_TABLE: &str = "…";` — the `_TABLE` suffix is what
-            // separates a table's name from the query-builder's `_sc_`-prefixed
+            // separates a table's name from the query-builder's `_fd_`-prefixed
             // column aliases, which are not tables and are not drawn.
             let trimmed = line.trim();
             let Some(rest) = trimmed
@@ -1329,7 +1329,7 @@ fn the_er_diagram_names_every_metadata_table() {
             let Some((table, _)) = value.split_once('"') else {
                 continue;
             };
-            if table.starts_with("_sc_") || table == "users" {
+            if table.starts_with("_fd_") || table == "users" {
                 tables.push(table.to_owned());
             }
         }
@@ -1345,6 +1345,123 @@ fn the_er_diagram_names_every_metadata_table() {
             er.contains(&format!("\"{table}\"")),
             "§9.2's ER diagram does not draw `{table}`"
         );
+    }
+}
+
+/// The metadata namespace is `_fd_`, and nothing live still spells it `_sc_`.
+///
+/// Saltcorn v1 keeps its own metadata in `_sc_*` tables, and a transition
+/// project runs v1 and this server against **one** schema. So the prefix is not
+/// decoration: a table bootstrapped as `_sc_config` here would land on top of
+/// v1's, and `is_system` would hide v1's rows from the very admin who came to
+/// look at them.
+///
+/// The query builder's aliases (`_fd_a1`, `_fd_j1`, `_fd_g1`, `_fd_rn`, …) carry
+/// the same prefix, and have to: an alias is only guaranteed not to shadow a
+/// real table because §9 forbids a user table from starting with the reserved
+/// prefix. Two prefixes would mean the reserved one and the alias one could
+/// drift apart, and the day a user names a table `_sc_a1` a correlated column
+/// reference silently resolves to the wrong row.
+///
+/// What may still say `_sc_`: a line that says on its own face that it is
+/// talking about v1's tables, and the historical records (`docs/TODO-*.md`, the
+/// CHANGELOG) that describe work as it was done.
+#[test]
+fn the_metadata_namespace_is_fd_and_only_v1_is_still_called_sc() {
+    let root = workspace_root();
+
+    // The reserved prefix, at the two places that enforce it — the catalog's
+    // classifier and the API's create-table guard — read out of the sources
+    // rather than restated, because a constant asserted against itself proves
+    // nothing.
+    let table = read(&root, "crates/sc-catalog/src/table.rs");
+    assert!(
+        table.contains(r#"self.name.starts_with("_fd_")"#),
+        "`Table::is_system` should reserve the `_fd_` prefix"
+    );
+    let edit = read(&root, "crates/sc-api/src/schema_edit.rs");
+    assert!(
+        edit.contains(r#"name.starts_with("_fd_")"#),
+        "creating a table should refuse the `_fd_` prefix"
+    );
+
+    let mut files = Vec::new();
+    collect_rust_sources(&root.join("crates"), &mut files);
+    collect_rust_sources(&root.join("tests"), &mut files);
+    for dir in ["crates", "ui", "docs"] {
+        collect_text_sources(&root.join(dir), &mut files);
+    }
+    files.push(root.join("README.md"));
+    assert!(
+        files.len() > 100,
+        "the sweep should reach the workspace's sources, found {}",
+        files.len()
+    );
+
+    let mut stale = Vec::new();
+    for path in &files {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned();
+        // Historical records describe the work as it was done (see
+        // `the_binary_and_everything_it_owns_are_named_feldspar`), and this
+        // file is the sweep itself, which has to write the word to look for it.
+        if rel.contains("TODO")
+            || rel.contains("Saltcorn1_description")
+            || rel.ends_with("repo_hygiene.rs")
+        {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(path) else {
+            continue;
+        };
+        for (n, line) in text.lines().enumerate() {
+            // Only where `_sc_` *starts* an identifier. `op_sc_files`,
+            // `__sc_db` and `manifest_section_sc_keys` are a Deno op, a Python
+            // global and a Rust helper — none of them is a SQL name.
+            let starts_identifier = line.match_indices("_sc_").any(|(i, _)| {
+                i == 0
+                    || !line.as_bytes()[i - 1].is_ascii_alphanumeric()
+                        && line.as_bytes()[i - 1] != b'_'
+            });
+            if starts_identifier && !line.contains("v1") {
+                stale.push(format!("{rel}:{}: {}", n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "`_sc_` is Saltcorn v1's namespace; say so on the line or use `_fd_`:\n{}",
+        stale.join("\n")
+    );
+}
+
+/// Every source file under `dir` whose extension this sweep can read, minus the
+/// build outputs and vendored trees nobody in this repository wrote.
+fn collect_text_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path
+                .file_name()
+                .is_some_and(|n| n == "target" || n == "node_modules" || n == "dist")
+            {
+                continue;
+            }
+            collect_text_sources(&path, out);
+        } else if path.extension().is_some_and(|ext| {
+            matches!(
+                ext.to_string_lossy().as_ref(),
+                "ts" | "tsx" | "js" | "py" | "toml" | "md" | "sql"
+            )
+        }) {
+            out.push(path);
+        }
     }
 }
 

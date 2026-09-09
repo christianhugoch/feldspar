@@ -1,4 +1,4 @@
-//! `_sc_acme_cache`: where the ACME account key and the issued certificates
+//! `_fd_acme_cache`: where the ACME account key and the issued certificates
 //! live (design §13.5).
 //!
 //! Not configuration — nobody types this and nobody reads it — but it belongs
@@ -25,7 +25,7 @@ use sc_types::{BasicType, TypeRef};
 use sha2::{Digest, Sha256};
 
 /// Name of the ACME cache table in the primary database.
-pub const ACME_CACHE_TABLE: &str = "_sc_acme_cache";
+pub const ACME_CACHE_TABLE: &str = "_fd_acme_cache";
 
 /// The cache key: `cert:<digest>` or `account:<digest>`.
 pub const COL_KEY: &str = "key";
@@ -41,7 +41,7 @@ fn cache_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure `_sc_acme_cache` exists. Idempotent, like every other bootstrap.
+/// Ensure `_fd_acme_cache` exists. Idempotent, like every other bootstrap.
 pub async fn bootstrap_acme_cache(catalog: &Catalog) -> Result<Table> {
     catalog
         .bootstrap_table(ACME_CACHE_TABLE, &cache_fields())
@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn the_table_is_a_hidden_system_table() {
-        assert!(ACME_CACHE_TABLE.starts_with("_sc_"));
+        assert!(ACME_CACHE_TABLE.starts_with("_fd_"));
         assert!(cache_fields()[0].primary_key);
     }
 

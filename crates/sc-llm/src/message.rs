@@ -11,7 +11,7 @@
 //! code in the tree that names a rig type.
 //!
 //! They are also **serialisable**, which is not incidental: `sc-agent` persists
-//! a run's message history into `_sc_runs` after every step (§11.2), so the
+//! a run's message history into `_fd_runs` after every step (§11.2), so the
 //! history has to survive a round trip through JSON without losing a tool call's
 //! id or arguments.
 
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn a_history_round_trips_through_json() {
-        // `_sc_runs` stores the message history as JSON after every step
+        // `_fd_runs` stores the message history as JSON after every step
         // (§11.2), so a tool call's id and arguments have to survive the trip —
         // losing an id would break the correlation the next turn depends on.
         let history = vec![

@@ -1,8 +1,8 @@
-//! The `_sc_tables` overlay: its schema, bootstrap, and the [`TableMeta`] ⇄ row
+//! The `_fd_tables` overlay: its schema, bootstrap, and the [`TableMeta`] ⇄ row
 //! mapping (design §9).
 //!
 //! This is the first **overlay** table Saltcorn stores, and that word carries a
-//! rule the other `_sc_*` tables do not have to keep. A file store or an
+//! rule the other `_fd_*` tables do not have to keep. A file store or an
 //! application *is* its row — delete the row and the object is gone (§13.2,
 //! §14.1). A table is not: it exists in the database whether or not this table
 //! has a row for it, and it must stay exactly as usable with no row as it is
@@ -17,7 +17,7 @@
 //! [`Catalog::reload`](crate::Catalog::reload); the precedence rule is stated
 //! there. This module is the storage under it.
 //!
-//! The shape follows the `_sc_file_stores` module column for column:
+//! The shape follows the `_fd_file_stores` module column for column:
 //! one column per value every row has, sparse values in `attributes`, and
 //! **strict reads** — a missing or ill-typed column is an [`Error::invalid`]
 //! naming the table and the column, never a silent default. Strictness matters
@@ -25,25 +25,25 @@
 //! may read and write rows: a `min_role_read` that fails to parse must not
 //! degrade to *some* role.
 //!
-//! Two deliberate differences from `_sc_file_stores`, both about the same thing:
+//! Two deliberate differences from `_fd_file_stores`, both about the same thing:
 //!
 //! - **The access columns are `NOT NULL`.** A store's `min_role` is nullable
 //!   because "no floor" is a real state for it. A table's rules are always a
 //!   pair of roles — a row that exists says who may read and who may write, and
 //!   a NULL there would be a third state ("inherit from what?") that has no
 //!   answer.
-//! - **A system (`_sc_*`) table may not have a row.** System tables are hidden
+//! - **A system (`_fd_*`) table may not have a row.** System tables are hidden
 //!   from users (§9) and their access is not the admin's to widen; the check is
 //!   here, on save, rather than only in the merge, so the state never exists.
 //!
 //! ## The one exception: a **provided** table's row is not an overlay
 //!
-//! `_sc_tables` holds two kinds of row, and the paragraphs above are about the
+//! `_fd_tables` holds two kinds of row, and the paragraphs above are about the
 //! first. A row carrying a [`ProvidedTableDef`] — a module, a provider within
 //! it, and that provider's configuration — is a **definition**: the table it
 //! names exists *because the row does*, there is nothing in the database to
 //! introspect, and deleting the row deletes the table. That is the same
-//! relationship `_sc_triggers` has to a trigger, in a table whose other rows
+//! relationship `_fd_triggers` has to a trigger, in a table whose other rows
 //! have the opposite one.
 //!
 //! It is stated here rather than left implicit because the rule above ("nothing
@@ -51,7 +51,7 @@
 //! "legacy databases just work" true, and a reader has to be able to see that
 //! this does not weaken it: a provided table is not a database table, so there
 //! is no fact of the database for its row to contradict. The design anticipated
-//! it — §9's `_sc_tables` line reads "access rules, label/description,
+//! it — §9's `_fd_tables` line reads "access rules, label/description,
 //! attributes, **provided-table defs**".
 
 use sc_db::Row;
@@ -66,7 +66,7 @@ use crate::field::DataField;
 use crate::table::{AccessRules, Table};
 
 /// Name of the table-overlay table in the primary database.
-pub const TABLE_META_TABLE: &str = "_sc_tables";
+pub const TABLE_META_TABLE: &str = "_fd_tables";
 
 /// The UUID primary-key column (§9).
 pub const COL_ID: &str = "id";
@@ -98,7 +98,7 @@ pub const ATTR_PROVIDER_NAME: &str = "provider_name";
 /// v1's `fields(cfg)` and `get_table(cfg)`.
 pub const ATTR_PROVIDER_CONFIG: &str = "provider_config";
 
-/// What makes a `_sc_tables` row a **definition** rather than an overlay: the
+/// What makes a `_fd_tables` row a **definition** rather than an overlay: the
 /// module, the provider within it, and the configuration an admin filled in.
 ///
 /// Three attributes rather than three columns, on §9's own rule: a value present
@@ -350,12 +350,12 @@ fn non_empty(value: Option<&Json>) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The fields of the `_sc_tables` table, in declaration order.
+/// The fields of the `_fd_tables` table, in declaration order.
 ///
 /// `name` carries the `UNIQUE` constraint: it is the key the merge joins on, and
 /// two overlay rows for one table is not a state that can be merged — there
 /// would be no rule saying which one's access rules apply. As with
-/// `_sc_file_stores`, the database is the authority, because two admins saving
+/// `_fd_file_stores`, the database is the authority, because two admins saving
 /// concurrently cannot see each other's transaction.
 fn table_meta_fields() -> Vec<DataField> {
     let text = || TypeRef::Basic(BasicType::Text);
@@ -374,7 +374,7 @@ fn table_meta_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure the `_sc_tables` table exists, creating it if absent, and return it.
+/// Ensure the `_fd_tables` table exists, creating it if absent, and return it.
 ///
 /// Idempotent, and safe against a database that has never seen Saltcorn — the
 /// same contract as [`bootstrap_file_stores`](crate::bootstrap_file_stores).
@@ -398,7 +398,7 @@ pub async fn bootstrap_table_meta(catalog: &Catalog) -> Result<Table> {
 /// - **Roles in `1..=100`** — the role scale is fixed (`sc-auth`), so an
 ///   out-of-range role is not a value to clamp; clamping would silently decide
 ///   who can reach the data.
-/// - **Not a system table** — `_sc_*` tables are hidden from users (§9); their
+/// - **Not a system table** — `_fd_*` tables are hidden from users (§9); their
 ///   access is not the admin's to configure, and refusing the row means the
 ///   merge never has to decide what to do with one.
 /// - **The name is not already claimed by another row** — the database's
@@ -429,7 +429,7 @@ pub async fn save_table_meta_row(catalog: &Catalog, meta: &TableMeta) -> Result<
     if name.is_empty() {
         return Err(Error::invalid("a table overlay needs a table name"));
     }
-    if name.starts_with("_sc_") {
+    if name.starts_with("_fd_") {
         return Err(Error::invalid(format!(
             "`{name}` is a system table; its access rules are not configurable"
         )));
@@ -593,7 +593,7 @@ fn meta_values(meta: &TableMeta) -> Vec<Value> {
     ]
 }
 
-/// Rebuild a [`TableMeta`] from its `_sc_tables` row. The strictness note in the
+/// Rebuild a [`TableMeta`] from its `_fd_tables` row. The strictness note in the
 /// module docs applies throughout.
 fn table_meta_from_row(row: &Row) -> Result<TableMeta> {
     let id = match row.get(COL_ID) {
@@ -770,7 +770,7 @@ mod tests {
 
     #[test]
     fn the_table_is_a_hidden_system_table() {
-        assert!(TABLE_META_TABLE.starts_with("_sc_"));
+        assert!(TABLE_META_TABLE.starts_with("_fd_"));
     }
 
     #[test]
@@ -817,7 +817,7 @@ mod tests {
     #[test]
     fn a_provided_table_definition_round_trips_through_the_row() {
         let mut meta = TableMeta::new("headlines");
-        // No provider is the ordinary case: a `_sc_tables` row is an overlay
+        // No provider is the ordinary case: a `_fd_tables` row is an overlay
         // unless it says otherwise.
         assert_eq!(meta.provider(), None);
 

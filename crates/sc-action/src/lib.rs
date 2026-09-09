@@ -4,7 +4,7 @@
 //! happen ([`Event`]), what can be done about it ([`Action`]), what one run of an
 //! action can see ([`ActionContext`]), which actions exist ([`ActionRegistry`]),
 //! and the [`Trigger`] that binds an event to a configured action — its storage in
-//! `_sc_triggers` ([`save_trigger`] and friends), its
+//! `_fd_triggers` ([`save_trigger`] and friends), its
 //! [validation](validate_trigger), and the cached live set ([`Triggers`]) an event
 //! is matched against. The dispatch that actually fires one lands in a later
 //! phase; the event model is deliberately independent of the trigger, so the row

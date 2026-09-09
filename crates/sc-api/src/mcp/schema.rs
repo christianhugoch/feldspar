@@ -95,7 +95,7 @@ fn describe_description(catalog: &Catalog) -> String {
          directions, so \"what points at clients?\" is answerable. \
          {listing}\n\n\
          This returns **no row data and no row counts**: it describes the shape of \
-         the database, never its contents. System tables (`_sc_*`) are not shown."
+         the database, never its contents. System tables (`_fd_*`) are not shown."
     )
 }
 
@@ -146,7 +146,7 @@ fn describe(catalog: &Catalog, args: &Json) -> Result<Json> {
     }))
 }
 
-/// Every table an admin would call a table: not `_sc_*`, which are invisible to
+/// Every table an admin would call a table: not `_fd_*`, which are invisible to
 /// this tool and refused by the other.
 fn user_tables(catalog: &Catalog) -> Vec<Table> {
     catalog

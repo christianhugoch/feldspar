@@ -301,7 +301,7 @@ pub fn ssl_settings_from(config: &Attrs) -> Result<SslSettings> {
     })
 }
 
-/// Read the TLS settings out of `_sc_config`.
+/// Read the TLS settings out of `_fd_config`.
 pub async fn ssl_settings(catalog: &Catalog) -> Result<SslSettings> {
     ssl_settings_from(&crate::store::all_config(catalog).await?)
 }

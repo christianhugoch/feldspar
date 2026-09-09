@@ -1,4 +1,4 @@
-// Settings screen: the values in `_sc_config`, rendered from their declarations —
+// Settings screen: the values in `_fd_config`, rendered from their declarations —
 // and, beside them, backup and restore.
 //
 // The screen is **tabbed**, and the tabs are **the sections the server declared**,

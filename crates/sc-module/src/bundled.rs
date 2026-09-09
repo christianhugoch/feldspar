@@ -44,7 +44,7 @@
 //! ```
 //!
 //! `name` is what the package calls itself once installed, because that is the
-//! key `_sc_modules` and the loaded set resolve through — it is how this catalog
+//! key `_fd_modules` and the loaded set resolve through — it is how this catalog
 //! knows an entry is already installed, and `tests/bundled_catalog.rs` asserts it
 //! agrees with the package's own `package.json` or `pyproject.toml`.
 //!

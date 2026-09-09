@@ -1,4 +1,4 @@
-//! The `_sc_fields` overlay: its schema, bootstrap, and the [`FieldMeta`] ⇄ row
+//! The `_fd_fields` overlay: its schema, bootstrap, and the [`FieldMeta`] ⇄ row
 //! mapping (design §9).
 //!
 //! The field-level twin of [`table_meta`](crate::table_meta). Everything the
@@ -9,7 +9,7 @@
 //! column already carries (its SQL type, its nullability). That is what keeps
 //! §9's "legacy databases just work" true one level down.
 //!
-//! Three shape decisions distinguish this table from `_sc_tables`:
+//! Three shape decisions distinguish this table from `_fd_tables`:
 //!
 //! - **The natural key is composite.** A table overlay is keyed by one name; a
 //!   field overlay by the pair `(table_name, field_name)`, since a field name is
@@ -37,7 +37,7 @@
 //!   still round-trip). §3.2's merge resolves it and reports a mismatch; §3.3's
 //!   API validates it on create.
 //!
-//! **Strict reads**, as in `_sc_tables`: a missing or ill-typed column — or a
+//! **Strict reads**, as in `_fd_tables`: a missing or ill-typed column — or a
 //! `kind` that is not a known discriminant — is an [`Error::invalid`] naming the
 //! field and what was wrong, never a silent default.
 
@@ -54,7 +54,7 @@ use crate::file_stores::QUERY_FILE_STORES;
 use crate::table::Table;
 
 /// Name of the field-overlay table in the primary database.
-pub const FIELD_META_TABLE: &str = "_sc_fields";
+pub const FIELD_META_TABLE: &str = "_fd_fields";
 
 /// The UUID row-handle column (§9).
 pub const COL_ID: &str = "id";
@@ -234,12 +234,12 @@ impl FieldMeta {
     }
 }
 
-/// The fields of the `_sc_fields` table, in declaration order.
+/// The fields of the `_fd_fields` table, in declaration order.
 ///
 /// `(table_name, name)` is the composite **primary key**: it is what enforces one
 /// overlay row per field, and the merge (§3.2) joins fields on the pair. `id` is
 /// a separate required, unique row handle (see the module docs on why it is not
-/// the key here, unlike `_sc_tables`).
+/// the key here, unlike `_fd_tables`).
 fn field_meta_fields() -> Vec<DataField> {
     let text = || TypeRef::Basic(BasicType::Text);
     let json = || TypeRef::Basic(BasicType::Json);
@@ -256,11 +256,11 @@ fn field_meta_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure the `_sc_fields` table exists, creating it if absent, and return it.
+/// Ensure the `_fd_fields` table exists, creating it if absent, and return it.
 ///
 /// Idempotent, and safe against a database that has never seen Saltcorn — the
 /// same contract as [`bootstrap_table_meta`](crate::bootstrap_table_meta). Not
-/// wired into the boot path here: like `_sc_tables` before §1.2, nothing reads
+/// wired into the boot path here: like `_fd_tables` before §1.2, nothing reads
 /// these rows until §3.2's merge exists, so wiring it in belongs there.
 pub async fn bootstrap_field_meta(catalog: &Catalog) -> Result<Table> {
     if let Some(existing) = catalog.get(FIELD_META_TABLE)? {
@@ -278,7 +278,7 @@ pub async fn bootstrap_field_meta(catalog: &Catalog) -> Result<Table> {
 /// [`save_table_meta`](crate::save_table_meta)):
 ///
 /// - **A table and a field name** — an overlay of nothing has no meaning.
-/// - **Not a system table** — `_sc_*` tables are hidden from users (§9); their
+/// - **Not a system table** — `_fd_*` tables are hidden from users (§9); their
 ///   fields are not the admin's to configure.
 /// - **The `(table, field)` pair is not already claimed by another row** — the
 ///   composite primary key is the authority, but this names the conflict rather
@@ -309,7 +309,7 @@ pub async fn save_field_meta_row(catalog: &Catalog, meta: &FieldMeta) -> Result<
             "a field overlay needs both a table name and a field name",
         ));
     }
-    if table.starts_with("_sc_") {
+    if table.starts_with("_fd_") {
         return Err(Error::invalid(format!(
             "`{table}` is a system table; its fields are not configurable"
         )));
@@ -517,7 +517,7 @@ fn attributes_for_storage(meta: &FieldMeta) -> Attrs {
     obj
 }
 
-/// Rebuild a [`FieldMeta`] from its `_sc_fields` row. The strictness note in the
+/// Rebuild a [`FieldMeta`] from its `_fd_fields` row. The strictness note in the
 /// module docs applies throughout: every column is read for its exact shape.
 fn field_meta_from_row(row: &Row) -> Result<FieldMeta> {
     let id = match row.get(COL_ID) {
@@ -798,7 +798,7 @@ mod tests {
 
     #[test]
     fn the_table_is_a_hidden_system_table() {
-        assert!(FIELD_META_TABLE.starts_with("_sc_"));
+        assert!(FIELD_META_TABLE.starts_with("_fd_"));
     }
 
     #[test]

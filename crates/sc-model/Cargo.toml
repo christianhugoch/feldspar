@@ -49,10 +49,10 @@ sc-query.workspace = true
 # assignment moved under a toolchain upgrade would make two instances of one
 # model incomparable — which is the whole reason the split is a hash.
 sha2.workspace = true
-# `_sc_models` and `_sc_model_instances` are stored metadata, so this crate
+# `_fd_models` and `_fd_model_instances` are stored metadata, so this crate
 # speaks the query language, reads rows back out of the driver and bootstraps
-# its two tables through the catalog (§9's storage pattern, as `_sc_triggers`
-# and `_sc_agents` do). The catalog is also what fixes the crate above layer 4.
+# its two tables through the catalog (§9's storage pattern, as `_fd_triggers`
+# and `_fd_agents` do). The catalog is also what fixes the crate above layer 4.
 sc-catalog.workspace = true
 sc-db.workspace = true
 uuid.workspace = true

@@ -1,7 +1,7 @@
-//! The `_sc_llm_providers` table: its schema, bootstrap, and the
+//! The `_fd_llm_providers` table: its schema, bootstrap, and the
 //! [`LlmProviderDef`] ⇄ row mapping (design §9, §11.1).
 //!
-//! Follows `_sc_file_stores` in every respect that matters, because it is the
+//! Follows `_fd_file_stores` in every respect that matters, because it is the
 //! same kind of thing: a provider, like a store and like an application, has
 //! **nothing to introspect it from**, so its row *is* its definition rather than
 //! an overlay on something the database already knows.
@@ -28,7 +28,7 @@ use serde_json::Value as Json;
 use crate::def::{LlmProviderDef, LlmProviderDefId, validate_provider_config};
 
 /// Name of the providers table in the primary database.
-pub const LLM_PROVIDERS_TABLE: &str = "_sc_llm_providers";
+pub const LLM_PROVIDERS_TABLE: &str = "_fd_llm_providers";
 
 /// The UUID primary-key column (§9).
 pub const COL_ID: &str = "id";
@@ -43,7 +43,7 @@ pub const COL_CONFIG: &str = "config";
 /// The sparse per-provider values column (§9) — JSON, always an object.
 pub const COL_ATTRIBUTES: &str = "attributes";
 
-/// The fields of the `_sc_llm_providers` table, in declaration order.
+/// The fields of the `_fd_llm_providers` table, in declaration order.
 ///
 /// `name` carries the `UNIQUE` constraint for the same reason a file store's
 /// does: it is the key an agent resolves through, so two definitions claiming
@@ -64,7 +64,7 @@ fn provider_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure the `_sc_llm_providers` table exists, creating it if absent.
+/// Ensure the `_fd_llm_providers` table exists, creating it if absent.
 ///
 /// Idempotent and safe against a database that has never seen Saltcorn — the
 /// same contract `bootstrap_file_stores` has. Call once at startup, after the
@@ -181,7 +181,7 @@ pub async fn list_llm_providers(catalog: &Catalog) -> Result<Vec<LlmProviderDef>
 /// Delete a provider definition, returning whether one was there to delete.
 ///
 /// `extra_referents` is how references this crate cannot see are supplied: an
-/// **agent** names a provider, and `_sc_agents` lives in `sc-agent`, a layer
+/// **agent** names a provider, and `_fd_agents` lives in `sc-agent`, a layer
 /// above this one. Callers that know about agents collect those first and pass
 /// them in; a caller passing an empty slice gets no reference check at all,
 /// which is correct for a system with no agents and wrong for one with them.
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn the_table_is_a_hidden_system_table() {
-        assert!(LLM_PROVIDERS_TABLE.starts_with("_sc_"));
+        assert!(LLM_PROVIDERS_TABLE.starts_with("_fd_"));
     }
 
     #[test]

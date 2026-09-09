@@ -43,7 +43,7 @@ Two design invariants that fall out of the goals and pervade everything below:
   spine. Workflows, actions, agents, files, and models are all ultimately operations over,
   or triggered by, rows.
 - **The database is the source of truth.** All metadata and users live in the primary
-  database (in `_sc_*` tables and `users`). The in-memory catalog is a *cache* of that
+  database (in `_fd_*` tables and `users`). The in-memory catalog is a *cache* of that
   truth, kept coherent across processes by the message bus. There is no separate on-disk
   app format; a backup is a database dump plus the file stores.
 
@@ -76,23 +76,23 @@ feldspar/
 │  ├─ sc-expr/                    # 3. ownership-formula language: parse/analyse/validate,
 │  │                              #    symbolic (→ sc-query::Expr) + reified (deno_core) eval
 │  ├─ sc-catalog/                 # 4. Catalog, Table, Field, TableProvider trait, cache
-│  ├─ sc-config/                  # 5. `_sc_config`: declared settings, validation, ACME cache
+│  ├─ sc-config/                  # 5. `_fd_config`: declared settings, validation, ACME cache
 │  ├─ sc-auth/                    # 5. User, Role, authz (ACL/RLS), sessions, OAuth2 provider
 │  ├─ sc-files/                   # 5. FileStore trait, drivers (local, S3, git), xattr metadata
-│  ├─ sc-action/                  # 6. Action trait + registry, Event/Trigger model, `_sc_triggers`
+│  ├─ sc-action/                  # 6. Action trait + registry, Event/Trigger model, `_fd_triggers`
 │  │                              #    storage & validation, the live set, dispatch, scheduler
 │  ├─ sc-llm/                     # 6. object-safe LlmProvider seam over a provider crate
-│  │                              #    (OpenAI Responses + Anthropic), `_sc_llm_providers` (§11.1)
+│  │                              #    (OpenAI Responses + Anthropic), `_fd_llm_providers` (§11.1)
 │  ├─ sc-email/                   # 6. Email, the Mailer transport seam, SMTP over lettre (§18.2)
 │  ├─ sc-workflow/                # 7. durable workflows: the program a trigger body can be,
-│  │                              #    `_sc_workflow_versions`, `_sc_run_traces`, the engine
+│  │                              #    `_fd_workflow_versions`, `_fd_run_traces`, the engine
 │  │                              #    that advances a run of it (§10.3)
 │  ├─ sc-agent/                   # 7. Agent record + AgentTrait trait + registry + inference
-│  │                              #    loop + `_sc_agents`/`_sc_runs` storage (§11.2)
+│  │                              #    loop + `_fd_agents`/`_fd_runs` storage (§11.2)
 │  ├─ sc-model/                   # 6. Predictive models: the dataset (formulas over a table),
 │  │                              #    the columnar Frame, the primary-key-hash split, the
-│  │                              #    DatasetSource + ModelProvider seams, `_sc_models` /
-│  │                              #    `_sc_model_instances`. Beside sc-action rather than
+│  │                              #    DatasetSource + ModelProvider seams, `_fd_models` /
+│  │                              #    `_fd_model_instances`. Beside sc-action rather than
 │  │                              #    above the row layer it reads through, because a module
 │  │                              #    supplies model providers (TODO "Predictive models" §4)
 │  ├─ sc-fieldview/               # 6. FieldView trait, built-in fieldviews (React components)
@@ -453,7 +453,7 @@ Design rules from GOALS:
 ### 5.0 Secondary databases (Connections)
 
 The primary database is the one `feldspar.toml` names: the one that hosts `users` and every
-`_sc_*` table, and the one the process must reach before it can read anything at all. It is not
+`_fd_*` table, and the one the process must reach before it can read anything at all. It is not
 the only one. An admin adds a **connection** in Tables → Connections — host, port, database,
 user, password, schema — and that database's tables join the catalog beside the primary's, with
 the connection's name badged next to each in the tables list.
@@ -467,7 +467,7 @@ tables list, stamped with the connection, read and written through the same path
 is not there is refused rather than created — a connection to a missing file is a mistake, and
 answering it with an empty database that works would be the least helpful possible reply.
 
-- **A connection is a row** (`_sc_db_connections`, §9.2), not a line in the configuration file,
+- **A connection is a row** (`_fd_db_connections`, §9.2), not a line in the configuration file,
   because it is added on a running server with immediate effect. It is stored as columns rather
   than as a URL, so the password is a column that can be declared secret: it is redacted to
   `SECRET_SENTINEL` on every read, restored when a save echoes the sentinel back, and never
@@ -506,7 +506,7 @@ A table's **constraints** — its jointly-unique keys, its indexes, its full-tex
 row constraints — are modelled the way its primary key and its foreign keys are: as facts of the
 live schema. `PhysicalTable::constraints` is what `introspect()` reads back, `Table::constraints`
 is the merged view, and `SchemaChange` grew `AddUniqueConstraint`, `DropConstraint`,
-`CreateIndex`, `DropIndex` and `SetComment` to create them. **There is no `_sc_constraints`
+`CreateIndex`, `DropIndex` and `SetComment` to create them. **There is no `_fd_constraints`
 table**, and that is the §9 rule applied rather than an omission: a constraint is something the
 database knows, so storing it again would be storing a second answer. A `UNIQUE` added in `psql`
 is therefore listed beside Saltcorn's own, a restored dump keeps its constraints with no metadata
@@ -560,7 +560,7 @@ admin, because it is the one kind whose identity cannot be derived from its fiel
 A **backup** carries a table's constraints in its `table.json` and the restore adds them after
 the rows, the order `pg_dump` uses — a unique constraint over restored data is checked in one
 pass rather than once per insert, and a row constraint created first would judge each row as it
-arrived against a table whose other rows are not in yet. There is no `_sc_*` table for a backup
+arrived against a table whose other rows are not in yet. There is no `_fd_*` table for a backup
 to have picked them up from incidentally, so a restore without this would rebuild the columns
 and the rows and quietly drop every rule.
 
@@ -571,7 +571,7 @@ rebuilt whenever its text fields change, because that index is over *every* text
 index that stopped covering the table it claims to cover is the failure nobody notices.
 
 The **primary database** is one connected driver, distinguished by the fact that it hosts
-the `_sc_*` metadata tables and the `users` table. Additional databases are connected for
+the `_fd_*` metadata tables and the `users` table. Additional databases are connected for
 data only. (MVP: single database, same as the primary store.)
 
 ### 5.2 The SQLite backend (`sc-db-sqlite`)
@@ -606,7 +606,7 @@ What the backend has to solve, and how:
   beside a table-level key declaration, which would stop SQLite numbering it.
 - **There is no `COMMENT ON`.** A constraint's error message and a row constraint's formula ride
   in an object's comment (§5.1), so the driver keeps them in a table of its own
-  (`_sc_object_comments`), written by the same `SetComment` change and read back by
+  (`_fd_object_comments`), written by the same `SetComment` change and read back by
   introspection.
 - **A constraint violation arrives wearing a SQLSTATE.** SQLite reports an extended result code;
   the driver translates the constraint ones to the Postgres spellings (`23505`, `23502`,
@@ -669,7 +669,7 @@ is a *reference* (a store-relative path stored as `text`), not a value family �
 type picker merges kinds and types into one list because that is how an admin thinks, but the
 model keeps them apart. And **introspection never resolves a column back to a rich type**:
 `TypeRef::from_sql_type` always yields a basic type, and a column is rich only because the
-`_sc_fields` overlay says so (§9) — guessing "this `text` column is an Email" from the database
+`_fd_fields` overlay says so (§9) — guessing "this `text` column is an Email" from the database
 is exactly the magic that makes a legacy database behave surprisingly.
 
 ### 6.2 Fields — the `BaseField` / `DataField` / `FormField` split
@@ -800,7 +800,7 @@ Per GOALS, the `users` table lives in the primary database and is deliberately m
   integers).
 - `role` is an integer **1–100**; 1 = admin (full access), 100 = public (not logged in).
   Admins MAY add arbitrary fields to the user table. `role` is a **foreign key onto
-  `_sc_roles`** (§7.4): a role is a row carrying a name and role-specific settings, so
+  `_fd_roles`** (§7.4): a role is a row carrying a name and role-specific settings, so
   `users.role` naming a role that does not exist is a state the database rules out.
 
 ```rust
@@ -815,7 +815,7 @@ pub struct User {
 
 - Password + session cookie baseline.
 - **Sessions are rows, cached per node.** A login mints a 256-bit opaque token, sends it in an
-  `HttpOnly` cookie and writes a row to `_sc_sessions` in the primary database. An in-memory
+  `HttpOnly` cookie and writes a row to `_fd_sessions` in the primary database. An in-memory
   map would be the fastest possible store and the reason there could only ever be *one*
   application server — a session minted on node A is not one node B has heard of, so a load
   balancer in front of two processes logs people out at random. The table is the one thing
@@ -937,7 +937,7 @@ half H, category Lu) is a valid JavaScript identifier character, so `publisher�
 *single* identifier that V8 and swc both accept unchanged — no preprocessing, no syntax
 extension. The reified path binds a variable literally named `publisherⱵname`; the symbolic
 path splits on Ⱶ into a **join path** rendered as correlated scalar subselects
-(`(SELECT _sc_j1.name FROM publishers _sc_j1 WHERE _sc_j1.id = books.publisher)`), nested per
+(`(SELECT _fd_j1.name FROM publishers _fd_j1 WHERE _fd_j1.id = books.publisher)`), nested per
 link to any depth, resolving link-by-link through `Key` fields. A null FK yields no row yields
 SQL NULL, granting nothing — optional-chaining semantics for free.
 
@@ -999,15 +999,15 @@ What it changes is the *speed* at which they can be set, which is why enabling R
 unless the formula translates for all four operations, and why disabling it — the one operation
 whose damage is invisible in the schema afterwards — is reported back to the model in words.
 
-### 7.4 Roles (`_sc_roles`)
+### 7.4 Roles (`_fd_roles`)
 
-A role is a **row in `_sc_roles`**, not a bare integer. It carries the role number on the fixed
+A role is a **row in `_fd_roles`**, not a bare integer. It carries the role number on the fixed
 1–100 scale (lower = more privileged), a name shown wherever a role is chosen or displayed, and
 `attributes` for role-specific settings (§9's sparse-value rule, so the first such setting needs
 no schema change). `users.role` is a foreign key onto it, and so, in intent, is every
 `min_role` the access model uses.
 
-`_sc_roles` is **not an overlay** (§9): a role does not exist without its row, exactly as an
+`_fd_roles` is **not an overlay** (§9): a role does not exist without its row, exactly as an
 application or a file store does not, so the table holds the authoritative list rather than
 adding to introspection. Bootstrap seeds exactly the two roles the system itself depends on —
 **admin (1)** and **public (100)** — and no invented middle role, because a seeded role nobody
@@ -1024,7 +1024,7 @@ user to a different role.
 
 ```rust
 pub struct Catalog {
-    primary: Arc<dyn DatabaseDriver>,          // hosts _sc_* and users
+    primary: Arc<dyn DatabaseDriver>,          // hosts _fd_* and users
     databases: HashMap<DbId, Arc<dyn DatabaseDriver>>,
     cache: RwLock<CatalogCache>,               // tables, fields, config, triggers, apps…
     bus: Arc<dyn BusDriver>,
@@ -1081,8 +1081,8 @@ non-trivial one is `ProvidedTableProvider`: a table whose rows come from a **mod
 `table_providers` export — `@saltcorn/rss`'s `RSS feed`, `@saltcorn/proxmox`'s cluster
 listings, `@saltcorn/postgres-tables`' remote tables. Materialisation is still deferred.
 
-**A provided table's `_sc_tables` row is not an overlay, it is the table's only definition.**
-That is the one exception to §9's rule, and it is exactly the `_sc_triggers` relationship
+**A provided table's `_fd_tables` row is not an overlay, it is the table's only definition.**
+That is the one exception to §9's rule, and it is exactly the `_fd_triggers` relationship
 appearing inside a table whose other rows have the opposite one: the table exists because the
 row does, there is nothing in any database to introspect, and deleting the row deletes the
 table. It does not weaken "legacy databases just work", because a provided table is not a
@@ -1158,9 +1158,9 @@ plugin of the second kind (`@saltcorn/rss`) loads here; one of the first does no
 
 ---
 
-## 9. Metadata storage (`_sc_*` tables)
+## 9. Metadata storage (`_fd_*` tables)
 
-All metadata lives in the primary database. **Any table named `_sc_*` is a system table:
+All metadata lives in the primary database. **Any table named `_fd_*` is a system table:
 hidden from users.** Every system metadata table MUST have: `name`, `id` (UUID),
 `description`, `attributes` (JSON, always an object), plus any other fields. The design rule
 (a genuine value judgement per GOALS): **a value present for many rows gets its own column;
@@ -1168,23 +1168,23 @@ a sparse value goes into `attributes`.**
 
 | Table | Holds | Notes |
 |---|---|---|
-| `_sc_tables` | overlay metadata for tables **and** provided-table definitions | access rules, label/description, attributes; the DB's own tables need no row to be usable (§9.1). A row carrying `provider_module`/`provider_name`/`provider_config` in `attributes` is **not** an overlay — it is a virtual table's only definition (§8.3) |
-| `_sc_fields` | overlay metadata for fields | rich type name, field kind (`Key`/`File`) + parameters, label/description, attributes; later calculated-field defs and fieldview defaults (§9.1) |
-| `_sc_triggers` | triggers, whose body is an action **or a workflow** | **not an overlay** — the row is the trigger's only definition (§10.2): event, channel, `only_if`, `body` (`action` \| `workflow`), the action + configuration an `action` body carries, `min_role`, and in `attributes` the sparse `enabled` flag and periodic timing. `last_run_at` is the scheduler's own column, never written by a save. A workflow body's steps are **not** here: they are versioned in `_sc_workflow_versions`, so a suspended run finishes on its own version (§10.3) |
-| `_sc_workflow_versions` | one row per saved version of a workflow | `(workflow, version)` is unique and the table is **append-only**: saving an edited workflow mints `version + 1`, and a run records the version it started on and loads that one for its whole life (§10.3). `steps` holds the whole workflow document — the same JSON the API answers and the editor round-trips |
-| `_sc_agents` | agents | **not an overlay** — the row is the agent's only definition (§11.2): provider + model, system prompt, enabled traits with their configurations, `min_role`, and in `attributes` the sparse temperature / max tokens / max steps |
-| `_sc_llm_providers` | LLM connections | name + backend (`openai_responses` \| `anthropic`) + config (§11.1); the same shape as `_sc_file_stores`, and the API key is a `secret` field, redacted on read |
-| `_sc_runs` | workflow & agent runs | current context + state, updated after each step; `kind` discriminates `agent` from `workflow`, so a chat session and a durable run are one mechanism (§11.4) |
-| `_sc_run_traces` | per-step context + timing | one row per completed step attempt: when it ran, which attempt it was, how it came out, and the context **after** it. Written only when tracing is enabled for that workflow, and in the same batch as the run's own advance (§10.3) |
-| `_sc_errors` | error log | one row per logged error; `kind` = Application \| System (§16); message, source chain, and context (app/route/table/run/step/role); a runtime stream, **not cached** |
-| `_sc_config` | configuration | key + JSON value, one row per setting. Every key is **declared** as a `FormField` in `sc-config` (§6.2's vocabulary), which is what types it: a write is validated against the declaration and an undeclared key is refused, so the admin UI renders the settings screen from the declarations and knows nothing about any particular setting. Per-application scope is not built yet — today's keys are all installation-wide (§13.5). `feldspar get-cfg` / `set-cfg` read and write the same rows from a terminal — the value a terminal supplies is a string, so the declaration is what types it — for the reason `feldspar api` exists: a setting reachable only from a browser is unreachable from a deploy script |
-| `_sc_acme_cache` | ACME account + issued certificates | not configuration and not admin-visible: opaque bytes keyed by the digest of the domain list and the CA directory URL (§13.5), in the database so a renewal survives a restart and a second node does not order its own |
-| `_sc_applications` | applications | framework + its config, subdomain, table/store subset, API config, static dirs, CSP; **not an overlay** — the row is the app's only definition (§13.2), so this table is needed as soon as apps are (MVP) |
-| `_sc_models` | model definitions | **not an overlay** — the row is the model's only definition (§14.2): the provider, the `dataset` (which rows and which derived values, as a list of `sc-expr` formulas), the provider's configuration, the hyperparameter *space* (per key a value or a list to search over) and the split's fractions and seed. `table_name` is derived from the dataset on the way out and checked against it on the way in, so the list can be filtered by table without reading every dataset |
-| `_sc_model_instances` | one fit each | the provider's serialised `state`, its `parameters` (structured for display), the **host's** `metrics` per split, and the `encoding` the fit was made with — which is the load-bearing one: a prediction is encoded the way its fit was, or it fails. `status` is a column because every row has one and it is what the list filters on; the failure **sentence** is in `attributes`, because it is present only on the rows that failed. `active` is a column and at most one row per model carries it |
-| `_sc_roles` | roles | **not an overlay** — a role is a row carrying a name and role-specific settings; `users.role` is a foreign key onto it (§7.4). Two built-ins (admin, public) seeded at bootstrap |
-| `_sc_sessions` | live sessions | **`UNLOGGED`** where the backend allows it (§7.2): the SHA-256 of the token, the user it names, and when it lapses. Shared by every node, cached per node behind an LRU + freshness TTL. `user_id` is deliberately **not** a foreign key — the schema layer renders no `ON DELETE` action, so one would block deleting a signed-in user; a session resolves by reading the user, so a deleted one's session resolves to nobody |
-| `users` | users | UUID PK (not `_sc_`-prefixed; it is user-facing and extensible) |
+| `_fd_tables` | overlay metadata for tables **and** provided-table definitions | access rules, label/description, attributes; the DB's own tables need no row to be usable (§9.1). A row carrying `provider_module`/`provider_name`/`provider_config` in `attributes` is **not** an overlay — it is a virtual table's only definition (§8.3) |
+| `_fd_fields` | overlay metadata for fields | rich type name, field kind (`Key`/`File`) + parameters, label/description, attributes; later calculated-field defs and fieldview defaults (§9.1) |
+| `_fd_triggers` | triggers, whose body is an action **or a workflow** | **not an overlay** — the row is the trigger's only definition (§10.2): event, channel, `only_if`, `body` (`action` \| `workflow`), the action + configuration an `action` body carries, `min_role`, and in `attributes` the sparse `enabled` flag and periodic timing. `last_run_at` is the scheduler's own column, never written by a save. A workflow body's steps are **not** here: they are versioned in `_fd_workflow_versions`, so a suspended run finishes on its own version (§10.3) |
+| `_fd_workflow_versions` | one row per saved version of a workflow | `(workflow, version)` is unique and the table is **append-only**: saving an edited workflow mints `version + 1`, and a run records the version it started on and loads that one for its whole life (§10.3). `steps` holds the whole workflow document — the same JSON the API answers and the editor round-trips |
+| `_fd_agents` | agents | **not an overlay** — the row is the agent's only definition (§11.2): provider + model, system prompt, enabled traits with their configurations, `min_role`, and in `attributes` the sparse temperature / max tokens / max steps |
+| `_fd_llm_providers` | LLM connections | name + backend (`openai_responses` \| `anthropic`) + config (§11.1); the same shape as `_fd_file_stores`, and the API key is a `secret` field, redacted on read |
+| `_fd_runs` | workflow & agent runs | current context + state, updated after each step; `kind` discriminates `agent` from `workflow`, so a chat session and a durable run are one mechanism (§11.4) |
+| `_fd_run_traces` | per-step context + timing | one row per completed step attempt: when it ran, which attempt it was, how it came out, and the context **after** it. Written only when tracing is enabled for that workflow, and in the same batch as the run's own advance (§10.3) |
+| `_fd_errors` | error log | one row per logged error; `kind` = Application \| System (§16); message, source chain, and context (app/route/table/run/step/role); a runtime stream, **not cached** |
+| `_fd_config` | configuration | key + JSON value, one row per setting. Every key is **declared** as a `FormField` in `sc-config` (§6.2's vocabulary), which is what types it: a write is validated against the declaration and an undeclared key is refused, so the admin UI renders the settings screen from the declarations and knows nothing about any particular setting. Per-application scope is not built yet — today's keys are all installation-wide (§13.5). `feldspar get-cfg` / `set-cfg` read and write the same rows from a terminal — the value a terminal supplies is a string, so the declaration is what types it — for the reason `feldspar api` exists: a setting reachable only from a browser is unreachable from a deploy script |
+| `_fd_acme_cache` | ACME account + issued certificates | not configuration and not admin-visible: opaque bytes keyed by the digest of the domain list and the CA directory URL (§13.5), in the database so a renewal survives a restart and a second node does not order its own |
+| `_fd_applications` | applications | framework + its config, subdomain, table/store subset, API config, static dirs, CSP; **not an overlay** — the row is the app's only definition (§13.2), so this table is needed as soon as apps are (MVP) |
+| `_fd_models` | model definitions | **not an overlay** — the row is the model's only definition (§14.2): the provider, the `dataset` (which rows and which derived values, as a list of `sc-expr` formulas), the provider's configuration, the hyperparameter *space* (per key a value or a list to search over) and the split's fractions and seed. `table_name` is derived from the dataset on the way out and checked against it on the way in, so the list can be filtered by table without reading every dataset |
+| `_fd_model_instances` | one fit each | the provider's serialised `state`, its `parameters` (structured for display), the **host's** `metrics` per split, and the `encoding` the fit was made with — which is the load-bearing one: a prediction is encoded the way its fit was, or it fails. `status` is a column because every row has one and it is what the list filters on; the failure **sentence** is in `attributes`, because it is present only on the rows that failed. `active` is a column and at most one row per model carries it |
+| `_fd_roles` | roles | **not an overlay** — a role is a row carrying a name and role-specific settings; `users.role` is a foreign key onto it (§7.4). Two built-ins (admin, public) seeded at bootstrap |
+| `_fd_sessions` | live sessions | **`UNLOGGED`** where the backend allows it (§7.2): the SHA-256 of the token, the user it names, and when it lapses. Shared by every node, cached per node behind an LRU + freshness TTL. `user_id` is deliberately **not** a foreign key — the schema layer renders no `ON DELETE` action, so one would block deleting a signed-in user; a session resolves by reading the user, so a deleted one's session resolves to nobody |
+| `users` | users | UUID PK (not `_fd_`-prefixed; it is user-facing and extensible) |
 
 **Files have no per-file database row.** Per-file metadata is stored in **xattrs** on disk;
 a cross-platform xattr crate is required (Linux/macOS/Windows/FreeBSD). File stores that are
@@ -1194,26 +1194,26 @@ recorded on write and never rewritten afterwards, since the owner is the creator
 the last writer. It is a *label*, not an authority: reaching a file is the path-cumulative
 `min_role` rule and nothing else.
 
-The **overlay** principle for `_sc_tables`/`_sc_fields` is the key to "legacy databases just
+The **overlay** principle for `_fd_tables`/`_fd_fields` is the key to "legacy databases just
 work": introspection yields the tables and fields; the overlay only *adds* access rules and
 attributes where present. A newly connected database needs zero metadata rows.
 
 The overlay principle also decides where things **do not** go. A table's constraints — its
-jointly-unique keys, its indexes and its row constraints — have no `_sc_*` table at all, because
+jointly-unique keys, its indexes and its row constraints — have no `_fd_*` table at all, because
 they are facts the database already holds: they are created as the objects they are, read back by
 introspection, and carry what Postgres has nowhere to put (an error message, a formula) in the
 object's own comment (§5.1). A metadata table for them would be the one thing this section
 forbids — a second copy of something introspection yields.
 
-The overlay principle does **not** extend to every `_sc_*` table, and the distinction decides
-what the MVP can defer. A table exists in the database whether or not `_sc_tables` has a row
+The overlay principle does **not** extend to every `_fd_*` table, and the distinction decides
+what the MVP can defer. A table exists in the database whether or not `_fd_tables` has a row
 for it; an application, a trigger or a model does not exist anywhere but its row. So the
-overlay tables can be deferred while their subjects still work (§17), whereas `_sc_applications`
+overlay tables can be deferred while their subjects still work (§17), whereas `_fd_applications`
 must arrive with applications themselves — there is nothing to introspect an app *from*.
 
 ### 9.1 The merge and precedence rules, as implemented
 
-`_sc_tables` and `_sc_fields` now exist, and the rules below are the ones the code enforces
+`_fd_tables` and `_fd_fields` now exist, and the rules below are the ones the code enforces
 (stated on `Table::apply_overlay` / `Table::apply_field_overlay` in `sc-catalog`).
 
 **Precedence.** The database is the authority on everything it knows — columns, types,
@@ -1231,15 +1231,15 @@ default, never to the previous value. `Table.overlay: Option<TableMetaId>` recor
 `None` means "nobody has configured this table", and the id is what lets an edit update the
 existing row instead of racing to create a second.
 
-**Keys.** `_sc_tables.name` is `UNIQUE` — it is the key the merge joins on, and it *is* the §9
-`name` column (the subject's name; the Rust field stays `table_name`). `_sc_fields` has the
+**Keys.** `_fd_tables.name` is `UNIQUE` — it is the key the merge joins on, and it *is* the §9
+`name` column (the subject's name; the Rust field stays `table_name`). `_fd_fields` has the
 composite `PRIMARY KEY (table_name, name)`, since a field name is unique only within its table;
 `id` remains a required, unique row handle (§9 requires `id` present, not that it be the key).
 
 **Strict reads, refused nonsense.** A missing or ill-typed column is an error naming the table
 and column, never a silent default. Both role columns are `NOT NULL`, and an off-scale role is
 refused — on save and on read alike — rather than clamped, because rounding a role to the nearest
-legal one would silently decide who reaches the data. System (`_sc_*`) tables may not have overlay
+legal one would silently decide who reaches the data. System (`_fd_*`) tables may not have overlay
 rows: refused on save *and* ignored in the merge, because a restored dump or hand-edited database
 can contain a row the API would not have written.
 
@@ -1275,13 +1275,13 @@ diagram with one caveat in mind, because it is the whole character of this schem
 of these relationships is a database foreign key.**
 
 One of them is not bootstrapped and is not in the primary database at all:
-`_sc_object_comments` is the SQLite driver's stand-in for `COMMENT ON` (§5.2), created on demand
-in whichever SQLite database a comment is set in. It is drawn here because it is a `_sc_` table
+`_fd_object_comments` is the SQLite driver's stand-in for `COMMENT ON` (§5.2), created on demand
+in whichever SQLite database a comment is set in. It is drawn here because it is a `_fd_` table
 somebody will meet, and it is not connected to anything because it is not part of this schema.
 
 ```mermaid
 erDiagram
-  ROLES["_sc_roles"] {
+  ROLES["_fd_roles"] {
     uuid id PK
     int role UK "1..=100; the number authz compares"
     text name UK
@@ -1290,17 +1290,17 @@ erDiagram
   }
   USERS["users"] {
     uuid id PK
-    int role FK "-> _sc_roles.role, a real REFERENCES"
+    int role FK "-> _fd_roles.role, a real REFERENCES"
     text email UK
     text password_hash "argon2; nullable"
     bool disabled
   }
-  SESSIONS["_sc_sessions"] {
+  SESSIONS["_fd_sessions"] {
     text token_hash PK "SHA-256 of the cookie token"
     uuid user_id "deliberately NOT a foreign key"
     timestamp expires_at
   }
-  APITOKENS["_sc_api_tokens"] {
+  APITOKENS["_fd_api_tokens"] {
     text token_hash PK "SHA-256 of the bearer token"
     uuid id UK "the public handle a list reports and a revoke names"
     uuid user_id "deliberately NOT a foreign key"
@@ -1311,7 +1311,7 @@ erDiagram
     timestamp last_used_at "throttled to one write a minute"
     timestamp revoked_at "nullable while it is live"
   }
-  TABLES["_sc_tables"] {
+  TABLES["_fd_tables"] {
     uuid id PK
     text name UK "the physical table it overlays"
     text label
@@ -1320,7 +1320,7 @@ erDiagram
     int min_role_write
     json attributes
   }
-  FIELDS["_sc_fields"] {
+  FIELDS["_fd_fields"] {
     uuid id UK
     text table_name PK "composite PK with name"
     text name PK
@@ -1330,7 +1330,7 @@ erDiagram
     text kind "Plain | Key | File"
     json attributes "kind parameters, incl. target_table"
   }
-  TRIGGERS["_sc_triggers"] {
+  TRIGGERS["_fd_triggers"] {
     uuid id PK
     text name UK
     text description
@@ -1344,18 +1344,18 @@ erDiagram
     json attributes "enabled, periodic timing"
     timestamp last_run_at "written only by the scheduler"
   }
-  AGENTS["_sc_agents"] {
+  AGENTS["_fd_agents"] {
     uuid id PK
     text name UK
     text description
-    text provider "-> _sc_llm_providers.name"
+    text provider "-> _fd_llm_providers.name"
     text model
     text system_prompt
     json traits "enabled traits + their configuration"
     int min_role
     json attributes
   }
-  MODELS["_sc_models"] {
+  MODELS["_fd_models"] {
     uuid id PK
     text name UK
     text description
@@ -1367,9 +1367,9 @@ erDiagram
     json split "train/validation/test fractions + the hash seed"
     json attributes
   }
-  INSTANCES["_sc_model_instances"] {
+  INSTANCES["_fd_model_instances"] {
     uuid id PK
-    uuid model FK "-> _sc_models.id"
+    uuid model FK "-> _fd_models.id"
     text name
     text description
     text status "fitting | fitted | failed"
@@ -1382,7 +1382,7 @@ erDiagram
     json hyperparameters "the point this fit used -- never a list"
     json attributes "the failure sentence, the outcome, the row counts, the search"
   }
-  LLM["_sc_llm_providers"] {
+  LLM["_fd_llm_providers"] {
     uuid id PK
     text name UK
     text description
@@ -1390,7 +1390,7 @@ erDiagram
     json config "api_key is a redacted secret"
     json attributes
   }
-  DBCONN["_sc_db_connections"] {
+  DBCONN["_fd_db_connections"] {
     uuid id PK
     text name UK "stamped onto every table it contributes"
     text description
@@ -1405,13 +1405,13 @@ erDiagram
     text file_path "sqlite: the file, inside that store"
     json attributes
   }
-  COMMENTS["_sc_object_comments"] {
+  COMMENTS["_fd_object_comments"] {
     text kind PK "index | trigger"
     text table PK "empty for an index, which is named on its own"
     text name PK
     text comment "what COMMENT ON would have held"
   }
-  STORES["_sc_file_stores"] {
+  STORES["_fd_file_stores"] {
     uuid id PK
     text name UK
     text description
@@ -1420,7 +1420,7 @@ erDiagram
     int min_role
     json attributes
   }
-  RUNS["_sc_runs"] {
+  RUNS["_fd_runs"] {
     uuid id PK
     text kind "agent | workflow"
     text subject "the agent's or workflow's name"
@@ -1437,7 +1437,7 @@ erDiagram
     timestamp created_at
     timestamp updated_at
   }
-  WFVERSIONS["_sc_workflow_versions"] {
+  WFVERSIONS["_fd_workflow_versions"] {
     uuid id PK
     uuid workflow "the trigger, by value"
     int version "UNIQUE (workflow, version); append-only"
@@ -1447,7 +1447,7 @@ erDiagram
     timestamp created_at
     uuid created_by "nullable, NOT a foreign key"
   }
-  TRACES["_sc_run_traces"] {
+  TRACES["_fd_run_traces"] {
     uuid id PK
     uuid run "the run, by value"
     int seq "its position in the run"
@@ -1460,7 +1460,7 @@ erDiagram
     json context "the context AFTER the step"
     json attributes
   }
-  APPS["_sc_applications"] {
+  APPS["_fd_applications"] {
     uuid id PK
     text name
     text description
@@ -1475,7 +1475,7 @@ erDiagram
     json csp
     json attributes
   }
-  MODULES["_sc_modules"] {
+  MODULES["_fd_modules"] {
     uuid id PK
     text name UK "the npm package name"
     text source "npm | local"
@@ -1484,11 +1484,11 @@ erDiagram
     json configuration "the module's own settings; passwords redacted"
     json attributes
   }
-  CONFIG["_sc_config"] {
+  CONFIG["_fd_config"] {
     text key PK "declared as a FormField in sc-config"
     json value
   }
-  ACME["_sc_acme_cache"] {
+  ACME["_fd_acme_cache"] {
     text key PK "digest of domains + CA directory URL"
     text data
   }
@@ -1512,43 +1512,43 @@ erDiagram
   MODULES |o--o{ TRIGGERS : "action -- by name, an action the module supplies"
 ```
 
-Exactly **one** relationship above is an enforced `REFERENCES`: `users.role → _sc_roles.role`
+Exactly **one** relationship above is an enforced `REFERENCES`: `users.role → _fd_roles.role`
 (§7.4), which is why `bootstrap_roles` must run before the users table is created. Every other
 line is a reference *by value*, and each one is a decision rather than an omission:
 
-- **`_sc_sessions.user_id`, `_sc_api_tokens.user_id` and `_sc_runs.user_id`** are unenforced on
+- **`_fd_sessions.user_id`, `_fd_api_tokens.user_id` and `_fd_runs.user_id`** are unenforced on
   purpose. The schema layer renders no `ON DELETE` action, so a foreign key here would mean an
   administrator cannot delete a signed-in user, cannot delete a user who once minted an API
   token, and cannot delete a user who once chatted without destroying the record of what
   happened. A session and a token both resolve by *reading* the user, so a row naming somebody
   who is gone resolves to nobody and the sweep collects it; a run is evidence, and evidence
   outlives its subject.
-- **References by name — `_sc_agents.provider`, `_sc_runs.subject`, `_sc_triggers.channel`, and
-  the JSON name arrays in `_sc_applications`** — are by name because the name is the thing an
+- **References by name — `_fd_agents.provider`, `_fd_runs.subject`, `_fd_triggers.channel`, and
+  the JSON name arrays in `_fd_applications`** — are by name because the name is the thing an
   admin writes and an action configuration quotes. An id would make the configuration
   unreadable and unportable between installations.
-- **`_sc_modules` is drawn against `_sc_triggers` but owns nothing there.** A module supplies
+- **`_fd_modules` is drawn against `_fd_triggers` but owns nothing there.** A module supplies
   actions under v1's unqualified names (§15.1), and a trigger names an action — so the line is
   "this trigger may be running something that module supplies", by name, and it is dotted in
   both directions on purpose: the trigger does not know a module exists, and removing the module
   leaves the trigger stored and reported rather than deleted. What is *not* in the row is what
   the module supplies: the actions, their settings and the module's own settings form are read
   from the package at load, never stored, because `npm install` can change all three.
-- **`_sc_tables` and `_sc_fields` are overlays, not parents.** The line between them is a join on
+- **`_fd_tables` and `_fd_fields` are overlays, not parents.** The line between them is a join on
   `table_name`, not ownership: the subject of both rows is a *physical* table, which exists
-  whether or not either row does (§9.1). A field overlay for a table with no `_sc_tables` row is
+  whether or not either row does (§9.1). A field overlay for a table with no `_fd_tables` row is
   normal, and both may outlive the table itself as reported orphans.
-- **`_sc_fields.attributes.target_table`** points at a table for `Key` fields, but only supplies
+- **`_fd_fields.attributes.target_table`** points at a table for `Key` fields, but only supplies
   the reference when the database does not already enforce one; atop an introspected foreign key
   the overlay adds `summary_field` and nothing else (§9.1).
 
-Note also what is *not* an entity here. There is no `_sc_constraints`: a table's unique keys,
+Note also what is *not* an entity here. There is no `_fd_constraints`: a table's unique keys,
 indexes and row constraints are database objects, introspected like the primary key (§5.1). There
-is no per-file table: file metadata lives in xattrs on disk. And `_sc_config`/`_sc_acme_cache` are
-deliberately relationship-free key/value stores — every `_sc_config` key gets its meaning from a
+is no per-file table: file metadata lives in xattrs on disk. And `_fd_config`/`_fd_acme_cache` are
+deliberately relationship-free key/value stores — every `_fd_config` key gets its meaning from a
 `FormField` declaration in `sc-config`, not from a row pointing anywhere.
 
-Tables named in §9 that are **not yet created**: `_sc_errors`.
+Tables named in §9 that are **not yet created**: `_fd_errors`.
 
 ---
 
@@ -2126,7 +2126,7 @@ later listen to with a different body.
 
 #### Storage and the live set
 
-`_sc_triggers` follows §9: a trigger has nothing to introspect it from, so **its row is its
+`_fd_triggers` follows §9: a trigger has nothing to introspect it from, so **its row is its
 definition** (not an overlay). Reading is strict — a missing or ill-shaped column is an error
 naming the trigger, never a silently defaulted field that would fire the wrong action.
 
@@ -2253,7 +2253,7 @@ that is data, a **version** that is a row, a **run** that is a steppable value, 
 that is a query.
 
 **A workflow is a trigger body, not a top-level entity.** `TriggerBody` is `Action { action,
-configuration }` or `Workflow`, `_sc_triggers` carries a `body` discriminator, and `action` is
+configuration }` or `Workflow`, `_fd_triggers` carries a `body` discriminator, and `action` is
 nullable. So a workflow inherits its event, its `only_if`, its `min_role`, its enabled flag, its
 periodic timing, its exposure through an application and the admin's Run button with no second
 copy of any of them (GOALS: "every workflow is a trigger").
@@ -2265,7 +2265,7 @@ pub struct Workflow {
     pub start: String,
     pub steps: Vec<Step>,
     pub error_policy: ErrorPolicy,        // the default for every step
-    pub trace: bool,                      // write `_sc_run_traces` rows
+    pub trace: bool,                      // write `_fd_run_traces` rows
     pub max_steps: u32,                   // the step budget; 1000 by default
 }
 
@@ -2316,10 +2316,10 @@ dead. All four lower to one question the engine asks: *given this context, which
 
 #### Versions are rows, and a run pins one
 
-`_sc_workflow_versions` holds `(id, workflow, version, description, steps, attributes,
+`_fd_workflow_versions` holds `(id, workflow, version, description, steps, attributes,
 created_at, created_by)` with `UNIQUE (workflow, version)`, and it is **append-only**: saving an
 edited workflow reads the maximum and inserts the next; nothing updates a row, and a *revert*
-mints a new version whose steps are an old one's. `_sc_runs.subject_version` is what the run
+mints a new version whose steps are an old one's. `_fd_runs.subject_version` is what the run
 started on, and the driver loads *that* row on every advance. That is the whole implementation of
 GOALS' "a suspended run can finish with its version of the workflow": the program may be edited
 twice while an approval sits in somebody's inbox, and the run is not retro-fitted to steps it
@@ -2343,14 +2343,14 @@ Failed    { step, error }
 
 fed back through `step_succeeded`, `step_failed`, `evaluated` and `resumed`. It is **idempotent**:
 asking twice without answering asks for the same thing twice and spends no more budget, which is
-what makes at-least-once a property rather than a hope. The state *is* what `_sc_runs.context`
+what makes at-least-once a property rather than a hope. The state *is* what `_fd_runs.context`
 stores, so resuming is a deserialise rather than a reconstruction, and every rule above is
 testable synchronously with no database, no clock and no runtime — the same split as the agent
 loop (§11.2), for the same reason.
 
-`_sc_runs` is one table for both engines, as `RunKind` promised; a workflow run adds
+`_fd_runs` is one table for both engines, as `RunKind` promised; a workflow run adds
 `subject_version`, `wake_at`, `lease_until` and `claimed_by`, and `RunState` gained `Waiting`.
-`_sc_run_traces` holds one row per completed step attempt — when it ran, which attempt, how it
+`_fd_run_traces` holds one row per completed step attempt — when it ran, which attempt, how it
 came out, and the context *after* it — written only when the workflow's `trace` flag is on,
 because a trace row carries a copy of the whole context.
 
@@ -2410,7 +2410,7 @@ trace row **per item** — the durability granularity of a loop is the item.
   runs out **fails** rather than starting again. A `Next` that names a step the workflow does not
   have is the *program* being wrong: it ends the run without consulting a policy.
 - **Durability.** A run persists its context and position after every step, so it can wait for a
-  timer, a person, or a restart. A failed run is a record — the reason on `_sc_runs.error` with
+  timer, a person, or a restart. A failed run is a record — the reason on `_fd_runs.error` with
   the step named, in the error log (§16), and raised as an `error` event, once.
 
 #### The queue is the runs table, claimed with a lease
@@ -2599,7 +2599,7 @@ no-OpenSSL posture. Rejected, with reasons, because the survey is the decision:
   maintained crate is actually buying.
 
 **What rig is *not* used for.** Its `Agent`, its tool registry, its RAG and vector stores, its
-`CompletionModel` generics: the loop is ours (§11.2) because it must persist to `_sc_runs`,
+`CompletionModel` generics: the loop is ours (§11.2) because it must persist to `_fd_runs`,
 enforce a caller's role inside every tool, and stream to a browser. Concretely, rig's
 `CompletionModel` is not object-safe (associated types, `impl Future`, `Clone`), so a
 `Box<dyn>` chosen from stored configuration needs a seam regardless; `sc-llm` is that seam and
@@ -2616,15 +2616,15 @@ declined for three reasons, in order of weight:
 
 - **There is no erased model.** Rig type-erases vector stores and tools but not models: there is
   no `dyn CompletionModel` anywhere in 0.41. Because Saltcorn chooses the provider at runtime
-  from an `_sc_llm_providers` row, `Agent<M>` would require a unified `enum` model with unified
+  from an `_fd_llm_providers` row, `Agent<M>` would require a unified `enum` model with unified
   `Serialize`/`DeserializeOwned` `Response` and `StreamingResponse` types and a re-mapping of
   both stream shapes — glue that would also make `sc-llm`'s two adapters redundant.
 - **Persistence granularity.** `ConversationMemory::append` is specified as running after a
   successful *turn* and carries messages only — no usage, state, caller or run kind — whereas
-  §11.4 writes `_sc_runs` after every *step*. Reconstructing that from hooks, which return
+  §11.4 writes `_fd_runs` after every *step*. Reconstructing that from hooks, which return
   control actions rather than state, is not the shorter path.
 - **Nothing to say about the rest.** The bulk of `sc-agent` is the agent record, its storage,
-  `AgentTrait` with admin-rendered `config_spec`s, validate-on-save-and-load, and `_sc_runs`.
+  `AgentTrait` with admin-rendered `config_spec`s, validate-on-save-and-load, and `_fd_runs`.
   Rig's agent addresses none of it, and the loop it *would* replace is the smallest part.
 
 Tool authority, expected to be the obstacle, is not one: rig carries a per-run `ToolContext`
@@ -2642,7 +2642,7 @@ cross-version stability, which is a poor property for a stored run. The one futu
 revisiting is `rig-agent`'s MCP integration — but it pays off only through rig's `ToolSet`, which
 returns to the first bullet, so an `AgentTrait` over the `rmcp` crate is the likelier route.
 
-**Providers are configured entities, like file stores.** A named record in `_sc_llm_providers`
+**Providers are configured entities, like file stores.** A named record in `_fd_llm_providers`
 — `name`, `backend` (`openai_responses` | `anthropic`), `config` (`Attrs`), `description` —
 with the backend's settings declared as `FormField`s and rendered by the same admin form that
 renders a file store's. `openai_responses` takes a `base_url` (defaulted, so any
@@ -2695,7 +2695,7 @@ pub struct Agent {
     pub id: AgentId,                 // UUID: stored metadata (§9)
     pub name: String,                // unique; what a trigger and the chat address
     pub description: String,
-    pub provider: String,            // an `_sc_llm_providers` name
+    pub provider: String,            // an `_fd_llm_providers` name
     pub model: Option<String>,       // overrides the provider's default
     pub system_prompt: String,
     pub traits: Vec<EnabledTrait>,   // { trait_: String, config: Attrs }
@@ -2736,7 +2736,7 @@ discovered when the model picks the wrong one.
 **The loop**, in `sc-agent`. It is a **steppable machine, not an `async fn`** (§11.1): the run
 holds its own state, `next_step()` says what must happen next — call the model, call these tools,
 or stop — and the driver performs that one piece of IO and hands the result back. The state is
-therefore serialisable at every step boundary, which is what `_sc_runs` stores; a resumed process
+therefore serialisable at every step boundary, which is what `_fd_runs` stores; a resumed process
 loads it and asks for the next step, and the durable workflow engine (§10.3) inherits the same
 machine rather than needing a second one. What the driver does at each step:
 
@@ -2761,7 +2761,7 @@ admin's configuration running on the admin's behalf, whereas a chat turn is a us
 agent run *from* a trigger runs with that trigger's authority, and the difference is visible at
 exactly one place — where the run is created.
 
-**Storage and validation** follow triggers exactly (§10.2): `_sc_agents` is a definition, not an
+**Storage and validation** follow triggers exactly (§10.2): `_fd_agents` is a definition, not an
 overlay; reading is strict; validation runs on save and again on load, in one function (the
 provider resolves, each named trait resolves in the registry, each configuration validates
 against its `config_spec` and then its `validate_config`, `min_role` is on the 1–100 scale, tool
@@ -2988,8 +2988,8 @@ and one refusal.
   created three operations earlier and a formula naming a field added two operations earlier both
   validate; only then is any DDL issued, through one `Transaction`, with the RLS policy SQL joining
   it at the end because it may reference columns the operations above it create. A refused
-  operation rolls the whole batch back, naming the operation by its index. The `_sc_tables` /
-  `_sc_fields` overlay rows cannot join that transaction — they go through the row layer, not the
+  operation rolls the whole batch back, naming the operation by its index. The `_fd_tables` /
+  `_fd_fields` overlay rows cannot join that transaction — they go through the row layer, not the
   driver handle — so `createField`'s partial-failure message becomes the batch's.
 - **Dropping is new capability, not just a new caller.** `Catalog::drop_table` /
   `drop_field` did not exist; they do now, each deleting the overlay rows with the thing they
@@ -3016,8 +3016,8 @@ and one refusal.
   other trait leans on §7.3 to decide what a caller may see; a schema has no ownership formula to
   fall back on, and the admin API guards every catalog endpoint with `admin()` — so without this,
   an agent exposed to a role-80 user through a chat view would hand them the table editor.
-- **What it may never touch, regardless of grant**: `_sc_*` tables (invisible to `describe_schema`,
-  refused by `edit_schema`); `users` and `_sc_roles`, which are described and may gain a field but
+- **What it may never touch, regardless of grant**: `_fd_*` tables (invisible to `describe_schema`,
+  refused by `edit_schema`); `users` and `_fd_roles`, which are described and may gain a field but
   are never dropped and never lose a built-in column.
 - **The tool schema decides three things rather than leaving them to the model**, each because a
   guess costs a turn or a wrong column: the **type names are an enum built from the live registry**
@@ -3066,7 +3066,7 @@ have used**. Four reasons, in the order they mattered:
   In one loop that is a tool result and the next turn corrects it; inside a nested call it is
   either an error nobody can attribute or a retry loop nobody can see.
 - **A hidden second inference is a run nobody can read.** §11 is built on a run being a transcript
-  with one subject, a step budget and a row in `_sc_runs`. A tool that quietly calls the model
+  with one subject, a step budget and a row in `_fd_runs`. A tool that quietly calls the model
   again has none of those. Where a task genuinely wants its own context window, `subagent` already
   provides one — visibly.
 - **It costs less.** Saltcorn 1's flow spends two inferences on every action, always. This spends
@@ -3094,7 +3094,7 @@ Four more decisions in that half:
   implicit upsert safe — an agent allowed only to build new triggers cannot rewrite one an admin
   wrote by reusing its name. Omitted means unchanged and `null` clears, as `alter_table` does.
 - **Secrets are masked on the way out and merged back on the way in.** A tool result is written
-  into `_sc_runs` and re-read into the provider's context on every later turn, so a key that
+  into `_fd_runs` and re-read into the provider's context on every later turn, so a key that
   reaches one has been copied somewhere nobody thought about. `redact_attrs`/`merge_secrets` —
   §11.1's pair — apply here for that reason rather than as an access control; the caller is an
   admin either way.
@@ -3154,7 +3154,7 @@ can write an SQL endpoint and cannot remove one.
 **Other agents.** `subagent` exposes **one configured agent** as one tool, so an agent is a
 thing an agent can be given, exactly as a table and a trigger are. The parent hands over one
 bounded task, the sub-agent runs a whole loop of its own — its own system prompt, its own tools,
-its own step budget, its own row in `_sc_runs` — and hands back what it concluded. Two things
+its own step budget, its own row in `_fd_runs` — and hands back what it concluded. Two things
 make it worth having, and they are different things: **context**, because the sub-agent's twenty
 tool calls happen in a window that is not the parent's and the parent's conversation grows by one
 paragraph rather than by a transcript; and **scope**, because "the agent that may edit the source"
@@ -3211,7 +3211,7 @@ answer, and the child is its own run.
 
 ### 11.4 Chat: runs, transport, UI
 
-**A chat session is a run.** `_sc_runs` (§9) is created by this milestone with the shape the
+**A chat session is a run.** `_fd_runs` (§9) is created by this milestone with the shape the
 workflow engine will also use: `id`, `kind` (`agent` today, `workflow` later), `subject` (the
 agent's or workflow's id), `context` (JSON — for an agent, the message history and accumulated
 usage), `state`, `user`, timestamps. Persisting after every step is what a durable engine needs
@@ -3289,7 +3289,7 @@ history for that agent.
   `description` is set from the first line of the first message, so a list with no transcripts is
   still a list of recognisable conversations.
 - **Deleting an LLM provider is refused while an agent names it.** The `extra_referents` slot
-  §11.1 left open is filled by the server, which can see `_sc_agents` from above. Deleting an
+  §11.1 left open is filled by the server, which can see `_fd_agents` from above. Deleting an
   **agent**, by contrast, leaves its runs: `subject` is the name, and the transcript is the
   record of what happened.
 
@@ -3323,7 +3323,7 @@ reach the row layer) taking an agent name and a prompt formula evaluated in the 
 (§10.1). It makes an agent a trigger body without touching the trigger model: a row insert can
 start an agent with a prompt derived from the row, an application can expose it as
 `POST {mount}/actions/{name}` under the trigger's `min_role` (§13.2), and the run it creates is
-the same `_sc_runs` row the chat interface reads, so a triggered run is inspectable afterwards.
+the same `_fd_runs` row the chat interface reads, so a triggered run is inspectable afterwards.
 
 Its result is the agent's final assistant message plus the run id. It does **not** stream: an
 action returns a value (§10.1), and a caller who wants the deltas is a chat client.
@@ -3878,8 +3878,8 @@ subdirectories. This is the whole configuration path; embedding `sc-server` in a
 binary to declare an `Application` in Rust is not one. `sc-cli` may grow app commands for
 scripted deployment, but the admin UI is the primary and complete surface.
 
-**Applications are stored in `_sc_applications`** (§9) and so obey the §9 rules: UUID `id`,
-`name`, `description`, `attributes`. Note what this is *not*: `_sc_tables`/`_sc_fields` are
+**Applications are stored in `_fd_applications`** (§9) and so obey the §9 rules: UUID `id`,
+`name`, `description`, `attributes`. Note what this is *not*: `_fd_tables`/`_fd_fields` are
 **overlays** — introspection already yields the tables, so a row only adds to what the
 database itself reports, and a legacy database needs zero metadata rows. An application has
 no such underlying reality. It exists only as stored configuration, so its row is the
@@ -3898,7 +3898,7 @@ actions registry arrives.
 restart should never be required and that only individual APIs and applications may need
 one, so mounting is a runtime operation, not a boot-time one:
 
-- **At boot**, `sc-server` loads every row of `_sc_applications` and mounts each app.
+- **At boot**, `sc-server` loads every row of `_fd_applications` and mounts each app.
 - **On create/edit**, the admin UI's call persists the row, then builds (for a framework with
   a build step, §13.3) and mounts or re-mounts *that app alone*. Other apps keep serving; the
   admin never goes away; the process does not restart.
@@ -4242,9 +4242,9 @@ the caller is at a shell, and "not found" alone would send them to the admin UI 
 question this command could answer.
 
 **It writes the session itself, and contacts no server.** A session *is* a row in
-`_sc_sessions` (§7.2) — that is what lets two application servers share one — so the authority
+`_fd_sessions` (§7.2) — that is what lets two application servers share one — so the authority
 that can write that table can start a session, and this command holds exactly that authority.
-It used to need a running server and a one-time grant in `_sc_session_grants` to bridge the
+It used to need a running server and a one-time grant in `_fd_session_grants` to bridge the
 gap, because the store it had to reach lived in the server's own memory; with the store in the
 database there is nothing left to ask for, and the grant, the `POST /auth/token` route that
 redeemed it and the CSRF priming request it needed are all gone. `auth token` now works
@@ -4554,8 +4554,8 @@ projected as another column of the parent `SELECT`:
 
 ```sql
 SELECT "departments".*,
-       (SELECT count(*) FROM "employees" AS "_sc_g1"
-         WHERE "_sc_g1"."department" = "departments"."id" AND "_sc_g1"."salary" < $1) AS …
+       (SELECT count(*) FROM "employees" AS "_fd_g1"
+         WHERE "_fd_g1"."department" = "departments"."id" AND "_fd_g1"."salary" < $1) AS …
 FROM "departments"
 ```
 
@@ -4675,7 +4675,7 @@ Both modes feed the same rustls `ServerConfig`; switching modes does not change 
 listener is set up. Plain-HTTP serving (behind a trusted proxy, or for local development)
 remains available.
 
-**As built.** `sc-config` declares the TLS section of `_sc_config` (`ssl_mode` ∈
+**As built.** `sc-config` declares the TLS section of `_fd_config` (`ssl_mode` ∈
 `off`/`letsencrypt`/`custom`, the pasted chain and key, the ACME contact and directory URL,
 extra domains, `https_port`, `redirect_http_to_https`); `sc-server::tls` turns those into a
 serving plan and an `axum-server` acceptor — a fixed `rustls::ServerConfig` for a pasted
@@ -4690,7 +4690,7 @@ subdomain. Five decisions worth stating:
 - **ALPN advertises `http/1.1` only.** WebSockets over HTTP/2 need RFC 8441 extended CONNECT,
   which axum's `ws` does not implement; advertising `h2` would trade the agent chat (§11.4)
   and the IDE's language server (§12.1) for multiplexing on an admin console.
-- **The ACME cache is a table** (`_sc_acme_cache`), keyed by the digest of the domain list and
+- **The ACME cache is a table** (`_fd_acme_cache`), keyed by the digest of the domain list and
   the directory URL, so a renewal survives a restart, a second node serves what the first
   ordered, and pointing a deployment at the staging directory misses rather than serving the
   wrong certificate.
@@ -4764,7 +4764,7 @@ owner's attention, which is what expiry, revocation and the audit line below are
 
 #### The token
 
-`_sc_api_tokens`, in the primary database, and — unlike `_sc_sessions` (§7.2) — a **logged**
+`_fd_api_tokens`, in the primary database, and — unlike `_fd_sessions` (§7.2) — a **logged**
 table: a lost session costs a re-login and a lost token costs a support call.
 
 | column | meaning |
@@ -4785,7 +4785,7 @@ may share. So the row keeps a handle that is nobody's secret and everybody's nam
 record of what an administrator agreed to, and a key that is absent because it matched a default
 is a key that would silently mean something else the day the default changed.
 
-**What is stored MUST be the hash, never the token**, for the reason `_sc_sessions` gives: a
+**What is stored MUST be the hash, never the token**, for the reason `_fd_sessions` gives: a
 bearer credential at rest is worth stealing and a hash of one is not. A fast hash is the
 correct one here — the token is 256 bits of uniform randomness, so there is no dictionary to
 run and nothing a slow hash (§7.2's argon2id, which is for passwords) would buy.
@@ -4857,7 +4857,7 @@ table is what it mints into — an authentication path added, not a credential m
 
 #### Off by default, and the switch is a setting
 
-Two `_sc_config` keys declared in the **Development** section (§6.2, beside `log_sql` and
+Two `_fd_config` keys declared in the **Development** section (§6.2, beside `log_sql` and
 `log_verbosity`, whose section description already frames them as *for finding out what a
 running installation is doing, not for leaving on*): `mcp_enabled`, whether the server is
 served at all, and `mcp_loopback_only`, whether it accepts non-loopback peers. Unlike the two
@@ -5066,8 +5066,8 @@ Five nouns, fixed here because the words are overloaded everywhere else in the i
 |---|---|---|
 | **model provider** | code that can fit something — `linear_regression`, `kmeans`, a module's `sklearn_ridge` | a registry, like actions |
 | **dataset** | which table, which derived columns, which rows | a JSON column *on the model* |
-| **model** | a dataset + a provider + its configuration + its hyperparameter space | `_sc_models` |
-| **model instance** | one fit: parameters, metrics, encoding, serialised state | `_sc_model_instances` |
+| **model** | a dataset + a provider + its configuration + its hyperparameter space | `_fd_models` |
+| **model instance** | one fit: parameters, metrics, encoding, serialised state | `_fd_model_instances` |
 | **prediction** | applying an instance to rows | the `predict_row` action, and `predictRows` |
 
 A model is edited and refitted; each fit leaves an instance behind, so the instances of a model
@@ -5102,7 +5102,7 @@ admin who wants `log(price)` types it over what the picker wrote.
 refused in a calculated field: a dataset has no caller, and a fit that meant something different
 depending on who pressed the button would be indefensible.
 
-**The dataset has no tab, and no store.** It is a JSON column on `_sc_models`. A shared, named
+**The dataset has no tab, and no store.** It is a JSON column on `_fd_models`. A shared, named
 dataset would need a lifecycle — what happens to the four models fitted against it when somebody
 adds a column, whether an instance fitted against version 1 is still readable, whether deleting
 it is allowed — and that is a versioning problem bought for a saving (retyping a column list)
@@ -5417,11 +5417,11 @@ where somebody chose it.
 
 #### Storage
 
-`_sc_models`: `id` (uuid pk), `name` (unique), `description`, `table_name`, `provider`, `dataset`
+`_fd_models`: `id` (uuid pk), `name` (unique), `description`, `table_name`, `provider`, `dataset`
 (JSON), `configuration` (JSON), `hyperparameters` (JSON — values or lists), `split` (JSON —
 fractions and seed), `attributes` (JSON).
 
-`_sc_model_instances`: `id` (uuid pk), `model` (uuid), `name`, `description`, `status`
+`_fd_model_instances`: `id` (uuid pk), `model` (uuid), `name`, `description`, `status`
 (`fitting` | `fitted` | `failed`), `created`, `active` (bool), `state` (JSON — the provider's
 serialised fit), `parameters` (JSON), `metrics` (JSON), `encoding` (JSON), `hyperparameters`
 (JSON — the chosen point), `attributes` (JSON).
@@ -5644,7 +5644,7 @@ has a sandbox:
 
 - **Running a module is sandboxed.** `deno_permissions::PermissionsContainer` is a per-worker
   argument, so a module's worker is given exactly what an admin granted it and nothing else:
-  four allow-lists on `_sc_modules.permissions` — `net`, `read`, `write`, `env` — where **every
+  four allow-lists on `_fd_modules.permissions` — `net`, `read`, `write`, `env` — where **every
   empty list means nothing, never everything**, and a module installed with nothing declared
   gets the closed set. A container belongs to an isolate and there is no fence inside one, so
   the pool pins **by permission set**: two modules share a worker only when they may reach the
@@ -5671,7 +5671,7 @@ on the Modules tab as a card each with an Install button.
 
 **They are still modules.** Nothing in `plugins/` is loaded, registered or resident until an
 admin installs one; a server that installs none runs exactly the code it ran before. What
-installing does is what installing has always done — a row in `_sc_modules`, a package in the
+installing does is what installing has always done — a row in `_fd_modules`, a package in the
 modules root, a reload — and the module then loads on a worker with the permissions its row
 carries, like every other.
 
@@ -5702,7 +5702,7 @@ manifest that will not parse is an issue on the boot log rather than a module li
 the row is keyed by, so it is how the card knows it is already installed), the language, the
 card's words, what installing downloads, and what installing grants.
 
-**The grant is the one thing worth arguing about.** `_sc_modules.permissions` is deliberately
+**The grant is the one thing worth arguing about.** `_fd_modules.permissions` is deliberately
 the *server's* record and not the package's: what a package declares is a request, and a
 request that granted itself would be no permission model at all. A bundled manifest's
 `permissions` is such a request — and it is granted by the install, because the Modules tab
@@ -5962,7 +5962,7 @@ own package and two plugins in one interpreter cannot see each other's declarati
 `settings()` decorates nothing, so it reads its caller's frame — the same rule, one level of
 indirection away.
 
-**One `_sc_modules`, two languages** (a module is a module to an admin, so one table, one tab and
+**One `_fd_modules`, two languages** (a module is a module to an admin, so one table, one tab and
 one set of endpoints). The row gains `language` (`javascript` | `python`, NULL reading as
 `javascript`) and `source` gains `pypi` beside `npm` and `local`; a language and a source that
 disagree are refused on save, because npm cannot fetch from PyPI and a row with the wrong pair is
@@ -6120,7 +6120,7 @@ impl Error { pub fn kind(&self) -> ErrorKind { /* per-variant classification */ 
 ```
 
 Regardless of whether an error is handled or propagates to a crash, it is **logged to an
-error log in the primary database** — the `_sc_errors` table (§9). A log row records the
+error log in the primary database** — the `_fd_errors` table (§9). A log row records the
 kind, the variant, the message and source chain, and context (application, request/route,
 table, workflow run + step, user role) where available. The error log is a runtime record
 stream, so like users/runs/files it is **not cached** and is written on a best-effort path
@@ -6134,7 +6134,7 @@ never retrofitted.
 
 **Diagnostic logging (Settings → Development).** Distinct from the error log above, which is
 a durable record in the database: this is what a *running process prints*, and it is two
-stored settings in the `development` section of `_sc_config` (§9).
+stored settings in the `development` section of `_fd_config` (§9).
 
 - **`log_verbosity`** — the Unix ladder `error < warning < info < verbose < trace`, default
   `warning`. **`info` logs every server request**: one line per finished request with its
@@ -6269,7 +6269,7 @@ admin HTML (the earlier "web 1.0 admin" and `sc-markup` plan are dropped, §12).
 |---|---|
 | Enum `Statement` for select/insert/update/delete | `sc-query` |
 | Postgres driver (host/user/pass/db); run queries | `sc-db`, `sc-db-postgres` |
-| Catalog initialised from a driver; introspect via information_schema; get/create table & field; **no stored metadata beyond information_schema and `_sc_applications`** *(true for the MVP; since superseded — see the note below)* | `sc-catalog` |
+| Catalog initialised from a driver; introspect via information_schema; get/create table & field; **no stored metadata beyond information_schema and `_fd_applications`** *(true for the MVP; since superseded — see the note below)* | `sc-catalog` |
 | Types: all **basic**, no rich types | `sc-types` |
 | Users: create-first-user flow; login/logout | `sc-auth`, `sc-server` |
 | Endpoint model (typed Rust values) + generated TypeScript API client | `sc-api` |
@@ -6278,23 +6278,23 @@ admin HTML (the earlier "web 1.0 admin" and `sc-markup` plan are dropped, §12).
 | File store connect + basic file manager + edit files | `sc-files`, `sc-server` |
 | React app served entirely from the Saltcorn process, no DB access, living in a git-repo file store, with a build step | `sc-app`, `ui/` build path, `sc-server` |
 | API to serve the React app; auth from the React app | `sc-api`, `sc-auth` |
-| **Applications created and configured in the admin UI**; stored in `_sc_applications`; built and mounted with no process restart | `sc-app`, `sc-api`, `sc-server`, `ui/admin` |
+| **Applications created and configured in the admin UI**; stored in `_fd_applications`; built and mounted with no process restart | `sc-app`, `sc-api`, `sc-server`, `ui/admin` |
 | Tests against a real Postgres, reinitialised per test | `tests/` |
 
 MVP explicitly excluded: multiple databases, rich types, stored table/field metadata
 overlay, workflows, agents, models, and the drag-and-drop builder. The system is "useful" at
 the end of the MVP.
 
-Note the one deliberate exception the MVP made to "no stored metadata": `_sc_applications` was
-in scope because an application has no other definition (§9), while the `_sc_tables`/`_sc_fields`
+Note the one deliberate exception the MVP made to "no stored metadata": `_fd_applications` was
+in scope because an application has no other definition (§9), while the `_fd_tables`/`_fd_fields`
 overlays stayed out because tables and fields work without them. "No stored metadata beyond
-information_schema" was always a statement about *overlays*, not a ban on the `_sc_*` tables
+information_schema" was always a statement about *overlays*, not a ban on the `_fd_*` tables
 whose subjects exist nowhere else.
 
 **Since superseded.** Three post-MVP milestones later, the catalog's stored metadata is:
-`_sc_applications`, `_sc_file_stores` and `_sc_triggers` (definitions — their subjects exist
-nowhere else), `_sc_roles` (the authoritative role list, §7.4), and the
-`_sc_tables`/`_sc_fields` **overlays**
+`_fd_applications`, `_fd_file_stores` and `_fd_triggers` (definitions — their subjects exist
+nowhere else), `_fd_roles` (the authoritative role list, §7.4), and the
+`_fd_tables`/`_fd_fields` **overlays**
 (§9.1), which is what replaced the "information_schema only" invariant. What the invariant was
 *for* — the zero-setup promise, "point Saltcorn at a legacy database and it just works" — still
 holds, and the merge rule is what carries it now: a table or field with **no overlay row** comes

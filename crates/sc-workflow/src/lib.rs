@@ -12,10 +12,10 @@
 //! - The **program** ([`workflow`]): [`Workflow`], [`Step`], [`StepKind`],
 //!   [`Next`] and [`ErrorPolicy`] — pure data, whose serde shape *is* the stored
 //!   shape, the API shape and the visual editor's shape.
-//! - The **versions** ([`versions`]): `_sc_workflow_versions`, append-only, so a
+//! - The **versions** ([`versions`]): `_fd_workflow_versions`, append-only, so a
 //!   run pins the version it started on and finishes on it however many times the
 //!   workflow is edited meanwhile.
-//! - The **trace** ([`traces`]): `_sc_run_traces`, one row per completed step
+//! - The **trace** ([`traces`]): `_fd_run_traces`, one row per completed step
 //!   attempt, written only when the workflow asks for it.
 //! - The **scope** ([`scope`]): [`workflow_shape`], the one place a step's
 //!   formulas' scope is decided.
@@ -24,7 +24,7 @@
 //!   driver. Sans-IO — it owns every decision and performs none of the work — so
 //!   the engine's rules are testable synchronously, with no database, no runtime
 //!   and no clock.
-//! - The **run record** ([`run`]): the workflow half of an `_sc_runs` row — the
+//! - The **run record** ([`run`]): the workflow half of an `_fd_runs` row — the
 //!   machine state, the version it is pinned to, the event that started it and
 //!   the chain that bounds its writes.
 //! - The **driver** ([`driver`]): the one thing that does the IO — load the

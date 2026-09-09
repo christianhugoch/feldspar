@@ -2,7 +2,7 @@
 //!
 //! GOALS: every created entity except users, runs and files is cached in memory,
 //! and firing an event must be a lookup rather than a query — a table write that
-//! did a `SELECT` on `_sc_triggers` first would put the cost of the *feature* on
+//! did a `SELECT` on `_fd_triggers` first would put the cost of the *feature* on
 //! every write that does not use it.
 //!
 //! **Loading validates**, and a trigger that fails is dropped from the live set
@@ -41,7 +41,7 @@ pub struct Triggers {
 }
 
 impl Triggers {
-    /// An empty set — a catalog with no `_sc_triggers` table, and the starting
+    /// An empty set — a catalog with no `_fd_triggers` table, and the starting
     /// point for a test.
     pub fn empty() -> Triggers {
         Triggers::default()
@@ -60,7 +60,7 @@ impl Triggers {
 
     /// Load and validate every stored trigger.
     ///
-    /// A catalog with no `_sc_triggers` table yields an empty set rather than an
+    /// A catalog with no `_fd_triggers` table yields an empty set rather than an
     /// error: that table's absence *means* "no triggers have ever been defined",
     /// which is a legitimate state for a database Saltcorn has just met. A
     /// database error while reading a table that does exist stays an error.

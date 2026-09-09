@@ -7,14 +7,14 @@
 //! flow ([`create_first_user`], [`any_user_exists`]), credential
 //! [`authenticate`]ion, the admin-driven [`create_user`] path, and the
 //! [`SessionStore`] behind login/logout — rows in
-//! [`_sc_sessions`](SESSIONS_TABLE) behind a per-node cache, so a second
+//! [`_fd_sessions`](SESSIONS_TABLE) behind a per-node cache, so a second
 //! application server is a deployment decision rather than a rewrite — and the
-//! **API tokens** of [`_sc_api_tokens`](API_TOKENS_TABLE), the bearer credential
+//! **API tokens** of [`_fd_api_tokens`](API_TOKENS_TABLE), the bearer credential
 //! the administration MCP server authenticates with (§13.6). A token names a
 //! user and resolves to one, which is the whole of that server's authentication
 //! ([`authenticate_api_token`], [`mint_api_token`]).
 //!
-//! Roles live in [`_sc_roles`](ROLES_TABLE) and `users.role` is a foreign key
+//! Roles live in [`_fd_roles`](ROLES_TABLE) and `users.role` is a foreign key
 //! onto it (§7.1, §9): a role is a row carrying a name and role-specific
 //! settings, not a bare integer with a convention attached.
 

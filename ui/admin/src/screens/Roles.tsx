@@ -1,6 +1,6 @@
 // Roles screen: list the roles that exist, add one, delete one.
 //
-// A role is a row in `_sc_roles` (design §7.1, §9): a number on the fixed 1–100
+// A role is a row in `_fd_roles` (design §7.1, §9): a number on the fixed 1–100
 // scale, a name, and — in its attributes — whatever role-specific settings
 // arrive later. `users.role` is a foreign key onto it, so this screen is a
 // prerequisite for the Users screen rather than a decoration: a user cannot hold

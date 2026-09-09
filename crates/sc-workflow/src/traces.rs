@@ -1,4 +1,4 @@
-//! `_sc_run_traces`: what happened, step by step (design §9, §10.3).
+//! `_fd_run_traces`: what happened, step by step (design §9, §10.3).
 //!
 //! §9 named this table with the agent milestone and left it uncreated; it is
 //! created here, because the workflow engine is the thing that has per-step
@@ -27,11 +27,11 @@ use serde_json::Value as Json;
 use uuid::Uuid;
 
 /// Name of the run-traces table in the primary database.
-pub const TRACES_TABLE: &str = "_sc_run_traces";
+pub const TRACES_TABLE: &str = "_fd_run_traces";
 
 /// The UUID primary-key column (§9).
 pub const COL_ID: &str = "id";
-/// The run this is a step of — `_sc_runs.id`, by value.
+/// The run this is a step of — `_fd_runs.id`, by value.
 pub const COL_RUN: &str = "run";
 /// Which step of the run this is: 1, 2, 3 … in the order they were taken.
 pub const COL_SEQ: &str = "seq";
@@ -179,7 +179,7 @@ impl RunTrace {
     }
 }
 
-/// The fields of the `_sc_run_traces` table, in declaration order.
+/// The fields of the `_fd_run_traces` table, in declaration order.
 fn trace_fields() -> Vec<DataField> {
     let text = || TypeRef::Basic(BasicType::Text);
     let json = || TypeRef::Basic(BasicType::Json);
@@ -188,7 +188,7 @@ fn trace_fields() -> Vec<DataField> {
     let ts = || TypeRef::Basic(BasicType::Timestamp);
     vec![
         DataField::plain(COL_ID, uuid()).required().primary_key(),
-        // By value, not a foreign key — the same rule `_sc_runs.user_id`
+        // By value, not a foreign key — the same rule `_fd_runs.user_id`
         // follows: a trace is evidence, and deleting the run it belongs to is
         // `delete_run_traces`' job rather than a cascade nobody declared.
         DataField::plain(COL_RUN, uuid()).required(),
@@ -204,7 +204,7 @@ fn trace_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure `_sc_run_traces` exists, creating it if absent, and return it.
+/// Ensure `_fd_run_traces` exists, creating it if absent, and return it.
 pub async fn bootstrap_run_traces(catalog: &Catalog) -> Result<Table> {
     catalog.bootstrap_table(TRACES_TABLE, &trace_fields()).await
 }

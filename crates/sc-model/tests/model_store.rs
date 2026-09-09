@@ -1,4 +1,4 @@
-//! `_sc_models` and `_sc_model_instances` against a **real Postgres**
+//! `_fd_models` and `_fd_model_instances` against a **real Postgres**
 //! (principle 4): the rows *are* the definition and the fit, so what a save
 //! writes and a load reads back is the whole of whether a configured model — and
 //! an hour of fitting — survives a restart.

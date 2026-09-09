@@ -331,7 +331,7 @@ export function splitCodeBlocks(text: string): Block[] {
   return blocks;
 }
 
-/** The transcript of a **stored** run, rebuilt from `_sc_runs.context`.
+/** The transcript of a **stored** run, rebuilt from `_fd_runs.context`.
  *
  * This is how the history reopens a conversation: the run's context is the
  * loop's own state (§11.2), whose `messages` are the same `LlmMessage`s the

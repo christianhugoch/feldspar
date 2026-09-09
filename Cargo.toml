@@ -48,7 +48,7 @@ members = [
     # Layer 7 — workflows: the program a trigger body can be, its versions, and
     # the engine that advances a run of it durably (§10.3). Beside the agents
     # rather than above them: both are things that *run*, both persist their
-    # state to `_sc_runs` after every step, and neither knows about the other.
+    # state to `_fd_runs` after every step, and neither knows about the other.
     "crates/sc-workflow",
     # Layer 8 — applications & API
     "crates/sc-api",

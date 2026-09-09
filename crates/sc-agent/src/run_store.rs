@@ -1,4 +1,4 @@
-//! The `_sc_runs` table: its schema, bootstrap, and the [`Run`] ⇄ row mapping
+//! The `_fd_runs` table: its schema, bootstrap, and the [`Run`] ⇄ row mapping
 //! (design §9, §11.4).
 //!
 //! Written after **every** step, not at the end of a run. That is what makes a
@@ -24,7 +24,7 @@ use serde_json::Value as Json;
 use crate::run::{Run, RunId, RunKind, RunState};
 
 /// Name of the runs table in the primary database.
-pub const RUNS_TABLE: &str = "_sc_runs";
+pub const RUNS_TABLE: &str = "_fd_runs";
 
 /// The UUID primary-key column (§9).
 pub const COL_ID: &str = "id";
@@ -57,7 +57,7 @@ pub const COL_CREATED_AT: &str = "created_at";
 /// When it was last written — after every step.
 pub const COL_UPDATED_AT: &str = "updated_at";
 
-/// The fields of the `_sc_runs` table, in declaration order.
+/// The fields of the `_fd_runs` table, in declaration order.
 fn run_fields() -> Vec<DataField> {
     let text = || TypeRef::Basic(BasicType::Text);
     let json = || TypeRef::Basic(BasicType::Json);
@@ -80,7 +80,7 @@ fn run_fields() -> Vec<DataField> {
         // meaningless for an agent run: what version this run is pinned to, when
         // it next wants the engine, and the lease that says a node is working on
         // it. They reach a database that already has runs in it through the
-        // additive bootstrap, exactly as `_sc_triggers.last_run_at` did.
+        // additive bootstrap, exactly as `_fd_triggers.last_run_at` did.
         DataField::plain(COL_SUBJECT_VERSION, int()),
         DataField::plain(COL_WAKE_AT, ts()),
         DataField::plain(COL_LEASE_UNTIL, ts()),
@@ -91,7 +91,7 @@ fn run_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure the `_sc_runs` table exists, creating it if absent, and return it.
+/// Ensure the `_fd_runs` table exists, creating it if absent, and return it.
 pub async fn bootstrap_runs(catalog: &Catalog) -> Result<Table> {
     catalog.bootstrap_table(RUNS_TABLE, &run_fields()).await
 }
@@ -255,9 +255,9 @@ fn run_values(run: &Run) -> Vec<Value> {
     ]
 }
 
-/// Rebuild a [`Run`] from its `_sc_runs` row.
+/// Rebuild a [`Run`] from its `_fd_runs` row.
 ///
-/// Strict, for the reason `_sc_agents`' reader is: a run read as something other
+/// Strict, for the reason `_fd_agents`' reader is: a run read as something other
 /// than what was stored would be resumed as something other than what was
 /// running.
 ///

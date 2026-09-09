@@ -139,7 +139,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
 
     // How this process serves TLS is a **stored setting**, not a flag (§13.5):
     // the certificate an admin pastes and the ACME account it renews through
-    // live in `_sc_config`, so every node against one database serves the same
+    // live in `_fd_config`, so every node against one database serves the same
     // thing and a renewal is not a deploy. Read here, before anything is
     // announced, because it decides the port the outside world reaches this
     // server on — which is what the public origin and the cookie's `Secure`

@@ -37,9 +37,9 @@ use crate::trigger::Trigger;
 /// and where it has got to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowStarted {
-    /// The `_sc_runs` id of the run that was started.
+    /// The `_fd_runs` id of the run that was started.
     pub run: Uuid,
-    /// The run's state, as `_sc_runs.state` spells it (`running`, `waiting`,
+    /// The run's state, as `_fd_runs.state` spells it (`running`, `waiting`,
     /// `done`, `failed`, `aborted`).
     ///
     /// A string rather than the `RunState` enum because that type lives beside

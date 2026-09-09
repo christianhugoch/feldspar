@@ -59,7 +59,7 @@ use sc_test_harness::TestDb;
 use sc_types::{BasicType, TypeRef};
 use serde_json::{Value as Json, json};
 
-/// The distribution the fixture installs as, as pip and `_sc_modules` name it.
+/// The distribution the fixture installs as, as pip and `_fd_modules` name it.
 const PACKAGE: &str = "sc-plugin-fixture";
 /// The table provider it supplies.
 const PROVIDER: &str = "Fixture rows";
@@ -148,7 +148,7 @@ fn host(dir: &Path) -> Arc<PyModuleHost> {
     Arc::new(PyModuleHost::new(python))
 }
 
-/// The `_sc_modules` row an admin's install would have written.
+/// The `_fd_modules` row an admin's install would have written.
 async fn install_row(catalog: &Catalog, configuration: Json) -> Result<()> {
     bootstrap_modules(catalog).await?;
     let mut module = Module::new(
@@ -564,7 +564,7 @@ return {
 // 6.4 — the table provider, through a real provided table
 // ---------------------------------------------------------------------------
 
-/// A table whose `_sc_tables` row names a Python provider: its columns are the
+/// A table whose `_fd_tables` row names a Python provider: its columns are the
 /// plugin's answer, its rows are read and filtered through the ordinary query
 /// path, and all three writes work because the class defines all three methods.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

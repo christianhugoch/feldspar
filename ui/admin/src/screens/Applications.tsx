@@ -1,4 +1,4 @@
-// Applications list: every application in `_sc_applications`, with the actions
+// Applications list: every application in `_fd_applications`, with the actions
 // that make one real — build (+mount) it, edit its configuration, delete it —
 // and a link to each app's own subdomain.
 //

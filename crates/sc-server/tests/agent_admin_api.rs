@@ -461,7 +461,7 @@ async fn runs_are_listed_read_and_deleted_and_outlive_their_agent() -> sc_error:
 }
 
 /// A provider an agent still calls through cannot be deleted out from under it.
-/// `sc-llm` cannot see `_sc_agents` from a layer below, so the server collects
+/// `sc-llm` cannot see `_fd_agents` from a layer below, so the server collects
 /// the references and passes them in — the check exists only if that happens.
 #[tokio::test]
 async fn a_provider_an_agent_uses_cannot_be_deleted() -> sc_error::Result<()> {

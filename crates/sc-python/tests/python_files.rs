@@ -53,7 +53,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 
 /// A catalog with `docs` connected to a fresh directory, and that directory.
 ///
-/// `_sc_file_stores` is bootstrapped even where no definition is saved: a
+/// `_fd_file_stores` is bootstrapped even where no definition is saved: a
 /// delegated operation reads the store's floor from it, and a table that is not
 /// there is a different failure from a store that has no floor.
 async fn setup(db: &TestDb, tag: &str) -> Result<(Catalog, PathBuf)> {

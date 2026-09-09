@@ -63,7 +63,7 @@ impl DatasetColumn {
 
 /// Which rows and which derived values make up a model's data.
 ///
-/// Stored as the `dataset` JSON column of `_sc_models`, so this is the wire
+/// Stored as the `dataset` JSON column of `_fd_models`, so this is the wire
 /// shape as well as the in-memory one.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Dataset {

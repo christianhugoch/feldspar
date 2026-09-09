@@ -228,7 +228,7 @@ impl Error {
 /// The audience an [`Error`] is for (design §16): the two classes split "the app
 /// builder must fix their configuration" from "this is likely a bug to report".
 ///
-/// The MVP does not yet log errors to `_sc_errors`, but the classification lands
+/// The MVP does not yet log errors to `_fd_errors`, but the classification lands
 /// with `sc-error` from the start (as §16 requires) so it is never retrofitted —
 /// and `sc-server` already uses it to map a failed build to a client-fixable
 /// `422` rather than a `500`.

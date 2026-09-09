@@ -217,7 +217,7 @@ pub fn check_may_resume(form: &PendingForm, role: u8) -> Result<()> {
 /// The runs of one workflow, newest first, optionally of one state, one page at
 /// a time (§10.3, phase 5.2).
 ///
-/// By the trigger's **name**, which is what `_sc_runs.subject` holds, for the
+/// By the trigger's **name**, which is what `_fd_runs.subject` holds, for the
 /// reason an agent's runs are listed by its name: a run outlives the trigger it
 /// was of, deliberately, and a finished run stays readable after somebody
 /// deletes the workflow.

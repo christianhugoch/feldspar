@@ -55,14 +55,14 @@ async fn a_nullable_column_reaches_a_table_that_already_has_rows() -> sc_error::
     let db = TestDb::new().await?;
     let cat = catalog(&db).await?;
 
-    cat.bootstrap_table("_sc_widgets", &v1_fields()).await?;
-    insert_row(&cat, "_sc_widgets", "a", "first").await?;
+    cat.bootstrap_table("_fd_widgets", &v1_fields()).await?;
+    insert_row(&cat, "_fd_widgets", "a", "first").await?;
 
     // The next release declares one more column. Nullable, so the stored row's
     // missing value is a real state rather than a refusal.
     let mut fields = v1_fields();
     fields.push(DataField::plain("description", text()));
-    let table = cat.bootstrap_table("_sc_widgets", &fields).await?;
+    let table = cat.bootstrap_table("_fd_widgets", &fields).await?;
 
     let added = table.field("description").expect("description added");
     assert!(!added.required);
@@ -76,11 +76,11 @@ async fn a_required_column_reaches_a_table_with_no_rows() -> sc_error::Result<()
 
     // The table is there from a previous release but nothing was ever written to
     // it: there is nothing for NOT NULL to contradict, so the server starts.
-    cat.bootstrap_table("_sc_widgets", &v1_fields()).await?;
+    cat.bootstrap_table("_fd_widgets", &v1_fields()).await?;
 
     let mut fields = v1_fields();
     fields.push(DataField::plain("body", text()).required());
-    let table = cat.bootstrap_table("_sc_widgets", &fields).await?;
+    let table = cat.bootstrap_table("_fd_widgets", &fields).await?;
 
     let added = table.field("body").expect("body added");
     assert!(added.required, "added as NOT NULL, as declared");
@@ -89,8 +89,8 @@ async fn a_required_column_reaches_a_table_with_no_rows() -> sc_error::Result<()
     let physical = cat.primary().introspect().await?;
     let widgets = physical
         .iter()
-        .find(|t| t.name == "_sc_widgets")
-        .expect("_sc_widgets present");
+        .find(|t| t.name == "_fd_widgets")
+        .expect("_fd_widgets present");
     let body = widgets
         .columns
         .iter()
@@ -105,13 +105,13 @@ async fn a_required_column_on_a_table_with_rows_is_refused_by_name() -> sc_error
     let db = TestDb::new().await?;
     let cat = catalog(&db).await?;
 
-    cat.bootstrap_table("_sc_widgets", &v1_fields()).await?;
-    insert_row(&cat, "_sc_widgets", "a", "first").await?;
+    cat.bootstrap_table("_fd_widgets", &v1_fields()).await?;
+    insert_row(&cat, "_fd_widgets", "a", "first").await?;
 
     let mut fields = v1_fields();
     fields.push(DataField::plain("body", text()).required());
     let err = cat
-        .bootstrap_table("_sc_widgets", &fields)
+        .bootstrap_table("_fd_widgets", &fields)
         .await
         .expect_err("a NOT NULL column cannot be added over stored rows");
 
@@ -119,11 +119,11 @@ async fn a_required_column_on_a_table_with_rows_is_refused_by_name() -> sc_error
     // whichever boot step was running, and "null value violates not-null
     // constraint" would not say which table or which column.
     let msg = err.to_string();
-    assert!(msg.contains("_sc_widgets"), "{msg}");
+    assert!(msg.contains("_fd_widgets"), "{msg}");
     assert!(msg.contains("body"), "{msg}");
 
     // The table is left exactly as it was — no half-added column.
-    let table = cat.require("_sc_widgets")?;
+    let table = cat.require("_fd_widgets")?;
     assert!(table.field("body").is_none());
     let names: Vec<&str> = table.fields.iter().map(|f| f.base.name.as_str()).collect();
     assert_eq!(names, ["id", "name"]);

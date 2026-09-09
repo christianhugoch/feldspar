@@ -235,7 +235,7 @@ The feed is still there. Make the table again and you have it back.
 
 ## What this is, in one paragraph
 
-A `_sc_tables` row usually *adds* to a table the database already has — a label, roles, an
+A `_fd_tables` row usually *adds* to a table the database already has — a label, roles, an
 ownership formula — and the table exists whether or not the row does. A provided table's row is
 the opposite: it **is** the table. It names a module, a provider inside that module, and the
 settings you typed; the columns are what that provider answers when asked, and the rows are what

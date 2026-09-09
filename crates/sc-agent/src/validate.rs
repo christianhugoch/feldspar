@@ -149,7 +149,7 @@ pub struct Agents {
 }
 
 impl Agents {
-    /// An empty set — a catalog with no `_sc_agents` table, and the starting
+    /// An empty set — a catalog with no `_fd_agents` table, and the starting
     /// point for a test.
     pub fn empty() -> Agents {
         Agents::default()
@@ -157,7 +157,7 @@ impl Agents {
 
     /// Load and validate every stored agent.
     ///
-    /// A catalog with no `_sc_agents` table yields an empty set rather than an
+    /// A catalog with no `_fd_agents` table yields an empty set rather than an
     /// error: that table's absence *means* "no agents have ever been defined".
     pub async fn load(catalog: &Catalog, registry: &AgentRegistry) -> Result<Agents> {
         if catalog.get(crate::AGENTS_TABLE)?.is_none() {

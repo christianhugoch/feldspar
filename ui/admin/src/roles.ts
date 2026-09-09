@@ -1,6 +1,6 @@
 // Roles as the admin picks them.
 //
-// A role is a row in `_sc_roles` (design §7.1, §9) carrying a number on the
+// A role is a row in `_fd_roles` (design §7.1, §9) carrying a number on the
 // fixed 1–100 scale, a name, and role-specific settings; `users.role` is a
 // foreign key onto it. `listRoles` reports what exists, so this module is the
 // client half: load the list once per screen, and render a role number as the

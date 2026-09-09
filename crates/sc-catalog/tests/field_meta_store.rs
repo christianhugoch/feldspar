@@ -1,12 +1,12 @@
 //! Phase 3.1 integration test: a field's overlay row round-tripping through
-//! `_sc_fields`, against a real database (design §9).
+//! `_fd_fields`, against a real database (design §9).
 //!
 //! The field-level twin of `table_meta_store.rs`, and it asserts the two things
 //! that are new here: a `File` field's kind parameters (store, folder, MIME list)
 //! survive the trip out through the sparse `attributes` bag and back into the
 //! structured kind, and a `kind` the model does not know is refused **by name**
 //! rather than loaded as some default. Plus the overlay invariants shared with
-//! `_sc_tables`: one row per field (enforced by the composite key), an overlay
+//! `_fd_tables`: one row per field (enforced by the composite key), an overlay
 //! outliving its column, and a delete that removes the row and nothing else.
 
 use std::sync::Arc;
@@ -200,7 +200,7 @@ async fn an_ill_typed_kind_is_rejected_by_name_on_read() -> Result<()> {
     db.client()
         .await?
         .execute(
-            "INSERT INTO _sc_fields \
+            "INSERT INTO _fd_fields \
                (id, table_name, name, label, description, \"type\", kind, attributes) \
              VALUES (gen_random_uuid(), 'books', 'cover', '', '', NULL, 'blob', '{}'::jsonb)",
             &[],

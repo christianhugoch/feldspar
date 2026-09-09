@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::agent_trait::RunCaller;
 use crate::machine::{AgentLoop, Conclusion};
 
-/// Identifies a run: the UUID primary key of its `_sc_runs` row (§9).
+/// Identifies a run: the UUID primary key of its `_fd_runs` row (§9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RunId(pub Uuid);
 
@@ -162,7 +162,7 @@ impl std::fmt::Display for RunState {
 /// One execution of an agent: what it is of, who it is for, and where it got to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Run {
-    /// Stable identity: the UUID of its `_sc_runs` row.
+    /// Stable identity: the UUID of its `_fd_runs` row.
     pub id: RunId,
     /// Agent or workflow.
     pub kind: RunKind,

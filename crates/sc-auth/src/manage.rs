@@ -151,7 +151,7 @@ pub async fn delete_user(catalog: &Catalog, id: Uuid) -> Result<bool> {
     Ok(!rows(catalog, Statement::from(delete)).await?.is_empty())
 }
 
-/// Refuse a role that is out of range or that no `_sc_roles` row defines.
+/// Refuse a role that is out of range or that no `_fd_roles` row defines.
 ///
 /// The foreign key on `users.role` already makes the second state impossible;
 /// this is what makes the refusal legible, and it is shared by create and update

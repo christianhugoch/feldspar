@@ -19,7 +19,7 @@
 //! ## Why this shape
 //!
 //! Because the whole state is a value, it is `Serialize + Deserialize`, and *the
-//! state is what `_sc_runs.context` stores*. A run written after every step is
+//! state is what `_fd_runs.context` stores*. A run written after every step is
 //! therefore a run that resumes: load it, ask for the next step, carry on. The
 //! agent loop is the same shape for the same reason (§11.2, decision 8), and the
 //! two share the runs table because they are the same problem.
@@ -32,7 +32,7 @@
 //! ## What it deliberately does not hold
 //!
 //! The [`Workflow`] itself. A run is *pinned* to the version it started on
-//! (decision 2) and the driver loads that version from `_sc_workflow_versions`,
+//! (decision 2) and the driver loads that version from `_fd_workflow_versions`,
 //! so every method that needs the program takes it as an argument. Copying the
 //! steps into the run row would store the same document twice and invite the two
 //! to disagree.
@@ -115,7 +115,7 @@ pub enum Decision {
         /// The step that suspended.
         step: String,
         /// When the run next wants the engine — `None` for one only a person can
-        /// wake, which is what `_sc_runs.wake_at` being NULL means.
+        /// wake, which is what `_fd_runs.wake_at` being NULL means.
         until: Option<DateTime<Utc>>,
         /// The form somebody must fill in, for a `UserForm` suspension.
         awaiting_input: Option<PendingForm>,
@@ -260,7 +260,7 @@ enum Phase {
 /// loops it is inside, where it has got to, and what it has spent.
 ///
 /// `Serialize + Deserialize`, and that is not incidental — this value *is*
-/// `_sc_runs.context` for a workflow run, exactly as `sc-agent`'s `AgentLoop` is
+/// `_fd_runs.context` for a workflow run, exactly as `sc-agent`'s `AgentLoop` is
 /// for an agent one. Resuming is a deserialise, not a reconstruction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowRun {
@@ -578,7 +578,7 @@ impl WorkflowRun {
     /// form's timeout — and `None` both for a run waiting only on a person and
     /// for one that is runnable right now.
     ///
-    /// What `_sc_runs.wake_at` is written from; the difference between the two
+    /// What `_fd_runs.wake_at` is written from; the difference between the two
     /// `None`s is the run's state, which the driver sets — `waiting` for a
     /// suspension, `running` for a run the queue may pick up now.
     pub fn wake_at(&self) -> Option<DateTime<Utc>> {

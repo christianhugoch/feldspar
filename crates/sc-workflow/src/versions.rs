@@ -1,4 +1,4 @@
-//! `_sc_workflow_versions`: the rows a workflow's history is made of (design §9,
+//! `_fd_workflow_versions`: the rows a workflow's history is made of (design §9,
 //! §10.3).
 //!
 //! **Versions are rows, and the table is append-only.** Saving an edited workflow
@@ -14,12 +14,12 @@
 //! made that sentence unimplementable, because there would be nothing to pin to.
 //!
 //! Two departures from §9's "every metadata table has a `name`", both of them the
-//! same departure `_sc_runs` makes: a version has no name and no description of
+//! same departure `_fd_runs` makes: a version has no name and no description of
 //! its own identity. It is addressed by `(workflow, version)`, which is what the
 //! `UNIQUE` is on, and the name an admin knows it by is the **trigger's** —
 //! inventing one here would be residue on every row.
 //!
-//! Reading is strict, as `_sc_triggers`' reader is: a version that does not parse
+//! Reading is strict, as `_fd_triggers`' reader is: a version that does not parse
 //! is an error naming the workflow and the version, never a workflow silently
 //! read as fewer steps than it has. A run advanced on a half-read program would
 //! do a subset of what the admin drew.
@@ -37,7 +37,7 @@ use uuid::Uuid;
 use crate::workflow::Workflow;
 
 /// Name of the workflow-versions table in the primary database.
-pub const VERSIONS_TABLE: &str = "_sc_workflow_versions";
+pub const VERSIONS_TABLE: &str = "_fd_workflow_versions";
 
 /// The UUID primary-key column (§9).
 pub const COL_ID: &str = "id";
@@ -58,7 +58,7 @@ pub const COL_CREATED_AT: &str = "created_at";
 /// migration, an agent acting on its own).
 pub const COL_CREATED_BY: &str = "created_by";
 
-/// The fields of the `_sc_workflow_versions` table, in declaration order.
+/// The fields of the `_fd_workflow_versions` table, in declaration order.
 fn version_fields() -> Vec<DataField> {
     let text = || TypeRef::Basic(BasicType::Text);
     let json = || TypeRef::Basic(BasicType::Json);
@@ -67,7 +67,7 @@ fn version_fields() -> Vec<DataField> {
     let ts = || TypeRef::Basic(BasicType::Timestamp);
     vec![
         DataField::plain(COL_ID, uuid()).required().primary_key(),
-        // Not a foreign key, for the reason `_sc_runs.user_id` is not one: the
+        // Not a foreign key, for the reason `_fd_runs.user_id` is not one: the
         // schema layer renders no `ON DELETE` action, so a key here would make
         // deleting a workflow trigger impossible rather than tidy. Deleting the
         // trigger deletes its versions, and `delete_workflow_versions` is what
@@ -97,7 +97,7 @@ fn version_key() -> ConstraintKind {
     }
 }
 
-/// Ensure `_sc_workflow_versions` exists, with its jointly-unique key, and return
+/// Ensure `_fd_workflow_versions` exists, with its jointly-unique key, and return
 /// it.
 ///
 /// Idempotent, like every other bootstrap: an existing table is reconciled

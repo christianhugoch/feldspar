@@ -14,7 +14,7 @@
 //!   flattened to a sentence; the model can act on a list of diagnostics, and the
 //!   admin watching the transcript can read one.
 //! - **It builds the *stored* application**, resolved by subdomain from
-//!   `_sc_applications` and built through the same `sc_app::build_application`
+//!   `_fd_applications` and built through the same `sc_app::build_application`
 //!   the admin's Build button runs — the client is regenerated, a React app's
 //!   runtime is regenerated, the same bundler runs over the same tree. A second
 //!   build path would be a second set of results to explain.

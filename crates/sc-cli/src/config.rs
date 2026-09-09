@@ -1,7 +1,7 @@
 //! `feldspar get-cfg` / `set-cfg` — the stored configuration values from the
 //! command line (§13.5).
 //!
-//! Saltcorn's settings are rows in `_sc_config`, not a file, which is what makes
+//! Saltcorn's settings are rows in `_fd_config`, not a file, which is what makes
 //! every node against one database agree about them — and what makes them
 //! unreachable from a terminal until there is a command for it. This is that
 //! command, and it exists for the reasons `build-app` and `api` do: it is

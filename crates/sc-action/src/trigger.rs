@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use crate::event::EventKind;
 
-/// Identifies a trigger: the UUID primary key of its `_sc_triggers` row (§9).
+/// Identifies a trigger: the UUID primary key of its `_fd_triggers` row (§9).
 ///
 /// Serialises as the bare UUID — no wrapper object — because that is what it is
 /// wherever it crosses a boundary: a workflow version's stored JSON names the
@@ -61,7 +61,7 @@ pub const ATTR_ENABLED: &str = "enabled";
 
 /// What a trigger does when it fires: one configured action, or a **workflow**.
 ///
-/// The discriminator is stored in `_sc_triggers.body`, and reading is strict in
+/// The discriminator is stored in `_fd_triggers.body`, and reading is strict in
 /// both directions — a `workflow` body naming an action is as much an error as
 /// an `action` body without one — because the two are run by different engines
 /// and a half-understood body is one that would run the wrong thing.
@@ -75,7 +75,7 @@ pub enum TriggerBody {
         /// That action's configuration, keyed by its `config_spec` field names.
         configuration: Attrs,
     },
-    /// A **workflow**: a program of steps, versioned in `_sc_workflow_versions`
+    /// A **workflow**: a program of steps, versioned in `_fd_workflow_versions`
     /// and advanced durably by the engine (§10.3). Nothing is stored on the
     /// trigger row itself, because the steps are the version's.
     Workflow,
@@ -156,7 +156,7 @@ impl TriggerBody {
 /// One event bound to one body: a configured action, or a workflow.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Trigger {
-    /// Stable identity: the UUID of its `_sc_triggers` row.
+    /// Stable identity: the UUID of its `_fd_triggers` row.
     pub id: TriggerId,
     /// The unique, human-facing name. It is what an application's exposed subset,
     /// an API path (`POST /actions/{name}`) and a "run" button all reference, so
@@ -222,7 +222,7 @@ impl Trigger {
     }
 
     /// A **new workflow** trigger with a fresh id: an event, a workflow body, and
-    /// nothing else set. Its steps live in `_sc_workflow_versions` under its id.
+    /// nothing else set. Its steps live in `_fd_workflow_versions` under its id.
     pub fn workflow(name: impl Into<String>, when: EventKind) -> Trigger {
         Trigger::with_body(TriggerId::new(), name, when, TriggerBody::Workflow)
     }

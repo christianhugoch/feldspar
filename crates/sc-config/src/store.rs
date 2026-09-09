@@ -1,4 +1,4 @@
-//! The `_sc_config` table: one row per configuration value (design §9).
+//! The `_fd_config` table: one row per configuration value (design §9).
 //!
 //! A configuration value is **a key and a JSON value**, and the key is not free
 //! text: every key this server understands is declared in [`crate::defs`] as a
@@ -25,14 +25,14 @@ use serde_json::Value as Json;
 use crate::defs::{definition, known_keys};
 
 /// Name of the configuration table in the primary database.
-pub const CONFIG_TABLE: &str = "_sc_config";
+pub const CONFIG_TABLE: &str = "_fd_config";
 
 /// The key column — the primary key, and the name a declaration is found by.
 pub const COL_KEY: &str = "key";
 /// The value column: JSON, whatever the key's declared type renders as.
 pub const COL_VALUE: &str = "value";
 
-/// The fields of `_sc_config`, in declaration order.
+/// The fields of `_fd_config`, in declaration order.
 ///
 /// The value is JSON rather than one column per type because the *type* lives in
 /// the declaration, not in the table (§9: "per-key value-type restriction; values
@@ -47,7 +47,7 @@ fn config_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure `_sc_config` exists, creating it if absent.
+/// Ensure `_fd_config` exists, creating it if absent.
 ///
 /// Idempotent, like every other bootstrap; call once at startup after the
 /// [`Catalog`] is initialised.
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn the_table_is_a_hidden_system_table_keyed_by_the_setting() {
-        assert!(CONFIG_TABLE.starts_with("_sc_"));
+        assert!(CONFIG_TABLE.starts_with("_fd_"));
         let fields = config_fields();
         let key = &fields[0];
         assert!(key.primary_key && key.required);

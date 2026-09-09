@@ -496,7 +496,7 @@ mod tests {
         let expr = where_expr(
             &tasks(),
             &gql(serde_json::json!({ "priority": { "gt": 1 } })),
-            Some("_sc_a1"),
+            Some("_fd_a1"),
         )
         .expect("lowers")
         .expect("a predicate");
@@ -504,7 +504,7 @@ mod tests {
             .filter(expr)
             .into();
         let (sql, _) = Pg.render(&stmt).expect("renders");
-        assert!(sql.contains("\"_sc_a1\".\"priority\" > $1"), "{sql}");
+        assert!(sql.contains("\"_fd_a1\".\"priority\" > $1"), "{sql}");
     }
 
     #[test]

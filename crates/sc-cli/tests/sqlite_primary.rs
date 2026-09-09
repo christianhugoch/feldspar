@@ -1,7 +1,7 @@
 //! A whole Saltcorn installation whose **primary database is a SQLite file**.
 //!
 //! The same boot path the binary takes — [`DbConfig`] → [`connect_catalog`]
-//! (connect, introspect, bootstrap every `_sc_*` table) — with a file where the
+//! (connect, introspect, bootstrap every `_fd_*` table) — with a file where the
 //! Postgres URL usually is. That is the claim `--sqlite` makes, and it is not a
 //! claim about the driver alone: the bootstrap creates tables with uuid primary
 //! keys that fill themselves in, json columns and unique constraints, and every

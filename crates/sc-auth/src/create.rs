@@ -31,7 +31,7 @@ pub struct NewUser {
     /// The password, or **blank to have one generated** — see
     /// [`CreatedUser::generated_password`].
     pub password: String,
-    /// The role, `1..=100`, which must already exist in `_sc_roles`.
+    /// The role, `1..=100`, which must already exist in `_fd_roles`.
     pub role: u8,
     /// Admin-added columns, keyed by column name and already coerced to each
     /// column's type. System columns ([`SYSTEM_USER_COLUMNS`](crate::SYSTEM_USER_COLUMNS))

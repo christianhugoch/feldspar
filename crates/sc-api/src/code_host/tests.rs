@@ -181,8 +181,8 @@ async fn a_join_projection_is_a_correlated_subquery_aliased_by_the_path() {
     let (sql, _) = rendered(&read);
     assert!(
         sql.contains(
-            "(SELECT \"_sc_j1\".\"name\" FROM \"authors\" AS \"_sc_j1\" \
-             WHERE (\"_sc_j1\".\"id\" = \"books\".\"author\")) AS \"authorⱵname\""
+            "(SELECT \"_fd_j1\".\"name\" FROM \"authors\" AS \"_fd_j1\" \
+             WHERE (\"_fd_j1\".\"id\" = \"books\".\"author\")) AS \"authorⱵname\""
         ),
         "{sql}"
     );
@@ -303,7 +303,7 @@ async fn the_formula_spelling_of_a_filter_reaches_the_same_where() {
     let (sql, binds) = where_of(json!({ "authorⱵcountry": "GB" }))
         .await
         .expect("ok");
-    assert!(sql.contains("FROM \"authors\" AS \"_sc_j1\""), "{sql}");
+    assert!(sql.contains("FROM \"authors\" AS \"_fd_j1\""), "{sql}");
     assert_eq!(binds, vec![Value::Text("GB".into())]);
 
     // The two spellings **mix**, which is what two `.where()` calls produce:
@@ -337,7 +337,7 @@ async fn order_limit_and_offset_are_the_plans_own() {
     // An ordering by a Ⱶ-path is the same correlated subquery a projection is.
     let (sql, _) = rendered(&read);
     assert!(
-        sql.contains("ORDER BY \"published\" DESC, (SELECT \"_sc_j1\".\"name\""),
+        sql.contains("ORDER BY \"published\" DESC, (SELECT \"_fd_j1\".\"name\""),
         "{sql}"
     );
     assert!(sql.contains("LIMIT $1 OFFSET $2"), "{sql}");
@@ -414,8 +414,8 @@ async fn a_grouped_aggregate_projects_its_keys_beside_its_values_and_bounds_the_
     // The group key is a Ⱶ-path, so it is the same correlated subquery a
     // projection or an ordering would be — projected under the path itself and
     // grouped by the expression, because an output alias is not in scope there.
-    let joined = "(SELECT \"_sc_j1\".\"name\" FROM \"authors\" AS \"_sc_j1\" \
-                  WHERE (\"_sc_j1\".\"id\" = \"books\".\"author\"))";
+    let joined = "(SELECT \"_fd_j1\".\"name\" FROM \"authors\" AS \"_fd_j1\" \
+                  WHERE (\"_fd_j1\".\"id\" = \"books\".\"author\"))";
     assert!(
         sql.contains(&format!("{joined} AS \"authorⱵname\"")),
         "{sql}"

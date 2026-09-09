@@ -253,7 +253,7 @@ async fn a_per_parent_limit_takes_the_first_k_of_each_parent() -> Result<()> {
     let filter = children
         .find("\"department\" IN (")
         .expect("the correlation");
-    let compared = children.rfind("\"_sc_rn\"").expect("the comparison");
+    let compared = children.rfind("\"_fd_rn\"").expect("the comparison");
     assert!(numbering < filter && filter < compared, "{children}");
     Ok(())
 }

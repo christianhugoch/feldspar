@@ -38,7 +38,7 @@
 //!   [`SchemaStep::Sql`](sc_catalog::SchemaStep)), emitted after the column
 //!   changes they may reference.
 //! - **The catalog reloads once**, at the end, rather than once per operation.
-//! - **The `_sc_tables`/`_sc_fields` overlay rows are written after the commit**
+//! - **The `_fd_tables`/`_fd_fields` overlay rows are written after the commit**
 //!   and cannot join that transaction — they go through the row layer, not the
 //!   driver handle. So the partial-failure message `createField` always carried —
 //!   the column exists, its settings did not save, edit or drop it and retry —
@@ -103,9 +103,9 @@ pub fn key_generator(storage: &TypeRef, kind: &DataFieldKind) -> Option<ColumnGe
 /// and never loses a built-in column.
 const USERS_TABLE: &str = "users";
 /// The role table, protected for the same reason.
-const ROLES_TABLE: &str = "_sc_roles";
+const ROLES_TABLE: &str = "_fd_roles";
 
-/// The columns of `users` and `_sc_roles` that the rest of the system requires
+/// The columns of `users` and `_fd_roles` that the rest of the system requires
 /// to exist. Dropping one is refused regardless of grant: authentication reads
 /// them by name, so "it dropped and now nobody can log in" is not a state any
 /// checkbox should be able to produce.
@@ -606,7 +606,7 @@ fn refuse_on_provided(catalog: &Catalog, op: &Operation) -> Result<()> {
     )))
 }
 
-/// Forget a table's stored settings: delete its `_sc_tables` row, drop the
+/// Forget a table's stored settings: delete its `_fd_tables` row, drop the
 /// row-level-security policies if the row was what turned them on, and notify
 /// the observers.
 ///
@@ -712,7 +712,7 @@ struct Plan {
     projection: SchemaProjection,
     ddl: Vec<SchemaChange>,
     metas: Vec<MetaWrite>,
-    /// The pending `_sc_tables` row per table, so two `alter_table`s on one table
+    /// The pending `_fd_tables` row per table, so two `alter_table`s on one table
     /// update one row rather than racing to create two.
     table_metas: BTreeMap<String, TableMeta>,
     /// Whether each table was enforcing RLS *before* the batch — what decides,
@@ -891,9 +891,9 @@ impl Plan {
     ) -> Result<()> {
         let name = name.trim();
         check_identifier(name, "table")?;
-        if name.starts_with("_sc_") {
+        if name.starts_with("_fd_") {
             return Err(Error::invalid(format!(
-                "`{name}` is a system table name; the `_sc_` prefix is reserved"
+                "`{name}` is a system table name; the `_fd_` prefix is reserved"
             )));
         }
         if self.projection.get(name).is_some() {
@@ -1673,7 +1673,7 @@ impl Plan {
     /// The table exists, is not a system table, and is not one this batch has
     /// already dropped.
     fn require_editable(&self, table: &str) -> Result<()> {
-        if table.starts_with("_sc_") {
+        if table.starts_with("_fd_") {
             return Err(Error::invalid(format!(
                 "`{table}` is a system table; its schema is not editable"
             )));
@@ -1931,7 +1931,7 @@ impl Plan {
     }
 }
 
-/// The stored `_sc_fields` row for a field, or `None` — including on a database
+/// The stored `_fd_fields` row for a field, or `None` — including on a database
 /// that has no overlay table at all, which is how a catalog behaves before
 /// bootstrap and how §9 says a legacy database must go on behaving.
 async fn stored_field_meta(

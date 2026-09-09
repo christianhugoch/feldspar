@@ -17,7 +17,7 @@
 //   4. **Triggers on this table** — what happens when its rows change. Filtered
 //      from the trigger list by channel, because a trigger's channel *is* its
 //      table (§10.2).
-//   5. **Edit table properties** — the `_sc_tables` overlay: labels, roles,
+//   5. **Edit table properties** — the `_fd_tables` overlay: labels, roles,
 //      ownership. Last because it is the part an admin sets once.
 //
 // Fields come from `listFields`; the settings come from the tables listing,
@@ -1050,7 +1050,7 @@ function ProviderSettings({
 }
 
 /**
- * The table's settings: the `_sc_tables` overlay (design §9).
+ * The table's settings: the `_fd_tables` overlay (design §9).
  *
  * Everything here is *added* to what the database already says about the table —
  * nothing on this card restates a column, a type or a key, because those are the
@@ -1236,7 +1236,7 @@ type Editing = { mode: "add" } | { mode: "edit"; field: string };
  * One modal for both, because a field is one thing to describe however it got
  * here, and the alternative is two forms that have to agree about where a File's
  * parameters live. What differs is only what may be changed: an edit writes the
- * `_sc_fields` overlay and nothing else (§3.3), so the name and the NOT NULL are
+ * `_fd_fields` overlay and nothing else (§3.3), so the name and the NOT NULL are
  * shown disabled rather than offered and quietly dropped.
  *
  * The type input is a pick-list assembled from `listFieldTypes` — basic types,

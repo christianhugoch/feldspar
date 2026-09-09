@@ -4,9 +4,9 @@
 //! ## They live in the database
 //!
 //! Everything else Saltcorn stores about a table is an *overlay* — a row in
-//! `_sc_tables` adding what introspection cannot yield, under §9's rule that
+//! `_fd_tables` adding what introspection cannot yield, under §9's rule that
 //! nothing there may restate a fact the database already knows. A constraint is
-//! such a fact. So there is no `_sc_constraints` table: a constraint is created
+//! such a fact. So there is no `_fd_constraints` table: a constraint is created
 //! as the database object it *is*, read back by
 //! [`introspect`](sc_db::DatabaseDriver::introspect) like the primary key and
 //! the foreign keys, and presented here as a [`TableConstraint`]. Three

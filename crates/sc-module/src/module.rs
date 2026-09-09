@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::permissions::ModulePermissions;
 
-/// A module's stable identity — the primary key of its `_sc_modules` row.
+/// A module's stable identity — the primary key of its `_fd_modules` row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ModuleId(pub Uuid);
 

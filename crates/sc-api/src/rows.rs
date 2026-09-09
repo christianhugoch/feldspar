@@ -225,10 +225,10 @@ pub struct Partition {
 /// The alias the per-partition row number rides back under. Structural — chosen
 /// here, never user data — and prefixed so it cannot be a column of a table an
 /// admin declared.
-const PARTITION_ROW_NUMBER: &str = "_sc_rn";
+const PARTITION_ROW_NUMBER: &str = "_fd_rn";
 
 /// The alias the partitioned read's inner query is exposed under. Same rule.
-const PARTITION_SOURCE: &str = "_sc_part";
+const PARTITION_SOURCE: &str = "_fd_part";
 
 impl RowQuery {
     /// Every row, unordered and unbounded.
@@ -422,7 +422,7 @@ pub async fn aggregate_grouped(
 
 /// The alias `count_rows` reads its one value back under. Structural — chosen
 /// here, never user data — so it cannot collide with a column an admin declared.
-const ROW_COUNT_KEY: &str = "_sc_count";
+const ROW_COUNT_KEY: &str = "_fd_count";
 
 /// How many rows `table` has, as [`aggregate_values`] answers it.
 ///

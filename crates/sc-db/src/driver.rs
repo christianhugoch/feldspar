@@ -18,7 +18,7 @@ use crate::schema::{DescribedColumn, PhysicalTable, SchemaChange};
 /// schema, and open transactions (technical design §5).
 ///
 /// The **primary** database is just the one driver that additionally hosts the
-/// `_sc_*` metadata and `users` tables; the trait itself draws no distinction.
+/// `_fd_*` metadata and `users` tables; the trait itself draws no distinction.
 #[async_trait]
 pub trait DatabaseDriver: Send + Sync {
     /// Read the live schema (via `information_schema` or the backend

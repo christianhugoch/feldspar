@@ -1,6 +1,6 @@
 [package]
 name = "sc-config"
-description = "The `_sc_config` table: typed, admin-editable configuration values (layer 5)"
+description = "The `_fd_config` table: typed, admin-editable configuration values (layer 5)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -20,7 +20,7 @@ sc-log.workspace = true
 # admin UI renders settings with the same code it renders a file store's config
 # with, and `validate_attrs` is the type check on write.
 sc-types.workspace = true
-# `_sc_config` is a table like every other piece of stored metadata (§9), so
+# `_fd_config` is a table like every other piece of stored metadata (§9), so
 # this crate speaks the query language and reads rows back out of the driver.
 sc-catalog.workspace = true
 sc-query.workspace = true

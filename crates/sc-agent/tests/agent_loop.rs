@@ -1,5 +1,5 @@
 //! The loop end to end: the [`Runner`] driving an [`AgentLoop`] against the
-//! scripted [`FakeProvider`], with `_sc_runs` written after every step.
+//! scripted [`FakeProvider`], with `_fd_runs` written after every step.
 //!
 //! Against a real Postgres, because the claim under test is not "the machine
 //! transitions correctly" — `machine.rs`'s unit tests cover that without a
@@ -426,7 +426,7 @@ async fn a_run_at_trace_logs_every_tool_it_ran_and_how_it_ended() -> Result<()> 
     assert!(log.contains("\"since\": 1999"), "{log}");
     assert!(log.contains("tool `count_books` result"), "{log}");
     // How the run ended, with the step count and the run's own id — the line
-    // that ties a transcript to a row in `_sc_runs`.
+    // that ties a transcript to a row in `_fd_runs`.
     assert!(
         log.contains(&format!(
             "agent `librarian` run {}: answered after 2 steps",

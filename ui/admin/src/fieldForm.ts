@@ -9,7 +9,7 @@
 //
 // What the two do *not* share is what they may change. Adding a field writes a
 // column: its name, its storage type and its NOT NULL are all decided then.
-// Editing one writes only the `_sc_fields` overlay (§3.2) — the label, the rich
+// Editing one writes only the `_fd_fields` overlay (§3.2) — the label, the rich
 // type, the kind and the attributes — because retyping or re-constraining a
 // column is a migration and a migration framework is out of scope (§3.3). So
 // `updateFieldBody` states the whole overlay and nothing else, and the form

@@ -141,7 +141,7 @@ async fn a_connected_database_shares_the_catalog() -> sc_error::Result<()> {
     // --- 2. rows come from the right database -------------------------------
     assert_eq!(titles(&catalog, "invoice").await?, vec!["foreign invoice"]);
     // `book` exists in both. The primary keeps the name — a foreign table
-    // silently taking `users` or `_sc_config` would repoint authentication at
+    // silently taking `users` or `_fd_config` would repoint authentication at
     // somebody else's database — and the loser is *named* rather than dropped in
     // silence.
     assert_eq!(catalog.require("book")?.database, DbId::primary());

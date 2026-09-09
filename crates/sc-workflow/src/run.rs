@@ -1,4 +1,4 @@
-//! The **workflow half of an `_sc_runs` row** (§10.3, §11.4): what a run of a
+//! The **workflow half of an `_fd_runs` row** (§10.3, §11.4): what a run of a
 //! workflow carries beyond what an agent run does, and how the machine's state
 //! gets in and out of it.
 //!
@@ -40,7 +40,7 @@ use crate::machine::{Conclusion, PendingForm, WorkflowRun};
 ///
 /// The run's `subject` is the trigger's *name*, so a finished run stays readable
 /// after the trigger it was of is gone; the id is what
-/// `_sc_workflow_versions.workflow` is keyed by, and a run that could not name it
+/// `_fd_workflow_versions.workflow` is keyed by, and a run that could not name it
 /// could not load the version it is pinned to.
 pub const ATTR_WORKFLOW: &str = "workflow";
 
@@ -176,7 +176,7 @@ fn describe(trigger: &Trigger, event: &Event) -> String {
     }
 }
 
-/// The caller's own id, for `_sc_runs.user_id` — who the run is on behalf of.
+/// The caller's own id, for `_fd_runs.user_id` — who the run is on behalf of.
 fn event_user(event: &Event) -> Option<Uuid> {
     event
         .user

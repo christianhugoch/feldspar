@@ -33,13 +33,13 @@ sc-auth.workspace = true
 sc-app.workspace = true
 sc-catalog.workspace = true
 sc-files.workspace = true
-# `_sc_llm_providers` is bootstrapped alongside the other stored-metadata tables
+# `_fd_llm_providers` is bootstrapped alongside the other stored-metadata tables
 # at connect time (§9): an overlay may be created lazily, but a table whose rows
 # *are* the definitions must exist before anything can list them.
 sc-llm.workspace = true
-# `_sc_agents` and `_sc_runs`, bootstrapped beside the other metadata tables.
+# `_fd_agents` and `_fd_runs`, bootstrapped beside the other metadata tables.
 sc-agent.workspace = true
-# `_sc_config` and the ACME cache, bootstrapped the same way — and read at boot,
+# `_fd_config` and the ACME cache, bootstrapped the same way — and read at boot,
 # because how this process serves TLS is a stored setting rather than a flag
 # (§13.5).
 sc-config.workspace = true

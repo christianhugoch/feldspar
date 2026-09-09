@@ -11,7 +11,7 @@
 //! can only ever be **one** application server: a session minted on node A is
 //! not a session node B has heard of, so a load balancer in front of two
 //! processes logs people out at random. So sessions live in
-//! [`_sc_sessions`](SESSIONS_TABLE) in the primary database — the one thing every
+//! [`_fd_sessions`](SESSIONS_TABLE) in the primary database — the one thing every
 //! node already shares — and every node keeps a **read-through cache** in front
 //! of it so the common case is still a map lookup rather than a round trip.
 //!
@@ -101,7 +101,7 @@ pub const CACHE_TTL_SECONDS: i64 = 60;
 pub const CACHE_CAPACITY: usize = 10_000;
 
 /// Name of the session table in the primary database.
-pub const SESSIONS_TABLE: &str = "_sc_sessions";
+pub const SESSIONS_TABLE: &str = "_fd_sessions";
 
 /// The SHA-256 of the session token, hex-encoded — the primary key.
 pub const COL_TOKEN_HASH: &str = "token_hash";
@@ -196,7 +196,7 @@ enum Backend {
     /// A plain map in this process — no database, no sharing (see the module
     /// docs: a test seam).
     Memory(RwLock<std::collections::HashMap<String, Entry>>),
-    /// Rows in [`_sc_sessions`](SESSIONS_TABLE), shared by every node.
+    /// Rows in [`_fd_sessions`](SESSIONS_TABLE), shared by every node.
     Database {
         catalog: Arc<Catalog>,
         /// When this process last swept lapsed rows, so that a busy server does
@@ -238,7 +238,7 @@ impl SessionStore {
         }
     }
 
-    /// A store backed by [`_sc_sessions`](SESSIONS_TABLE), shared with every
+    /// A store backed by [`_fd_sessions`](SESSIONS_TABLE), shared with every
     /// other node against the same database, with the default lifetimes.
     pub fn database(catalog: Arc<Catalog>) -> SessionStore {
         SessionStore::database_with(
@@ -579,7 +579,7 @@ async fn sweep_sessions(catalog: &Catalog) -> Result<()> {
 }
 
 /// The two columns a lookup needs, read strictly: a missing or ill-typed column
-/// in an `_sc_*` table is an error naming it, never a silent default.
+/// in an `_fd_*` table is an error naming it, never a silent default.
 fn session_from_row(row: &Row) -> Result<(Uuid, DateTime<Utc>)> {
     let user_id = match row.get(COL_USER) {
         Some(Value::Uuid(u)) => *u,

@@ -1,4 +1,4 @@
-//! The `_sc_models` table: its schema, bootstrap, and the [`Model`] ⇄ row
+//! The `_fd_models` table: its schema, bootstrap, and the [`Model`] ⇄ row
 //! mapping (TODO §15; design §9).
 //!
 //! A model, like a trigger or an agent, has **nothing to introspect it from**:
@@ -41,7 +41,7 @@ use crate::registry::ModelRegistry;
 use crate::split::Split;
 
 /// Name of the models table in the primary database.
-pub const MODELS_TABLE: &str = "_sc_models";
+pub const MODELS_TABLE: &str = "_fd_models";
 
 /// The [`OptionsSource::ServerQuery`](sc_types::OptionsSource) name meaning "the
 /// models over this table" — what `predict_row`'s model picker declares (§12).
@@ -73,7 +73,7 @@ pub const COL_SPLIT: &str = "split";
 /// The sparse per-model values column (§9) — JSON, always an object.
 pub const COL_ATTRIBUTES: &str = "attributes";
 
-/// The fields of the `_sc_models` table, in declaration order.
+/// The fields of the `_fd_models` table, in declaration order.
 fn model_fields() -> Vec<DataField> {
     let text = || TypeRef::Basic(BasicType::Text);
     let json = || TypeRef::Basic(BasicType::Json);
@@ -96,7 +96,7 @@ fn model_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure the `_sc_models` table exists, creating it if absent, and return it.
+/// Ensure the `_fd_models` table exists, creating it if absent, and return it.
 ///
 /// Idempotent, and safe against a database that has never seen Saltcorn — the
 /// same contract as `bootstrap_triggers` and `bootstrap_agents`. Call once at
@@ -271,7 +271,7 @@ fn to_json<T: serde::Serialize>(value: &T, what: &str) -> Result<Json> {
         .map_err(|e| Error::msg(format!("a model's {what} could not be stored: {e}")))
 }
 
-/// Rebuild a [`Model`] from its `_sc_models` row. The strictness note in the
+/// Rebuild a [`Model`] from its `_fd_models` row. The strictness note in the
 /// module docs applies throughout.
 fn model_from_row(row: &Row) -> Result<Model> {
     let id = match row.get(COL_ID) {

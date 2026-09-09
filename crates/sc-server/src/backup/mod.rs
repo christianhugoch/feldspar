@@ -68,7 +68,7 @@ pub const BACKUP_UPLOAD_ROUTE: &str = "/backup/upload";
 
 /// The manifest's file name inside the zip.
 pub const MANIFEST_FILE: &str = "manifest.json";
-/// The settings section the SSL choice covers — the one section of `_sc_config`
+/// The settings section the SSL choice covers — the one section of `_fd_config`
 /// a backup carries. Named here because the writer picks the keys out of it and
 /// the restorer refuses every key that is not in it: a backup must not be a way to
 /// set a setting that has nothing to do with certificates.
@@ -464,7 +464,7 @@ impl Selection {
     }
 }
 
-/// The remembered choice, stored in `_sc_config` under
+/// The remembered choice, stored in `_fd_config` under
 /// [`BACKUP_INCLUDE`](sc_config::BACKUP_INCLUDE).
 ///
 /// **Exclusions, not inclusions.** A stored list of what to include would freeze

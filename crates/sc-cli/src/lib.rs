@@ -33,7 +33,7 @@ pub use db::{DbConfig, Serving};
 
 /// Connect to the primary database described by `db`, initialise the
 /// [`Catalog`] from its live schema, and ensure the platform tables (`users`,
-/// `_sc_applications`, `_sc_file_stores`, `_sc_tables`) exist.
+/// `_fd_applications`, `_fd_file_stores`, `_fd_tables`) exist.
 ///
 /// This is the whole "bring the data layer up" step of `feldspar serve`. The
 /// first real connection happens inside [`Catalog::init`] (introspection), so a
@@ -44,7 +44,7 @@ pub use db::{DbConfig, Serving};
 /// this runs on every boot: a legacy database gains the tables on first serve,
 /// and the admin UI can list/create applications without a migration step.
 ///
-/// `_sc_tables` is bootstrapped here rather than lazily on first use because it
+/// `_fd_tables` is bootstrapped here rather than lazily on first use because it
 /// is an **overlay**: [`Catalog::reload`] consults it on every reload, and a
 /// table that only appears once someone saves an overlay would mean the merge
 /// silently does nothing on exactly the databases nobody has configured yet —

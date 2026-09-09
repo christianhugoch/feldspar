@@ -341,15 +341,15 @@ async fn the_system_tables_are_invisible_to_one_tool_and_refused_by_the_other() 
     assert!(names.contains(&"books".to_owned()));
     assert!(names.contains(&"users".to_owned()), "{names:?}");
     assert!(
-        !names.iter().any(|n| n.starts_with("_sc_")),
+        !names.iter().any(|n| n.starts_with("_fd_")),
         "system tables are not described: {names:?}"
     );
 
-    // `_sc_agents` is refused whatever the grant says.
+    // `_fd_agents` is refused whatever the grant says.
     for op in [
-        json!({"op": "add_field", "table": "_sc_agents", "field": "x", "type": "text"}),
-        json!({"op": "drop_table", "table": "_sc_agents"}),
-        json!({"op": "create_table", "table": "_sc_mine"}),
+        json!({"op": "add_field", "table": "_fd_agents", "field": "x", "type": "text"}),
+        json!({"op": "drop_table", "table": "_fd_agents"}),
+        json!({"op": "create_table", "table": "_fd_mine"}),
     ] {
         let err = edit(&env, &all_grants(), json!({"operations": [op]}))
             .await

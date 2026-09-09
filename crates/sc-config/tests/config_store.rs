@@ -1,4 +1,4 @@
-//! `_sc_config` against real Postgres (design §9, §13.5).
+//! `_fd_config` against real Postgres (design §9, §13.5).
 //!
 //! The claim under test is the one the table exists for: **a configuration
 //! value is typed, and the type is checked where it is written**. A settings

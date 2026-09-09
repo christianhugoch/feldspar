@@ -195,7 +195,7 @@ impl WorkflowEngineTask {
         }
     }
 
-    /// This process's node identity, as it appears in `_sc_runs.claimed_by`.
+    /// This process's node identity, as it appears in `_fd_runs.claimed_by`.
     pub fn node(&self) -> &str {
         self.queue.node()
     }

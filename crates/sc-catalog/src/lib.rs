@@ -8,13 +8,13 @@
 //! fields, keeping its cache in step, and hand out a [`TableProvider`] to run
 //! queries against a table.
 //!
-//! The `_sc_tables` overlay ([`TableMeta`]) is the first stored metadata that
+//! The `_fd_tables` overlay ([`TableMeta`]) is the first stored metadata that
 //! *adds* to introspection rather than replacing it: a table with no overlay row
 //! is exactly as usable as it was before the overlay existed, which is what
 //! keeps the zero-setup promise true (§9).
 //!
 //! A **provided** table (§8.3) is the one thing here that introspection does not
-//! produce: its `_sc_tables` row is its whole definition, its fields are what a
+//! produce: its `_fd_tables` row is its whole definition, its fields are what a
 //! module's table provider answers, and [`ProvidedTableProvider`] serves its
 //! rows by asking that module and applying the [`Select`](sc_query::Select) to
 //! the answer ([`inmem`]).
@@ -223,11 +223,18 @@ mod tests {
     }
 
     #[test]
-    fn is_system_detects_sc_prefixed_tables() {
+    fn is_system_detects_fd_prefixed_tables() {
         let mut physical = physical_with_fk();
         assert!(!Table::from_physical(DbId::primary(), &physical).is_system());
-        physical.name = "_sc_config".into();
+        physical.name = "_fd_config".into();
         assert!(Table::from_physical(DbId::primary(), &physical).is_system());
+
+        // `_sc_` is Saltcorn v1's metadata namespace, and a transition project
+        // runs both servers against one schema. Nothing here claims it: a v1
+        // table found in the primary is an ordinary table this server can be
+        // pointed at, not one of its own it would try to read a row shape out of.
+        physical.name = "_sc_config".into(); // v1's
+        assert!(!Table::from_physical(DbId::primary(), &physical).is_system());
     }
 
     #[test]
@@ -273,19 +280,19 @@ mod tests {
     fn a_system_table_never_takes_an_overlay() {
         // `save_table_meta` refuses to write such a row, so this only fires on
         // one inserted behind the API's back — a hand-edited database, a
-        // restored dump. `_sc_*` tables are hidden from users (§9) and their
+        // restored dump. `_fd_*` tables are hidden from users (§9) and their
         // access is not configurable, so the row is ignored rather than obeyed.
         let mut physical = physical_with_fk();
-        physical.name = "_sc_config".into();
+        physical.name = "_fd_config".into();
         let mut table = Table::from_physical(DbId::primary(), &physical);
         table.apply_overlay(
-            &TableMeta::new("_sc_config")
+            &TableMeta::new("_fd_config")
                 .label("Config")
                 .access(100, 100),
         );
 
         assert_eq!(table.access, AccessRules::default());
-        assert_eq!(table.label, "_sc_config");
+        assert_eq!(table.label, "_fd_config");
         assert_eq!(table.overlay, None);
     }
 

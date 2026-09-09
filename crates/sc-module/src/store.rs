@@ -1,7 +1,7 @@
-//! The `_sc_modules` table: its schema, bootstrap, and the [`Module`] ⇄ row
+//! The `_fd_modules` table: its schema, bootstrap, and the [`Module`] ⇄ row
 //! mapping (design §9).
 //!
-//! Follows `_sc_llm_providers` and `_sc_file_stores` in every respect that
+//! Follows `_fd_llm_providers` and `_fd_file_stores` in every respect that
 //! matters, because it is the same kind of thing: nothing in
 //! `information_schema` says "this installation has an MQTT module", so the row
 //! *is* the module rather than an overlay on something the database knows.
@@ -22,7 +22,7 @@ use crate::module::{Module, ModuleId, ModuleLanguage, ModuleSource};
 use crate::permissions::ModulePermissions;
 
 /// Name of the modules table in the primary database.
-pub const MODULES_TABLE: &str = "_sc_modules";
+pub const MODULES_TABLE: &str = "_fd_modules";
 
 /// The UUID primary-key column (§9).
 pub const COL_ID: &str = "id";
@@ -43,7 +43,7 @@ pub const COL_PERMISSIONS: &str = "permissions";
 /// The sparse per-module values column (§9) — JSON, always an object.
 pub const COL_ATTRIBUTES: &str = "attributes";
 
-/// The fields of the `_sc_modules` table, in declaration order.
+/// The fields of the `_fd_modules` table, in declaration order.
 ///
 /// `name` carries the `UNIQUE` constraint for the reason every other stored
 /// definition's does: it is the key the loader, the action registry and the
@@ -77,7 +77,7 @@ fn module_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure the `_sc_modules` table exists, creating it if absent.
+/// Ensure the `_fd_modules` table exists, creating it if absent.
 ///
 /// Idempotent and safe against a database that has never seen Saltcorn — the
 /// same contract every other bootstrap has. Called once at startup.
@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn the_table_is_a_hidden_system_table() {
-        assert!(MODULES_TABLE.starts_with("_sc_"));
+        assert!(MODULES_TABLE.starts_with("_fd_"));
     }
 
     #[test]

@@ -27,7 +27,7 @@
 //! emits it into the app's source tree before invoking the bundler.
 //!
 //! Applications are **created in the admin UI, not in Rust** (§13.2), so an app
-//! is defined by its `_sc_applications` row and nothing else — there is nothing
+//! is defined by its `_fd_applications` row and nothing else — there is nothing
 //! to introspect one from, which is why this is the one stored-metadata table
 //! the MVP needs. [`bootstrap`] creates the table (idempotently, on any database
 //! including one that has never seen Saltcorn) and [`save_application`] /

@@ -910,7 +910,7 @@ Unknown flags in either group are rejected with a clear error rather than ignore
 > database connection pool, which is where it belongs.
 
 > **`--base-domain` mounts your applications.** With it set, `feldspar serve` loads
-> every `_sc_applications` row at boot, builds each, and serves it at
+> every `_fd_applications` row at boot, builds each, and serves it at
 > `<subdomain>.<base-domain>`; an app that fails to build is logged and skipped, not
 > fatal, and can be fixed and rebuilt without a restart. Without a base domain the
 > server has no way to address an app, so it serves the admin only.
@@ -918,7 +918,7 @@ Unknown flags in either group are rejected with a clear error rather than ignore
 ### HTTPS
 
 TLS is **not** a flag: it is configured in the admin UI under **Settings → SSL / TLS
-certificates**, stored in `_sc_config`, and read at boot. Two sources, and both serve
+certificates**, stored in `_fd_config`, and read at boot. Two sources, and both serve
 the admin UI and every application:
 
 | `ssl_mode` | What happens |
@@ -941,7 +941,7 @@ ACME notes:
   anything listed in `ssl_extra_domains`. **Adding an application adds a name at the
   next restart**, which is when the order is built.
 - The account key and the issued certificates are cached in the database
-  (`_sc_acme_cache`), so a renewal survives a restart and a second node serves what the
+  (`_fd_acme_cache`), so a renewal survives a restart and a second node serves what the
   first one ordered instead of ordering its own.
 - Try `https://acme-staging-v02.api.letsencrypt.org/directory` first. Its certificates
   are untrusted; its rate limits are not.

@@ -22,13 +22,13 @@
 //!   its token cost at `info`, and the whole request and response at `trace`
 //!   (§16).
 //! - The **configured entity** ([`def`], [`storage`]): [`LlmProviderDef`],
-//!   the backend registry, `_sc_llm_providers`, and [`connect_provider`] — a
+//!   the backend registry, `_fd_llm_providers`, and [`connect_provider`] — a
 //!   provider is a named record an admin fills in, exactly as a file store is.
 //!
 //! ## What is deliberately not here
 //!
 //! rig's `Agent`, its tool registry, its RAG and vector stores. The loop is
-//! `sc-agent`'s because it persists to `_sc_runs`, runs every tool as the
+//! `sc-agent`'s because it persists to `_fd_runs`, runs every tool as the
 //! chatting user, and streams to a browser — none of which a provider crate can
 //! know about. Concretely, rig's `CompletionModel` is not object-safe (associated
 //! types, `impl Future`, `Clone`), so a `Box<dyn>` chosen from stored

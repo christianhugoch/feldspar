@@ -1,14 +1,14 @@
-//! The `_sc_applications` table: its schema and one-time bootstrap (design §9,
+//! The `_fd_applications` table: its schema and one-time bootstrap (design §9,
 //! §13.2).
 //!
 //! This is the **one stored-metadata table the MVP needs**, and the reason is
-//! the distinction §9 draws between an overlay and a definition. `_sc_tables` /
-//! `_sc_fields` are overlays: introspection already yields the tables and
+//! the distinction §9 draws between an overlay and a definition. `_fd_tables` /
+//! `_fd_fields` are overlays: introspection already yields the tables and
 //! fields, so a row only *adds* access rules and attributes, and a legacy
 //! database needs none. An application has no such underlying reality — there is
 //! nothing to introspect it from — so its row **is** the application.
 //!
-//! Being an `_sc_*` table it is a system table, hidden from users
+//! Being an `_fd_*` table it is a system table, hidden from users
 //! ([`Table::is_system`](sc_catalog::Table::is_system)), and it obeys the §9
 //! required columns: UUID [`id`](COL_ID), [`name`](COL_NAME),
 //! [`description`](COL_DESCRIPTION), [`attributes`](COL_ATTRIBUTES).
@@ -31,7 +31,7 @@ use sc_error::Result;
 use sc_types::{BasicType, TypeRef};
 
 /// Name of the applications table in the primary database.
-pub const APPLICATIONS_TABLE: &str = "_sc_applications";
+pub const APPLICATIONS_TABLE: &str = "_fd_applications";
 
 /// The UUID primary-key column (§9).
 pub const COL_ID: &str = "id";
@@ -56,7 +56,7 @@ pub const COL_FILE_STORES: &str = "file_stores";
 /// The exposed trigger subset (JSON array of trigger names).
 ///
 /// **Nullable**, unlike its siblings, and that is a fact about *when* it was
-/// added rather than about what it means. It arrived after `_sc_applications`
+/// added rather than about what it means. It arrived after `_fd_applications`
 /// existed in the field, so [`bootstrap`] adds it to tables that already have
 /// rows — and a `NOT NULL` column cannot be added to a table with rows in it
 /// without inventing a value for them. `NULL` reads back as "this app exposes no
@@ -69,7 +69,7 @@ pub const COL_STATIC_DIRS: &str = "static_dirs";
 /// The content-security policy (JSON object of directive → source list).
 pub const COL_CSP: &str = "csp";
 
-/// The fields of the `_sc_applications` table, in declaration order.
+/// The fields of the `_fd_applications` table, in declaration order.
 ///
 /// `subdomain` carries the `UNIQUE` constraint: routing dispatches on it, so two
 /// apps claiming the same one is not a state the system can serve. Enforcing it
@@ -99,7 +99,7 @@ fn applications_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure the `_sc_applications` table exists, creating it if absent, and return
+/// Ensure the `_fd_applications` table exists, creating it if absent, and return
 /// it.
 ///
 /// Idempotent, and **additively reconciled**: a declared column an existing table
@@ -188,6 +188,6 @@ mod tests {
 
     #[test]
     fn the_table_is_a_hidden_system_table() {
-        assert!(APPLICATIONS_TABLE.starts_with("_sc_"));
+        assert!(APPLICATIONS_TABLE.starts_with("_fd_"));
     }
 }

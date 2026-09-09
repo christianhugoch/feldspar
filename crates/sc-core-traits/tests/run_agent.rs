@@ -6,7 +6,7 @@
 //! - the milestone's **done when** — an insert on a table fires a trigger that
 //!   runs an agent, the row's data reaches the prompt (checked where it matters:
 //!   in the request the model was actually sent), and the run is readable
-//!   afterwards out of `_sc_runs`, which is where the chat panel's history reads
+//!   afterwards out of `_fd_runs`, which is where the chat panel's history reads
 //!   it from;
 //! - a triggered run carries the **trigger's authority** (decision 5): its tools
 //!   run, its row is written, and the run records no user because nobody was

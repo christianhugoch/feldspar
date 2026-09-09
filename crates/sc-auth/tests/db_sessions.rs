@@ -204,7 +204,7 @@ async fn the_session_table_is_unlogged() -> Result<()> {
     Ok(())
 }
 
-/// What is in the table is a hash. A dump of `_sc_sessions` is not a set of
+/// What is in the table is a hash. A dump of `_fd_sessions` is not a set of
 /// cookies somebody can present.
 #[tokio::test]
 async fn the_stored_row_is_not_the_cookie() -> Result<()> {
@@ -235,7 +235,7 @@ async fn the_stored_row_is_not_the_cookie() -> Result<()> {
 /// A deleted user's session stops being one, and — the half that is easy to get
 /// backwards — having a session does not stop a user being deleted.
 ///
-/// There is no foreign key on `_sc_sessions.user_id` for exactly this reason:
+/// There is no foreign key on `_fd_sessions.user_id` for exactly this reason:
 /// the schema layer renders no `ON DELETE` action, so a constraint here would
 /// block an administrator on an ephemeral row. The guarantee comes from
 /// resolving a session by reading the user instead.

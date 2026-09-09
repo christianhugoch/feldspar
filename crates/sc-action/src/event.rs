@@ -44,7 +44,7 @@ pub const MAX_DEPTH: usize = 5;
 ///
 /// Round-trips through a lowercase string ([`as_str`](EventKind::as_str) /
 /// [`parse`](EventKind::parse)) because that is how it is stored (a column in
-/// `_sc_triggers`) and how the admin SPA posts it. There is no `serde` derive:
+/// `_fd_triggers`) and how the admin SPA posts it. There is no `serde` derive:
 /// every crossing is one of those two, and a second spelling of the same mapping
 /// is a second thing to keep in step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

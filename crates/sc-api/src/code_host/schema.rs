@@ -137,7 +137,7 @@ fn table_json(by_name: &HashMap<&str, &Table>, table: &Table) -> Json {
         // for an ordinary database table.
         "provider_name": table.source.provider().map(|(_, provider)| provider),
         "provider_module": table.source.provider().map(|(module, _)| module),
-        // Not v1's, and named as this server's own: `_sc_*` is where this
+        // Not v1's, and named as this server's own: `_fd_*` is where this
         // server keeps its own rows, and a `Table.find()` that listed them
         // would put them in front of a plugin that only ever wanted the
         // application's tables.

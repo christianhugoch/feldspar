@@ -1,8 +1,8 @@
-//! Configuration values: `_sc_config`, and what may be in it (layer 5).
+//! Configuration values: `_fd_config`, and what may be in it (layer 5).
 //!
 //! Saltcorn's settings are **rows**, not a file: an admin edits them in the
 //! admin UI, and every node against the same database sees the same answer. The
-//! design's table catalogue (§9) describes `_sc_config` as "per-key value-type
+//! design's table catalogue (§9) describes `_fd_config` as "per-key value-type
 //! restriction; values stored as JSON", and that is exactly this crate's shape:
 //!
 //! - [`defs`] declares every key as a [`FormField`](sc_types::FormField) — the

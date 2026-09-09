@@ -19,8 +19,8 @@ use sc_test_harness::TestDb;
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Value as Json, json};
 
-/// A catalog over a per-test database with `_sc_llm_providers`, `_sc_agents` and
-/// `_sc_runs` bootstrapped, and one provider named `main` saved — because an
+/// A catalog over a per-test database with `_fd_llm_providers`, `_fd_agents` and
+/// `_fd_runs` bootstrapped, and one provider named `main` saved — because an
 /// agent that names no connected provider does not validate, so every test would
 /// otherwise start by writing the same row.
 pub async fn catalog(db: &TestDb) -> Result<Catalog> {

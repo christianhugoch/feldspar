@@ -113,7 +113,7 @@ Two buttons worth pressing once each:
 - **Stop**, mid-answer. The provider stream is closed and the run is left `aborted`, with
   everything it had already said still in the transcript.
 - **History**, in the card on the right. Reload the page and the conversation is still there:
-  every step of every run is written to `_sc_runs` as it happens, so a chat panel that was closed
+  every step of every run is written to `_fd_runs` as it happens, so a chat panel that was closed
   mid-answer reopens on what actually happened. An old run opens read-only; **Continue** is the
   deliberate act that reconnects it.
 

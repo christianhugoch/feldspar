@@ -8,7 +8,7 @@
 //! - the `pg-module` fixture installed by `npm` (which pulls **npm's `pg`**) and
 //!   loaded on a `deno_runtime` worker in this process, granted exactly the one
 //!   socket the database is on;
-//! - a `_sc_tables` row in *Saltcorn's own* database making a provided table out
+//! - a `_fd_tables` row in *Saltcorn's own* database making a provided table out
 //!   of it;
 //! - `INSERT`, `UPDATE` and `DELETE` statements — the ones `sc-api`'s `rows.rs`
 //!   builds, `RETURNING *` and all — going through `Catalog::provider`, and the
@@ -157,7 +157,7 @@ async fn a_remote_postgres_table_is_read_and_written_through_a_module() {
         .set_table_providers(Arc::clone(&providers) as Arc<dyn TableProviderHost>)
         .unwrap();
 
-    // The `_sc_tables` row that *is* the table.
+    // The `_fd_tables` row that *is* the table.
     let mut meta = TableMeta::new("people").label("People");
     meta.set_provider(Some(
         &ProvidedTableDef::new(&package.name, PROVIDER).configuration(config(&parts, false)),

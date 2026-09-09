@@ -27,7 +27,7 @@ use uuid::Uuid;
 use crate::dataset::Dataset;
 use crate::split::Split;
 
-/// Identifies a model: the UUID primary key of its `_sc_models` row (§15).
+/// Identifies a model: the UUID primary key of its `_fd_models` row (§15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ModelId(pub Uuid);
 
@@ -54,7 +54,7 @@ impl std::fmt::Display for ModelId {
 /// the data, which provider answers it, and with what settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Model {
-    /// Stable identity: the UUID of its `_sc_models` row.
+    /// Stable identity: the UUID of its `_fd_models` row.
     pub id: ModelId,
     /// The unique, human-facing name — what a `predict_row` action and the admin
     /// screen address it by, so renaming one breaks those references
@@ -115,7 +115,7 @@ impl Model {
 
     /// The table this model is over — the dataset's, and **only** the dataset's.
     ///
-    /// `_sc_models` carries a `table_name` column so the list can be filtered by
+    /// `_fd_models` carries a `table_name` column so the list can be filtered by
     /// table without reading every dataset (and so `predict_row`'s
     /// `config_spec_for` can offer "the models on this table"), but it is
     /// derived from here on the way out and checked against here on the way in.

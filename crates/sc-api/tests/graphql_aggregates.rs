@@ -370,7 +370,7 @@ async fn one_relation_aggregated_twice_is_two_subqueries_and_two_answers() -> Re
     // and an alias each is what keeps them apart.
     let statements = recorded(&sql);
     assert_eq!(statements.len(), 1, "{statements:#?}");
-    for alias in ["_sc_g1", "_sc_g2", "_sc_g3"] {
+    for alias in ["_fd_g1", "_fd_g2", "_fd_g3"] {
         assert!(statements[0].contains(alias), "{}", statements[0]);
     }
     Ok(())
@@ -592,7 +592,7 @@ async fn an_aggregate_below_the_root_rides_in_the_read_that_reaches_its_row() ->
     let statements = recorded(&sql);
     assert_eq!(statements.len(), 2, "{statements:#?}");
     assert!(
-        statements[1].contains("\"tasks\" AS \"_sc_g1\""),
+        statements[1].contains("\"tasks\" AS \"_fd_g1\""),
         "{}",
         statements[1]
     );

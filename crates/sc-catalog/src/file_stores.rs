@@ -1,10 +1,10 @@
-//! The `_sc_file_stores` table: its schema, bootstrap, and the
+//! The `_fd_file_stores` table: its schema, bootstrap, and the
 //! [`FileStoreDef`] ⇄ row mapping (design §9, §14.1).
 //!
 //! A file store, like an application (§13.2), has **nothing to introspect it
 //! from**: `information_schema` knows about tables, not about which directories
 //! an admin has connected. So — by the same §9 argument that gives
-//! `_sc_applications` its existence — a store's row *is* the store's definition,
+//! `_fd_applications` its existence — a store's row *is* the store's definition,
 //! and this is the second stored-metadata table Saltcorn needs. It is not an
 //! overlay: without the row there is no store at all.
 //!
@@ -36,7 +36,7 @@ use crate::field::{DataField, DataFieldKind};
 use crate::table::Table;
 
 /// Name of the file-stores table in the primary database.
-pub const FILE_STORES_TABLE: &str = "_sc_file_stores";
+pub const FILE_STORES_TABLE: &str = "_fd_file_stores";
 
 /// The UUID primary-key column (§9).
 pub const COL_ID: &str = "id";
@@ -53,7 +53,7 @@ pub const COL_MIN_ROLE: &str = "min_role";
 /// The sparse per-store values column (§9) — JSON, always an object.
 pub const COL_ATTRIBUTES: &str = "attributes";
 
-/// The fields of the `_sc_file_stores` table, in declaration order.
+/// The fields of the `_fd_file_stores` table, in declaration order.
 ///
 /// `name` carries the `UNIQUE` constraint, for the same reason an application's
 /// `subdomain` does: it is the key everything resolves through — a `File` field's
@@ -79,7 +79,7 @@ fn file_store_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure the `_sc_file_stores` table exists, creating it if absent, and return
+/// Ensure the `_fd_file_stores` table exists, creating it if absent, and return
 /// it.
 ///
 /// Idempotent, and safe against a database that has never seen Saltcorn — the
@@ -371,7 +371,7 @@ pub async fn resolve_options(catalog: &Catalog, spec: Vec<FormField>) -> Result<
 /// that re-saving an existing app started failing because of an unrelated
 /// outage.
 pub async fn choosable_file_stores(catalog: &Catalog) -> Result<Vec<String>> {
-    // A catalog with no `_sc_file_stores` table has no stored definitions — that
+    // A catalog with no `_fd_file_stores` table has no stored definitions — that
     // is what its absence *means*, so answering "none" is correct rather than
     // lenient. Asking the catalog (a cache lookup) instead of running the query
     // and swallowing the failure keeps a genuine database error an error: this
@@ -404,7 +404,7 @@ pub async fn choosable_file_stores(catalog: &Catalog) -> Result<Vec<String>> {
 /// [`DataFieldKind::File`] is modelled but persisted nowhere: the catalog builds
 /// its fields from introspection, and a column cannot say "I am a path in store
 /// `uploads`" — [`Table::from_physical`](crate::Table::from_physical) can only
-/// derive `Plain` or `Key`. Storing that needs the `_sc_fields` overlay, which
+/// derive `Plain` or `Key`. Storing that needs the `_fd_fields` overlay, which
 /// §9 places out of MVP scope. So this scan is correct against whatever the
 /// catalog holds and inert until the overlay exists, and the *application*-level
 /// references passed as `extra_referents` are what actually protect a store
@@ -456,7 +456,7 @@ fn store_values(def: &FileStoreDef) -> Vec<Value> {
     ]
 }
 
-/// Rebuild a [`FileStoreDef`] from its `_sc_file_stores` row. The strictness
+/// Rebuild a [`FileStoreDef`] from its `_fd_file_stores` row. The strictness
 /// note in the module docs applies throughout.
 fn file_store_from_row(row: &Row) -> Result<FileStoreDef> {
     let id = match row.get(COL_ID) {
@@ -601,7 +601,7 @@ mod tests {
 
     #[test]
     fn the_table_is_a_hidden_system_table() {
-        assert!(FILE_STORES_TABLE.starts_with("_sc_"));
+        assert!(FILE_STORES_TABLE.starts_with("_fd_"));
     }
 
     #[test]

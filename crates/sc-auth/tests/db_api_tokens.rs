@@ -1,4 +1,4 @@
-//! `_sc_api_tokens` against real Postgres (design §13.6, TODO phase 2).
+//! `_fd_api_tokens` against real Postgres (design §13.6, TODO phase 2).
 //!
 //! Every property here is one the credential's *value* rests on, so each is
 //! asserted against the table rather than against the value returned beside it:
@@ -9,7 +9,7 @@
 //!   with its own message, because each is a different thing to tell the holder.
 //! - **`last_used_at` is written once a minute**, not once a call: a token is on
 //!   the request path and a write there is a write on every tool call.
-//! - **The table is logged**, which is the one thing `_sc_sessions` is not, and
+//! - **The table is logged**, which is the one thing `_fd_sessions` is not, and
 //!   the difference between a lost session and a support call.
 
 use std::sync::Arc;
@@ -347,7 +347,7 @@ async fn an_unrecognised_credential_is_told_apart_from_a_malformed_one() -> Resu
     Ok(())
 }
 
-/// The one difference from `_sc_sessions`: this table is worth a WAL record,
+/// The one difference from `_fd_sessions`: this table is worth a WAL record,
 /// because a truncated session table costs a re-login and a truncated token
 /// table costs a support call.
 #[tokio::test]

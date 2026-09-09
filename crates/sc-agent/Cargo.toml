@@ -18,8 +18,8 @@ sc-log.workspace = true
 # `FormField` for a trait's declared configuration and `Attrs` for the values —
 # the vocabulary every configurable extension point in the tree speaks (§6.2).
 sc-types.workspace = true
-# `_sc_agents` and `_sc_runs` are stored metadata, so this crate speaks the query
-# language and reads rows back out of the driver, exactly as `_sc_triggers` does.
+# `_fd_agents` and `_fd_runs` are stored metadata, so this crate speaks the query
+# language and reads rows back out of the driver, exactly as `_fd_triggers` does.
 # `CallerContext` also lives here, which is what a trait's tools run as.
 sc-catalog.workspace = true
 sc-query.workspace = true

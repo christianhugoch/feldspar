@@ -31,7 +31,7 @@
 //!
 //! - [`module`] — what a module is: the row, and where its package came from.
 //! - [`bundled`] — the modules this server ships with, and installs from itself.
-//! - [`store`] — `_sc_modules`, the row's schema and its lifecycle.
+//! - [`store`] — `_fd_modules`, the row's schema and its lifecycle.
 //! - [`paths`] — where packages are installed.
 //! - [`install`] — npm, and what it turned out to have installed.
 //! - [`bounds`] — the four bounds a module call is under, and the pool's size.

@@ -1,4 +1,4 @@
-//! `_sc_workflow_versions` and `_sc_run_traces` against a real Postgres.
+//! `_fd_workflow_versions` and `_fd_run_traces` against a real Postgres.
 //!
 //! What is under test is what only a database can settle: that saving an edited
 //! workflow **mints** a version rather than rewriting one, that an old version is
@@ -159,7 +159,7 @@ async fn the_database_refuses_a_second_row_claiming_one_version() -> Result<()> 
         .map(|e| e.to_string())
         .unwrap_or_default();
     assert!(
-        err.contains("sc_uq__sc_workflow_versions_workflow_version") || err.contains("unique"),
+        err.contains("sc_uq__fd_workflow_versions_workflow_version") || err.contains("unique"),
         "the second version 1 should be refused by the database, got: {err}"
     );
     // And the history still has exactly one version 1.

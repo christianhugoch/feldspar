@@ -60,7 +60,7 @@ async fn the_flag_cannot_turn_on_what_the_build_left_out() {
 
 /// A **module** in this build, which is the other half of the same fact.
 ///
-/// The `_sc_modules` rows are still there and the Modules tab still renders
+/// The `_fd_modules` rows are still there and the Modules tab still renders
 /// them, so what a Python module supplies has to be *something* — and it is a
 /// module carried in the set with one sentence saying why it supplies nothing,
 /// exactly as a JavaScript module whose package is missing is (§8).

@@ -150,7 +150,7 @@ impl AgentTrait for Subagent {
         if load_agent_by_name(check.catalog, &name).await?.is_none() {
             // With the alternatives, because this field is free text (the
             // sub-agent is not a pick-list for `run_trigger`'s reason: the spec
-            // is declared where `_sc_agents` cannot be read) and a typo is the
+            // is declared where `_fd_agents` cannot be read) and a typo is the
             // likeliest way to get here.
             let others: Vec<String> = sc_agent::list_agents(check.catalog)
                 .await?

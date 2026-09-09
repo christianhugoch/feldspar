@@ -1,5 +1,5 @@
 //! Phase 1.1 integration test: a table's overlay row round-tripping through
-//! `_sc_tables`, against a real database (design §9).
+//! `_fd_tables`, against a real database (design §9).
 //!
 //! An overlay is not like the stored objects that came before it. A file store
 //! or an application *is* its row; a table exists whether or not it has one. So
@@ -182,7 +182,7 @@ async fn a_system_table_is_not_configurable_and_a_nameless_overlay_is_not_savabl
     let cat = catalog(&db).await?;
     bootstrap_table_meta(&cat).await?;
 
-    // `_sc_*` tables are hidden from users (§9); their access is not the
+    // `_fd_*` tables are hidden from users (§9); their access is not the
     // admin's to widen, so the row is refused rather than merged-and-ignored.
     let err = save_table_meta(&cat, &TableMeta::new(TABLE_META_TABLE))
         .await

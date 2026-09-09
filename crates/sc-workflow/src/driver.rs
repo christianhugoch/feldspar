@@ -598,7 +598,7 @@ impl<'a> Driver<'a> {
     /// advance that did not happen, an advance whose writes were lost, or a run
     /// half way through a step.
     async fn write_on(&self, run: &Run, traces: &[RunTrace], tx: &SharedTx) -> Result<()> {
-        // No caller context: these are the engine's own `_sc_*` tables, which
+        // No caller context: these are the engine's own `_fd_*` tables, which
         // carry no policies (§9) and are not reachable by an application's rows.
         tx.run(None, &sc_query::Statement::from(run_update(run)))
             .await?;

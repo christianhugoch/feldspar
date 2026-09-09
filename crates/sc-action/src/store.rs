@@ -1,4 +1,4 @@
-//! The `_sc_triggers` table: its schema, bootstrap, and the [`Trigger`] ⇄ row
+//! The `_fd_triggers` table: its schema, bootstrap, and the [`Trigger`] ⇄ row
 //! mapping (design §9, §10.2).
 //!
 //! A trigger, like an application or a file store, has **nothing to introspect
@@ -26,7 +26,7 @@ use crate::event::EventKind;
 use crate::trigger::{Trigger, TriggerBody, TriggerId};
 
 /// Name of the triggers table in the primary database.
-pub const TRIGGERS_TABLE: &str = "_sc_triggers";
+pub const TRIGGERS_TABLE: &str = "_fd_triggers";
 
 /// The UUID primary-key column (§9).
 pub const COL_ID: &str = "id";
@@ -68,11 +68,11 @@ pub const COL_ATTRIBUTES: &str = "attributes";
 /// the admin edits, so an edit at 3pm must not be able to claim the daily job ran
 /// at 3pm (or that it never ran). Only [`record_trigger_run`] writes it.
 ///
-/// It arrived after `_sc_triggers` did, so it is nullable and reaches existing
+/// It arrived after `_fd_triggers` did, so it is nullable and reaches existing
 /// databases through the additive bootstrap (`Catalog::bootstrap_table`).
 pub const COL_LAST_RUN_AT: &str = "last_run_at";
 
-/// The fields of the `_sc_triggers` table, in declaration order.
+/// The fields of the `_fd_triggers` table, in declaration order.
 ///
 /// `name` carries the `UNIQUE` constraint for the same reason an application's
 /// `subdomain` and a file store's `name` do: it is the key everything resolves
@@ -95,7 +95,7 @@ fn trigger_fields() -> Vec<DataField> {
         DataField::plain(COL_ONLY_IF, text()),
         DataField::plain(COL_BODY, text()).required(),
         // Nullable since §10.3: a workflow's body is its steps, which live in
-        // `_sc_workflow_versions`, so there is no action to name here.
+        // `_fd_workflow_versions`, so there is no action to name here.
         DataField::plain(COL_ACTION, text()),
         DataField::plain(COL_CONFIGURATION, json()).required(),
         DataField::plain(COL_MIN_ROLE, int()),
@@ -106,7 +106,7 @@ fn trigger_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure the `_sc_triggers` table exists, creating it if absent, and return it.
+/// Ensure the `_fd_triggers` table exists, creating it if absent, and return it.
 ///
 /// Idempotent, and safe against a database that has never seen Saltcorn — the
 /// same contract as `sc_app::bootstrap` and `bootstrap_file_stores`. Call once at
@@ -288,7 +288,7 @@ fn text_or_null(value: Option<&str>) -> Value {
     }
 }
 
-/// Rebuild a [`Trigger`] from its `_sc_triggers` row. The strictness note in the
+/// Rebuild a [`Trigger`] from its `_fd_triggers` row. The strictness note in the
 /// module docs applies throughout.
 fn trigger_from_row(row: &Row) -> Result<Trigger> {
     let id = match row.get(COL_ID) {

@@ -153,8 +153,8 @@ ownership formulae, not a special case for the wire.
    requested aggregate** — the `employees_aggregate` above is one more column of that query:
 
    ```sql
-   (SELECT count(*) FROM "employees" AS "_sc_g1"
-     WHERE "_sc_g1"."department" = "departments"."id" AND "_sc_g1"."salary" < $1)
+   (SELECT count(*) FROM "employees" AS "_fd_g1"
+     WHERE "_fd_g1"."department" = "departments"."id" AND "_fd_g1"."salary" < $1)
    ```
 
    which is byte-for-byte what the calculated-field expression

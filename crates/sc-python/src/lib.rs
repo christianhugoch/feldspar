@@ -21,7 +21,7 @@
 //! a `pip`-installable distribution that declares an action, a function and a
 //! table provider with decorators, loaded into the same interpreter and answering
 //! the same `sc_module` types the other language's modules answer — one
-//! `_sc_modules`, one Modules tab, one action registry.
+//! `_fd_modules`, one Modules tab, one action registry.
 //!
 //! # Why there is nothing new below the plans
 //!
@@ -127,7 +127,7 @@ mod interp;
 /// actions, functions and table providers (§2 of the API, §8; phase 6).
 ///
 /// Un-gated like [`env`], and for a sharper version of the same reason: a build
-/// without an interpreter still has `_sc_modules` rows whose language is Python,
+/// without an interpreter still has `_fd_modules` rows whose language is Python,
 /// and the Modules tab still has to render them — with the one sentence saying
 /// why nothing they supply is available.
 pub mod pymodule;

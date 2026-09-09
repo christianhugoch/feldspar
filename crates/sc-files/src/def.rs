@@ -10,7 +10,7 @@
 //! The split matters and is worth stating plainly:
 //!
 //! - A **definition** is inert data: a name, which backend, and that backend's
-//!   settings. It is what the admin edits and what a `_sc_file_stores` row
+//!   settings. It is what the admin edits and what a `_fd_file_stores` row
 //!   holds. It can describe a store that does not currently work — a path that
 //!   has since been unmounted — and that is a state the admin UI must be able to
 //!   show and let them fix, not an error to refuse to load.
@@ -30,7 +30,7 @@ use uuid::Uuid;
 /// directory, implemented by [`LocalFileStore`](crate::LocalFileStore).
 ///
 /// A constant rather than a bare `"local"` at each use because a backend name is
-/// a stored value — it is written into a `_sc_file_stores` row and read back —
+/// a stored value — it is written into a `_fd_file_stores` row and read back —
 /// so it is part of the on-disk format, not an incidental string.
 pub const LOCAL_BACKEND: &str = "local";
 
@@ -135,7 +135,7 @@ impl Default for FileStoreDefId {
 
 /// The stored definition of one file store (technical design §14.1).
 ///
-/// The fields mirror the `_sc_file_stores` columns, which follow §9's
+/// The fields mirror the `_fd_file_stores` columns, which follow §9's
 /// column-vs-attributes rule: every store has an id, name, description, backend,
 /// backend config and optional minimum role, so each of those gets a column, and
 /// anything sparse goes in [`attributes`](FileStoreDef::attributes).

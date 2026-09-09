@@ -44,7 +44,7 @@ async fn admin_only_login_gate() -> sc_error::Result<()> {
     create_first_user(&catalog, "admin@example.com", "admin-pw").await?;
 
     // Role 40 has to exist before anyone can hold it: `users.role` is a foreign
-    // key onto `_sc_roles` (§7.1), so this is not setup noise — it is the
+    // key onto `_fd_roles` (§7.1), so this is not setup noise — it is the
     // constraint doing its job.
     save_role(&catalog, &Role::new(40, "Member")).await?;
 

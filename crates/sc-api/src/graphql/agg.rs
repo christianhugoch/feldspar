@@ -32,11 +32,11 @@ pub const RESPONSE_SEP: char = '.';
 
 /// The prefix a correlated aggregate's subquery alias takes.
 ///
-/// Deliberately not `_sc_a`, which is what the formula translator numbers *its*
+/// Deliberately not `_fd_a`, which is what the formula translator numbers *its*
 /// subqueries from: a child table's ownership formula may itself contain a
 /// Ↄ-aggregation, and that subquery is nested inside this one. Two different
 /// prefixes is how the inner alias cannot shadow the outer one it correlates to.
-const CHILD_ALIAS_PREFIX: &str = "_sc_g";
+const CHILD_ALIAS_PREFIX: &str = "_fd_g";
 
 /// One value an aggregate selection asked for.
 #[derive(Debug, Clone, PartialEq)]
@@ -338,13 +338,13 @@ mod tests {
         let (sql, binds) = Pg.render(&stmt).expect("renders");
         assert!(
             sql.contains(
-                "(SELECT count(*) FROM \"employees\" AS \"_sc_g1\" \
-                 WHERE ((\"_sc_g1\".\"department\" = \"departments\".\"id\") \
-                 AND (\"_sc_g1\".\"salary\" < $1))) AS \"cheap.count\""
+                "(SELECT count(*) FROM \"employees\" AS \"_fd_g1\" \
+                 WHERE ((\"_fd_g1\".\"department\" = \"departments\".\"id\") \
+                 AND (\"_fd_g1\".\"salary\" < $1))) AS \"cheap.count\""
             ),
             "{sql}"
         );
-        assert!(sql.contains("\"_sc_g2\""), "{sql}");
+        assert!(sql.contains("\"_fd_g2\""), "{sql}");
         assert!(sql.contains("AS \"cheap.total.salary\""), "{sql}");
         // The bound is a parameter, not text in the statement — and so is the
         // `0` a `sum` over no rows coalesces to.

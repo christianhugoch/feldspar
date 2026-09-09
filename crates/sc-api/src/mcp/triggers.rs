@@ -1,5 +1,5 @@
 //! The trigger half of the administrative surface (§13.6): four tools over
-//! `_sc_triggers`.
+//! `_fd_triggers`.
 //!
 //! [`describe_triggers`](TOOL_DESCRIBE_TRIGGERS) reads the trigger set,
 //! [`describe_action`](TOOL_DESCRIBE_ACTION) hands back what one action may be
@@ -322,7 +322,7 @@ fn trigger_json(
 ///
 /// The caller is an admin, so this is not an access control — it is the same rule
 /// the admin API applies to itself (§11.1), applied here for the reason that is
-/// specific to an agent: a tool result is written into `_sc_runs` and read back
+/// specific to an agent: a tool result is written into `_fd_runs` and read back
 /// into a provider's context on every later turn, so a key that reaches it has
 /// been copied somewhere nobody thought about. [`save`] merges the stored value
 /// back when the mask is sent in again, which is what makes the masking safe.

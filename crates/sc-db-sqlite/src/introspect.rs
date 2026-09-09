@@ -27,7 +27,7 @@ use sc_db::{
 use sc_error::{Error, Result};
 
 /// The table this driver keeps object comments in — see [`crate::ddl`].
-pub(crate) const COMMENTS_TABLE: &str = "_sc_object_comments";
+pub(crate) const COMMENTS_TABLE: &str = "_fd_object_comments";
 
 /// One row of `pragma_table_info`, before it becomes a [`Column`].
 #[derive(Debug, Clone)]

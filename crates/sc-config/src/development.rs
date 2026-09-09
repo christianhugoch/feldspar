@@ -149,7 +149,7 @@ pub fn development_settings_from(config: &Attrs) -> Result<DevelopmentSettings> 
     })
 }
 
-/// Read the development settings out of `_sc_config`.
+/// Read the development settings out of `_fd_config`.
 pub async fn development_settings(catalog: &Catalog) -> Result<DevelopmentSettings> {
     development_settings_from(&crate::store::all_config(catalog).await?)
 }
@@ -163,7 +163,7 @@ pub async fn development_settings(catalog: &Catalog) -> Result<DevelopmentSettin
 /// that read a copy taken at startup would be a switch that needs a restart,
 /// which is the thing this section exists not to need.
 ///
-/// The cost is two values read out of `_sc_config` per MCP request. A request
+/// The cost is two values read out of `_fd_config` per MCP request. A request
 /// here is an agent's tool call rather than a page load, and the alternative — a
 /// cached copy invalidated on save — is a second thing to keep in step for a
 /// query that is already smaller than the work the call is about to do.
@@ -208,7 +208,7 @@ pub fn mcp_settings_from(config: &Attrs) -> McpSettings {
     }
 }
 
-/// Read the MCP settings out of `_sc_config`.
+/// Read the MCP settings out of `_fd_config`.
 pub async fn mcp_settings(catalog: &Catalog) -> Result<McpSettings> {
     Ok(mcp_settings_from(&crate::store::all_config(catalog).await?))
 }

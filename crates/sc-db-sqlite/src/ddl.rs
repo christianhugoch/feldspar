@@ -842,7 +842,7 @@ mod tests {
             },
             comment: Some("that ISBN is already used".into()),
         });
-        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"_sc_object_comments\""));
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"_fd_object_comments\""));
         assert!(sql.contains("that ISBN is already used"));
         assert!(sql.contains("ON CONFLICT"));
 
@@ -852,7 +852,7 @@ mod tests {
             },
             comment: None,
         });
-        assert!(removed.contains("DELETE FROM \"_sc_object_comments\""));
+        assert!(removed.contains("DELETE FROM \"_fd_object_comments\""));
     }
 
     #[test]

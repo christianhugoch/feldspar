@@ -21,7 +21,7 @@
 //! [`LoadedModule`](sc_module::LoadedModule),
 //! [`Action`](sc_action::Action), [`ModuleFnHost`](sc_expr::ModuleFnHost),
 //! [`TableProviderHost`](sc_catalog::TableProviderHost) — because a module is a
-//! module to an admin (§8). One `_sc_modules` table, one tab, one set of
+//! module to an admin (§8). One `_fd_modules` table, one tab, one set of
 //! endpoints, one action registry and one pair of catalog hosts; what the
 //! language decides is which package manager installed the package and which
 //! host loads it, and both of those are below every screen.
@@ -46,7 +46,7 @@
 //! §10: **there is no sandbox.** A Python module runs with the server's
 //! privileges, as its `pip install` already did. There is no import gate here —
 //! the gate is for a code body, whose author typed it into a form — and no
-//! permission set: `_sc_modules.permissions` stays a JavaScript column and the
+//! permission set: `_fd_modules.permissions` stays a JavaScript column and the
 //! Modules tab says so beside the Install button rather than showing an admin a
 //! model that is not there.
 

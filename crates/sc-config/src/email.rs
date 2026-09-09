@@ -332,7 +332,7 @@ impl EmailSettings {
         Ok(Some(settings))
     }
 
-    /// Read the email settings out of `_sc_config`.
+    /// Read the email settings out of `_fd_config`.
     pub async fn load(catalog: &Catalog) -> Result<Option<EmailSettings>> {
         EmailSettings::from_config(&crate::store::all_config(catalog).await?)
     }

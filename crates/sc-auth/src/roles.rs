@@ -1,4 +1,4 @@
-//! The `_sc_roles` table: roles as objects rather than bare integers.
+//! The `_fd_roles` table: roles as objects rather than bare integers.
 //!
 //! A role has always been an integer on the fixed `1..=100` scale (§7.1), and
 //! for a while an integer was all it was: `1` meant admin because
@@ -14,7 +14,7 @@
 //! nothing is a user whose privileges cannot be described, and the database is
 //! the only thing that can rule that state out under concurrency.
 //!
-//! **Not an overlay** (§9). A table exists whether or not `_sc_tables` has a row
+//! **Not an overlay** (§9). A table exists whether or not `_fd_tables` has a row
 //! for it; a role does not exist without its row, exactly as an application or a
 //! file store does not. That is why this table can hold the authoritative list
 //! rather than merely adding to one.
@@ -34,7 +34,7 @@ use uuid::Uuid;
 use crate::users::{ROLE_ADMIN, ROLE_PUBLIC, USERS_TABLE, role_in_range};
 
 /// Name of the roles table in the primary database.
-pub const ROLES_TABLE: &str = "_sc_roles";
+pub const ROLES_TABLE: &str = "_fd_roles";
 
 /// The UUID primary-key column (§9).
 pub const COL_ID: &str = "id";
@@ -93,7 +93,7 @@ impl Role {
     }
 }
 
-/// The fields of the `_sc_roles` table, in declaration order.
+/// The fields of the `_fd_roles` table, in declaration order.
 ///
 /// `role` carries the `UNIQUE` constraint — not `name` — because `role` is what
 /// everything else holds: `users.role`, every `min_role`, every access rule.
@@ -131,7 +131,7 @@ pub(crate) fn user_role_field() -> DataField {
     }
 }
 
-/// Ensure the `_sc_roles` table exists and holds the two built-in roles.
+/// Ensure the `_fd_roles` table exists and holds the two built-in roles.
 ///
 /// **Must run before the users table is created**, because `users.role`
 /// references this table: a foreign key onto a table that does not exist is not
@@ -314,9 +314,9 @@ fn role_values(role: &Role) -> Vec<Value> {
     ]
 }
 
-/// Rebuild a [`Role`] from its `_sc_roles` row.
+/// Rebuild a [`Role`] from its `_fd_roles` row.
 ///
-/// Strict, as every `_sc_*` read is: a missing or ill-typed column is an error
+/// Strict, as every `_fd_*` read is: a missing or ill-typed column is an error
 /// naming it, never a silent default. A role that fails to parse is a role whose
 /// privileges cannot be stated, and guessing is not available.
 fn role_from_row(row: &Row) -> Result<Role> {
@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn the_table_is_a_hidden_system_table() {
-        assert!(ROLES_TABLE.starts_with("_sc_"));
+        assert!(ROLES_TABLE.starts_with("_fd_"));
     }
 
     #[test]

@@ -896,13 +896,13 @@ mod tests {
         let (sql, _) = render(
             Select::from(Source::table_as("children", "c")).columns(vec![Projection::Expr {
                 expr: rn,
-                alias: Some("_sc_rn".into()),
+                alias: Some("_fd_rn".into()),
             }]),
         );
         assert_eq!(
             sql,
             "SELECT row_number() OVER (PARTITION BY \"c\".\"parent\" \
-             ORDER BY \"c\".\"created\" DESC, \"c\".\"id\" ASC) AS \"_sc_rn\" \
+             ORDER BY \"c\".\"created\" DESC, \"c\".\"id\" ASC) AS \"_fd_rn\" \
              FROM \"children\" AS \"c\""
         );
     }

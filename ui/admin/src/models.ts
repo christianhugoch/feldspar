@@ -141,7 +141,7 @@ export type InstanceItem = ListModelInstancesResponse[number];
 /** One model provider the picker offers. */
 export type ProviderItem = ListModelProvidersResponse["providers"][number];
 
-/** The three states a fit is in (`_sc_model_instances.status`). */
+/** The three states a fit is in (`_fd_model_instances.status`). */
 export type FitStatus = "fitting" | "fitted" | "failed";
 
 // --- reading the `unknown`s -------------------------------------------------

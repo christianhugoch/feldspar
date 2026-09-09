@@ -1,7 +1,7 @@
 //! The settings API, driven through the assembled router as an admin's browser
 //! drives it (design §9, §13.5).
 //!
-//! `_sc_config`'s own tests cover the table. What can only be pinned down here,
+//! `_fd_config`'s own tests cover the table. What can only be pinned down here,
 //! at the HTTP boundary, is what the *screen* is handed and what a save does:
 //!
 //! - the response carries the **declarations** as well as the values, because a
@@ -718,7 +718,7 @@ async fn a_null_clears_a_setting_back_to_its_default() -> sc_error::Result<()> {
 /// server prints.
 ///
 /// What is worth driving through HTTP here is that saving them **moves the
-/// process**, immediately. The values in `_sc_config` are inert — the thing that
+/// process**, immediately. The values in `_fd_config` are inert — the thing that
 /// decides whether the next statement is echoed is a `sc_log` atomic — so a save
 /// that stored them and did not apply them would look right in the form, and in
 /// the database, and change nothing about the server the admin is watching.

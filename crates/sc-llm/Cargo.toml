@@ -19,8 +19,8 @@ sc-log.workspace = true
 # and `redact_attrs`/`merge_secrets` for the API key (§11.1) — the one
 # vocabulary every configurable extension point speaks (§6.2).
 sc-types.workspace = true
-# `_sc_llm_providers` is stored metadata, so this crate speaks the query
-# language and reads rows back out of the driver, exactly as `_sc_file_stores`
+# `_fd_llm_providers` is stored metadata, so this crate speaks the query
+# language and reads rows back out of the driver, exactly as `_fd_file_stores`
 # does (§9's storage pattern). Needing a `Catalog` is what fixes this crate
 # above layer 4.
 sc-catalog.workspace = true

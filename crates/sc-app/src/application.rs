@@ -10,7 +10,7 @@
 //! [`store`](crate::store).
 //!
 //! An application has nothing to introspect — unlike a table, it exists only as
-//! stored configuration — so its `_sc_applications` row is its only definition
+//! stored configuration — so its `_fd_applications` row is its only definition
 //! (§13.2). That is why [`AppId`] is a UUID (the §9 rule for stored metadata)
 //! while `TableId`/`FileStoreId` remain names: an app's *identity* is its row,
 //! and the human-facing key that must be unique is its
@@ -23,7 +23,7 @@ use serde_json::Value as Json;
 use uuid::Uuid;
 
 /// Identifies an application within the server: the UUID primary key of its
-/// `_sc_applications` row (design §9).
+/// `_fd_applications` row (design §9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AppId(pub Uuid);
 
@@ -263,7 +263,7 @@ impl Default for CspPolicy {
 /// served on its own subdomain (design §13.2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Application {
-    /// Stable identity: the UUID of its `_sc_applications` row (§9).
+    /// Stable identity: the UUID of its `_fd_applications` row (§9).
     pub id: AppId,
     /// Human-readable name.
     pub name: String,

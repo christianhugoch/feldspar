@@ -388,7 +388,7 @@ async fn restore_fields(
 /// Without this a restore would hand back a table that **accepts what the
 /// original refused** — the columns and the rows, with none of the rules that
 /// were the point of half of them — and would say nothing about it. Constraints
-/// are not stored in an `_sc_*` table (§5.1), so they travel in the backup as
+/// are not stored in an `_fd_*` table (§5.1), so they travel in the backup as
 /// what the database reported, which is also how a constraint somebody added by
 /// hand comes back.
 ///

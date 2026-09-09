@@ -38,9 +38,9 @@ async-trait.workspace = true
 # back as a `Value::Timestamp` is what makes ordering by it sort by date
 # (`inmem`).
 chrono.workspace = true
-# The `_sc_file_stores` JSON columns (a backend's settings, sparse attributes).
+# The `_fd_file_stores` JSON columns (a backend's settings, sparse attributes).
 serde_json.workspace = true
-# UUID row identities for the `_sc_*` tables this crate stores (§9).
+# UUID row identities for the `_fd_*` tables this crate stores (§9).
 # The hoist of a formula's module function call is bounded here (§4b), which
 # is the one thing in this crate that needs a clock.
 tokio = { workspace = true }

@@ -33,8 +33,8 @@ async fn serve_boots_against_a_db_and_answers_health() -> sc_error::Result<()> {
     );
 
     // ...and so does the applications table. The admin UI lists applications on
-    // load — the exact `SELECT * FROM _sc_applications` that failed with
-    // `relation "_sc_applications" does not exist` before this bootstrap was
+    // load — the exact `SELECT * FROM _fd_applications` that failed with
+    // `relation "_fd_applications" does not exist` before this bootstrap was
     // wired into the boot path. It must now succeed (an empty list, not an error).
     assert!(
         catalog.get(sc_app::APPLICATIONS_TABLE)?.is_some(),

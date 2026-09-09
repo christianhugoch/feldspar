@@ -139,7 +139,7 @@ impl SharedTx {
         Ok(SharedTx::begin_on(&driver, database.clone()))
     }
 
-    /// One on the **primary** database — where the `_sc_*` tables and, for
+    /// One on the **primary** database — where the `_fd_*` tables and, for
     /// almost every deployment, the application's own tables live.
     pub fn begin_primary(catalog: &Catalog) -> Result<SharedTx> {
         SharedTx::begin(catalog, catalog.primary_db())

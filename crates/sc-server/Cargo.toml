@@ -39,7 +39,7 @@ sc-api.workspace = true
 # is where they meet the catalog, because it is the one that serves requests.
 sc-action.workspace = true
 sc-core-actions.workspace = true
-# Modules: the `_sc_modules` table, the npm installer and the Node host whose
+# Modules: the `_fd_modules` table, the npm installer and the Node host whose
 # actions join the registry the dispatcher runs from (TODO "Modules").
 # `deno-host`: modules run on a `deno_runtime` worker **in this process** rather
 # than in a `node` child (TODO "Modules in-process"). The server is the one crate
@@ -65,7 +65,7 @@ sc-llm.workspace = true
 # registry meets the catalog, because it is the one that serves requests.
 sc-agent.workspace = true
 # The workflow half of a trigger body (§10.3): the tables a workflow's versions
-# and a run's trace live in, bootstrapped beside `_sc_triggers`, and — from the
+# and a run's trace live in, bootstrapped beside `_fd_triggers`, and — from the
 # next phase — the engine this server installs on the dispatcher.
 sc-workflow.workspace = true
 # Predictive models (TODO "Predictive models"). This crate supplies the

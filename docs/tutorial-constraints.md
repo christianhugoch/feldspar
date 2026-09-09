@@ -150,7 +150,7 @@ That is the point of the whole screen in one line of output.
 Open the card again and look at the list. Alongside your four rules you may see constraints
 marked **External** — a `UNIQUE` somebody added in a migration, an index from before Saltcorn
 ever saw this database. They are listed because **constraints are not stored here**. There is no
-`_sc_constraints` table: a constraint is read back out of the database on every reload, exactly
+`_fd_constraints` table: a constraint is read back out of the database on every reload, exactly
 like the primary key and the foreign keys.
 
 That is worth knowing for three reasons:

@@ -1,8 +1,8 @@
-//! The `_sc_model_instances` table: its schema, bootstrap, the
+//! The `_fd_model_instances` table: its schema, bootstrap, the
 //! [`ModelInstance`] ⇄ row mapping, the `active` rule and the boot reap
 //! (TODO §8, §15).
 //!
-//! Read strictly, for the reason `_sc_models` is: an instance read with half an
+//! Read strictly, for the reason `_fd_models` is: an instance read with half an
 //! encoding would still *predict*, and a prediction encoded differently from the
 //! way its fit was is confident nonsense (§6).
 //!
@@ -32,7 +32,7 @@ use crate::provider::ParameterBlock;
 use crate::store::{bad_column, exec, object, optional_text, rows, structured, text};
 
 /// Name of the model-instances table in the primary database.
-pub const INSTANCES_TABLE: &str = "_sc_model_instances";
+pub const INSTANCES_TABLE: &str = "_fd_model_instances";
 
 /// The UUID primary-key column (§9).
 pub const COL_ID: &str = "id";
@@ -62,7 +62,7 @@ pub const COL_HYPERPARAMETERS: &str = "hyperparameters";
 /// scores.
 pub const COL_ATTRIBUTES: &str = "attributes";
 
-/// The fields of the `_sc_model_instances` table, in declaration order.
+/// The fields of the `_fd_model_instances` table, in declaration order.
 fn instance_fields() -> Vec<DataField> {
     let text = || TypeRef::Basic(BasicType::Text);
     let json = || TypeRef::Basic(BasicType::Json);
@@ -70,7 +70,7 @@ fn instance_fields() -> Vec<DataField> {
         DataField::plain(COL_ID, TypeRef::Basic(BasicType::Uuid))
             .required()
             .primary_key(),
-        // Not a foreign key: `_sc_models` is a bootstrap table like this one, and
+        // Not a foreign key: `_fd_models` is a bootstrap table like this one, and
         // the deletion rule is stated in code (`delete_model` takes its
         // instances with it) rather than in a constraint that would also have to
         // be reconciled onto every existing database.
@@ -94,7 +94,7 @@ fn instance_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure the `_sc_model_instances` table exists, creating it if absent.
+/// Ensure the `_fd_model_instances` table exists, creating it if absent.
 pub async fn bootstrap_model_instances(catalog: &Catalog) -> Result<Table> {
     catalog
         .bootstrap_table(INSTANCES_TABLE, &instance_fields())

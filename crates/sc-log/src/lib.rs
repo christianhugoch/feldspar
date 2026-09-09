@@ -87,7 +87,7 @@ impl Verbosity {
     ];
 
     /// The stored spelling: lower-case, as every other option-valued setting in
-    /// `_sc_config` is stored.
+    /// `_fd_config` is stored.
     pub fn as_str(self) -> &'static str {
         match self {
             Verbosity::Error => "error",

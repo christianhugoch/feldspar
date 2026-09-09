@@ -119,7 +119,7 @@ pub struct FileStoreHost<'a> {
     max_copy_bytes: u64,
     /// The store-wide floors already read, by store name.
     ///
-    /// A floor is a row in `_sc_file_stores`, so reading it per operation would
+    /// A floor is a row in `_fd_file_stores`, so reading it per operation would
     /// put a query in front of every file a loop touches. It cannot change under
     /// a run that is measured in milliseconds, and a run that raced an admin
     /// editing the store would be as arbitrary either way.

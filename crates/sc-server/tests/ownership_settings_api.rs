@@ -1,7 +1,7 @@
 //! Phase 4 integration test: ownership-formula settings through the admin API
 //! (§7.3, TODO Phase 4).
 //!
-//! Storage landed in `_sc_tables` attributes and the merge parses/validates on
+//! Storage landed in `_fd_tables` attributes and the merge parses/validates on
 //! load; this asserts the *admin-facing* contract over HTTP: a formula round
 //! trips and survives the merge, every invalid shape is a 400 naming the
 //! problem with nothing written, the RLS flag is refused when it could never be

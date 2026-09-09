@@ -417,8 +417,8 @@ async fn a_constraints_comment_is_stored_and_read_back() -> Result<()> {
             .introspect()
             .await?
             .iter()
-            .any(|t| t.name == "_sc_object_comments"),
-        "it is an ordinary table in the file; the catalog hides `_sc_` tables"
+            .any(|t| t.name == "_fd_object_comments"),
+        "it is an ordinary table in the file; the catalog hides `_fd_` tables"
     );
     Ok(())
 }

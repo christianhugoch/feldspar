@@ -63,7 +63,7 @@ pub const DEFAULT_PYTHON_BIN: &str = "python3";
 const APP_DIR: &str = "feldspar";
 const PYTHON_DIR: &str = "python";
 
-/// Where a Python module comes from — the `source` of its `_sc_modules` row,
+/// Where a Python module comes from — the `source` of its `_fd_modules` row,
 /// narrowed to the two a Python module can have.
 ///
 /// The JavaScript pair is `npm` and `local`; this is `pypi` and `local`, and

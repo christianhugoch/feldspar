@@ -13,7 +13,7 @@
 //! }
 //! ```
 //!
-//! and a table whose `_sc_tables` row names one is a **provided** table: it
+//! and a table whose `_fd_tables` row names one is a **provided** table: it
 //! exists because the row does, its columns are what `fields(cfg)` answers, and
 //! its rows are what `get_table(cfg).getRows(...)` answers.
 //!

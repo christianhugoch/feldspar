@@ -279,7 +279,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let table = ctx.path_param("table")?.to_owned();
                 // A **provided** table (§8.3) is deleted, not dropped: there is
                 // no table in any database to issue DDL against, and its
-                // `_sc_tables` row is its whole definition. One verb in the UI,
+                // `_fd_tables` row is its whole definition. One verb in the UI,
                 // because "delete this table" is one thing an admin means.
                 if catalog.get(&table)?.is_some_and(|t| t.provider().is_some()) {
                     sc_api::provided_tables::forget(&catalog, &table).await?;
@@ -523,7 +523,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let table = catalog.require(ctx.path_param("table")?)?;
                 // Descriptions live only in the overlay row, not the merged field,
                 // so they are looked up alongside — but only when the overlay
-                // table exists at all (a database with no `_sc_fields` behaves as
+                // table exists at all (a database with no `_fd_fields` behaves as
                 // before the overlay, §9).
                 let metas = if catalog.get(FIELD_META_TABLE)?.is_some() {
                     list_field_meta_for_table(&catalog, &table.name).await?
@@ -1370,7 +1370,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             async move {
                 let id = parse_llm_provider_id(ctx.path_param("id")?)?;
                 // The agents naming this provider are the references `sc-llm`
-                // cannot see for itself: `_sc_agents` is a layer above it, so
+                // cannot see for itself: `_fd_agents` is a layer above it, so
                 // they are collected here and passed in (the same arrangement
                 // `delete_file_store` has with applications). Deleting a
                 // provider an agent still calls through would leave that agent
@@ -3120,7 +3120,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     // --- settings -----------------------------------------------------------
     //
-    // `_sc_config` (§9), rendered from its declarations: the response carries
+    // `_fd_config` (§9), rendered from its declarations: the response carries
     // the sections and their fields alongside the values, so the screen is
     // generic over what a setting is — the same arrangement the file-store and
     // provider forms have. Two things happen *here* rather than in the store:
@@ -3197,7 +3197,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
     // One message through the **stored** email settings, so an admin can find
     // out whether they work while they are still on the screen that sets them.
     //
-    // Everything about it is deliberate. The settings come from `_sc_config`
+    // Everything about it is deliberate. The settings come from `_fd_config`
     // rather than the request, so this tests what is saved and the note beside
     // the button says to save first. The recipient defaults to the signed-in
     // admin's own address, because they are the one person who can go and look.
@@ -4060,7 +4060,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 // field added to an application, an agent or a trigger reaches the backup format
 // the moment it reaches the API, with nothing to remember.
 
-/// A field (column) with its `_sc_fields` overlay merged on (§3.2): the
+/// A field (column) with its `_fd_fields` overlay merged on (§3.2): the
 /// introspected column facts plus the overlay's type, kind, label, description and
 /// attributes. `description` is passed in because it lives only in the overlay
 /// row, not the merged [`DataField`].
@@ -4490,7 +4490,7 @@ async fn create_builder_agent(
 /// transcript is a record of what happened, and what happened does not stop
 /// having happened because the application was removed.
 async fn delete_builder_agent(catalog: &Catalog, app: &Application) -> Result<Option<String>> {
-    // No `_sc_agents` table *means* no agent has ever been defined — the same
+    // No `_fd_agents` table *means* no agent has ever been defined — the same
     // reading `Agents::load` takes — so a server without agents installed deletes
     // an application rather than failing over a table nobody made.
     if catalog.get(sc_agent::AGENTS_TABLE)?.is_none() {
@@ -5608,7 +5608,7 @@ fn run_json(run: &sc_agent::Run) -> Json {
     out
 }
 
-/// One whole run, with the workflow half filled in: the `_sc_run_traces` rows a
+/// One whole run, with the workflow half filled in: the `_fd_run_traces` rows a
 /// traced workflow wrote, and the form a suspended run is waiting on (§10.3).
 ///
 /// Empty and null on an agent run rather than absent, so one typed shape serves
@@ -5781,7 +5781,7 @@ async fn agents_using_provider(catalog: &Catalog, id: LlmProviderDefId) -> Resul
     let Some(def) = load_llm_provider(catalog, id).await? else {
         return Ok(Vec::new());
     };
-    // No `_sc_agents` table *means* no agent has ever been defined — the same
+    // No `_fd_agents` table *means* no agent has ever been defined — the same
     // reading `Agents::load` takes — so a server without agents installed
     // deletes a provider rather than failing over a table nobody made.
     if catalog.get(sc_agent::AGENTS_TABLE)?.is_none() {
@@ -6662,7 +6662,7 @@ fn file_body_bytes(obj: &Map<String, Json>) -> Result<Bytes> {
 // --- body accessors ------------------------------------------------------------
 
 /// A required string field of an object body.
-/// A table as the admin UI sees it: its name plus the `_sc_tables` overlay
+/// A table as the admin UI sees it: its name plus the `_fd_tables` overlay
 /// merged onto it (§9).
 ///
 /// `configured` is the overlay's *presence*, not its content. A table an admin

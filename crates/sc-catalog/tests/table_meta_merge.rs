@@ -1,4 +1,4 @@
-//! Phase 1.2 integration test: the `_sc_tables` overlay merged onto
+//! Phase 1.2 integration test: the `_fd_tables` overlay merged onto
 //! introspection, against a real database (design §9).
 //!
 //! The merge has one job and one prohibition. The job: a table an admin has
@@ -186,7 +186,7 @@ async fn a_system_table_ignores_an_overlay_inserted_behind_the_api() -> Result<(
 
     // `save_table_meta` refuses to write this row, so the only way to have one
     // is to insert it directly — which is exactly what a hand-edited database
-    // or a restored dump can contain. `_sc_*` tables are hidden from users (§9)
+    // or a restored dump can contain. `_fd_*` tables are hidden from users (§9)
     // and their access is nobody's to widen, so the merge ignores it.
     let insert = Insert::row(
         TABLE_META_TABLE,

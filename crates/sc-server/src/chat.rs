@@ -82,7 +82,7 @@ const MAX_CLOSE_REASON: usize = 120;
 enum ClientMessage {
     /// Bind this socket to an agent, optionally continuing a run of it.
     Start {
-        /// The agent's name — what `_sc_runs.subject` holds, and what a run is
+        /// The agent's name — what `_fd_runs.subject` holds, and what a run is
         /// listed under.
         agent: String,
         /// An existing run to carry on, or `None` for a fresh conversation.

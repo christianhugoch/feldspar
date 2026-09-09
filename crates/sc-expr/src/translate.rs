@@ -265,7 +265,7 @@ pub fn translate(
 /// — rather than through the table's name.
 ///
 /// A predicate evaluated *inside* a subquery that aliased the table cannot name
-/// the table: `FROM "employees" "_sc_a1"` hides `employees`, so a translated
+/// the table: `FROM "employees" "_fd_a1"` hides `employees`, so a translated
 /// ownership formula that says `"employees"."owner"` is an error rather than a
 /// filter. The GraphQL provider needs exactly this — a child table's ownership
 /// predicate ANDed into the `WHERE` of a correlated aggregate over it — and it
@@ -352,7 +352,7 @@ pub fn join_path_expr(
 /// `root_table` is the table `root_alias` names — the schema shape is consulted
 /// by table, and an alias is not one.
 ///
-/// Aliases inside the returned expression are numbered from `_sc_j1` per call,
+/// Aliases inside the returned expression are numbered from `_fd_j1` per call,
 /// so a caller composing two of these into *nested* positions must keep them
 /// apart itself; siblings in one statement are separate scopes and are fine.
 pub fn join_path_expr_rooted(
@@ -478,7 +478,7 @@ struct Translator<'a> {
     /// correlation — goes through this rather than through
     /// [`table`](Self::table), which stays the shape's key.
     root: &'a str,
-    /// Counter for join-subquery aliases. Prefixed `_sc_` because user tables
+    /// Counter for join-subquery aliases. Prefixed `_fd_` because user tables
     /// cannot start with it (§9 reserves the prefix), so an alias can never
     /// shadow a real table a correlated column reference points at.
     aliases: usize,
@@ -726,8 +726,8 @@ impl<'a> Translator<'a> {
 
     /// A Ⱶ-identifier as a value: nested correlated scalar subselects, one per
     /// link. `publisherⱵname` on `books` becomes
-    /// `(SELECT _sc_j1.name FROM publishers AS _sc_j1
-    ///    WHERE _sc_j1.id = books.publisher)`;
+    /// `(SELECT _fd_j1.name FROM publishers AS _fd_j1
+    ///    WHERE _fd_j1.id = books.publisher)`;
     /// a null foreign key selects no row, the subquery yields SQL `NULL`, and
     /// nothing is granted — which *is* the Ⱶ optional-chaining contract, for
     /// free.
@@ -781,7 +781,7 @@ impl<'a> Translator<'a> {
                 Some(prev) => prev,
             };
             self.aliases += 1;
-            let alias = format!("_sc_j{}", self.aliases);
+            let alias = format!("_fd_j{}", self.aliases);
             let next = segments[i + 1];
             let sub = Select::from(Source::table_as(key.target_table.clone(), alias.clone()))
                 .columns(vec![Projection::expr(QExpr::qcol(alias.clone(), next))])
@@ -834,7 +834,7 @@ impl<'a> Translator<'a> {
             .resolve(self.shape, self.table)
             .map_err(TranslateError::Error)?;
         self.aliases += 1;
-        let alias = format!("_sc_a{}", self.aliases);
+        let alias = format!("_fd_a{}", self.aliases);
         // What the chain's `filter` steps constrain the child rows by; the
         // correlation back to the parent is the builder's own business.
         let mut extra: Option<QExpr> = None;
@@ -1482,9 +1482,9 @@ mod tests {
     #[test]
     fn a_rooted_translation_names_the_alias_everywhere_the_row_is_read() {
         // What a child table's ownership predicate needs to be usable inside a
-        // correlated aggregate over it: `FROM "books" "_sc_g1"` hides `books`,
+        // correlated aggregate over it: `FROM "books" "_fd_g1"` hides `books`,
         // so every reference to the row — a column, the root of a Ⱶ-join, the
-        // parent side of a Ↄ-correlation — has to say `_sc_g1` instead.
+        // parent side of a Ↄ-correlation — has to say `_fd_g1` instead.
         let env = inline_user(&[("id", Value::Text("u1".into()))]);
         let formula = Formula::parse(
             "owner === user.id && publisherⱵname === 'Acme' && reviewsↃbook.length > 0",
@@ -1496,18 +1496,18 @@ mod tests {
             &Env::new(&env),
             &shape(),
             "books",
-            "_sc_g1",
+            "_fd_g1",
         )
         .unwrap();
-        let stmt: Statement = Select::from(Source::table_as("books", "_sc_g1"))
+        let stmt: Statement = Select::from(Source::table_as("books", "_fd_g1"))
             .filter(pred)
             .into();
         let (sql, _) = Pg.render(&stmt).unwrap();
-        assert!(sql.contains("\"_sc_g1\".\"owner\""), "{sql}");
-        assert!(sql.contains("\"_sc_g1\".\"publisher\""), "{sql}");
-        // (`_sc_a2`: the join path took the first alias of this translation.)
+        assert!(sql.contains("\"_fd_g1\".\"owner\""), "{sql}");
+        assert!(sql.contains("\"_fd_g1\".\"publisher\""), "{sql}");
+        // (`_fd_a2`: the join path took the first alias of this translation.)
         assert!(
-            sql.contains("\"_sc_a2\".\"book\" = \"_sc_g1\".\"id\""),
+            sql.contains("\"_fd_a2\".\"book\" = \"_fd_g1\".\"id\""),
             "{sql}"
         );
         // The table's own name is nowhere but in the `FROM`.
@@ -1611,8 +1611,8 @@ mod tests {
         let (sql, binds) = where_sql("publisherⱵname === 'ACME'", Operation::Read, &env);
         assert_eq!(
             sql,
-            "((SELECT \"_sc_j1\".\"name\" FROM \"publishers\" AS \"_sc_j1\" \
-             WHERE (\"_sc_j1\".\"id\" = \"books\".\"publisher\")) IS NOT DISTINCT FROM $1)"
+            "((SELECT \"_fd_j1\".\"name\" FROM \"publishers\" AS \"_fd_j1\" \
+             WHERE (\"_fd_j1\".\"id\" = \"books\".\"publisher\")) IS NOT DISTINCT FROM $1)"
         );
         assert_eq!(binds, vec![Value::Text("ACME".into())]);
     }
@@ -1623,10 +1623,10 @@ mod tests {
         let (sql, _) = where_sql("publisherⱵcountryⱵname === 'DK'", Operation::Read, &env);
         assert_eq!(
             sql,
-            "((SELECT \"_sc_j2\".\"name\" FROM \"countries\" AS \"_sc_j2\" WHERE \
-             (\"_sc_j2\".\"code\" = \
-             (SELECT \"_sc_j1\".\"country\" FROM \"publishers\" AS \"_sc_j1\" \
-             WHERE (\"_sc_j1\".\"id\" = \"books\".\"publisher\")))) IS NOT DISTINCT FROM $1)"
+            "((SELECT \"_fd_j2\".\"name\" FROM \"countries\" AS \"_fd_j2\" WHERE \
+             (\"_fd_j2\".\"code\" = \
+             (SELECT \"_fd_j1\".\"country\" FROM \"publishers\" AS \"_fd_j1\" \
+             WHERE (\"_fd_j1\".\"id\" = \"books\".\"publisher\")))) IS NOT DISTINCT FROM $1)"
         );
     }
 
@@ -1808,8 +1808,8 @@ mod tests {
         );
         assert_eq!(
             sql,
-            "((SELECT count(*) FROM \"reviews\" AS \"_sc_a1\" \
-             WHERE (\"_sc_a1\".\"book\" = \"books\".\"id\")) > $1)"
+            "((SELECT count(*) FROM \"reviews\" AS \"_fd_a1\" \
+             WHERE (\"_fd_a1\".\"book\" = \"books\".\"id\")) > $1)"
         );
     }
 
@@ -1822,8 +1822,8 @@ mod tests {
         );
         assert_eq!(
             sql,
-            "(COALESCE((SELECT sum(\"_sc_a1\".\"rating\") FROM \"reviews\" AS \"_sc_a1\" \
-             WHERE (\"_sc_a1\".\"book\" = \"books\".\"id\")), $1) >= $2)"
+            "(COALESCE((SELECT sum(\"_fd_a1\".\"rating\") FROM \"reviews\" AS \"_fd_a1\" \
+             WHERE (\"_fd_a1\".\"book\" = \"books\".\"id\")), $1) >= $2)"
         );
         assert_eq!(binds, vec![Value::Int(0), Value::Int(10)]);
     }
@@ -1837,9 +1837,9 @@ mod tests {
         );
         assert!(
             sql.contains(
-                "SELECT avg(\"_sc_a1\".\"rating\") FROM \"reviews\" AS \"_sc_a1\" \
-                 WHERE ((\"_sc_a1\".\"book\" = \"books\".\"id\") AND \
-                 (\"_sc_a1\".\"approved\" IS NOT DISTINCT FROM"
+                "SELECT avg(\"_fd_a1\".\"rating\") FROM \"reviews\" AS \"_fd_a1\" \
+                 WHERE ((\"_fd_a1\".\"book\" = \"books\".\"id\") AND \
+                 (\"_fd_a1\".\"approved\" IS NOT DISTINCT FROM"
             ),
             "got: {sql}"
         );
@@ -1855,9 +1855,9 @@ mod tests {
         );
         assert_eq!(
             sql,
-            "((SELECT count(*) FROM \"reviews\" AS \"_sc_a1\" \
-             WHERE ((\"_sc_a1\".\"book\" = \"books\".\"id\") AND \
-             (\"_sc_a1\".\"reviewer\" IS NOT DISTINCT FROM $1))) > $2)"
+            "((SELECT count(*) FROM \"reviews\" AS \"_fd_a1\" \
+             WHERE ((\"_fd_a1\".\"book\" = \"books\".\"id\") AND \
+             (\"_fd_a1\".\"reviewer\" IS NOT DISTINCT FROM $1))) > $2)"
         );
     }
 
@@ -1871,9 +1871,9 @@ mod tests {
         // A row fails when `rating >= 3` is not provenly true.
         assert_eq!(
             sql,
-            "((SELECT count(*) FROM \"reviews\" AS \"_sc_a1\" \
-             WHERE ((\"_sc_a1\".\"book\" = \"books\".\"id\") AND \
-             ((\"_sc_a1\".\"rating\" >= $1) IS DISTINCT FROM $2))) = $3)"
+            "((SELECT count(*) FROM \"reviews\" AS \"_fd_a1\" \
+             WHERE ((\"_fd_a1\".\"book\" = \"books\".\"id\") AND \
+             ((\"_fd_a1\".\"rating\" >= $1) IS DISTINCT FROM $2))) = $3)"
         );
     }
 
@@ -1887,8 +1887,8 @@ mod tests {
         );
         assert_eq!(
             sql,
-            "($1 IN (SELECT \"_sc_a1\".\"reviewer\" FROM \"reviews\" AS \"_sc_a1\" \
-             WHERE (\"_sc_a1\".\"book\" = \"books\".\"id\")))"
+            "($1 IN (SELECT \"_fd_a1\".\"reviewer\" FROM \"reviews\" AS \"_fd_a1\" \
+             WHERE (\"_fd_a1\".\"book\" = \"books\".\"id\")))"
         );
     }
 
@@ -1901,8 +1901,8 @@ mod tests {
         );
         assert_eq!(
             sql,
-            "((SELECT count(DISTINCT \"_sc_a1\".\"reviewer\") FROM \"reviews\" AS \"_sc_a1\" \
-             WHERE (\"_sc_a1\".\"book\" = \"books\".\"id\")) > $1)"
+            "((SELECT count(DISTINCT \"_fd_a1\".\"reviewer\") FROM \"reviews\" AS \"_fd_a1\" \
+             WHERE (\"_fd_a1\".\"book\" = \"books\".\"id\")) > $1)"
         );
     }
 
@@ -1915,10 +1915,10 @@ mod tests {
         );
         assert_eq!(
             sql,
-            "((SELECT \"_sc_a1\".\"reviewer\" FROM \"reviews\" AS \"_sc_a1\" \
-             WHERE ((\"_sc_a1\".\"book\" = \"books\".\"id\") AND \
-             (\"_sc_a1\".\"rating\" IS NOT NULL)) \
-             ORDER BY \"_sc_a1\".\"rating\" DESC, \"_sc_a1\".\"id\" DESC LIMIT $1) \
+            "((SELECT \"_fd_a1\".\"reviewer\" FROM \"reviews\" AS \"_fd_a1\" \
+             WHERE ((\"_fd_a1\".\"book\" = \"books\".\"id\") AND \
+             (\"_fd_a1\".\"rating\" IS NOT NULL)) \
+             ORDER BY \"_fd_a1\".\"rating\" DESC, \"_fd_a1\".\"id\" DESC LIMIT $1) \
              IS NOT DISTINCT FROM $2)"
         );
     }
@@ -1931,7 +1931,7 @@ mod tests {
             &UserEnv::Inline(None),
         );
         assert!(
-            sql.contains("COALESCE((SELECT string_agg(\"_sc_a1\".\"reviewer\", $1)"),
+            sql.contains("COALESCE((SELECT string_agg(\"_fd_a1\".\"reviewer\", $1)"),
             "got: {sql}"
         );
     }
@@ -1968,7 +1968,7 @@ mod tests {
             key_field: "book".into(),
             parent: "books".into(),
             parent_field: "id".into(),
-            alias: "_sc_a1".into(),
+            alias: "_fd_a1".into(),
             func,
             distinct: false,
             value,
@@ -1988,11 +1988,11 @@ mod tests {
         );
         assert_eq!(
             value_expr("reviewsↃbook.sum(\"rating\")"),
-            built(AggFunc::Sum, Some(QExpr::qcol("_sc_a1", "rating")), None)
+            built(AggFunc::Sum, Some(QExpr::qcol("_fd_a1", "rating")), None)
         );
         assert_eq!(
             value_expr("reviewsↃbook.avg(\"rating\")"),
-            built(AggFunc::Avg, Some(QExpr::qcol("_sc_a1", "rating")), None)
+            built(AggFunc::Avg, Some(QExpr::qcol("_fd_a1", "rating")), None)
         );
         // …and with a child predicate, which is the GraphQL `where` argument's
         // shape: the constraint is the subquery's, not the caller's.
@@ -2003,7 +2003,7 @@ mod tests {
                 None,
                 Some(QExpr::binary(
                     QBinOp::Ge,
-                    QExpr::qcol("_sc_a1", "rating"),
+                    QExpr::qcol("_fd_a1", "rating"),
                     QExpr::lit(3_i64),
                 )),
             )
@@ -2015,15 +2015,15 @@ mod tests {
         // What a GraphQL filter over a *child* table needs: the same join
         // path, correlated from the subquery's alias rather than from the
         // table's own name.
-        let expr = join_path_expr_rooted(&shape(), "_sc_a1", "books", "publisherⱵname").unwrap();
+        let expr = join_path_expr_rooted(&shape(), "_fd_a1", "books", "publisherⱵname").unwrap();
         let stmt: Statement = Select::from(Source::table("books"))
             .columns(vec![Projection::expr(expr)])
             .into();
         let (sql, _) = Pg.render(&stmt).unwrap();
         assert_eq!(
             sql,
-            "SELECT (SELECT \"_sc_j1\".\"name\" FROM \"publishers\" AS \"_sc_j1\" \
-             WHERE (\"_sc_j1\".\"id\" = \"_sc_a1\".\"publisher\")) FROM \"books\""
+            "SELECT (SELECT \"_fd_j1\".\"name\" FROM \"publishers\" AS \"_fd_j1\" \
+             WHERE (\"_fd_j1\".\"id\" = \"_fd_a1\".\"publisher\")) FROM \"books\""
         );
 
         // Rooting at the table's own name is what the table-rooted entry point

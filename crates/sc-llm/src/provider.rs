@@ -3,7 +3,7 @@
 //!
 //! ## Why the trait exists at all
 //!
-//! Which provider runs is decided at runtime, from a row in `_sc_llm_providers`
+//! Which provider runs is decided at runtime, from a row in `_fd_llm_providers`
 //! that an admin filled in. That needs a `Box<dyn _>`, and rig's
 //! `CompletionModel` cannot be one: it has associated types, returns
 //! `impl Future`, and requires `Clone`. So a seam is needed whatever crate is

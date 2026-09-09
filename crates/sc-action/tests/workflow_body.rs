@@ -63,7 +63,7 @@ impl WorkflowEngine for Recorder {
     }
 }
 
-/// A catalog with `_sc_triggers` and one table to hang a trigger on.
+/// A catalog with `_fd_triggers` and one table to hang a trigger on.
 async fn setup(db: &TestDb) -> Result<Catalog> {
     let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
     let cat = Catalog::init(driver as Arc<dyn DatabaseDriver>).await?;

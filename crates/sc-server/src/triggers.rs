@@ -9,7 +9,7 @@
 //! validated against them, and the dispatcher is installed into the catalog.
 //!
 //! The same call brings up the **workflow** half of a trigger body (§10.3): the
-//! `_sc_workflow_versions` a run pins itself to and the `_sc_run_traces` a traced
+//! `_fd_workflow_versions` a run pins itself to and the `_fd_run_traces` a traced
 //! workflow writes. They belong here rather than in a boot step of their own
 //! because a workflow is not a second kind of thing to start — it is what one of
 //! these triggers *is*.
@@ -40,7 +40,7 @@ use crate::agents::AgentServices;
 ///
 /// Fails only on the things a server must not start without: the built-in action
 /// set not assembling (a TLS stack that will not initialise, §10.1), the
-/// `_sc_triggers` table not being creatable, or the database being unreadable. A
+/// `_fd_triggers` table not being creatable, or the database being unreadable. A
 /// **trigger** that does not validate is not one of those — it is dropped from
 /// the live set with its reason reported, exactly as a file store that will not
 /// connect is, because the rest of the server works and the admin can fix it in

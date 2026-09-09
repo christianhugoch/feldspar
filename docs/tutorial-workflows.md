@@ -21,7 +21,7 @@ A **trigger** binds one event to one **body**, and a body is either one action o
 Three consequences worth holding on to before you draw anything:
 
 - **A run is a row, not a process.** Nothing is holding a future or a timer. A run that is
-  waiting is a `_sc_runs` row with a `wake_at` in it (or a NULL, for one waiting on a person),
+  waiting is a `_fd_runs` row with a `wake_at` in it (or a NULL, for one waiting on a person),
   and the engine is a query for the rows whose time has come.
 - **A run is pinned to the version it started on.** Saving an edited workflow mints a *new*
   version; it never rewrites one. A run suspended since yesterday finishes on yesterday's

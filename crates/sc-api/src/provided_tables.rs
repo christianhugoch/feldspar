@@ -1,6 +1,6 @@
 //! Creating, configuring and forgetting a **provided** table (design §8.3).
 //!
-//! A provided table's `_sc_tables` row is not an overlay, it is the table's only
+//! A provided table's `_fd_tables` row is not an overlay, it is the table's only
 //! definition — so the three things an admin can do to one are not schema edits
 //! and none of them issues DDL. They live here rather than in
 //! [`schema_edit`](crate::schema_edit) for exactly that reason, and here rather

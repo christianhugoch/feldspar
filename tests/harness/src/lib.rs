@@ -174,7 +174,7 @@ impl TestDb {
     /// password, database.
     ///
     /// For the code paths that take the parts because an admin typed them into
-    /// six boxes — a database *connection* (`_sc_db_connections`), which is
+    /// six boxes — a database *connection* (`_fd_db_connections`), which is
     /// stored as columns precisely so the password can be a column that redacts
     /// itself. A test of that path cannot use [`url`](TestDb::url) without
     /// re-parsing it, and re-parsing a URL the harness just rendered is a test of

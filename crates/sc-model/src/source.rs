@@ -55,7 +55,7 @@ pub const DEFAULT_MAX_ROWS: u64 = 200_000;
 /// A reserved name rather than the primary-key column's own, because a dataset
 /// column may legitimately be *called* `id` while computing something else — and
 /// a split that hashed that would be a split over the wrong thing.
-pub const SPLIT_KEY: &str = "_sc_split_key";
+pub const SPLIT_KEY: &str = "_fd_split_key";
 
 /// What one read of a dataset asks for: the bound it must stay under, the rows
 /// it is restricted to, and how many of them it wants.

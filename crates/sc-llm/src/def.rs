@@ -76,7 +76,7 @@ impl Default for LlmProviderDefId {
 
 /// The stored definition of one LLM provider (§11.1).
 ///
-/// The fields mirror the `_sc_llm_providers` columns, following §9's
+/// The fields mirror the `_fd_llm_providers` columns, following §9's
 /// column-vs-attributes rule: every provider has an id, name, description,
 /// backend and backend config, so each gets a column, and anything sparse goes
 /// in [`attributes`](LlmProviderDef::attributes).

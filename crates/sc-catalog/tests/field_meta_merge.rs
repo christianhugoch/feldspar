@@ -1,4 +1,4 @@
-//! Phase 3.2 integration test: the `_sc_fields` overlay merged onto
+//! Phase 3.2 integration test: the `_fd_fields` overlay merged onto
 //! introspection, against a real database (design §9, §3.2).
 //!
 //! The field-level twin of `table_meta_merge.rs`. The merge's promise is the
@@ -186,14 +186,14 @@ async fn a_system_table_ignores_a_field_overlay_inserted_behind_the_api() -> Res
     let cat = catalog(&db).await?;
 
     // `save_field_meta` refuses a system table, so reach past it: insert a row
-    // naming `_sc_fields` directly. The merge must ignore it (system tables are
+    // naming `_fd_fields` directly. The merge must ignore it (system tables are
     // hidden and unconfigurable) rather than apply or crash.
     db.client()
         .await?
         .execute(
-            "INSERT INTO _sc_fields \
+            "INSERT INTO _fd_fields \
                (id, table_name, name, label, description, \"type\", kind, attributes) \
-             VALUES (gen_random_uuid(), '_sc_fields', 'kind', 'Hacked', '', 'string', 'plain', \
+             VALUES (gen_random_uuid(), '_fd_fields', 'kind', 'Hacked', '', 'string', 'plain', \
                      '{}'::jsonb)",
             &[],
         )
@@ -201,7 +201,7 @@ async fn a_system_table_ignores_a_field_overlay_inserted_behind_the_api() -> Res
         .map_err(|e| sc_error::Error::database(e.to_string()))?;
     cat.reload().await?;
 
-    let system = cat.require("_sc_fields")?;
+    let system = cat.require("_fd_fields")?;
     let kind = system.field("kind").expect("kind column");
     assert_eq!(kind.base.label, "kind", "the injected label did not apply");
     assert_eq!(

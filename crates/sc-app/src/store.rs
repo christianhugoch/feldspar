@@ -1,4 +1,4 @@
-//! Persisting applications: `_sc_applications` row ⇄ [`Application`] (design
+//! Persisting applications: `_fd_applications` row ⇄ [`Application`] (design
 //! §13.2).
 //!
 //! An application exists only as its stored row, so this module is the whole of
@@ -295,7 +295,7 @@ fn csp_to_json(csp: &CspPolicy) -> Json {
     )
 }
 
-/// Rebuild an [`Application`] from its `_sc_applications` row.
+/// Rebuild an [`Application`] from its `_fd_applications` row.
 ///
 /// Public within the crate so the server can hydrate an app from a row it has
 /// already read; the strictness note in the module docs applies throughout.

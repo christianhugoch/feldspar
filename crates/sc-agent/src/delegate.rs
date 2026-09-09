@@ -79,7 +79,7 @@ pub const DEFAULT_MAX_DEPTH: u32 = 3;
 /// One agent asking another to do one task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DelegateRequest<'a> {
-    /// The sub-agent's name, as `_sc_agents` stores it.
+    /// The sub-agent's name, as `_fd_agents` stores it.
     pub agent: &'a str,
     /// The run doing the asking, recorded on the child as [`ATTR_PARENT_RUN`].
     ///
@@ -132,7 +132,7 @@ impl<'a> DelegateRequest<'a> {
 /// How a delegated run ended.
 ///
 /// The run **id** rather than its transcript, deliberately: the caller that wants
-/// to know what the sub-agent actually did reads `_sc_runs`, which is where the
+/// to know what the sub-agent actually did reads `_fd_runs`, which is where the
 /// chat panel reads every other run from, and a tool result that carried the
 /// whole transcript would put back into the parent's context precisely what
 /// delegating it took out.

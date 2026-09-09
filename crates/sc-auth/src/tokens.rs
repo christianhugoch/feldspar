@@ -37,7 +37,7 @@
 //!   §7.2 says why; a token is rarer and its last use is worth more, but a write
 //!   on every tool call is still a write on the request path.
 //!
-//! Unlike `_sc_sessions` this table is **logged**: a lost session costs a
+//! Unlike `_fd_sessions` this table is **logged**: a lost session costs a
 //! re-login and a lost token costs a support call.
 //!
 //! # The identifier a list carries
@@ -77,7 +77,7 @@ use crate::user::User;
 use crate::users::ROLE_ADMIN;
 
 /// Name of the API token table in the primary database.
-pub const API_TOKENS_TABLE: &str = "_sc_api_tokens";
+pub const API_TOKENS_TABLE: &str = "_fd_api_tokens";
 
 /// The SHA-256 of the token, hex-encoded — the primary key.
 pub const COL_TOKEN_HASH: &str = "token_hash";
@@ -542,7 +542,7 @@ fn timestamp_or_null(at: Option<DateTime<Utc>>) -> Value {
 
 /// Rebuild an [`ApiToken`] from its row.
 ///
-/// Strict, like every other `_sc_*` reader: a missing or ill-typed column is an
+/// Strict, like every other `_fd_*` reader: a missing or ill-typed column is an
 /// error naming it, never a silent default. A credential table that quietly
 /// defaulted `revoked_at` would honour a revoked token.
 fn token_from_row(row: &Row) -> Result<ApiToken> {

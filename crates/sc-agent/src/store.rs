@@ -1,4 +1,4 @@
-//! The `_sc_agents` table: its schema, bootstrap, and the [`Agent`] ⇄ row
+//! The `_fd_agents` table: its schema, bootstrap, and the [`Agent`] ⇄ row
 //! mapping (design §9, §11.2).
 //!
 //! An agent, like a trigger, has **nothing to introspect it from**: no column in
@@ -24,7 +24,7 @@ use serde_json::Value as Json;
 use crate::agent::{Agent, AgentId, EnabledTrait};
 
 /// Name of the agents table in the primary database.
-pub const AGENTS_TABLE: &str = "_sc_agents";
+pub const AGENTS_TABLE: &str = "_fd_agents";
 
 /// The UUID primary-key column (§9).
 pub const COL_ID: &str = "id";
@@ -32,7 +32,7 @@ pub const COL_ID: &str = "id";
 pub const COL_NAME: &str = "name";
 /// The human-readable description column (§9).
 pub const COL_DESCRIPTION: &str = "description";
-/// The `_sc_llm_providers` name this agent calls through.
+/// The `_fd_llm_providers` name this agent calls through.
 pub const COL_PROVIDER: &str = "provider";
 /// The model, overriding the provider's default, or NULL for the provider's own.
 pub const COL_MODEL: &str = "model";
@@ -49,7 +49,7 @@ pub const COL_MIN_ROLE: &str = "min_role";
 /// The sparse per-agent values column (§9) — JSON, always an object.
 pub const COL_ATTRIBUTES: &str = "attributes";
 
-/// The fields of the `_sc_agents` table, in declaration order.
+/// The fields of the `_fd_agents` table, in declaration order.
 fn agent_fields() -> Vec<DataField> {
     let text = || TypeRef::Basic(BasicType::Text);
     let json = || TypeRef::Basic(BasicType::Json);
@@ -73,7 +73,7 @@ fn agent_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure the `_sc_agents` table exists, creating it if absent, and return it.
+/// Ensure the `_fd_agents` table exists, creating it if absent, and return it.
 ///
 /// Idempotent, and safe against a database that has never seen Saltcorn — the
 /// same contract as `bootstrap_triggers`. Call once at startup, after the [`Catalog`] is initialised.
@@ -228,7 +228,7 @@ fn agent_values(agent: &Agent) -> Vec<Value> {
     ]
 }
 
-/// Rebuild an [`Agent`] from its `_sc_agents` row. The strictness note in the
+/// Rebuild an [`Agent`] from its `_fd_agents` row. The strictness note in the
 /// module docs applies throughout.
 fn agent_from_row(row: &Row) -> Result<Agent> {
     let id = match row.get(COL_ID) {
