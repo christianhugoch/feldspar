@@ -7,7 +7,7 @@ use crate::common;
 
 use std::sync::Arc;
 
-use common::{fixture, have_npm, temp_root};
+use common::{fixture, have_npm, surfaces, temp_root};
 use sc_action::{Action, ActionContext, ActionRegistry, Event, EventKind};
 use sc_catalog::Catalog;
 use sc_db::DatabaseDriver;
@@ -78,7 +78,7 @@ async fn set_up(
     for name in builtins {
         registry.register(Arc::new(Builtin(name))).unwrap();
     }
-    let set = ModuleSet::load(cat, &host, &installer, &mut registry)
+    let set = ModuleSet::load(cat, &host, &installer, &surfaces(), &mut registry)
         .await
         .unwrap();
     (installer, host, registry, set)
@@ -215,7 +215,7 @@ async fn a_module_whose_package_is_gone_is_reported_and_the_rest_still_load() {
     save_module(&cat, &ghost).await.unwrap();
 
     registry = ActionRegistry::new();
-    let set = ModuleSet::load(&cat, &host, &installer, &mut registry)
+    let set = ModuleSet::load(&cat, &host, &installer, &surfaces(), &mut registry)
         .await
         .unwrap();
 

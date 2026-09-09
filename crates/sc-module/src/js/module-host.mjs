@@ -40,20 +40,39 @@
 // server's log is one place with one format, and a module's `console.log` is
 // part of it rather than beside it.
 //
-// ## The `@saltcorn` stubs
+// ## Asking the server something
+//
+// Everything above answers; this is the other direction. A module's action can
+// now *ask* — one more native function on the global, and one this file
+// installs back:
+//
+//   __scAsk(callId, askId, requestJson)   a host call, from inside a call
+//   __scAnswer(askId, ok, text)           its answer, later
+//
+// The `callId` is the one the request arrived with, because that is what says
+// **whose** authority the ask runs under: the caller of that call is where the
+// host is borrowed, and the worker routes the ask to it. An ask is answered on
+// the server's own task, so a module parked on a query is not holding this
+// worker's JavaScript slice — awaiting a promise yields, which is the whole of
+// why the bounds are unchanged.
+//
+// ## The `@saltcorn` API
 //
 // A v1 plugin's first lines are `require("@saltcorn/data/models/table")` and
 // friends. Those packages are v1's server — the thing being replaced — and are
 // not installed, so `Module._load` is patched to answer every `@saltcorn/*`
 // specifier from the table below.
 //
-// Three tiers. `Workflow`, `Form` and `interpolate` are **real**, because the
-// first two are what a `configuration_workflow` is written in and the third is
-// called on every `proxmox_snapshot` run. Everything else is a stub whose
-// properties are reachable and whose **calls throw**, naming the API. A silent
-// no-op was the alternative and is refused on the same grounds the rest of this
-// system refuses silent failures: a `Table.findOne` that returns `undefined`
-// does not fail, it computes the wrong answer, inside somebody's trigger.
+// Three tiers. `Table` and `Field` are the **real** v1 classes — the shared
+// `v1_api.js` this file is concatenated after, over the ask channel above and
+// the schema snapshot the call carried. `Workflow`, `Form` and `interpolate`
+// are real too, because the first two are what a `configuration_workflow` is
+// written in and the third is called on every `proxmox_snapshot` run.
+// Everything else is a stub whose properties are reachable and whose **calls
+// throw**, naming the API. A silent no-op was the alternative and is refused on
+// the same grounds the rest of this system refuses silent failures: a
+// `Table.findOne` that returns `undefined` does not fail, it computes the wrong
+// answer, inside somebody's trigger.
 
 import { createRequire } from "node:module";
 import Module from "node:module";
@@ -73,19 +92,24 @@ const done = globalThis.__scDone;
 const fail = globalThis.__scFail;
 /** One log line: `(level, moduleName | null, message)`. */
 const log = globalThis.__scLog;
+/** One host call, out: `(callId, askId, requestJson)`. */
+const askHost = globalThis.__scAsk;
 
 // ---------------------------------------------------------------------------
 // Which module is speaking
 // ---------------------------------------------------------------------------
 
-/** The module whose call is running, for the log tag.
+/** The **call** that is running: which module it is of, its id, whether it has
+ * a caller to ask, the schema snapshot it carried, and the v1 API built over
+ * those — built once, lazily, per call.
  *
  * An `AsyncLocalStorage` rather than a variable, because the interesting lines
  * are not the ones written on the way in: `@saltcorn/mqtt` logs from a `connect`
  * callback it registered while it was being loaded, long after `load` answered,
  * and a plain variable would have moved on by then. The store is captured when
  * the callback's async resource is created, so that line still says which module
- * wrote it. */
+ * wrote it — and, since this milestone, so a `Table.findOne` inside an action
+ * still knows which call's authority it is reading under. */
 const running = new AsyncLocalStorage();
 
 /** The module's own logging, in the server's log rather than beside it.
@@ -95,7 +119,8 @@ const running = new AsyncLocalStorage();
 const speak = (level) =>
   (...args) => {
     try {
-      log(level, running.getStore() ?? null, format(...args));
+      const store = running.getStore();
+      log(level, (store && store.module) || null, format(...args));
     } catch (_) {
       // A module that logs an object whose inspection throws must not have that
       // become the failure of whatever it was doing.
@@ -108,6 +133,120 @@ console.debug = speak("verbose");
 console.trace = speak("verbose");
 console.warn = speak("warning");
 console.error = speak("error");
+
+// ---------------------------------------------------------------------------
+// Asking this server something
+// ---------------------------------------------------------------------------
+
+/** The asks this worker is waiting on, by ask id, and the counter that names
+ * them. Per **worker** rather than per call, because the ids are what
+ * `__scAnswer` routes on and the two sides have to agree on one space. */
+const asks = new Map();
+let nextAsk = 1;
+
+/** One ask, answered. `ok` says which of the two the third argument is: the
+ * answer's JSON text, or the message it failed with.
+ *
+ * Installed from here rather than by the Rust side, because what it settles is
+ * a promise this file made — and an answer for an ask nobody is waiting on is
+ * dropped rather than reported: the call it belonged to was given up on, and
+ * its caller has already been told why. */
+globalThis.__scAnswer = (askId, ok, text) => {
+  const pending = asks.get(askId);
+  if (!pending) return;
+  asks.delete(askId);
+  if (!ok) {
+    pending.reject(new Error(text || "the server refused without saying why"));
+    return;
+  }
+  let value = null;
+  try {
+    value = text === undefined || text === null || text === "" ? null : JSON.parse(text);
+  } catch (e) {
+    pending.reject(
+      new Error(`the server answered with something this host cannot read: ${(e && e.message) || e}`),
+    );
+    return;
+  }
+  pending.resolve(value);
+};
+
+/** What a module is told when it reaches for the database from somewhere that
+ * has no caller to borrow one from (§3).
+ *
+ * A load, a module function and a table provider are all called with nobody's
+ * authority: `onLoad` runs while the module is being installed, a function is
+ * hoisted into a formula, and a provider is called from inside a query. None of
+ * them has a `CodeHosts` borrowed on a caller's stack, so none of them can ask.
+ * Said by name at the property, rather than answered with nothing. */
+const noCaller = (what) =>
+  `\`${what}\` is not available here: the Saltcorn v1 Table and Field read and ` +
+  `write under the authority of the call they are used in, and this call has ` +
+  `none to lend — a module load (onLoad, a configuration workflow), a module ` +
+  `function and a table provider are each called with nobody's. A module reads ` +
+  `and writes rows from an action.`;
+
+/** One host call, from inside the call it belongs to.
+ *
+ * `surface` is which of this server's seams is meant — `db` for a plan, and
+ * `trigger` for a run of another trigger — and the pair crosses as one JSON
+ * request, because there is one native function rather than one per seam. */
+function ask(surface, plan) {
+  return new Promise((resolve, reject) => {
+    const store = running.getStore();
+    if (!store || !store.asks) {
+      reject(new Error(noCaller(surface === "trigger" ? "run_trigger" : "this database call")));
+      return;
+    }
+    let text;
+    try {
+      text = JSON.stringify({ surface, plan });
+    } catch (e) {
+      reject(new Error(`this request is not JSON: ${(e && e.message) || e}`));
+      return;
+    }
+    const id = nextAsk;
+    nextAsk += 1;
+    asks.set(id, { resolve, reject });
+    try {
+      askHost(store.call, id, text);
+    } catch (e) {
+      asks.delete(id);
+      reject(e);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The schema snapshot
+// ---------------------------------------------------------------------------
+
+/** The snapshot this worker holds, by the catalog generation it was built at.
+ *
+ * One entry, exactly as the code isolates keep it: a generation is bumped by a
+ * catalog reload, so the previous one is of no use to any call that has not
+ * already started — and a call that *has* resolved its snapshot holds the
+ * object itself, so clearing the map never pulls a schema out from under a
+ * module's action. A call carries the generation; it carries the JSON only when
+ * this worker does not have that generation yet. */
+const schemas = new Map();
+
+/** The snapshot for one generation — what this call's `Table` is built over.
+ *
+ * A generation this worker does not hold is a **named failure** and never an
+ * empty schema, for `v1_api.js`'s own reason: a `Table.findOne` answering
+ * undefined for every table would compute the wrong answer inside somebody's
+ * action rather than fail. */
+function schemaFor(generation) {
+  if (generation === null || generation === undefined) return null;
+  const held = schemas.get(generation);
+  if (held === undefined) {
+    throw new Error(
+      `the schema snapshot for catalog generation ${generation} is not on this module worker`,
+    );
+  }
+  return held;
+}
 
 // ---------------------------------------------------------------------------
 // The `@saltcorn` API: real, stubbed, and named
@@ -182,9 +321,99 @@ function interpolate(template, row = {}, user = undefined) {
   });
 }
 
+/** v1's `Table` and `Field`, as the one object a plugin captures.
+ *
+ * The awkward part of the port, and it is v1's own doing: a plugin's **first
+ * line** is `const Table = require("@saltcorn/data/models/table")`, evaluated
+ * once at load time, and every action it ever runs uses that one binding. So
+ * the object has to be stable for the module's life while what it answers has
+ * to be the *running call's* — a different schema after a catalog reload, and a
+ * different caller's authority on every firing.
+ *
+ * Hence a façade: a stable proxy whose every property is read off the v1 API of
+ * the call in flight, built once per call and lazily, so a call that never
+ * names a table never builds one. Outside a call there is nothing to read it
+ * from, and the property says so ([`noCaller`]) rather than answering nothing.
+ *
+ * `default` and the class's own name answer the façade itself, because a plugin
+ * transpiled from ESM writes `require("…/table").default` and a careful one
+ * writes `.Table`; both mean this. */
+function v1Facade(which) {
+  const target = function () {};
+  return new Proxy(target, {
+    get(_t, prop) {
+      if (typeof prop === "symbol") return undefined;
+      if (passThrough.has(prop)) return undefined;
+      if (prop === "name") return which;
+      if (prop === "__esModule") return false;
+      if (prop === "default" || prop === which) return v1Classes[which];
+      // The two v1 statics with no authority in them: `Field.labelToName` and
+      // `Field.nameToLabel` are string functions, and a plugin building form
+      // labels in its `configuration_workflow` calls them where there is no call
+      // in flight. Answered from an api over no snapshot and no sender, which is
+      // all they need.
+      if (which === "Field" && (prop === "labelToName" || prop === "nameToLabel")) {
+        return pureApi().Field[prop];
+      }
+      return callApi(`${which}.${String(prop)}`)[which][prop];
+    },
+    // v1's models are classes, so `Table(…)` is a mistake and `new Table(…)` is
+    // schema editing — which `v1_api.js` refuses by name from its own list. The
+    // constructor is refused here because there is no instance to refuse from.
+    apply() {
+      throw new Error(notAvailable(which));
+    },
+    construct() {
+      throw new Error(notAvailable(`new ${which}`));
+    },
+  });
+}
+
+/** The two façades, built once. */
+const v1Classes = {};
+v1Classes.Table = v1Facade("Table");
+v1Classes.Field = v1Facade("Field");
+
+/** The v1 API over nothing at all: no sender, no snapshot.
+ *
+ * What it is for is the two pure `Field` statics above. Everything else on it
+ * refuses by name (`v1_api.js` builds it that way deliberately), which is why it
+ * is not the answer to a `Table.findOne` outside a call — that one has a sharper
+ * thing to say. */
+let pure = null;
+function pureApi() {
+  if (!pure) pure = globalThis.__scMakeV1Api(null, null, null);
+  return pure;
+}
+
+/** This call's v1 API — `{ Table, Field }` from the shared `v1_api.js` — built
+ * over this call's own ask channel and the snapshot it carried.
+ *
+ * Built on the store rather than in a module-level variable because calls are
+ * concurrent: two actions of two modules are in flight at once, and each has
+ * its own caller, its own authority and its own budget. */
+function callApi(what) {
+  const store = running.getStore();
+  if (!store || !store.asks) throw new Error(noCaller(what));
+  if (!store.api) {
+    store.api = globalThis.__scMakeV1Api(
+      (plan) => ask("db", plan),
+      store.schema,
+      (request) => ask("trigger", request),
+    );
+  }
+  return store.api;
+}
+
 /** The `@saltcorn/*` specifiers this host answers itself, and with what. */
 function saltcornModule(specifier) {
   switch (specifier) {
+    case "@saltcorn/data/models/table":
+    case "@saltcorn/data/models/table.js":
+      return v1Classes.Table;
+    case "@saltcorn/data/models/field":
+    case "@saltcorn/data/models/field.js":
+      return v1Classes.Field;
     case "@saltcorn/data/models/form":
     case "@saltcorn/data/models/form.js":
       return Form;
@@ -986,9 +1215,31 @@ function answer(id, value) {
  * Deliberately not awaited by the caller — each request is its own task, which
  * is what puts many calls in flight at once. */
 globalThis.__scModuleHost = (id, request) => {
-  running.run(request && request.module ? request.module : null, () => {
+  // The call's own context: which module it is of (the log tag), its id (what
+  // an ask is routed by), whether it has a caller to ask at all, and the schema
+  // its `Table` answers from. Everything a v1 `Table` needs reaches it through
+  // this and nothing else, because a module holds one `Table` for its whole
+  // life and only the store knows which call is using it.
+  const context = {
+    module: request && request.module ? request.module : null,
+    call: id,
+    asks: !!(request && request.asks),
+    schema: null,
+    api: null,
+  };
+  running.run(context, () => {
     let pending;
     try {
+      // The snapshot the call carried, when this worker did not already have
+      // that generation. Recorded before anything is dispatched, and
+      // synchronously — the entry point runs to its first `await` before the
+      // Rust side hands over the next call, so two calls at one generation
+      // cannot race here.
+      if (request && typeof request.schema === "string") {
+        schemas.clear();
+        schemas.set(request.schemaGeneration, JSON.parse(request.schema));
+      }
+      context.schema = schemaFor(request && request.schemaGeneration);
       pending = handle(request);
     } catch (e) {
       fail(id, (e && e.message) || String(e), (e && e.stack) || null);

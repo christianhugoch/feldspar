@@ -13,7 +13,7 @@ use crate::common;
 use std::time::Duration;
 
 use common::{closed, have_npm, installed_on_deno};
-use sc_module::PoolBounds;
+use sc_module::{CallHosts, PoolBounds};
 use serde_json::json;
 
 /// The default bounds, which is what a server runs.
@@ -61,6 +61,7 @@ async fn a_module_loads_and_runs_in_this_process() {
             name,
             "echo_row",
             json!({ "row": { "id": 7 }, "configuration": { "greeting": "hi" } }),
+            CallHosts::default(),
         )
         .await
         .unwrap();
@@ -72,10 +73,10 @@ async fn a_module_loads_and_runs_in_this_process() {
     // and the `@saltcorn/*` stubs are the same three tiers: a call into one of
     // them throws, naming itself, rather than quietly answering `undefined`.
     let err = host
-        .run(name, "echo_missing_api", json!({}))
+        .run(name, "echo_missing_api", json!({}), CallHosts::default())
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("models/table.findOne"), "{err}");
+    assert!(err.to_string().contains("models/file.findOne"), "{err}");
 
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(installer.root());
@@ -117,7 +118,10 @@ async fn a_modules_on_load_hook_runs_with_its_configuration() {
 
     // It ran, before any action did, and it was handed the module's own stored
     // configuration rather than an empty object.
-    let value = host.run(name, "echo_loaded", json!({})).await.unwrap();
+    let value = host
+        .run(name, "echo_loaded", json!({}), CallHosts::default())
+        .await
+        .unwrap();
     assert_eq!(
         value["loaded_with"]["endpoint"],
         json!("https://echo.example")
@@ -133,7 +137,10 @@ async fn a_modules_on_load_hook_runs_with_its_configuration() {
     )
     .await
     .unwrap();
-    let value = host.run(name, "echo_loaded", json!({})).await.unwrap();
+    let value = host
+        .run(name, "echo_loaded", json!({}), CallHosts::default())
+        .await
+        .unwrap();
     assert_eq!(
         value["loaded_with"]["endpoint"],
         json!("https://elsewhere.example")
@@ -199,12 +206,17 @@ async fn a_modules_functions_are_reported_and_called() {
     // A synchronous v1 function, awaited across the seam (§4a's behaviour
     // difference), with v1's positional arguments.
     let value = host
-        .call(name, "echo_upper", vec![json!("hi")])
+        .call(name, "echo_upper", vec![json!("hi")], CallHosts::default())
         .await
         .unwrap();
     assert_eq!(value, json!("HI"));
     let value = host
-        .call(name, "echo_join", vec![json!("a"), json!("b")])
+        .call(
+            name,
+            "echo_join",
+            vec![json!("a"), json!("b")],
+            CallHosts::default(),
+        )
         .await
         .unwrap();
     assert_eq!(value, json!("a-b"));
@@ -213,7 +225,12 @@ async fn a_modules_functions_are_reported_and_called() {
     // configuration sees the configured value, because it ran where the module
     // was loaded.
     let value = host
-        .call(name, "echo_endpoint", vec![json!("/v1")])
+        .call(
+            name,
+            "echo_endpoint",
+            vec![json!("/v1")],
+            CallHosts::default(),
+        )
         .await
         .unwrap();
     assert_eq!(value, json!("https://echo.example/v1"));
@@ -221,7 +238,7 @@ async fn a_modules_functions_are_reported_and_called() {
     // A result JSON will not encode is a failure naming why, never a mangled
     // value (§4a).
     let err = host
-        .call(name, "echo_unserialisable", vec![])
+        .call(name, "echo_unserialisable", vec![], CallHosts::default())
         .await
         .unwrap_err()
         .to_string();
@@ -229,7 +246,7 @@ async fn a_modules_functions_are_reported_and_called() {
 
     // A name the module does not have says so rather than answering null.
     let err = host
-        .call(name, "echo_nonesuch", vec![])
+        .call(name, "echo_nonesuch", vec![], CallHosts::default())
         .await
         .unwrap_err()
         .to_string();
@@ -271,6 +288,7 @@ async fn a_module_function_reaches_a_stub_http_server() {
             name,
             "echo_fetch",
             vec![json!(format!("http://127.0.0.1:{port}/search"))],
+            CallHosts::default(),
         )
         .await
         .unwrap();
@@ -310,6 +328,7 @@ async fn a_module_granted_one_host_cannot_reach_a_second() {
             name,
             "echo_fetch",
             vec![json!(format!("http://127.0.0.1:{allowed}/"))],
+            CallHosts::default(),
         )
         .await
         .unwrap();
@@ -323,6 +342,7 @@ async fn a_module_granted_one_host_cannot_reach_a_second() {
             name,
             "echo_fetch",
             vec![json!(format!("http://127.0.0.1:{denied}/"))],
+            CallHosts::default(),
         )
         .await
         .unwrap_err()
@@ -368,7 +388,7 @@ async fn a_module_denied_the_filesystem_cannot_read_the_modules_root() {
         .await
         .unwrap();
     assert_eq!(
-        host.call(name, "echo_upper", vec![json!("hi")])
+        host.call(name, "echo_upper", vec![json!("hi")], CallHosts::default())
             .await
             .unwrap(),
         json!("HI")
@@ -380,7 +400,12 @@ async fn a_module_denied_the_filesystem_cannot_read_the_modules_root() {
         .display()
         .to_string();
     let err = host
-        .call(name, "echo_read", vec![json!(script.clone())])
+        .call(
+            name,
+            "echo_read",
+            vec![json!(script.clone())],
+            CallHosts::default(),
+        )
         .await
         .unwrap_err()
         .to_string();
@@ -400,11 +425,14 @@ async fn a_module_denied_the_filesystem_cannot_read_the_modules_root() {
     .await
     .unwrap();
     let text = host
-        .call(name, "echo_read", vec![json!(script)])
+        .call(name, "echo_read", vec![json!(script)], CallHosts::default())
         .await
         .unwrap();
+    // The first forty characters of the written script, which since the v1
+    // `Table` milestone are the shared `v1_api.js`'s own first line: the host
+    // script is that source with this host's half concatenated after it.
     assert!(
-        text.as_str().unwrap_or_default().contains("module"),
+        text.as_str().unwrap_or_default().contains("Saltcorn 1"),
         "{text:?}"
     );
 
@@ -432,7 +460,7 @@ async fn an_ungranted_environment_variable_is_invisible_rather_than_fatal() {
     // `PATH` is set in every process this could run in, and the module cannot
     // see it.
     assert_eq!(
-        host.call(name, "echo_env", vec![json!("PATH")])
+        host.call(name, "echo_env", vec![json!("PATH")], CallHosts::default())
             .await
             .unwrap(),
         json!(null)
@@ -450,7 +478,7 @@ async fn an_ungranted_environment_variable_is_invisible_rather_than_fatal() {
     .await
     .unwrap();
     assert_eq!(
-        host.call(name, "echo_env", vec![json!("PATH")])
+        host.call(name, "echo_env", vec![json!("PATH")], CallHosts::default())
             .await
             .unwrap(),
         json!(true)
@@ -516,9 +544,14 @@ async fn modules_with_different_permissions_do_not_share_a_worker() {
     assert_eq!(host.workers().await, 1);
     // The moved module still answers, on its new isolate.
     assert_eq!(
-        host.call(&echo, "echo_upper", vec![json!("moved")])
-            .await
-            .unwrap(),
+        host.call(
+            &echo,
+            "echo_upper",
+            vec![json!("moved")],
+            CallHosts::default()
+        )
+        .await
+        .unwrap(),
         json!("MOVED")
     );
 
@@ -551,6 +584,7 @@ async fn a_modules_console_log_goes_to_the_log_and_not_to_a_pipe() {
             name,
             "echo_log",
             json!({ "configuration": { "greeting": "hello" } }),
+            CallHosts::default(),
         )
         .await
         .unwrap();
@@ -577,7 +611,10 @@ async fn a_result_that_is_not_json_fails_with_a_sentence() {
         .await
         .unwrap();
 
-    let err = host.run(name, "echo_cycle", json!({})).await.unwrap_err();
+    let err = host
+        .run(name, "echo_cycle", json!({}), CallHosts::default())
+        .await
+        .unwrap_err();
     assert!(
         err.to_string().contains("not JSON"),
         "the failure should name what went wrong: {err}"
@@ -585,9 +622,14 @@ async fn a_result_that_is_not_json_fails_with_a_sentence() {
     // The module's fault, and the worker is untouched by it.
     assert_eq!(err.kind(), sc_error::ErrorKind::Application);
     assert_eq!(
-        host.run(name, "echo_row", json!({ "configuration": {} }))
-            .await
-            .unwrap()["row"],
+        host.run(
+            name,
+            "echo_row",
+            json!({ "configuration": {} }),
+            CallHosts::default()
+        )
+        .await
+        .unwrap()["row"],
         json!(null)
     );
 
@@ -645,7 +687,10 @@ async fn a_module_that_exits_loses_its_call_and_leaves_the_server_up() {
 
     // The exiting call is lost, and it is lost **by name** rather than by
     // waiting out the 120-second wall clock.
-    let err = host.run(name, "echo_exit", json!({})).await.unwrap_err();
+    let err = host
+        .run(name, "echo_exit", json!({}), CallHosts::default())
+        .await
+        .unwrap_err();
     assert!(
         err.to_string().contains("process.exit"),
         "the failure should name what happened: {err}"
@@ -659,6 +704,7 @@ async fn a_module_that_exits_loses_its_call_and_leaves_the_server_up() {
             name,
             "echo_row",
             json!({ "row": {}, "configuration": { "greeting": "again" } }),
+            CallHosts::default(),
         )
         .await
         .unwrap();
@@ -694,7 +740,10 @@ async fn a_runaway_module_is_stopped_by_the_js_slice() {
     let actions: Vec<&str> = manifest.actions.iter().map(|a| a.name.as_str()).collect();
     assert!(actions.contains(&"echo_spin"), "{actions:?}");
 
-    let err = host.run(name, "echo_spin", json!({})).await.unwrap_err();
+    let err = host
+        .run(name, "echo_spin", json!({}), CallHosts::default())
+        .await
+        .unwrap_err();
     assert!(
         err.to_string().contains("without yielding"),
         "the failure should name the slice: {err}"
@@ -708,6 +757,7 @@ async fn a_runaway_module_is_stopped_by_the_js_slice() {
             name,
             "echo_row",
             json!({ "row": {}, "configuration": { "greeting": "still here" } }),
+            CallHosts::default(),
         )
         .await
         .unwrap();
@@ -768,7 +818,10 @@ async fn a_co_resident_module_survives_its_neighbours_exit() {
     assert_eq!(host.workers().await, 1);
 
     // The exiting call is lost, by name.
-    let err = host.run(&echo, "echo_exit", json!({})).await.unwrap_err();
+    let err = host
+        .run(&echo, "echo_exit", json!({}), CallHosts::default())
+        .await
+        .unwrap_err();
     assert!(
         err.to_string().contains("process.exit"),
         "the failure should name what happened: {err}"
@@ -778,7 +831,9 @@ async fn a_co_resident_module_survives_its_neighbours_exit() {
     // its load replayed, which is what makes this an interruption rather than an
     // uninstall.
     assert_eq!(
-        host.run(&other, "clash_ok", json!({})).await.unwrap(),
+        host.run(&other, "clash_ok", json!({}), CallHosts::default())
+            .await
+            .unwrap(),
         json!("fine")
     );
     // And so does the module that exited, still carrying the configuration it
@@ -788,6 +843,7 @@ async fn a_co_resident_module_survives_its_neighbours_exit() {
             &echo,
             "echo_row",
             json!({ "row": {}, "configuration": { "greeting": "back" } }),
+            CallHosts::default(),
         )
         .await
         .unwrap();
@@ -833,11 +889,16 @@ async fn a_module_on_another_worker_does_not_notice() {
         "two modules and two workers should not share one"
     );
 
-    let _ = host.run(echo, "echo_exit", json!({})).await.unwrap_err();
+    let _ = host
+        .run(echo, "echo_exit", json!({}), CallHosts::default())
+        .await
+        .unwrap_err();
     // The other worker never saw it: its module answers straight away, with no
     // restart and no replay in between.
     assert_eq!(
-        host.run(other, "clash_ok", json!({})).await.unwrap(),
+        host.run(other, "clash_ok", json!({}), CallHosts::default())
+            .await
+            .unwrap(),
         json!("fine")
     );
     host.shutdown().await;
@@ -877,14 +938,25 @@ async fn an_unloaded_module_is_not_replayed() {
 
     // Take the worker down and let the next call rebuild it. What comes back is
     // the module that is still installed, and only that one.
-    let _ = host.run(echo, "echo_exit", json!({})).await.unwrap_err();
+    let _ = host
+        .run(echo, "echo_exit", json!({}), CallHosts::default())
+        .await
+        .unwrap_err();
     assert_eq!(
-        host.run(echo, "echo_row", json!({ "row": {}, "configuration": {} }))
-            .await
-            .unwrap()["row"],
+        host.run(
+            echo,
+            "echo_row",
+            json!({ "row": {}, "configuration": {} }),
+            CallHosts::default()
+        )
+        .await
+        .unwrap()["row"],
         json!({})
     );
-    let err = host.run(gone, "clash_ok", json!({})).await.unwrap_err();
+    let err = host
+        .run(gone, "clash_ok", json!({}), CallHosts::default())
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("not loaded"), "{err}");
 
     host.shutdown().await;

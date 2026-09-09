@@ -159,8 +159,14 @@ impl ModuleServices {
     /// to the live server", and no caller has to remember the four steps.
     pub async fn reload(&self) -> Result<()> {
         let mut registry = crate::triggers::base_action_registry(&self.agents, &self.models)?;
-        let set =
-            ModuleSet::load(&self.catalog, &self.host, &self.installer, &mut registry).await?;
+        let set = ModuleSet::load(
+            &self.catalog,
+            &self.host,
+            &self.installer,
+            &self.surfaces,
+            &mut registry,
+        )
+        .await?;
         // And the other language's, into the **same** registry: the two share
         // one namespace of action names, so a Python module claiming a name a
         // built-in or a JavaScript module already has is refused by the registry

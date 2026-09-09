@@ -8,15 +8,25 @@
 //! `run` destructures `{ row, table, configuration, user }` and has done for
 //! years, and every one of those names is what a module already reads. So the
 //! translation is written out here, once, and the names do not change.
+//!
+//! # And it reaches the same surfaces a code body does
+//!
+//! Built by [`CodeSurfaces`] — `sc_core_actions`', the very ones `run_js_code`
+//! and `PyModuleAction` build — so a v1 plugin's `books.insertRow(row)` carries
+//! the event's caller and this trigger's chain, and its `run_trigger` goes
+//! through *the* dispatcher. This is what the v1 `Table` inside the module runs
+//! over (TODO "the v1 `Table` API" §3): the ask channel is served by the future
+//! awaiting the call, because that is where the hosts are borrowed.
 
 use std::sync::Arc;
 
 use sc_action::{Action, ActionContext, Event};
+use sc_core_actions::CodeSurfaces;
 use sc_error::Result;
 use sc_types::{Attrs, FormField};
 use serde_json::{Map, Value as Json, json};
 
-use crate::host::ModuleHost;
+use crate::host::{CallHosts, ModuleHost};
 
 /// One action supplied by one module.
 pub struct ModuleAction {
@@ -32,6 +42,11 @@ pub struct ModuleAction {
     config_spec: Vec<FormField>,
     /// The host to run it in.
     host: Arc<ModuleHost>,
+    /// The HTTP client behind `fetch` and the builder of the five surfaces, held
+    /// once for the reason `run_js_code` holds one: a client is a connection pool
+    /// and a TLS configuration, and one per firing would pay for a handshake
+    /// every time a trigger runs.
+    surfaces: Arc<CodeSurfaces>,
 }
 
 impl ModuleAction {
@@ -42,6 +57,7 @@ impl ModuleAction {
         description: impl Into<String>,
         config_spec: Vec<FormField>,
         host: Arc<ModuleHost>,
+        surfaces: Arc<CodeSurfaces>,
     ) -> ModuleAction {
         let module = module.into();
         let name = name.into();
@@ -57,6 +73,7 @@ impl ModuleAction {
             description,
             config_spec,
             host,
+            surfaces,
         }
     }
 
@@ -82,17 +99,28 @@ impl Action for ModuleAction {
 
     async fn run(&self, ctx: &mut ActionContext<'_>) -> Result<Json> {
         let args = v1_arguments(ctx.event, ctx.config, ctx.trigger);
-        self.host.run(&self.module, &self.name, args).await
+        // Held for the length of the call: the surfaces borrow from it, and the
+        // borrow lives exactly as long as the run — which is also what lets the
+        // host serve the module's asks while it waits for the answer.
+        let hosts = self.surfaces.build(ctx);
+        self.host
+            .run(
+                &self.module,
+                &self.name,
+                args,
+                CallHosts::new(hosts.surfaces(), hosts.schema()),
+            )
+            .await
     }
 }
 
 /// The object a v1 `run` is called with.
 ///
-/// `table` is an object with a `name` rather than v1's `Table` model: the model
-/// is one of the APIs that is stubbed in this milestone, and handing over
-/// something that *looks* like one but answers nothing would be the silent
-/// failure this system refuses. A module that only needs the name — which is
-/// most of them — gets it.
+/// `table` is an object with a `name` rather than v1's `Table` model, even now
+/// that there is a real one: a `Table` here would be one built outside the
+/// call's own async context, and what a plugin does with the argument is read
+/// its name. `Table.findOne(table.name)` inside the action is the model, on the
+/// call's own authority.
 fn v1_arguments(event: &Event, config: &Attrs, trigger: &str) -> Json {
     let mut args = Map::new();
     args.insert("row".into(), event.row.clone().unwrap_or(Json::Null));
@@ -173,7 +201,15 @@ mod tests {
     #[test]
     fn an_action_with_no_description_is_attributed_to_its_module() {
         let host = Arc::new(ModuleHost::new("/tmp/does-not-need-to-exist"));
-        let action = ModuleAction::new("@saltcorn/mqtt", "mqtt_publish", "", Vec::new(), host);
+        let surfaces = Arc::new(CodeSurfaces::new().expect("an HTTP client"));
+        let action = ModuleAction::new(
+            "@saltcorn/mqtt",
+            "mqtt_publish",
+            "",
+            Vec::new(),
+            host,
+            surfaces,
+        );
         assert_eq!(action.name(), "mqtt_publish");
         assert!(action.description().contains("@saltcorn/mqtt"));
         assert_eq!(action.module(), "@saltcorn/mqtt");

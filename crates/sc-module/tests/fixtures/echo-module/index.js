@@ -3,6 +3,7 @@
 // have to make survivable), configures itself with a `Workflow` of `Form`s, and
 // exports its actions as a function of the module's configuration.
 const Table = require("@saltcorn/data/models/table");
+const File = require("@saltcorn/data/models/file");
 const { getState } = require("@saltcorn/data/db/state");
 const { interpolate } = require("@saltcorn/data/utils");
 const Workflow = require("@saltcorn/data/models/workflow");
@@ -66,7 +67,13 @@ module.exports = {
     },
     echo_missing_api: {
       description: "Call an API this version does not have",
-      run: async () => await Table.findOne({ name: "books" }),
+      // `File`, and not `Table`: the v1 `Table` is real now, and what a test of
+      // the stub tier needs is something that is still a stub.
+      run: async () => await File.findOne({ filename: "notes.txt" }),
+    },
+    echo_table_no_caller: {
+      description: "Reach the v1 Table from a call that has no authority to lend",
+      run: async () => Table.findOne("books"),
     },
     echo_state: {
       run: async () => getState().getConfig("x"),

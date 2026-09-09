@@ -140,9 +140,16 @@ impl ModuleFnHost for ModuleFunctions {
                 request.module, request.function
             )));
         }
-        let call = self
-            .host
-            .call(&request.module, &request.function, request.args);
+        // No surfaces and no schema: a module function is hoisted into a formula
+        // and called from inside one, so there is no caller's authority to lend
+        // it and no spare database connection to lend it with. A `Table` reached
+        // from one says so by name (`CallHosts::default`).
+        let call = self.host.call(
+            &request.module,
+            &request.function,
+            request.args,
+            crate::host::CallHosts::default(),
+        );
         // The caller's clock, when it named one: the pool's own bound is the
         // 120 s a Proxmox snapshot needs, which is not a bound a five-second
         // code body can be held to.

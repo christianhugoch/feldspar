@@ -53,8 +53,18 @@ sc-db.workspace = true
 # crate documents as the one a plugin uses.
 sc-action.workspace = true
 # The fifth host surface's trait (`ModuleFnHost`) lives in sc-expr, and
-# `functions.rs` implements it: the seam is defined where the guest is.
+# `functions.rs` implements it: the seam is defined where the guest is. It is
+# also where `CodeHosts` and the schema snapshot are declared — what a module's
+# action is handed so that the v1 `Table` inside it can reach this server.
 sc-expr.workspace = true
+# The five host surfaces a module's action reaches, built from its
+# `ActionContext` by `CodeSurfaces` — the very ones `run_js_code` builds, so a
+# module's write carries the event's caller and this trigger's chain. The edge
+# runs the way `sc-python`'s does one layer up: `sc-core-actions` is layer 9 and
+# knows nothing of modules, so there is no cycle, and building the surfaces here
+# a second time is exactly how the two would come to disagree about who a
+# module's write is caused by.
+sc-core-actions.workspace = true
 # A module also supplies **model providers**, and `ModelProviderHost` — the seam
 # for them — is declared in `sc-model` beside this crate at layer 6, for exactly
 # the reason `TableProviderHost` is declared in `sc-catalog` below it: a trait a
@@ -68,6 +78,10 @@ uuid.workspace = true
 # runtime thread, its stdio piped. `sync` carries the in-flight call map's
 # oneshots — the host itself is no longer a process.
 tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "rt"] }
+# `FuturesUnordered`: a module call may have several asks in flight at once — a
+# `Promise.all` of two reads — and the caller that serves them is holding
+# borrowed hosts, so they cannot be spawned onto the runtime.
+futures.workspace = true
 
 # `deno-host` only. The four wirings of the in-process runtime: the worker and
 # its node compatibility layer, the byonm resolver over the modules root's own

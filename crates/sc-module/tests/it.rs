@@ -41,3 +41,5 @@ mod pg_provider;
 mod rss_provider;
 #[path = "two_pools.rs"]
 mod two_pools;
+#[path = "v1_table.rs"]
+mod v1_table;

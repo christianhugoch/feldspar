@@ -28,12 +28,47 @@
 use std::path::{Path, PathBuf};
 
 use sc_error::{Error, Result};
+use sc_expr::{CodeHosts, SchemaSnapshot};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
 use crate::permissions::ModulePermissions;
 
-/// The host script, written into the modules root at every worker start.
+/// What one module call may reach while it runs, and what its `Table` knows
+/// without reaching for anything (TODO "the v1 `Table` API" §3).
+///
+/// The five host surfaces a code body reaches, plus the schema snapshot — the
+/// same pair a [`sc_expr::CodeCall`] carries, and built in the same place: a
+/// module's action gets them from `sc_core_actions::CodeSurfaces`, so its write
+/// carries the event's caller and this trigger's chain exactly as `run_js_code`'s
+/// does.
+///
+/// [`Default`] is the honest answer for every call that has **nobody's**
+/// authority to lend: a load (`onLoad`, a configuration workflow), a module
+/// function hoisted into a formula, a table provider called from inside a query.
+/// None of those has a caller with a `CodeHosts` borrowed on its stack, and a
+/// `Table` reached from one of them is refused by name rather than answering
+/// nothing.
+#[derive(Default)]
+pub struct CallHosts<'a> {
+    /// The five surfaces — of which this milestone's `Table` speaks two: the
+    /// tables and the triggers.
+    pub hosts: CodeHosts<'a>,
+    /// This server's tables as the guest sees them without asking — what v1's
+    /// synchronous `Table.findOne` is answered from.
+    pub schema: Option<&'a SchemaSnapshot>,
+}
+
+impl<'a> CallHosts<'a> {
+    /// The surfaces and the schema of one run, as
+    /// `sc_core_actions::code_body::Hosts` supplies them.
+    #[must_use]
+    pub fn new(hosts: CodeHosts<'a>, schema: Option<&'a SchemaSnapshot>) -> CallHosts<'a> {
+        CallHosts { hosts, schema }
+    }
+}
+
+/// The host script's own half, before the shared v1 API is put in front of it.
 ///
 /// `pub(crate)` because [`crate::deno`] is what writes and evaluates it: it is
 /// the JavaScript half of the host, and the only thing that runs it is the
@@ -44,6 +79,26 @@ use crate::permissions::ModulePermissions;
     expect(dead_code, reason = "no runtime to run it")
 )]
 pub(crate) const HOST_SCRIPT: &str = include_str!("js/module-host.mjs");
+
+/// What is actually written into the modules root at every worker start: the
+/// shared v1 `Table`/`Field` source, then this host's own script.
+///
+/// **One source, two hosts** (TODO "the v1 `Table` API" §1). `sc_expr::V1_API_JS`
+/// is the same text compiled into the code isolates' prelude, so the `Table` a
+/// `run_js_code` body gets and the `Table` an installed v1 plugin gets are the
+/// same translation of v1's `Where` vocabulary. Two implementations that agreed
+/// today would disagree by the third bug fixed in one of them.
+///
+/// Concatenated rather than imported because the worker evaluates **one** main
+/// module and `v1_api.js` is a script — an IIFE that defines `__scMakeV1Api` on
+/// the global — so putting it first is all the wiring there is.
+#[cfg_attr(
+    not(any(feature = "deno-host", test)),
+    expect(dead_code, reason = "no runtime to run it")
+)]
+pub(crate) fn host_script() -> String {
+    format!("{}\n{HOST_SCRIPT}", sc_expr::V1_API_JS)
+}
 
 /// What the host script is called on disk.
 pub const HOST_SCRIPT_NAME: &str = "module-host.mjs";
@@ -348,15 +403,26 @@ impl ModuleHost {
         }
     }
 
-    /// Run one action of one module with v1's argument object.
-    pub async fn run(&self, module: &str, action: &str, args: Json) -> Result<Json> {
+    /// Run one action of one module with v1's argument object, over the surfaces
+    /// its caller has.
+    ///
+    /// The surfaces are what make the v1 `Table` work inside a module (§3): the
+    /// action's own asks are served by *this* future, because the hosts are
+    /// borrowed on the caller's stack and cannot be sent anywhere.
+    pub async fn run(
+        &self,
+        module: &str,
+        action: &str,
+        args: Json,
+        call: CallHosts<'_>,
+    ) -> Result<Json> {
         #[cfg(feature = "deno-host")]
         {
-            self.pool.run(module, action, args).await
+            self.pool.run(module, action, args, call).await
         }
         #[cfg(not(feature = "deno-host"))]
         {
-            let _ = (module, action, args);
+            let _ = (module, action, args, call);
             Err(no_runtime())
         }
     }
@@ -369,14 +435,20 @@ impl ModuleHost {
     /// over what its module built at load time — a `markdown-it`, a
     /// `Nominatim`, the module's own configuration — and that lives in one
     /// place because a module is loaded once.
-    pub async fn call(&self, module: &str, function: &str, args: Vec<Json>) -> Result<Json> {
+    pub async fn call(
+        &self,
+        module: &str,
+        function: &str,
+        args: Vec<Json>,
+        call: CallHosts<'_>,
+    ) -> Result<Json> {
         #[cfg(feature = "deno-host")]
         {
-            self.pool.call(module, function, args).await
+            self.pool.call(module, function, args, call).await
         }
         #[cfg(not(feature = "deno-host"))]
         {
-            let _ = (module, function, args);
+            let _ = (module, function, args, call);
             Err(no_runtime())
         }
     }
@@ -670,13 +742,44 @@ mod tests {
         assert!(HOST_SCRIPT.contains("@saltcorn/"), "the stubs are missing");
     }
 
+    /// **One source, two hosts** (TODO "the v1 `Table` API" §1). The `Table` a
+    /// code body gets and the `Table` a v1 plugin gets are the same text, and
+    /// this is the assertion that the concatenation really happens: a checkout
+    /// where it did not would be a module host whose `require` of
+    /// `@saltcorn/data/models/table` answered a façade over a factory that is
+    /// not there.
+    #[test]
+    fn the_written_script_carries_the_shared_v1_api_in_front_of_it() {
+        let script = host_script();
+        assert!(
+            script.contains("__scMakeV1Api"),
+            "the shared v1 Table/Field source is missing"
+        );
+        assert!(
+            script.find("__scMakeV1Api") < script.find("globalThis.__scModuleHost"),
+            "the factory has to be defined before the host script reads it"
+        );
+        // And the host's own half is still all there, after it.
+        assert!(script.contains("module-host"), "the host script is missing");
+        assert!(
+            script.contains("__scAnswer"),
+            "the ask channel's answer is missing"
+        );
+    }
+
     #[test]
     fn the_host_script_speaks_the_seam_and_not_a_pipe() {
         // The three functions [`crate::deno`] installs, and the entry point it
         // calls. If either side is renamed without the other, a worker starts
         // and never answers — so the pair is asserted here, where a rename is
         // one grep away from both.
-        for name in ["__scModuleHost", "__scDone", "__scFail", "__scLog"] {
+        for name in [
+            "__scModuleHost",
+            "__scDone",
+            "__scFail",
+            "__scLog",
+            "__scAsk",
+        ] {
             assert!(HOST_SCRIPT.contains(name), "{name} is missing");
         }
         // And nothing is left of the transport: no framing, no stdout, no

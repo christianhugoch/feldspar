@@ -76,7 +76,7 @@ pub use bundled::{BUNDLED_IN_CHECKOUT, BundledModule, BundledModules};
 pub use deno::{DenoModuleHost, PoolBounds};
 pub use functions::ModuleFunctions;
 pub use host::{
-    ActionManifest, FunctionArg, FunctionManifest, ModelProviderManifest, ModuleHost,
+    ActionManifest, CallHosts, FunctionArg, FunctionManifest, ModelProviderManifest, ModuleHost,
     ModuleManifest, TableProviderManifest, UnsupportedEntity, prime_v8,
 };
 pub use install::{

@@ -35,7 +35,7 @@ use crate::common;
 
 use std::sync::Arc;
 
-use common::{fixture, have_npm, temp_root};
+use common::{fixture, have_npm, surfaces, temp_root};
 use sc_action::ActionRegistry;
 use sc_catalog::{
     Attrs, Catalog, ProvidedTableDef, ProvidedWrites, TableMeta, TableProviderHost,
@@ -147,7 +147,7 @@ async fn a_remote_postgres_table_is_read_and_written_through_a_module() {
 
     let host = Arc::new(ModuleHost::new(&root));
     let mut registry = ActionRegistry::new();
-    let set = ModuleSet::load(&catalog, &host, &installer, &mut registry)
+    let set = ModuleSet::load(&catalog, &host, &installer, &surfaces(), &mut registry)
         .await
         .unwrap();
     let loaded = set.get(&package.name).unwrap();
@@ -300,7 +300,7 @@ async fn a_read_only_configuration_refuses_all_three_and_still_reads() {
 
     let host = Arc::new(ModuleHost::new(&root));
     let mut registry = ActionRegistry::new();
-    let set = ModuleSet::load(&catalog, &host, &installer, &mut registry)
+    let set = ModuleSet::load(&catalog, &host, &installer, &surfaces(), &mut registry)
         .await
         .unwrap();
     catalog

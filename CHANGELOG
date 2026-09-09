@@ -2,6 +2,89 @@
 
 Changes in reverse chronological order.
 
+## A module can ask this server for rows, and v1's `Table` inside one is real
+
+The fifth phase of the v1 `Table` API: **the module bridge**. An installed v1
+plugin's action can now write the six lines the milestone is defined by —
+`require("@saltcorn/data/models/table")`, `Table.findOne`, `getRows`, `updateRow`
+— and the plugin never learns it is not running on Saltcorn 1. It was the largest
+piece of Rust in the milestone, because until now a module worker could only ever
+*answer*.
+
+- **The worker got a second direction.** `__scAsk(callId, askId, requestJson)` is
+  a fourth native function on the isolate's global, beside `__scDone`, `__scFail`
+  and `__scLog`, and it is the only one that runs outwards. It answers nothing:
+  the JavaScript holds a promise for the ask id, the worker routes the ask to
+  **the caller of the call it belongs to** — which is where a `CodeHosts` is
+  borrowed on somebody's stack and therefore the only place that can serve it —
+  and the answer comes back as a `Control::Answer` on the control channel the
+  worker already selects on, which it hands to the isolate through `__scAnswer`.
+- **The bounds are unchanged, and that is the point.** An ask is served on the
+  server's own tokio task rather than the worker thread, so a module parked on a
+  query is not holding the JS slice: the watchdog's clock is about JavaScript that
+  does not yield, and awaiting a promise yields. The call budget is the run's, and
+  it is the *body's* number — a module's N+1 costs what a code body's N+1 costs,
+  because it is the same bound on the same server doing the same work.
+- **Asks are served concurrently**, so a module's `Promise.all` of two reads is
+  two reads. Awaiting them in turn would also have stopped the caller watching for
+  the reply and the wall clock, and a module whose worker died mid-query would
+  then have been discovered by neither.
+- **A caller that stops waiting fails the asks it took on, by name.** The
+  dangerous version of a dead worker is silence: an answer that never arrives
+  leaves a module awaiting a promise nothing will settle, to be discovered two
+  minutes later by a timeout. So the reply and the asks end together, and an ask
+  for a call that is no longer in flight — a callback the module registered
+  outlived it — is refused saying exactly that.
+- **One source, two hosts.** `sc_expr::V1_API_JS` — the same text compiled into
+  the code isolates' prelude — is now written in front of `module-host.mjs` at
+  every worker start, so the `Table` a `run_js_code` body gets and the `Table` an
+  installed plugin gets are the same translation of v1's `Where` vocabulary. Two
+  implementations that agreed today would disagree by the third bug fixed in one
+  of them.
+- **`Table` is a façade, because v1 made it one.** A plugin's *first line* is
+  `const Table = require("@saltcorn/data/models/table")`, evaluated once at load
+  and held for the module's life, while what it must answer is the running call's
+  — a different schema after a catalog reload, a different caller's authority on
+  every firing. So the object is stable and every property is read off the v1 API
+  of the call in flight, built once per call and lazily through the
+  `AsyncLocalStorage` context the host script already kept for the log tag.
+- **The schema crosses once per reload, not once per firing.** A call carries the
+  catalog generation; the *worker* decides whether the JSON goes with it, because
+  only the worker knows which generation its isolate holds and whether it was
+  restarted a moment ago. `Table.findOne("books")` is therefore synchronous inside
+  a module, which is what eight years of plugins assume on their first line.
+- **A load has no authority to lend, and says so.** `onLoad`, a configuration
+  workflow, a module function hoisted into a formula and a table provider called
+  from inside a query are each called with nobody's — there is no `CodeHosts`
+  borrowed anywhere — so a `Table` reached from one refuses **at the property**,
+  synchronously, naming the method and why. A plugin whose `onLoad` reads rows
+  still loads: the throw is an issue on its Modules card and every action it
+  supplies goes on working.
+- **A module's action reaches the same five surfaces a code body does**, built by
+  `sc_core_actions::CodeSurfaces` — the very ones `run_js_code` and
+  `PyModuleAction` build — so a v1 plugin's `insertRow` carries the event's caller
+  and this trigger's chain, is coerced and validated like every other write, and
+  is **observed by triggers**. That needed the `sc-module` → `sc-core-actions`
+  edge `sc-python` already has one layer up; building the surfaces twice is
+  exactly how the two would have come to disagree about who a module's write is
+  caused by.
+- **`Table` came off the stub tier, so the fixture that tested the tier moved
+  to `File`**, which is still one. What is still refused through the real class —
+  `add_unique_constraint` and the rest of v1's schema editing — is refused from
+  `v1_api.js`'s one list, the same list a code body reaches.
+- **Tested at the level the failures are at.** `tests/v1_table.rs` runs the
+  definition of done against a real Postgres through the whole path a server
+  takes — npm install, a stored row, `ModuleSet::load`, the registry, an
+  `ActionContext` — and asserts: the metadata answered with no host call
+  (`pk_name`, `fields`, `getField("author").is_fkey`, its `reftable_name`), the
+  read, the write landing in the database, the second firing working with the
+  schema already on the worker, three module calls in flight at once each getting
+  their own answers, two asks from one call served together, `onLoad`'s refusal
+  naming why while its actions still run, a worker that `process.exit()`s with a
+  read in flight failing the call by name and the module coming back on the next
+  one, and the two named refusals — schema editing, and a module function that
+  has nobody's authority to read with.
+
 ## A key on the fields screen is a link, both ways
 
 The fields list named a `Key`'s target and left the admin to go and find it, and

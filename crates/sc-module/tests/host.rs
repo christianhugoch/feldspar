@@ -12,7 +12,7 @@
 use crate::common;
 
 use common::{closed, fixture, have_npm, installed, temp_root};
-use sc_module::{Installer, ModuleHost, ModuleSource};
+use sc_module::{CallHosts, Installer, ModuleHost, ModuleSource};
 use serde_json::json;
 
 #[tokio::test]
@@ -114,6 +114,7 @@ async fn an_action_runs_and_gets_v1s_argument_object() {
                 "user": { "email": "a@b.c" },
                 "mode": "insert",
             }),
+            CallHosts::default(),
         )
         .await
         .unwrap();
@@ -153,6 +154,7 @@ async fn the_saltcorn_stubs_are_free_to_require_and_named_when_called() {
                 "row": { "name": "vm1", "id": 7 },
                 "configuration": { "template": "{{ name }}-{{ id }}" },
             }),
+            CallHosts::default(),
         )
         .await
         .unwrap();
@@ -161,7 +163,7 @@ async fn the_saltcorn_stubs_are_free_to_require_and_named_when_called() {
     // Calling one that is not implemented fails by name, rather than answering
     // `undefined` and computing the wrong thing.
     let err = host
-        .run(name, "echo_missing_api", json!({}))
+        .run(name, "echo_missing_api", json!({}), CallHosts::default())
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -170,8 +172,27 @@ async fn the_saltcorn_stubs_are_free_to_require_and_named_when_called() {
     // The module's fault to the admin, not Saltcorn's (§16's split).
     assert_eq!(err.kind(), sc_error::ErrorKind::Application);
 
-    let err = host.run(name, "echo_state", json!({})).await.unwrap_err();
+    let err = host
+        .run(name, "echo_state", json!({}), CallHosts::default())
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("getState"), "{err}");
+
+    // `Table` is **not** on that tier any more — it is the real v1 class — but a
+    // call given no surfaces has no authority to lend it, and that is what it
+    // says. Named rather than answered with nothing, for the same reason.
+    let err = host
+        .run(
+            name,
+            "echo_table_no_caller",
+            json!({}),
+            CallHosts::default(),
+        )
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("Table.findOne"), "{msg}");
+    assert!(msg.contains("authority of the call"), "{msg}");
 
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(installer.root());
@@ -186,7 +207,10 @@ async fn a_module_that_throws_is_an_ordinary_failed_call() {
         .await
         .unwrap();
 
-    let err = host.run(name, "echo_throw", json!({})).await.unwrap_err();
+    let err = host
+        .run(name, "echo_throw", json!({}), CallHosts::default())
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("the module said no"), "{err}");
 
     // …and the host is still serving.
@@ -194,7 +218,8 @@ async fn a_module_that_throws_is_an_ordinary_failed_call() {
         host.run(
             name,
             "echo_row",
-            json!({ "configuration": { "greeting": "still here" } })
+            json!({ "configuration": { "greeting": "still here" } }),
+            CallHosts::default()
         )
         .await
         .unwrap()["greeting"],
@@ -214,7 +239,10 @@ async fn a_module_that_kills_its_worker_fails_its_call_and_the_next_one_works() 
         .await
         .unwrap();
 
-    let err = host.run(name, "echo_exit", json!({})).await.unwrap_err();
+    let err = host
+        .run(name, "echo_exit", json!({}), CallHosts::default())
+        .await
+        .unwrap_err();
     assert!(
         err.to_string().contains("process.exit"),
         "the caller should be told what happened: {err}"
@@ -227,6 +255,7 @@ async fn a_module_that_kills_its_worker_fails_its_call_and_the_next_one_works() 
             name,
             "echo_row",
             json!({ "configuration": { "greeting": "restarted" } }),
+            CallHosts::default(),
         )
         .await
         .unwrap();
@@ -352,6 +381,7 @@ async fn a_checkouts_own_dependencies_are_installed_and_its_v1_ones_are_not() {
             &package.name,
             "shout",
             json!({ "row": { "what": "hello" } }),
+            CallHosts::default(),
         )
         .await
         .unwrap();
@@ -444,6 +474,7 @@ async fn reloading_a_module_picks_up_a_new_configuration() {
             &package.name,
             "echo_row",
             json!({ "configuration": { "greeting": "x" } }),
+            CallHosts::default(),
         )
         .await
         .unwrap();
@@ -601,6 +632,7 @@ async fn the_real_mqtt_module_publishes_to_a_real_broker() {
             "row": { "id": 7, "title": "Dune" },
             "configuration": { "channel": topic.clone() },
         }),
+        CallHosts::default(),
     )
     .await
     .unwrap();

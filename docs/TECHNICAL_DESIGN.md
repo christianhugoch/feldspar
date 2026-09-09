@@ -147,6 +147,7 @@ graph TD
   server --> python["sc-python"]
   python --> module
   python --> coreact
+  module --> coreact
   server --> workflow["sc-workflow"]
   workflow --> agent
   module --> action["sc-action"]
@@ -202,7 +203,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-llm` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
 | `sc-action` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-model` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
-| `sc-module` | `sc-action` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-model` `sc-query` `sc-types` |
+| `sc-module` | `sc-action` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-model` `sc-query` `sc-types` |
 | `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-model` `sc-module` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
 | `sc-workflow` | `sc-action` `sc-agent` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
@@ -5595,15 +5596,40 @@ itself. What resolves a `require("async-mqtt")` at run time is
 against a directory somebody else installed. No Deno npm cache, no lockfile and no registry
 client inside the server: the modules directory on disk is the npm project it always was.
 
-**The `@saltcorn` API is stubbed in three tiers** (`sc_module`'s `module-host.mjs`): `Workflow`
-and `Form` are real, because a v1 `configuration_workflow` is written in them and its first
-form *is* the module's settings form here; `utils.interpolate` is real, because a module that
-names a snapshot `{{ name }}-{{ id }}` needs the real thing; and everything else — `Table`,
-`File`, `User`, `getState`, `eval_expression` — is a stub whose properties are reachable and
-whose **calls throw**, naming the API. That last is principle 5 rather than politeness: a
-`Table.findOne` that answered `undefined` would not fail, it would compute the wrong answer
-inside somebody's trigger. Replacing that tier with the real thing is the same `CodeHost` seam
-the `db` surface already speaks, in the other direction, and is a later milestone.
+**The `@saltcorn` API is answered in three tiers** (`sc_module`'s `module-host.mjs`).
+`Workflow` and `Form` are real, because a v1 `configuration_workflow` is written in them and
+its first form *is* the module's settings form here; `utils.interpolate` is real, because a
+module that names a snapshot `{{ name }}-{{ id }}` needs the real thing. **`Table` and `Field`
+are real too**, over the ask channel below: a module's action reads and writes rows through
+v1's own methods, against the same plan seam `db` speaks. Everything still left — `File`,
+`User`, `getState`, `eval_expression`, and v1's schema-editing methods on `Table` and `Field`
+itself — is a stub whose properties are reachable and whose **calls throw**, naming the API.
+That last is principle 5 rather than politeness: a `Table.findOne` that answered `undefined`
+would not fail, it would compute the wrong answer inside somebody's trigger.
+
+**A module can ask this server for things, which is what makes `Table` possible.** The worker
+seam used to run one way only — `__scDone`, `__scFail`, `__scLog`, all answers — so nothing
+inside a module could reach the catalog. `__scAsk(callId, askId, requestJson)` is the other
+direction: it answers nothing, the JavaScript holds a promise for the ask id, and the worker
+routes the ask to **the caller of the call it belongs to**, because that is where a `CodeHosts`
+is borrowed on somebody's stack and therefore the only place that can serve it. The answer
+comes back as a `Control::Answer` on the control channel the worker already selects on. An ask
+is served on the server's own task rather than the worker thread, so a module parked on a query
+is not holding the JS slice — awaiting a promise yields — and the call budget is the run's, the
+same number a code body gets. A caller that stops waiting fails the asks it took on **by
+name**, because the dangerous shape of a dead worker is silence.
+
+The metadata half asks nothing. v1's `Table.findOne` is *synchronous* and eight years of
+plugins are written that way, so this server's tables cross **with the call** as a serialised
+*schema snapshot* stamped with the catalog's generation: the call carries the generation, and
+the worker — which is the only side that knows which generation its isolate holds, or that it
+was restarted a moment ago — decides whether the JSON goes too. A load, a module function and
+a table provider are each called with nobody's authority, so a `Table` reached from one refuses
+at the property, naming why; a plugin whose `onLoad` reads rows still loads, with the throw as
+an issue on its Modules card. The source is `sc_expr::V1_API_JS`, written in front of the host
+script at every worker start — **the same text** the code isolates compile, because two
+implementations of v1's `Where` translation would disagree by the third bug fixed in one of
+them.
 
 **What a module supplies arrives as data.** A load answers a manifest — the actions, their v1
 `configFields`, the functions with their declared `arguments` and `isAsync`, the
@@ -5612,7 +5638,10 @@ and `sc_module::spec` translates v1's field vocabulary into `FormField`, which i
 every configurable thing here already speaks (§6.2). So a module's action is rendered by the
 trigger form, validated on save and run by the dispatcher with no code anywhere that knows what
 a module is: `ModuleAction` is an ordinary `Action` whose `run` marshals the `ActionContext`
-into v1's argument object. v1's `onLoad(configuration)` hook is called at load, because a plugin
+into v1's argument object — and builds the same five host surfaces `run_js_code` builds, from
+the same `sc_core_actions::CodeSurfaces`, so a v1 plugin's `insertRow` carries the event's
+caller and this trigger's chain and is observed by triggers exactly as a `db.books.insert(…)`
+is. v1's `onLoad(configuration)` hook is called at load, because a plugin
 builds there the state its actions close over — `@saltcorn/mqtt`'s one action publishes through
 a client only `onLoad` ever assigns.
 

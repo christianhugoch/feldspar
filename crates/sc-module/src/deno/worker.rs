@@ -9,11 +9,11 @@
 //! notices a `process.exit()` that happened while the event loop was parked on
 //! an idle socket with no JavaScript to throw out of.
 //!
-//! ## The seam, which is three V8 functions and no protocol
+//! ## The seam, which is four V8 functions and no protocol
 //!
 //! A call is `globalThis.__scModuleHost(id, request)` — one V8 function call
 //! with the request converted straight into a V8 object — and the answer comes
-//! back through two native functions this file installs on the isolate's global
+//! back through native functions this file installs on the isolate's global
 //! before the host script is evaluated:
 //!
 //! | | |
@@ -21,6 +21,21 @@
 //! | `__scDone(id, jsonText)` | the call answered; the text is `JSON.stringify`'s |
 //! | `__scFail(id, message, stack)` | the call threw |
 //! | `__scLog(level, module, message)` | one `console.*` line, into [`sc_log`] |
+//! | `__scAsk(callId, askId, requestJson)` | the module is asking this server something |
+//!
+//! `__scAsk` is the only one that runs the other way, and it is what makes the
+//! v1 `Table` work inside a module (TODO "the v1 `Table` API" §3). It answers
+//! nothing: the ask is routed to **the caller of the call it belongs to**,
+//! because that is where a `CodeHosts` is borrowed on somebody's stack, and the
+//! answer comes back as a [`Control::Answer`] on the channel this worker
+//! already selects on — which the worker hands to the isolate by calling
+//! `globalThis.__scAnswer(askId, ok, text)`, the one function the *host script*
+//! installs rather than this file.
+//!
+//! The bounds are unchanged and it is worth saying why: an ask is served on the
+//! server's own tokio task, not this thread, so a module parked on a query is
+//! not holding the JS slice — the watchdog's clock is about JavaScript that does
+//! not yield, and awaiting a promise yields.
 //!
 //! **Native functions rather than ops**, which is not a preference: an op is
 //! reached from JavaScript through `Deno.core.ops`, and `deno_runtime`'s worker
@@ -51,7 +66,7 @@ use sc_error::{Error, Result};
 use serde_json::{Value as Json, json};
 use tokio::sync::oneshot;
 
-use crate::host::{HOST_SCRIPT, HOST_SCRIPT_NAME, module_error};
+use crate::host::{HOST_SCRIPT_NAME, host_script, module_error};
 use crate::permissions::ModulePermissions;
 
 /// How often the worker thread comes round its loop when nothing else wakes it.
@@ -86,12 +101,39 @@ pub struct Job {
     pub remember: Option<(String, LoadRequest)>,
     /// Where the answer goes.
     pub reply: oneshot::Sender<Result<Json>>,
+    /// Where this call's **asks** go, when it has a caller with hosts to serve
+    /// them (§3). `None` for the calls that have none — a load, a module
+    /// function, a table provider — and the host script is told so in the
+    /// request, so a `Table` reached from one of those refuses at the property
+    /// rather than sending an ask nobody can answer.
+    pub asks: Option<tokio::sync::mpsc::UnboundedSender<HostAsk>>,
+    /// This server's schema as the guest sees it, when the call carries one.
+    ///
+    /// Cheap to clone (the JSON is an `Arc<str>`), and the **worker** decides
+    /// whether the JSON crosses: it knows which generation its isolate already
+    /// holds, and the caller does not.
+    pub schema: Option<sc_expr::SchemaSnapshot>,
+}
+
+/// One ask, on its way from a module to the caller of its call.
+pub struct HostAsk {
+    /// The ask's id, which the answer carries back.
+    pub id: u64,
+    /// `{ surface, plan }` — which seam is meant, and what to send it.
+    pub request: Json,
 }
 
 /// What the pool says to a worker.
 pub enum Control {
     /// Run this call.
     Job(Box<Job>),
+    /// One ask, answered. `ok` says which of the two `text` is: the answer's
+    /// JSON, or the sentence it failed with.
+    ///
+    /// On the **control** channel rather than one of its own, because that is
+    /// the channel the worker already selects on and an answer is a message to
+    /// a worker like any other.
+    Answer { ask: u64, ok: bool, text: String },
     /// Drop this module from the replay table — it has been uninstalled, and a
     /// restarted worker must not reload a package that is no longer there.
     Forget(String),
@@ -245,7 +287,18 @@ struct Settled {
     outcome: Result<Json>,
 }
 
-/// What the native functions reach: the worker thread's own channel, and which
+/// One ask, on its way out of the isolate.
+struct Asked {
+    /// The call it belongs to — which is what says whose authority it runs
+    /// under, because the caller of that call is where the host is borrowed.
+    call: u64,
+    /// The ask's own id, which the answer carries back.
+    ask: u64,
+    /// `{ surface, plan }`, as the host script built it.
+    request: Json,
+}
+
+/// What the native functions reach: the worker thread's own channels, and which
 /// worker this is.
 ///
 /// Lives in the isolate's [`OpState`], which is where a `deno_core` embedder's
@@ -253,6 +306,9 @@ struct Settled {
 /// reach it.
 struct Bridge {
     settled: tokio::sync::mpsc::UnboundedSender<Settled>,
+    /// Where an `__scAsk` goes — the other direction, and the whole of what a
+    /// module has to reach this server with.
+    asked: tokio::sync::mpsc::UnboundedSender<Asked>,
     index: usize,
 }
 
@@ -291,6 +347,27 @@ fn host_fail(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv:
     let id = args.get(0).integer_value(scope).unwrap_or(0).max(0) as u64;
     let message = args.get(1).to_rust_string_lossy(scope);
     settle(scope, id, Err(module_error(&message)));
+}
+
+/// `__scAsk(callId, askId, requestJson)` — the module is asking this server
+/// something (§3).
+///
+/// Answers nothing: the JavaScript holds a promise for `askId`, and the answer
+/// arrives later through the host script's own `__scAnswer`. A request that is
+/// not JSON is sent on as `null`, which the surface refuses by name — the host
+/// script encodes with `JSON.stringify` and rejects a failure to do so on its
+/// own side, so an unreadable one here is a bug in this pair rather than a
+/// module's doing.
+fn host_ask(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    let call = args.get(0).integer_value(scope).unwrap_or(0).max(0) as u64;
+    let ask = args.get(1).integer_value(scope).unwrap_or(0).max(0) as u64;
+    let text = args.get(2).to_rust_string_lossy(scope);
+    let request = serde_json::from_str(&text).unwrap_or(Json::Null);
+    let op_state = deno_core::JsRuntime::op_state_from(scope);
+    let state = op_state.borrow();
+    if let Some(bridge) = state.try_borrow::<Bridge>() {
+        let _ = bridge.asked.send(Asked { call, ask, request });
+    }
 }
 
 /// `__scLog(level, module, message)` — one `console.*` line from a module.
@@ -355,8 +432,21 @@ struct Host {
     op_state: Rc<RefCell<OpState>>,
     /// `globalThis.__scModuleHost`, resolved once: a call is a call of this.
     entry: v8::Global<v8::Function>,
+    /// `globalThis.__scAnswer`, resolved once: an ask's answer is a call of
+    /// this. The one function the **host script** installs rather than this
+    /// file, because what it settles is a promise the host script made.
+    answer: v8::Global<v8::Function>,
     /// Answers, from the three native functions above.
     settled: tokio::sync::mpsc::UnboundedReceiver<Settled>,
+    /// Asks, from [`host_ask`] — the other direction.
+    asked: tokio::sync::mpsc::UnboundedReceiver<Asked>,
+    /// The catalog generation whose schema snapshot this isolate has been given,
+    /// so a call carries the JSON once per reload rather than once per firing.
+    ///
+    /// On the [`Host`] and not the pool, because a restart is what makes it
+    /// wrong: a fresh isolate holds nothing, and only this side knows there was
+    /// one.
+    schema_generation: Option<u64>,
     watchdog: Arc<Watchdog>,
 }
 
@@ -380,7 +470,7 @@ impl Host {
         // and a stale copy from an older version would be a bug nobody would
         // look for.
         let script = config.root.join(HOST_SCRIPT_NAME);
-        std::fs::write(&script, HOST_SCRIPT)
+        std::fs::write(&script, host_script())
             .map_err(|e| Error::config(format!("writing {}: {e}", script.display())))?;
         let cwd = std::env::current_dir()
             .map_err(|e| Error::config(format!("the server has no working directory: {e}")))?;
@@ -405,8 +495,10 @@ impl Host {
         op_state.borrow_mut().put(WatcherExitHandle(handle.clone()));
 
         let (sender, settled) = tokio::sync::mpsc::unbounded_channel::<Settled>();
+        let (asker, asked) = tokio::sync::mpsc::unbounded_channel::<Asked>();
         op_state.borrow_mut().put(Bridge {
             settled: sender,
+            asked: asker,
             index: config.index,
         });
 
@@ -441,15 +533,55 @@ impl Host {
             .execute_main_module(&url)
             .await
             .map_err(|e| Error::config(format!("the module host script would not start: {e}")))?;
-        let entry = entry_point(&mut worker)?;
+        let entry = global_function(&mut worker, "__scModuleHost")?;
+        let answer = global_function(&mut worker, "__scAnswer")?;
 
         Ok(Host {
             worker,
             op_state,
             entry,
+            answer,
             settled,
+            asked,
+            schema_generation: None,
             watchdog,
         })
+    }
+
+    /// Hand one ask's answer to the isolate: `__scAnswer(askId, ok, text)`.
+    ///
+    /// Best effort by design. The promise this settles may be gone — the module
+    /// that was awaiting it threw, or its call was given up on — and the host
+    /// script drops an answer nobody is waiting on, so there is nothing here to
+    /// report. What is *not* dropped is a termination: an isolate the watchdog
+    /// has stopped is noticed by the tick, as everywhere else in this file.
+    fn answer_ask(&mut self, ask: u64, ok: bool, text: &str) {
+        // Nothing to settle on an isolate that is going away, and one good
+        // reason not to try: a `TryCatch` entered while execution is terminating
+        // is a chance to swallow the termination, and the call this ask belongs
+        // to is about to be failed by name on its own reply channel anyway.
+        if self.watchdog.tripped() || exited(&self.op_state) {
+            return;
+        }
+        deno_core::scope!(scope, self.worker.js_runtime);
+        v8::tc_scope!(let scope, scope);
+        let answer = v8::Local::new(scope, &self.answer);
+        let receiver: v8::Local<v8::Value> = v8::undefined(scope).into();
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "an ask id is a per-worker counter; a worker that made 2^53 host calls \
+                      has other problems"
+        )]
+        let id: v8::Local<v8::Value> = v8::Number::new(scope, ask as f64).into();
+        let ok: v8::Local<v8::Value> = v8::Boolean::new(scope, ok).into();
+        let text: v8::Local<v8::Value> = match v8::String::new(scope, text) {
+            Some(text) => text.into(),
+            // A message V8 will not allocate a string for — a refusal so long
+            // the heap is already gone. The ask is still settled, so the module
+            // fails rather than hanging.
+            None => v8::undefined(scope).into(),
+        };
+        answer.call(scope, receiver, &[id, ok, text]);
     }
 
     /// Call `__scModuleHost(id, request)`.
@@ -491,7 +623,8 @@ impl Host {
     }
 }
 
-/// Install `__scDone`, `__scFail` and `__scLog` on the isolate's global.
+/// Install `__scDone`, `__scFail`, `__scLog` and `__scAsk` on the isolate's
+/// global.
 fn install_seam(worker: &mut MainWorker) -> Result<()> {
     deno_core::scope!(scope, worker.js_runtime);
     let context = scope.get_current_context();
@@ -499,23 +632,27 @@ fn install_seam(worker: &mut MainWorker) -> Result<()> {
     define(scope, global, "__scDone", host_done)?;
     define(scope, global, "__scFail", host_fail)?;
     define(scope, global, "__scLog", host_log)?;
+    define(scope, global, "__scAsk", host_ask)?;
     Ok(())
 }
 
-/// `globalThis.__scModuleHost`, as something callable for the worker's lifetime.
-fn entry_point(worker: &mut MainWorker) -> Result<v8::Global<v8::Function>> {
+/// One function the host script put on the global, as something callable for the
+/// worker's lifetime — the entry point, and `__scAnswer`.
+fn global_function(worker: &mut MainWorker, name: &str) -> Result<v8::Global<v8::Function>> {
     deno_core::scope!(scope, worker.js_runtime);
     let context = scope.get_current_context();
     let global = context.global(scope);
-    let key = v8::String::new(scope, "__scModuleHost")
-        .ok_or_else(|| Error::msg("the module worker could not name its entry point"))?;
+    let key = v8::String::new(scope, name)
+        .ok_or_else(|| Error::msg(format!("the module worker could not name `{name}`")))?;
     let value = global
         .get(scope, key.into())
-        .ok_or_else(|| Error::config("the module host script defined no entry point"))?;
-    let entry: v8::Local<v8::Function> = value.try_into().map_err(|_| {
-        Error::config("the module host script's `__scModuleHost` is not a function")
+        .ok_or_else(|| Error::config(format!("the module host script defined no `{name}`")))?;
+    let function: v8::Local<v8::Function> = value.try_into().map_err(|_| {
+        Error::config(format!(
+            "the module host script's `{name}` is not a function"
+        ))
     })?;
-    Ok(v8::Global::new(scope, entry))
+    Ok(v8::Global::new(scope, function))
 }
 
 /// Whether `op_exit` has run on this isolate — a module called `process.exit()`.
@@ -541,6 +678,10 @@ enum Pending {
     Call {
         reply: oneshot::Sender<Result<Json>>,
         remember: Option<(String, LoadRequest)>,
+        /// Where this call's asks go, when it has a caller that can serve them.
+        /// Dropped with the entry, which is what tells the caller's serving loop
+        /// that no further ask will arrive.
+        asks: Option<tokio::sync::mpsc::UnboundedSender<HostAsk>>,
     },
     /// A load replayed into a restarted worker. Nobody is waiting on it, but a
     /// failure has to reach the log by name rather than vanishing.
@@ -603,6 +744,7 @@ pub(super) fn worker_thread(
 enum Woke {
     Control(Option<Control>),
     Settled(Option<Settled>),
+    Asked(Option<Asked>),
     EventLoop(std::result::Result<(), deno_core::error::CoreError>),
     Tick,
 }
@@ -625,6 +767,10 @@ async fn serve(config: WorkerConfig, mut rx: tokio::sync::mpsc::UnboundedReceive
                 Some(Control::Forget(name)) => {
                     loads.remove(&name);
                 }
+                // The worker is idle, so there is no isolate to hand an answer
+                // to and no ask it could be for: whatever it belonged to died
+                // with the last host, and its caller has already been told.
+                Some(Control::Answer { .. }) => {}
                 Some(Control::Job(job)) => break job,
             }
         };
@@ -675,6 +821,7 @@ async fn serve(config: WorkerConfig, mut rx: tokio::sync::mpsc::UnboundedReceive
                 biased;
                 control = rx.recv() => Woke::Control(control),
                 answer = host.settled.recv() => Woke::Settled(answer),
+                asked = host.asked.recv() => Woke::Asked(asked),
                 result = host.worker.run_event_loop(false), if !resting => Woke::EventLoop(result),
                 () = tokio::time::sleep(TICK) => Woke::Tick,
             };
@@ -691,8 +838,17 @@ async fn serve(config: WorkerConfig, mut rx: tokio::sync::mpsc::UnboundedReceive
                     resting = false;
                     submit(&mut host, &mut next_id, &mut pending, *job);
                 }
+                // Settling a promise queues microtasks, so the event loop has
+                // work again — exactly as submitting a job does, and for the
+                // same reason it clears `resting` there.
+                Woke::Control(Some(Control::Answer { ask, ok, text })) => {
+                    resting = false;
+                    host.answer_ask(ask, ok, &text);
+                }
                 Woke::Settled(None) => break End::Silent,
                 Woke::Settled(Some(answer)) => dispatch(&mut pending, &mut loads, answer),
+                Woke::Asked(None) => break End::Silent,
+                Woke::Asked(Some(asked)) => route(&mut host, &pending, asked),
                 Woke::EventLoop(Ok(())) => resting = true,
                 Woke::EventLoop(Err(e)) => break End::EventLoop(e),
                 Woke::Tick => {
@@ -773,21 +929,88 @@ fn ending_reason(host: &Host, ended: &End, slice: Duration) -> String {
     }
 }
 
-/// Give a job an id, call the isolate with it, and remember who is waiting for
-/// the answer.
+/// Give a job an id, put this server's schema in front of it if the isolate does
+/// not already hold it, call the isolate, and remember who is waiting for the
+/// answer.
 fn submit(host: &mut Host, next_id: &mut u64, pending: &mut HashMap<u64, Pending>, job: Job) {
     let id = *next_id;
     *next_id += 1;
     let Job {
-        request,
+        mut request,
         remember,
         reply,
+        asks,
+        schema,
     } = job;
+    // The generation always, the JSON only the first time (§2). The caller
+    // cannot make this decision — it does not know which isolate this is, nor
+    // whether it was restarted a moment ago — so it hands over the snapshot and
+    // this is where "you already have this" is one integer comparison.
+    let mut defined = None;
+    if let (Some(snapshot), Json::Object(map)) = (&schema, &mut request) {
+        let generation = snapshot.generation();
+        map.insert("schemaGeneration".to_owned(), json!(generation));
+        if host.schema_generation != Some(generation) {
+            map.insert(
+                "schema".to_owned(),
+                Json::String(snapshot.json().to_owned()),
+            );
+            defined = Some(generation);
+        }
+    }
     if let Err(e) = host.call(id, &request) {
         let _ = reply.send(Err(e));
         return;
     }
-    pending.insert(id, Pending::Call { reply, remember });
+    // Recorded only once the call has really reached the isolate: a call that
+    // did not is a worker on its way out, and a worker that had been marked as
+    // holding a snapshot it never received would refuse the next call naming a
+    // generation it does not have.
+    if let Some(generation) = defined {
+        host.schema_generation = Some(generation);
+    }
+    pending.insert(
+        id,
+        Pending::Call {
+            reply,
+            remember,
+            asks,
+        },
+    );
+}
+
+/// One ask, to the caller of the call it belongs to — or refused by name.
+///
+/// Every refusal here is the same fact from a different angle: there is nobody
+/// on the other end. The call was given up on, it is a load or a provider call
+/// that never had a caller with hosts, or it is a replayed load nobody asked
+/// for. A module told that fails at its `await`; one told nothing would hang
+/// until the call's own wall clock ran out, which is the failure this whole
+/// system's naming rule exists to prevent.
+fn route(host: &mut Host, pending: &HashMap<u64, Pending>, asked: Asked) {
+    let refused = match pending.get(&asked.call) {
+        Some(Pending::Call { asks: Some(to), .. }) => {
+            match to.send(HostAsk {
+                id: asked.ask,
+                request: asked.request,
+            }) {
+                Ok(()) => return,
+                Err(_) => "its caller has stopped waiting for the call it belongs to",
+            }
+        }
+        Some(Pending::Call { asks: None, .. }) => {
+            "the call it belongs to has no caller whose authority it could run under"
+        }
+        Some(Pending::Replay(_)) => {
+            "it belongs to a module being reloaded into a restarted worker, which nobody asked for"
+        }
+        None => "the call it belongs to is no longer in flight",
+    };
+    host.answer_ask(
+        asked.ask,
+        false,
+        &format!("this module asked this server for something, and {refused}"),
+    );
 }
 
 /// One answer: to whoever is waiting for it, and to the replay table if it was a
@@ -804,6 +1027,7 @@ fn dispatch(
         Pending::Call {
             reply: sender,
             remember,
+            ..
         } => {
             if answer.outcome.is_ok()
                 && let Some((name, request)) = remember

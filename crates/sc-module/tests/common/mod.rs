@@ -11,7 +11,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use sc_core_actions::CodeSurfaces;
 use sc_module::{Installer, ModuleHost, ModulePermissions, ModuleSource};
+
+/// The five host surfaces a module's action is built over — the HTTP client
+/// behind `fetch`, and the builder of the rest.
+///
+/// One per `ModuleSet::load`, which is what a server holds one of: what these
+/// tests are about is the module, not the client, and building one costs a TLS
+/// configuration.
+pub fn surfaces() -> Arc<CodeSurfaces> {
+    Arc::new(CodeSurfaces::new().expect("an HTTP client"))
+}
 
 /// Whether `npm` is on the PATH.
 pub fn have_npm() -> bool {

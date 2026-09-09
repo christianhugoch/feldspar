@@ -81,21 +81,24 @@
 mod wiring;
 mod worker;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use sc_error::{Error, Result};
+use sc_expr::{CodeHost, TriggerHost};
 use serde_json::{Value as Json, json};
 use tokio::sync::{Mutex, oneshot};
 
 use crate::bounds::{
     DEFAULT_CALL_TIMEOUT, DEFAULT_MODULE_JS_SLICE, DEFAULT_MODULE_MAX_HEAP, DEFAULT_MODULE_WORKERS,
 };
-use crate::host::ModuleManifest;
+use crate::host::{CallHosts, ModuleManifest};
 use crate::permissions::ModulePermissions;
 
-pub use worker::{Control, Job, LoadRequest, WorkerConfig};
+pub use worker::{Control, HostAsk, Job, LoadRequest, WorkerConfig};
 
 /// Build one snapshot-backed isolate and **keep it**, so that V8's process-wide
 /// read-only heap is the module runtime's.
@@ -366,9 +369,15 @@ impl DenoModuleHost {
     /// state is. A module nobody has loaded is routed to any worker, so the host
     /// script answers with its own "the module … is not loaded in this host"
     /// rather than this layer inventing a second wording for it.
-    pub async fn run(&self, module: &str, action: &str, args: Json) -> Result<Json> {
+    pub async fn run(
+        &self,
+        module: &str,
+        action: &str,
+        args: Json,
+        call: CallHosts<'_>,
+    ) -> Result<Json> {
         let index = self.worker_for(module).await;
-        self.send(
+        self.send_with(
             index,
             json!({
                 "op": "run",
@@ -377,6 +386,7 @@ impl DenoModuleHost {
                 "args": args,
             }),
             None,
+            call,
         )
         .await
         .map_err(|e| denial(module, e))
@@ -389,9 +399,15 @@ impl DenoModuleHost {
     /// execute on the isolate that module was loaded on. That is what makes this
     /// a hop at all — module state is a singleton, and no arrangement of pools
     /// changes it.
-    pub async fn call(&self, module: &str, function: &str, args: Vec<Json>) -> Result<Json> {
+    pub async fn call(
+        &self,
+        module: &str,
+        function: &str,
+        args: Vec<Json>,
+        call: CallHosts<'_>,
+    ) -> Result<Json> {
         let index = self.worker_for(module).await;
-        self.send(
+        self.send_with(
             index,
             json!({
                 "op": "call",
@@ -400,6 +416,7 @@ impl DenoModuleHost {
                 "args": args,
             }),
             None,
+            call,
         )
         .await
         .map_err(|e| denial(module, e))
@@ -818,37 +835,192 @@ impl DenoModuleHost {
     }
 
     /// Send one request to one worker and await its reply, under the wall clock.
+    ///
+    /// The calls with nobody's authority to lend go through here: a load, an
+    /// unload, a table provider's six and a model provider's two. A module
+    /// reaching for a `Table` from one of those is refused by name in the host
+    /// script, because [`CallHosts::default`] carries no channel for it to ask
+    /// on.
     async fn send(
         &self,
         index: usize,
         request: Json,
         remember: Option<(String, LoadRequest)>,
     ) -> Result<Json> {
+        self.send_with(index, request, remember, CallHosts::default())
+            .await
+    }
+
+    /// The same, over the surfaces this call may reach — and **serving its asks
+    /// while it waits** (§3).
+    ///
+    /// This is the other half of the module bridge. The worker routes a module's
+    /// `__scAsk` to the caller of the call it belongs to, which is here: the
+    /// hosts are borrowed on this stack and cannot be sent anywhere, so this
+    /// future is the only thing that can serve them. Each ask becomes one
+    /// `host.call(plan).await` and one [`Control::Answer`] back.
+    ///
+    /// Asks are served **concurrently** — a module's `Promise.all` of two reads
+    /// is two reads — which is why they go into a `FuturesUnordered` rather than
+    /// being awaited in the arm that received them. Awaiting inline would also
+    /// stop this loop watching for the reply and the wall clock, and a module
+    /// whose worker died mid-query would then be discovered by neither.
+    async fn send_with(
+        &self,
+        index: usize,
+        mut request: Json,
+        remember: Option<(String, LoadRequest)>,
+        call: CallHosts<'_>,
+    ) -> Result<Json> {
         let control = self
             .sender(index)
             .await
             .ok_or_else(|| Error::msg("the module pool has no such worker"))?;
+        // Whether there is anything to ask. Told to the host script so that a
+        // `Table` reached from a call with no caller refuses at the property,
+        // synchronously, naming why — rather than sending an ask that would come
+        // back refused from somewhere the plugin author cannot see.
+        let can_ask = call.hosts.host.is_some() || call.hosts.triggers.is_some();
+        if let Json::Object(map) = &mut request {
+            map.insert("asks".to_owned(), Json::Bool(can_ask));
+        }
         let (reply, answer) = oneshot::channel();
+        let (asks, mut asked) = tokio::sync::mpsc::unbounded_channel::<HostAsk>();
         control
             .send(Control::Job(Box::new(Job {
                 request,
                 remember,
                 reply,
+                asks: can_ask.then_some(asks),
+                schema: call.schema.cloned(),
             })))
             .map_err(|_| Error::config("the module pool's worker has stopped"))?;
 
-        match tokio::time::timeout(self.bounds.timeout, answer).await {
-            Ok(Ok(result)) => result,
-            // The sender was dropped without a reply: the worker died and
-            // cleared its call table.
-            Ok(Err(_)) => Err(Error::config(
-                "the module host stopped before answering this call",
-            )),
-            Err(_) => Err(Error::config(format!(
-                "a module call took longer than {:?} and was given up on",
-                self.bounds.timeout
-            ))),
+        let host = call.hosts.host;
+        let triggers = call.hosts.triggers;
+        // The run's budget, and the same one a code body's run gets: a module's
+        // N+1 costs what a body's N+1 costs, because it is the same bound on the
+        // same server doing the same work.
+        let mut left = sc_expr::DEFAULT_MAX_HOST_CALLS;
+        let mut serving = FuturesUnordered::new();
+        // The asks this caller has taken on and not yet answered. Kept so that a
+        // caller which stops waiting — its worker died, or its wall clock ran out
+        // — can fail them **by name** on the way out, rather than leaving a
+        // module awaiting a promise that will never settle.
+        let mut outstanding: BTreeSet<u64> = BTreeSet::new();
+        let clock = tokio::time::sleep(self.bounds.timeout);
+        tokio::pin!(clock, answer);
+        let outcome = loop {
+            tokio::select! {
+                // Biased so that a call which answered just as its clock ran out
+                // is reported as what it said, not as a timeout.
+                biased;
+                outcome = &mut answer => {
+                    break match outcome {
+                        Ok(result) => result,
+                        // The sender was dropped without a reply: the worker died
+                        // and cleared its call table.
+                        Err(_) => Err(Error::config(
+                            "the module host stopped before answering this call",
+                        )),
+                    };
+                }
+                () = &mut clock => {
+                    break Err(Error::config(format!(
+                        "a module call took longer than {:?} and was given up on",
+                        self.bounds.timeout
+                    )));
+                }
+                Some(ask) = asked.recv() => {
+                    if left == 0 {
+                        let _ = control.send(Control::Answer {
+                            ask: ask.id,
+                            ok: false,
+                            text: over_budget(),
+                        });
+                        continue;
+                    }
+                    left -= 1;
+                    outstanding.insert(ask.id);
+                    let control = control.clone();
+                    serving.push(async move {
+                        let (ok, text) = match serve(host, triggers, ask.request).await {
+                            Ok(value) => (
+                                true,
+                                serde_json::to_string(&value)
+                                    .unwrap_or_else(|_| "null".to_owned()),
+                            ),
+                            Err(e) => (false, e.to_string()),
+                        };
+                        // A worker that has stopped is a call that is already
+                        // being failed by name on the reply channel, so there is
+                        // nothing here to report.
+                        let _ = control.send(Control::Answer { ask: ask.id, ok, text });
+                        ask.id
+                    });
+                }
+                Some(answered) = serving.next(), if !serving.is_empty() => {
+                    outstanding.remove(&answered);
+                }
+            }
+        };
+        // Nobody is going to answer these now, and a module left awaiting one
+        // would hang until its own worker was restarted for some other reason.
+        for ask in outstanding {
+            let _ = control.send(Control::Answer {
+                ask,
+                ok: false,
+                text: "the call this request belongs to was given up on before this server \
+                       could answer it"
+                    .to_owned(),
+            });
         }
+        outcome
+    }
+}
+
+/// What a module is told when it has spent the run's whole call budget.
+///
+/// The **run's** budget, and the same number a code body's run gets: a module's
+/// N+1 costs what a body's N+1 costs, because it is the same bound on the same
+/// server doing the same work.
+fn over_budget() -> String {
+    format!(
+        "this module made more than {} database calls in one call; the bound exists so an \
+         accidental loop cannot hammer the database",
+        sc_expr::DEFAULT_MAX_HOST_CALLS
+    )
+}
+
+/// One ask, on the surface it names.
+///
+/// Two surfaces, because two are what the v1 `Table` speaks: a plan (`db`) and a
+/// run of another trigger (`trigger`). Anything else is a sentence naming what it
+/// asked for and what there is — a module cannot be allowed to reach a seam by
+/// guessing at its name, and a silently ignored ask would be a module computing
+/// the wrong answer.
+async fn serve(
+    host: Option<&dyn CodeHost>,
+    triggers: Option<&dyn TriggerHost>,
+    request: Json,
+) -> Result<Json> {
+    let surface = request
+        .get("surface")
+        .and_then(Json::as_str)
+        .unwrap_or_default();
+    let plan = request.get("plan").cloned().unwrap_or(Json::Null);
+    match surface {
+        "db" => match host {
+            Some(host) => host.call(plan).await,
+            None => Err(Error::config("this module call has no database access")),
+        },
+        "trigger" => match triggers {
+            Some(triggers) => triggers.run(plan).await,
+            None => Err(Error::config("this module call cannot run other triggers")),
+        },
+        other => Err(Error::config(format!(
+            "`{other}` is not something a module can ask this server for; what a module may              reach is the database (`db`) and this server's triggers (`trigger`)"
+        ))),
     }
 }
 
@@ -1022,6 +1194,46 @@ mod tests {
 
     /// Nothing is started until something is asked for — the bargain the
     /// sidecar made, kept.
+    /// The ask seam's own vocabulary: two surfaces, and anything else named
+    /// rather than ignored. A silently dropped ask would be a module computing
+    /// the wrong answer, which is the failure the whole naming rule exists for.
+    #[tokio::test]
+    async fn an_ask_naming_a_surface_a_module_has_not_got_is_refused_by_name() {
+        // A plan on a call with no database host: the honest sentence, and the
+        // same one a code body's op answers.
+        let err = serve(None, None, json!({ "surface": "db", "plan": {} }))
+            .await
+            .expect_err("there is no host");
+        assert!(err.to_string().contains("no database access"), "{err}");
+
+        let err = serve(None, None, json!({ "surface": "trigger", "plan": {} }))
+            .await
+            .expect_err("there is no dispatcher");
+        assert!(err.to_string().contains("run other triggers"), "{err}");
+
+        // A surface nobody has: named, with what there is.
+        for request in [json!({ "surface": "fs", "plan": {} }), json!({})] {
+            let err = serve(None, None, request.clone())
+                .await
+                .expect_err("not a surface");
+            let message = err.to_string();
+            assert!(message.contains("`db`"), "{request}: {message}");
+            assert!(message.contains("`trigger`"), "{request}: {message}");
+        }
+    }
+
+    /// The budget is the run's, and it says which bound it is: a module's N+1
+    /// costs what a code body's N+1 costs.
+    #[test]
+    fn the_call_budget_names_itself_and_is_the_bodies_own() {
+        let message = over_budget();
+        assert!(
+            message.contains(&sc_expr::DEFAULT_MAX_HOST_CALLS.to_string()),
+            "{message}"
+        );
+        assert!(message.contains("accidental loop"), "{message}");
+    }
+
     #[tokio::test]
     async fn a_pool_nobody_has_used_runs_nothing() {
         let pool = DenoModuleHost::with_workers("/nonexistent/modules", 3);

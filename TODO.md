@@ -355,18 +355,18 @@ Three levels, because the failure modes are at three levels:
 
 ## Phase 5 — The module bridge
 
-- [ ] 5.1 `__scAsk`/`__scAnswer` and the `asked` channel in `sc-module`'s worker (§3), with
+- [x] 5.1 `__scAsk`/`__scAnswer` and the `asked` channel in `sc-module`'s worker (§3), with
       `Control::Answer` on the existing control channel.
-- [ ] 5.2 `ModuleHost::run` and `::call` take `CodeHosts<'_>` and service asks while awaiting
+- [x] 5.2 `ModuleHost::run` and `::call` take `CodeHosts<'_>` and service asks while awaiting
       the reply; a dead worker fails in-flight asks by name, as it already fails calls.
-- [ ] 5.3 `ModuleAction` builds the surfaces from its `ActionContext` — the same
+- [x] 5.3 `ModuleAction` builds the surfaces from its `ActionContext` — the same
       `sc_core_actions::CodeSurfaces` `PyModuleAction` uses (which needs the `sc-module` →
       `sc-core-actions` edge `sc-python` already has one layer up).
-- [ ] 5.4 The `@saltcorn/data/models/table` and `.../field` specifiers answer the real classes
+- [x] 5.4 The `@saltcorn/data/models/table` and `.../field` specifiers answer the real classes
       instead of `namedNamespace`; the snapshot and the ask channel reach them through the
       `AsyncLocalStorage` context the host script already keeps per call.
-- [ ] 5.5 `Table` outside a call (`onLoad`, a configuration workflow) refused naming why.
-- [ ] 5.6 Tests: a fixture module that reads and writes rows; a module whose `onLoad` uses
+- [x] 5.5 `Table` outside a call (`onLoad`, a configuration workflow) refused naming why.
+- [x] 5.6 Tests: a fixture module that reads and writes rows; a module whose `onLoad` uses
       `Table` failing with the named error and still loading its actions; a module ask
       answered while a second module's action runs concurrently.
 

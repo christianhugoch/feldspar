@@ -683,6 +683,7 @@ async fn a_runaway_module_does_not_delay_a_code_body() -> sc_error::Result<()> {
             "@saltcorn-test/echo",
             "echo_row",
             json!({ "row": {}, "configuration": { "greeting": "still here" } }),
+            sc_module::CallHosts::default(),
         )
         .await?;
     assert_eq!(value["greeting"], json!("still here"));

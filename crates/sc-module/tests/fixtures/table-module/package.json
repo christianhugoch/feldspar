@@ -1,0 +1,8 @@
+{
+  "name": "@saltcorn-test/table",
+  "version": "0.1.0",
+  "description": "A Saltcorn v1-shaped module that reads and writes rows through v1's Table API, for the module bridge's tests.",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT"
+}

@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use sc_action::ActionRegistry;
 use sc_catalog::Catalog;
+use sc_core_actions::CodeSurfaces;
 use sc_error::Result;
 use sc_types::{Attrs, FormField};
 use serde_json::{Value as Json, json};
@@ -107,6 +108,7 @@ impl ModuleSet {
         catalog: &Catalog,
         host: &Arc<ModuleHost>,
         installer: &Installer,
+        surfaces: &Arc<CodeSurfaces>,
         registry: &mut ActionRegistry,
     ) -> Result<ModuleSet> {
         let stored = list_modules(catalog).await?;
@@ -122,7 +124,7 @@ impl ModuleSet {
             if module.language != crate::module::ModuleLanguage::JavaScript {
                 continue;
             }
-            modules.push(load_one(&module, host, installer, registry).await);
+            modules.push(load_one(&module, host, installer, surfaces, registry).await);
         }
         Ok(ModuleSet { modules })
     }
@@ -172,6 +174,7 @@ async fn load_one(
     module: &Module,
     host: &Arc<ModuleHost>,
     installer: &Installer,
+    surfaces: &Arc<CodeSurfaces>,
     registry: &mut ActionRegistry,
 ) -> LoadedModule {
     let mut issues = Vec::new();
@@ -223,6 +226,7 @@ async fn load_one(
             &action.description,
             spec,
             Arc::clone(host),
+            Arc::clone(surfaces),
         );
         if let Err(e) = registry.register(Arc::new(registered)) {
             // The built-in — or the module that got there first — keeps the
