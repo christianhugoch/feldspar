@@ -284,10 +284,16 @@ async fn projects_for_unusual_table_sets_also_build() -> sc_error::Result<()> {
     let cat = tutorial_catalog(&db).await?;
     // A table with no primary key (so no row-addressed endpoints) and a spread of
     // column types: a date, a number and a nullable text.
+    //
+    // And beside it the `users` shape: a **UUID key with no default**, which the
+    // caller issues rather than the database. Its insert type requires the `id`
+    // the page must therefore supply — the scaffold that left it out did not
+    // compile (TS2345), which is a failure only a real `tsc` sees.
     db.client()
         .await?
         .batch_execute(
-            "CREATE TABLE events (name text not null, starts date, seats int, note text)",
+            "CREATE TABLE events (name text not null, starts date, seats int, note text);\n\
+             CREATE TABLE people (id uuid primary key, name text not null, note text)",
         )
         .await
         .map_err(|e| sc_error::Error::database(e.to_string()))?;
@@ -311,7 +317,8 @@ async fn projects_for_unusual_table_sets_also_build() -> sc_error::Result<()> {
     let source = app_source_from_config(&bare.framework)?;
     build_application(&cat, &bare, &source, None).await?;
 
-    // (b) Two tables, one of them keyless and carrying date/int columns.
+    // (b) Three tables: one keyless and carrying date/int columns, and one whose
+    //     key the caller issues.
     let mixed = Application::new(
         "Mixed",
         "mixed",
@@ -321,14 +328,19 @@ async fn projects_for_unusual_table_sets_also_build() -> sc_error::Result<()> {
     )
     .with_table(TableId("tasks".to_owned()))
     .with_table(TableId("events".to_owned()))
+    .with_table(TableId("people".to_owned()))
     .with_file_store(FileStoreId("apps".to_owned()))
     .with_api(ApiConfig::new("rest", "/api"));
     scaffold_app(&cat, &mixed, None).await?;
     let source = app_source_from_config(&mixed.framework)?;
     let report = build_application(&cat, &mixed, &source, None).await?;
 
-    // Both tables have a page, and the second one is reachable at its own path.
+    // Every table has a page, each reachable at its own path.
     let fw = CodeFramework::new("react", report.bundle);
     assert_eq!(fw.serve(&AppRequest::get("/events")).status, 200);
+    assert_eq!(fw.serve(&AppRequest::get("/people")).status, 200);
+    // The page mints the key its insert requires, rather than omitting it.
+    let page = std::fs::read_to_string(tmp.path().join("mixed/src/pages/People.tsx"))?;
+    assert!(page.contains("crypto.randomUUID()"), "{page}");
     Ok(())
 }

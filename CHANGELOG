@@ -2,6 +2,37 @@
 
 Changes in reverse chronological order.
 
+## A scaffolded page supplies the key its own insert type requires
+
+Reported from a real app: a project scaffolded over a table whose **UUID primary
+key the caller issues** — the `users` table's shape — did not compile. `tsc` said
+`TS2345: Property 'id' is missing`, in a page the admin had never opened, on
+their first build.
+
+The generated create form was built from the rule "every column but the key",
+which is right for a key the database issues and wrong for one it does not.
+Postgres has nothing to put in `users.id`: it is a UUID minted by whoever creates
+the row, so the generated insert type requires it — and the form that never
+collected it produced a call that could not type-check.
+
+- **The form is now derived from the resource model the client is generated
+  from**, not from the table. What a write may set (a calculated column is
+  refused) and what an insert may omit (an identity column, a `DEFAULT`) are the
+  API's own answers, so the page and the types it is compiled against can no
+  longer disagree.
+- **A required key with nothing behind it is minted by the page**:
+  `add({ ...form, id: crypto.randomUUID() })`. A UUID is a value any client can
+  produce, and a control asking a person to type one is not a form. It is minted
+  at submit rather than held in `const empty`, which is evaluated once and would
+  hand every row the same key.
+- **A required key of any other type is asked for** — a text key is one only the
+  person filling the form knows — and a key the database issues still gets no
+  control at all.
+- The `users` shape now goes through the real toolchain: `people (id uuid primary
+  key, …)` joins the app in `projects_for_unusual_table_sets_also_build`, so the
+  scaffold for it is `npm install`ed, type-checked and bundled by the test suite.
+  Reverting the fix reproduces the reported `TS2345` there.
+
 ## v1's `Table` writes, and whose authority a write runs under
 
 The fourth phase of the v1 `Table` API: the writes. `books.insertRow(row, user)`,

@@ -1279,7 +1279,7 @@ fn page_tsx(table: &Table, endpoints: &EndpointSet) -> String {
     // rest — a keyless table, one the app exposes without writes — get the page
     // built on the hooks directly, which is what a store cannot be built on.
     if storable(table, endpoints) {
-        return store_page_tsx(table);
+        return store_page_tsx(table, endpoints);
     }
     let pascal = pascal(&table.name);
     let row_type = format!("{pascal}Row");
@@ -1327,24 +1327,10 @@ fn page_tsx(table: &Table, endpoints: &EndpointSet) -> String {
     ));
 
     let (empty_const, create_form) = if can_create {
-        // Primary-key columns get no input. A v2 table's key is a
-        // database-generated identity, so offering a control for it would invite
-        // an insert that fights the database for the value — and the catalog does
-        // not record "generated" as a property, so "is it the key?" is the honest
-        // question available. A table with an admin-supplied key is the case this
-        // gets wrong, and the fix is to edit the page, which is the admin's file.
-        let inputs: Vec<&sc_catalog::DataField> =
-            table.fields.iter().filter(|f| !f.primary_key).collect();
-        let empty_form = inputs
-            .iter()
-            .map(|f| format!("  {}: {}", f.base.name, ts_empty(f)))
-            .collect::<Vec<_>>()
-            .join(",\n");
-        let form_fields = inputs
-            .iter()
-            .map(|f| form_control(&f.base.name, basic_type(f)))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let form = CreateForm::of(table, endpoints);
+        let empty_form = form.empty();
+        let form_fields = form.controls();
+        let argument = form.argument();
         (
             format!("\nconst empty = {{\n{empty_form}\n}};\n"),
             format!(
@@ -1352,7 +1338,7 @@ fn page_tsx(table: &Table, endpoints: &EndpointSet) -> String {
         className="card"
         onSubmit={{(e) => {{
           e.preventDefault();
-          void create.run(form).then(() => setForm(empty));
+          void create.run({argument}).then(() => setForm(empty));
         }}}}
       >
 {form_fields}
@@ -1434,7 +1420,7 @@ export default function {pascal}Page() {{
 /// that it is the version an app would end up writing anyway — a row appears the
 /// moment it is typed, a deleted row goes at once, and a write the server refuses
 /// takes its change back and says why.
-fn store_page_tsx(table: &Table) -> String {
+fn store_page_tsx(table: &Table, endpoints: &EndpointSet) -> String {
     let name = &table.name;
     let pascal = pascal(name);
     let pk = single_pk(table).unwrap_or_default();
@@ -1457,22 +1443,10 @@ fn store_page_tsx(table: &Table) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // The key is the database's to issue, so the form does not offer it.
-    let inputs: Vec<&sc_catalog::DataField> = table
-        .fields
-        .iter()
-        .filter(|f| !f.primary_key && !matches!(f.kind, sc_catalog::DataFieldKind::Calc { .. }))
-        .collect();
-    let empty_form = inputs
-        .iter()
-        .map(|f| format!("  {}: {}", f.base.name, ts_empty(f)))
-        .collect::<Vec<_>>()
-        .join(",\n");
-    let form_fields = inputs
-        .iter()
-        .map(|f| form_control(&f.base.name, basic_type(f)))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let form = CreateForm::of(table, endpoints);
+    let empty_form = form.empty();
+    let form_fields = form.controls();
+    let argument = form.argument();
 
     format!(
         r#"import {{ useState }} from "react";
@@ -1497,7 +1471,7 @@ export default function {pascal}Page() {{
           e.preventDefault();
           // The row is on screen before this resolves; the store puts it back
           // if the server refuses it.
-          void {name}.add(form);
+          void {name}.add({argument});
           setForm(empty);
         }}}}
       >
@@ -1533,6 +1507,112 @@ export default function {pascal}Page() {{
 "#,
         title = title(name)
     )
+}
+
+/// The create form of a generated page: which columns it draws a control for,
+/// and which it fills in without asking.
+///
+/// The question it answers is the **client's**, not the table's. What `create`
+/// accepts is decided by the resource model the typed client was generated from
+/// (§13.1) — writable columns, minus the ones an insert may leave out — so a
+/// form built from any other rule is a form that can disagree with the types it
+/// is compiled against. "Every column but the key" was that other rule, and it
+/// is wrong for exactly the tables whose key the *caller* issues: `users.id` is
+/// a UUID minted by whoever creates the user, not a Postgres default, so its
+/// insert type requires an `id` the form never collected and the generated page
+/// did not compile.
+///
+/// A key the database issues (an identity column, a `DEFAULT`) still gets no
+/// control — an insert that fought the database for the value is the mistake the
+/// old rule existed to prevent. What changes is the case it did not consider: a
+/// required key with nothing behind it is now either minted in the browser, when
+/// it is a UUID and any client can produce one, or asked for, when it is
+/// anything else and only the person filling the form knows it.
+struct CreateForm<'a> {
+    /// The columns the form draws a control for, in declaration order.
+    inputs: Vec<&'a sc_catalog::DataField>,
+    /// Required key columns the page mints at submit time rather than asking
+    /// for: `crypto.randomUUID()`. Typing a UUID into a text box is not a thing
+    /// anyone should have to do, and a `const empty` holding one would hand
+    /// every row the same key.
+    minted: Vec<&'a sc_catalog::DataField>,
+}
+
+impl<'a> CreateForm<'a> {
+    /// Read the form off the table and the API's own model of it.
+    ///
+    /// The model is what the client was generated from, and it is consulted for
+    /// both questions — may a write set this column, and may an insert omit it.
+    /// A table with no model (an API that registered none) falls back to the
+    /// same rules read off the catalog, which is what the model is computed from
+    /// in the first place.
+    fn of(table: &'a Table, endpoints: &EndpointSet) -> CreateForm<'a> {
+        let resource = endpoints.resource(&table.name);
+        let mut form = CreateForm {
+            inputs: Vec::new(),
+            minted: Vec::new(),
+        };
+        for field in &table.fields {
+            let modelled =
+                resource.and_then(|r| r.fields.iter().find(|f| f.name == field.base.name));
+            let writable = modelled.map_or(
+                !matches!(field.kind, sc_catalog::DataFieldKind::Calc { .. }),
+                |f| f.writable(),
+            );
+            if !writable {
+                continue;
+            }
+            if field.primary_key {
+                let optional = modelled.map_or(!field.required || field.generated.is_some(), |f| {
+                    f.optional_on_insert()
+                });
+                if optional {
+                    // The database issues it.
+                    continue;
+                }
+                if matches!(basic_type(field), BasicType::Uuid) {
+                    form.minted.push(field);
+                    continue;
+                }
+            }
+            form.inputs.push(field);
+        }
+        form
+    }
+
+    /// The body of the page's `const empty` — the state the form starts at, and
+    /// returns to after a row is added.
+    fn empty(&self) -> String {
+        self.inputs
+            .iter()
+            .map(|f| format!("  {}: {}", f.base.name, ts_empty(f)))
+            .collect::<Vec<_>>()
+            .join(",\n")
+    }
+
+    /// The form's controls, one per column it asks for.
+    fn controls(&self) -> String {
+        self.inputs
+            .iter()
+            .map(|f| form_control(&f.base.name, basic_type(f)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// What the page passes to `create`: the form state, plus the keys it mints
+    /// on the way out.
+    fn argument(&self) -> String {
+        if self.minted.is_empty() {
+            return "form".to_owned();
+        }
+        let keys = self
+            .minted
+            .iter()
+            .map(|f| format!("{}: crypto.randomUUID()", f.base.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{{ ...form, {keys} }}")
+    }
 }
 
 /// Whether the app's API exposes `op` on `table` — the single question every
@@ -2485,7 +2565,7 @@ mod tests {
         let tables = [tasks()];
         let app = todo();
         let files = runtime_files(&ctx(&app, &tables, &endpoints(&tables), None));
-        assert_eq!(files.len(), 6);
+        assert_eq!(files.len(), 7);
         // Every regenerated file says so, each in a syntax its own reader can
         // parse; nothing outside the directory does, because nothing outside it
         // is overwritten.
@@ -3010,6 +3090,94 @@ mod tests {
         assert!(page.contains(r#"type="checkbox""#), "{page}");
         // Every column is still *shown*, including the key.
         assert!(page.contains("String(row.id ?? \"\")"), "{page}");
+    }
+
+    /// The shape of the `users` table, which is where this went wrong in a real
+    /// app: a **UUID primary key with no database default**, because whoever
+    /// creates the row is what issues it.
+    fn people() -> Table {
+        let mut table = tasks();
+        table.id = TableId("people".to_owned());
+        table.name = "people".to_owned();
+        table.label = "people".to_owned();
+        table.fields[0] = DataField::plain("id", TypeRef::Basic(BasicType::Uuid))
+            .required()
+            .primary_key();
+        table
+    }
+
+    /// A key the database does **not** issue is the page's to supply, and the
+    /// page supplies it: a UUID is a value any client can produce, so it is
+    /// minted at submit time rather than typed into a text box.
+    ///
+    /// The bug: the form was built from "every column but the key", so the page
+    /// called `create` without the `id` its own generated type requires —
+    /// `TS2345`, in the scaffold, before the admin had written a line.
+    #[test]
+    fn a_create_form_supplies_a_key_the_database_does_not_issue() {
+        let tables = [people()];
+        let page = page_tsx(&tables[0], &endpoints(&tables));
+        // Still no control for it — nobody types a UUID.
+        assert!(!page.contains("form.id"), "{page}");
+        // A fresh one per row: minted at submit, not held in `empty`, which is
+        // evaluated once and would hand every row the same key.
+        assert!(
+            page.contains(".add({ ...form, id: crypto.randomUUID() })"),
+            "{page}"
+        );
+        assert!(!page.contains("id: crypto.randomUUID(),\n"), "{page}");
+    }
+
+    /// The invariant behind that fix, over the table shapes that differ in it:
+    /// **every column the generated insert type requires is one the page
+    /// supplies.** Asked of the resource model the client is generated from, so
+    /// the two cannot answer differently.
+    #[test]
+    fn a_create_form_supplies_every_column_its_insert_type_requires() {
+        // A key the database issues, one the caller issues, and one only the
+        // person filling the form can know.
+        let admin_key = {
+            let mut table = people();
+            table.fields[0] = DataField::plain("id", TypeRef::Basic(BasicType::Text))
+                .required()
+                .primary_key();
+            table
+        };
+        for table in [tasks(), people(), admin_key] {
+            let tables = [table.clone()];
+            let eps = endpoints(&tables);
+            let form = CreateForm::of(&table, &eps);
+            let supplied: Vec<&str> = form
+                .inputs
+                .iter()
+                .chain(form.minted.iter())
+                .map(|f| f.base.name.as_str())
+                .collect();
+            let resource = eps.resource(&table.name).expect("REST projects a model");
+            for field in resource.fields.iter().filter(|f| !f.optional_on_insert()) {
+                assert!(
+                    supplied.contains(&field.name.as_str()),
+                    "`{}.{}` is required by the insert type and the form does not \
+                     supply it",
+                    table.name,
+                    field.name
+                );
+            }
+        }
+        // A key only the admin can know is asked for; the identity key is not.
+        let admin_key_page = {
+            let mut table = people();
+            table.fields[0] = DataField::plain("id", TypeRef::Basic(BasicType::Text))
+                .required()
+                .primary_key();
+            let tables = [table];
+            page_tsx(&tables[0], &endpoints(&tables))
+        };
+        assert!(admin_key_page.contains("form.id"), "{admin_key_page}");
+        assert!(
+            !admin_key_page.contains("crypto.randomUUID()"),
+            "{admin_key_page}"
+        );
     }
 
     #[test]
