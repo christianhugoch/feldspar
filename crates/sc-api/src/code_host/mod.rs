@@ -265,12 +265,97 @@ impl<'a> TableHost<'a> {
         // delegated read of a table the caller may not reach through a key is
         // refused by the same guard a REST embed is.
         let actor = self.actor(plan.authority)?;
+        if plan.render && !matches!(plan.op, Op::Select) {
+            return Err(Error::invalid(format!(
+                "the statement of a `{}` of `{}` is not something to ask for: only a read \
+                 renders, and only because Saltcorn 1's `getJoinedQuery` answers one",
+                match plan.op {
+                    Op::Aggregate => "grouped read",
+                    Op::Insert => "insert",
+                    Op::Update => "update",
+                    _ => "delete",
+                },
+                plan.table
+            )));
+        }
         match plan.op {
+            Op::Select if plan.render => self.render(plan, &actor).await,
             Op::Select => self.select(plan, &actor).await,
             Op::Aggregate => self.aggregate(plan, &actor).await,
             Op::Insert => self.insert(plan, &actor).await,
             Op::Update | Op::Delete => self.write(plan, &actor).await,
         }
+    }
+
+    /// The **statement** a read would run, as `{ sql, values }` — v1's
+    /// `getJoinedQuery` (TODO "the v1 `Table` API" §3.5).
+    ///
+    /// The same plan `select` resolves, lowered by the same code, and then
+    /// rendered rather than run: what comes back is the text and the binds, in
+    /// v1's own shape. **This server will not run it** — there is no v1 `db`
+    /// module in this version — so it is for the plugin that inspects or logs
+    /// its query, and the tutorial says so where the method is documented.
+    ///
+    /// Delegation is where it gets interesting, and where it is narrower than a
+    /// `select`. A rendered statement is a statement: it cannot decide row by
+    /// row, so the caller's read rule has to be expressible *inside* it. That is
+    /// exactly the question [`ownership::aggregate_guard`] answers, so it is
+    /// asked here rather than answered a second time — the floor, a translatable
+    /// ownership formula ANDed into the `WHERE`, or the database's own policies.
+    /// A caller the rule does not admit at all gets v1's own answer,
+    /// `{ notAuthorized: true }`; a formula only the evaluator can decide is a
+    /// refusal naming it, because a statement that quietly dropped it would hand
+    /// somebody SQL that reads rows they may not.
+    async fn render(&self, plan: &Plan, actor: &Actor) -> Result<Json> {
+        let read = plan::read(self.catalog, plan, &self.limits, actor.role())?;
+        if read.table.provider().is_some() {
+            return Err(Error::invalid(format!(
+                "`{}` is served by a table provider, so there is no SQL statement to \
+                 answer with: its rows come from a module",
+                read.table.name
+            )));
+        }
+        let mut query = read.query;
+        if let Actor::Caller { role, user } = actor {
+            match ownership::aggregate_guard(
+                self.catalog,
+                &read.table,
+                &read.table.name,
+                *role,
+                user.as_ref(),
+            ) {
+                Ok(ownership::AggregateGuard::Predicate(Some(pred))) => {
+                    query = query.and_filter(pred);
+                }
+                // Nothing to add: the caller is at or above the floor, or the
+                // table's rule is the database's own policies — which apply when
+                // the statement runs, wherever that turns out to be.
+                Ok(_) => {}
+                Err(e) if matches!(e.repr(), Repr::Auth(_)) => {
+                    return Ok(serde_json::json!({ "notAuthorized": true }));
+                }
+                Err(e) => {
+                    return Err(Error::invalid(format!(
+                        "the statement of a read of `{}` cannot be rendered for this user, \
+                         because a statement decides once and this rule decides row by row: \
+                         {e}",
+                        read.table.name
+                    )));
+                }
+            }
+        }
+        let select = rows::read_select(self.catalog, &read.table, &query)?;
+        let driver = self.catalog.driver_for(&read.table)?;
+        let (sql, binds) = driver
+            .dialect()
+            .render(&sc_query::Statement::Select(Box::new(select)))?;
+        let mut out = serde_json::Map::with_capacity(2);
+        out.insert("sql".to_owned(), Json::String(sql));
+        out.insert(
+            "values".to_owned(),
+            Json::Array(binds.iter().map(value_to_json).collect()),
+        );
+        Ok(Json::Object(out))
     }
 
     /// Whose authority this plan runs under, as the value the operations dispatch

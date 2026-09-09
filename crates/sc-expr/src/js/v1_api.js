@@ -8,9 +8,11 @@
 // third bug fixed in one of them.
 //
 // It is JavaScript for the reason the `db` prelude is: what crosses into Rust
-// is a **plan**, so v1's whole `Where` vocabulary, its `selopts` and (later) its
+// is a **plan**, so v1's whole `Where` vocabulary, its `selopts` and its
 // `joinFields` are lowered *here*, against a seam that resolves every name it is
-// handed and trusts none of them. No SQL is assembled anywhere in this file.
+// handed and trusts none of them. No SQL is assembled anywhere in this file —
+// `getJoinedQuery` answers a statement, and even that one is rendered by the
+// host out of the plan this file sent it.
 //
 // # The division
 //
@@ -67,16 +69,8 @@
   // A `null` reason is a method that is simply not built yet: it says it is not
   // available and does not pretend to have a principle behind it.
   const NOT_IMPLEMENTED = {
-    // Reads and writes. Not built yet; the phases after this one are them, and
-    // each is deleted from this list by the edit that implements it.
-    "table.getRows": LATER,
-    "table.getRow": LATER,
-    "table.countRows": LATER,
-    "table.distinctValues": LATER,
-    "table.aggregationQuery": LATER,
-    "table.getJoinedRows": LATER,
-    "table.getJoinedRow": LATER,
-    "table.getJoinedQuery": LATER,
+    // The writes. Not built yet; the phase after this one is them, and each is
+    // deleted from this list by the edit that implements it.
     "table.insertRow": LATER,
     "table.tryInsertRow": LATER,
     "table.updateRow": LATER,
@@ -84,7 +78,6 @@
     "table.deleteRows": LATER,
     "table.toggleBool": LATER,
     "table.run_trigger": LATER,
-    "field.distinct_values": LATER,
 
     // Schema editing (§9): a v1 plugin that edits the schema is a plugin
     // editing a schema this server introspects, which is a different argument.
@@ -557,6 +550,208 @@
   fixed("__scV1Selopts", translateSelopts);
 
   // -------------------------------------------------------------------------
+  // The reads (§3, §6)
+  // -------------------------------------------------------------------------
+
+  // Every read below is **one plan** — the same object a `db.books.rows()`
+  // sends — so it goes through the catalog's name resolution, the shared
+  // operator vocabulary, §7.3's ownership rule, the row cap and the call
+  // budget. No host operation was added for any of them except the one
+  // `getJoinedQuery` needs, and no SQL is assembled here or anywhere in this
+  // file.
+
+  // The two join characters, which are what makes §6 possible: v1's
+  // `joinFields` is a forward path and v1's `aggregations` is an inverse
+  // relation, and this server's expression language already says both
+  // (docs/AGG_EXPRS.md).
+  const JOIN = "Ⱶ";
+  const INVERSE = "Ↄ";
+
+  // A name that is about to be **built into a formula string**. Every other
+  // name a plan carries is a JSON value the host resolves against the catalog;
+  // these are text this file concatenates, and a name with a quote or a dot in
+  // it would be a formula that says something else rather than a name the
+  // catalog refuses.
+  const identifier = (what, value) => {
+    if (typeof value !== "string" || !/^[A-Za-z_][A-Za-z_0-9]*$/.test(value)) {
+      throw new Error(
+        "`" + what + "` is the name of a table or a field, and `" + String(value) +
+        "` is not one"
+      );
+    }
+    return value;
+  };
+
+  // One v1 read, as a select plan: v1's where, v1's selopts, and whatever the
+  // method itself projects.
+  const selectPlan = (table, where, opts, extra) => {
+    const plan = { op: "select", table: table };
+    const filter = translateWhere(where);
+    if (filter !== null) plan.where = filter;
+    return Object.assign(plan, translateSelopts(opts), extra || {});
+  };
+
+  // The only selopt a question **about** rows rather than about a row can
+  // honour: an ordering or a bound over a count says nothing, and v1 passes
+  // neither. An unknown key is refused for the reason it is in `selopts`.
+  const authorityOf = (opts, method) => {
+    if (opts === undefined || opts === null) return null;
+    if (!isObject(opts)) {
+      throw new Error(method + "'s options are an object, e.g. { forUser: user }");
+    }
+    for (const key of Object.keys(opts)) {
+      if (key !== "forUser" && key !== "forPublic") {
+        throw new Error(
+          "`" + key + "` is not an option of " + method + "; the options are: " +
+          "forUser, forPublic"
+        );
+      }
+    }
+    return whoFor(opts);
+  };
+
+  // The alias `distinctValues` counts under. It is grouped rather than selected
+  // because distinct values *are* groups — and the plan seam has no count-free
+  // grouping, for the good reason that a group with no aggregate is a question
+  // nobody asked. `_fd_` is this server's own prefix, so it cannot collide with
+  // a field of the table being grouped.
+  const DISTINCT_COUNT = "_fd_n";
+
+  // v1's aggregate names, in the expression language this server aggregates
+  // with. Everything v1 can spell that this server cannot compute is refused
+  // naming itself — an aggregation quietly computing the wrong number inside
+  // somebody's list view is the failure this is here to prevent.
+  //
+  // The plain half first, because both callers share it: over a table's own
+  // rows an aggregate is the plan's own `{ fn, arg }`, and there are five.
+  const plainAggregate = (what, spelling) => {
+    if (typeof spelling !== "string") {
+      throw new Error(
+        "`" + what + ".aggregate` is the aggregate to compute, e.g. \"sum\""
+      );
+    }
+    const lower = spelling.trim().toLowerCase();
+    if (lower === "count") return { fn: "count", arg: null };
+    if (lower === "sum" || lower === "avg" || lower === "min" || lower === "max") {
+      return { fn: lower, arg: true };
+    }
+    return null;
+  };
+
+  const aggregateCall = (what, spelling, field) => {
+    const over = () => "\"" + identifier(what + ".field", field) + "\"";
+    const plain = plainAggregate(what, spelling);
+    if (plain !== null) {
+      return plain.arg === null ? "length" : plain.fn + "(" + over() + ")";
+    }
+    const agg = spelling.trim();
+    const lower = agg.toLowerCase();
+    if (lower === "count distinct" || lower === "countunique") {
+      return "distinct(" + over() + ").length";
+    }
+    // v1's `Latest ts` / `Earliest ts`: the named field of the child row that is
+    // latest (or earliest) by another of its fields — which is exactly what
+    // `maxBy`/`minBy` are, down to the trailing member access.
+    const ordered = /^(latest|earliest)[ \t]+([A-Za-z_][A-Za-z_0-9]*)$/i.exec(agg);
+    if (ordered) {
+      const pick = ordered[1].toLowerCase() === "latest" ? "maxBy" : "minBy";
+      return pick + "(\"" + ordered[2] + "\")." + identifier(what + ".field", field);
+    }
+    throw new Error(
+      "`" + agg + "` is not an aggregate this server computes: they are count, " +
+      "count distinct, sum, avg, min, max, and `Latest <field>` / `Earliest <field>`"
+    );
+  };
+
+  // What v1 can write in an aggregation that this server does not carry. Each
+  // is a SQL construct the plan seam does not express, and each names what it
+  // is rather than being dropped.
+  const REFUSED_AGGREGATION = {
+    ontable:
+      "an aggregation over a table other than the one the key points from is " +
+      "not part of this server's expression language; read that table directly",
+    valueFormula:
+      "Saltcorn 1's valueFormula is SQL text; write the value as a projection " +
+      "formula instead, e.g. { alias: \"x\", formula: \"childrenↃparent.sum(...)\" }",
+    subselect: "a subquery aggregation is not part of this server's plan seam",
+    through: "a two-hop aggregation is not part of this server's expression language",
+    rename_object: "this is Saltcorn 1's view builder talking to itself",
+    where:
+      "restricting which child rows count is not part of this version's " +
+      "aggregations; read the child table and aggregate the rows in your code",
+  };
+
+  // What v1 can write in a join field, likewise.
+  const REFUSED_JOIN_FIELD = {
+    through:
+      "a join through a second key is not part of this version; read the " +
+      "intermediate row first, or write the two hops as a projection formula",
+    ontable: "a join field names a key of this table, and `ontable` names another",
+    rename_object: "this is Saltcorn 1's view builder talking to itself",
+    lookupFunction: "a lookup function is JavaScript this server would have to run per row",
+  };
+
+  const refuseOptions = (what, opts, allowed, refused) => {
+    if (!isObject(opts)) {
+      throw new Error("`" + what + "` is an object, e.g. { " + allowed.join(", ") + " }");
+    }
+    for (const key of Object.keys(opts)) {
+      if (Object.prototype.hasOwnProperty.call(refused, key)) {
+        throw new Error(
+          "`" + what + "." + key + "` is not supported: " + refused[key]
+        );
+      }
+      if (allowed.indexOf(key) < 0) {
+        throw new Error(
+          "`" + key + "` is not part of `" + what + "`; it is written { " +
+          allowed.join(", ") + " }"
+        );
+      }
+    }
+  };
+
+  // v1's join field, as a Ⱶ-path projection: `{ ref: "home", target: "name" }`
+  // over `patients` is the formula `homeⱵname`, which is a projection of the
+  // very same select plan and goes through `ownership::join_guard` like every
+  // other path.
+  const joinProjection = (alias, opts) => {
+    refuseOptions("joinFields." + alias, opts, ["ref", "target"], REFUSED_JOIN_FIELD);
+    return {
+      alias: alias,
+      formula:
+        identifier("joinFields." + alias + ".ref", opts.ref) + JOIN +
+        identifier("joinFields." + alias + ".target", opts.target),
+    };
+  };
+
+  // v1's aggregation, as an inverse-relation projection: `{ table: "readings",
+  // ref: "patient_id", field: "temperature", aggregate: "avg" }` is the formula
+  // `readingsↃpatient_id.avg("temperature")` — again a projection of the same
+  // plan, so a joined read is one statement.
+  const aggregationProjection = (alias, opts, where) => {
+    const what = where + "." + alias;
+    refuseOptions(
+      what, opts, ["table", "ref", "field", "aggregate"], REFUSED_AGGREGATION
+    );
+    return {
+      alias: alias,
+      formula:
+        identifier(what + ".table", opts.table) + INVERSE +
+        identifier(what + ".ref", opts.ref) + "." +
+        aggregateCall(what, opts.aggregate, opts.field),
+    };
+  };
+
+  // What v1's `getJoinedRows` takes. Anything else it can be handed —
+  // `starts_with`, `searchTerm`, `nullPositions` — is refused by the same rule
+  // an unknown selopt is, and for the same reason.
+  const JOIN_OPTS = [
+    "where", "joinFields", "aggregations",
+    "orderBy", "orderDesc", "limit", "offset", "forUser", "forPublic",
+  ];
+  const JOIN_SELOPTS = ["orderBy", "orderDesc", "limit", "offset", "forUser", "forPublic"];
+
+  // -------------------------------------------------------------------------
   // `Field`: a view of the snapshot, not a record (§7)
   // -------------------------------------------------------------------------
 
@@ -587,8 +782,9 @@
     String(label).toLowerCase().replace(/ /g, "_").replace(/[^a-z0-9_]/g, "");
   const nameToLabel = (name) => capitalise(String(name).replace(/_/g, " "));
 
-  // One field of one table, with v1's property names on it.
-  const makeField = (api, table, spec) => {
+  // One field of one table, with v1's property names on it. `send` is the run's
+  // sender, for the one member of `Field` with I/O behind it.
+  const makeField = (api, table, spec, send) => {
     const field = {
       // Its id **is** its name: this server identifies a field by name (§9),
       // and a plugin keying a map by `f.id` gets a stable key either way.
@@ -628,18 +824,93 @@
     Object.defineProperty(field, "table", {
       get: () => api.Table.findOne(spec.table_id), enumerable: false,
     });
+    // The one member of `Field` with I/O behind it: `Table.distinctValues` from
+    // the other end, and the same plan. v1's own signature is `(req, where)`,
+    // and the request half of it is a v1 web request this server does not have
+    // — so this takes the where alone, and says so in the tutorial.
+    Object.defineProperty(field, "distinct_values", {
+      enumerable: false,
+      value: (where) => api.Table.findOne(spec.table_id).distinctValues(spec.name, where),
+    });
     installRefusals(field, "field.");
     return readOnly(field, "a field of `" + table + "`");
   };
 
   // -------------------------------------------------------------------------
-  // `Table`: metadata, synchronously (§2)
+  // `Table`: metadata synchronously (§2), rows through the sender (§3)
   // -------------------------------------------------------------------------
 
-  const makeTable = (api, spec) => {
-    const fields = spec.fields.map((f) => makeField(api, spec.name, f));
+  const makeTable = (api, spec, send) => {
+    const fields = spec.fields.map((f) => makeField(api, spec.name, f, send));
     const byName = new Map(fields.map((f) => [f.name, f]));
     const pk = spec.primary_key || [];
+    // The sender, or a sentence saying why there is none. A run that was given
+    // no database host still has the whole schema — that is what the snapshot
+    // is — so its `Table` answers every property and refuses every read, which
+    // is the honest division rather than a read that answers no rows.
+    const ask = (method) => {
+      if (typeof send !== "function") {
+        throw new Error(
+          "`" + spec.name + "." + method + "` reads the database, and nothing here " +
+          "can: this run was given no database host, only the schema"
+        );
+      }
+      return send;
+    };
+    // One plan, sent. Written as a function of the method's name so that the
+    // refusal above names the method the plugin actually called.
+    const ships = (method, plan) => ask(method)(plan);
+    // v1's `getJoinedRows` and its two relatives, which differ only in what
+    // they do with the answer. Every option is lowered here (§6): `joinFields`
+    // to Ⱶ-paths, `aggregations` to Ↄ-relations, and both as `Selection`s of an
+    // ordinary select plan — so a joined read is **one** statement and needs no
+    // host operation of its own.
+    const joinedPlan = (opts, method) => {
+      const given = opts === undefined || opts === null ? {} : opts;
+      if (!isObject(given)) {
+        throw new Error(
+          method + " takes an options object, e.g. { joinFields: { town: { ref: " +
+          "\"home\", target: \"name\" } } }"
+        );
+      }
+      for (const key of Object.keys(given)) {
+        if (JOIN_OPTS.indexOf(key) < 0) {
+          throw new Error(
+            "`" + key + "` is not an option of " + method + " on this server; the " +
+            "options are: " + JOIN_OPTS.join(", ")
+          );
+        }
+      }
+      // The row itself is the table's own fields: a plan's empty `select` is
+      // the whole row, and this read has projections to add to it, so what the
+      // whole row *is* has to be said.
+      const select = spec.fields.map((f) => f.name);
+      if (given.joinFields !== undefined && given.joinFields !== null) {
+        const joins = given.joinFields;
+        if (!isObject(joins)) {
+          throw new Error("`joinFields` is an object of { ref, target } by alias");
+        }
+        for (const alias of Object.keys(joins)) {
+          select.push(joinProjection(alias, joins[alias]));
+        }
+      }
+      if (given.aggregations !== undefined && given.aggregations !== null) {
+        const aggs = given.aggregations;
+        if (!isObject(aggs)) {
+          throw new Error(
+            "`aggregations` is an object of { table, ref, field, aggregate } by alias"
+          );
+        }
+        for (const alias of Object.keys(aggs)) {
+          select.push(aggregationProjection(alias, aggs[alias], "aggregations"));
+        }
+      }
+      const selopts = {};
+      for (const key of JOIN_SELOPTS) {
+        if (given[key] !== undefined) selopts[key] = given[key];
+      }
+      return selectPlan(spec.name, given.where, selopts, { select: select });
+    };
     const table = {
       // A table's id is its name too, and for the same reason a field's is.
       id: spec.name,
@@ -678,6 +949,145 @@
         primary_key: pk.slice(),
         fields: spec.fields.map((f) => Object.assign({}, f)),
       }),
+
+      // ---------------------------------------------------------------------
+      // The reads (§3)
+      // ---------------------------------------------------------------------
+
+      // v1's `getRows(where, selopts)`: one select plan, and the rows as this
+      // server's wire shape — which is what `db.books.rows()` answers, because
+      // it is the same plan.
+      getRows: (where, opts) =>
+        ships("getRows", selectPlan(spec.name, where, opts)),
+      // v1's `getRow`: the first row the same read finds, or null. The bound is
+      // this method's own and overrides a `limit` in the options, as v1's does
+      // — one row is what the caller asked for by calling this rather than the
+      // other one.
+      getRow: (where, opts) =>
+        ships("getRow", selectPlan(spec.name, where, opts, { limit: 1 }))
+          .then((rows) => (rows.length ? rows[0] : null)),
+      // v1's `countRows`: an aggregate plan, so the counting is the database's
+      // and the row cap never enters into it.
+      countRows: (where, opts) => {
+        const plan = {
+          op: "aggregate", table: spec.name,
+          aggregate: [{ alias: "count", fn: "count", arg: null }],
+        };
+        const filter = translateWhere(where);
+        if (filter !== null) plan.where = filter;
+        const authority = authorityOf(opts, "countRows");
+        if (authority !== null) plan.authority = authority;
+        return ships("countRows", plan).then((r) =>
+          r === null || r === undefined || r.count === null ? 0 : r.count
+        );
+      },
+      // v1's `distinctValues`: a grouped select, answering v1's plain array of
+      // values rather than rows. It groups rather than selecting distinct
+      // because distinct values *are* groups; the count it groups with is not
+      // answered, and is there because a group with no aggregate is a question
+      // this seam (rightly) does not ask.
+      distinctValues: (field, where) => {
+        const name = identifier("distinctValues", field);
+        const plan = {
+          op: "aggregate", table: spec.name, group: [name],
+          aggregate: [{ alias: DISTINCT_COUNT, fn: "count", arg: null }],
+          order: [{ field: name, dir: "asc" }],
+        };
+        const filter = translateWhere(where);
+        if (filter !== null) plan.where = filter;
+        return ships("distinctValues", plan).then((groups) =>
+          groups.map((g) => g[name])
+        );
+      },
+      // v1's `aggregationQuery(aggregations, { where, groupBy })`: the plan's
+      // own `aggregate`, answering **one object** ungrouped and an array of
+      // them grouped — which is v1's own convention and this server's, because
+      // a grouped answer has no one value to be.
+      aggregationQuery: (aggregations, opts) => {
+        if (!isObject(aggregations)) {
+          throw new Error(
+            "aggregationQuery takes the values to compute, e.g. " +
+            "{ n: { aggregate: \"count\" }, longest: { field: \"pages\", aggregate: \"max\" } }"
+          );
+        }
+        const plan = { op: "aggregate", table: spec.name, aggregate: [] };
+        for (const alias of Object.keys(aggregations)) {
+          const one = aggregations[alias];
+          refuseOptions(
+            "aggregationQuery." + alias, one, ["field", "aggregate"],
+            Object.assign({
+              table:
+                "aggregationQuery aggregates this table's own rows; the child " +
+                "table's are `getJoinedRows`'s aggregations",
+              ref:
+                "aggregationQuery aggregates this table's own rows; the key back " +
+                "to it is `getJoinedRows`'s aggregations",
+            }, REFUSED_AGGREGATION)
+          );
+          // The same five aggregates a relation's are, without the relation:
+          // `Latest x` and `count distinct` are shapes of a *subquery* over
+          // child rows, and this aggregates the table's own.
+          const plain = plainAggregate("aggregationQuery." + alias, one.aggregate);
+          if (plain === null) {
+            throw new Error(
+              "`" + one.aggregate + "` is not an aggregate over this table's own " +
+              "rows: they are count, sum, avg, min, max"
+            );
+          }
+          plan.aggregate.push({
+            alias: alias,
+            fn: plain.fn,
+            arg: plain.arg === null
+              ? null
+              : identifier("aggregationQuery." + alias + ".field", one.field),
+          });
+        }
+        if (opts !== undefined && opts !== null) {
+          if (!isObject(opts)) {
+            throw new Error(
+              "aggregationQuery's second argument is an options object, e.g. " +
+              "{ where: { pages: { gt: 100 } }, groupBy: \"author\" }"
+            );
+          }
+          for (const key of Object.keys(opts)) {
+            if (["where", "groupBy", "forUser", "forPublic"].indexOf(key) < 0) {
+              throw new Error(
+                "`" + key + "` is not an option of aggregationQuery; the options " +
+                "are: where, groupBy, forUser, forPublic"
+              );
+            }
+          }
+          const filter = translateWhere(opts.where);
+          if (filter !== null) plan.where = filter;
+          if (opts.groupBy !== undefined && opts.groupBy !== null) {
+            const by = Array.isArray(opts.groupBy) ? opts.groupBy : [opts.groupBy];
+            plan.group = by.map((g) => identifier("groupBy", g));
+          }
+          const authority = whoFor(opts);
+          if (authority !== null) plan.authority = authority;
+        }
+        return ships("aggregationQuery", plan);
+      },
+      // v1's `getJoinedRows` (§6), and the row-at-a-time spelling of it.
+      getJoinedRows: (opts) =>
+        ships("getJoinedRows", joinedPlan(opts, "getJoinedRows")),
+      getJoinedRow: (opts) => {
+        const plan = joinedPlan(opts, "getJoinedRow");
+        plan.limit = 1;
+        return ships("getJoinedRow", plan).then((rows) => (rows.length ? rows[0] : null));
+      },
+      // v1's `getJoinedQuery`: the statement the same plan renders, as
+      // `{ sql, values }` — v1's own shape — or `{ notAuthorized: true }` where
+      // the ownership rule says this reader may not have it.
+      //
+      // **This server will not run it for you.** There is no v1 `db` module in
+      // this version, so what this answers is for the plugin that inspects or
+      // logs the query, and nothing here will take it back as SQL.
+      getJoinedQuery: (opts) => {
+        const plan = joinedPlan(opts, "getJoinedQuery");
+        plan.render = true;
+        return ships("getJoinedQuery", plan);
+      },
     };
     // v1's `pk_type` is what a caller branches on, so it is the type's *name*
     // — `"Integer"`, `"String"` — and not the type object `type` already
@@ -717,17 +1127,23 @@
   // The factory
   // -------------------------------------------------------------------------
 
-  // One run's `Table` and `Field`, over one run's token and the schema snapshot
-  // that run resolved at invoke.
+  // One run's `Table` and `Field`, over one run's **sender** and the schema
+  // snapshot that run resolved at invoke.
   //
-  // The token is what a read will carry when there are reads (the phase after
-  // this one): with many runs resident on one isolate it is what tells the host
-  // whose call this is, and a body is handed the classes rather than the token.
+  // `send` is one function — a plan in, a promise of the answer out — and it is
+  // the whole of what this file can reach: in a code body it is the run's own
+  // `db` sender, closed over the token that says whose call this is; in a
+  // module it is the ask channel back to the server. Passing the sender rather
+  // than the token is what lets the *same text* serve both, which is the point
+  // of there being one file.
   //
-  // A run with **no snapshot** gets classes that say so by name rather than
-  // classes that know no tables: a `Table.findOne` answering undefined for
-  // everything would have a plugin compute the wrong answer instead of failing.
-  fixed("__scMakeV1Api", (__scTok, snapshot) => {
+  // A run with **no sender** gets a `Table` whose metadata is whole and whose
+  // reads say so by name, because a run with no database host really can answer
+  // the one and not the other. A run with **no snapshot** gets classes that say
+  // so by name rather than classes that know no tables: a `Table.findOne`
+  // answering undefined for everything would have a plugin compute the wrong
+  // answer instead of failing.
+  fixed("__scMakeV1Api", (send, snapshot) => {
     const api = {};
     const absent = (what) => {
       throw new Error(
@@ -759,7 +1175,7 @@
     // comes out of it.
     const built = new Map();
     const tableOf = (spec) => {
-      if (!built.has(spec.name)) built.set(spec.name, makeTable(api, spec));
+      if (!built.has(spec.name)) built.set(spec.name, makeTable(api, spec, send));
       return built.get(spec.name);
     };
 

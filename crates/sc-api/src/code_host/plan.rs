@@ -121,6 +121,17 @@ pub struct Plan {
     /// What an `aggregate` asks for, each aliased by the key it rides back under.
     #[serde(default)]
     pub aggregate: Vec<AggSpec>,
+    /// Whether this read wants the **statement** rather than the rows — v1's
+    /// `getJoinedQuery`, which answers `{ sql, values }` (TODO "the v1 `Table`
+    /// API" §3.5).
+    ///
+    /// A field of the read rather than a sixth [`Op`] because it *is* the read:
+    /// the same plan, the same lowering, the same ownership rule — only the last
+    /// step differs, and rendering a statement this server then declines to run
+    /// is not an operation of its own. Nothing runs, so the row cap has nothing
+    /// to count and the call budget is what bounds it.
+    #[serde(default)]
+    pub render: bool,
     /// An insert's row(s), or an update's assignments (phase 3).
     #[serde(default)]
     pub values: Option<Json>,

@@ -474,7 +474,7 @@ pub async fn count_rows_where(
 
 /// The `SELECT` one [`RowQuery`] renders to: every column plus the calculated
 /// fields and the query's own extra projections, filtered, ordered and bounded.
-fn read_select(catalog: &Catalog, table: &Table, query: &RowQuery) -> Result<Select> {
+pub(crate) fn read_select(catalog: &Catalog, table: &Table, query: &RowQuery) -> Result<Select> {
     let mut columns = vec![Projection::all()];
     columns.extend(calc_projections(catalog, table)?);
     columns.extend(query.extra.iter().cloned());

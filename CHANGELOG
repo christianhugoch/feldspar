@@ -2,6 +2,60 @@
 
 Changes in reverse chronological order.
 
+## v1's `Table` reads, as the plans `db` already sends
+
+The third phase of the v1 `Table` API: the reads. `books.getRows(…)`, `getRow`, `countRows`,
+`distinctValues`, `aggregationQuery`, `getJoinedRows`, `getJoinedRow`, `getJoinedQuery` and
+`field.distinct_values` all answer now, and each of them is **one plan** — the
+same JSON object a `db.books.rows()` sends — so every one goes through the catalog's name
+resolution, the shared operator vocabulary, §7.3's ownership rule, the row cap and the call
+budget without a line of Rust knowing that Saltcorn 1 exists. The nine methods left their
+line in the refusal list in the same edit that implemented them, which is what
+`installRefusals` refusing to shadow a real method is for.
+
+- **A joined read is one statement, because both halves of v1's vocabulary were already
+  ours.** `joinFields: { writer: { ref: "author", target: "name" } }` lowers to the
+  projection `{ alias: "writer", formula: "authorⱵname" }` and
+  `aggregations: { stars: { table: "reviews", ref: "book", field: "stars", aggregate: "avg" } }`
+  to `{ alias: "stars", formula: "reviewsↃbook.avg(\"stars\")" }` — a Ⱶ-path and an inverse
+  relation, both ordinary `Selection`s of an ordinary select plan. So the row, the joined
+  value and the child aggregate come back in one read, through `ownership::join_guard` like
+  every other path, and no host operation was added for any of it. v1's `Latest posted`
+  aggregate is `maxBy("posted").stars`, and `count distinct` is `distinct("critic").length`;
+  `array_agg`, `percent_true` and the rest are refused naming themselves, as are `through`,
+  `ontable`, `rename_object`, `lookupFunction`, an aggregation's `valueFormula` and its
+  `where`.
+- **`getJoinedQuery` needed the one new thing: a plan that renders instead of running.**
+  `render: true` on a select plan answers `{ sql, values }` — v1's own shape — out of
+  `sc-query`'s renderer, and nothing runs. It is a field of the read rather than a sixth op
+  because it *is* the read: same lowering, same ownership rule, only the last step differs.
+  Delegated, it is narrower than a `select` and says why: a statement decides once for all
+  its rows, so the caller's rule has to be expressible inside it — which is exactly the
+  question `ownership::aggregate_guard` answers, asked here rather than answered a second
+  time. A reader the floor does not admit and no formula extends gets v1's own
+  `{ notAuthorized: true }`; a formula only the evaluator can decide is a refusal naming it.
+  **This server will not run the SQL back for you** — there is no v1 `db` module in this
+  version — so what it is for is the plugin that inspects or logs its query.
+- **The factory takes a sender, not a token.** `__scMakeV1Api(send, snapshot)`: one function,
+  a plan in and a promise out. In a code body it is the `db` handle's own `__scSend`, closed
+  over the run's token — one sender, one call budget, one authority default — and in a module
+  it will be the ask channel, which is what lets the same file serve both hosts. A run with a
+  snapshot and **no** sender is a real state (a module's `onLoad`, phase 5) and behaves like
+  one: every property answers and every read refuses, naming the method, because a `getRows`
+  answering `[]` there would have a plugin conclude the table is empty.
+- **The two shapes v1 answers in are preserved.** `getRow` answers `null` and not `undefined`;
+  `distinctValues` answers a plain array of values, though it is computed as groups (the plan
+  seam has no count-free grouping, for the good reason that a group with no aggregate is a
+  question nobody asked); `aggregationQuery` answers one object ungrouped and an array
+  grouped. A `sum` over a bigint column comes back as a Decimal string, because that is this
+  server's wire shape everywhere and a v1 method is not the place to invent a second.
+- **Tests at both levels the failures are at.** In `sc-expr`, a spy behind the sender asserts
+  the exact plan each method sends and that every unlowerable option names itself; in
+  `sc-api`, `tests/v1_table_reads.rs` builds the api the way phase 6 will — over `db.__scSend`
+  and the run's snapshot — and reads a real Postgres: v1's wheres and selopts, the two
+  aggregation shapes, a joined read whose join field and four aggregates all ride back on the
+  row, and a rendered statement that the database itself then accepts.
+
 ## The metadata namespace is `_fd_`, so v1 can share the schema
 
 Every metadata table this server owns is renamed from the `_sc_` prefix to `_fd_`:

@@ -1224,6 +1224,18 @@ Object.defineProperty(globalThis, "__scMakeDb", {
       sql: (text, params, options) => sql(authority, text, params, options),
       asUser: () => handle("user"),
       asAdmin: () => handle("admin"),
+      // The plan seam itself, and the one thing on this handle that is not the
+      // fluent surface: one plan in, a promise of its answer out, over this
+      // run's own token.
+      //
+      // It is here because the **v1 `Table`** is built over it (TODO "the v1
+      // `Table` API" §1): that surface lowers v1's `Where`, its `selopts` and
+      // its `joinFields` to plans of its own, and it has to send them as this
+      // run — one sender, one call budget, one authority default. It grants a
+      // body nothing the chain does not: a plan is re-resolved against the
+      // catalog on arrival and every name in it refused there, which is why the
+      // chain can be a convenience rather than a boundary.
+      __scSend: (plan) => send(plan),
     };
     return new Proxy(base, {
       get: (target, prop) => {
@@ -2332,11 +2344,12 @@ pub(crate) const MODULE_FNS_PRELUDE: &str = r#"
 /// code runtime and needs the source.
 ///
 /// Compiled **once per isolate**, and minted per run by
-/// `__scMakeV1Api(token, snapshot)` — the token because a read will carry it
-/// (whose call this is, with many runs resident), the snapshot because that is
-/// what makes v1's synchronous `Table.findOne` answerable at all: metadata is
-/// local and synchronous, data is a host call and asynchronous, which is v1's
-/// own division.
+/// `__scMakeV1Api(send, snapshot)` — the sender because a read is one plan sent
+/// as *this* run (in a code body it is the `db` handle's `__scSend`, closed
+/// over the run's token; in a module it will be the ask channel), the snapshot
+/// because that is what makes v1's synchronous `Table.findOne` answerable at
+/// all: metadata is local and synchronous, data is a host call and
+/// asynchronous, which is v1's own division.
 ///
 /// It also publishes two pure functions, `__scV1Where` and `__scV1Selopts`,
 /// which are v1's where-vocabulary and v1's `selopts` lowered to the plan's.
@@ -8972,6 +8985,357 @@ mod tests {
         assert_eq!(out["name_to_label"], json!("First name"));
     }
 
+    /// The api over a sender that **records** what it is handed and answers
+    /// what the method expects back — which is all a plan-shape test needs, and
+    /// is what the live tests in `sc-api` put a real host behind.
+    const SPY: &str = r#"const sent = [];
+       const answers = { select: [], aggregate: {}, grouped: [] };
+       const { Table, Field } = __scMakeV1Api((plan) => {
+         sent.push(plan);
+         if (plan.render) return Promise.resolve({ sql: "select …", values: [1] });
+         if (plan.op === "aggregate") {
+           return Promise.resolve(plan.group ? answers.grouped : answers.aggregate);
+         }
+         return Promise.resolve(answers.select);
+       }, __scSchema(7));"#;
+
+    #[tokio::test]
+    async fn every_v1_read_is_one_plan_of_the_seam_db_already_speaks() {
+        // §1: a `getRows` is a `Plan { op: Select, … }`, so it goes through the
+        // catalog's name resolution, the shared operator vocabulary, §7.3's
+        // ownership rule, the row cap and the call budget — because it *is* the
+        // plan a `db.books.rows()` sends. What is asserted here is exactly that
+        // equality; that the plan then answers is the live tests' business.
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            &format!(
+                r#"{SPY}
+                   const books = Table.findOne("books");
+                   answers.select = [{{ id: 1, title: "Orlando" }}];
+                   answers.aggregate = {{ count: 3 }};
+                   answers.grouped = [{{ author: 1, _fd_n: 2 }}, {{ author: 2, _fd_n: 1 }}];
+                   const rows = await books.getRows({{ pages: {{ gt: 300 }} }},
+                                                    {{ orderBy: "title", limit: 10 }});
+                   const one = await books.getRow({{ id: 1 }});
+                   const none = await (async () => {{
+                     answers.select = [];
+                     const r = await books.getRow({{ id: 99 }});
+                     answers.select = [{{ id: 1, title: "Orlando" }}];
+                     return r;
+                   }})();
+                   const n = await books.countRows({{ author: 1 }});
+                   const values = await books.distinctValues("author");
+                   const fromField = await books.getField("author").distinct_values();
+                   return {{
+                     rows: rows, one: one, none: none, n: n, values: values,
+                     fromField: fromField, sent: sent,
+                   }};"#
+            ),
+        )
+        .await;
+
+        assert_eq!(out["rows"], json!([{ "id": 1, "title": "Orlando" }]));
+        assert_eq!(out["one"], json!({ "id": 1, "title": "Orlando" }));
+        // v1's `getRow` answers null when there is no row, and never undefined:
+        // a plugin tests it with `if (row)` and JSON carries the one and not the
+        // other.
+        assert_eq!(out["none"], Json::Null);
+        assert_eq!(out["n"], json!(3));
+        // A distinct read answers v1's plain array of values, not the groups it
+        // is computed as.
+        assert_eq!(out["values"], json!([1, 2]));
+        assert_eq!(
+            out["fromField"],
+            json!([1, 2]),
+            "the same read from the field"
+        );
+
+        let sent = out["sent"].as_array().expect("the plans");
+        assert_eq!(
+            sent[0],
+            json!({
+                "op": "select", "table": "books",
+                "where": { "pages": { "gt": 300 } },
+                "order": [{ "field": "title", "dir": "asc" }],
+                "limit": 10,
+            })
+        );
+        assert_eq!(
+            sent[1],
+            json!({
+                "op": "select", "table": "books",
+                "where": { "id": { "eq": 1 } }, "limit": 1,
+            }),
+            "`getRow` is `getRows` with the bound this method's name promises"
+        );
+        assert_eq!(
+            sent[3],
+            json!({
+                "op": "aggregate", "table": "books",
+                "where": { "author": { "eq": 1 } },
+                "aggregate": [{ "alias": "count", "fn": "count", "arg": Json::Null }],
+            }),
+            "a count is the database's, so the row cap never enters into it"
+        );
+        assert_eq!(
+            sent[4],
+            json!({
+                "op": "aggregate", "table": "books", "group": ["author"],
+                "aggregate": [{ "alias": "_fd_n", "fn": "count", "arg": Json::Null }],
+                "order": [{ "field": "author", "dir": "asc" }],
+            }),
+            "distinct values are groups"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_aggregation_query_lowers_to_the_plans_own_aggregate() {
+        // §3.3: v1's aggregation spec, answering one object ungrouped and an
+        // array grouped — which is v1's convention and this server's, because a
+        // grouped answer has no one value to be.
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            &format!(
+                r#"{SPY}
+                   const books = Table.findOne("books");
+                   answers.aggregate = {{ n: 3, longest: 412 }};
+                   answers.grouped = [{{ author: 1, n: 2 }}];
+                   const flat = await books.aggregationQuery({{
+                     n: {{ aggregate: "count" }},
+                     longest: {{ field: "pages", aggregate: "max" }},
+                   }});
+                   const grouped = await books.aggregationQuery(
+                     {{ n: {{ aggregate: "count" }} }},
+                     {{ where: {{ pages: {{ gt: 100 }} }}, groupBy: "author" }}
+                   );
+                   const said = (f) => {{ try {{ f(); return "did not throw"; }}
+                                          catch (e) {{ return e.message; }} }};
+                   return {{
+                     flat: flat, grouped: grouped, sent: sent,
+                     latest: said(() => books.aggregationQuery(
+                       {{ x: {{ field: "pages", aggregate: "Latest published" }} }})),
+                     child: said(() => books.aggregationQuery(
+                       {{ x: {{ table: "reviews", ref: "book", aggregate: "count" }} }})),
+                     unknown: said(() => books.aggregationQuery({{ n: {{ aggregate: "count" }} }},
+                                                               {{ cached: true }})),
+                   }};"#
+            ),
+        )
+        .await;
+
+        assert_eq!(out["flat"], json!({ "n": 3, "longest": 412 }));
+        assert_eq!(out["grouped"], json!([{ "author": 1, "n": 2 }]));
+        let sent = out["sent"].as_array().expect("the plans");
+        assert_eq!(
+            sent[0],
+            json!({
+                "op": "aggregate", "table": "books",
+                "aggregate": [
+                    { "alias": "n", "fn": "count", "arg": Json::Null },
+                    { "alias": "longest", "fn": "max", "arg": "pages" },
+                ],
+            })
+        );
+        assert_eq!(
+            sent[1],
+            json!({
+                "op": "aggregate", "table": "books",
+                "aggregate": [{ "alias": "n", "fn": "count", "arg": Json::Null }],
+                "where": { "pages": { "gt": 100 } },
+                "group": ["author"],
+            })
+        );
+        // The two aggregate shapes that are a *subquery* over child rows are
+        // refused here rather than approximated: this question is about the
+        // table's own rows, and `getJoinedRows` is the one with children.
+        assert!(
+            out["latest"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Latest published"),
+            "{out}"
+        );
+        assert!(
+            out["child"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("getJoinedRows"),
+            "{out}"
+        );
+        assert!(
+            out["unknown"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("cached"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_joined_read_lowers_to_paths_and_relations_in_one_plan() {
+        // §6, which is the piece of v1 whose vocabulary looks least like this
+        // server's and turns out to fit best: `joinFields` is a Ⱶ-path
+        // projection and `aggregations` is an inverse-relation one, so a joined
+        // read is **one** select plan and needs no host operation of its own.
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            &format!(
+                r#"{SPY}
+                   const books = Table.findOne("books");
+                   answers.select = [{{ id: 1, title: "Orlando", writer: "Woolf", stars: 4.5 }}];
+                   const rows = await books.getJoinedRows({{
+                     where: {{ pages: {{ gt: 100 }} }},
+                     joinFields: {{ writer: {{ ref: "author", target: "name" }} }},
+                     aggregations: {{
+                       stars: {{ table: "reviews", ref: "book", field: "stars",
+                                 aggregate: "avg" }},
+                       reviews: {{ table: "reviews", ref: "book", aggregate: "count" }},
+                       critics: {{ table: "reviews", ref: "book", field: "critic",
+                                   aggregate: "count distinct" }},
+                       latest: {{ table: "reviews", ref: "book", field: "stars",
+                                  aggregate: "Latest posted" }},
+                     }},
+                     orderBy: "title", limit: 5,
+                   }});
+                   const one = await books.getJoinedRow({{ joinFields: {{}} }});
+                   const query = await books.getJoinedQuery({{
+                     joinFields: {{ writer: {{ ref: "author", target: "name" }} }},
+                   }});
+                   return {{ rows: rows, one: one, query: query, sent: sent }};"#
+            ),
+        )
+        .await;
+
+        let sent = out["sent"].as_array().expect("the plans");
+        assert_eq!(
+            sent[0],
+            json!({
+                "op": "select", "table": "books",
+                "where": { "pages": { "gt": 100 } },
+                "select": [
+                    "id", "title", "pages", "author", "owner",
+                    { "alias": "writer", "formula": "authorⱵname" },
+                    { "alias": "stars", "formula": "reviewsↃbook.avg(\"stars\")" },
+                    { "alias": "reviews", "formula": "reviewsↃbook.length" },
+                    { "alias": "critics", "formula": "reviewsↃbook.distinct(\"critic\").length" },
+                    { "alias": "latest", "formula": "reviewsↃbook.maxBy(\"posted\").stars" },
+                ],
+                "order": [{ "field": "title", "dir": "asc" }],
+                "limit": 5,
+            }),
+            "the row is the table's own fields, and the join and the aggregations \
+             are projections beside them"
+        );
+        assert_eq!(sent[1]["limit"], json!(1), "`getJoinedRow` bounds itself");
+        assert_eq!(
+            sent[2]["render"],
+            json!(true),
+            "`getJoinedQuery` asks for the statement rather than the rows"
+        );
+        assert_eq!(
+            out["one"],
+            json!({ "id": 1, "title": "Orlando", "writer": "Woolf", "stars": 4.5 })
+        );
+        // v1's own shape, and this server will not run it back for you.
+        assert_eq!(out["query"], json!({ "sql": "select …", "values": [1] }));
+    }
+
+    #[tokio::test]
+    async fn every_join_option_this_server_cannot_lower_is_refused_by_name() {
+        // §6's list, each naming itself. A join field this server dropped on the
+        // floor would answer a row with a column missing, which a v1 list view
+        // renders as an empty cell rather than as a failure.
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            &format!(
+                r#"{SPY}
+                   const books = Table.findOne("books");
+                   const said = (f) => {{ try {{ f(); return "did not throw"; }}
+                                          catch (e) {{ return e.message; }} }};
+                   const join = (spec) => said(() => books.getJoinedRows({{ joinFields: {{ x: spec }} }}));
+                   const agg = (spec) => said(() => books.getJoinedRows({{ aggregations: {{ x: spec }} }}));
+                   return {{
+                     through: join({{ ref: "author", target: "name", through: "publisher" }}),
+                     ontable: join({{ ref: "author", target: "name", ontable: "authors" }}),
+                     rename: join({{ ref: "author", target: "name", rename_object: ["a"] }}),
+                     lookup: join({{ ref: "author", target: "name", lookupFunction: "f" }}),
+                     unknown_join: join({{ ref: "author", target: "name", summary: "name" }}),
+                     not_a_name: join({{ ref: "author", target: "name; drop" }}),
+                     valueFormula: agg({{ table: "reviews", ref: "book", aggregate: "count",
+                                          valueFormula: "x + 1" }}),
+                     agg_where: agg({{ table: "reviews", ref: "book", aggregate: "count",
+                                       where: {{ stars: 5 }} }}),
+                     array_agg: agg({{ table: "reviews", ref: "book", field: "stars",
+                                       aggregate: "array_agg" }}),
+                     no_field: agg({{ table: "reviews", ref: "book", aggregate: "avg" }}),
+                     option: said(() => books.getJoinedRows({{ starts_with: {{ title: "O" }} }})),
+                   }};"#
+            ),
+        )
+        .await;
+
+        for (key, wanted) in [
+            ("through", "through"),
+            ("ontable", "ontable"),
+            ("rename", "rename_object"),
+            ("lookup", "lookupFunction"),
+            ("unknown_join", "summary"),
+            ("not_a_name", "target"),
+            ("valueFormula", "valueFormula"),
+            ("agg_where", "where"),
+            ("array_agg", "array_agg"),
+            ("no_field", "field"),
+            ("option", "starts_with"),
+        ] {
+            let message = out[key].as_str().unwrap_or_default();
+            assert!(
+                message.contains(wanted),
+                "the refusal of {key} does not name it: {message}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_read_with_no_database_says_so_and_the_metadata_still_answers() {
+        // The division the snapshot buys, at its edge: a run with the schema and
+        // no host answers every property and refuses every read. Phase 5's
+        // `onLoad` is exactly this, and a `getRows` that answered `[]` there
+        // would have a plugin conclude the table is empty.
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            r#"const { Table } = __scMakeV1Api(null, __scSchema(7));
+               const books = Table.findOne("books");
+               const said = (f) => { try { f(); return "did not throw"; }
+                                     catch (e) { return e.message; } };
+               return {
+                 pk: books.pk_name,
+                 rows: said(() => books.getRows({})),
+                 count: said(() => books.countRows()),
+                 field: said(() => books.getField("author").distinct_values()),
+               };"#,
+        )
+        .await;
+        assert_eq!(out["pk"], json!("id"));
+        for key in ["rows", "count", "field"] {
+            let message = out[key].as_str().unwrap_or_default();
+            assert!(message.contains("no database host"), "{key}: {message}");
+        }
+        assert!(
+            out["rows"].as_str().unwrap_or_default().contains("getRows"),
+            "the refusal names the method the plugin called: {out}"
+        );
+    }
+
     #[tokio::test]
     async fn a_v1_field_cannot_be_assigned_to() {
         // v1 code assigns to a field and expects it to matter — that is what
@@ -9031,7 +9395,7 @@ mod tests {
                      try {{ owner[name](); out[path] = "did not throw"; }}
                      catch (e) {{ out[path] = e.message; }}
                    }}
-                   out.implemented = __scV1Refused().indexOf("table.getField") < 0;
+                   out.implemented = __scV1Refused().indexOf("table.getRows") < 0;
                    return out;"#
             ),
         )
@@ -9066,7 +9430,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out["table.getRows"]
+            out["table.insertRow"]
                 .as_str()
                 .unwrap_or_default()
                 .ends_with("this version of Saltcorn"),

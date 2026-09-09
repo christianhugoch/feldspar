@@ -322,19 +322,19 @@ Three levels, because the failure modes are at three levels:
 
 ## Phase 3 — Reads
 
-- [ ] 3.1 `getRows(where, selopts)` and `getRow(where, selopts)` — one select plan each.
-- [ ] 3.2 `countRows(where, opts)` — an aggregate plan; `distinctValues(field, where?)` — a
+- [x] 3.1 `getRows(where, selopts)` and `getRow(where, selopts)` — one select plan each.
+- [x] 3.2 `countRows(where, opts)` — an aggregate plan; `distinctValues(field, where?)` — a
       grouped select, answering v1's plain array of values.
-- [ ] 3.3 `aggregationQuery(aggregations, { where, groupBy })` — v1's aggregation spec lowered
+- [x] 3.3 `aggregationQuery(aggregations, { where, groupBy })` — v1's aggregation spec lowered
       to the plan's `aggregate`, answering one object ungrouped and an array grouped, as v1
       does.
-- [ ] 3.4 `getJoinedRows(opts)` / `getJoinedRow(opts)` (§6): `joinFields` to Ⱶ-paths,
+- [x] 3.4 `getJoinedRows(opts)` / `getJoinedRow(opts)` (§6): `joinFields` to Ⱶ-paths,
       `aggregations` to Ↄ-relations, everything else in v1's `JoinOptions` refused by name.
-- [ ] 3.5 `getJoinedQuery(opts)` answering `{ sql, values }` from the rendered statement, with
+- [x] 3.5 `getJoinedQuery(opts)` answering `{ sql, values }` from the rendered statement, with
       `notAuthorized: true` where the ownership rule says so — needs the statement's SQL text
       and binds out of `sc-query`'s renderer, and a doc line saying this server will not run
       it for you.
-- [ ] 3.6 Live tests against Postgres for each, including a joined read whose aggregation and
+- [x] 3.6 Live tests against Postgres for each, including a joined read whose aggregation and
       join field both come back on the row.
 
 ## Phase 4 — Writes, and whose authority

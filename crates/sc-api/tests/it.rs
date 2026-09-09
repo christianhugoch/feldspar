@@ -57,3 +57,5 @@ mod rich_type_write_path;
 mod sqlite_rows;
 #[path = "typescript_typecheck.rs"]
 mod typescript_typecheck;
+#[path = "v1_table_reads.rs"]
+mod v1_table_reads;
