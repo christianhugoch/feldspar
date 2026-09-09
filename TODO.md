@@ -1,6 +1,6 @@
-# Saltcorn v2 — Predictive models
+# Saltcorn v2 — The v1 `Table` API
 
-Ordered, checkable task list for the twenty-second milestone after the MVP. Earlier lists are
+Ordered, checkable task list for the twenty-third milestone after the MVP. Earlier lists are
 archived in [docs/TODO-mvp.md](./docs/TODO-mvp.md) (the MVP),
 [docs/TODO-post-mvp-1.md](./docs/TODO-post-mvp-1.md) (file stores + the React framework),
 [docs/TODO-post-mvp-2.md](./docs/TODO-post-mvp-2.md) (the `_sc_tables`/`_sc_fields` overlays,
@@ -22,40 +22,46 @@ and indexes), [docs/TODO-post-mvp-10.md](./docs/TODO-post-mvp-10.md) (email),
 [docs/TODO-post-mvp-17.md](./docs/TODO-post-mvp-17.md) (writable table providers),
 [docs/TODO-post-mvp-18.md](./docs/TODO-post-mvp-18.md) (workflows),
 [docs/TODO-post-mvp-19.md](./docs/TODO-post-mvp-19.md) (the Python code adapter),
-[docs/TODO-post-mvp-20.md](./docs/TODO-post-mvp-20.md) (the administration MCP server) and
-[docs/TODO-post-mvp-21.md](./docs/TODO-post-mvp-21.md) (bundled modules).
-Scope and rationale remain in [docs/GOALS.md](./docs/GOALS.md) ("Model providers",
-"Datasets", "Predictive models") and [docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md)
-(**§14.2**, which this milestone replaces).
+[docs/TODO-post-mvp-20.md](./docs/TODO-post-mvp-20.md) (the administration MCP server),
+[docs/TODO-post-mvp-21.md](./docs/TODO-post-mvp-21.md) (bundled modules) and
+[docs/TODO-post-mvp-22.md](./docs/TODO-post-mvp-22.md) (predictive models).
+Scope and rationale remain in [docs/GOALS.md](./docs/GOALS.md) and
+[docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md) (**§15.1**, whose third tier — "`Table`,
+`File`, `User` … is a stub whose properties are reachable and whose calls throw … Replacing
+that tier with the real thing … is a later milestone" — this milestone is).
 
-Everything in this system so far *retrieves*: a query answers what is in the tables, an
-expression computes what follows from a row, an agent asks a model about text. Nothing yet
-answers **"what does this data imply about a row I have not seen"** — or the question that is
-often the real one, **"what does this data imply, full stop"**: is the coefficient on price
-negative, do the two groups differ, how many clusters are there.
+A v1 plugin's code, and a v1 application's `run_js_code`, do not write `db.books.where(…)`.
+They write:
 
-This milestone is that. A **model** is a saved question about a table: which rows and which
-derived values make up the data (the **dataset**), which provider answers it, and with what
-settings. Fitting one produces a **model instance** — the fitted parameters, the metrics, and
-enough state to apply it to a new row. Both halves of the point are first class: an instance
-you inspect (the coefficients, the test statistic, the explained variance) and an instance you
-apply (a predicted price on a row a trigger just inserted).
+```js
+const Table = require("@saltcorn/data/models/table");
+const books = Table.findOne({ name: "books" });
+const recent = await books.getRows({ published: { gt: 2000 } }, { orderBy: "title", limit: 10 });
+await books.updateRow({ read: true }, recent[0].id, user);
+```
 
-**Milestone definition of done:** an admin opens the Models tab on a server with a `houses`
-table, creates *House prices*, and builds its dataset by picking columns — `price`,
-`bedrooms`, `neighbourhoodⱵaverage_income`, `viewingsↃcount` — and a filter, `sold`. They
-choose **Linear regression**, name `price` as the label, and press Fit. Seconds later the
-instance shows a coefficient table with standard errors, *t* and *p* for each feature, R² and
-RMSE on the training and test rows, and the number of rows each was fitted on. They mark it
-active. A trigger on `houses` with a `predict_row` action now writes `estimated_price` on
-every insert. On the same screen, the same dataset, they fit a scikit-learn gradient-boosting
-model from a bundled module and compare its RMSE against the regression's — and nothing on the
-screen knows that one of the two answers came from Python.
+Every line of that is currently either a throw (in a module, where `Table` is a `namedStub`)
+or a `ReferenceError` (in a code body, which has never had a `Table` at all). This milestone
+makes it work — the *data* half of v1's `Table`, and the `Field` it is made of, over the plan
+seam `db` already speaks. Nothing about **changing** a table comes with it: `Table.create`,
+`Table.update`, `Field.create` and every DDL method stay stubs, because a v1 plugin that
+edits the schema is a plugin editing a schema this server introspects (§9), and that is a
+different argument to have.
 
-**Not in this milestone:** Bayesian inference (mc-stan), which needs cmdstan on the host and a
-model *file* rather than a form; statsmodels as a second bundled module; k-fold
-cross-validation; and any application-facing (REST/GraphQL) prediction endpoint. Each is named
-under *Carried past this milestone* with what it would take.
+**Milestone definition of done:** a `run_js_code` trigger whose body is the six lines above
+runs, reads and writes. The same six lines, inside an installed v1 plugin's action, do the
+same — and the plugin never learns it is not running on Saltcorn 1. `Table.findOne("books")`
+answers **synchronously**, `books.fields` is an array of `Field`s with v1's property names on
+them, `books.getField("author").is_fkey` is `true`, and `books.pk_name` is `"id"` — none of
+which costs a host call. A read with `{ forUser: user }` returns the rows that user may see,
+by §7.3's rule and through the same `*_as` functions the agent tools go through. A method
+this milestone does not implement throws naming itself, exactly as the stub tier does today.
+
+**Not in this milestone:** the v1 `db` module (`db.query`, `db.select`, `db.insert` …), so
+`getJoinedQuery` answers `{ sql, values }` that this server will not run for you; `File` and
+`User`, which stay stubs; v1's `View` and `State`; row history and the sync-info methods;
+stored-calculated-field recomputation; CSV/JSON import and export; and the view-builder
+relation helpers. Each is named under *Explicitly OUT* with what it would take.
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -63,576 +69,370 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 # The specification
 
-### 1. The shape of the thing, end to end
+### 1. One implementation, in JavaScript, over the plan seam
 
-Five nouns, and it is worth fixing them before anything else because the words are overloaded
-everywhere else in the industry.
+The `Table` a code body gets and the `Table` a module gets are the **same text**: a
+JavaScript source file in `sc-expr`, exported as a `pub const`, compiled into the code
+isolates' prelude and concatenated into `sc-module`'s host script. Not two implementations
+that agree today, because two implementations of v1's `Where` translation are two
+implementations that will disagree by the third bug fixed in one of them.
 
-| noun | what it is | where it lives |
-| --- | --- | --- |
-| **model provider** | code that can fit something — `linear_regression`, `kmeans`, a module's `sklearn` | a registry, like actions |
-| **dataset** | which table, which derived columns, which rows | a JSON column *on the model* |
-| **model** | a dataset + a provider + its configuration + its hyperparameter space | `_sc_models` |
-| **model instance** | one fit: parameters, metrics, encoding, serialised state | `_sc_model_instances` |
-| **prediction** | applying an instance to rows | the `predict_row` action, and an endpoint |
+It is JavaScript for the reason `DB_PRELUDE` is (§10.1, decision 4): what crosses into Rust
+is a **plan**, so `getRows`'s `orderBy`, `getJoinedRows`'s `joinFields` and v1's whole `Where`
+vocabulary are lowered in the guest, against a seam that already resolves every name it is
+handed and trusts none of them. No new SQL is assembled anywhere in this milestone.
 
-A model is edited and refitted; each fit leaves an instance behind, so the instances of a model
-are its history and are comparable — same dataset, same split, different settings. One instance
-per model may be **active**, which is what lets a trigger name a model rather than a fit.
+What that buys, precisely: a `getRows` is one `Plan { op: Select, … }`, so it goes through
+the catalog's name resolution, `crate::filter`'s shared operator vocabulary, §7.3's ownership
+rule, the row cap and the call budget — the same six things a `db.books.rows()` goes through,
+because it *is* one.
 
-### 2. A dataset is a list of formulas, and that is the whole of it
+### 2. `Table.findOne` is synchronous, and that decides the design
 
-GOALS asks for "table fields and derived fields such as calculations, joinfields and
-aggregations, and any inclusion/exclusion criteria on the rows". This system already has one
-language that is exactly those four things: the calc-field/ownership expression language
-(`sc-expr`), with `Ⱶ` for a join path and `Ↄ` for an aggregation over an incoming key, already
-translated to SQL by `translate_value`, already falling back to the reified evaluator when a
-construct has no SQL counterpart, and already proven at parity between the two.
+v1's `Table.findOne` reads a state cache. It returns a `Table`, not a promise, and every
+plugin written in eight years assumes it:
 
-So a dataset is:
-
-```rust
-pub struct Dataset {
-    pub table: String,
-    pub columns: Vec<DatasetColumn>,   // { name, expr }
-    pub filter: Option<String>,        // one boolean formula, or none
-}
+```js
+const table = Table.findOne("books");     // not awaited
+const pk = table.pk_name;                 // not awaited
+for (const f of table.fields) { … }       // not awaited
 ```
 
-and `expr` is a formula: `price`, `price / area`, `neighbourhoodⱵaverage_income`,
-`viewings.filter(v => v.attended).length` — whatever the calc-field editor already accepts,
-validated against the same `SchemaShape` with the same errors. There is **no second vocabulary**
-of "field / joinfield / aggregation" with three shapes in the JSON and three code paths behind
-it. The admin UI still offers a picker — click a field, click a join path, click an aggregation
-— but what the picker *writes* is a formula, and a user who wants `log(price)` types it.
+A host round trip cannot answer that, and a `Table` that answered a promise would break every
+line after it. So the **metadata is in the isolate before the run starts**: a *schema
+snapshot* — every table, its fields, its access rules, its ownership formula's source — built
+from the `Catalog`, serialised once, and cached on the isolate against the catalog's
+generation. A run carries the generation, not the snapshot; the snapshot crosses only when
+the isolate does not have that generation yet, which is once per catalog reload rather than
+once per run.
 
-`user` and the operation flags are out of scope in a dataset formula for the same reason they
-are out of scope in a calc field: a dataset has no caller, and a fit that meant something
-different depending on who pressed the button would be indefensible.
+So the division is: **metadata is local and synchronous, data is a host call and
+asynchronous** — which is v1's own division, and is why the port is possible at all.
 
-### 3. The dataset lives on the model, and has no tab
+The snapshot is a **read of the catalog and not a second source of truth**: it is built by
+`sc-api` from the same `Catalog` the plans resolve against, and it goes stale exactly when
+the catalog reloads, which bumps the generation. A module worker is handed it the same way,
+per call, and caches it the same way.
 
-GOALS says so ("Datasets do not have their own tab in the admin UI"), and the reason is worth
-recording. A shared, named dataset would need a lifecycle — what happens to the four models
-fitted against it when somebody adds a column, whether an instance fitted against version 1 is
-still readable, whether deleting it is allowed. That is a versioning problem bought for a
-saving (retyping a column list) that a **Duplicate model** button answers instead. So
-`_sc_models.dataset` is a JSON column, the definition belongs to that model, and `Dataset` is a
-plain Rust value with no store, no id and no name.
+### 3. A module can now call the host
 
-### 4. `sc-model` at layer 6, and the two seams that put it there
+`sc-module`'s worker only ever *answers*: `__scDone`, `__scFail`, `__scLog`. There is no way
+for JavaScript inside a module to ask this server anything, which is why the whole
+`@saltcorn` API below `Workflow`/`Form`/`interpolate` is a stub. This milestone adds the
+other direction, and it is the largest piece of Rust in it:
 
-The crate goes **beside `sc-action`, before `sc-module`** — not above the row layer where its
-data comes from — for one reason: a module supplies model providers the way it supplies actions
-and table providers, and `sc-module` (layer 6) can only implement a trait declared below it.
-That is the same placement argument `sc-action` already carries, and `TableProviderHost`
-(declared in `sc-catalog` at layer 4, implemented in `sc-module` at layer 6) is the same shape.
+- `__scAsk(callId, askId, requestJson)` — a native function on the worker's global, alongside
+  the three already there. It returns nothing; the JavaScript holds a promise for `askId`.
+- The worker loop gains an `asked` channel beside `settled`, and routes each ask to the
+  **caller of the call it belongs to** — which is where the host is, because
+  `CodeHosts<'a>` is borrowed on that caller's stack and cannot be sent anywhere.
+- `Control::Answer { askId, outcome }` comes back in on the channel the worker already
+  selects on, and the worker calls `__scAnswer(askId, ok, json)` into the isolate.
+- `ModuleHost::run`/`call` take `CodeHosts<'_>` and drive the loop: await the reply, and
+  while waiting, service asks by calling `host.call(plan).await`. Which is
+  `PyModuleAction`'s arrangement exactly (`CodeSurfaces::build(ctx)`, `hosts.surfaces()`),
+  one language over.
 
-The cost is that `sc-model` cannot read a row: `sc-api::rows` is layer 8, and going around it
-would mean a dataset that ignored non-stored calc fields, ownership and RLS, and could not read
-a provided table at all. So the crate declares the seam and somebody above the row layer fills
-it in — exactly as `sc-agent` declares `ProviderConnector` and `sc-server` supplies it:
+The bounds hold unchanged and it is worth saying why: an ask is answered on the **server's**
+tokio task, not the worker's, so a module blocked on a query is not holding the JS slice —
+the watchdog's clock is about JavaScript that does not yield, and awaiting a promise yields.
+The call budget is the run's, counted where it already is, so a module's N+1 costs what a
+code body's N+1 costs.
 
-```rust
-/// How a dataset becomes rows. Implemented in `sc-server` over `sc_api::rows`.
-#[async_trait]
-pub trait DatasetSource: Send + Sync {
-    async fn materialise(&self, ds: &Dataset, cap: u64) -> Result<Frame>;
-}
+`Table` is unavailable at **load** time (`onLoad`, `configuration_workflow`), because no call
+is in flight and therefore no host is borrowed. It says so by name rather than answering
+nothing: a v1 plugin that reads rows from `onLoad` is rare, and one that silently read none
+would be worse.
 
-/// The model providers a module supplies. Implemented in `sc-module` and `sc-python`.
-#[async_trait]
-pub trait ModelProviderHost: Send + Sync {
-    fn providers(&self) -> Vec<ModelProviderKind>;
-    async fn fit(&self, p: &str, frame: &Frame, cfg: &Attrs, hp: &Attrs) -> Result<FitResult>;
-    async fn predict(&self, p: &str, state: &Json, frame: &Frame) -> Result<Vec<Prediction>>;
-}
+### 4. Whose authority, and v1's `user` argument
+
+v1 says *whose* view of the data this is with an argument: `getRows(where, { forUser: u })`,
+`insertRow(row, user)`, `deleteRows(where, user)`. Omitted, it means unrestricted.
+
+The plan's `authority` is `admin` (the default, §5: a trigger is server-side configuration)
+or `user` (the event's caller, through `sc_api::ownership`'s `*_as` functions). Neither is
+"this particular user", and v1's argument frequently *is* that particular user — a plugin
+that looked one up, or the `user` off its own argument object.
+
+So `Authority` gains a third form, `{ user: <id> }`: the named user is loaded, and the
+operation goes through **the same `*_as` functions** `authority: "user"` goes through. There
+is no second implementation of "meets the floor OR the formula grants it" and there must
+never be one. This can only ever **narrow** — the body already runs as admin and could read
+everything by omitting the argument — so it is not an escalation; it is a body voluntarily
+asking to be treated as somebody smaller. A named user who does not exist is an error naming
+them, never a silent fall back to admin.
+
+`forPublic: true` is the public role with no user, which the seam can already express.
+
+### 5. v1's `Where`, translated
+
+v1's where-expressions are a vocabulary of their own and are not v2's. The translation is in
+the shared JavaScript, is unit-tested against v1's own cases, and refuses by name what it
+cannot say:
+
+| v1 | becomes |
+| --- | --- |
+| `{ author: "Tolstoy" }` | `{ author: { eq: … } }` |
+| `{ author: null }` | `{ author: { is_null: true } }` |
+| `{ pages: { gt: 500 } }`, `{ lt }`, with `equal: true` | `gt`/`gte`/`lt`/`lte` |
+| `{ pages: { gt: 100, lt: 500 } }` | `and` of the two |
+| `{ id: { in: [1, 2] } }` / `{ id: { not: { in: […] } } }` | `in` / `nin` |
+| `{ author: { ilike: "tol" } }` | `ilike` with v1's implicit `%…%` |
+| `{ author: { ilike: "tol", fullMatch: true } }` | `ilike` with the pattern as given |
+| `{ or: [ … ] }`, `{ and: [ … ] }`, `{ not: { … } }` | the same combinators |
+| `{ x: { or: [ {gt: 1}, {lt: 0} ] } }` | `or` of the two on `x` |
+| `{ x: [ {gt: 1}, {lt: 9} ] }` (array is AND) | `and` of the two on `x` |
+| `{ _false: true }` | a false predicate |
+
+Refused, naming the key and what to write instead: `inSelect`, `inSelectWithLevels`, `json`,
+`slugify`, `_fts`, a `RegExp` value, a `Symbol` value (v1's raw-SQL escape), `day_only`, and
+`{ eq: [a, b] }`'s two-expression form. Each of those is either a SQL construct the plan seam
+deliberately does not carry or a feature this server does not have; a translator that dropped
+one on the floor would compute the wrong answer inside somebody's trigger, which is the
+failure principle 5 exists to prevent.
+
+An **unknown `selopts` key** is refused the same way, for the same reason a misspelled
+`fetch` option is: `cached`, `starts_with`, `distinct` and anything else this milestone does
+not implement are errors naming themselves, not silence.
+
+### 6. Joins and aggregations lower to expressions
+
+v1's `getJoinedRows` is the one method whose vocabulary looks nothing like v2's, and it turns
+out to be the one that fits best, because both halves of it are things the expression
+language already says:
+
+```js
+await patients.getJoinedRows({
+  joinFields:   { town: { ref: "home", target: "name" } },
+  aggregations: { avg_temp: { table: "readings", ref: "patient_id",
+                              field: "temperature", aggregate: "avg" } },
+});
 ```
 
-`ModelServices` in `sc-server/src/models.rs` assembles the pieces the way `AgentServices` and
-the trigger dispatcher already are: the registry (built-ins plus one entry per module-supplied
-provider, rebuilt on every module change), the `DatasetSource`, and the fit job runner.
+`joinFields` becomes a Ⱶ-path projection — `{ alias: "town", formula: "homeⱵname" }` — and
+`aggregations` becomes an inverse-relation projection —
+`{ alias: "avg_temp", formula: "readingsↃpatient_id.avg(\"temperature\")" }` (docs/AGG_EXPRS.md).
+Both are `Selection`s of an ordinary select plan, so a joined read is **one** statement, goes
+through `ownership::join_guard` like every other Ⱶ-path, and needs no new host op at all.
 
-### 5. The split is a hash of the primary key, not a shuffle
+What does not lower is refused naming itself: `through` (a two-hop join field), `ontable`,
+`rename_object`, `lookupFunction`, and an aggregation's `valueFormula` in v1's spelling.
 
-A fit divides its rows into **train**, **validation** and **test**. The obvious implementation
-shuffles a vector with a seeded RNG. This one instead assigns each row by hashing its primary
-key with the fit's seed and taking the fraction — which costs the same and buys three things:
+`getJoinedQuery` answers `{ sql, values }` from the statement the plan renders — v1's own
+shape. This server will not run it for you (there is no `db` module in this milestone), so it
+is there for the plugin that inspects or logs it, and the tutorial says so.
 
-- **It does not depend on row order**, so a dataset materialised with a different `ORDER BY`, a
-  different `LIMIT`, or off a table provider that answers in feed order splits identically.
-- **A refit after new rows arrive keeps every old row on the side it was on.** The test metric
-  of instance 7 is therefore comparable with the test metric of instance 3, which is the entire
-  reason anybody looks at two instances of one model.
-- **It is reproducible from the row, not from the run** — an instance records its seed and
-  fractions, so the question "was this row in the training set" is answerable afterwards
-  without storing a list of ids.
+### 7. `Field` is a view of the catalog, not a record
 
-The price is that the fractions are approximate on small datasets (200 rows at 20% test is
-whatever the hash gives, not exactly 40). The instance records the counts it actually got, so
-nobody has to guess.
+v1's `Field` is a row of `_sc_fields` with behaviour on it. Here it is a **projection of the
+snapshot** with v1's property names: `name`, `label`, `type`, `typename`, `required`,
+`is_unique`, `primary_key`, `calculated`, `stored`, `expression`, `is_fkey`, `reftable_name`,
+`reftype`, `refname`, `attributes`, `table_id`, `table`, `fieldview`, `sublabel`, and the
+getters `type_name`, `pretty_type`, `sql_type`, `form_name`. Its `id` is its name, because
+this server's fields are identified by name (§9) and a plugin that keys a map by `f.id` gets
+a stable key either way.
 
-A dataset whose table has **no single primary key** cannot be split this way and is refused by
-name, saying so: there is nothing stable to hash. (Reads are unaffected — that restriction is
-the fit's, not the dataset's, and an unsupervised fit with no split is still allowed.)
+It is **frozen**. v1 code assigns to a field and expects the assignment to matter (that is
+what `Field.update` is for); here an assignment would change a copy of a snapshot and nothing
+else, so it is refused at the property rather than accepted and ignored.
 
-### 6. The encoding belongs to the instance
+The one method with I/O behind it is `distinct_values(where?)`, which is `Table`'s
+`distinctValues` from the other end.
 
-A model provider wants numbers. A dataset column is a string, a boolean, a date or a float. The
-translation — one-hot for a categorical feature, a label mapping for a classification target,
-an epoch-seconds cast for a date, standardisation where a provider asks for it — happens once,
-in `sc-model`, and the **result is stored on the instance**:
+### 8. What a code body sees
 
-```rust
-pub struct Encoding { pub columns: Vec<ColumnEncoding>, pub target: Option<TargetEncoding> }
-```
+`Table` and `Field` are **run parameters**, beside `db`, `fetch`, `fs`, `trigger` and
+`modfn` — minted per run from the run's token, for the reason `db` is (decision 5): a body
+that assigns to `Table` poisons nothing, because the next run is handed its own.
 
-This is the single most load-bearing decision in the milestone, because the failure it prevents
-is silent. If prediction re-derived the one-hot column order from whatever categories happen to
-be in the rows being predicted, a model fitted when `region` had four values and applied to a
-batch containing three would put every coefficient against the wrong column and return
-confident nonsense. Fitting the encoding once and carrying it means a prediction is encoded
-**the way the fit was**, or it fails.
+The consequence, and it is a real one: a body compiled as
+`async function (bindings, db, …, Table, Field)` cannot contain `const Table = …` — that is a
+`SyntaxError` where it used to be a working line. The system is in prototype status and there
+are no applications to migrate, so this is stated rather than worked around.
 
-And it fails loudly. A category at predict time that was not present at fit time is an error
-naming the column and the value — not a row of zeros, which is the industry's usual answer and
-is a prediction from a model that was never shown this input. A null in a feature is a dropped
-row at fit time (counted, and reported on the instance) and an error at predict time, for the
-same reason: at fit time dropping is a defensible sample restriction that we report; at predict
-time it would mean answering a question about a row we cannot represent.
+They are bound **only when the `db` host is present**, so a body in a context with no host
+(client generation, a unit test) names `Table` and gets the `ReferenceError` it already gets
+for `db`, rather than a class that fails on use.
 
-### 7. Metrics are the host's, parameters are the provider's
+### 9. Refusals are named, and that is the whole tier boundary
 
-A provider returns `FitResult { state, parameters }` and **no metrics**. `sc-model` computes
-them, by running the fitted state back over each split and scoring the predictions:
+Everything not implemented keeps the behaviour the stub tier has today: reachable as a
+property, fatal on call, naming the path. `Table.create(…)` throws
+*"the Saltcorn v1 API Table.create is not available…"*; so does `field.alter_sql_type(…)`,
+`table.get_history(…)` and `table.dump_to_json(…)`. A method that answered `undefined` would
+not fail — it would compute the wrong answer inside somebody's trigger.
 
-- **regression** — R², RMSE, MAE per split
-- **classification** — accuracy, per-class precision/recall/F1, and the confusion matrix
-- **clustering** — cluster sizes and within-cluster sum of squares
-- **dimensionality reduction** — explained variance per component
-- **hypothesis test** — nothing; the parameters *are* the answer
+The list of what throws is **generated from one place**, so that a method added later is
+removed from the refusal list in the same edit that implements it, and the two can never
+disagree.
 
-Two reasons. It makes providers **comparable** — the smartcore regression and the scikit-learn
-one are scored by the same code on the same rows, so the number on the screen means one thing —
-and it means a provider in another language does not have to reimplement R² to be a citizen
-here. What a provider *does* own is its parameters, which is where the providers genuinely
-differ, and those are structured for display rather than free JSON:
+### 10. Tests
 
-```rust
-pub enum ParameterBlock {
-    Scalar { name: String, value: f64 },
-    Table  { name: String, columns: Vec<String>, rows: Vec<ParameterRow> },
-    Text   { name: String, body: String },
-}
-```
+Three levels, because the failure modes are at three levels:
 
-`Table` is a coefficient table (estimate, std. error, *t*, *p*); `Text` is for a provider whose
-own output is a summary nobody should reformat — statsmodels' `summary()` is the case this
-variant exists for, and it can be added later without touching a schema.
-
-### 8. Fitting is a job, not a request
-
-A fit reads every row of a dataset and runs an optimiser over it. That is seconds at best and
-minutes at worst, and it must not be an HTTP request that a proxy times out halfway through
-while the work carries on invisibly.
-
-So `fitModel` **creates the instance row first**, with `status = "fitting"`, returns its id, and
-runs the fit on a spawned task that writes `fitted` (with parameters and metrics) or `failed`
-(with the sentence) when it finishes. The screen polls. There is no in-memory job registry,
-because the row is the registry.
-
-Two consequences, both stated rather than discovered:
-
-- **A fit does not survive a restart.** A process that dies mid-fit leaves an instance saying
-  `fitting` forever, so boot reaps them: any instance still `fitting` at startup becomes
-  `failed` with "the server restarted while this fit was running". Making a fit durable is the
-  workflow engine's job and would mean expressing a fit as a workflow, which is a bigger claim
-  than this milestone makes.
-- **There is no cancel.** Stopping a fit means stopping a `smartcore` call or a Python call
-  mid-flight, and §15.2 has already said what CPython can and cannot be interrupted at. The
-  bound that exists is the row cap (§9), and it is the honest one.
-
-### 9. The frame is columnar, and it is bounded
-
-```rust
-pub enum Column { Float(Vec<Option<f64>>), Int(…), Bool(…), Str(…), Null }
-pub struct Frame { pub columns: Vec<(String, Column)>, pub rows: usize }
-```
-
-Columnar because every consumer wants a column: the encoder standardises one, the splitter
-indexes rows across all of them, and a numeric matrix is built column-major anyway.
-
-**Bounded** because a dataset is a `SELECT` an admin wrote and the server has to hold the answer
-in memory. `--model-max-rows` (default 200 000) is the ceiling; a materialisation that would
-exceed it is refused by name — "the dataset selects more than 200 000 rows; add a filter or
-raise `--model-max-rows`" — rather than by the OOM killer. The count is asked for before the
-rows, so the refusal costs one `COUNT(*)` and not a partial read.
-
-### 10. What a provider is, and what its outcome is
-
-```rust
-#[async_trait]
-pub trait ModelProvider: Send + Sync {
-    fn name(&self) -> &str;
-    fn description(&self) -> &str;
-    /// The form, given the dataset's columns — a provider naming a label needs
-    /// to offer *these* columns as its options.
-    fn config_spec(&self, shape: &DatasetShape) -> Vec<FormField>;
-    fn hyperparameters(&self) -> Vec<FormField>;
-    /// What a fit of this configuration will produce. Not a constant: a random
-    /// forest is a regressor or a classifier depending on its label's type.
-    fn outcome(&self, shape: &DatasetShape, cfg: &Attrs) -> Result<Outcome>;
-    fn validate(&self, shape: &DatasetShape, cfg: &Attrs) -> Result<()> { Ok(()) }
-    async fn fit(&self, frame: &Frame, cfg: &Attrs, hp: &Attrs) -> Result<FitResult>;
-    async fn predict(&self, state: &Json, frame: &Frame) -> Result<Vec<Prediction>>;
-}
-```
-
-`config_spec` takes the dataset's shape for the reason `Action::config_spec_for` takes the
-catalog and the channel: a label picker with a free-text field would push the checking to fit
-time and the guessing to the admin. `outcome` is a *function of the configuration* because
-GOALS says it is — "the model provider defines what the outcome is, depending on the
-configuration parameters" — and because the alternative is four providers where there is one
-algorithm:
-
-```rust
-pub enum Outcome {
-    Regression { label: String },
-    Classification { label: String, classes: Option<Vec<String>> },
-    Cluster,                        // a cluster number per row
-    Embedding { dimensions: usize },// a vector per row
-    Test,                           // no per-row output; the parameters are the result
-}
-```
-
-`Outcome` is what the UI renders against, what the metrics are chosen by, and what `predict_row`
-checks before it writes a number into a text column.
-
-**Prediction takes a frame, not a row.** A single row is a frame of one. Batching is what makes
-a Python provider usable at all (the call is the cost, not the arithmetic) and it is what lets
-the metric pass score 50 000 rows in one call rather than 50 000.
-
-### 11. Hyperparameters, and the search over them
-
-A provider declares its hyperparameters as form fields. A **model** stores, per hyperparameter,
-either a value or a **list** of values; a fit runs the grid of the lists, scores each point on
-the **validation** split by the outcome's primary metric (R² for a regression, accuracy for a
-classification), fits the winner, and reports the **test** metrics for it. The instance records
-the chosen point and the score of every point tried, so the search is inspectable and not a
-number that appeared.
-
-A grid and a fixed three-way split, and not k-fold cross-validation, is the deliberate stopping
-point: k-fold is *k* times the fits for a variance estimate that matters at hundreds of rows and
-not at hundreds of thousands, and it changes nothing about the seam. It is named under
-*Carried past*.
-
-With no lists declared there is no search, the validation split is empty, and a fit is a fit —
-which is the common case and must not pay for the uncommon one.
-
-### 12. Prediction: the action, and the calc field there is not
-
-`predict_row` is an ordinary action (`sc-core-actions`, layer 9 with the others that write
-rows): configure a model — or a named instance — and where the answer goes, either a field on
-the row or a key in the workflow context. Its `config_spec_for` offers the models on *this*
-table when the trigger has one, and it validates that the target field's type can hold what the
-model's `Outcome` produces.
-
-**There is no calculated field that predicts,** and the reason is not effort. A calc field is an
-`sc-expr` formula with two evaluators that must agree, and a prediction is translatable to
-neither SQL nor the reified evaluator; a *stored* one would have to be recomputed on every write
-to every row the model reads, which for a model with an aggregation in its dataset is every row
-of two tables. An action, fired by a trigger the admin wrote, puts the recomputation where
-somebody chose it.
-
-### 13. The built-ins, and the `smartcore` feature
-
-GOALS: "The core rust code supplies model providers for regression, classification, clustering
-and dimensionality reduction based on smartcore. this needs to be a cargo feature flag so it can
-be disabled."
-
-`sc-model`'s `smartcore` feature (**default on**, so `--no-default-features` is the opt-out) adds
-five: `linear_regression`, `logistic_regression`, `random_forest` (regressor or classifier by
-its label's type — the case `Outcome` exists for), `kmeans` and `pca`.
-
-Two more are **not** behind it, because they are arithmetic and not machine learning:
-`t_test` (one-sample, two-sample, paired, Welch) and `anova` (one-way). They are GOALS'
-"statistical hypothesis testing" category, they need a distribution function and nothing else
-(`statrs`), and a build with no smartcore should still be able to answer whether two groups
-differ.
-
-The regression provider computes **standard errors, *t* and *p* for every coefficient** — from
-the residual variance and `(XᵀX)⁻¹`, about forty lines on top of the fit. smartcore does not
-give them, and without them "a regression model where we are more interested in the slope
-coefficients" (GOALS again) is a number with no way to tell whether it means anything.
-
-A build without the feature lists the providers it has and says on the screen that the built-in
-model providers were compiled out, rather than showing an empty list that reads like a bug.
-
-### 14. Providers from modules, in both languages
-
-The third source, and the one that makes this an extension point rather than a fixed menu. A
-JavaScript module exports `modelproviders` beside its `actions` and `table_providers`; a Python
-plugin decorates with `@sc.model_provider`. Both flatten to the same `ModelProviderKind` on the
-manifest and route to the worker or interpreter that loaded them, exactly as a table provider
-does — the machinery is built, and what this milestone adds is one more key at each end.
-
-`plugins/sklearn` is the proof and the useful thing: a bundled Python module wrapping a curated
-set of scikit-learn estimators, installed with one click from the Modules tab, appearing on the
-model form beside the built-ins. It is the third bundled module and needs nothing new from the
-mechanism.
-
-The frame crosses the seam as columns, not as rows of objects: a 50 000 × 12 dataset is 12 JSON
-arrays and not 50 000 JSON objects with the same twelve keys repeated, and on the Python side it
-lands as something `numpy.asarray` takes directly.
-
-### 15. Storage (§9's rule applied)
-
-`_sc_models`: `id` (uuid pk), `name` (unique), `description`, `table_name`, `provider`,
-`dataset` (JSON), `configuration` (JSON), `hyperparameters` (JSON — values or lists), `split`
-(JSON — fractions and seed), `attributes` (JSON).
-
-`_sc_model_instances`: `id` (uuid pk), `model` (uuid), `name`, `description`, `status`
-(`fitting` | `fitted` | `failed`), `created`, `active` (bool), `state` (JSON — the provider's
-serialised fit), `parameters` (JSON), `metrics` (JSON), `encoding` (JSON), `hyperparameters`
-(JSON — the chosen point), `attributes` (JSON).
-
-The judgements §9 asks for, made out loud: `status` is a column (every row has one, and it is
-what the list filters on) while the **failure sentence** is in `attributes`, because it is
-present only on the rows that failed. `active` is a column because at most one row per model
-carries it and the uniqueness is enforced on save — a nullable column would be a second way to
-say the same thing. `state` is a column and it is the big one; a provider that wants to store
-bytes stores base64, because a system table with a `bytea` column would be the only one.
+- **Unit, in Rust**: the snapshot's shape from a fixture catalog; the `Authority::User(id)`
+  lowering.
+- **Unit, in JavaScript, run through the code isolate**: the `Where` translator against v1's
+  own test cases, the `selopts` lowering, the `joinFields`/`aggregations` lowering, and every
+  refusal — each asserted to name the thing it refuses.
+- **Live, against Postgres**: every read and write method on a real table, ownership through
+  `forUser` on a table with an ownership formula, and a **module fixture** that does the
+  definition of done's six lines from inside an installed plugin.
 
 ---
 
-## Phase 1 — The dataset
+## Phase 1 — The schema snapshot
 
-- [x] 1.1 `crates/sc-model`, layer 6, in the workspace between `sc-action` and `sc-module`,
-      with the layering comment saying why it is below the row layer it reads through (§4).
-- [x] 1.2 `sc_model::dataset`: `Dataset`, `DatasetColumn`, `DatasetShape` (the column names and
-      their inferred types, which is what a provider's `config_spec` is handed), and
-      `validate_dataset` against a `SchemaShape` — each column's formula parsed and validated
-      like a calc field, `user` and the operation flags refused by name, duplicate and empty
-      column names refused, the filter validated in boolean position.
-- [x] 1.3 `Dataset::select`: the `Select` a dataset becomes — one `Projection::expr_as` per
-      column from `translate_value`, the filter from `translate`, against the dataset's table.
-      Columns that will not translate are **not** an error here; they are the ones the row layer
-      falls back to the reified evaluator for, which is the arrangement calc fields already have.
-- [x] 1.4 `Frame` and `Column` (§9), `Frame::column`, `Frame::take_rows`, and the JSON encoding
-      that crosses a module seam — columnar, one array per column.
-- [x] 1.5 The `DatasetSource` seam, and `sc_server::models::CatalogDatasetSource` implementing
-      it over `sc_api::rows::list_rows_query` with the projections from 1.3 — the row cap asked
-      as a `COUNT(*)` first, and refused by name over `--model-max-rows`.
-- [x] 1.6 `sc_model::split`: `Split { train, validation, test, seed }`, `assign(pk, seed)` by
-      hash (§5), `Frame::split` returning three frames, the actual counts recorded, and the
-      refusal when the table has no single primary key.
-- [x] 1.7 Unit tests: a formula per column translating to the projection it should, a filter
-      folding into the `WHERE`, `user` refused, the split stable across a reordered frame and
-      across an appended one, and the primary-key refusal.
+- [x] 1.1 `sc_api::code_host::schema`: `SchemaSnapshot` built from a `&Catalog` — for every
+      table its name, label, description, primary key, access rules (`min_role_read`,
+      `min_role_write` in v1's spelling), ownership field and formula source, provider name
+      where it has one, and for every field the §7 property list. Serialised once and cached
+      behind the catalog's generation stamp.
+- [x] 1.2 The generation stamp itself: a counter on `Catalog` bumped by `reload`, so "the
+      isolate has this snapshot already" is one integer comparison and never a hash of a
+      megabyte of JSON.
+- [x] 1.3 `CodeCall` carries `schema: Option<&SchemaSnapshot>` and its generation;
+      `__scDefineSchema(generation, json)` caches it on the isolate and `__scInvoke` passes
+      the generation. A run whose generation the isolate does not have carries the JSON.
+- [x] 1.4 `sc_core_actions::Hosts` supplies it from `ctx.catalog`, so a code body, a workflow
+      step and a module's action all get the one built in one place.
+- [x] 1.5 Unit tests: the snapshot of a fixture catalog has v1's property names with v1's
+      values; a reload bumps the generation; a second run at the same generation carries no
+      JSON.
 
-## Phase 2 — The seam, the registry and the store
+## Phase 2 — The v1 surface in JavaScript
 
-- [x] 2.1 `ModelProvider`, `Outcome`, `FitResult`, `ParameterBlock`, `Prediction` (§7, §10) —
-      the trait and the vocabulary, with no implementation behind them yet.
-- [x] 2.2 `ModelRegistry`: the built-ins plus `ModelProviderHost`'s, assembled the way
-      `ActionRegistry` is, rebuilt on every module change, a duplicate name refused naming both
-      sources, and `kinds()` for the picker.
-- [x] 2.3 `_sc_models`: the fields, `bootstrap_models`, the `Model` ⇄ row mapping read strictly
-      (a missing or misshapen column is an error naming the model and the column, never a
-      default), and `save_model` / `delete_model` / `models`.
-- [x] 2.4 `_sc_model_instances`: the same, plus `active` enforced at most one per model on save,
-      and `reap_fitting_instances` marking every `fitting` row failed at boot (§8).
-- [x] 2.5 `validate_model`, run on save **and** on load: the dataset validates, the provider
-      exists, the configuration validates against `config_spec(shape)` and the provider's own
-      `validate`, the hyperparameters are known names, the split fractions sum to 1. A model
-      that fails on load is listed with its reason and stays editable — the agent rule.
-- [x] 2.6 Unit tests: the round-trip through both tables, the strict read refusing each way a
-      row can be wrong, `active` uniqueness, and the boot reap.
+- [ ] 2.1 `crates/sc-expr/src/js/v1_api.js`, exported as `pub const V1_API_JS` — the one
+      source both hosts compile. A factory over a token and a snapshot, like `__scMakeDb`.
+- [ ] 2.2 The `Where` translator (§5), with every refusal named.
+- [ ] 2.3 The `selopts` lowering (§5): `fields`, `orderBy` (string or `{ field, desc }`),
+      `orderDesc`, `limit`, `offset`, `forUser`, `forPublic`; unknown keys refused.
+- [ ] 2.4 `Table` metadata (§2, synchronous): `Table.findOne`, `Table.find`, `fields`,
+      `getFields()`, `getField(path)`, `getForeignKeys()`, `pk_name`, `pk_type`,
+      `composite_pk_names`, `sql_name`, `to_json`, `owner_fieldname()`, `min_role_read`,
+      `min_role_write`, `ownership_formula`, `ownership_field_id`, `id`, `name`,
+      `description`.
+- [ ] 2.5 `Field` (§7): the property projection, frozen, with `type_name`, `pretty_type`,
+      `sql_type`, `form_name`, `Field.labelToName`, `Field.nameToLabel`, and
+      `Field.find`/`findOne`/`findCached` answered from the snapshot.
+- [ ] 2.6 The refusal tier (§9): one list, one `namedStub`, every unimplemented v1 `Table`
+      and `Field` method on it.
+- [ ] 2.7 JavaScript unit tests through the code isolate: the translator against v1's cases,
+      the metadata shape, and each refusal naming itself.
 
-## Phase 3 — Encoding, fitting and prediction
+## Phase 3 — Reads
 
-- [x] 3.1 `sc_model::encode`: `Encoding`, `ColumnEncoding` (passthrough, standardised, one-hot
-      with its fitted category list, date-to-epoch), `TargetEncoding` (label map), `fit_encoding`
-      and `apply_encoding` → a `Matrix` (row-major `Vec<f64>` plus width, which is what every
-      provider wants). Unknown category and null refused by name at apply time (§6).
-- [x] 3.2 `sc_model::metrics`: the five metric sets of §7, computed from predictions and truth,
-      as a `Metrics` value that serialises to the instance's column.
-- [x] 3.3 `sc_model::fit`: the orchestration — materialise, split, fit the encoding on train,
-      run the hyperparameter grid scoring on validation (§11), fit the winner, score every
-      split, write the instance. One function, taking the `DatasetSource` and the registry.
-- [x] 3.4 `sc_model::predict`: load an instance, apply its encoding to a frame, call the
-      provider, and map the raw output back through the target encoding into `Prediction`s —
-      a class *name* and not a class index, because the index is an implementation detail of
-      the encoding and nobody's row wants to hold a 2.
-- [x] 3.5 Unit tests against a stub provider (a deterministic "predict the mean"): the grid
-      picking the point it should, the encoding fitted on train only and applied to test, the
-      unknown-category refusal, and the class round-trip.
+- [ ] 3.1 `getRows(where, selopts)` and `getRow(where, selopts)` — one select plan each.
+- [ ] 3.2 `countRows(where, opts)` — an aggregate plan; `distinctValues(field, where?)` — a
+      grouped select, answering v1's plain array of values.
+- [ ] 3.3 `aggregationQuery(aggregations, { where, groupBy })` — v1's aggregation spec lowered
+      to the plan's `aggregate`, answering one object ungrouped and an array grouped, as v1
+      does.
+- [ ] 3.4 `getJoinedRows(opts)` / `getJoinedRow(opts)` (§6): `joinFields` to Ⱶ-paths,
+      `aggregations` to Ↄ-relations, everything else in v1's `JoinOptions` refused by name.
+- [ ] 3.5 `getJoinedQuery(opts)` answering `{ sql, values }` from the rendered statement, with
+      `notAuthorized: true` where the ownership rule says so — needs the statement's SQL text
+      and binds out of `sc-query`'s renderer, and a doc line saying this server will not run
+      it for you.
+- [ ] 3.6 Live tests against Postgres for each, including a joined read whose aggregation and
+      join field both come back on the row.
 
-## Phase 4 — The built-in providers
+## Phase 4 — Writes, and whose authority
 
-- [x] 4.1 The `smartcore` feature (default on) and the `statrs` dependency; the two
-      distribution-only providers built either way (§13).
-- [x] 4.2 `linear_regression`: OLS through smartcore, plus standard errors, *t* and *p* from
-      the residual variance and `(XᵀX)⁻¹`, as a `ParameterBlock::Table`. Intercept optional.
-- [x] 4.3 `logistic_regression`: coefficients, odds ratios, and predicted class with the
-      predicted probability as the `Prediction`'s uncertainty.
-- [x] 4.4 `random_forest`: regressor or classifier by the label's type — the `Outcome`
-      demonstration — with `n_trees`, `max_depth` and `min_samples_leaf` as hyperparameters and
-      feature importances as parameters.
-- [x] 4.5 `kmeans`: `k` as a hyperparameter, cluster centres and sizes as parameters, the
-      cluster number as the per-row prediction.
-- [x] 4.6 `pca`: components, explained variance ratio, and the projected vector per row.
-- [x] 4.7 `t_test` and `anova`: configuration is which column is the value and which the group
-      (or the two columns, or the constant, per test type); parameters are the statistic, the
-      degrees of freedom, the p-value, the group means and the confidence interval. `Outcome`
-      is `Test`, so nothing asks them to predict.
-- [x] 4.8 Unit tests with hand-checked numbers: a regression whose coefficients, standard errors
-      and p-values are asserted against values computed independently (R/`statsmodels` output
-      pasted into the test as constants), a two-class logistic separation, k-means on three
-      obvious blobs, PCA on a rotated line, and each test statistic against a textbook example.
-- [x] 4.9 A build with `--no-default-features` compiles, lists two providers, and says on the
-      screen that the rest were compiled out.
+- [ ] 4.1 `Authority::User(id)` in the plan (§4): loaded through `sc-auth`, checked through
+      `sc_api::ownership`'s existing `*_as` functions, refused by name when the user does not
+      exist. `forUser` and v1's `user` argument lower to it; `forPublic` to the public role.
+- [ ] 4.2 `insertRow(row, user?)` answering the primary key, and `tryInsertRow` answering
+      v1's `{ success }` / `{ error }`.
+- [ ] 4.3 `updateRow(values, id, user?, opts?)` and `tryUpdateRow`, with v1's return
+      convention (a string is the error, `undefined` is success) preserved.
+- [ ] 4.4 `deleteRows(where, user?)` and `toggleBool(id, field, user?)`.
+- [ ] 4.5 `run_trigger(trigger, row, user?)` onto the existing `TriggerRunHost` — through
+      *the* dispatcher, so `only_if`, the role floor and the cascade bound all still apply.
+- [ ] 4.6 Live tests: each write raising the table event a trigger sees; a delegated write
+      checked on the row as it is *and* as it would become; a write for a user who may not
+      make it refused as v1 refuses it.
 
-## Phase 5 — The API and the action
+## Phase 5 — The module bridge
 
-- [x] 5.1 `sc-api::admin` endpoints: `listModelProviders` (name, description, hyperparameter
-      spec, and — given a dataset in the query — the config spec and the outcome),
-      `listModels`, `getModel`, `saveModel`, `deleteModel`.
-- [x] 5.2 `previewDataset`: validate a dataset and return its column types and the first rows —
-      what makes the dataset builder a thing you can see the answer of before you fit it.
-- [x] 5.3 `fitModel` (creates the instance, returns its id, spawns the job — §8),
-      `listModelInstances`, `getModelInstance`, `deleteModelInstance`, `activateModelInstance`.
-- [x] 5.4 `predictRows`: an instance (or a model, meaning its active instance) plus either
-      literal rows or a filter over the model's table; answers predictions in row order. Admin
-      only, like everything else on this API.
-- [x] 5.5 `predict_row` in `sc-core-actions` (§12): `config_spec_for` offering this table's
-      models, the target checked against the outcome's type, writing to a field or to the
-      workflow context.
-- [x] 5.6 `--model-max-rows` in `ServerConfig` and the CLI.
-- [x] 5.7 API tests: the full model lifecycle over HTTP, a fit polled to completion, a fit that
-      fails leaving the sentence on the instance, and the action writing a prediction onto a row
-      through a trigger.
+- [ ] 5.1 `__scAsk`/`__scAnswer` and the `asked` channel in `sc-module`'s worker (§3), with
+      `Control::Answer` on the existing control channel.
+- [ ] 5.2 `ModuleHost::run` and `::call` take `CodeHosts<'_>` and service asks while awaiting
+      the reply; a dead worker fails in-flight asks by name, as it already fails calls.
+- [ ] 5.3 `ModuleAction` builds the surfaces from its `ActionContext` — the same
+      `sc_core_actions::CodeSurfaces` `PyModuleAction` uses (which needs the `sc-module` →
+      `sc-core-actions` edge `sc-python` already has one layer up).
+- [ ] 5.4 The `@saltcorn/data/models/table` and `.../field` specifiers answer the real classes
+      instead of `namedNamespace`; the snapshot and the ask channel reach them through the
+      `AsyncLocalStorage` context the host script already keeps per call.
+- [ ] 5.5 `Table` outside a call (`onLoad`, a configuration workflow) refused naming why.
+- [ ] 5.6 Tests: a fixture module that reads and writes rows; a module whose `onLoad` uses
+      `Table` failing with the named error and still loading its actions; a module ask
+      answered while a second module's action runs concurrently.
 
-## Phase 6 — The admin UI
+## Phase 6 — Code bodies
 
-- [x] 6.1 The **Models** tab: the models with their table, provider, outcome and last fit; the
-      compiled-out notice when there are no built-ins; a model that failed validation listed
-      with its reason.
-- [x] 6.2 The **dataset builder**: a column list where each row is a name and a formula, with
-      the field / join-path / aggregation picker writing formulas into it (§2), the filter
-      formula beside it, and a live preview from `previewDataset` — types and the first rows.
-- [x] 6.3 The **model form**: provider picker, the provider's config form rendered from
-      `config_spec` against the dataset's shape, the hyperparameter grid (a value or a list per
-      hyperparameter), and the split.
-- [x] 6.4 The **fit** button and the instance list: status, the poll while `fitting`, the
-      failure sentence, Activate, and Delete.
-- [x] 6.5 The **instance screen**: the parameter blocks rendered per variant (scalar, table,
-      text), the metrics per split, the search results when there was a grid, the row counts and
-      what was dropped, and a "try a row" box that calls `predictRows`.
-- [x] 6.6 `models.ts` helpers and their tests: the hyperparameter grid's parse and print, the
-      outcome-to-metric-set mapping, the parameter-table formatting (significance stars and
-      p-values that do not print as `1.2e-16` in a table), and the instance ordering.
+- [ ] 6.1 `Table` and `Field` as run parameters in `run_js_code`, bound when the `db` host is
+      (§8), and absent with a `ReferenceError` when it is not.
+- [ ] 6.2 `Table` and `Field` join `DB`/`FETCH`/`FS`/`TRIGGER`/`MODFN` as **reserved names**
+      when the host is present, so a caller that also binds `Table` gets the named error
+      those already get rather than a redeclaration deep inside the generated wrapper.
+- [ ] 6.3 Tests: the definition of done's body as a trigger, run against a live database;
+      a body that shadows `Table` failing to compile with a message that says why.
 
-## Phase 7 — Providers from modules
+## Phase 7 — Documentation and the definition of done
 
-- [x] 7.1 `ModelProviderHost` implemented in `sc-module`: the `modelproviders` export read into
-      the manifest as `ModelProviderKind`, `fit`/`predict` routed to the module's worker, the
-      frame crossing columnar (§14).
-- [x] 7.2 The same in `sc-python`: `@sc.model_provider` in `plugin.py`, the class's
-      `fit`/`predict` called with the frame as columns, and the entry on the module's manifest.
-- [x] 7.3 `plugins/sklearn` — a bundled Python module over scikit-learn, with its
-      `feldspar-module.json` (card, `installs`, no permissions), a curated estimator list
-      (ridge, gradient boosting, SVM, DBSCAN, t-SNE) and its parameters as blocks.
-- [x] 7.4 The registry composing all three sources, a module change rebuilding it, and a model
-      whose provider has gone away listed with the sentence rather than dropped.
-- [x] 7.5 Tests: `sc-module`'s provider seam against a fixture module (no network); `sc-python`'s
-      `bundled_sklearn` (ignored; pip) fitting and predicting through the real package; and the
-      catalog test extended to the third bundled module.
-
-## Phase 8 — Documentation and the definition of done
-
-- [x] 8.1 `docs/TECHNICAL_DESIGN.md` §14.2 rewritten from the sketch it is now: the five nouns,
-      the two seams, the split, the encoding, the job, and the storage tables. §2's crate table
-      and the layer diagram gain `sc-model`.
-- [x] 8.2 `docs/tutorial-models.md`: the house-prices walk-through of the definition of done,
-      end to end, including the trigger that writes the prediction and the second provider from
-      a bundled module.
-- [x] 8.3 README §3, `docs/OPERATIONS.md` (the `--model-max-rows` bound, the `smartcore` feature
-      in the build-time table, and what a `fitting` instance means after a restart), and the
-      CHANGELOG.
-- [x] 8.4 The definition of done, run by hand on a real server, and what it found written down.
-
-### What running it by hand found
-
-Run on 2026-09-06 against a real PostgreSQL, on a debug build serving `houses` (60 rows, 50 of
-them sold), `neighbourhoods` (3) and `viewings` (154), with a dataset of `price`, `area`,
-`bedrooms`, `neighbourhoodⱵaverage_income` and `viewingsↃhouse.length` under a `sold` filter.
-Everything the definition of done names happened — a fit in under a second, a coefficient table
-recovering the generating coefficients (1769 ± 60 against a true 1800; 7472 ± 1355 against 9000;
-1.07 ± 0.18 against 0.9; `viewings_count` correctly *p* = 0.89), R² 0.969 on the held-out rows,
-**Activate**, a trigger writing `estimated_price`, and the same dataset fitted by
-`sklearn_gradient_boosting` from `feldspar-sklearn` with a three-point grid over `n_estimators`,
-both fits holding out the **same twelve rows** so their test RMSEs (15 195 against 26 254) are a
-real comparison. Four things it found:
-
-1. **The filter blocked every prediction, which was a real bug and is fixed.** `predict_row`
-   read the row *through the dataset including its filter*, so a model fitted on `sold === true`
-   answered "the dataset of model `House prices` does not select this row" for the unsold house
-   the trigger had just inserted — the exact row the definition of done asks it about. The
-   filter says which rows a model is fitted **from**, not which rows it may be asked about.
-   `Read::unfiltered` now carries that distinction and `predict_subject` uses it; the API test
-   that covers the trigger gained a filter, because a dataset without one could never have
-   caught this.
-2. **A bare boolean is not a filter.** The definition of done writes the filter as `sold`;
-   `sc-expr` refuses a bare value in boolean position and asks for `sold === true`. The message
-   says exactly that and names the fix, and the rule is the one every other boolean formula in
-   the system already follows, so this is a documentation correction (the tutorial says it) and
-   not a change.
-3. **`predictRows` takes a model *id* and `predict_row` takes a model *name*.** Both are right
-   for their caller — the screen has an id in hand, an admin writing a trigger has a name — but
-   the asymmetry is worth knowing before reaching for the endpoint from a script.
-4. **A *p* of 4×10⁻²⁰ prints as `0` in the raw API.** The admin UI's formatter handles it (6.6),
-   but a caller reading `parameters` off the endpoint sees the underflow. Left alone: the value
-   is a `f64` and rounding it in the API would be the wrong place.
+- [ ] 7.1 `docs/TECHNICAL_DESIGN.md` §15.1's third tier rewritten: what is real now, what is
+      still a stub, and the two mechanisms (the snapshot, the ask channel).
+- [ ] 7.2 `docs/tutorial-modules.md` and `docs/tutorial-triggers.md`: the v1 `Table` in a
+      module and in a code body, with the refusal list and what to write instead.
+- [ ] 7.3 A compatibility table in the tutorial: every v1 `Table` and `Field` method, and
+      whether it is implemented, refused, or means something different here.
+- [ ] 7.4 The definition of done, run by hand on a real server, and what it found written
+      down.
 
 ---
 
 ## Explicitly OUT of scope for this milestone
 
-- **Bayesian inference / mc-stan.** GOALS names it, and it is genuinely different in kind: the
-  configuration is a *Stan file* whose `data` block has to be matched against the dataset's
-  columns, the toolchain is a cmdstan installation on the host, and the output is posterior
-  draws rather than parameters and metrics. Every one of those is a design question this
-  milestone would have to answer badly to answer at all. The seam it needs is the one being
-  built — a provider whose config is a file reference and whose parameters are `Table` blocks.
-- **statsmodels as a second bundled module.** Nearly free once `plugins/sklearn` works (same
-  decorator, a `Text` parameter block for `summary()`), and therefore not the thing that proves
-  anything. Carried past.
-- **k-fold cross-validation.** §11.
-- **Application-facing prediction.** A REST or GraphQL endpoint that scores a row is an
-  application API question — which application, which permission, what shape — and this
-  milestone's API is the admin's.
-- **A calculated field that predicts.** §12.
-- **Online / incremental fitting, and a scheduled refit.** A refit is a fit; scheduling one is
-  a trigger firing an action, and the action that fits does not exist yet. It is two lines when
-  somebody wants it.
-- **Feature selection, imputation and outlier removal as configuration.** A dataset is a
-  formula list, so a transformation the admin wants is a formula they write. Automatic ones are
-  a provider's business, not the host's.
+- **The v1 `db` module** (`db.query`, `db.select`, `db.selectOne`, `db.insert`, `db.update`,
+  `db.deleteWhere`, `db.isSQLite`, `db.getTenantSchemaPrefix`). It would be small — the `sql`
+  plan already exists — but a v1 `db.insert` raises no table event, so a trigger would not see
+  it, and half of what it offers is a worse `Table`. Stays a stub; `getJoinedQuery` therefore
+  answers SQL nothing here will run.
+- **`File` and `User`.** Both are stubs still. `File` has a real seam to be built on
+  (`FileStoreHost`); `User` is authentication, and a v1 plugin that creates users is doing
+  something this server should look at directly.
+- **Schema editing**: `Table.create`, `Table.update`, `Table.rename`, `Table.delete`,
+  `Field.create`, `Field.update`, `Field.delete`, `alter_sql_type`, `add_unique_constraint`,
+  `toggle_not_null`, `enable_fkey_constraint`, `resetSequence`, `repairCompositePrimary`.
+- **Row history**: `get_history`, `restore_row_version`, `undo_row_changes`,
+  `redo_row_changes`, `compress_history`, `insert_history_row`. This server has no row
+  versioning to expose.
+- **Sync info**: `latestSyncInfo`, `latestSyncInfos` — the mobile offline sync of v1, which
+  has no counterpart here.
+- **Stored calculated fields**: v1's recalculation entry points. The recomputation this
+  server does is its own (§6.2) and a plugin driving it by hand would fight it.
+- **Import and export**: `import_csv_file`, `create_from_csv`, `dump_to_json`,
+  `import_json_file` and the stream variants. `sc-api::csv` is the server's answer and is
+  reached through the API.
+- **The view-builder helpers**: `get_join_field_options`, `get_relation_options`,
+  `get_relation_data`, `get_parent_relations`, `get_child_relations`, `field_options`,
+  `slug_options`, `delete_url`, `getTags`, `getFormulaExamples`, `Field.fill_fkey_options`,
+  `Field.generate`, `Field.validate`. These are v1's view builder talking to itself.
+- **Python.** A Python plugin has no v1 to be compatible with (§15.2) and keeps the native
+  surface it has.
 
 ## Carried past this milestone
 
-- **`fit_model` as an action**, so a trigger can refit nightly. Wanted the moment somebody has a
-  model in production; needs the job (§8) to be startable from outside a request, which it
-  already is.
-- **A fit as a durable workflow run.** What would make a fit survive a restart instead of being
-  reaped. The engine is there; expressing a fit as steps is the work.
-- **Predicted-value caching.** An instance applied to a table's every row, stored, and
-  invalidated on write — the thing a "stored calculated prediction" would actually be, done
-  where the recomputation is visible.
-- **Probability calibration and prediction intervals.** The `Prediction`'s `uncertainty` is
-  carried from the start and is a class probability today; a regression's interval needs the
-  residual variance kept on the instance, which the regression provider already computes.
-- **Comparing instances side by side.** The instances of a model are comparable by construction
-  (§5) and the screen lists them; a comparison view is the obvious next screen and needs no new
-  data.
+- **The v1 `db` module**, if a real plugin turns out to need it. It is the `sql` plan plus a
+  `Where` translation this milestone will already have written, and the argument to have is
+  about the eventless write, not about the work.
+- **`File`**, over `FileStoreHost` — v1's `File.findOne`, `File.from_contents`, `file.delete`.
+  A plugin that writes an attachment is a common enough shape to be worth it.
+- **`getState()`**, the largest one: v1's plugin state is configuration, types, view
+  templates, function registry and `getState().log`. Some of it has a counterpart here and
+  some of it is v1's architecture, so it wants sorting into three lists before any of it is
+  built.
+- **`through` join fields and `ontable` aggregations**, if the expression language grows the
+  two-hop forms they need.

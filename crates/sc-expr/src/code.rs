@@ -659,6 +659,53 @@ pub trait CodeAdapter: Send + Sync {
     async fn run_code(&self, call: CodeCall<'_>) -> Result<Json>;
 }
 
+/// The **schema snapshot** a guest run is handed: every table this server has,
+/// with v1's property names on it, serialised once and stamped with the catalog
+/// generation it was built at (TODO "the v1 `Table` API" §2).
+///
+/// It exists because v1's `Table.findOne` is **synchronous**. Eight years of
+/// plugins are written as `const t = Table.findOne("books"); t.pk_name;` — not
+/// awaited, on either line — and a host round trip cannot answer that. So the
+/// metadata is in the isolate *before* the run starts and the division is v1's
+/// own: metadata is local and synchronous, data is a host call and
+/// asynchronous.
+///
+/// This crate does not know what a table is and does not learn here: what it
+/// carries is the **text** and the **stamp**. Building it is the catalog's
+/// side of the seam (`sc_api::code_host::schema`), reading it is the guest's,
+/// and the stamp is what lets a run say "you already have this" in one integer
+/// rather than in a megabyte of JSON — which is the whole reason a generation
+/// exists rather than a hash.
+///
+/// Cheap to clone: the JSON is an [`Arc<str>`], so a snapshot crossing to a
+/// worker thread copies sixteen bytes and a refcount rather than the schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaSnapshot {
+    generation: u64,
+    json: Arc<str>,
+}
+
+impl SchemaSnapshot {
+    /// A snapshot of `json`, built at catalog generation `generation`.
+    pub fn new(generation: u64, json: impl Into<Arc<str>>) -> SchemaSnapshot {
+        SchemaSnapshot {
+            generation,
+            json: json.into(),
+        }
+    }
+
+    /// The catalog generation this was built at — what a run carries, and what
+    /// an isolate compares against what it already holds.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The serialised schema, as the guest parses it.
+    pub fn json(&self) -> &str {
+        &self.json
+    }
+}
+
 /// One run of a JavaScript **code body**: the source, the values in scope, and
 /// what it is allowed to reach and for how long.
 ///
@@ -714,6 +761,16 @@ pub struct CodeCall<'a> {
     ///
     /// Borrowed for the same reason `host` is, and bridged the same way.
     pub module_fns: Option<&'a dyn ModuleFnHost>,
+    /// This server's tables as the guest sees them *without asking* — what v1's
+    /// synchronous `Table.findOne` is answered from ([`SchemaSnapshot`]), or
+    /// `None` where nobody supplied one.
+    ///
+    /// **Borrowed**, like the five hosts and for a related reason: the snapshot
+    /// is built once per catalog generation and shared by every run at that
+    /// generation, so a run refers to it rather than owning a copy of the
+    /// schema. What crosses to the isolate is the generation — and the JSON
+    /// only when that isolate has not got it yet.
+    pub schema: Option<&'a SchemaSnapshot>,
     /// The wall clock allowed for this run, clamped to [`MAX_CODE_TIMEOUT`];
     /// `None` is [`DEFAULT_CODE_TIMEOUT`].
     pub timeout: Option<Duration>,
@@ -742,6 +799,7 @@ impl Default for CodeCall<'_> {
             files: None,
             triggers: None,
             module_fns: None,
+            schema: None,
             timeout: None,
             max_calls: DEFAULT_MAX_HOST_CALLS,
             max_fetches: DEFAULT_MAX_FETCHES,
@@ -815,6 +873,7 @@ impl std::fmt::Debug for CodeCall<'_> {
             .field("files", &self.files.is_some())
             .field("triggers", &self.triggers.is_some())
             .field("module_fns", &self.module_fns.is_some())
+            .field("schema", &self.schema.map(SchemaSnapshot::generation))
             .field("timeout", &self.timeout)
             .field("max_calls", &self.max_calls)
             .field("max_fetches", &self.max_fetches)
@@ -2522,6 +2581,40 @@ const SETUP: &str = r#"
       wantsTrigger: wantsTrigger, wantsModFn: wantsModFn,
     });
   });
+  // The schema snapshot this isolate holds, keyed by the catalog generation it
+  // was built at (TODO "the v1 `Table` API" §2). One entry: a generation is
+  // bumped by a catalog reload, so the previous one is of no use to any run that
+  // has not already started — and one that *has* resolved its snapshot at invoke
+  // holds the object itself, so clearing the map never pulls a schema out from
+  // under a resident run.
+  const schemas = new Map();
+  fixed("__scDefineSchema", (generation, json) => {
+    schemas.clear();
+    schemas.set(generation, JSON.parse(json));
+  });
+  // The snapshot for one generation — what this run's `Table` is built over.
+  // A generation this isolate does not hold is a **named failure** and never an
+  // empty schema: a `Table.findOne` answering undefined for every table would
+  // compute the wrong answer inside somebody's trigger rather than fail.
+  const schemaFor = (generation) => {
+    if (generation === null || generation === undefined) return null;
+    const held = schemas.get(generation);
+    if (held === undefined) {
+      throw new Error(
+        "the schema snapshot for catalog generation " + generation +
+        " is not on this isolate"
+      );
+    }
+    return held;
+  };
+  // Reachable from a body, and deliberately so: it is the same hygiene the
+  // shadowed node globals are (§1a), not a privilege boundary, and what it
+  // answers is what this run's own `Table` would answer anyway.
+  fixed("__scSchema", (generation) =>
+    generation === undefined && schemas.size === 1
+      ? schemas.values().next().value
+      : schemaFor(generation)
+  );
   // Dropped when the cache is full and this body is the one least recently run.
   // A run already executing keeps its own reference, so forgetting a body can
   // never pull one out from under a resident run — it only means the next run of
@@ -2537,7 +2630,7 @@ const SETUP: &str = r#"
   // this run's alone. A body with no host is defined to take one argument, so
   // there is no `db` in its scope to name — a ReferenceError, as it has always
   // been, rather than a handle that fails on use.
-  fixed("__scInvoke", (token, key, bindings, stores, triggers, functions) => {
+  fixed("__scInvoke", (token, key, bindings, stores, triggers, functions, schemaGeneration) => {
     const entry = bodies.get(key);
     if (entry === undefined) {
       // Unreachable while the Rust side and this map agree, which they do
@@ -2549,6 +2642,13 @@ const SETUP: &str = r#"
     }
     let running;
     try {
+      // Resolved **here**, once, rather than when a `Table` is built: the run
+      // holds this object from now on, so a catalog reload between this line and
+      // the body's last statement cannot change what its `Table` knows halfway
+      // through. Phase 2's `__scMakeTable(token, snapshot)` is what takes it;
+      // until then, resolving it is what turns a generation this isolate does
+      // not hold into a named failure on the run that asked for it.
+      const snapshot = schemaFor(schemaGeneration);
       // The handles this body was compiled to take, in the order its parameter
       // list has them. A body with neither is the pure one `run_js_code` began
       // as: nothing in its scope to reach anything with.
@@ -3456,6 +3556,11 @@ struct CodeRun {
     /// before the job crosses, for [`CodeRun::file_stores`]' reason: the guest's
     /// `modfn.x` is a property access and cannot await an answer.
     module_functions: Vec<ModuleFunction>,
+    /// The schema snapshot this run's `Table` is answered from, cloned off the
+    /// call before the job crosses — sixteen bytes and a refcount, not a copy
+    /// of the schema. `None` for a run nobody gave one to, whose guest then has
+    /// no `Table` to name.
+    schema: Option<SchemaSnapshot>,
     /// Already defaulted and clamped, so the worker has no policy left to apply.
     timeout: Duration,
     max_calls: u32,
@@ -3855,6 +3960,7 @@ impl CodeRuntime {
                     trigger_names,
                     module_fns: mods,
                     module_functions,
+                    schema: call.schema.cloned(),
                     timeout,
                     max_calls: call.max_calls,
                     max_fetches: call.max_fetches,
@@ -4134,19 +4240,19 @@ async fn serve(
     let mut requeued: std::collections::VecDeque<CodeJob> = std::collections::VecDeque::new();
     // What this isolate has already compiled. It lives as long as the isolate
     // does, which is what makes the second run of a body cheap.
-    let mut bodies = BodyCache::new();
+    let mut cache = IsolateCache::new();
     loop {
         // Admit whatever is already waiting, up to the occupancy bound.
         while resident(op_state) < max_inflight {
             if let Some(job) = requeued.pop_front() {
-                start_run(runtime, op_state, job, &mut requeued, watchdog, &mut bodies);
+                start_run(runtime, op_state, job, &mut requeued, watchdog, &mut cache);
                 continue;
             }
             if closed || pressure.load(Ordering::SeqCst) {
                 break;
             }
             match rx.try_recv() {
-                Ok(job) => start_run(runtime, op_state, job, &mut requeued, watchdog, &mut bodies),
+                Ok(job) => start_run(runtime, op_state, job, &mut requeued, watchdog, &mut cache),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     closed = true;
@@ -4167,9 +4273,7 @@ async fn serve(
             // Nothing to pump: park on the channel rather than poll an empty
             // event loop for ever.
             match rx.recv().await {
-                Some(job) => {
-                    start_run(runtime, op_state, job, &mut requeued, watchdog, &mut bodies)
-                }
+                Some(job) => start_run(runtime, op_state, job, &mut requeued, watchdog, &mut cache),
                 None => closed = true,
             }
             continue;
@@ -4234,7 +4338,7 @@ async fn serve(
                 }
             }
             Tick::Job(Some(job)) => {
-                start_run(runtime, op_state, job, &mut requeued, watchdog, &mut bodies)
+                start_run(runtime, op_state, job, &mut requeued, watchdog, &mut cache)
             }
             Tick::Job(None) => closed = true,
             Tick::Freed | Tick::Due => {}
@@ -4488,7 +4592,7 @@ fn start_run(
     job: CodeJob,
     requeued: &mut std::collections::VecDeque<CodeJob>,
     watchdog: &Watchdog,
-    bodies: &mut BodyCache,
+    cache: &mut IsolateCache,
 ) {
     let CodeJob { run, reply } = job;
     // A job that never enters the table has to give its place back by hand;
@@ -4511,7 +4615,19 @@ fn start_run(
     // The body's source travels only when this isolate has not compiled it: a
     // trigger firing repeatedly sends a token, a key and its bindings.
     let key = BodyCache::key(&scripts.definition);
-    let held = bodies.holds(key, &scripts.definition);
+    let held = cache.bodies.holds(key, &scripts.definition);
+    // The schema snapshot travels on the same terms as the body's source: only
+    // when this isolate has not got this generation. That is the whole point of
+    // the generation stamp — "you already have this" is one integer comparison
+    // rather than a megabyte of JSON on every firing of every trigger.
+    let generation = run.schema.as_ref().map(SchemaSnapshot::generation);
+    let define_schema = match &run.schema {
+        Some(snapshot) if cache.schema != Some(snapshot.generation()) => Some(snapshot),
+        _ => None,
+    };
+    // Read off before the run is moved into its retry, because what has to be
+    // recorded once the script has run is the number and not the snapshot.
+    let defined_generation = define_schema.map(SchemaSnapshot::generation);
     // The store names this run may open, as the array the guest's `fs` closes
     // over. Per run rather than per body: the definition is cached across runs
     // and the stores a server has can change between two of them.
@@ -4522,7 +4638,17 @@ fn start_run(
     // The module functions, on the same terms again: installing or configuring
     // a module reloads the set, and one compiled body serves every run.
     let functions = module_functions_json(&run.module_functions);
-    let script = build_script(&scripts, &token, key, held, &stores, &triggers, &functions);
+    let script = build_script(
+        &scripts,
+        &token,
+        key,
+        held,
+        &stores,
+        &triggers,
+        &functions,
+        define_schema,
+        generation,
+    );
     // A re-queued run carries the clock it was first admitted with: its caller
     // has been waiting since then, and a retry with a fresh deadline would
     // outlive the future that is going to answer with it.
@@ -4577,8 +4703,15 @@ fn start_run(
     // is recorded here and not before: a syntax error, or a termination inside
     // this very call, leaves the cache saying what is true — that the next run
     // of this body must carry its source again.
+    // The isolate holds the snapshot only if the script that defined it ran, for
+    // the reason the body cache is recorded here and not before.
+    if outcome.is_ok()
+        && let Some(generation) = defined_generation
+    {
+        cache.schema = Some(generation);
+    }
     if !held && outcome.is_ok() {
-        for gone in bodies.store(key, scripts.definition) {
+        for gone in cache.bodies.store(key, scripts.definition) {
             // Rare (one distinct body past the cache's capacity), and cheap
             // enough not to be worth batching into the next run's script, where
             // it would have to be carried until there was a next run.
@@ -4837,6 +4970,36 @@ struct CachedBody {
     used: u64,
 }
 
+/// Everything one isolate has been told and therefore need not be told again:
+/// the bodies it has compiled and the catalog generation whose schema snapshot
+/// it holds.
+///
+/// One value rather than two locals threaded through five call sites, and one
+/// place to look when the question is "what does a run's script still have to
+/// carry?". Both halves answer it the same way — a key or an integer if the
+/// isolate has it, the source or the JSON if it does not.
+#[cfg(feature = "eval")]
+struct IsolateCache {
+    bodies: BodyCache,
+    /// The generation of the snapshot defined on this isolate, or `None` before
+    /// any run has carried one.
+    ///
+    /// A single generation, because a reload makes the previous one useless: a
+    /// run resolves its snapshot **at invoke**, so replacing what the isolate
+    /// holds can never change what a run already in flight sees.
+    schema: Option<u64>,
+}
+
+#[cfg(feature = "eval")]
+impl IsolateCache {
+    fn new() -> IsolateCache {
+        IsolateCache {
+            bodies: BodyCache::new(),
+            schema: None,
+        }
+    }
+}
+
 /// How many compiled bodies one isolate keeps. Generous next to the number of
 /// triggers an installation has, and small next to the heap a run needs, so the
 /// eviction path is the one this will almost never take.
@@ -4898,13 +5061,14 @@ impl BodyCache {
     }
 }
 
-/// One run's script: the definition when the isolate has not got it, and the
-/// invocation either way.
+/// One run's script: the definition when the isolate has not got it, the schema
+/// snapshot when the isolate has not got *that*, and the invocation either way.
 ///
-/// The token and the bindings are what is left travelling per run — 32 hex
-/// characters and this run's own values — because everything else is already
-/// there.
+/// The token, the bindings and one integer are what is left travelling per run —
+/// 32 hex characters, this run's own values and the catalog generation — because
+/// everything else is already there.
 #[cfg(feature = "eval")]
+#[allow(clippy::too_many_arguments)]
 fn build_script(
     scripts: &RunScripts,
     token: &str,
@@ -4913,6 +5077,8 @@ fn build_script(
     stores: &str,
     triggers: &str,
     functions: &str,
+    define_schema: Option<&SchemaSnapshot>,
+    generation: Option<u64>,
 ) -> String {
     let RunScripts {
         definition,
@@ -4924,6 +5090,21 @@ fn build_script(
         wants_module_fns,
     } = scripts;
     let mut script = String::new();
+    // Before the definition, because a body's very first run is also the run
+    // that carries the schema, and the invocation at the end of this script has
+    // to find it already there.
+    if let Some(snapshot) = define_schema {
+        // The JSON is `serde_json`'s own text, which is why it crosses as a
+        // *string literal* to be parsed rather than spliced in as source: a
+        // table called `</script>` is somebody's data either way, and only one
+        // of the two arrangements makes that a name and not a token.
+        let json = Json::String(snapshot.json().to_owned());
+        script.push_str(&format!(
+            "__scDefineSchema({}, {});\n",
+            snapshot.generation(),
+            json
+        ));
+    }
     if !held {
         script.push_str(&format!(
             "__scDefine(\"{key:016x}\", {wants_db}, {wants_fetch}, {wants_files}, \
@@ -4932,8 +5113,13 @@ fn build_script(
     }
     // The token is 32 hex characters this crate minted and the key is 16 this
     // one made; quoting them is belt and braces rather than escaping.
+    let generation = match generation {
+        Some(generation) => generation.to_string(),
+        None => "null".to_owned(),
+    };
     script.push_str(&format!(
-        "__scInvoke(\"{token}\", \"{key:016x}\", {args}, {stores}, {triggers}, {functions});"
+        "__scInvoke(\"{token}\", \"{key:016x}\", {args}, {stores}, {triggers}, {functions}, \
+         {generation});"
     ));
     script
 }
@@ -6485,12 +6671,114 @@ mod tests {
             max_file_ops: 10,
             max_trigger_runs: 10,
             max_module_calls: 10,
+            schema: None,
             started: None,
         };
         for (name, value) in bindings {
             run.bindings.insert((*name).to_owned(), value.clone());
         }
         build_run_scripts(&run).unwrap()
+    }
+
+    /// A snapshot with one table in it, at a given generation.
+    fn snapshot_of(generation: u64, table: &str) -> SchemaSnapshot {
+        SchemaSnapshot::new(
+            generation,
+            format!(r#"{{"tables":[{{"name":"{table}","fields":[]}}]}}"#),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_schema_reaches_the_isolate_and_travels_only_on_a_miss() {
+        // One worker, so all three runs land on one isolate — which is what
+        // makes "the isolate already has it" a thing this test can observe.
+        let rt = CodeRuntime::with_workers(1);
+        let fifth = snapshot_of(5, "books");
+
+        let mut first = call("return globalThis.__scSchema().tables[0].name;");
+        first.schema = Some(&fifth);
+        assert_eq!(rt.run(first).await.unwrap(), json!("books"));
+
+        // A second run at the same generation: the isolate keeps what it was
+        // given, and the guest reads the same schema. That the JSON did not
+        // travel a second time is `build_script`'s claim, asserted below.
+        let mut again = call("return globalThis.__scSchema().tables[0].name;");
+        again.schema = Some(&fifth);
+        assert_eq!(rt.run(again).await.unwrap(), json!("books"));
+
+        // A reload bumps the generation, and the new snapshot replaces the old
+        // one on the isolate.
+        let sixth = snapshot_of(6, "authors");
+        let mut after = call("return globalThis.__scSchema().tables[0].name;");
+        after.schema = Some(&sixth);
+        assert_eq!(rt.run(after).await.unwrap(), json!("authors"));
+
+        // A run given no snapshot names none: `__scSchema` with no generation
+        // still answers the one this isolate holds, but the run's own is null —
+        // which is what Phase 2's `Table` will be absent for.
+        assert_eq!(
+            rt.run(call("return 1;")).await.unwrap(),
+            json!(1),
+            "a run with no schema is an ordinary run"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_generation_the_isolate_does_not_hold_fails_by_name() {
+        // Unreachable while Rust and the isolate agree — the define always
+        // precedes the invoke that names it — and named rather than silent
+        // anyway, because the alternative is a `Table` that knows no tables and
+        // says nothing about why. This is the same lookup `__scInvoke` makes,
+        // asked for a generation nothing defined.
+        let rt = CodeRuntime::with_workers(1);
+        let held = snapshot_of(5, "books");
+        let mut warm = call("return 1;");
+        warm.schema = Some(&held);
+        rt.run(warm).await.unwrap();
+
+        let refusal = rt
+            .run(call("return globalThis.__scSchema(9).tables.length;"))
+            .await
+            .expect_err("a schema this isolate has not got is not an empty schema")
+            .to_string();
+        assert!(refusal.contains("generation 9"), "{refusal}");
+        assert!(refusal.contains("not on this isolate"), "{refusal}");
+    }
+
+    #[test]
+    fn the_schema_travels_only_when_the_isolate_has_not_got_that_generation() {
+        let scripts = definition_of("return 1;", &[]);
+        let key = BodyCache::key(&scripts.definition);
+        let fifth = snapshot_of(5, "books");
+
+        // A miss carries the whole snapshot — as a *string literal* to be
+        // parsed, so a table named `");alert(1);//` is a name and not a token.
+        let miss = build_script(
+            &scripts,
+            "aa",
+            key,
+            false,
+            "[]",
+            "[]",
+            "[]",
+            Some(&fifth),
+            Some(5),
+        );
+        assert!(miss.contains("__scDefineSchema(5, \""), "{miss}");
+        assert!(miss.contains("books"), "{miss}");
+        assert!(miss.contains(", 5);"), "the generation travels too: {miss}");
+
+        // A hit carries one integer and no JSON at all — the whole reason a
+        // generation exists rather than a hash of the schema.
+        let hit = build_script(&scripts, "bb", key, true, "[]", "[]", "[]", None, Some(5));
+        assert!(!hit.contains("__scDefineSchema"), "{hit}");
+        assert!(!hit.contains("books"), "the schema travelled: {hit}");
+        assert!(hit.contains(", 5);"), "{hit}");
+
+        // And a run with no snapshot at all names none, so the guest resolves
+        // nothing rather than the last schema some other run left behind.
+        let none = build_script(&scripts, "cc", key, true, "[]", "[]", "[]", None, None);
+        assert!(none.contains(", null);"), "{none}");
     }
 
     #[test]
@@ -6506,7 +6794,7 @@ mod tests {
             "nothing is warm yet"
         );
 
-        let miss = build_script(&scripts, "aa", key, false, "[]", "[]", "[]");
+        let miss = build_script(&scripts, "aa", key, false, "[]", "[]", "[]", None, None);
         assert!(miss.contains("__scDefine"), "{miss}");
         assert!(miss.contains("return secret + 1;"), "{miss}");
         assert!(miss.contains("__scInvoke"), "{miss}");
@@ -6516,7 +6804,7 @@ mod tests {
             cache.holds(key, &scripts.definition),
             "the isolate has it now"
         );
-        let hit = build_script(&scripts, "bb", key, true, "[]", "[]", "[]");
+        let hit = build_script(&scripts, "bb", key, true, "[]", "[]", "[]", None, None);
         assert!(!hit.contains("__scDefine"), "{hit}");
         assert!(
             !hit.contains("return secret + 1;"),

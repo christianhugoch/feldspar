@@ -17,11 +17,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use sc_api::code_host::{FileStoreHost, TableHost, TriggerRunHost};
+use sc_api::code_host::{FileStoreHost, TableHost, TriggerRunHost, schema_snapshot};
 use sc_error::{Error, Result};
 use sc_expr::{
     CodeCall, CodeHosts, DEFAULT_CODE_TIMEOUT, JsEvaluator, MAX_CODE_TIMEOUT, ModuleFnHost,
-    TriggerHost,
+    SchemaSnapshot, TriggerHost,
 };
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::Value as Json;
@@ -135,8 +135,9 @@ pub(crate) fn bindings(event: &Event, run_context: Option<&Attrs>) -> BTreeMap<S
     bindings
 }
 
-/// The five host surfaces one run may reach, built from the context that fired
-/// it and borrowed by the [`CodeCall`] for exactly as long as the run.
+/// The five host surfaces one run may reach — and the schema it reads without
+/// reaching for anything — built from the context that fired it and borrowed by
+/// the [`CodeCall`] for exactly as long as the run.
 ///
 /// A struct rather than five locals at each call site because a [`CodeCall`]
 /// borrows all of them: they have to outlive the call, so they have to live
@@ -149,12 +150,18 @@ pub(crate) fn bindings(event: &Event, run_context: Option<&Attrs>) -> BTreeMap<S
 /// how the two would come to disagree about who a module's write is caused by,
 /// so they are built here, once, and handed over as
 /// [`surfaces`](Hosts::surfaces).
+///
+/// The schema snapshot is here for the same reason and is **not** one of the
+/// five: nothing calls it. It is what v1's synchronous `Table.findOne` is
+/// answered from (TODO "the v1 `Table` API" §2), local to the isolate and
+/// asked of nobody.
 pub struct Hosts<'a> {
     table: TableHost<'a>,
     fetch: CodeFetchHost,
     files: FileStoreHost<'a>,
     triggers: Option<TriggerRunHost<'a>>,
     module_fns: Option<Arc<dyn ModuleFnHost>>,
+    schema: Option<Arc<SchemaSnapshot>>,
 }
 
 impl<'a> Hosts<'a> {
@@ -206,6 +213,19 @@ impl<'a> Hosts<'a> {
                     .chained(ctx.chain.clone())
                     .in_transaction(ctx.transaction())
             }),
+            // This server's tables as the guest sees them without asking — what
+            // v1's synchronous `Table.findOne` is answered from. Built here,
+            // once, for the reason the five surfaces are: a code body, a
+            // workflow step and a module's action must all be looking at the
+            // same schema, and the catalog caches it behind its generation
+            // stamp so this is a clone of an `Arc` on every firing but the
+            // first after a reload.
+            //
+            // `None` only where the catalog cannot be read at all — a poisoned
+            // lock, on which this run's `db` call is about to fail by name too
+            // — and a `Table` built over nothing refuses by name rather than
+            // answering an empty schema.
+            schema: schema_snapshot(ctx.catalog).ok(),
             // The module functions, when this server has modules installed and
             // loaded — and nothing at all when it does not, so a body that names
             // `modfn` on a server with no modules says so by name rather than
@@ -227,6 +247,13 @@ impl<'a> Hosts<'a> {
         }
     }
 
+    /// This server's schema as the guest sees it, for a run that is not a code
+    /// body — the same value, from the same place, for the reason
+    /// [`surfaces`](Hosts::surfaces) exists.
+    pub fn schema(&self) -> Option<&SchemaSnapshot> {
+        self.schema.as_deref()
+    }
+
     /// One call over these hosts: the source, what the event binds, and how long
     /// it may take.
     pub(crate) fn call(
@@ -244,6 +271,7 @@ impl<'a> Hosts<'a> {
             files: surfaces.files,
             triggers: surfaces.triggers,
             module_fns: surfaces.module_fns,
+            schema: self.schema(),
             timeout,
             ..CodeCall::default()
         }

@@ -2,6 +2,53 @@
 
 Changes in reverse chronological order.
 
+## The schema snapshot: metadata in the isolate before the run starts
+
+The first phase of the v1 `Table` API. v1's `Table.findOne` is **synchronous** — eight years of
+plugins read `Table.findOne("books").pk_name` on one unawaited line — and a host round trip
+cannot answer that. So the division this milestone rests on is v1's own: **metadata is local
+and synchronous, data is a host call and asynchronous**. This is the local half, built and
+delivered; nothing reads it yet, which is Phase 2.
+
+- **`sc_api::code_host::schema` builds a `SchemaSnapshot` from a `&Catalog`** — every table
+  with its name, label, description, primary key, access rules in v1's spelling
+  (`min_role_read`/`min_role_write`), ownership formula source and provider, and every field
+  with §7's property list on it: `type`, `typename`, `required`, `is_unique`, `primary_key`,
+  `calculated`, `stored`, `expression`, `is_fkey`, `reftable_name`, `reftype`, `refname`,
+  `attributes`, `fieldview`, `sublabel`, `table_id`. It is a **read of the catalog and not a
+  second source of truth**: a guest's `books.getField("author").is_fkey` and the server's own
+  answer are the same fact, one computed from the other.
+- **Where v1 spells something differently, the translation is made once and named where it is
+  made.** A table's and a field's `id` is its **name**, because this server identifies both by
+  name (§9). A key's `type` is the string `"Key to authors"` and a plain field's is the type
+  object, exactly as v1 has it — and the type *names* are v1's (`String`, `Integer`, `Bool`,
+  `Date`, `JSON`), because a plugin branching on `field.type.name` would otherwise take its
+  default branch and render the wrong widget. Types v1 never had keep this server's own name:
+  calling a `numeric` column `"Float"` to make a branch fire is how a plugin comes to round
+  somebody's money.
+- **Ownership is carried both ways it can be read.** The formula's source always; v1's
+  `ownership_field_id` only when the formula says exactly what such a field says —
+  `owner === user.id`, in either order, and nothing wider. `owner === user.id || user.role_id
+  === 1` keeps its source and answers no field, because reducing it would hand a plugin a
+  narrower rule than the one this server enforces.
+- **The generation stamp.** A counter on `Catalog`, bumped by `reload` and by nothing else, so
+  "does this isolate already have the schema?" is one integer comparison rather than a hash of
+  a megabyte of JSON on every firing of every trigger. The snapshot is cached on the catalog
+  behind it and a stale one is handed back as **nothing** rather than as a schema that claims
+  to be current: a `Table.findOne` answering confidently about a dropped column is the failure
+  this prevents.
+- **It crosses to the isolate on a miss and never again.** `CodeCall` gains
+  `schema: Option<&SchemaSnapshot>`; a worker records which generation its isolate holds beside
+  which bodies it has compiled (both now in one `IsolateCache`), and a run's script carries
+  `__scDefineSchema(generation, json)` only when that isolate has not got that generation.
+  Every run's `__scInvoke` carries the generation — one integer — and resolves its snapshot
+  **at invoke**, so a catalog reload between a body's first and last statement cannot change
+  what its `Table` knows halfway through. A generation the isolate does not hold is a named
+  failure on the run that asked for it, never an empty schema.
+- **One place builds it.** `sc_core_actions::Hosts` takes it off `ctx.catalog` beside the five
+  host surfaces, so a code body, a workflow step and a module's action are all looking at the
+  same schema for the same reason they all see the same `db`.
+
 ## The predictive-models milestone, written down
 
 The eighth and last phase of predictive models: the design document says what was built rather

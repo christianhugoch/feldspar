@@ -104,6 +104,7 @@
 
 mod files;
 mod plan;
+pub mod schema;
 mod triggers;
 
 use std::sync::Arc;
@@ -122,6 +123,7 @@ use crate::rows;
 
 pub use files::{FileStoreHost, MAX_COPY_BYTES, MAX_FILE_BYTES};
 pub use plan::{AggSpec, Authority, Dir, Op, OrderKey, Plan, Selection, SqlOp, SqlPlan};
+pub use schema::snapshot as schema_snapshot;
 pub use triggers::TriggerRunHost;
 
 /// How many rows one read may return before it is refused.

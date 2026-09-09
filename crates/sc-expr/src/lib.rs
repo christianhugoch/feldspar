@@ -63,7 +63,7 @@ pub use code::{
     DEFAULT_MAX_INFLIGHT, DEFAULT_MAX_MODULE_CALLS, DEFAULT_MAX_TRIGGER_RUNS, FETCH_MARGIN,
     FetchHost, FileHost, MAX_CODE_TIMEOUT, MIN_FETCH_WINDOW, MIN_MODULE_FN_WINDOW,
     MIN_TRIGGER_WINDOW, MODULE_FN_MARGIN, ModuleFnArg, ModuleFnHost, ModuleFnHosts, ModuleFunction,
-    PYTHON, TRIGGER_MARGIN, TriggerHost, set_isolate_prime,
+    PYTHON, SchemaSnapshot, TRIGGER_MARGIN, TriggerHost, set_isolate_prime,
 };
 #[cfg(feature = "eval")]
 pub use eval::DenoEvaluator;

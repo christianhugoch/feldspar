@@ -11,6 +11,7 @@
 //! (single process for the MVP), so a simple `RwLock` guards the cache here.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use sc_db::{DatabaseDriver, SchemaChange};
@@ -136,6 +137,33 @@ pub struct Catalog {
     /// `feldspar.toml` environment. `None` where nobody said, which is a normal
     /// state: a server with no base domain serves no applications.
     public_origin: RwLock<Option<crate::PublicOrigin>>,
+    /// How many times this catalog has been (re)loaded — the **generation
+    /// stamp**, bumped by [`reload`](Catalog::reload) and by nothing else.
+    ///
+    /// It exists so that "does this isolate already have the schema?" is one
+    /// integer comparison (TODO "the v1 `Table` API" §2). A guest that answers
+    /// v1's synchronous `Table.findOne` has to hold the whole schema *before*
+    /// its run starts, and the alternative to a stamp is hashing a megabyte of
+    /// JSON on every firing of every trigger to discover that nothing changed.
+    ///
+    /// Monotonic, never reset, and no part of any identity: it says *when*, not
+    /// *what*. Two catalogs of the same database in the same process have
+    /// generations of their own, which is right — an isolate is told by the
+    /// catalog whose snapshot it holds.
+    generation: AtomicU64,
+    /// The serialised schema snapshot for [`generation`](Catalog::generation),
+    /// built once and shared by every run at that generation.
+    ///
+    /// Held here for [`table_events`](Catalog::set_table_events)' reason,
+    /// inverted the same way: what *builds* it is `sc-api` (layer 8), which
+    /// knows what v1 calls each of a field's properties; what needs it is every
+    /// code body, workflow step and module action; and the catalog is what they
+    /// all already hold. The stamp on the snapshot is what makes a stale one
+    /// unusable rather than wrong — [`code_schema`](Catalog::code_schema) hands
+    /// back nothing once the generation has moved on.
+    ///
+    /// [`table_events`]: Catalog::set_table_events
+    code_schema: RwLock<Option<Arc<sc_expr::SchemaSnapshot>>>,
     /// Whether anything in this database wants the workflow engine, and when
     /// ([`crate::RunWakeups`]).
     ///
@@ -210,6 +238,8 @@ impl Catalog {
             provided_table_issues: RwLock::new(Vec::new()),
             public_origin: RwLock::new(None),
             table_events: RwLock::new(None),
+            generation: AtomicU64::new(0),
+            code_schema: RwLock::new(None),
             run_wakeups: crate::RunWakeups::new(),
         };
         catalog.reload().await?;
@@ -456,7 +486,51 @@ impl Catalog {
             .write()
             .map_err(|_| Error::msg("catalog shadowed-table lock poisoned"))?;
         *guard = shadowed;
+        drop(guard);
+        // Last, and after every swap above: a run that reads the generation and
+        // then the tables must never get a number older than what it goes on to
+        // read. The snapshot built at the old number is dropped here rather than
+        // left to be recognised as stale, so a reloaded catalog is not also
+        // holding a megabyte of the schema it used to have.
+        let mut schema = self
+            .code_schema
+            .write()
+            .map_err(|_| Error::msg("catalog code-schema lock poisoned"))?;
+        *schema = None;
+        drop(schema);
+        self.generation.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// How many times this catalog has been loaded — the **generation stamp**
+    /// (see [`generation`](Catalog::generation)). One past the last reload, and
+    /// therefore never 0 on a catalog that [`init`](Catalog::init) built.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// The schema snapshot for the **current** generation, or `None` when
+    /// nothing has built one since the last reload.
+    ///
+    /// Stale is `None` rather than stale: a snapshot stamped with a generation
+    /// this catalog has moved past describes tables that may no longer be
+    /// there, and handing it to a guest would be a `Table.findOne` answering
+    /// confidently about a column that was dropped.
+    pub fn code_schema(&self) -> Option<Arc<sc_expr::SchemaSnapshot>> {
+        let held = self.code_schema.read().ok()?.clone()?;
+        (held.generation() == self.generation()).then_some(held)
+    }
+
+    /// Record a snapshot as this catalog's, for the next run at its generation
+    /// to be handed without building it again.
+    ///
+    /// Stored whatever its stamp, and read back only when the stamp still
+    /// matches: a snapshot built across a reload is simply never handed out,
+    /// and the next caller builds one that is.
+    pub fn set_code_schema(&self, snapshot: Arc<sc_expr::SchemaSnapshot>) {
+        if let Ok(mut guard) = self.code_schema.write() {
+            *guard = Some(snapshot);
+        }
     }
 
     /// The `_sc_fields` overlay rows that did not cleanly merge on the last
