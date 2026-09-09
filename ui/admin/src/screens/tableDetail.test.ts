@@ -1,12 +1,15 @@
 /**
  * The table page's own arrangement.
  *
- * Two claims worth pinning down, both of which a rearrangement could silently
+ * Three claims worth pinning down, any of which a rearrangement could silently
  * break:
  *
  *   - the "Triggers on this table" card shows the triggers on *this* table's
  *     rows, and only those — a scheduled trigger that happens to write here is
  *     not one of them;
+ *   - a Key field names the table it points at, and both directions of a key —
+ *     out of this table and into it — are something to click rather than
+ *     something to read and then go and find;
  *   - the rows have moved to a screen of their own, and that screen still
  *     belongs to the Tables section of the sidebar rather than lighting nothing
  *     up.
@@ -15,8 +18,8 @@
 import { describe, expect, it } from "vitest";
 
 import { NAV } from "../App";
-import type { ListTriggersResponse } from "../client";
-import { triggersOnTable } from "./TableDetail";
+import type { ListInboundKeysResponse, ListTriggersResponse } from "../client";
+import { inboundKeyGroups, keyTarget, tableHref, triggersOnTable } from "./TableDetail";
 
 type TriggerItem = ListTriggersResponse[number];
 
@@ -76,5 +79,47 @@ describe("the table-data screen", () => {
 
   it("is still part of the Tables section", () => {
     expect(activeLabels("/tables/books/data")).toEqual(["Tables"]);
+  });
+});
+
+describe("a key field's target", () => {
+  it("is the table a Key points at, and nothing for any other kind", () => {
+    expect(keyTarget({ type: "key", target_table: "authors", target_field: "id" })).toBe(
+      "authors",
+    );
+    expect(keyTarget({ type: "file", store: "uploads" })).toBeNull();
+    expect(keyTarget({ type: "calc", expression: "1 + 1" })).toBeNull();
+    expect(keyTarget({ type: "plain" })).toBeNull();
+    expect(keyTarget(null)).toBeNull();
+  });
+
+  it("is nothing when the key names no table, so a broken overlay is not a link", () => {
+    expect(keyTarget({ type: "key" })).toBeNull();
+    expect(keyTarget({ type: "key", target_table: "" })).toBeNull();
+  });
+
+  it("addresses the target's own page, escaped", () => {
+    expect(tableHref("authors")).toBe("#/tables/authors");
+    expect(tableHref("odd name")).toBe("#/tables/odd%20name");
+  });
+});
+
+describe("the tables that point at this one", () => {
+  const keys: ListInboundKeysResponse = [
+    { table: "reviews", field: "book" },
+    { table: "loans", field: "book" },
+    // Two keys from one table: still one table to open.
+    { table: "reviews", field: "sequel" },
+  ];
+
+  it("are one line per table, in name order, listing every key", () => {
+    expect(inboundKeyGroups(keys)).toEqual([
+      { table: "loans", fields: ["book"] },
+      { table: "reviews", fields: ["book", "sequel"] },
+    ]);
+  });
+
+  it("are nothing at all when no table points here", () => {
+    expect(inboundKeyGroups([])).toEqual([]);
   });
 });

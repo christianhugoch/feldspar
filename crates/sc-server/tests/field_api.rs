@@ -605,3 +605,77 @@ async fn a_key_field_takes_its_storage_type_from_its_target() -> sc_error::Resul
 
     Ok(())
 }
+
+/// The other direction of a `Key`: which tables point *at* this one.
+///
+/// The fields screen shows both — a key field names its target, and the table
+/// lists what references it — so the second half needs an endpoint, and it is
+/// the whole catalog's question rather than one table's. Two things it must get
+/// right: every key from a table that has more than one, and no self-joins (a
+/// table's key onto itself is already a row in its own field list).
+#[tokio::test]
+async fn inbound_keys_name_the_tables_that_point_here() -> sc_error::Result<()> {
+    let (mut client, _catalog, _db) = setup().await?;
+
+    client
+        .send("POST", "/api/tables", Some(json!({ "name": "author" })))
+        .await;
+    for table in ["author", "book"] {
+        let (status, body) = client
+            .send(
+                "POST",
+                &format!("/api/tables/{table}/fields"),
+                Some(json!({ "name": "id", "type": "int", "primary_key": true })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+
+    // Two keys from `book` onto `author`, and one from `author` onto itself.
+    for (table, name, target) in [
+        ("book", "written_by", "author"),
+        ("book", "edited_by", "author"),
+        ("author", "mentor", "author"),
+    ] {
+        let (status, body) = client
+            .send(
+                "POST",
+                &format!("/api/tables/{table}/fields"),
+                Some(json!({
+                    "name": name,
+                    "kind": { "type": "key", "target_table": target, "target_field": "id" }
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+
+    let (status, body) = client
+        .send("GET", "/api/tables/author/inbound-keys", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!([
+            { "table": "book", "field": "written_by" },
+            { "table": "book", "field": "edited_by" },
+        ]),
+        "both of `book`'s keys, and never `author.mentor`: {body}"
+    );
+
+    // Nothing points at `book`, and that is an empty list rather than an error.
+    let (status, body) = client
+        .send("GET", "/api/tables/book/inbound-keys", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!([]));
+
+    // A table that is not there is a 404: "who points at nothing" is not a
+    // question with an empty answer.
+    let (status, body) = client
+        .send("GET", "/api/tables/nosuch/inbound-keys", None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    Ok(())
+}

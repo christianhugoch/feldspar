@@ -329,6 +329,28 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // The other half of the fields screen: not what this table points at, but
+    // what points at *it*. The catalog already answers this for a drop
+    // (`SchemaProjection::referencing_fields`), and it is the same question an
+    // admin asks looking at a table — "what breaks if I change this?" — so the
+    // rule is not restated here, endpoint or UI. Self-joins are excluded by that
+    // rule: a table's key onto itself is already in its own field list.
+    set.register(
+        Endpoint::new(
+            "listInboundKeys",
+            Method::Get,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("inbound-keys"),
+        )
+        .output(TypeSchema::array(TypeSchema::struct_of([
+            StructField::new("table", TypeSchema::text()),
+            StructField::new("field", TypeSchema::text()),
+        ])))
+        .auth(AuthRequirement::admin()),
+    );
+
     set.register(
         Endpoint::new(
             "createField",

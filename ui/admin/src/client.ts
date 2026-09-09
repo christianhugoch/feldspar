@@ -30,6 +30,7 @@ export type CreateRoleRequest = { role: number; name: string; description: strin
 export type CreateRoleResponse = { role: number; name: string; description: string; builtin: boolean };
 export type DeleteRoleResponse = { deleted: boolean };
 export type ListFieldsResponse = Array<{ name: string; label: string; description: string; sql_type: string; type: string; nullable: boolean; required: boolean; unique: boolean; primary_key: boolean; generated: boolean; kind: unknown; attributes: unknown }>;
+export type ListInboundKeysResponse = Array<{ table: string; field: string }>;
 export type CreateFieldRequest = { name: string; type?: string | null; kind?: unknown | null; attributes?: unknown | null; label?: string | null; description?: string | null; required?: boolean | null; unique?: boolean | null; primary_key?: boolean | null };
 export type CreateFieldResponse = { name: string; label: string; description: string; sql_type: string; type: string; nullable: boolean; required: boolean; unique: boolean; primary_key: boolean; generated: boolean; kind: unknown; attributes: unknown };
 export type UpdateFieldRequest = { type?: string | null; kind?: unknown | null; attributes?: unknown | null; label?: string | null; description?: string | null; primary_key?: boolean | null };
@@ -215,6 +216,7 @@ export interface ApiClient {
   createRole(body: CreateRoleRequest): Promise<CreateRoleResponse>;
   deleteRole(role: number): Promise<DeleteRoleResponse>;
   listFields(table: string): Promise<ListFieldsResponse>;
+  listInboundKeys(table: string): Promise<ListInboundKeysResponse>;
   createField(table: string, body: CreateFieldRequest): Promise<CreateFieldResponse>;
   updateField(table: string, field: string, body: UpdateFieldRequest): Promise<UpdateFieldResponse>;
   deleteField(table: string, field: string): Promise<DeleteFieldResponse>;
@@ -479,6 +481,14 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("listFields", res);
       return (await res.json()) as ListFieldsResponse;
+    },
+    async listInboundKeys(table) {
+      const res = await doFetch(`${baseUrl}/api/tables/${table}/inbound-keys`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listInboundKeys", res);
+      return (await res.json()) as ListInboundKeysResponse;
     },
     async createField(table, body) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/fields`, {

@@ -50,6 +50,7 @@ import type {
   ListConstraintsResponse,
   ListFieldsResponse,
   ListFieldTypesResponse,
+  ListInboundKeysResponse,
   ListTablesResponse,
   ListTriggersResponse,
 } from "../client";
@@ -88,6 +89,67 @@ function kindLabel(kind: unknown): string {
   if (k.type === "key") return `key → ${k.target_table || "?"}`;
   if (k.type === "calc") return `calc: ${k.expression || "?"}`;
   return k.type;
+}
+
+/**
+ * The table a `Key` field points at, or `null` for every other kind.
+ *
+ * A key whose target is missing is `null` too rather than a link to nowhere:
+ * `kindLabel` renders that case as `key → ?`, and a broken overlay is a thing to
+ * read, not a thing to click.
+ */
+export function keyTarget(kind: unknown): string | null {
+  const k = kind as FieldKind;
+  if (!k || k.type !== "key") return null;
+  return k.target_table || null;
+}
+
+/** Where a table's page lives, as the hash router addresses it. */
+export function tableHref(table: string): string {
+  return `#/tables/${encodeURIComponent(table)}`;
+}
+
+/** One `Key` pointing at this table, as `listInboundKeys` reports it. */
+type InboundKey = ListInboundKeysResponse[number];
+
+/**
+ * The inbound keys gathered by the table they come from.
+ *
+ * One line per *table*, not per field, because "`time_entries` points here" is
+ * the fact an admin is after and a table with two keys onto this one
+ * (`author` and `editor`, say) is still one table to open. The server has
+ * already left self-joins out (`SchemaProjection::referencing_fields`), so
+ * nothing here has to know about them.
+ */
+export function inboundKeyGroups(keys: InboundKey[]): Array<{ table: string; fields: string[] }> {
+  const groups = new Map<string, string[]>();
+  for (const k of keys) {
+    const fields = groups.get(k.table);
+    if (fields) fields.push(k.field);
+    else groups.set(k.table, [k.field]);
+  }
+  return [...groups.entries()]
+    .map(([table, fields]) => ({ table, fields }))
+    .sort((a, b) => a.table.localeCompare(b.table));
+}
+
+/**
+ * A field's kind in the list — the same one line `kindLabel` writes, except that
+ * a `Key`'s target is a link.
+ *
+ * The target *is* the interesting half of a key, and following it used to mean
+ * reading the name here and then finding it in the Tables list. Everything else
+ * a kind can be names something that is not a page (a store, an expression), so
+ * this is the only cell with a link in it.
+ */
+function KindCell({ kind }: { kind: unknown }) {
+  const target = keyTarget(kind);
+  if (!target) return <>{kindLabel(kind)}</>;
+  return (
+    <>
+      key &rarr; <a href={tableHref(target)}>{target}</a>
+    </>
+  );
 }
 
 /** The human heading for a field-type category in the picker. */
@@ -130,6 +192,11 @@ export function TableDetail({ table }: { table: string }) {
   const [rowCount, setRowCount] = useState<number | null>(null);
   const [settings, setSettings] = useState<TableSummary | null>(null);
   const [constraints, setConstraints] = useState<ListConstraintsResponse | null>(null);
+  // Which other tables hold a `Key` onto this one — the fields card's other
+  // direction. Answered by the server rather than assembled here: it is the
+  // whole catalog's question, and `listFields` per table would be one request
+  // per table to ask it.
+  const [inbound, setInbound] = useState<ListInboundKeysResponse | null>(null);
   const [triggers, setTriggers] = useState<TriggerItem[] | null>(null);
   // Every table in the catalog: what a Key field's target is chosen from. This
   // table is included — a key onto its own table (a parent link) is legitimate.
@@ -142,15 +209,17 @@ export function TableDetail({ table }: { table: string }) {
       // The settings come from the tables listing rather than a per-table
       // endpoint: the list already carries every overlay field, so a second
       // endpoint would be a second thing to keep in step with it.
-      const [f, ft, c, t, tr, cons] = await Promise.all([
+      const [f, ft, c, t, tr, cons, inb] = await Promise.all([
         api.listFields(table),
         api.listFieldTypes(),
         api.countRows(table),
         api.listTables(),
         api.listTriggers(),
         api.listConstraints(table),
+        api.listInboundKeys(table),
       ]);
       setFields(f);
+      setInbound(inb);
       setFieldTypes(ft);
       setRowCount(c.count);
       setTables(t);
@@ -195,6 +264,7 @@ export function TableDetail({ table }: { table: string }) {
           fields={fields}
           fieldTypes={fieldTypes}
           tables={tables}
+          inbound={inbound}
           provided={Boolean(settings?.provider)}
           onChange={load}
         />
@@ -1251,6 +1321,7 @@ function Fields({
   fields,
   fieldTypes,
   tables,
+  inbound,
   provided,
   onChange,
 }: {
@@ -1258,6 +1329,9 @@ function Fields({
   fields: ListFieldsResponse | null;
   fieldTypes: ListFieldTypesResponse | null;
   tables: ListTablesResponse | null;
+  /** The `Key` fields on *other* tables that point here (self-joins excluded —
+   * a table's key onto itself is already a row in the list above). */
+  inbound: ListInboundKeysResponse | null;
   /** Whether a module's table provider decides the columns (§8.3). They are
    * shown, because they are what the table *is*; they are not editable, because
    * there is no column in any database to edit. */
@@ -1415,6 +1489,10 @@ function Fields({
   // is where it is fixed. `fields === null` is "not loaded yet", not "no key".
   const hasPrimaryKey = fields === null || fields.some((f) => f.primary_key);
 
+  // One line per table that points here, whatever number of keys it does it
+  // with.
+  const groups = useMemo(() => inboundKeyGroups(inbound ?? []), [inbound]);
+
   return (
     <Card className="mb-4">
       <Card.Header>Fields</Card.Header>
@@ -1459,7 +1537,9 @@ function Fields({
                 <td>
                   <code>{f.type}</code>
                 </td>
-                <td>{kindLabel(f.kind)}</td>
+                <td>
+                  <KindCell kind={f.kind} />
+                </td>
                 <td>{f.nullable ? "yes" : "no"}</td>
                 <td>
                   {f.primary_key && (
@@ -1504,6 +1584,25 @@ function Fields({
             <IconPlus className="icon-2" />
             Add field
           </Button>
+        )}
+
+        {/* The other direction, under the fields rather than in a card of its
+            own: it is the same question the list above answers — what is this
+            table joined to? — read from the far end. Absent entirely when
+            nothing points here, because "no inbound keys" is the ordinary case
+            and an empty heading is noise. */}
+        {groups.length > 0 && (
+          <div className="mt-4">
+            <div className="fw-bold mb-1">Referenced by</div>
+            <ul className="list-unstyled mb-0 small">
+              {groups.map((g) => (
+                <li key={g.table}>
+                  <a href={tableHref(g.table)}>{g.table}</a>
+                  <span className="text-muted"> &middot; {g.fields.join(", ")}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
 
         <Modal show={editing !== null} onHide={() => setEditing(null)} size="lg" scrollable>

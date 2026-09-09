@@ -2,6 +2,25 @@
 
 Changes in reverse chronological order.
 
+## A key on the fields screen is a link, both ways
+
+The fields list named a `Key`'s target and left the admin to go and find it, and
+said nothing at all about the tables pointing the other way — the ones a change
+here would break.
+
+- **A `Key` field's target is now a link.** `key → author` opens `author`'s own
+  page. A key whose target is missing stays `key → ?`: a broken overlay is
+  something to read, not something to click.
+- **Under the field list, "Referenced by"** — one line per table holding a `Key`
+  onto this one, naming its key fields and linking to that table's page. Absent
+  entirely when nothing points here.
+- **A new admin endpoint answers it**: `GET /api/tables/{table}/inbound-keys`.
+  It is the whole catalog's question rather than one table's, so it is the
+  server's — asking it from the browser would be one `listFields` per table —
+  and it reuses `SchemaProjection::referencing_fields`, the same rule that
+  refuses a drop, which already leaves self-joins out: a table's key onto itself
+  is already a row in its own field list.
+
 ## A scaffolded page supplies the key its own insert type requires
 
 Reported from a real app: a project scaffolded over a table whose **UUID primary

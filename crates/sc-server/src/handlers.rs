@@ -46,13 +46,13 @@ use sc_auth::{
 };
 use sc_catalog::{
     ATTR_OWNERSHIP_FORMULA, Attrs, Catalog, ConstraintKind, DataField, DataFieldKind,
-    DbConnectionDef, DbConnectionId, FIELD_META_TABLE, FieldId, FieldMeta, FileStoreId, Table,
-    TableConstraint, TableId, check_db_connection_saveable, check_file_store_saveable,
-    connect_db_connection, connect_file_store_def, delete_db_connection, delete_file_store,
-    file_kind_config_spec, key_kind_config_spec, list_db_connections, list_field_meta_for_table,
-    list_file_stores, load_db_connection, load_db_connection_by_name, load_file_store,
-    load_file_store_by_name, orphan_table_meta, resolve_options, save_db_connection,
-    save_file_store,
+    DbConnectionDef, DbConnectionId, FIELD_META_TABLE, FieldId, FieldMeta, FileStoreId,
+    SchemaProjection, Table, TableConstraint, TableId, check_db_connection_saveable,
+    check_file_store_saveable, connect_db_connection, connect_file_store_def, delete_db_connection,
+    delete_file_store, file_kind_config_spec, key_kind_config_spec, list_db_connections,
+    list_field_meta_for_table, list_file_stores, load_db_connection, load_db_connection_by_name,
+    load_file_store, load_file_store_by_name, orphan_table_meta, resolve_options,
+    save_db_connection, save_file_store,
 };
 use sc_email::Mailer;
 use sc_error::{Error, Result};
@@ -534,6 +534,25 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     .fields
                     .iter()
                     .map(|f| field_json(f, &description_of(&metas, &f.base.name)))
+                    .collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("listInboundKeys", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                // `require` first: "who points at a table that does not exist"
+                // is a 404, not an empty list.
+                let table = catalog.require(ctx.path_param("table")?)?;
+                let projection = SchemaProjection::new(catalog.tables()?);
+                let out: Vec<Json> = projection
+                    .referencing_fields(&table.name)
+                    .into_iter()
+                    .map(|(t, f)| json!({ "table": t, "field": f }))
                     .collect();
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
