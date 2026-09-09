@@ -2,6 +2,55 @@
 
 Changes in reverse chronological order.
 
+## v1's `Table` and `Field`, in the one JavaScript both hosts compile
+
+The second phase of the v1 `Table` API: the surface itself. `crates/sc-expr/src/js/v1_api.js`
+is the **one source** the code isolates compile as a prelude and `sc-module`'s host script will
+concatenate, so the `Table` a `run_js_code` body gets and the `Table` an installed v1 plugin
+gets are the same implementation — not two that agree today and disagree by the third bug fixed
+in one of them. It answers metadata now; the reads and writes are the phases after this one.
+
+- **`__scMakeV1Api(token, snapshot)`**, a factory per run beside `__scMakeDb`, answering
+  `{ Table, Field }` over the schema snapshot that run resolved at invoke. Nothing in it makes a
+  host call to answer a property: `Table.findOne("books")` is **synchronous**, and so are
+  `books.fields`, `books.getField("author.name")`, `books.pk_name`, `books.getForeignKeys()` and
+  `books.to_json()` — which is what eight years of plugins are written against and the whole
+  reason Phase 1's snapshot exists.
+- **v1's `Where` vocabulary, translated** (`__scV1Where`), against §5's table line by line:
+  `{ author: null }` becomes `is_null`, `{ pages: { gt: 100, lt: 500 } }` two clauses and not a
+  literal, `{ gt: 500, equal: true }` a `gte`, `{ not: { in: […] } }` the single operator `nin`
+  rather than a negated one, `{ ilike: "tol" }` v1's implicit `%…%` and `fullMatch: true` the
+  pattern as written, an array of conditions on one field their conjunction, and `_false` the
+  formula spelling of a predicate this vocabulary has no `false` for. What this server cannot
+  say is **refused naming itself**: `inSelect`, `inSelectWithLevels`, `json`, `slugify`, `_fts`,
+  `day_only`, `eq`'s two-expression form, a RegExp value and a Symbol value (v1's raw-SQL
+  escape). The RegExp is the one that shows why: it has no own keys, so an object walk would
+  have read v1's `~` as an empty condition and quietly matched every row.
+- **v1's `selopts`, lowered** (`__scV1Selopts`): `fields`, `orderBy` as a name or
+  `{ field, desc }`, `orderDesc`, `limit`, `offset`, and the two that say whose view of the data
+  this is — `forUser` (a user row or an id) to the plan's `{ user: id }` authority, `forPublic`
+  to the public role. An **unknown key is refused** for the reason a misspelled fetch option is,
+  and naming both of them at once is refused because they answer the same question differently.
+- **`Field` is a view of the snapshot with v1's property names on it**, `is_fkey` and
+  `reftable_name` and `reftype` and `attributes` and `pretty_type` and the rest, and its `id` is
+  its name because this server identifies a field by name. It **cannot be assigned to**: v1 code
+  assigns to a field and expects it to matter (that is what `Field.update` is for), here it would
+  change a copy of a snapshot, and a `Object.freeze` would have swallowed the assignment silently
+  in a body that is not in strict mode. So the refusal is a Proxy that throws saying so.
+- **The refusal tier is one list.** Every v1 `Table` and `Field` member this version does not
+  implement is reachable as a property and fatal on call, naming the path and — where there is
+  one — the principle: schema editing because this server introspects the schema it is given,
+  row history and offline sync because it has neither, import and export because they are the
+  server's own, and the view-builder helpers because they are v1's builder talking to itself. The
+  installer **refuses to shadow a method that exists**, so the list and the implementation cannot
+  disagree: a method implemented later is deleted from the list by the edit that implements it,
+  or the api fails to build.
+- **Tested through the code isolate**, which is where it will run: v1's own where-cases and each
+  refusal naming itself, the `selopts` lowering, the metadata shape against a snapshot in the
+  shape `sc_api::code_host::schema` builds, the assignment refusal, and a walk over the whole
+  refusal list asserting every member of it names itself. A run with no snapshot gets a `Table`
+  that **says why** rather than one that knows no tables.
+
 ## The schema snapshot: metadata in the isolate before the run starts
 
 The first phase of the v1 `Table` API. v1's `Table.findOne` is **synchronous** — eight years of

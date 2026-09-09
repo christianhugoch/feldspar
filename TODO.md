@@ -302,22 +302,22 @@ Three levels, because the failure modes are at three levels:
 
 ## Phase 2 — The v1 surface in JavaScript
 
-- [ ] 2.1 `crates/sc-expr/src/js/v1_api.js`, exported as `pub const V1_API_JS` — the one
+- [x] 2.1 `crates/sc-expr/src/js/v1_api.js`, exported as `pub const V1_API_JS` — the one
       source both hosts compile. A factory over a token and a snapshot, like `__scMakeDb`.
-- [ ] 2.2 The `Where` translator (§5), with every refusal named.
-- [ ] 2.3 The `selopts` lowering (§5): `fields`, `orderBy` (string or `{ field, desc }`),
+- [x] 2.2 The `Where` translator (§5), with every refusal named.
+- [x] 2.3 The `selopts` lowering (§5): `fields`, `orderBy` (string or `{ field, desc }`),
       `orderDesc`, `limit`, `offset`, `forUser`, `forPublic`; unknown keys refused.
-- [ ] 2.4 `Table` metadata (§2, synchronous): `Table.findOne`, `Table.find`, `fields`,
+- [x] 2.4 `Table` metadata (§2, synchronous): `Table.findOne`, `Table.find`, `fields`,
       `getFields()`, `getField(path)`, `getForeignKeys()`, `pk_name`, `pk_type`,
       `composite_pk_names`, `sql_name`, `to_json`, `owner_fieldname()`, `min_role_read`,
       `min_role_write`, `ownership_formula`, `ownership_field_id`, `id`, `name`,
       `description`.
-- [ ] 2.5 `Field` (§7): the property projection, frozen, with `type_name`, `pretty_type`,
+- [x] 2.5 `Field` (§7): the property projection, frozen, with `type_name`, `pretty_type`,
       `sql_type`, `form_name`, `Field.labelToName`, `Field.nameToLabel`, and
       `Field.find`/`findOne`/`findCached` answered from the snapshot.
-- [ ] 2.6 The refusal tier (§9): one list, one `namedStub`, every unimplemented v1 `Table`
+- [x] 2.6 The refusal tier (§9): one list, one `namedStub`, every unimplemented v1 `Table`
       and `Field` method on it.
-- [ ] 2.7 JavaScript unit tests through the code isolate: the translator against v1's cases,
+- [x] 2.7 JavaScript unit tests through the code isolate: the translator against v1's cases,
       the metadata shape, and each refusal naming itself.
 
 ## Phase 3 — Reads

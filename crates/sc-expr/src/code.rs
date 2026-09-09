@@ -2319,6 +2319,32 @@ pub(crate) const MODULE_FNS_PRELUDE: &str = r#"
 })();
 "#;
 
+/// The **Saltcorn 1 `Table` and `Field`**, in JavaScript, over the plan seam
+/// (TODO "the v1 `Table` API" §1).
+///
+/// One source, two hosts. This is the text `sc-module`'s host script
+/// concatenates as well, so the `Table` a `run_js_code` body gets and the
+/// `Table` an installed v1 plugin gets are the same implementation — not two
+/// that agree today and disagree by the third bug fixed in one of them.
+///
+/// Not `pub(crate)` like the five preludes above it, and not behind the `eval`
+/// feature, for exactly that reason: `sc-module` links this crate without V8's
+/// code runtime and needs the source.
+///
+/// Compiled **once per isolate**, and minted per run by
+/// `__scMakeV1Api(token, snapshot)` — the token because a read will carry it
+/// (whose call this is, with many runs resident), the snapshot because that is
+/// what makes v1's synchronous `Table.findOne` answerable at all: metadata is
+/// local and synchronous, data is a host call and asynchronous, which is v1's
+/// own division.
+///
+/// It also publishes two pure functions, `__scV1Where` and `__scV1Selopts`,
+/// which are v1's where-vocabulary and v1's `selopts` lowered to the plan's.
+/// Reachable for the reason `__scSchema` is: they hold no authority and reach
+/// nothing, and asserting what v1's vocabulary becomes is worth more than the
+/// privacy of a function that rearranges an object.
+pub const V1_API_JS: &str = include_str!("js/v1_api.js");
+
 /// Installed once per isolate: the op handles, the promise a database call
 /// answers, and the run wrapper — as globals that a code body **cannot
 /// replace**.
@@ -4169,6 +4195,12 @@ fn worker_thread(
     // The `modfn` factory, on the same terms as the four above it.
     if let Err(e) = runtime.execute_script("sc_module_fns.js", MODULE_FNS_PRELUDE) {
         debug_assert!(false, "the module functions prelude failed to compile: {e}");
+    }
+    // The v1 `Table` and `Field`, on the same terms as the five above them —
+    // and the one prelude a module gets a copy of too, because a v1 plugin's
+    // `Table` and a code body's have to be the same implementation.
+    if let Err(e) = runtime.execute_script("sc_v1_api.js", V1_API_JS) {
+        debug_assert!(false, "the v1 API prelude failed to compile: {e}");
     }
     // Code bodies get the aggregation prelude too, so `rows().sum("qty")` means
     // in a body what it means in a formula.
@@ -8546,5 +8578,544 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("modfn is not defined"), "{error}");
+    }
+
+    // -----------------------------------------------------------------------
+    // The v1 `Table` API, in the isolate that will serve it
+    // -----------------------------------------------------------------------
+
+    /// A snapshot in the shape `sc_api::code_host::schema` builds: two tables
+    /// with a key between them, an ownership formula that v1 can also read as a
+    /// field, and one of this server's own tables for `Table.find()` to leave
+    /// out.
+    fn library_snapshot() -> SchemaSnapshot {
+        let field = |name: &str, typename: &str, sql: &str, pk: bool| {
+            json!({
+                "name": name, "label": name, "type": { "name": typename, "sql_name": sql },
+                "typename": typename, "required": pk, "is_unique": pk, "primary_key": pk,
+                "calculated": false, "stored": false, "expression": null,
+                "is_fkey": false, "reftable_name": null, "refname": null, "reftype": null,
+                "attributes": {}, "fieldview": null, "sublabel": null,
+                "table_id": "books", "sql_name": name, "sql_type": sql,
+            })
+        };
+        let author_key = json!({
+            "name": "author", "label": "Author", "type": "Key to authors",
+            "typename": "Key to authors", "required": false, "is_unique": false,
+            "primary_key": false, "calculated": false, "stored": false, "expression": null,
+            "is_fkey": true, "reftable_name": "authors", "refname": "id",
+            "reftype": "Integer", "attributes": { "summary_field": "name" },
+            "fieldview": "select", "sublabel": "who wrote it",
+            "table_id": "books", "sql_name": "author", "sql_type": "int8",
+        });
+        let json = json!({ "tables": [
+            {
+                "id": "books", "name": "books", "label": "Books",
+                "description": "the library", "primary_key": ["id"],
+                "min_role_read": 40, "min_role_write": 20,
+                "ownership_formula": "owner === user.id", "ownership_field_id": "owner",
+                "provider_name": null, "provider_module": null, "is_system": false,
+                "fields": [
+                    field("id", "Integer", "int8", true),
+                    field("title", "String", "text", false),
+                    field("pages", "Integer", "int8", false),
+                    author_key,
+                    field("owner", "Integer", "int8", false),
+                ],
+            },
+            {
+                "id": "authors", "name": "authors", "label": "Authors",
+                "description": null, "primary_key": ["id"],
+                "min_role_read": 100, "min_role_write": 20,
+                "ownership_formula": null, "ownership_field_id": null,
+                "provider_name": null, "provider_module": null, "is_system": false,
+                "fields": [
+                    json!({
+                        "name": "id", "label": "id", "type": { "name": "Integer", "sql_name": "int8" },
+                        "typename": "Integer", "required": true, "is_unique": true,
+                        "primary_key": true, "calculated": false, "stored": false,
+                        "expression": null, "is_fkey": false, "reftable_name": null,
+                        "refname": null, "reftype": null, "attributes": {},
+                        "fieldview": null, "sublabel": null, "table_id": "authors",
+                        "sql_name": "id", "sql_type": "int8",
+                    }),
+                    json!({
+                        "name": "name", "label": "Name", "type": { "name": "String", "sql_name": "text" },
+                        "typename": "String", "required": false, "is_unique": false,
+                        "primary_key": false, "calculated": false, "stored": false,
+                        "expression": null, "is_fkey": false, "reftable_name": null,
+                        "refname": null, "reftype": null, "attributes": {},
+                        "fieldview": null, "sublabel": null, "table_id": "authors",
+                        "sql_name": "name", "sql_type": "text",
+                    }),
+                ],
+            },
+            {
+                "id": "_sc_modules", "name": "_sc_modules", "label": "_sc_modules",
+                "description": null, "primary_key": ["id"],
+                "min_role_read": 1, "min_role_write": 1,
+                "ownership_formula": null, "ownership_field_id": null,
+                "provider_name": null, "provider_module": null, "is_system": true,
+                "fields": [],
+            },
+        ]});
+        SchemaSnapshot::new(7, json.to_string())
+    }
+
+    /// A body run with the library snapshot on it, answering whatever it
+    /// returns.
+    async fn with_schema(rt: &CodeRuntime, snapshot: &SchemaSnapshot, code: &str) -> Json {
+        let mut c = call(code);
+        c.schema = Some(snapshot);
+        rt.run(c).await.expect("the body ran")
+    }
+
+    /// The api, over the run's own snapshot — what Phase 6 binds as a run
+    /// parameter and what these tests build by hand until it does.
+    const MAKE: &str = "const { Table, Field } = __scMakeV1Api(null, __scSchema(7));";
+
+    #[tokio::test]
+    async fn v1s_where_vocabulary_becomes_this_servers() {
+        // §5's table, line by line: every spelling v1 has for a condition, and
+        // the one this server's filter object says it in. A translator that got
+        // one of these wrong would not fail — it would compute the wrong answer
+        // inside somebody's trigger.
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            r#"const W = __scV1Where;
+               return {
+                 scalar:    W({ author: "Tolstoy" }),
+                 null:      W({ author: null }),
+                 gt:        W({ pages: { gt: 500 } }),
+                 gt_equal:  W({ pages: { gt: 500, equal: true } }),
+                 lt_equal:  W({ pages: { lt: 500, equal: true } }),
+                 between:   W({ pages: { gt: 100, lt: 500 } }),
+                 in:        W({ id: { in: [1, 2] } }),
+                 not_in:    W({ id: { not: { in: [1, 2] } } }),
+                 ilike:     W({ author: { ilike: "tol" } }),
+                 full:      W({ author: { ilike: "tol", fullMatch: true } }),
+                 or:        W({ or: [{ pages: 1 }, { pages: 2 }] }),
+                 and:       W({ and: [{ pages: 1 }, { title: "x" } ] }),
+                 not:       W({ not: { pages: 1 } }),
+                 field_or:  W({ pages: { or: [{ gt: 1 }, { lt: 0 }] } }),
+                 array_and: W({ pages: [{ gt: 1 }, { lt: 9 }] }),
+                 false:     W({ _false: true }),
+                 two:       W({ author: "T", pages: { gt: 1 } }),
+                 empty:     W({}),
+                 undef:     W({ author: undefined }),
+                 none:      W(undefined),
+               };"#,
+        )
+        .await;
+
+        assert_eq!(out["scalar"], json!({ "author": { "eq": "Tolstoy" } }));
+        assert_eq!(out["null"], json!({ "author": { "is_null": true } }));
+        assert_eq!(out["gt"], json!({ "pages": { "gt": 500 } }));
+        assert_eq!(out["gt_equal"], json!({ "pages": { "gte": 500 } }));
+        assert_eq!(out["lt_equal"], json!({ "pages": { "lte": 500 } }));
+        assert_eq!(
+            out["between"],
+            json!({ "and": [{ "pages": { "gt": 100 } }, { "pages": { "lt": 500 } }] })
+        );
+        assert_eq!(out["in"], json!({ "id": { "in": [1, 2] } }));
+        // v1's negated membership is one operator here rather than a negated
+        // one, which is the statement anybody reading the SQL expects.
+        assert_eq!(out["not_in"], json!({ "id": { "nin": [1, 2] } }));
+        // v1's implicit `%…%`, and the spelling that turns it off.
+        assert_eq!(out["ilike"], json!({ "author": { "ilike": "%tol%" } }));
+        assert_eq!(out["full"], json!({ "author": { "ilike": "tol" } }));
+        assert_eq!(
+            out["or"],
+            json!({ "or": [{ "pages": { "eq": 1 } }, { "pages": { "eq": 2 } }] })
+        );
+        assert_eq!(
+            out["and"],
+            json!({ "and": [{ "pages": { "eq": 1 } }, { "title": { "eq": "x" } }] })
+        );
+        assert_eq!(out["not"], json!({ "not": { "pages": { "eq": 1 } } }));
+        // A field-level `or` is an `or` of two conditions **on that field**.
+        assert_eq!(
+            out["field_or"],
+            json!({ "or": [{ "pages": { "gt": 1 } }, { "pages": { "lt": 0 } }] })
+        );
+        assert_eq!(
+            out["array_and"],
+            json!({ "and": [{ "pages": { "gt": 1 } }, { "pages": { "lt": 9 } }] })
+        );
+        // There is no `false` in the filter vocabulary, so v1's "match nothing"
+        // is said in the other spelling this seam carries.
+        assert_eq!(out["false"], json!({ "formula": "false" }));
+        assert_eq!(
+            out["two"],
+            json!({ "and": [{ "author": { "eq": "T" } }, { "pages": { "gt": 1 } }] })
+        );
+        // Nothing said is nothing sent — never a predicate that matches none.
+        assert_eq!(out["empty"], Json::Null);
+        assert_eq!(out["undef"], Json::Null, "v1 drops an undefined value");
+        assert_eq!(out["none"], Json::Null);
+    }
+
+    #[tokio::test]
+    async fn every_v1_where_this_server_cannot_say_is_refused_by_name() {
+        // Each of these is a SQL construct the plan seam deliberately does not
+        // carry or a feature this server does not have. Dropping one on the
+        // floor would compute the wrong answer quietly, so each says the key it
+        // refused.
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            r#"const W = __scV1Where;
+               const cases = {
+                 inSelect: () => W({ id: { inSelect: { table: "x", field: "y" } } }),
+                 inSelectWithLevels: () => W({ id: { inSelectWithLevels: {} } }),
+                 json: () => W({ meta: { json: ["a", 1] } }),
+                 slugify: () => W({ slugify: "x" }),
+                 _fts: () => W({ _fts: { fields: [], searchTerm: "x" } }),
+                 day_only: () => W({ when: { day_only: true } }),
+                 eq: () => W({ eq: [{ field: "a" }, { field: "b" }] }),
+                 RegExp: () => W({ author: /tol/ }),
+                 Symbol: () => W({ author: Symbol("raw sql") }),
+                 starts_with: () => W({ author: { starts_with: "tol" } }),
+               };
+               const out = {};
+               for (const key of Object.keys(cases)) {
+                 try { cases[key](); out[key] = "did not throw"; }
+                 catch (e) { out[key] = e.message; }
+               }
+               return out;"#,
+        )
+        .await;
+
+        for (key, wanted) in [
+            ("inSelect", "inSelect"),
+            ("inSelectWithLevels", "inSelectWithLevels"),
+            ("json", "json"),
+            ("slugify", "slugify"),
+            ("_fts", "_fts"),
+            ("day_only", "day_only"),
+            ("eq", "eq"),
+            ("RegExp", "regular expression"),
+            ("Symbol", "Symbol"),
+            ("starts_with", "starts_with"),
+        ] {
+            let message = out[key].as_str().unwrap_or_default();
+            assert!(
+                message.contains(wanted),
+                "the refusal of {key} does not name it: {message}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn v1s_selopts_lower_and_an_unknown_one_is_refused() {
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            r#"const S = __scV1Selopts;
+               const refused = (f) => { try { f(); return "did not throw"; }
+                                        catch (e) { return e.message; } };
+               return {
+                 plain:   S({ orderBy: "title", limit: 10, offset: 5 }),
+                 desc:    S({ orderBy: "title", orderDesc: true }),
+                 object:  S({ orderBy: { field: "title", desc: true } }),
+                 fields:  S({ fields: ["title", "pages"] }),
+                 forUser: S({ forUser: { id: 7, role_id: 40 } }),
+                 byId:    S({ forUser: 7 }),
+                 public:  S({ forPublic: true }),
+                 nothing: S(undefined),
+                 unknown: refused(() => S({ cached: true })),
+                 both:    refused(() => S({ forUser: { id: 1 }, forPublic: true })),
+                 near:    refused(() => S({ orderBy: { operator: "near" } })),
+               };"#,
+        )
+        .await;
+
+        assert_eq!(
+            out["plain"],
+            json!({ "order": [{ "field": "title", "dir": "asc" }], "limit": 10, "offset": 5 })
+        );
+        assert_eq!(
+            out["desc"],
+            json!({ "order": [{ "field": "title", "dir": "desc" }] })
+        );
+        assert_eq!(
+            out["object"],
+            json!({ "order": [{ "field": "title", "dir": "desc" }] })
+        );
+        assert_eq!(out["fields"], json!({ "select": ["title", "pages"] }));
+        // v1 says whose view of the data this is with a user; the plan says it
+        // with an authority, and the named user goes through the same ownership
+        // functions `asUser()` goes through.
+        assert_eq!(out["forUser"], json!({ "authority": { "user": 7 } }));
+        assert_eq!(out["byId"], json!({ "authority": { "user": 7 } }));
+        assert_eq!(out["public"], json!({ "authority": "public" }));
+        assert_eq!(out["nothing"], json!({}));
+        let unknown = out["unknown"].as_str().unwrap_or_default();
+        assert!(
+            unknown.contains("cached") && unknown.contains("orderBy"),
+            "{unknown}"
+        );
+        assert!(
+            out["both"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("forPublic"),
+            "{out}"
+        );
+        assert!(
+            out["near"].as_str().unwrap_or_default().contains("near"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_v1_table_answers_its_metadata_synchronously() {
+        // The definition of done's first four lines: none of this awaits
+        // anything, none of it costs a host call, and this run has no host at
+        // all — which is the point of the snapshot.
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            &format!(
+                r#"{MAKE}
+                   const books = Table.findOne("books");
+                   const author = books.getField("author");
+                   return {{
+                     name: books.name,
+                     label: books.label,
+                     pk_name: books.pk_name,
+                     pk_type: books.pk_type,
+                     composite: books.composite_pk_names,
+                     sql_name: books.sql_name,
+                     min_role_read: books.min_role_read,
+                     fields: books.fields.map((f) => f.name),
+                     getFields: (await books.getFields()).length,
+                     is_fkey: author.is_fkey,
+                     reftable_name: author.reftable_name,
+                     reftype: author.reftype,
+                     pretty_type: author.pretty_type,
+                     fieldview: author.fieldview,
+                     sublabel: author.sublabel,
+                     summary: author.attributes.summary_field,
+                     type_name: books.getField("title").type_name,
+                     sql_type: books.getField("title").sql_type,
+                     id_is_name: books.getField("title").id,
+                     path: books.getField("author.name").table_id,
+                     own_table: author.table.name,
+                     foreign: books.getForeignKeys().map((f) => f.name),
+                     owner: books.owner_fieldname(),
+                     formula: books.ownership_formula,
+                     cached: Table.findOne("books") === books,
+                     by_object: Table.findOne({{ name: "authors" }}).name,
+                     missing: Table.findOne("nope") === undefined,
+                     tables: Table.find().map((t) => t.name),
+                     json_name: books.to_json().name,
+                     json_fields: books.to_json().fields.length,
+                     one_field: Field.findOne({{ table_id: "books", name: "title" }}).label,
+                     keys: Field.find({{ is_fkey: true }}).map((f) => f.name),
+                     cached_fields: Field.findCached({{ name: "id" }}).length,
+                     label_to_name: Field.labelToName("First Name!"),
+                     name_to_label: Field.nameToLabel("first_name"),
+                   }};"#
+            ),
+        )
+        .await;
+
+        assert_eq!(out["name"], json!("books"));
+        assert_eq!(out["label"], json!("Books"));
+        assert_eq!(out["pk_name"], json!("id"));
+        assert_eq!(out["pk_type"], json!("Integer"));
+        assert_eq!(out["composite"], json!(["id"]));
+        assert_eq!(out["sql_name"], json!("\"books\""));
+        assert_eq!(out["min_role_read"], json!(40));
+        assert_eq!(
+            out["fields"],
+            json!(["id", "title", "pages", "author", "owner"])
+        );
+        assert_eq!(out["getFields"], json!(5));
+        // v1's own property names, with v1's values behind them.
+        assert_eq!(out["is_fkey"], json!(true));
+        assert_eq!(out["reftable_name"], json!("authors"));
+        assert_eq!(out["reftype"], json!("Integer"));
+        assert_eq!(out["pretty_type"], json!("Key to authors"));
+        assert_eq!(out["fieldview"], json!("select"));
+        assert_eq!(out["sublabel"], json!("who wrote it"));
+        assert_eq!(out["summary"], json!("name"));
+        assert_eq!(out["type_name"], json!("String"));
+        assert_eq!(out["sql_type"], json!("text"));
+        // A field's id is its name, because this server identifies it by name.
+        assert_eq!(out["id_is_name"], json!("title"));
+        // A dotted path is the *other* table's field.
+        assert_eq!(out["path"], json!("authors"));
+        assert_eq!(out["own_table"], json!("books"));
+        assert_eq!(out["foreign"], json!(["author"]));
+        assert_eq!(out["owner"], json!("owner"));
+        assert_eq!(out["formula"], json!("owner === user.id"));
+        // v1's is a state cache and plugins compare what comes out of it.
+        assert_eq!(out["cached"], json!(true));
+        assert_eq!(out["by_object"], json!("authors"));
+        assert_eq!(out["missing"], json!(true));
+        // This server's own tables are not the application's, and a plugin
+        // listing tables meant the application's.
+        assert_eq!(out["tables"], json!(["books", "authors"]));
+        assert_eq!(out["json_name"], json!("books"));
+        assert_eq!(out["json_fields"], json!(5));
+        assert_eq!(out["one_field"], json!("title"));
+        assert_eq!(out["keys"], json!(["author"]));
+        assert_eq!(out["cached_fields"], json!(2), "both tables have an id");
+        assert_eq!(out["label_to_name"], json!("first_name"));
+        assert_eq!(out["name_to_label"], json!("First name"));
+    }
+
+    #[tokio::test]
+    async fn a_v1_field_cannot_be_assigned_to() {
+        // v1 code assigns to a field and expects it to matter — that is what
+        // `Field.update` is for. Here it would change a copy of a snapshot, so
+        // it is refused at the property rather than swallowed: a body that is
+        // not in strict mode would otherwise never learn.
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            &format!(
+                r#"{MAKE}
+                   const books = Table.findOne("books");
+                   const said = (f) => {{ try {{ f(); return "accepted"; }}
+                                          catch (e) {{ return e.message; }} }};
+                   return {{
+                     field: said(() => {{ books.getField("title").label = "Nope"; }}),
+                     added: said(() => {{ books.getField("title").invented = 1; }}),
+                     table: said(() => {{ books.name = "nope"; }}),
+                   }};"#
+            ),
+        )
+        .await;
+        for key in ["field", "added", "table"] {
+            let message = out[key].as_str().unwrap_or_default();
+            assert!(message.contains("would change a copy"), "{key}: {message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_refused_v1_method_names_itself() {
+        // §9's whole tier boundary, walked from the one list it is generated
+        // from: reachable as a property, fatal on call, naming the path. A
+        // method implemented later is deleted from that list by the edit that
+        // implements it — and `installRefusals` refuses to shadow a method that
+        // is there, so the list and the implementation cannot disagree.
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            &format!(
+                r#"{MAKE}
+                   const books = Table.findOne("books");
+                   const owners = {{
+                     Table: Table, table: books,
+                     Field: Field, field: books.getField("title"),
+                   }};
+                   const out = {{}};
+                   for (const path of __scV1Refused()) {{
+                     const dot = path.indexOf(".");
+                     const owner = owners[path.slice(0, dot)];
+                     const name = path.slice(dot + 1);
+                     if (typeof owner[name] !== "function") {{
+                       out[path] = "not reachable as a property";
+                       continue;
+                     }}
+                     try {{ owner[name](); out[path] = "did not throw"; }}
+                     catch (e) {{ out[path] = e.message; }}
+                   }}
+                   out.implemented = __scV1Refused().indexOf("table.getField") < 0;
+                   return out;"#
+            ),
+        )
+        .await;
+
+        let refusals = out.as_object().expect("an object of refusals");
+        assert!(refusals.len() > 40, "the refusal tier is the list: {out}");
+        assert_eq!(
+            out["implemented"],
+            json!(true),
+            "an implemented method is not refused"
+        );
+        for (path, message) in refusals {
+            if path == "implemented" {
+                continue;
+            }
+            let message = message.as_str().unwrap_or_default();
+            assert!(
+                message.contains(path) && message.contains("is not available"),
+                "{path} does not name itself: {message}"
+            );
+        }
+        // And the three kinds of reason are each said, rather than one blanket
+        // sentence for everything.
+        let schema = out["Table.create"].as_str().unwrap_or_default();
+        assert!(schema.contains("introspects the schema"), "{schema}");
+        assert!(
+            out["table.get_history"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no row history"),
+            "{out}"
+        );
+        assert!(
+            out["table.getRows"]
+                .as_str()
+                .unwrap_or_default()
+                .ends_with("this version of Saltcorn"),
+            "a method that is simply not built yet claims no principle: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_with_no_snapshot_gets_a_table_that_says_why() {
+        // Phase 5's `onLoad` and any other context with no schema. A
+        // `Table.findOne` that answered `undefined` for every table would have
+        // a plugin compute the wrong answer instead of failing.
+        let rt = CodeRuntime::with_workers(1);
+        let out = rt
+            .run(call(
+                r#"const { Table, Field } = __scMakeV1Api(null, null);
+                   const said = (f) => { try { return f(); } catch (e) { return e.message; } };
+                   return {
+                     table: said(() => Table.findOne("books")),
+                     find: said(() => Field.find({})),
+                     create: said(() => Table.create("books")),
+                     pure: Field.nameToLabel("first_name"),
+                   };"#,
+            ))
+            .await
+            .expect("the body ran");
+        assert!(
+            out["table"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no schema snapshot"),
+            "{out}"
+        );
+        assert!(
+            out["find"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no schema snapshot"),
+            "{out}"
+        );
+        // A method that is refused everywhere is refused here too, in its own
+        // words rather than the snapshot's.
+        assert!(
+            out["create"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Table.create"),
+            "{out}"
+        );
+        assert_eq!(out["pure"], json!("First name"));
     }
 }
