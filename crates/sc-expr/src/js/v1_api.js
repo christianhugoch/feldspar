@@ -60,25 +60,15 @@
   const BUILDER =
     "these are Saltcorn 1's view builder talking to itself, and this server " +
     "builds its views another way";
-  const LATER = null;
-
   // Every v1 `Table` and `Field` member this version does not implement, and
   // why. `Table.`/`Field.` is a static, `table.`/`field.` an instance method —
   // the two spellings v1 itself uses.
   //
   // A `null` reason is a method that is simply not built yet: it says it is not
-  // available and does not pretend to have a principle behind it.
+  // available and does not pretend to have a principle behind it. There are
+  // none today — every member left on this list is here for a reason that is
+  // written down beside it.
   const NOT_IMPLEMENTED = {
-    // The writes. Not built yet; the phase after this one is them, and each is
-    // deleted from this list by the edit that implements it.
-    "table.insertRow": LATER,
-    "table.tryInsertRow": LATER,
-    "table.updateRow": LATER,
-    "table.tryUpdateRow": LATER,
-    "table.deleteRows": LATER,
-    "table.toggleBool": LATER,
-    "table.run_trigger": LATER,
-
     // Schema editing (§9): a v1 plugin that edits the schema is a plugin
     // editing a schema this server introspects, which is a different argument.
     "Table.create": SCHEMA,
@@ -752,6 +742,97 @@
   const JOIN_SELOPTS = ["orderBy", "orderDesc", "limit", "offset", "forUser", "forPublic"];
 
   // -------------------------------------------------------------------------
+  // The writes (§4)
+  // -------------------------------------------------------------------------
+
+  // v1 says whose write this is with an **argument** rather than an option:
+  // `insertRow(row, user)`, `updateRow(v, id, user)`, `deleteRows(where, user)`.
+  // Omitted, v1 means unrestricted — which is the plan's own default authority,
+  // the admin's. Given, it is *that* user, and it lowers to the same
+  // `{ user: id }` `forUser` does: the named user loaded where users live and
+  // checked through the very same ownership functions `asUser()` goes through.
+  //
+  // It can only ever narrow. The body already runs as admin and could write
+  // anything by leaving the argument out, so naming somebody is a body
+  // volunteering to be treated as them.
+  const asUserArg = (user, method) => {
+    if (user === undefined || user === null) return null;
+    if (typeof user === "number" || typeof user === "string") return { user: user };
+    if (isObject(user)) {
+      if (user.id === undefined || user.id === null) {
+        throw new Error(
+          "`" + method + "`'s user argument is who to write as, and this one has no " +
+          "id; pass the user row or its id"
+        );
+      }
+      return { user: user.id };
+    }
+    throw new Error("`" + method + "`'s user argument is a user row or a user id");
+  };
+
+  // v1's fourth argument to `updateRow`, which is `noTrigger` positionally and
+  // an options object in the spellings that grew later.
+  //
+  // **A write on this server is an event** (§4) — that is what a write through
+  // the row layer *is*, and it is why `insertRow` here is worth having at all —
+  // so a write no trigger sees is not something this server can do. Refused
+  // naming it, rather than accepted and ignored: a plugin that passed it did so
+  // to stop a cascade, and silently firing one would be the surprise, not the
+  // refusal.
+  const WRITE_OPTS_REFUSED = {
+    noTrigger:
+      "a write on this server is an event, and there is no way to make one that " +
+      "no trigger sees; the cascade is bounded by the run's own trigger budget",
+    resultCollector: "Saltcorn 1's result collector is its own form machinery",
+    restore_of_version: "this server keeps no row history to restore from",
+    syncTimestamp: "the mobile offline sync of Saltcorn 1 has no counterpart here",
+  };
+
+  const refuseWriteOpts = (method, opts) => {
+    if (opts === undefined || opts === null || opts === false) return;
+    if (opts === true) {
+      throw new Error(
+        "`" + method + "`'s fourth argument is Saltcorn 1's `noTrigger`: " +
+        WRITE_OPTS_REFUSED.noTrigger
+      );
+    }
+    if (!isObject(opts)) {
+      throw new Error("`" + method + "`'s fourth argument is an options object");
+    }
+    // Every key, because there is no option of a v1 write this version
+    // implements: the ones v1 has are the four above, and each says what it is.
+    const keys = Object.keys(opts);
+    if (keys.length > 0) {
+      const key = keys[0];
+      throw new Error(
+        "`" + method + "." + key + "` is not supported: " +
+        (WRITE_OPTS_REFUSED[key] || "this server has no counterpart for it")
+      );
+    }
+  };
+
+  // The row a write addresses, as a filter on the primary key. A plan's update
+  // and delete both refuse to run without one (§4: a whole table rewritten by an
+  // *omitted* argument is not something this seam allows), so the key v1 passes
+  // becomes the `where` that names the row.
+  const pkWhere = (spec, id, method) => {
+    const pk = spec.primary_key || [];
+    if (pk.length !== 1) {
+      throw new Error(
+        "`" + spec.name + "` has a composite primary key (" + pk.join(", ") + "), " +
+        "so there is no single id for " + method + " to address a row by; write the " +
+        "condition with deleteRows or db." + spec.name + " instead"
+      );
+    }
+    if (id === undefined || id === null) {
+      throw new Error("`" + method + "` takes the primary key of the row to write");
+    }
+    const clause = {};
+    clause[pk[0]] = { eq: id };
+    return clause;
+  };
+
+  // -------------------------------------------------------------------------
   // `Field`: a view of the snapshot, not a record (§7)
   // -------------------------------------------------------------------------
 
@@ -840,7 +921,7 @@
   // `Table`: metadata synchronously (§2), rows through the sender (§3)
   // -------------------------------------------------------------------------
 
-  const makeTable = (api, spec, send) => {
+  const makeTable = (api, spec, send, runTrigger) => {
     const fields = spec.fields.map((f) => makeField(api, spec.name, f, send));
     const byName = new Map(fields.map((f) => [f.name, f]));
     const pk = spec.primary_key || [];
@@ -1088,6 +1169,157 @@
         plan.render = true;
         return ships("getJoinedQuery", plan);
       },
+
+      // ---------------------------------------------------------------------
+      // The writes (§4)
+      // ---------------------------------------------------------------------
+
+      // v1's `insertRow(row, user)`, answering the **primary key** of the row
+      // written — which is what v1 answers and what a plugin then passes to
+      // `updateRow` or puts in a link.
+      //
+      // One insert plan, so the row is coerced against its columns, validated,
+      // File-field-checked and **observed by triggers** exactly as a write
+      // through the API is. That is the whole reason this method is worth
+      // having: a v1 plugin's write is an event here, and the trigger an admin
+      // wrote sees it.
+      insertRow: (row, user) => {
+        if (Array.isArray(row)) {
+          throw new Error(
+            "`insertRow` writes one row; pass one object, or call it once per row"
+          );
+        }
+        const plan = { op: "insert", table: spec.name, values: row };
+        const authority = asUserArg(user, "insertRow");
+        if (authority !== null) plan.authority = authority;
+        return ships("insertRow", plan).then((written) =>
+          written === null || written === undefined ? undefined : written[pk[0]]
+        );
+      },
+      // v1's `tryInsertRow`: the same write, with the failure answered rather
+      // than thrown — `{ success: id }` or `{ error: message }`, which is the
+      // shape a v1 plugin branches on.
+      tryInsertRow: (row, user) =>
+        table.insertRow(row, user).then(
+          (id) => ({ success: id }),
+          (e) => ({ error: e && e.message ? e.message : String(e) })
+        ),
+      // v1's `updateRow(values, id, user, noTrigger)`, with **v1's return
+      // convention**: `undefined` is success and a **string is the error**.
+      //
+      // That convention is the reason this method does not simply reject. Eight
+      // years of plugins are written as `const err = await t.updateRow(v, id,
+      // user); if (err) …`, and a rejection there is an unhandled one — the
+      // refusal a v1 plugin is written to *read* would become a crash it never
+      // sees. What it costs is stated where the tutorial documents it: a body
+      // that ignores the answer does not learn the write failed, which is v1's
+      // own trade and not one invented here. `db.<table>.update()` is the
+      // surface that throws.
+      updateRow: (values, id, user, opts) => {
+        refuseWriteOpts("updateRow", opts);
+        const plan = {
+          op: "update", table: spec.name, values: values,
+          where: pkWhere(spec, id, "updateRow"),
+        };
+        const authority = asUserArg(user, "updateRow");
+        if (authority !== null) plan.authority = authority;
+        return ships("updateRow", plan).then(
+          // **Nothing written is a refusal here, not a success.** A delegated
+          // write resolves the rows it touches through the delegated *read*, so
+          // a row this user may not see is a row that matched nothing — and a
+          // withheld row is the same not-found an absent one gets, deliberately
+          // (§7.3). v1 answers "not authorized" for the first and this method
+          // has one string for both, because telling them apart is exactly what
+          // the rule declines to do.
+          (r) => (r && r.updated
+            ? undefined
+            : "no row of `" + spec.name + "` with that id was updated: either there " +
+              "is no such row, or this user may not write it"),
+          (e) => (e && e.message ? e.message : String(e))
+        );
+      },
+      // v1's `tryUpdateRow`: the same write in the other of v1's two shapes.
+      tryUpdateRow: (values, id, user, opts) =>
+        table.updateRow(values, id, user, opts).then((error) =>
+          typeof error === "string" ? { error: error } : { success: true }
+        ),
+      // v1's `deleteRows(where, user)`. Each matched row is deleted through the
+      // row layer one at a time, so each is its own event — and a delete with
+      // **no condition** is refused by the plan seam, because a whole table
+      // emptied by an omitted argument is not something an accident should be
+      // able to cause.
+      deleteRows: (where, user) => {
+        const plan = { op: "delete", table: spec.name };
+        const filter = translateWhere(where);
+        if (filter !== null) plan.where = filter;
+        const authority = asUserArg(user, "deleteRows");
+        if (authority !== null) plan.authority = authority;
+        return ships("deleteRows", plan).then(() => undefined);
+      },
+      // v1's `toggleBool(id, field, user)`: the boolean at the other value.
+      //
+      // **Two round trips, not one statement.** v1 writes `SET f = NOT f`, and
+      // an assignment on this seam is a value rather than an expression over the
+      // row — so this reads the row and writes the negation back. The difference
+      // is a race: two toggles of the same row interleaved end where they
+      // started, where v1's single statement would have ended toggled. It is
+      // written down rather than hidden because a plugin toggling a flag from
+      // two events at once is a real shape, and the fix is a `db.sql()`.
+      toggleBool: (id, field, user) => {
+        const name = identifier("toggleBool", field);
+        if (!byName.has(name)) {
+          throw new Error("`" + spec.name + "` has no field `" + name + "` to toggle");
+        }
+        const where = pkWhere(spec, id, "toggleBool");
+        const authority = asUserArg(user, "toggleBool");
+        const read = { op: "select", table: spec.name, where: where, limit: 1 };
+        if (authority !== null) read.authority = authority;
+        return ships("toggleBool", read).then((rows) => {
+          if (!rows.length) {
+            throw new Error(
+              "there is no row of `" + spec.name + "` with that id to toggle `" +
+              name + "` on"
+            );
+          }
+          const values = {};
+          values[name] = !rows[0][name];
+          const plan = {
+            op: "update", table: spec.name, values: values, where: where,
+          };
+          if (authority !== null) plan.authority = authority;
+          return ships("toggleBool", plan).then(() => undefined);
+        });
+      },
+      // v1's `run_trigger(trigger, row, user)`: the named trigger, run on this
+      // row as its payload.
+      //
+      // Through **the** dispatcher — the same one a table event and a
+      // `trigger("name").run()` go through — so `only_if`, the role floor and
+      // the cascade bound all still apply, and a v1 plugin cannot start a run
+      // that a body in this server's own language could not. The trigger is a
+      // name or the object v1 passes, which carries one.
+      run_trigger: (trigger, row, user) => {
+        const name = isObject(trigger) ? trigger.name : trigger;
+        if (typeof name !== "string" || name === "") {
+          throw new Error(
+            "`run_trigger` takes the trigger to run, by name or as the object " +
+            "carrying one"
+          );
+        }
+        if (typeof runTrigger !== "function") {
+          throw new Error(
+            "`" + spec.name + ".run_trigger` runs another trigger, and nothing here " +
+            "can: this run was given no trigger host"
+          );
+        }
+        const request = {
+          trigger: name,
+          payload: row === undefined || row === null ? {} : row,
+        };
+        const authority = asUserArg(user, "run_trigger");
+        if (authority !== null) request.authority = authority;
+        return runTrigger(request);
+      },
     };
     // v1's `pk_type` is what a caller branches on, so it is the type's *name*
     // — `"Integer"`, `"String"` — and not the type object `type` already
@@ -1131,11 +1363,18 @@
   // snapshot that run resolved at invoke.
   //
   // `send` is one function — a plan in, a promise of the answer out — and it is
-  // the whole of what this file can reach: in a code body it is the run's own
-  // `db` sender, closed over the token that says whose call this is; in a
-  // module it is the ask channel back to the server. Passing the sender rather
-  // than the token is what lets the *same text* serve both, which is the point
-  // of there being one file.
+  // very nearly the whole of what this file can reach: in a code body it is the
+  // run's own `db` sender, closed over the token that says whose call this is;
+  // in a module it is the ask channel back to the server. Passing the sender
+  // rather than the token is what lets the *same text* serve both, which is the
+  // point of there being one file.
+  //
+  // `runTrigger` is the second and last of them, for the one v1 `Table` method
+  // that is not about rows: `run_trigger`. It is the run's own trigger sender —
+  // `trigger.__scRun` in a code body — so a v1 plugin's run is counted against
+  // the same trigger budget and carries the same chain a `trigger("x").run()`
+  // does. A run given none has a `run_trigger` that says so, exactly as a run
+  // given no `send` has reads that say so.
   //
   // A run with **no sender** gets a `Table` whose metadata is whole and whose
   // reads say so by name, because a run with no database host really can answer
@@ -1143,7 +1382,7 @@
   // so by name rather than classes that know no tables: a `Table.findOne`
   // answering undefined for everything would have a plugin compute the wrong
   // answer instead of failing.
-  fixed("__scMakeV1Api", (send, snapshot) => {
+  fixed("__scMakeV1Api", (send, snapshot, runTrigger) => {
     const api = {};
     const absent = (what) => {
       throw new Error(
@@ -1175,7 +1414,9 @@
     // comes out of it.
     const built = new Map();
     const tableOf = (spec) => {
-      if (!built.has(spec.name)) built.set(spec.name, makeTable(api, spec, send));
+      if (!built.has(spec.name)) {
+        built.set(spec.name, makeTable(api, spec, send, runTrigger));
+      }
       return built.get(spec.name);
     };
 

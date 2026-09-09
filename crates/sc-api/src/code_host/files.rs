@@ -196,9 +196,9 @@ impl<'a> FileStoreHost<'a> {
         store: &dyn FileStore,
         name: &str,
         path: &str,
-        authority: Authority,
+        authority: &Authority,
     ) -> Result<()> {
-        if authority == Authority::Admin {
+        if authority.is_admin() {
             return Ok(());
         }
         let floor = self.floor(name).await?;
@@ -276,6 +276,23 @@ impl FileHost for FileStoreHost<'_> {
 impl FileStoreHost<'_> {
     /// Answer one operation.
     async fn run(&self, req: &FileRequest) -> Result<Json> {
+        // Two of the four authorities, and the other two refused by name. `fs`
+        // offers `asAdmin()` and `asUser()` and nothing else, so `public` and a
+        // named user can only arrive from a guest that built the request itself
+        // — and this surface has no rule to apply them with: its access check
+        // reads *this run's* role (§10.1's file rule), which is not the role
+        // either of them means. Answering them as the run's own caller would be
+        // a body asking to be treated as somebody smaller and being treated as
+        // itself, which is the failure principle 5 exists to prevent.
+        if !matches!(req.authority, Authority::Admin | Authority::User) {
+            return Err(Error::invalid(format!(
+                "`{}` is not an authority the file surface carries: a file operation is the \
+                 admin's or this event's caller's, and nothing here can act as {} \
+                 (the file rule is checked against the role this event was served at)",
+                req.authority.spelling(),
+                req.authority.spelling()
+            )));
+        }
         let path = clean_path(&req.path)?;
         let store = self.store(&req.store)?;
         match req.op.as_str() {
@@ -284,13 +301,13 @@ impl FileStoreHost<'_> {
             "stat" => self.stat(store.as_ref(), req, &path).await,
             "list" => self.list(store.as_ref(), req, &path).await,
             "mkdir" => {
-                self.permit(store.as_ref(), &req.store, &path, req.authority)
+                self.permit(store.as_ref(), &req.store, &path, &req.authority)
                     .await?;
                 store.mkdir(&path).await?;
                 Ok(Json::Null)
             }
             "delete" => {
-                self.permit(store.as_ref(), &req.store, &path, req.authority)
+                self.permit(store.as_ref(), &req.store, &path, &req.authority)
                     .await?;
                 Ok(Json::Bool(store.delete(&path).await?))
             }
@@ -305,7 +322,7 @@ impl FileStoreHost<'_> {
 
     /// A `read`: the whole file, as text or as bytes.
     async fn read(&self, store: &dyn FileStore, req: &FileRequest, path: &str) -> Result<Json> {
-        self.permit(store, &req.store, path, req.authority).await?;
+        self.permit(store, &req.store, path, &req.authority).await?;
         let name = store.name();
         // Asked before the bytes are read, so a file too large to carry is
         // refused without first being loaded into this process to prove it.
@@ -346,7 +363,7 @@ impl FileStoreHost<'_> {
 
     /// A `write`: create or replace, making the parent directories on the way.
     async fn write(&self, store: &dyn FileStore, req: &FileRequest, path: &str) -> Result<Json> {
-        self.permit(store, &req.store, path, req.authority).await?;
+        self.permit(store, &req.store, path, &req.authority).await?;
         let name = store.name();
         if path.is_empty() {
             return Err(Error::invalid(format!(
@@ -383,7 +400,7 @@ impl FileStoreHost<'_> {
 
     /// A `stat`: the entry's own facts, or `null` when nothing is there.
     async fn stat(&self, store: &dyn FileStore, req: &FileRequest, path: &str) -> Result<Json> {
-        self.permit(store, &req.store, path, req.authority).await?;
+        self.permit(store, &req.store, path, &req.authority).await?;
         let Some(stat) = store.stat(path).await? else {
             return Ok(Json::Null);
         };
@@ -392,7 +409,7 @@ impl FileStoreHost<'_> {
 
     /// A `list`: the direct children, filtered to what the authority may see.
     async fn list(&self, store: &dyn FileStore, req: &FileRequest, path: &str) -> Result<Json> {
-        self.permit(store, &req.store, path, req.authority).await?;
+        self.permit(store, &req.store, path, &req.authority).await?;
         let entries = store.list(path).await?;
         // Filtered rather than refused, exactly as the browse endpoint is: naming
         // an entry the caller cannot open leaks what the rule was set to hide.
@@ -433,8 +450,8 @@ impl FileStoreHost<'_> {
             Some(self.store(&to_name)?)
         };
         let dest_store = dest.as_deref().unwrap_or(store);
-        self.permit(store, &req.store, path, req.authority).await?;
-        self.permit(dest_store, &to_name, &to_path, req.authority)
+        self.permit(store, &req.store, path, &req.authority).await?;
+        self.permit(dest_store, &to_name, &to_path, &req.authority)
             .await?;
         if !req.overwrite {
             self.refuse_existing(dest_store, &to_path).await?;
@@ -484,7 +501,7 @@ impl FileStoreHost<'_> {
     /// A `meta`: the rule set on this entry, the rule that applies, and the
     /// attributes.
     async fn meta(&self, store: &dyn FileStore, req: &FileRequest, path: &str) -> Result<Json> {
-        self.permit(store, &req.store, path, req.authority).await?;
+        self.permit(store, &req.store, path, &req.authority).await?;
         let meta = store.get_meta(path).await?;
         let floor = self.floor(&req.store).await?;
         let effective = effective_min_role(store, floor, path).await?;
@@ -500,7 +517,7 @@ impl FileStoreHost<'_> {
 
     /// A `setMeta`: replace this entry's metadata.
     async fn set_meta(&self, store: &dyn FileStore, req: &FileRequest, path: &str) -> Result<Json> {
-        self.permit(store, &req.store, path, req.authority).await?;
+        self.permit(store, &req.store, path, &req.authority).await?;
         if let Some(role) = req.min_role
             && !(1..=sc_auth::ROLE_PUBLIC).contains(&role)
         {

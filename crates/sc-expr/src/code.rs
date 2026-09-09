@@ -2174,6 +2174,21 @@ pub(crate) const TRIGGERS_PRELUDE: &str = r#"
     Object.defineProperty(trigger, "names", {
       value: Object.freeze(known.slice()), enumerable: true,
     });
+    // The seam itself, and the one thing on this surface that is not the
+    // handle: one request in, a promise of the action's answer out, over this
+    // run's own token.
+    //
+    // It is here for `db.__scSend`'s reason (TODO "the v1 `Table` API" §4.5):
+    // the v1 `Table.run_trigger` runs a named trigger **as a named user**, which
+    // the handle cannot say — `asUser()` means the event's caller and v1's
+    // argument frequently means somebody else. The request is re-read and every
+    // rule re-applied on arrival (the trigger must exist, the role floor holds,
+    // the run is one of this run's budget), which is why this can be a
+    // convenience rather than a boundary. It does not name the trigger against
+    // the list above, because the host names it in a sentence that lists them.
+    Object.defineProperty(trigger, "__scRun", {
+      value: (request) => __scTriggerCall(__scTok, request), enumerable: false,
+    });
     return trigger;
   });
 })();
@@ -9303,6 +9318,294 @@ mod tests {
         }
     }
 
+    /// The write spy: the same arrangement the read spy is, answering the
+    /// shapes the host answers a write with — an insert its written row, an
+    /// update and a delete their `{ updated | deleted, ids }` — and a third
+    /// sender for the one method that runs a trigger rather than touching a row.
+    const WRITE_SPY: &str = r#"const sent = [];
+       const answers = {
+         insert: { id: 7, title: "Orlando" },
+         select: [{ id: 1, title: "Orlando", read: false }],
+         write: { updated: 1, ids: [1] },
+         trigger: { ran: true },
+         fail: null,
+       };
+       const { Table, Field } = __scMakeV1Api((plan) => {
+         sent.push(plan);
+         if (answers.fail) return Promise.reject(new Error(answers.fail));
+         if (plan.op === "insert") return Promise.resolve(answers.insert);
+         if (plan.op === "select") return Promise.resolve(answers.select);
+         return Promise.resolve(answers.write);
+       }, __scSchema(7), (request) => {
+         sent.push(request);
+         if (answers.fail) return Promise.reject(new Error(answers.fail));
+         return Promise.resolve(answers.trigger);
+       });"#;
+
+    #[tokio::test]
+    async fn every_v1_write_is_one_plan_of_the_seam_db_already_speaks() {
+        // §4: a v1 write is the plan a `db.books.insert(…)` sends, so it goes
+        // through the row layer — coerced, validated, and **an event a trigger
+        // sees**. What is asserted here is that equality and v1's own answers;
+        // that the plan then writes is the live tests' business.
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            &format!(
+                r#"{WRITE_SPY}
+                   const books = Table.findOne("books");
+                   const id = await books.insertRow({{ title: "Orlando" }});
+                   const tried = await books.tryInsertRow({{ title: "Orlando" }});
+                   const updated = await books.updateRow({{ pages: 10 }}, 1);
+                   const triedUp = await books.tryUpdateRow({{ pages: 10 }}, 1);
+                   const deleted = await books.deleteRows({{ pages: {{ lt: 1 }} }});
+                   const toggled = await books.toggleBool(1, "owner");
+                   return {{ id: id, tried: tried, updated: updated,
+                             triedUp: triedUp, deleted: deleted, toggled: toggled,
+                             sent: sent }};"#
+            ),
+        )
+        .await;
+
+        // v1's `insertRow` answers the primary key of the row it wrote.
+        assert_eq!(out["id"], json!(7));
+        assert_eq!(out["tried"], json!({ "success": 7 }));
+        // v1's `updateRow` answers nothing at all when it worked, which is what
+        // `if (err)` in eight years of plugins is written against.
+        assert_eq!(out["updated"], Json::Null);
+        assert_eq!(out["triedUp"], json!({ "success": true }));
+        assert_eq!(out["deleted"], Json::Null);
+        assert_eq!(out["toggled"], Json::Null);
+
+        let sent = out["sent"].as_array().expect("the plans");
+        assert_eq!(
+            sent[0],
+            json!({ "op": "insert", "table": "books", "values": { "title": "Orlando" } })
+        );
+        assert_eq!(
+            sent[2],
+            json!({
+                "op": "update", "table": "books",
+                "values": { "pages": 10 }, "where": { "id": { "eq": 1 } },
+            }),
+            "v1 addresses a row by its key, and this seam by the `where` that names it"
+        );
+        assert_eq!(
+            sent[4],
+            json!({ "op": "delete", "table": "books", "where": { "pages": { "lt": 1 } } })
+        );
+        // A toggle is two round trips, because an assignment on this seam is a
+        // value and not an expression over the row.
+        assert_eq!(
+            sent[5],
+            json!({
+                "op": "select", "table": "books",
+                "where": { "id": { "eq": 1 } }, "limit": 1,
+            })
+        );
+        assert_eq!(
+            sent[6],
+            json!({
+                "op": "update", "table": "books",
+                "values": { "owner": true }, "where": { "id": { "eq": 1 } },
+            }),
+            "the row said false, so the write says true"
+        );
+    }
+
+    #[tokio::test]
+    async fn v1s_user_argument_is_the_named_user_authority() {
+        // §4: v1 says whose write this is with an argument, and it lowers to the
+        // very same `{ user: id }` `forUser` does — the named user, through the
+        // same ownership functions `asUser()` goes through. It can only narrow:
+        // the body already runs as admin.
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            &format!(
+                r#"{WRITE_SPY}
+                   const books = Table.findOne("books");
+                   const user = {{ id: "0d4e1e1e-0000-4000-8000-000000000001", role: 40 }};
+                   await books.insertRow({{ title: "x" }}, user);
+                   await books.updateRow({{ pages: 1 }}, 1, user.id);
+                   await books.deleteRows({{ id: 1 }}, user);
+                   const said = (f) => {{ try {{ f(); return "did not throw"; }}
+                                          catch (e) {{ return e.message; }} }};
+                   return {{
+                     sent: sent,
+                     no_id: said(() => books.insertRow({{ title: "x" }}, {{ email: "a@b" }})),
+                     nonsense: said(() => books.insertRow({{ title: "x" }}, true)),
+                   }};"#
+            ),
+        )
+        .await;
+
+        let sent = out["sent"].as_array().expect("the plans");
+        let named = json!({ "user": "0d4e1e1e-0000-4000-8000-000000000001" });
+        for (i, op) in [(0, "insert"), (1, "update"), (2, "delete")] {
+            assert_eq!(sent[i]["op"], json!(op));
+            assert_eq!(sent[i]["authority"], named, "{op} runs as the named user");
+        }
+        assert!(
+            out["no_id"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("has no "),
+            "a user with no id is refused rather than dropped: {out}"
+        );
+        assert!(
+            out["nonsense"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("user row or a user id"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_v1_write_answers_in_v1s_two_shapes() {
+        // v1's return convention, preserved: `updateRow` answers a **string**
+        // and `tryUpdateRow` an `{ error }`, because `const err = await
+        // t.updateRow(…); if (err)` is how a v1 plugin reads a refusal. An
+        // `insertRow` throws, which is what v1's own `tryInsertRow` catches.
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            &format!(
+                r#"{WRITE_SPY}
+                   const books = Table.findOne("books");
+                   answers.fail = "not authorized";
+                   const update = await books.updateRow({{ pages: 1 }}, 1);
+                   const tried = await books.tryUpdateRow({{ pages: 1 }}, 1);
+                   const triedIn = await books.tryInsertRow({{ title: "x" }});
+                   let threw = "did not throw";
+                   try {{ await books.insertRow({{ title: "x" }}); }}
+                   catch (e) {{ threw = e.message; }}
+                   answers.fail = null;
+                   answers.write = {{ updated: 0, ids: [] }};
+                   const nothing = await books.updateRow({{ pages: 1 }}, 99);
+                   return {{ update: update, tried: tried, triedIn: triedIn,
+                             threw: threw, nothing: nothing }};"#
+            ),
+        )
+        .await;
+        assert_eq!(out["update"], json!("not authorized"));
+        assert_eq!(out["tried"], json!({ "error": "not authorized" }));
+        assert_eq!(out["triedIn"], json!({ "error": "not authorized" }));
+        assert_eq!(out["threw"], json!("not authorized"));
+        // And a write that touched **nothing** is a refusal too, not a success:
+        // a delegated update resolves its rows through the delegated read, so a
+        // row this user may not see is a row that matched nothing — the same
+        // not-found an absent row gets, deliberately.
+        assert!(
+            out["nothing"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("may not write it"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_v1_run_trigger_is_the_dispatchers_own_run() {
+        // §4.5: through *the* dispatcher, so `only_if`, the role floor and the
+        // cascade bound all still apply — and as a named user when v1 named one.
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            &format!(
+                r#"{WRITE_SPY}
+                   const books = Table.findOne("books");
+                   const ran = await books.run_trigger("archive", {{ id: 1 }});
+                   await books.run_trigger({{ name: "archive" }}, {{ id: 2 }},
+                                           "0d4e1e1e-0000-4000-8000-000000000001");
+                   const said = (f) => {{ try {{ f(); return "did not throw"; }}
+                                          catch (e) {{ return e.message; }} }};
+                   const {{ Table: T2 }} = __scMakeV1Api(null, __scSchema(7));
+                   return {{
+                     ran: ran, sent: sent,
+                     unnamed: said(() => books.run_trigger(7)),
+                     hostless: said(() => T2.findOne("books").run_trigger("archive")),
+                   }};"#
+            ),
+        )
+        .await;
+        assert_eq!(out["ran"], json!({ "ran": true }));
+        let sent = out["sent"].as_array().expect("the requests");
+        assert_eq!(
+            sent[0],
+            json!({ "trigger": "archive", "payload": { "id": 1 } })
+        );
+        assert_eq!(
+            sent[1],
+            json!({
+                "trigger": "archive", "payload": { "id": 2 },
+                "authority": { "user": "0d4e1e1e-0000-4000-8000-000000000001" },
+            })
+        );
+        assert!(
+            out["unnamed"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("by name"),
+            "{out}"
+        );
+        assert!(
+            out["hostless"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no trigger host"),
+            "a run with no trigger sender says so rather than doing nothing: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_v1_write_option_this_server_cannot_honour_is_refused_by_name() {
+        // The `selopts` rule, on the writing side: v1's `noTrigger` is the one
+        // that matters, because a write here **is** an event and a plugin that
+        // passed it did so to stop a cascade this server bounds another way.
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            &format!(
+                r#"{WRITE_SPY}
+                   const books = Table.findOne("books");
+                   const said = (f) => {{ try {{ f(); return "did not throw"; }}
+                                          catch (e) {{ return e.message; }} }};
+                   return {{
+                     noTrigger: said(() => books.updateRow({{ pages: 1 }}, 1, null, true)),
+                     option: said(() =>
+                       books.updateRow({{ pages: 1 }}, 1, null, {{ noTrigger: true }})),
+                     collector: said(() =>
+                       books.updateRow({{ pages: 1 }}, 1, null, {{ resultCollector: {{}} }})),
+                     no_id: said(() => books.updateRow({{ pages: 1 }})),
+                     array: said(() => books.insertRow([{{ title: "x" }}])),
+                     no_field: said(() => books.toggleBool(1, "nope")),
+                   }};"#
+            ),
+        )
+        .await;
+        for (key, wanted) in [
+            ("noTrigger", "noTrigger"),
+            ("option", "noTrigger"),
+            ("collector", "resultCollector"),
+            ("no_id", "primary key"),
+            ("array", "one row"),
+            ("no_field", "nope"),
+        ] {
+            let message = out[key].as_str().unwrap_or_default();
+            assert!(
+                message.contains(wanted),
+                "the refusal of {key} does not name it: {message}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_read_with_no_database_says_so_and_the_metadata_still_answers() {
         // The division the snapshot buys, at its edge: a run with the schema and
@@ -9430,12 +9733,27 @@ mod tests {
             "{out}"
         );
         assert!(
-            out["table.insertRow"]
+            out["table.get_relation_options"]
                 .as_str()
                 .unwrap_or_default()
-                .ends_with("this version of Saltcorn"),
-            "a method that is simply not built yet claims no principle: {out}"
+                .contains("view builder"),
+            "{out}"
         );
+        // And the writes are gone from it, because the edit that implemented
+        // them deleted their lines — which is the only way `installRefusals`
+        // would have let the api build at all.
+        for method in [
+            "table.insertRow",
+            "table.updateRow",
+            "table.deleteRows",
+            "table.toggleBool",
+            "table.run_trigger",
+        ] {
+            assert!(
+                refusals.get(method).is_none(),
+                "{method} is implemented and still on the refusal list"
+            );
+        }
     }
 
     #[tokio::test]

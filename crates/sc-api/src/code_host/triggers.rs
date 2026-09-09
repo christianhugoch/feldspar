@@ -159,27 +159,50 @@ impl<'a> TriggerRunHost<'a> {
         if name.is_empty() {
             return Err(Error::invalid("trigger() needs the name of a trigger"));
         }
-        // The floor, before anything happens and only where it applies: under the
-        // trigger's own authority there is nothing to check, because a trigger is
-        // configuration and configuration is the admin's. `min_role` absent means
-        // admin-only — the safe reading a trigger nobody has thought about the
-        // access of gets everywhere else (§10.2).
-        if request.authority == Authority::User {
+        // Whose run this is. Three of the four authorities are somebody the floor
+        // is checked against; the fourth is the admin's own, where there is
+        // nothing to check because a trigger is configuration and configuration
+        // is the admin's. A **named** user is v1's `run_trigger(…, user)`: it is
+        // loaded where users live and then treated exactly as the event's caller
+        // is, at that user's own role — which can only narrow, since a body that
+        // said nothing runs as admin.
+        let (caller, named) = match &request.authority {
+            // The event's own caller, which is what both of these run as: the
+            // admin's authority is the *trigger's*, and the run still carries
+            // who caused it.
+            Authority::Admin | Authority::User => {
+                (CallerContext::new(self.role, self.user.clone()), None)
+            }
+            Authority::Public => (CallerContext::new(sc_auth::ROLE_PUBLIC, None), None),
+            Authority::Named(id) => {
+                let user = super::load_named_user(self.catalog, id).await?;
+                let caller = crate::ownership::caller_context_at(user.role, Some(&user));
+                (caller, Some(user))
+            }
+        };
+        // The floor, before anything happens and only where it applies.
+        // `min_role` absent means admin-only — the safe reading a trigger nobody
+        // has thought about the access of gets everywhere else (§10.2).
+        if !request.authority.is_admin() {
             // `require` first, so "you may not run it" never stands in for "there
             // is no such trigger": the second is the answer the author needs.
             let triggers = self.dispatcher.triggers()?;
             let min_role = triggers.require(name)?.min_role;
-            if self.role > min_role.unwrap_or(sc_auth::ROLE_ADMIN) {
+            let floor = min_role.unwrap_or(sc_auth::ROLE_ADMIN);
+            if caller.role > floor {
                 return Err(Error::auth(format!(
-                    "this event's caller may not run `{name}`; it needs role {} or better",
-                    min_role.unwrap_or(sc_auth::ROLE_ADMIN)
+                    "{} may not run `{name}`; it needs role {floor} or better",
+                    match (&named, &request.authority) {
+                        (Some(user), _) => format!("user `{}`", user.id),
+                        (None, Authority::Public) => "the public role".to_owned(),
+                        _ => "this event's caller".to_owned(),
+                    }
                 )));
             }
         }
-        // The caller: the event's own, whichever authority the run carries, and
-        // the chain that led here — so the trigger that runs sees who caused it
-        // and the cascade bound counts this level.
-        let caller = CallerContext::new(self.role, self.user.clone()).chained(self.chain.clone());
+        // The caller carries the chain that led here, so the trigger that runs
+        // sees who caused it and the cascade bound counts this level.
+        let caller = caller.chained(self.chain.clone());
         let run = self.dispatcher.run_trigger_in(
             self.catalog,
             name,

@@ -64,6 +64,18 @@
 //! else, because an ownership formula is applied by a row layer raw SQL does not
 //! go through.
 //!
+//! Two more authorities exist for Saltcorn 1's sake, and both are that same
+//! delegation with a different somebody in it (TODO "the v1 `Table` API" §4).
+//! v1 says whose view of the data it wants with an **argument** —
+//! `getRows(where, { forUser: u })`, `insertRow(row, user)` — and that argument
+//! is frequently a user the plugin looked up rather than the event's caller. So
+//! a plan may say `{ "user": id }`, which loads that user and goes through the
+//! very same `*_as` functions, at that user's own role; and `"public"`, which is
+//! the public role with nobody in it. Neither can be an escalation — the body
+//! already runs as admin and could read everything by saying nothing — and a
+//! named user who does not exist is an error naming the id, never a quiet fall
+//! back to the default.
+//!
 //! Events differ in whom they have to delegate to, and that difference is
 //! honoured rather than hidden: a table event or a directly-run trigger carries
 //! the user who caused it, while a scheduled or startup trigger carries nobody
@@ -264,7 +276,7 @@ impl<'a> TableHost<'a> {
         // decides the role every name in the plan is resolved *at*, so a
         // delegated read of a table the caller may not reach through a key is
         // refused by the same guard a REST embed is.
-        let actor = self.actor(plan.authority)?;
+        let actor = self.actor(&plan.authority).await?;
         if plan.render && !matches!(plan.op, Op::Select) {
             return Err(Error::invalid(format!(
                 "the statement of a `{}` of `{}` is not something to ask for: only a read \
@@ -361,13 +373,36 @@ impl<'a> TableHost<'a> {
     /// Whose authority this plan runs under, as the value the operations dispatch
     /// on. Delegation reads the event's caller back as an [`sc_auth::User`] here,
     /// so a caller object that is not one is refused before any statement runs.
-    fn actor(&self, authority: Authority) -> Result<Actor> {
+    ///
+    /// A **named** user is the one form with I/O behind it — v1's `forUser` and
+    /// its `user` argument, which are frequently a user the plugin looked up and
+    /// not the event's caller at all. It is loaded here, once per plan and
+    /// before anything is resolved, and what comes out of it is the very same
+    /// [`Actor::Caller`] `asUser()` produces: one role, one user, and
+    /// §7.3's rule applied by the same `*_as` functions. A user who does not
+    /// exist is an error naming the id, never a silent fall back to admin —
+    /// which is the one mistake here that would matter, because the caller asked
+    /// to be treated as somebody *smaller*.
+    async fn actor(&self, authority: &Authority) -> Result<Actor> {
         match authority {
             Authority::Admin => Ok(Actor::Admin(self.caller())),
             Authority::User => Ok(Actor::Caller {
                 role: self.role,
                 user: User::from_json(self.role, self.user.as_ref())?,
             }),
+            // The public role with nobody in it, which the seam can already
+            // express and which no lookup can improve on.
+            Authority::Public => Ok(Actor::Caller {
+                role: ROLE_PUBLIC,
+                user: None,
+            }),
+            Authority::Named(id) => {
+                let user = load_named_user(self.catalog, id).await?;
+                Ok(Actor::Caller {
+                    role: user.role,
+                    user: Some(user),
+                })
+            }
         }
     }
 
@@ -514,7 +549,7 @@ impl<'a> TableHost<'a> {
     /// the escape hatch.
     async fn sql(&self, plan: &SqlPlan) -> Result<Json> {
         let statement = plan::statement(self.catalog, plan)?;
-        let context = self.actor(plan.authority)?.context(&self.chain);
+        let context = self.actor(&plan.authority).await?.context(&self.chain);
         let rows = match &self.executor {
             // Inside a step's transaction the statement joins it, so a `db.sql()`
             // sees what the step has written and what it writes is undone with
@@ -791,6 +826,38 @@ impl<'a> TableHost<'a> {
         }
         Ok(())
     }
+}
+
+/// The user a `{ user: id }` authority names, loaded.
+///
+/// **Where users live and nowhere else**: a caller that named somebody is
+/// asking to be treated as a row of the users table, so the row is read and its
+/// own role is what the floor is then checked against — not the role the event
+/// was served at, which is somebody else's.
+///
+/// Two refusals, both by name. A user id here is a uuid, because that is what a
+/// user is identified by on this server (§7.1) — Saltcorn 1's integer ids have
+/// no counterpart, and a plugin handing one over is told so rather than left
+/// with an empty answer. And a uuid that names nobody is an error, never an
+/// unowned read: the request was to be treated as somebody smaller, and
+/// answering it as admin would be the one wrong answer that matters.
+pub(crate) async fn load_named_user(catalog: &Catalog, id: &Json) -> Result<User> {
+    let Json::String(text) = id else {
+        return Err(Error::invalid(format!(
+            "`{id}` is not a user id: a user is identified by a uuid on this server, so \
+             pass the user row or its `id`"
+        )));
+    };
+    let uuid = text.parse::<uuid::Uuid>().map_err(|_| {
+        Error::invalid(format!(
+            "`{text}` is not a user id: a user is identified by a uuid on this server"
+        ))
+    })?;
+    sc_auth::load_user(catalog, uuid).await?.ok_or_else(|| {
+        Error::invalid(format!(
+            "there is no user with id `{text}`, so there is nobody to run as"
+        ))
+    })
 }
 
 /// Whose authority one plan runs under, resolved (§5).

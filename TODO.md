@@ -339,17 +339,17 @@ Three levels, because the failure modes are at three levels:
 
 ## Phase 4 — Writes, and whose authority
 
-- [ ] 4.1 `Authority::User(id)` in the plan (§4): loaded through `sc-auth`, checked through
+- [x] 4.1 `Authority::User(id)` in the plan (§4): loaded through `sc-auth`, checked through
       `sc_api::ownership`'s existing `*_as` functions, refused by name when the user does not
       exist. `forUser` and v1's `user` argument lower to it; `forPublic` to the public role.
-- [ ] 4.2 `insertRow(row, user?)` answering the primary key, and `tryInsertRow` answering
+- [x] 4.2 `insertRow(row, user?)` answering the primary key, and `tryInsertRow` answering
       v1's `{ success }` / `{ error }`.
-- [ ] 4.3 `updateRow(values, id, user?, opts?)` and `tryUpdateRow`, with v1's return
+- [x] 4.3 `updateRow(values, id, user?, opts?)` and `tryUpdateRow`, with v1's return
       convention (a string is the error, `undefined` is success) preserved.
-- [ ] 4.4 `deleteRows(where, user?)` and `toggleBool(id, field, user?)`.
-- [ ] 4.5 `run_trigger(trigger, row, user?)` onto the existing `TriggerRunHost` — through
+- [x] 4.4 `deleteRows(where, user?)` and `toggleBool(id, field, user?)`.
+- [x] 4.5 `run_trigger(trigger, row, user?)` onto the existing `TriggerRunHost` — through
       *the* dispatcher, so `only_if`, the role floor and the cascade bound all still apply.
-- [ ] 4.6 Live tests: each write raising the table event a trigger sees; a delegated write
+- [x] 4.6 Live tests: each write raising the table event a trigger sees; a delegated write
       checked on the row as it is *and* as it would become; a write for a user who may not
       make it refused as v1 refuses it.
 

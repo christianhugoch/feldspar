@@ -195,9 +195,19 @@ pub enum Op {
 }
 
 /// Whose authority a plan runs under (§5): the trigger's own by default,
-/// the event's caller when the body said `asUser()`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// the event's caller when the body said `asUser()`, and — since v1's `Table`
+/// says whose view of the data it wants with an *argument* — a **named user**.
+///
+/// The three that are not `Admin` are one thing in the end: [`Actor::Caller`],
+/// a role and a user, checked through `sc_api::ownership`'s `*_as` functions.
+/// There is no second implementation of "meets the floor OR the formula grants
+/// it" here and there must never be one; what these forms differ in is only
+/// *which* role and user those functions are handed.
+///
+/// None of them can be an escalation. A body already runs as admin and could
+/// read everything by saying nothing at all, so naming somebody smaller is a
+/// body volunteering to be treated as them (TODO "the v1 `Table` API" §4).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Authority {
     /// The trigger's: `ROLE_ADMIN`, carrying the event's user. The default,
     /// because a trigger is server-side configuration and the audit row a caller
@@ -206,6 +216,61 @@ pub enum Authority {
     Admin,
     /// The event's caller, through `sc_api::ownership`'s `*_as` functions.
     User,
+    /// The **public** role and nobody — v1's `forPublic: true`, and the honest
+    /// reading of "what would an anonymous visitor see".
+    Public,
+    /// One **named** user, loaded from the users table and then treated exactly
+    /// as [`Authority::User`]'s caller is: v1's `forUser` and its `user`
+    /// argument. The id is carried as it arrived and resolved where users live,
+    /// so a value that is no user id is refused naming it rather than
+    /// deserialised into something plausible.
+    Named(Json),
+}
+
+impl<'de> Deserialize<'de> for Authority {
+    /// `"admin"`, `"user"`, `"public"` — or `{ "user": <id> }` for a named one.
+    ///
+    /// Hand-written rather than untagged, for the reason every other shape on
+    /// this seam is `deny_unknown_fields`: an authority this server does not
+    /// understand must be a sentence naming the four spellings, not a silent
+    /// fall back to the default — which is admin, and therefore the one wrong
+    /// answer that would matter.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Authority, D::Error> {
+        use serde::de::Error as _;
+        let json = Json::deserialize(d)?;
+        match &json {
+            Json::String(s) if s == "admin" => Ok(Authority::Admin),
+            Json::String(s) if s == "user" => Ok(Authority::User),
+            Json::String(s) if s == "public" => Ok(Authority::Public),
+            Json::Object(map) if map.len() == 1 && map.contains_key("user") => {
+                Ok(Authority::Named(map["user"].clone()))
+            }
+            _ => Err(D::Error::custom(format!(
+                "`{json}` is not an authority: it is \"admin\", \"user\", \"public\", \
+                 or {{ \"user\": id }} for one particular user"
+            ))),
+        }
+    }
+}
+
+impl Authority {
+    /// Whether this authority is the admin's — the one form that clears every
+    /// rule that can be written, and therefore the one worth asking about by
+    /// name rather than by matching three others.
+    pub fn is_admin(&self) -> bool {
+        matches!(self, Authority::Admin)
+    }
+
+    /// The name a refusal calls this authority, for a surface that carries only
+    /// two of the four.
+    pub fn spelling(&self) -> &'static str {
+        match self {
+            Authority::Admin => "admin",
+            Authority::User => "user",
+            Authority::Public => "public",
+            Authority::Named(_) => "a named user",
+        }
+    }
 }
 
 /// One projection: a name (a column, a calculated field or a Ⱶ-path), or a

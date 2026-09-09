@@ -19,7 +19,7 @@ use sc_query::{OrderDir, Projection, Select, Source, SqlDialect, Statement, Valu
 use serde_json::{Value as Json, json};
 
 use super::plan::{self, Read};
-use super::{HostLimits, Plan};
+use super::{Authority, HostLimits, Plan};
 use crate::graphql::testing::{catalog_of, physical};
 
 /// Postgres-flavoured rendering, as in `sc-query`'s own tests.
@@ -717,6 +717,69 @@ async fn delegation_needs_a_caller_it_can_name_and_public_is_a_valid_answer() {
         .await
         .expect_err("public may not read books");
     assert!(public.to_string().contains("may not read"), "{public}");
+}
+
+#[tokio::test]
+async fn the_four_authorities_are_the_four_spellings_and_nothing_else_is_one() {
+    // §4: v1's `Table` says whose view of the data this is with an argument, so
+    // the seam grew the two forms that argument means — the public role, and one
+    // **named** user. An authority this server does not understand must be a
+    // sentence naming the four, never a silent fall back to the default: the
+    // default is admin, which is the one wrong answer here that would matter.
+    let of = |json: Json| serde_json::from_value::<Authority>(json);
+    assert_eq!(of(json!("admin")).expect("admin"), Authority::Admin);
+    assert_eq!(of(json!("user")).expect("user"), Authority::User);
+    assert_eq!(of(json!("public")).expect("public"), Authority::Public);
+    assert_eq!(
+        of(json!({ "user": "0d4e1e1e-0000-4000-8000-000000000001" })).expect("named"),
+        Authority::Named(json!("0d4e1e1e-0000-4000-8000-000000000001"))
+    );
+    for bad in [json!("root"), json!({ "role": 40 }), json!(40), json!(null)] {
+        let refused = of(bad.clone()).expect_err("not an authority").to_string();
+        assert!(
+            refused.contains("is not an authority") && refused.contains("public"),
+            "{bad}: {refused}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_named_user_is_loaded_where_users_live_and_a_bad_name_is_refused() {
+    let cat = library().await;
+    // A user id is a uuid here, because that is what a user is identified by on
+    // this server — v1's integer ids have no counterpart, and a plugin handing
+    // one over is told so rather than left with an empty answer. Both refusals
+    // happen before any statement runs.
+    for (id, wanted) in [
+        (json!(7), "not a user id"),
+        (json!("ada@example.com"), "not a user id"),
+    ] {
+        let plan: Plan = serde_json::from_value(json!({
+            "op": "select", "table": "books", "authority": { "user": id },
+        }))
+        .expect("a plan");
+        let host = super::TableHost::new(&cat);
+        let refused = host.run(&plan).await.expect_err("no such user").to_string();
+        assert!(refused.contains(wanted), "{refused}");
+    }
+
+    // `public` is the public role and nobody, which the ownership rule can
+    // answer without a lookup — and does: `books` is admin-only here, so the
+    // refusal is the table's own.
+    let plan: Plan = serde_json::from_value(json!({
+        "op": "select", "table": "books", "authority": "public",
+    }))
+    .expect("a plan");
+    let refused = super::TableHost::new(&cat)
+        .caused_by(ROLE_ADMIN, Some(caller()))
+        .run(&plan)
+        .await
+        .expect_err("public may not read books")
+        .to_string();
+    assert!(
+        refused.contains("may not read"),
+        "an admin's run asked to be treated as the public and was: {refused}"
+    );
 }
 
 #[tokio::test]

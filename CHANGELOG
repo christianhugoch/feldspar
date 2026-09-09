@@ -2,6 +2,75 @@
 
 Changes in reverse chronological order.
 
+## v1's `Table` writes, and whose authority a write runs under
+
+The fourth phase of the v1 `Table` API: the writes. `books.insertRow(row, user)`,
+`tryInsertRow`, `updateRow`, `tryUpdateRow`, `deleteRows`, `toggleBool` and
+`run_trigger` all answer now, and each of them is the **same plan** a
+`db.books.insert(…)` sends — so a v1 plugin's write is coerced against its
+columns, validated, File-field-checked and **observed by triggers**, which is the
+whole reason to have the method rather than a SQL statement. The definition of
+done's six lines now read *and* write against a real database.
+
+- **v1 says whose write this is with an argument, and the plan grew the two forms
+  that argument means.** `Authority` was `admin` or `user`; it is now also
+  `public` and `{ user: <id> }` — the named user, loaded where users live and put
+  through the very same `sc_api::ownership` `*_as` functions `asUser()` goes
+  through, at *that user's* own role. There is no second implementation of "meets
+  the floor OR the formula grants it" and there must never be one; what these
+  forms differ in is only which role and user those functions are handed. None of
+  them can be an escalation — the body already runs as admin and could write
+  anything by leaving the argument out — so naming somebody is a body
+  volunteering to be treated as them. A user who does not exist is an error
+  naming the id, never a quiet fall back to the default, because the default is
+  admin and that is the one wrong answer here that would matter. A user id is a
+  **uuid** on this server, so v1's integer ids are refused saying so rather than
+  looked up and missed.
+- **The authority is read by hand rather than derived**, so an authority this
+  server does not understand is a sentence naming the four spellings. The file
+  surface carries only two of them and says so: its access rule is checked
+  against the role *this event* was served at, which is not the role either of
+  the new forms means, and answering them as the run's own caller would be a body
+  asking to be treated as somebody smaller and being treated as itself.
+- **v1's two return conventions are preserved, including the one that hurts.**
+  `insertRow` answers the primary key and rejects on failure (which is what v1's
+  own `tryInsertRow` catches); `updateRow` answers **`undefined` on success and a
+  string on failure**, because `const err = await t.updateRow(v, id, user); if
+  (err)` is how eight years of plugins read a refusal, and a rejection there is
+  an unhandled one. What it costs is written down where the method is: a body
+  that ignores the answer does not learn the write failed. `db.<table>.update()`
+  is the surface that throws.
+- **A write that touched nothing is a refusal, not a success.** A delegated
+  update resolves the rows it touches through the delegated *read*, so a row this
+  user may not see is a row that matched nothing — the same not-found an absent
+  row gets, deliberately. `updateRow` therefore answers one string for both,
+  because telling them apart is exactly what §7.3's rule declines to do.
+- **`noTrigger` is refused by name.** A write on this server *is* an event, so a
+  write no trigger sees is not something it can do; a plugin that passed the flag
+  passed it to stop a cascade, and firing one silently would be the surprise
+  rather than the refusal. The cascade is bounded by the run's own trigger budget
+  instead. `resultCollector`, `restore_of_version` and `syncTimestamp` say what
+  they are the same way.
+- **`toggleBool` is a read and a write, and says so.** v1 writes `SET f = NOT f`;
+  an assignment on this seam is a value rather than an expression over the row,
+  so this reads the row and writes the negation back. The difference is a race
+  between two toggles of the same row, which is written down where the method is
+  rather than left to be discovered.
+- **`run_trigger` goes through *the* dispatcher**, over a second sender —
+  `trigger.__scRun`, the trigger surface's own seam, beside `db.__scSend` — so
+  `only_if`, the role floor and the cascade bound all still apply and a v1 plugin
+  cannot start a run a body in this server's own language could not. It needed
+  the seam because v1's third argument names a *particular* user, which the
+  fluent `asUser()` cannot say.
+- **Tested at both levels the failures are at.** In `sc-expr`, the spy asserts
+  the exact plan each write sends, v1's two answer shapes, the named-user
+  authority and every refusal naming itself; in `sc-api`, `tests/v1_table_writes.rs`
+  writes a real Postgres: each write raising the event a trigger sees (three
+  deletes, three events), a delegated update checked on the row as it is *and* as
+  it would become, an insert the formula will not grant refused as v1 refuses it,
+  a `forUser` read seeing exactly the rows that user's writes were granted on,
+  and `forPublic` seeing none.
+
 ## v1's `Table` reads, as the plans `db` already sends
 
 The third phase of the v1 `Table` API: the reads. `books.getRows(…)`, `getRow`, `countRows`,
