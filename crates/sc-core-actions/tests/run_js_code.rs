@@ -215,7 +215,6 @@ async fn the_sandbox_has_three_host_surfaces_and_nothing_else() -> Result<()> {
     // through a store an admin connected.
     let probes = [
         "Deno",
-        "require",
         "process",
         "XMLHttpRequest",
         "WebSocket",
@@ -289,11 +288,121 @@ async fn the_sandbox_has_three_host_surfaces_and_nothing_else() -> Result<()> {
         refused.as_str().unwrap_or_default().contains("nope"),
         "a store nothing connected cannot be read: {refused}"
     );
+    // `require` is the one name a body reaches for that exists and reaches
+    // nothing: it is a refusal that says what to write instead, because the
+    // first line of eight years of Saltcorn 1 code is a `require` and an admin
+    // who pastes one deserves the answer rather than `require is not a
+    // function`.
+    let said = run(
+        &catalog,
+        &book_insert(),
+        r#"try { require("@saltcorn/data/models/table"); return "loaded it"; }
+           catch (e) { return e.message; }"#,
+    )
+    .await?;
+    let said = said.as_str().unwrap_or_default();
+    assert!(said.contains("not available in a code body"), "{said}");
+    assert!(said.contains("already in scope"), "{said}");
     // What the event bound is still exactly what it bound.
     assert_eq!(
         run(&catalog, &book_insert(), "return Object.keys(row);").await?,
         json!(["id", "title", "pages"])
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `Table` and `Field`: Saltcorn 1's own API (the "v1 `Table` API" milestone,
+// phase 6)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_v1_table_is_in_scope_in_a_trigger_and_reads_and_writes() -> Result<()> {
+    let db = TestDb::new().await?;
+    let catalog = setup(&db).await?;
+
+    // The milestone's definition of done, minus its first line — a code body is
+    // handed `Table` rather than requiring it (§8), and the `require` that used
+    // to fetch it says so by name (above). Everything after that line is v1's
+    // own text: a synchronous `findOne`, a v1 `where`, v1 `selopts`, and a
+    // write addressed by primary key.
+    let out = run(
+        &catalog,
+        &book_insert(),
+        r#"const books = Table.findOne({ name: "books" });
+           const recent = await books.getRows({ pages: { gt: 50 } },
+                                              { orderBy: "title", limit: 10 });
+           await books.updateRow({ pages: recent[0].pages + 1 }, recent[0].id);
+           return {
+             pk: books.pk_name,
+             fields: books.fields.map((f) => f.name),
+             label: Field.nameToLabel("published_at"),
+             titles: recent.map((b) => b.title),
+           };"#,
+    )
+    .await?;
+    assert_eq!(
+        out,
+        // The metadata half of that answered from the snapshot the run carried:
+        // no host call, and nothing awaited.
+        json!({
+            "pk": "id",
+            "fields": ["id", "title", "pages"],
+            "label": "Published at",
+            "titles": ["A Book"],
+        })
+    );
+
+    // And the write is really there afterwards, which is the half of the
+    // definition of done the returned value cannot show.
+    let rows = db
+        .client()
+        .await?
+        .query("SELECT pages FROM books WHERE id = 7", &[])
+        .await
+        .map_err(|e| Error::database(e.to_string()))?;
+    assert_eq!(
+        rows[0].get::<_, i64>(0),
+        101,
+        "the v1 write reached the row"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_v1_bodys_own_first_line_is_where_it_fails() -> Result<()> {
+    let db = TestDb::new().await?;
+    let catalog = setup(&db).await?;
+
+    // The body's own shadow is legal JavaScript and means what it says: the
+    // wrapper compiles a body as a nested function, so a `const Table` of its
+    // own is the author's variable and the class is what it was until that
+    // line.
+    assert_eq!(
+        run(
+            &catalog,
+            &book_insert(),
+            r#"const before = Table.findOne("books").pk_name;
+               const Table2 = 5;
+               return before;"#,
+        )
+        .await?,
+        json!("id")
+    );
+    // A v1 body's real first line, though, is the one an admin will paste, and
+    // it fails on the `require` rather than three lines later on something that
+    // is not a class.
+    let err = run(
+        &catalog,
+        &book_insert(),
+        r#"const Table = require("@saltcorn/data/models/table");
+           return Table.findOne("books").pk_name;"#,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("not available in a code body"), "{err}");
+    assert!(err.contains("delete the line"), "{err}");
     Ok(())
 }
 

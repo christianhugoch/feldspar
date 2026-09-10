@@ -245,10 +245,14 @@ The one method with I/O behind it is `distinct_values(where?)`, which is `Table`
 `modfn` — minted per run from the run's token, for the reason `db` is (decision 5): a body
 that assigns to `Table` poisons nothing, because the next run is handed its own.
 
-The consequence, and it is a real one: a body compiled as
-`async function (bindings, db, …, Table, Field)` cannot contain `const Table = …` — that is a
-`SyntaxError` where it used to be a working line. The system is in prototype status and there
-are no applications to migrate, so this is stated rather than worked around.
+The consequence was predicted here as a `SyntaxError` — a body compiled as
+`async function (bindings, db, …, Table, Field)` cannot contain `const Table = …` — and that
+turned out to be wrong about the mechanism: the wrapper compiles a body as a *nested* async
+function, so a body's own `const Table` shadows the parameter and compiles. What a pasted v1
+body actually hits is its **first** line, `require`, which used to be one of the shadowed node
+globals and so failed as `require is not a function` — a message about the wrong thing. So
+`require` in a code body is a function whose whole body is a refusal: it names the specifier
+and, where the classes are in scope, says to delete the line.
 
 They are bound **only when the `db` host is present**, so a body in a context with no host
 (client generation, a unit test) names `Table` and gets the `ReferenceError` it already gets
@@ -372,13 +376,15 @@ Three levels, because the failure modes are at three levels:
 
 ## Phase 6 — Code bodies
 
-- [ ] 6.1 `Table` and `Field` as run parameters in `run_js_code`, bound when the `db` host is
+- [x] 6.1 `Table` and `Field` as run parameters in `run_js_code`, bound when the `db` host is
       (§8), and absent with a `ReferenceError` when it is not.
-- [ ] 6.2 `Table` and `Field` join `DB`/`FETCH`/`FS`/`TRIGGER`/`MODFN` as **reserved names**
+- [x] 6.2 `Table` and `Field` join `DB`/`FETCH`/`FS`/`TRIGGER`/`MODFN` as **reserved names**
       when the host is present, so a caller that also binds `Table` gets the named error
       those already get rather than a redeclaration deep inside the generated wrapper.
-- [ ] 6.3 Tests: the definition of done's body as a trigger, run against a live database;
-      a body that shadows `Table` failing to compile with a message that says why.
+- [x] 6.3 Tests: the definition of done's body as a trigger, run against a live database;
+      a pasted v1 body failing on its `require` with a message that says what to write
+      instead (§8: the shadow itself compiles, and the `SyntaxError` predicted there does
+      not happen).
 
 ## Phase 7 — Documentation and the definition of done
 

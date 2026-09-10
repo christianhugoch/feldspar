@@ -2,6 +2,43 @@
 
 Changes in reverse chronological order.
 
+## A trigger's code body is handed Saltcorn 1's `Table` and `Field`
+
+The sixth phase of the v1 `Table` API: **code bodies**. A `run_js_code` body —
+and a workflow step, and everything else that runs one — now names `Table` and
+`Field` and gets the same classes an installed v1 plugin gets, from the same
+text (`sc_expr::V1_API_JS`). The definition of done's read and write run in a
+trigger against a live database, and none of the metadata half of it costs a
+host call.
+
+- **They are run parameters, beside `db`, `fetch`, `fs`, `trigger` and
+  `modfn`** (§8), minted per run from the run's own token — so a body that
+  assigns to `Table` poisons nothing, because the next run is handed its own.
+  The reads and writes they make are sent over *this* run's `db` handle
+  (`__scSend`) and this run's `trigger` handle (`__scRun`): one sender, one call
+  budget, one authority default, and a v1 `updateRow` inside a trigger is an
+  event that says who caused it and how deep in a cascade it already is.
+- **Bound only where the `db` host is** — a body in a context with no host names
+  `Table` and gets the `ReferenceError` it already gets for `db`, rather than a
+  class that fails on use. A run with a host but no snapshot (a catalog that
+  cannot be read) gets classes that refuse by name; a `Table.findOne` answering
+  `undefined` for every table would have a body compute the wrong answer instead
+  of failing.
+- **`Table` and `Field` are reserved names now**, on `db`'s terms: a caller
+  whose bindings include one is refused naming it, rather than emitting a
+  redeclaration deep inside the generated wrapper that nobody could act on. With
+  no host there are no classes, so the names stay the caller's to bind.
+- **`require` says what to write instead.** §8 expected a body's own
+  `const Table = require("@saltcorn/data/models/table")` to be a `SyntaxError`,
+  and it is not: the wrapper compiles a body as a *nested* function, so that
+  line legally shadows the parameter and compiles — and what an admin then saw
+  was `require is not a function` on line 1, a message about the wrong thing
+  entirely. So `require` is no longer one of the shadowed node globals that are
+  `undefined`; it is a function whose whole body is a refusal, naming the
+  specifier it was given and, where the classes really are in scope, saying to
+  delete the line. It is the first line of eight years of Saltcorn 1 code and it
+  is the one an admin will paste.
+
 ## A module can ask this server for rows, and v1's `Table` inside one is real
 
 The fifth phase of the v1 `Table` API: **the module bridge**. An installed v1

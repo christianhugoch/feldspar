@@ -1300,13 +1300,23 @@ mod tests {
         // *inside* a code body, which unlike a formula can name anything
         // JavaScript can.
         let ev = DenoEvaluator::new();
-        for probe in ["Deno", "fetch", "require", "process", "globalThis.sc", "db"] {
+        for probe in ["Deno", "fetch", "process", "globalThis.sc", "db"] {
             let call = code(&format!("return typeof {probe} === 'undefined';"), &[]);
             assert!(
                 ev.run_code(call).await.unwrap() == serde_json::json!(true),
                 "sandbox leak: {probe}"
             );
         }
+        // `require` is the one name here that exists, and it reaches nothing
+        // either: it is a function whose whole body is a refusal (see
+        // `code::REQUIRE`), so a body that calls it is told what to write
+        // instead rather than told that a function is not one.
+        let err = ev
+            .run_code(code("return require('axios');", &[]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not available in a code body"), "{err}");
     }
 
     #[tokio::test]

@@ -925,6 +925,30 @@ pub(crate) const TRIGGER: &str = "trigger";
 #[cfg(feature = "eval")]
 pub(crate) const MODFN: &str = "modfn";
 
+/// The names Saltcorn 1's `Table` and `Field` classes bind under, reserved when
+/// the `db` host is present for the reason [`DB`] is (TODO "the v1 `Table` API"
+/// §8).
+///
+/// They are capitalised because that is what eight years of plugins wrote —
+/// `Table.findOne("books")` is the first line of most of them — and a v1 body
+/// pasted into a trigger has to keep meaning what it meant.
+///
+/// Reserved means reserved against the **caller's bindings**: a binding of
+/// either name is refused by name where `db`'s is, because the alternative is a
+/// `const` beside a parameter of the same name, which is a redeclaration deep
+/// inside generated code that nobody could act on. A *body* that declares its
+/// own `Table` is a different thing and is legal — the body is compiled as a
+/// nested function, so it shadows rather than redeclares. What that costs is
+/// paid at [`REQUIRE`], which is the line a v1 body would have shadowed it
+/// from.
+#[cfg(feature = "eval")]
+pub(crate) const V1_TABLE: &str = "Table";
+
+/// The name Saltcorn 1's `Field` class binds under, on exactly [`V1_TABLE`]'s
+/// terms. It travels with `Table` because v1's own `require` pair does.
+#[cfg(feature = "eval")]
+pub(crate) const V1_FIELD: &str = "Field";
+
 /// The Node globals a code body sees as `undefined`, shadowed as parameters of
 /// the wrapper it is compiled into (TODO "Modules in-process", §1a).
 ///
@@ -947,16 +971,33 @@ pub(crate) const MODFN: &str = "modfn";
 /// deletion, no effect on module code, and escapable through `globalThis` — but
 /// not by accident, which is the whole of what is wanted.
 #[cfg(feature = "eval")]
-pub(crate) const SHADOWED_NODE_GLOBALS: [&str; 8] = [
+pub(crate) const SHADOWED_NODE_GLOBALS: [&str; 7] = [
     "process",
     "Deno",
     "Buffer",
-    "require",
     "module",
     "exports",
     "__dirname",
     "global",
 ];
+
+/// `require` is the one of them that is **not** `undefined`, because it is the
+/// one a body reaches for on purpose.
+///
+/// Saltcorn 1's first line is
+/// `const Table = require("@saltcorn/data/models/table")`, and a v1 snippet
+/// pasted into a trigger begins with it. §8 says a code body is *handed*
+/// `Table` and `Field` rather than requiring them — but the wrapper compiles the
+/// body as a nested function, so that line is legal JavaScript that shadows the
+/// parameter, and what an admin would then see is `require is not a function`
+/// on line 1: a message about the wrong thing entirely.
+///
+/// So it is a function that throws saying what to write instead. It is bound
+/// for every body, with or without a host, because "a code body is not a
+/// module" is true of both — and the sentence about `Table` and `Field` is
+/// added only where they really are in scope.
+#[cfg(feature = "eval")]
+pub(crate) const REQUIRE: &str = "require";
 
 // ---------------------------------------------------------------------------
 // The prelude (the fluent surface, in JavaScript)
@@ -2629,10 +2670,10 @@ const SETUP: &str = r#"
   // so a run's script carries the source only the first time and is
   // `__scInvoke(token, key, bindings)` every time after.
   const bodies = new Map();
-  fixed("__scDefine", (key, wantsDb, wantsFetch, wantsFs, wantsTrigger, wantsModFn, body) => {
+  fixed("__scDefine", (key, wantsDb, wantsFetch, wantsFs, wantsTrigger, wantsModFn, wantsV1, body) => {
     bodies.set(key, {
       body: body, wantsDb: wantsDb, wantsFetch: wantsFetch, wantsFs: wantsFs,
-      wantsTrigger: wantsTrigger, wantsModFn: wantsModFn,
+      wantsTrigger: wantsTrigger, wantsModFn: wantsModFn, wantsV1: wantsV1,
     });
   });
   // The schema snapshot this isolate holds, keyed by the catalog generation it
@@ -2669,6 +2710,22 @@ const SETUP: &str = r#"
       ? schemas.values().next().value
       : schemaFor(generation)
   );
+  // `require`, refused by name (see [`REQUIRE`]). One function per body, built
+  // from whether that body has the v1 classes in scope, and a *closure* rather
+  // than a message because the specifier is worth naming: an admin who required
+  // `axios` and one who required `@saltcorn/data/models/table` have two
+  // different mistakes and only one of them has an answer.
+  fixed("__scRequire", (hasV1) => (specifier) => {
+    const what = typeof specifier === "string" ? "`" + specifier + "`" : "a module";
+    throw new Error(
+      "require(" + what + ") is not available in a code body: a code body is " +
+      "not a module, and this server loads no packages into one" +
+      (hasV1
+        ? ". Saltcorn 1's `Table` and `Field` are already in scope here — " +
+          "delete the line that requires them"
+        : "")
+    );
+  });
   // Dropped when the cache is full and this body is the one least recently run.
   // A run already executing keeps its own reference, so forgetting a body can
   // never pull one out from under a resident run — it only means the next run of
@@ -2707,7 +2764,13 @@ const SETUP: &str = r#"
       // list has them. A body with neither is the pure one `run_js_code` began
       // as: nothing in its scope to reach anything with.
       const handles = [bindings];
-      if (entry.wantsDb) handles.push(__scMakeDb(token));
+      // Held, not just pushed: v1's `Table` sends its plans over *this* run's
+      // `db` (`__scSend`) and runs its triggers over this run's `trigger`
+      // (`__scRun`), so what it is built from is the very handles the body was
+      // given — one sender, one call budget, one authority default.
+      let dbHandle = null;
+      let triggerHandle = null;
+      if (entry.wantsDb) { dbHandle = __scMakeDb(token); handles.push(dbHandle); }
       if (entry.wantsFetch) handles.push(__scMakeFetch(token));
       // The store names come with the invocation rather than the definition:
       // one compiled body serves every run, and what stores this server has can
@@ -2716,11 +2779,28 @@ const SETUP: &str = r#"
       // The trigger names travel with the invocation for the reason the store
       // names do: one compiled body serves every run, and the trigger set is
       // reloaded whenever an admin saves one.
-      if (entry.wantsTrigger) handles.push(__scMakeTrigger(token, triggers));
+      if (entry.wantsTrigger) {
+        triggerHandle = __scMakeTrigger(token, triggers);
+        handles.push(triggerHandle);
+      }
       // The module functions travel with the invocation for the reason the
       // trigger names do: one compiled body serves every run, and installing or
       // configuring a module reloads the set between two of them.
       if (entry.wantsModFn) handles.push(__scMakeModFn(token, functions));
+      // v1's `Table` and `Field`, minted per run like every other handle here
+      // and from the same text a module's are (`V1_API_JS`). A run with a host
+      // but no snapshot gets classes that say so by name: a `Table.findOne`
+      // answering undefined for every table would have a body compute the wrong
+      // answer rather than fail. A run with no trigger host gets a
+      // `run_trigger` that says so, on the same terms.
+      if (entry.wantsV1) {
+        const v1 = __scMakeV1Api(
+          dbHandle === null ? null : dbHandle.__scSend,
+          snapshot,
+          triggerHandle === null ? null : triggerHandle.__scRun
+        );
+        handles.push(v1.Table, v1.Field);
+      }
       running = entry.body(...handles);
     } catch (e) {
       fail(token, describe(e));
@@ -4856,6 +4936,11 @@ struct RunScripts {
     wants_triggers: bool,
     /// Whether it takes `modfn`, on exactly the same terms.
     wants_module_fns: bool,
+    /// Whether it takes v1's `Table` and `Field` — the same condition
+    /// `wants_db` is (§8), kept as a field of its own so that the parameter
+    /// list and the isolate's definition record cannot drift apart if it ever
+    /// stops being.
+    wants_v1: bool,
 }
 
 /// Build one code body's definition and one run's arguments: the bindings as
@@ -4912,6 +4997,12 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
                 "code binding `modfn` collides with the module functions bound in a code body",
             ));
         }
+        if call.host.is_some() && (name == V1_TABLE || name == V1_FIELD) {
+            return Err(Error::msg(format!(
+                "code binding `{name}` collides with the Saltcorn 1 `{name}` class \
+                 bound in a code body"
+            )));
+        }
         // `const x = __b["x"];` — the name was checked as an identifier; the key
         // lookup quotes via JSON escaping.
         let key =
@@ -4919,13 +5010,29 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
         consts.push_str(&format!("const {name} = __b[{key}];\n"));
         bindings.insert(name.clone(), value.clone());
     }
-    let args = serde_json::to_string(&Json::Object(bindings))
-        .map_err(|e| Error::msg(format!("encode bindings: {e}")))?;
     let wants_db = call.host.is_some();
     let wants_fetch = call.fetch.is_some();
     let wants_files = call.files.is_some();
     let wants_triggers = call.triggers.is_some();
     let wants_module_fns = call.module_fns.is_some();
+    // The v1 classes ride on the `db` host and nothing else (§8): the metadata
+    // half of them is answered from the snapshot, but every method with I/O
+    // behind it is one plan sent as this run, and a body with no host has
+    // nowhere to send it. So a body without a host names `Table` and gets the
+    // ReferenceError it already gets for `db`, rather than a class that fails on
+    // use.
+    let wants_v1 = call.host.is_some();
+    // [`REQUIRE`]: bound as a `const` of the wrapper rather than a parameter,
+    // because unlike the handles it is the same function on every run and
+    // carries no authority — there is nothing per-run in a refusal. A caller
+    // that binds the name itself keeps it: the binding above is already a
+    // `const` of this scope, and a second one would be a redeclaration in
+    // generated code, which is the message 6.2 exists to prevent.
+    if !call.bindings.contains_key(REQUIRE) {
+        consts.push_str(&format!("const {REQUIRE} = __scRequire({wants_v1});\n"));
+    }
+    let args = serde_json::to_string(&Json::Object(bindings))
+        .map_err(|e| Error::msg(format!("encode bindings: {e}")))?;
     // The parameter list is the only difference a capability makes: no `fetch`
     // parameter is no `fetch` in scope, which is a ReferenceError naming it
     // rather than a call that fails somewhere in the host. It also means a body
@@ -4947,6 +5054,10 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
     }
     if wants_module_fns {
         names.push(MODFN);
+    }
+    if wants_v1 {
+        names.push(V1_TABLE);
+        names.push(V1_FIELD);
     }
     // §1a: the node globals, shadowed as parameters nobody passes. A binding of
     // the same name wins — it is already a `const` in this function's body, and
@@ -4973,6 +5084,7 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
         wants_files,
         wants_triggers,
         wants_module_fns,
+        wants_v1,
     })
 }
 
@@ -5148,6 +5260,7 @@ fn build_script(
         wants_files,
         wants_triggers,
         wants_module_fns,
+        wants_v1,
     } = scripts;
     let mut script = String::new();
     // Before the definition, because a body's very first run is also the run
@@ -5168,7 +5281,7 @@ fn build_script(
     if !held {
         script.push_str(&format!(
             "__scDefine(\"{key:016x}\", {wants_db}, {wants_fetch}, {wants_files}, \
-             {wants_triggers}, {wants_module_fns}, {definition});\n"
+             {wants_triggers}, {wants_module_fns}, {wants_v1}, {definition});\n"
         ));
     }
     // The token is 32 hex characters this crate minted and the key is 16 this
@@ -6006,13 +6119,24 @@ mod tests {
     #[tokio::test]
     async fn the_code_isolate_has_no_io_surface_of_its_own() {
         let rt = CodeRuntime::new();
-        for probe in ["Deno", "fetch", "require", "process", "setTimeout"] {
+        for probe in ["Deno", "fetch", "process", "setTimeout"] {
             let out = rt
                 .run(call(&format!("return typeof {probe} === 'undefined';")))
                 .await
                 .unwrap();
             assert_eq!(out, json!(true), "sandbox leak: {probe}");
         }
+        // `require` is the one name of that family that exists, and it reaches
+        // nothing either: its whole body is a refusal (see [`REQUIRE`]), so a
+        // body that calls it is told what to write instead of being told that a
+        // function is not one.
+        let err = rt
+            .run(call(r#"return require("node:fs");"#))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`node:fs`"), "{err}");
+        assert!(err.contains("not available in a code body"), "{err}");
         // The op handle exists — that is the one surface — but a body cannot
         // name its own run to it: the token is the `db` factory's argument and
         // stays in the handle's closure, so what a body holds is the handle.
@@ -9799,5 +9923,124 @@ mod tests {
             "{out}"
         );
         assert_eq!(out["pure"], json!("First name"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 6: the classes as run parameters
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_body_with_a_host_is_handed_v1s_table_and_field() {
+        // §8: `Table` and `Field` are minted per run beside `db`, so a body
+        // writes v1's own first line without building anything. The metadata
+        // half costs no host call and the read is one plan on this run's own
+        // sender — which is what `plans()` here proves.
+        let host = FakeHost::rows(json!([{ "id": 3, "title": "Dune" }]));
+        let mut c = with_host(
+            r#"const books = Table.findOne({ name: "books" });
+               const rows = await books.getRows({ pages: { gt: 100 } },
+                                                { orderBy: "title", limit: 10 });
+               return {
+                 pk: books.pk_name,
+                 fkey: books.getField("author").is_fkey,
+                 label: Field.nameToLabel("first_name"),
+                 titles: rows.map((b) => b.title),
+               };"#,
+            &*host,
+        );
+        let snapshot = library_snapshot();
+        c.schema = Some(&snapshot);
+        let out = CodeRuntime::with_workers(1).run(c).await.expect("it ran");
+        assert_eq!(out["pk"], json!("id"), "no host call answered this");
+        assert_eq!(out["fkey"], json!(true));
+        assert_eq!(out["label"], json!("First name"));
+        assert_eq!(out["titles"], json!(["Dune"]));
+        // One plan, and it is the read — the metadata went nowhere near the
+        // host.
+        let plans = host.plans();
+        assert_eq!(plans.len(), 1, "{plans:?}");
+        assert_eq!(plans[0]["op"], json!("select"), "{}", plans[0]);
+        assert_eq!(plans[0]["table"], json!("books"), "{}", plans[0]);
+    }
+
+    #[tokio::test]
+    async fn without_a_host_the_classes_are_not_in_scope_at_all() {
+        // The rule `db` has (§8): no host is no parameter, so naming one is the
+        // ReferenceError it has always been rather than a class that fails on
+        // use — and it is that even when the run carries a schema, because the
+        // metadata half of `Table` is not the half that matters here.
+        let rt = CodeRuntime::with_workers(1);
+        let snapshot = library_snapshot();
+        // Named rather than `typeof`, which answers "undefined" for a name
+        // that was never declared: what is asserted here is that reaching for
+        // the class fails, and that is what a body would do.
+        let mut c = call("return Table.findOne(\"books\");");
+        c.schema = Some(&snapshot);
+        let err = rt.run(c).await.unwrap_err().to_string();
+        assert!(err.contains("Table is not defined"), "{err}");
+        let mut c = call("return Field.nameToLabel(\"x\");");
+        c.schema = Some(&snapshot);
+        let err = rt.run(c).await.unwrap_err().to_string();
+        assert!(err.contains("Field is not defined"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn v1s_own_first_line_says_what_to_write_instead() {
+        // §8 predicted a `SyntaxError` here, and it is wrong about the
+        // mechanism: the wrapper compiles a body as a **nested** function, so
+        // `const Table = require(…)` shadows the parameter rather than
+        // redeclaring it and compiles perfectly well. What it then hits is
+        // `require`, so that is where the sentence belongs — and without it an
+        // admin who pasted six lines of Saltcorn 1 reads `require is not a
+        // function` on line 1, which is a message about the wrong thing.
+        let host = FakeHost::rows(json!([]));
+        let mut c = with_host(
+            r#"const Table = require("@saltcorn/data/models/table");
+               return 1;"#,
+            &*host,
+        );
+        let snapshot = library_snapshot();
+        c.schema = Some(&snapshot);
+        let err = CodeRuntime::with_workers(1)
+            .run(c)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("@saltcorn/data/models/table"), "{err}");
+        assert!(err.contains("not available in a code body"), "{err}");
+        assert!(err.contains("already in scope"), "{err}");
+        // A body with no host has no classes to be told about, and is told the
+        // half of it that is still true.
+        let err = CodeRuntime::with_workers(1)
+            .run(call(r#"return require("axios");"#))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`axios`"), "{err}");
+        assert!(err.contains("not a module"), "{err}");
+        assert!(!err.contains("already in scope"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_binding_that_collides_with_the_v1_classes_is_refused() {
+        // 6.2: the caller's own binding, refused where `db`'s is and in the same
+        // words — because the alternative is a redeclaration deep inside the
+        // generated wrapper, which is a message nobody could act on.
+        let host = FakeHost::rows(json!([]));
+        let rt = CodeRuntime::with_workers(1);
+        for name in ["Table", "Field"] {
+            let mut c = with_host("return 1;", &*host);
+            c.bindings.insert(name.into(), json!(1));
+            let err = rt.run(c).await.unwrap_err().to_string();
+            assert!(err.contains(&format!("`{name}` collides")), "{err}");
+            assert!(err.contains("Saltcorn 1"), "{err}");
+        }
+        // With no host there are no classes, so the names are the caller's to
+        // bind — a workflow step whose context has a variable called `Table`
+        // does not stop working because this milestone happened.
+        let mut c = call("return Table + Field;");
+        c.bindings.insert("Table".into(), json!(1));
+        c.bindings.insert("Field".into(), json!(2));
+        assert_eq!(rt.run(c).await.unwrap(), json!(3));
     }
 }
