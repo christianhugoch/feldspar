@@ -2,6 +2,73 @@
 
 Changes in reverse chronological order.
 
+## The application's coding agent, in the IDE's chat panel
+
+The agent that builds an application (§13.3) was reachable only from the admin
+SPA's chat window — a different tab from the editor showing the files it was
+changing. It is now in the **file-store IDE's chat panel**, VS Code's own view in
+the secondary side bar, over the socket the admin panel already speaks (§11.4).
+
+- **A relay, and nothing more.** The model, the tools, the grants and the
+  transcript stay on the server: `ui/ide` opens the same `/admin/agent-chat`
+  socket the admin panel does — same origin, same session cookie, no credential
+  of its own — sends one turn, and streams what comes back into VS Code's
+  response stream. The **run** outlives the socket, so a dropped connection costs
+  a reconnection and nothing else; nothing re-sends a transcript from the
+  browser, so there is no second copy of the history to disagree with the
+  server's.
+- **Which agents a store has is a filter over two listings that already exist.**
+  An agent belongs to the store when its `coding` trait's `store` is this one —
+  matched on the trait's configuration rather than on the builder agent's naming
+  convention, so a hand-made agent over the same tree is offered on the same
+  terms — and the application it builds comes from `listApplications`' derived
+  `source`, matched on the agent's own `root`. An agent whose definition is
+  broken is kept, with its reason: a chat that answers "no LLM provider named
+  `gpt`" beats an agent that is silently not offered.
+- **One participant per agent**, the application's first and marked default, so a
+  store with one agent needs no `@` and a store with several has VS Code's own
+  way to address them. The transcript names which one answered.
+- **The model picker is given one placeholder model, and says so.** VS Code will
+  not send a chat request without a language model and there is nothing for that
+  model to be: which LLM answers is the agent's own `provider` and `model`
+  (§11.2). It is registered `isUserSelectable: false` rather than pretending to
+  be a choice.
+- **Two of the three new service overrides are load-bearing invisibly.** Chat
+  calls `IMcpService.autostart()` *before* handing a request to a participant,
+  and an unregistered service throws — so without `mcp-service-override` the
+  request fails before the participant sees it, with the failure recorded only in
+  the Window log. The chat view builds each answer's accessible label as it
+  renders it, so without `accessibility-service-override` the answer arrives, the
+  row fails to draw, and the panel stays empty. Neither is a decision to support
+  MCP or to target screen readers.
+- **A store with no coding agent gets no chat view at all** — not an empty one.
+  The three overrides are therefore dynamically imported, which is load-bearing
+  rather than tidy: these packages register their views and commands as a side
+  effect of *import*, not of the override function being called. It also keeps
+  four megabytes out of the bundle for a store that holds assets. (Source control
+  stays unconditional, because "no source control providers registered" is an
+  honest empty state and a composer that fails on the first question is not.)
+- **The workbench is told what the agent changed under it.** A `write_file_…` or
+  `edit_file_…` tool call names its path; when the turn ends the IDE drops its
+  cached listings, announces those paths — resolved through the agent's own
+  `root`, not the workspace root — and refreshes source control, the same
+  discipline a build or a pull already follows. A tool call is shown as progress;
+  a successful tool's result is not (file contents would bury the answer), and a
+  failed one is, because it explains the turn.
+- All `@codingame/monaco-vscode-*` packages move to **36.2.7**. The chat override
+  pins its `monaco-vscode-api` exactly, and two copies of that package are two
+  service registries — which presented as `Missing proxy instance
+  MainThreadLanguageModels` and an extension host that could not find half its
+  actors.
+- Tests: `ui/ide/src/chat.test.ts` — the store→agent match (including the broken
+  agent, the sub-directory application and the ordering), what the panel is
+  contributed, every event's translation into the response stream, and the
+  conversation against a stubbed socket (the `start`/`message` order, the run
+  carried into the next turn, a mid-turn close, an abort, an unreadable frame).
+  Verified by hand against a running server: `/ide/?store=todoapp` answers from
+  `build-todo` with its tool calls and reasoning rendered, and `/ide/?store=myfiles`,
+  which has no agent, has no chat view.
+
 ## The v1 `Table` written down, and the definition of done run by hand
 
 The seventh and last phase of the v1 `Table` API: **the documentation, and the

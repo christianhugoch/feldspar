@@ -594,14 +594,20 @@ async fn a_client_that_goes_away_mid_turn_does_not_leave_a_run_running_for_ever(
 #[test]
 fn the_route_is_the_path_the_spa_connects_to() {
     assert_eq!(AGENT_CHAT_ROUTE, "/admin/agent-chat");
-    let spa = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../ui/admin/src/agentChat.ts");
-    let source = std::fs::read_to_string(&spa).expect("read agentChat.ts");
-    assert!(
-        source.contains(AGENT_CHAT_ROUTE),
-        "{} must connect to {AGENT_CHAT_ROUTE}",
-        spa.display()
-    );
+    // Two clients now, and neither can be checked by the other: the admin SPA's
+    // chat window and the IDE's chat panel (§12.1) are separate bundles that
+    // speak the same protocol, so each spells the route for itself and a page
+    // connecting to the wrong path looks exactly like an agent that never
+    // answers.
+    for client in ["../../ui/admin/src/agentChat.ts", "../../ui/ide/src/agentChat.ts"] {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(client);
+        let source = std::fs::read_to_string(&path).expect("read agentChat.ts");
+        assert!(
+            source.contains(AGENT_CHAT_ROUTE),
+            "{} must connect to {AGENT_CHAT_ROUTE}",
+            path.display()
+        );
+    }
 }
 
 /// A server assembled without agents cannot chat, and says so in the close frame

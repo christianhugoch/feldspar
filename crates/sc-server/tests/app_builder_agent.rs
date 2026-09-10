@@ -520,3 +520,30 @@ async fn with_no_provider_connected_the_application_is_still_created() -> sc_err
 
     Ok(())
 }
+
+/// The IDE's chat panel finds a store's agents by reading the `coding` trait's
+/// configuration (§12.1), and it is a **second** spelling of names that live in
+/// `sc_app::builder_agent` — a bundle Rust cannot type-check.
+///
+/// So the names are asserted from here, where both sides are visible: a rename
+/// on the Rust side that nobody carried into `ui/ide` would otherwise present as
+/// an IDE that quietly stops offering the agent, on exactly the stores that have
+/// one.
+#[test]
+fn the_ide_looks_for_the_trait_and_settings_this_crate_names() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ui/ide/src/codingAgents.ts");
+    let source = std::fs::read_to_string(&path).expect("read codingAgents.ts");
+    for name in [
+        sc_app::TRAIT_CODING,
+        sc_app::TRAIT_CFG_STORE,
+        sc_app::TRAIT_CFG_ROOT,
+        sc_app::TRAIT_CFG_MAY_EDIT,
+    ] {
+        assert!(
+            source.contains(&format!("\"{name}\"")),
+            "{} must look for `{name}`",
+            path.display()
+        );
+    }
+}

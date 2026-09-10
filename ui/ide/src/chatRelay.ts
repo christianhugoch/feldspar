@@ -1,0 +1,264 @@
+/**
+ * What a chat turn *is*, decided without a workbench (design §12.1).
+ *
+ * The two halves of putting a Saltcorn agent in VS Code's chat panel are what to
+ * offer (the store's agents, as the panel's models) and what to do with the
+ * events one turn streams back (§11.4). Both are functions over data — an agent
+ * listing, a socket event — so both are here and tested, and `chat.ts` is left
+ * holding only the `vscode.*` calls that cannot be.
+ */
+
+import type { ServerEvent } from "./agentChat";
+import type { StoreAgent } from "./codingAgents";
+
+/** The extension the participants below belong to; their ids are scoped to it. */
+export const CHAT_EXTENSION_ID = "saltcorn.saltcorn-agents";
+
+/** The vendor the placeholder model is registered under.
+ *
+ * `copilot` because that is the vendor the embedded workbench treats as its
+ * built-in one; a vendor of our own is registered but never resolved. It names
+ * nothing about GitHub here — see [`storeModel`](storeModel) for what the model
+ * actually is. */
+export const MODEL_VENDOR = "copilot";
+
+/** One participant, as a manifest contributes it. */
+export interface ParticipantContribution {
+  readonly id: string;
+  readonly name: string;
+  readonly fullName: string;
+  readonly description: string;
+  readonly isDefault?: boolean;
+  readonly modes: string[];
+  readonly locations: string[];
+}
+
+/**
+ * The `contributes.chatParticipants` for `agents` — one each, the first of them
+ * the default.
+ *
+ * Every agent gets a participant rather than one participant with a picker of
+ * its own, because that is the vocabulary the chat panel already has: `@build-todo`
+ * is how VS Code addresses one of several, it completes as it is typed, and the
+ * transcript records which one answered. The first is marked default because a
+ * store usually has exactly one agent, and typing its name to reach it would be
+ * a ceremony with one possible outcome.
+ *
+ * (The model picker would have been the other candidate, and is not: it collapses
+ * to "Auto" for a single model and buries the rest behind Manage Models, so it is
+ * where a *model* is chosen and not where an agent can be.)
+ */
+export function participantContributions(
+  agents: StoreAgent[],
+): ParticipantContribution[] {
+  const taken = new Set<string>();
+  return agents.map((agent, index) => {
+    const name = uniqueSlug(agent.name, taken);
+    return {
+      id: `${CHAT_EXTENSION_ID}.${name}`,
+      name,
+      fullName: agent.application ?? agent.name,
+      description: describe(agent),
+      ...(index === 0 ? { isDefault: true } : {}),
+      // `panel` only: the chat view in the secondary side bar. Inline chat in an
+      // editor is a different interaction — a selection, an edit applied to the
+      // buffer — and this agent edits the store, not the buffer.
+      modes: ["agent"],
+      locations: ["panel"],
+    };
+  });
+}
+
+/**
+ * A participant name: what an admin types after `@`.
+ *
+ * VS Code matches those against a restricted alphabet, and an agent's name is
+ * whatever the admin called it — so it is slugged rather than trusted, and made
+ * unique afterwards, because two agents that slug to the same thing would
+ * otherwise be one participant answering for whichever was registered last.
+ */
+export function uniqueSlug(name: string, taken: Set<string>): string {
+  const base =
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "agent";
+  let slug = base;
+  for (let n = 2; taken.has(slug); n += 1) slug = `${base}-${n}`;
+  taken.add(slug);
+  return slug;
+}
+
+/** The line the panel prints under a participant: what it is and what it may do. */
+export function describe(agent: StoreAgent): string {
+  const where = agent.root === "" ? "the whole store" : `${agent.root}/`;
+  const may = agent.mayEdit
+    ? "reads and changes"
+    : "reads (it may not change files)";
+  return `${agent.description || agent.name} — ${may} ${where}`;
+}
+
+/** The one model the chat is given. */
+export interface AgentModel {
+  readonly id: string;
+  readonly name: string;
+  readonly family: string;
+  readonly version: string;
+  readonly detail: string;
+  readonly maxInputTokens: number;
+  readonly maxOutputTokens: number;
+  readonly capabilities: { toolCalling: boolean };
+  readonly isDefault: boolean;
+  readonly isUserSelectable: boolean;
+}
+
+/**
+ * A budget the picker could print. It is **not** a limit this IDE enforces: what
+ * an agent's provider and model allow is the agent's business (§11.2), and a
+ * number invented here would be a second, wrong answer to that question.
+ */
+const UNBOUNDED_TOKENS = 1_000_000;
+
+/**
+ * The single model the chat is offered — a placeholder, and honestly labelled as
+ * one.
+ *
+ * VS Code will not send a chat request without a language model, so there has to
+ * be one. There is nothing for it to *be*: which LLM answers is already the
+ * agent's own `provider` and `model` (§11.2), chosen on the agent screen, so a
+ * picker offering models here would be a second place to configure the same
+ * thing — and the one that cannot see the agent's system prompt or its traits.
+ *
+ * `isUserSelectable: false` is therefore the point of it: the workbench has a
+ * model to hand the request, and the composer stops offering a choice that would
+ * not mean anything. Which *agent* answers is `@name`, above.
+ */
+export function storeModel(store: string): AgentModel {
+  return {
+    id: `saltcorn-${store}`,
+    name: "Saltcorn agent",
+    family: "saltcorn",
+    version: "1",
+    detail: "answered by this installation's agent, not by a model chosen here",
+    maxInputTokens: UNBOUNDED_TOKENS,
+    maxOutputTokens: UNBOUNDED_TOKENS,
+    // The agent calls its own tools, server-side, over the socket (§11.4). What
+    // this flag would offer is VS Code's own tool loop, which needs the model to
+    // be an LLM this page can talk to — it is not, it is an agent.
+    capabilities: { toolCalling: false },
+    isDefault: true,
+    isUserSelectable: false,
+  };
+}
+
+/** The slice of `ChatResponseStream` a turn is relayed into. */
+export interface ResponseStream {
+  markdown(value: string): void;
+  progress(value: string): void;
+  /** The collapsible "thinking" section — a proposed API, absent when it is not enabled. */
+  thinkingProgress?(delta: { text: string; id?: string }): void;
+}
+
+/**
+ * Fold one server event into the response stream, and say which scope-relative
+ * file it changed.
+ *
+ * A tool call is reported as progress and its *result* is not: the coding
+ * trait's results are file contents and search hits, which the model is reading
+ * on the admin's behalf, and pasting them into the answer would bury the answer.
+ * A failed tool is the exception — that is the sentence explaining a turn which
+ * then went sideways.
+ */
+export function relayEvent(
+  event: ServerEvent,
+  stream: ResponseStream,
+): string | null {
+  switch (event.type) {
+    case "text":
+      stream.markdown(event.delta);
+      return null;
+    case "reasoning":
+      // Rendered as the collapsible "thinking" section where the proposal is
+      // live, and dropped where it is not: reasoning shown as the answer reads
+      // as the answer.
+      stream.thinkingProgress?.({ text: event.delta, id: "agent" });
+      return null;
+    case "tool_call":
+      stream.progress(toolProgress(event.name, event.arguments));
+      return changedPath(event.name, event.arguments);
+    case "tool_result":
+      if (event.is_error)
+        stream.markdown(`\n\n\`${event.name}\` failed: ${event.content}\n\n`);
+      return null;
+    case "error":
+      // Appended, never replacing: a failure after two paragraphs and a tool
+      // call is read alongside them, not instead of them.
+      stream.markdown(`\n\n⚠️ ${event.message}\n\n`);
+      return null;
+    case "done":
+    case "controls":
+      return null;
+  }
+}
+
+/** The coding trait's tools, by the prefix its scope suffix is added to. */
+const VERBS: { prefix: string; label: string; writes?: true }[] = [
+  { prefix: "read_file_", label: "Reading" },
+  { prefix: "list_files_", label: "Listing" },
+  { prefix: "search_files_", label: "Searching for" },
+  { prefix: "write_file_", label: "Writing", writes: true },
+  { prefix: "edit_file_", label: "Editing", writes: true },
+  { prefix: "run_script_", label: "Running" },
+];
+
+/**
+ * The one-line "what is it doing" for a tool call.
+ *
+ * The tool's own name carries the store and directory it is scoped to
+ * (`read_file_app_src_web`), which is noise in a panel already open on that
+ * store — so the verb is kept, the scope dropped, and the argument that says
+ * *what* shown beside it. A tool from some other trait the agent also has is
+ * named as it is: this knows the coding trait's vocabulary and does not pretend
+ * to know anyone else's.
+ */
+export function toolProgress(tool: string, args: unknown): string {
+  const verb = VERBS.find((candidate) => tool.startsWith(candidate.prefix));
+  const subject = firstString(args, ["path", "directory", "query", "script"]);
+  if (verb == null) return subject == null ? tool : `${tool}: ${subject}`;
+  return subject == null ? verb.label : `${verb.label} ${subject}`;
+}
+
+/** The scope-relative path a tool call writes, or `null` if it writes nothing. */
+export function changedPath(tool: string, args: unknown): string | null {
+  const writes = VERBS.some(
+    (verb) => verb.writes === true && tool.startsWith(verb.prefix),
+  );
+  return writes ? firstString(args, ["path"]) : null;
+}
+
+/**
+ * Where a path the agent wrote is in the workspace: the store is the folder,
+ * and the agent's own root is inside it.
+ *
+ * The tool reports a path relative to the *agent's* scope, which is not the
+ * workspace root whenever the application's project sits in a sub-directory —
+ * so an editor open on `src/App.tsx` would be told that `src/App.tsx` changed
+ * and be right by accident only for a store whose root is the project.
+ */
+export function workspacePath(
+  store: string,
+  root: string,
+  path: string,
+): string {
+  return `/${[store, root, path].filter((part) => part !== "").join("/")}`;
+}
+
+/** The first of `keys` that is a non-empty string in `args`. */
+function firstString(args: unknown, keys: string[]): string | null {
+  if (args == null || typeof args !== "object") return null;
+  for (const key of keys) {
+    const value = (args as Record<string, unknown>)[key];
+    if (typeof value === "string" && value !== "") return value;
+  }
+  return null;
+}

@@ -774,6 +774,18 @@ npm install -g typescript-language-server    # or add it to the project's devDep
 Without it — or without either of the other two — the IDE says so once, in a notification,
 and everything else about the workbench goes on working.
 
+**The application's coding agent is in the chat panel.** Creating an application creates
+the agent that builds it (§13.3), and if that agent's file tools are scoped to the store
+being edited, VS Code's chat view — the panel on the right, `Ctrl+Alt+I` — talks to it.
+Ask it in the same window as the files it is changing; the edits it makes land in the
+store and the explorer picks them up when the turn ends.
+
+It is the **same agent** as the one in the admin UI's chat window, over the same socket,
+so it has the same tools and the same grants (whether it may write, whether it may run the
+project's scripts) and its runs are listed on the agent's screen. There is nothing to
+configure and no model to choose here: which LLM answers is the agent's own setting. A
+store that has no agent scoped to it simply has no chat panel.
+
 ---
 
 ## 7. Running the server

@@ -3766,6 +3766,78 @@ itself, not to the SCM service, and omitting the service changes nothing except 
 can work. So the service is always registered, and a plain directory shows VS Code's own "No
 source control providers registered."
 
+#### The application's coding agent, in the chat panel
+
+Creating an application creates the agent that builds it (§13.3): a `coding` trait scoped to the
+application's source directory, plus `build_application`. Until now that agent was reachable only
+from the admin SPA's chat window — a different tab from the editor showing the files it is
+changing. VS Code has a chat panel in the secondary side bar, so the agent belongs in it, and
+what `ui/ide` adds is a **relay** and nothing more: the model, the tools, the grants and the
+transcript stay on the server, where an agent's tools already run as the person who asked and
+every step is already written to its run (§11.2). The browser gains a second window onto the
+agent; the agent gains nothing it did not have.
+
+The socket is the one the admin panel speaks (§11.4), same-origin and authenticated by the
+session cookie the IDE's own page load was — so there is no credential here and nothing to
+configure. `AgentConversation` is a second, thinner client of that protocol: the panel folds
+events into a transcript it renders itself, while here the transcript is VS Code's, so what is
+needed is not a reducer but a turn. The **run** outlives the socket, which is what makes a
+dropped connection cost a reconnection and nothing else: the next `start` names the run and the
+agent carries on with the history the *server* holds. Nothing re-sends a transcript from the
+browser, so there is no second copy to disagree with.
+
+**Which agents a store has is a filter over two listings the API already serves.** An agent
+belongs to this store when it has a `coding` trait whose `store` is this one — the match is on
+the trait's configuration, not on the builder agent's naming convention, so a hand-made agent
+over the same tree is offered on exactly the same terms. Which *application* that is comes from
+`listApplications`' derived `source`, matched on the agent's own `root`, so an application built
+from a sub-directory is not credited to an agent scoped to a different one. An agent whose
+definition is broken is **kept**, with its reason: a chat that answers "no LLM provider named
+`gpt`" is more use than an agent that is silently not offered.
+
+**One participant per agent, and the model picker is not the chooser.** A participant is how VS
+Code addresses one of several — `@build-todo` completes as it is typed and the transcript records
+which one answered — and the first, the application's, is marked `isDefault` so a store with one
+agent needs no `@` at all. The alternative was the model picker, and it is not: it collapses to
+"Auto" for a single model and buries the rest behind *Manage Models*. The picker is instead given
+**one placeholder model, `isUserSelectable: false`** — because VS Code will not send a chat
+request without a language model, and there is nothing for that model to be. Which LLM answers is
+already the agent's own `provider` and `model` (§11.2); a picker offering models here would be a
+second place to configure the same thing and the one that cannot see the agent's system prompt or
+its traits.
+
+**Three service overrides, two of which are load-bearing in a way that is invisible until they
+are missing.** `chat-service-override` is the view. `mcp-service-override` is required because
+the chat service calls `IMcpService.autostart()` *before* handing a request to a participant, and
+an unregistered service in `monaco-vscode-api` **throws** rather than shrugging — so the request
+fails before the participant exists as far as the panel is concerned. `accessibility-service-override`
+is required because the chat view builds each answer's accessible label as it renders it: without
+it the agent's answer arrives, the row fails to draw, and the panel shows nothing at all. Neither
+is a decision to support MCP or to target screen readers; both are what makes chat work. VS Code
+also keeps the chat's *setup* state — signed in, entitled, installed — in its own storage with no
+API to say "this deployment brings its own model", so the storage service is seeded with it
+directly, and `defaultAccount` answers the same question the same way. The alternative is a chat
+view that is Copilot's sign-up flow, for a product this installation is not using.
+
+**A store with no agent gets no chat at all**, and this is where chat and source control differ.
+The SCM service is registered unconditionally because its empty state is honest — "no source
+control providers registered" — while a chat view with no participant and no model is a composer
+that accepts a question and then fails on it. So the three overrides are **dynamically imported**,
+which is load-bearing rather than tidy: these packages register their views and commands as a side
+effect of being *imported*, not of the override function being called, so a static import would
+put the chat view in every workbench and only the call would be conditional. It also splits four
+megabytes out of the bundle for stores that hold assets rather than an application.
+
+**What the workbench must be told afterwards.** The agent's edits reach the store over the
+server, not through an editor, so they are exactly the case `announceChanged` exists for (above):
+a `write_file_…`/`edit_file_…` tool call names the path it is about to change, and when the turn
+ends the IDE drops its cached listings, announces those paths — resolved through the agent's own
+`root`, which is not the workspace root when the project sits in a sub-directory — and refreshes
+source control. A tool *call* is reported as progress and a successful tool's *result* is not:
+the coding trait's results are file contents and search hits, which would bury the answer. A
+failed tool is the exception, because it is the sentence that explains a turn which then went
+sideways.
+
 ### 12.2 Code settings: the editor inside a settings form
 
 Some settings are **programs**. A `run_js_code` trigger body reads and writes tables (§10.1's
