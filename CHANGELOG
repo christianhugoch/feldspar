@@ -2,6 +2,58 @@
 
 Changes in reverse chronological order.
 
+## An index in the IDE's Source Control view
+
+The file-store IDE's SCM view (§12.1) had one group and a Commit that swept up the
+whole working copy. It now works the way desktop VS Code's does: **Staged Changes
+and Changes are separate**, `+` stages a file and `−` unstages it, and **Commit
+takes the index and nothing else**.
+
+- **Two new backend operations, and a flag on an old one.** `stage` and `unstage`
+  take `paths` — one per line, empty meaning everything — and `commit` takes
+  `staged_only`, absent meaning no, so the admin screen's "commit all changes"
+  button still means it while the IDE, which has an index on display, asks for the
+  index. Every path is checked before it becomes a git **pathspec**: no traversal,
+  no absolute path (a `C:\` drive included), no leading `-` or `:`. A pathspec is a
+  small query language, and what arrives is a client's idea of a file.
+  `unstage` is `git reset -q` rather than `git restore --staged`, because a
+  repository with no commits has no `HEAD` for `restore` to resolve and the first
+  file ever added must still be un-addable.
+- **Three groups, because a porcelain code is two columns.** A file that is staged
+  and then edited again is one row the commit will take and one it will not, and
+  `git.ts` splits `XY` into exactly that. Conflicts (`UU`, `AA`, `DD`, `AU`, `UA`,
+  `DU`, `UD`) are neither, so they get VS Code's own **Merge Changes** group, where
+  staging is what marks one resolved.
+- **The letters are file decorations, because there is nowhere else to put them.**
+  `SourceControlResourceDecorations` has no letter; VS Code's SCM tree asks the
+  *decoration service* for a badge per URI. So a `FileDecorationProvider` supplies
+  `M`/`A`/`D`/`R`/`C`/`T`/`U`/`!` in the `gitDecoration.*` colours (contributed with
+  VS Code's defaults, for a theme that does not define them) — which also puts the
+  same letters on the explorer's files, exactly as the desktop does. One badge per
+  URI means a file in two groups shows one letter: the working tree's, and a
+  conflict's over both.
+- **…and that needed a service the workbench had stubbed out.**
+  `monaco-vscode-api` registers a do-nothing `IDecorationsService` among its
+  fallbacks — a provider registered against it is accepted, never consulted, and
+  never draws anything, which is this codebase's known worst failure shape.
+  `decorations.ts` takes the real implementation out of `base-service-override`
+  as a single entry rather than adopting that package's other eighteen services
+  (the label, path, request and working-copy file services among them) for the
+  sake of one letter.
+- **Commit with nothing staged asks rather than refuses.** "Nothing is staged.
+  Commit all 3 change(s)?" with a Stage-all-and-commit button, because answering
+  "nothing to commit" while the Changes group is full of the admin's work is
+  technically true and useless.
+- **A bug the single group had been hiding.** git's combined output was trimmed as
+  a *string*, which ate the leading space of the **first** porcelain line and
+  turned ` M` (modified, unstaged) into `M ` (staged). Only blank *lines* are
+  trimmed now — a status code that means the opposite of the truth is worse than
+  none.
+- Staging does **not** run the refresh discipline the other operations do: nothing
+  moved on disk, so the store's listings are kept, no open document is re-read, and
+  there is no notification — VS Code's own `+` does not announce itself, and an
+  admin staging six files does not want six notifications.
+
 ## The application's coding agent, in the IDE's chat panel
 
 The agent that builds an application (§13.3) was reachable only from the admin

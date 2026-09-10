@@ -288,11 +288,14 @@ Then reload `todo.localhost:3032`. No restart, and other applications keep servi
 
 ### Commit it
 
-If the store's own root is a git working copy, the **Source Control** view is live: the files you
-have changed, a message box, and Commit / Pull / Push / Switch Branch as the view's title buttons,
-with the branch and its ahead/behind count in the status bar. It is a deliberate subset — see what
-changed, commit it, exchange it with the remote, switch branch — with no staging, no diff editor
-and no history; the rest waits on backend operations that do not exist yet.
+If the store's own root is a git working copy, the **Source Control** view is live, and it works
+the way desktop VS Code's does: **Staged Changes** and **Changes** are separate groups, each file
+carries git's own letter (`M` modified, `U` untracked, `A` added, `D` deleted, `!` conflicted),
+the `+` on a file — or on a group's header — stages it and the `−` unstages it, and **Commit
+commits what is staged**, asking first if you press it with nothing staged. Pull / Push / Switch
+Branch are the view's other title buttons, with the branch and its ahead/behind count in the
+status bar. It is still a deliberate subset — no diff editor, no staging by hunk, no history; the
+rest waits on backend operations that do not exist yet.
 
 Note *the store's* root. This tutorial's store is `/srv/apps` and the scaffold initialised the
 repository one level down, in `/srv/apps/todo`, so the store as opened here is not a working copy

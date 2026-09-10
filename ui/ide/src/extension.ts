@@ -26,9 +26,14 @@ import {
   CHECKOUT_COMMAND,
   COMMIT_COMMAND,
   GIT_STORE_CONTEXT,
+  GROUP_CONTEXT,
   PULL_COMMAND,
   PUSH_COMMAND,
   REFRESH_COMMAND,
+  STAGE_ALL_COMMAND,
+  STAGE_COMMAND,
+  UNSTAGE_ALL_COMMAND,
+  UNSTAGE_COMMAND,
   registerSourceControl,
 } from "./sourceControl";
 import type { StoreFiles } from "./storeFiles";
@@ -85,6 +90,46 @@ const MANIFEST: IExtensionManifest = {
         category: "Git",
         icon: "$(refresh)",
       },
+      // The index's four. `$(add)`/`$(remove)` are the icons VS Code's own git
+      // view uses for them, which is the whole point of having them here.
+      {
+        command: STAGE_COMMAND,
+        title: "Stage Changes",
+        category: "Git",
+        icon: "$(add)",
+      },
+      {
+        command: UNSTAGE_COMMAND,
+        title: "Unstage Changes",
+        category: "Git",
+        icon: "$(remove)",
+      },
+      {
+        command: STAGE_ALL_COMMAND,
+        title: "Stage All Changes",
+        category: "Git",
+        icon: "$(add)",
+      },
+      {
+        command: UNSTAGE_ALL_COMMAND,
+        title: "Unstage All Changes",
+        category: "Git",
+        icon: "$(remove)",
+      },
+    ],
+    // The letters' colours, with VS Code's own ids and VS Code's own defaults.
+    // The bundled themes define them, so this changes nothing under those — it is
+    // here so that a theme which does not still draws a `U` in green rather than
+    // in the foreground colour, which would make the letters the only thing
+    // distinguishing one kind of change from another.
+    colors: [
+      colour("gitDecoration.addedResourceForeground", "#81b88b", "#587c0c"),
+      colour("gitDecoration.modifiedResourceForeground", "#E2C08D", "#895503"),
+      colour("gitDecoration.deletedResourceForeground", "#c74e39", "#ad0707"),
+      colour("gitDecoration.untrackedResourceForeground", "#73C991", "#007100"),
+      colour("gitDecoration.conflictingResourceForeground", "#e4676b", "#ad0707"),
+      colour("gitDecoration.stageModifiedResourceForeground", "#E2C08D", "#895503"),
+      colour("gitDecoration.stageDeletedResourceForeground", "#c74e39", "#ad0707"),
     ],
     // The Source Control view's title bar, and the palette. Both are gated on
     // the same context key, which is set only for a store that is a git working
@@ -92,6 +137,71 @@ const MANIFEST: IExtensionManifest = {
     // fail. `navigation` is the group that renders as icons rather than as an
     // overflow menu.
     menus: {
+      // A row's own `+` or `−`, and a group's. `inline` is the group that renders
+      // as an icon on the row; `1_modification` is the same command in the
+      // right-click menu, where a name is shown rather than an icon.
+      "scm/resourceState/context": [
+        {
+          command: STAGE_COMMAND,
+          group: "inline",
+          when: `scmResourceState == ${GROUP_CONTEXT.unstaged}`,
+        },
+        {
+          command: STAGE_COMMAND,
+          group: "1_modification",
+          when: `scmResourceState == ${GROUP_CONTEXT.unstaged}`,
+        },
+        // A conflicted file is staged to mark it resolved, which is what `git
+        // add` means on one — so the same button, for the same reason VS Code
+        // offers it there.
+        {
+          command: STAGE_COMMAND,
+          group: "inline",
+          when: `scmResourceState == ${GROUP_CONTEXT.merge}`,
+        },
+        {
+          command: STAGE_COMMAND,
+          group: "1_modification",
+          when: `scmResourceState == ${GROUP_CONTEXT.merge}`,
+        },
+        {
+          command: UNSTAGE_COMMAND,
+          group: "inline",
+          when: `scmResourceState == ${GROUP_CONTEXT.staged}`,
+        },
+        {
+          command: UNSTAGE_COMMAND,
+          group: "1_modification",
+          when: `scmResourceState == ${GROUP_CONTEXT.staged}`,
+        },
+      ],
+      "scm/resourceGroup/context": [
+        {
+          command: STAGE_ALL_COMMAND,
+          group: "inline",
+          when: `scmResourceGroupState == ${GROUP_CONTEXT.unstaged}`,
+        },
+        {
+          command: STAGE_ALL_COMMAND,
+          group: "1_modification",
+          when: `scmResourceGroupState == ${GROUP_CONTEXT.unstaged}`,
+        },
+        {
+          command: STAGE_ALL_COMMAND,
+          group: "inline",
+          when: `scmResourceGroupState == ${GROUP_CONTEXT.merge}`,
+        },
+        {
+          command: UNSTAGE_ALL_COMMAND,
+          group: "inline",
+          when: `scmResourceGroupState == ${GROUP_CONTEXT.staged}`,
+        },
+        {
+          command: UNSTAGE_ALL_COMMAND,
+          group: "1_modification",
+          when: `scmResourceGroupState == ${GROUP_CONTEXT.staged}`,
+        },
+      ],
       "scm/title": [
         {
           command: COMMIT_COMMAND,
@@ -125,10 +235,30 @@ const MANIFEST: IExtensionManifest = {
         { command: PUSH_COMMAND, when: `${GIT_STORE_CONTEXT}` },
         { command: CHECKOUT_COMMAND, when: `${GIT_STORE_CONTEXT}` },
         { command: REFRESH_COMMAND, when: `${GIT_STORE_CONTEXT}` },
+        { command: STAGE_ALL_COMMAND, when: `${GIT_STORE_CONTEXT}` },
+        { command: UNSTAGE_ALL_COMMAND, when: `${GIT_STORE_CONTEXT}` },
+        // Not the per-row pair: they act on the rows a menu handed them, and
+        // chosen from the palette there are none, which is "everything" — the
+        // two commands above, under a name that does not say so.
+        { command: STAGE_COMMAND, when: "false" },
+        { command: UNSTAGE_COMMAND, when: "false" },
       ],
     },
   },
 };
+
+/** One colour contribution, light and dark, in the shape the manifest takes. */
+function colour(
+  id: string,
+  dark: string,
+  light: string,
+): { id: string; description: string; defaults: { dark: string; light: string; highContrast: string } } {
+  return {
+    id,
+    description: `Source control decoration: ${id}`,
+    defaults: { dark, light, highContrast: dark },
+  };
+}
 
 /** What activating the extension leaves for the rest of the page to use. */
 export interface SaltcornExtension {

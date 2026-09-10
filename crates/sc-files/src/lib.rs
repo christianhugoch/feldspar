@@ -38,10 +38,11 @@ pub use def::{
     CFG_URL, FileStoreDef, FileStoreDefId, GIT_BACKEND, LOCAL_BACKEND,
 };
 pub use git::{
-    ARG_BRANCH, ARG_CREATE, ARG_MESSAGE, CommitOutcome, DeployKey, GitChange, GitFileStore,
-    GitOutput, GitRepo, GitStatus, OP_CHECKOUT, OP_CLONE, OP_COMMIT, OP_GENERATE_KEY, OP_PULL,
-    OP_PUSH, OP_STATUS, clone_dir, clone_path, generate_deploy_key, git_operations, key_dir,
-    parse_change, record_clone_path, record_deploy_key,
+    ARG_BRANCH, ARG_CREATE, ARG_MESSAGE, ARG_PATHS, ARG_STAGED_ONLY, CommitOutcome, DeployKey,
+    GitChange, GitFileStore, GitOutput, GitRepo, GitStatus, OP_CHECKOUT, OP_CLONE, OP_COMMIT,
+    OP_GENERATE_KEY, OP_PULL, OP_PUSH, OP_STAGE, OP_STATUS, OP_UNSTAGE, clone_dir, clone_path,
+    generate_deploy_key, git_operations, key_dir, parse_change, record_clone_path,
+    record_deploy_key,
 };
 pub use local::{LocalFileStore, OP_SUGGEST_DIR, local_operations};
 pub use paths::{DATA_DIR_ENV, data_dir, local_store_dir, suggest_local_dir};

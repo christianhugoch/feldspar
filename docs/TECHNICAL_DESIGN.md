@@ -3719,25 +3719,55 @@ it, including the web worker host this bundle has no extension for and never sta
 contributions silently do not exist. The failure mode is a hang rather than a throw, so a wait
 longer than fifteen seconds logs what to suspect.
 
-#### Source control: the minimal SCM view
+#### Source control: the SCM view, with an index
 
 A store that is a git working copy gets VS Code's **Source Control** view, and the scope is one
-sentence: **see what changed, commit it, exchange it with the remote, switch branch.** Left out
-are the index (staging per file or per hunk), the diff editor and the gutter's quick-diff,
-history and blame, discard, merge and rebase, and conflict resolution. Those are not omitted for
-effort: the first three want the same missing thing, a way to read a blob at a revision — there
-is no operation that serves `HEAD:src/App.tsx`, so a "diff" would be a diff against nothing —
-and the rest want a log endpoint or a merge that can report and resolve conflicts. Clicking a
-changed file therefore *opens* it, which is the honest act available, and none of the absences is
-what stops an admin committing the file they just edited.
+sentence: **see what changed, stage what belongs in the next commit, commit it, exchange it with
+the remote, switch branch.** Left out are the diff editor and the gutter's quick-diff, staging by
+*hunk*, history and blame, discard, merge and rebase, and conflict resolution. Those are not
+omitted for effort: the first three want the same missing thing, a way to read a blob at a
+revision — there is no operation that serves `HEAD:src/App.tsx`, so a "diff" would be
+a diff against nothing — and the rest want a log endpoint or a merge that can report and
+resolve conflicts. Clicking a changed file therefore *opens* it, which is the honest act
+available, and none of the absences is what stops an admin committing the file they just edited.
+
+**The index is in, and it is what makes this view the one an admin already knows.** A porcelain
+code is two columns — what the index thinks, then what the working tree thinks — so one changed
+file can be *two* rows, one that the next commit will take and one it will not, and a single
+"Changes" group cannot say that. So the view has VS Code's own three groups (**Merge Changes**,
+**Staged Changes**, **Changes**), the inline `+` and `−` on each row and each group's header, and
+a **Commit that commits the index and nothing else**. Pressing Commit with nothing staged asks
+whether to stage everything and commit that, rather than answering "nothing to commit" while the
+admin's work sits in the group below. Each row carries the letter VS Code uses — `M`, `A`, `D`,
+`R`, `C`, `T`, `U` untracked, `!` conflicted — in VS Code's own `gitDecoration.*` colour, drawn
+through a `FileDecorationProvider` because that is the only way a letter reaches an SCM row (the
+resource state has no field for one), which also puts the same letters on the explorer's files.
+That needed one service the bundle had stubbed: `monaco-vscode-api`'s fallback `IDecorationsService`
+accepts a provider and never consults it, so `ui/ide/src/decorations.ts` lifts the real
+implementation out of `base-service-override` as a single entry — adopting that package's other
+eighteen services (the label, path, request and working-copy file services among them) would be a
+change to the whole service graph in exchange for a letter.
+A badge belongs to a URI rather than to a row, so a file in two groups gets one letter: the
+working tree's, and a conflict's over both — the precedence VS Code's git extension uses.
 
 Most of the operations existed already as declared backend operations (§14.1): `status`, `clone`,
-`pull`, `push`, `commit`. One is new — **`checkout`**, taking a `branch` name and a `create`
+`pull`, `push`, `commit`. Three are new. **`checkout`** takes a `branch` name and a `create`
 flag, so a missing branch name is caught by the same declared-input validation that catches a
 missing commit message. It runs plain `git checkout`: **no `--force` and no automatic stash**, so
 a switch that would overwrite uncommitted work fails with git's own refusal, naming the files.
 An editor that silently ate what someone had just typed would be the worse answer, and it is why
-commit and pull are the operations that come first.
+commit and pull are the operations that come first. **`stage`** and **`unstage`** take `paths` —
+one per line, empty meaning everything, because an operation argument is a `FormField` and a
+textarea is something an admin can fill in where a JSON array is not — and each path is checked
+before it becomes a *pathspec*: no traversal, no absolute path, no leading `-` or `:`, since a
+pathspec is a small query language and what arrives is a client's idea of a file. `commit` gains
+a **`staged_only`** flag, absent meaning no: the admin screen's button says "commit all changes"
+and still means it, and the IDE — which has an index on display — sends `true`.
+
+One thing that was wrong the whole time and only the groups revealed: git's combined output was
+trimmed as a *string*, which ate the leading space of the first porcelain line and turned ` M`
+("modified, unstaged") into `M ` ("staged"). A code meaning the opposite of the truth was
+invisible while every change went into one group. Only blank *lines* are trimmed now.
 
 **An operation answers twice.** `status`'s `output` is prose and stays prose — the admin screen
 that rendered branches and ahead/behind counts would be a screen that knows what those are, and

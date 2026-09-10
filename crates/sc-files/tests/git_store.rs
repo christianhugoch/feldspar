@@ -15,10 +15,10 @@ use std::process::Command;
 
 use bytes::Bytes;
 use sc_files::{
-    ARG_BRANCH, ARG_CREATE, ARG_MESSAGE, CFG_BRANCH, CFG_DIR, DATA_DIR_ENV, FileStore,
-    FileStoreDef, GIT_BACKEND, GitFileStore, GitRepo, OP_CHECKOUT, OP_COMMIT, OP_STATUS,
-    clone_path, connect_from_def, generate_deploy_key, record_clone_path, run_backend_operation,
-    validate_file_store_config,
+    ARG_BRANCH, ARG_CREATE, ARG_MESSAGE, ARG_PATHS, ARG_STAGED_ONLY, CFG_BRANCH, CFG_DIR,
+    DATA_DIR_ENV, FileStore, FileStoreDef, GIT_BACKEND, GitFileStore, GitRepo, OP_CHECKOUT,
+    OP_COMMIT, OP_STAGE, OP_STATUS, OP_UNSTAGE, clone_path, connect_from_def, generate_deploy_key,
+    record_clone_path, run_backend_operation, validate_file_store_config,
 };
 use sc_types::Attrs;
 
@@ -145,7 +145,7 @@ async fn a_git_store_clones_serves_commits_and_pushes() {
     );
 
     // Commit everything, with a message.
-    let commit = repo.commit_all("add today's notes").await.unwrap();
+    let commit = repo.commit("add today's notes", true).await.unwrap();
     assert!(commit.committed, "{}", commit.output);
     let status = repo.status().await.unwrap();
     assert!(status.clean());
@@ -154,7 +154,7 @@ async fn a_git_store_clones_serves_commits_and_pushes() {
     assert_eq!((status.ahead, status.behind), (1, 0));
 
     // Committing again with nothing changed is a no-op, not a failure.
-    let nothing = repo.commit_all("nothing to see").await.unwrap();
+    let nothing = repo.commit("nothing to see", true).await.unwrap();
     assert!(!nothing.committed, "{}", nothing.output);
 
     // Push, and the remote has it.
@@ -251,7 +251,7 @@ async fn operations_on_a_store_that_was_never_cloned_say_so() {
     for err in [
         repo.pull().await.unwrap_err().to_string(),
         repo.push().await.unwrap_err().to_string(),
-        repo.commit_all("anything").await.unwrap_err().to_string(),
+        repo.commit("anything", true).await.unwrap_err().to_string(),
     ] {
         assert!(err.contains("not a git clone yet"), "{err}");
     }
@@ -322,6 +322,196 @@ async fn the_status_operation_carries_the_working_copy_as_data() {
         .expect("every instance operation reports the state it left");
     assert!(data["changes"].as_array().unwrap().is_empty(), "{data}");
     assert_eq!(data["ahead"], serde_json::json!(1), "{data}");
+}
+
+/// The index, which is what a Source Control view's two groups are (§12.1):
+/// stage one of two changes, commit only what is staged, and the other change is
+/// still waiting afterwards.
+#[tokio::test]
+async fn staging_decides_what_a_commit_takes() {
+    let origin = origin_with_a_commit("staging");
+    let workspace = temp_dir("staging-clone");
+    let mut def = git_store_def("app", &origin, &workspace.join("app"));
+    let repo = GitRepo::from_def(&def).unwrap();
+    repo.ensure_cloned().await.unwrap();
+    let clone = workspace.join("app");
+    git(&clone, &["config", "user.email", "test@example.com"]);
+    git(&clone, &["config", "user.name", "Test"]);
+    let store = connect_from_def(&def).unwrap();
+
+    // Two new files and one edit: an untracked pair and a modification, which
+    // are the three codes the view draws letters from.
+    store
+        .write("notes/today.md", Bytes::from_static(b"today\n"))
+        .await
+        .unwrap();
+    store
+        .write("notes/later.md", Bytes::from_static(b"later\n"))
+        .await
+        .unwrap();
+    store
+        .write("README.md", Bytes::from_static(b"# edited\n"))
+        .await
+        .unwrap();
+    let codes = |status: &sc_files::GitStatus, path: &str| {
+        status
+            .changes
+            .iter()
+            .filter_map(|line| sc_files::parse_change(line))
+            .find(|change| change.path == path)
+            .unwrap_or_else(|| panic!("{path} is not among {:?}", status.changes))
+            .status
+    };
+    let status = repo.status().await.unwrap();
+    assert_eq!(codes(&status, "notes/today.md"), "??");
+    assert_eq!(codes(&status, "README.md"), " M");
+
+    // Stage one path. git's code moves from the working-tree column into the
+    // index column, which is the whole reason the view can tell the groups apart.
+    repo.stage(&["notes/today.md".to_owned()]).await.unwrap();
+    let status = repo.status().await.unwrap();
+    assert_eq!(codes(&status, "notes/today.md"), "A ");
+    assert_eq!(codes(&status, "notes/later.md"), "??");
+    assert_eq!(codes(&status, "README.md"), " M");
+
+    // A commit of what is staged takes that file and leaves the others.
+    let committed = repo.commit("add today's notes", false).await.unwrap();
+    assert!(committed.committed, "{}", committed.output);
+    assert_eq!(
+        git(&clone, &["show", "--name-only", "--pretty=format:", "HEAD"]),
+        "notes/today.md"
+    );
+    let status = repo.status().await.unwrap();
+    assert_eq!(codes(&status, "notes/later.md"), "??");
+    assert_eq!(codes(&status, "README.md"), " M");
+
+    // Committing staged-only again commits nothing — and is not a failure, the
+    // same way an unchanged working copy is not.
+    let nothing = repo.commit("nothing staged", false).await.unwrap();
+    assert!(!nothing.committed, "{}", nothing.output);
+
+    // Staging with no paths stages everything, including the edit.
+    repo.stage(&[]).await.unwrap();
+    let status = repo.status().await.unwrap();
+    assert_eq!(codes(&status, "notes/later.md"), "A ");
+    assert_eq!(codes(&status, "README.md"), "M ");
+
+    // Unstaging one path puts it back in the working tree, with its contents
+    // untouched — the file is still edited, it is just no longer staged.
+    repo.unstage(&["README.md".to_owned()]).await.unwrap();
+    let status = repo.status().await.unwrap();
+    assert_eq!(codes(&status, "README.md"), " M");
+    assert_eq!(codes(&status, "notes/later.md"), "A ");
+    assert_eq!(
+        &store.read("README.md").await.unwrap()[..],
+        b"# edited\n",
+        "unstaging must not touch the file"
+    );
+
+    // Unstaging with no paths unstages the rest, and a file that had never been
+    // committed is untracked again rather than lost.
+    repo.unstage(&[]).await.unwrap();
+    let status = repo.status().await.unwrap();
+    assert_eq!(codes(&status, "notes/later.md"), "??");
+
+    // The same through the declared operations, which is how the IDE reaches
+    // them: stage one path by name, then commit `staged_only`.
+    let mut input = Attrs::new();
+    input.insert(ARG_PATHS.to_owned(), serde_json::json!("notes/later.md\n"));
+    let outcome = run_backend_operation(&mut def, OP_STAGE, &input)
+        .await
+        .unwrap();
+    // `git add` prints nothing on success, and an operation whose output is git's
+    // own has to say something rather than nothing.
+    assert!(
+        outcome.output.contains("notes/later.md"),
+        "{}",
+        outcome.output
+    );
+    let data = outcome.data.unwrap();
+    let staged = data["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|change| change["path"] == serde_json::json!("notes/later.md"))
+        .unwrap()
+        .clone();
+    assert_eq!(staged["status"], serde_json::json!("A "), "{data}");
+
+    let mut input = Attrs::new();
+    input.insert(ARG_MESSAGE.to_owned(), serde_json::json!("add later"));
+    input.insert(ARG_STAGED_ONLY.to_owned(), serde_json::json!(true));
+    let outcome = run_backend_operation(&mut def, OP_COMMIT, &input)
+        .await
+        .unwrap();
+    let data = outcome.data.unwrap();
+    let left: Vec<&str> = data["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|change| change["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(left, ["README.md"], "{data}");
+
+    // And unstaging through the operation says what it did, since git does not.
+    run_backend_operation(&mut def, OP_STAGE, &Attrs::new())
+        .await
+        .unwrap();
+    let outcome = run_backend_operation(&mut def, OP_UNSTAGE, &Attrs::new())
+        .await
+        .unwrap();
+    assert!(
+        outcome.output.contains("every change"),
+        "{}",
+        outcome.output
+    );
+    let data = outcome.data.unwrap();
+    assert_eq!(data["changes"].as_array().unwrap().len(), 1, "{data}");
+}
+
+/// A path from a client is a **pathspec** once git sees it, and the three shapes
+/// that are not a file in this working tree are refused before it does.
+#[tokio::test]
+async fn a_staged_path_cannot_escape_the_working_copy() {
+    let origin = origin_with_a_commit("pathspec");
+    let workspace = temp_dir("pathspec-clone");
+    let def = git_store_def("app", &origin, &workspace.join("app"));
+    let repo = GitRepo::from_def(&def).unwrap();
+    repo.ensure_cloned().await.unwrap();
+
+    async fn refused(repo: &GitRepo, path: &str) -> String {
+        repo.stage(&[path.to_owned()])
+            .await
+            .unwrap_err()
+            .to_string()
+    }
+    assert!(
+        refused(&repo, "../elsewhere/secrets")
+            .await
+            .contains("escapes"),
+        "a traversal must be refused"
+    );
+    assert!(
+        refused(&repo, "/etc/passwd")
+            .await
+            .contains("inside the working copy"),
+        "an absolute path must be refused"
+    );
+    assert!(
+        refused(&repo, "--git-dir=/tmp")
+            .await
+            .contains("git option"),
+        "an option must be refused"
+    );
+    assert!(
+        refused(&repo, ":(exclude)src")
+            .await
+            .contains("pathspec pattern"),
+        "pathspec magic must be refused"
+    );
+    // A blank line is not an error: the list arrives as text, and an empty one
+    // means everything.
+    repo.stage(&["  ".to_owned()]).await.unwrap();
 }
 
 #[tokio::test]
@@ -403,7 +593,7 @@ async fn an_empty_commit_message_is_refused() {
     let repo = GitRepo::from_def(&def).unwrap();
     repo.ensure_cloned().await.unwrap();
 
-    let err = repo.commit_all("   ").await.unwrap_err().to_string();
+    let err = repo.commit("   ", true).await.unwrap_err().to_string();
     assert!(err.contains("message"), "{err}");
 }
 
@@ -551,7 +741,7 @@ async fn an_existing_checkout_is_adopted_rather_than_cloned_over() {
         .write("adopted.txt", Bytes::from_static(b"from saltcorn\n"))
         .await
         .unwrap();
-    repo.commit_all("adopted").await.unwrap();
+    repo.commit("adopted", true).await.unwrap();
     repo.push().await.unwrap();
     assert!(
         git(&origin, &["log", "-1", "--pretty=%s", "main"]).contains("adopted"),

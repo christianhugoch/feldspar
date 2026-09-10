@@ -18,6 +18,7 @@ import {
   kindOfStatus,
   parentPath,
   toStorePath,
+  toStorePathOrNull,
   toUriPath,
 } from "./storeFiles";
 
@@ -124,6 +125,15 @@ describe("paths", () => {
 
   it("refuses a path outside the workspace folder", () => {
     expect(() => toStorePath("app", "/other/App.tsx")).toThrow(StoreFileError);
+  });
+
+  it("answers rather than throws where a caller may be handed a foreign URI", () => {
+    // What a Source Control menu command gets is whatever the workbench put in
+    // its argument list, so "not one of ours" is an answer there.
+    expect(toStorePathOrNull("app", "/app/src/App.tsx")).toBe("src/App.tsx");
+    expect(toStorePathOrNull("app", "/other/App.tsx")).toBeNull();
+    expect(toStorePathOrNull("app", "/app")).toBeNull();
+    expect(toStorePathOrNull("app", "/app/")).toBeNull();
   });
 
   it("knows a path's parent", () => {

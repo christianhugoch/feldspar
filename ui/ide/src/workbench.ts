@@ -15,6 +15,7 @@ import getKeybindingsServiceOverride, {
   initUserKeybindings,
 } from "@codingame/monaco-vscode-keybindings-service-override";
 import getDialogsServiceOverride from "@codingame/monaco-vscode-dialogs-service-override";
+import { getDecorationsServiceOverride } from "./decorations";
 import getExplorerServiceOverride from "@codingame/monaco-vscode-explorer-service-override";
 import getExtensionServiceOverride from "@codingame/monaco-vscode-extensions-service-override";
 import getLanguagesServiceOverride from "@codingame/monaco-vscode-languages-service-override";
@@ -124,6 +125,9 @@ function services(chat: ChatServices | null): IEditorOverrideServices {
     // question, and for a store that is not a git working copy the answer is no,
     // which VS Code renders as its own "no source control providers" empty state.
     ...getScmServiceOverride(),
+    // …and the service that draws the letter at the end of each of its rows,
+    // which the workbench otherwise stubs out (see `decorations.ts`).
+    ...getDecorationsServiceOverride(),
     ...(chat?.services ?? {}),
   };
 }

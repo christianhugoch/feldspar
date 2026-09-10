@@ -13,12 +13,14 @@ import { describe, expect, it, vi } from "vitest";
 import type { ApiClient, ListFileStoresResponse } from "./client";
 import {
   StoreGit,
+  badgeRow,
   branchNameProblem,
+  changeRows,
   commitMessageProblem,
-  describeChange,
   isClean,
-  isDeletion,
   parseGitStatus,
+  rowColor,
+  rowsIn,
   storeGit,
   trackingSuffix,
 } from "./git";
@@ -111,19 +113,104 @@ describe("the status payload", () => {
   });
 });
 
-describe("how a change is shown", () => {
-  it("keeps git's own letters and says what they mean", () => {
-    expect(describeChange({ status: "??", path: "a" })).toBe("Untracked");
-    expect(describeChange({ status: " M", path: "a" })).toBe("Modified");
-    expect(describeChange({ status: "A ", path: "a" })).toBe("Added");
-    expect(describeChange({ status: "UU", path: "a" })).toBe("Conflicted");
-    // An unknown pair is reported as itself rather than guessed at.
-    expect(describeChange({ status: "XY", path: "a" })).toContain("XY");
+describe("the rows the view draws", () => {
+  /** The rows of one porcelain code, as `(group, letter)` pairs. */
+  function rows(status: string, path = "a.txt") {
+    return changeRows(parseGitStatus(payload({ changes: [{ status, path }] }))!).map((row) => [
+      row.group,
+      row.letter,
+    ]);
+  }
+
+  it("puts a change in the group its column says", () => {
+    expect(rows("??")).toEqual([["unstaged", "U"]]);
+    expect(rows(" M")).toEqual([["unstaged", "M"]]);
+    expect(rows("M ")).toEqual([["staged", "M"]]);
+    expect(rows("A ")).toEqual([["staged", "A"]]);
+    expect(rows(" D")).toEqual([["unstaged", "D"]]);
+    expect(rows("D ")).toEqual([["staged", "D"]]);
+    expect(rows("R ")).toEqual([["staged", "R"]]);
+    expect(rows("C ")).toEqual([["staged", "C"]]);
+    expect(rows(" T")).toEqual([["unstaged", "T"]]);
   });
 
-  it("knows which changes mean the file is gone", () => {
-    expect(isDeletion({ status: " D", path: "a" })).toBe(true);
-    expect(isDeletion({ status: "??", path: "a" })).toBe(false);
+  it("puts a file that is staged and edited again in both groups at once", () => {
+    // The whole reason there are two groups: one of these rows the next commit
+    // takes, and one it does not.
+    expect(rows("MM")).toEqual([
+      ["staged", "M"],
+      ["unstaged", "M"],
+    ]);
+    expect(rows("AM")).toEqual([
+      ["staged", "A"],
+      ["unstaged", "M"],
+    ]);
+    expect(rows("AD")).toEqual([
+      ["staged", "A"],
+      ["unstaged", "D"],
+    ]);
+  });
+
+  it("puts a conflict in neither, and marks it with VS Code's own !", () => {
+    for (const code of ["DD", "AU", "UD", "UA", "DU", "AA", "UU"]) {
+      expect(rows(code)).toEqual([["merge", "!"]]);
+    }
+  });
+
+  it("keeps a code it does not understand as a row rather than losing the file", () => {
+    const row = changeRows(
+      parseGitStatus(payload({ changes: [{ status: "XY", path: "a.txt" }] }))!,
+    )[0];
+    expect(row?.group).toBe("staged");
+    expect(row?.label).toContain("Changed");
+  });
+
+  it("says what each letter means, and which files are gone", () => {
+    const status = parseGitStatus(
+      payload({
+        changes: [
+          { status: "??", path: "new.txt" },
+          { status: "MM", path: "both.txt" },
+          { status: " D", path: "gone.txt" },
+        ],
+      }),
+    )!;
+    const all = changeRows(status);
+    expect(rowsIn(all, "staged").map((row) => row.path)).toEqual(["both.txt"]);
+    expect(rowsIn(all, "unstaged").map((row) => row.path)).toEqual([
+      "new.txt",
+      "both.txt",
+      "gone.txt",
+    ]);
+    expect(all.find((row) => row.path === "new.txt")?.label).toBe("Untracked");
+    expect(rowsIn(all, "staged")[0]?.label).toContain("Staged");
+    expect(all.filter((row) => row.deleted).map((row) => row.path)).toEqual(["gone.txt"]);
+  });
+
+  it("colours a letter the way VS Code's git view does", () => {
+    const colourOf = (status: string, group: "staged" | "unstaged" | "merge") => {
+      const row = changeRows(
+        parseGitStatus(payload({ changes: [{ status, path: "a" }] }))!,
+      ).find((candidate) => candidate.group === group)!;
+      return rowColor(row);
+    };
+    expect(colourOf("??", "unstaged")).toContain("untracked");
+    expect(colourOf("A ", "staged")).toContain("added");
+    expect(colourOf(" M", "unstaged")).toBe("gitDecoration.modifiedResourceForeground");
+    expect(colourOf("M ", "staged")).toBe("gitDecoration.stageModifiedResourceForeground");
+    expect(colourOf(" D", "unstaged")).toBe("gitDecoration.deletedResourceForeground");
+    expect(colourOf("D ", "staged")).toBe("gitDecoration.stageDeletedResourceForeground");
+    expect(colourOf("UU", "merge")).toContain("conflicting");
+  });
+
+  it("gives a file one badge, preferring the working tree and then a conflict", () => {
+    const of = (status: string) =>
+      badgeRow(changeRows(parseGitStatus(payload({ changes: [{ status, path: "a" }] }))!));
+    // Staged-added and edited since: the badge says what the file is now.
+    expect(of("AM")?.group).toBe("unstaged");
+    expect(of("A ")?.group).toBe("staged");
+    expect(of("UU")?.group).toBe("merge");
+    expect(badgeRow([])).toBeUndefined();
   });
 });
 
@@ -140,7 +227,7 @@ describe("the branch indicator", () => {
 });
 
 describe("the operations", () => {
-  it("commit passes the message through, and reports the state it left", async () => {
+  it("commit takes the index, and reports the state it left", async () => {
     const { client, calls } = stubClient({
       output: "1 file changed",
       data: payload({ changes: [] }),
@@ -149,10 +236,37 @@ describe("the operations", () => {
 
     const result = await git.commit("fix the header");
     expect(calls).toEqual([
-      { id: "store-id", operation: "commit", body: { input: { message: "fix the header" } } },
+      {
+        id: "store-id",
+        operation: "commit",
+        // `staged_only`: a view with an index must not commit the rows the admin
+        // left out of it.
+        body: { input: { message: "fix the header", staged_only: true } },
+      },
     ]);
     expect(result.output).toBe("1 file changed");
     expect(result.status?.changes).toEqual([]);
+  });
+
+  it("commitAll is the other answer, for a commit with nothing staged", async () => {
+    const { client, calls } = stubClient();
+    await new StoreGit("app-source", "store-id", client).commitAll("everything");
+    expect(calls[0]?.body).toEqual({ input: { message: "everything", staged_only: false } });
+  });
+
+  it("stage and unstage name the paths, one per line", async () => {
+    const { client, calls } = stubClient({ output: "", data: payload() });
+    const git = new StoreGit("app-source", "store-id", client);
+
+    await git.stage(["src/App.tsx", "notes/today.md"]);
+    await git.unstage(["src/App.tsx"]);
+    // No paths is every path, which is what the group's own button means.
+    await git.stage([]);
+    expect(calls.map((call) => [call.operation, call.body])).toEqual([
+      ["stage", { input: { paths: "src/App.tsx\nnotes/today.md" } }],
+      ["unstage", { input: { paths: "src/App.tsx" } }],
+      ["stage", { input: { paths: "" } }],
+    ]);
   });
 
   it("checkout says which branch, and whether to create it", async () => {

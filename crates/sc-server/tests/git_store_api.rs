@@ -291,6 +291,8 @@ async fn a_git_store_is_cloned_on_save_and_serves_the_repository() -> sc_error::
             "clone",
             "pull",
             "push",
+            "stage",
+            "unstage",
             "commit",
             "checkout"
         ]
@@ -311,9 +313,19 @@ async fn a_git_store_is_cloned_on_save_and_serves_the_repository() -> sc_error::
     // A commit's message is an ordinary `FormField`, rendered by the same code
     // that renders settings.
     let commit_input = by_name("commit")["input_spec"].as_array().unwrap();
-    assert_eq!(commit_input.len(), 1);
+    assert_eq!(commit_input.len(), 2);
     assert_eq!(commit_input[0]["name"], json!("message"));
     assert_eq!(commit_input[0]["required"], json!(true));
+    // Which changes a commit takes is an argument too, so the IDE's index — a
+    // view of git the admin screen does not have — asks for it through the same
+    // declared operation rather than through one of its own.
+    assert_eq!(commit_input[1]["name"], json!("staged_only"));
+    assert_eq!(commit_input[1]["required"], json!(false));
+    // Staging takes a textarea of paths, which is a `FormField` like any other.
+    let stage_input = by_name("stage")["input_spec"].as_array().unwrap();
+    assert_eq!(stage_input.len(), 1);
+    assert_eq!(stage_input[0]["name"], json!("paths"));
+    assert_eq!(stage_input[0]["multiline"], json!(true));
     // A public key is one long line to copy, so it declares itself multi-line
     // rather than the UI knowing which settings happen to hold keys.
     let public_key = git_backend["config_spec"]

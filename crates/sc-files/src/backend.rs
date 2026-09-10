@@ -563,6 +563,8 @@ mod tests {
                 crate::git::OP_CLONE,
                 crate::git::OP_PULL,
                 crate::git::OP_PUSH,
+                crate::git::OP_STAGE,
+                crate::git::OP_UNSTAGE,
                 crate::git::OP_COMMIT,
                 crate::git::OP_CHECKOUT,
             ]

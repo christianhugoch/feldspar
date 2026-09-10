@@ -23,8 +23,9 @@
 //!   repository someone has already cloned onto the server is connected by
 //!   naming its directory and leaving the URL blank, and the remote — if it has
 //!   one — is the one the checkout already points at.
-//! - **What else.** [`GitRepo`] carries `pull`, `push`, `commit_all` and
-//!   `status`. These are not [`FileStore`] methods and deliberately so: the
+//! - **What else.** [`GitRepo`] carries `pull`, `push`, `stage`, `unstage`,
+//!   `commit` and `status`. These are not [`FileStore`] methods and deliberately
+//!   so: the
 //!   trait is the contract every backend answers, and three quarters of its
 //!   implementations will never have a remote to push to. A caller that wants
 //!   git operations asks for a git repository.
@@ -502,28 +503,67 @@ impl GitRepo {
             .await
     }
 
-    /// Stage **everything** and commit it with `message`.
+    /// Add `paths` to the index, or **everything** when `paths` is empty.
     ///
-    /// Commits all changes — including files the admin created outside the
-    /// editor and deletions — because that is what the button says and because
-    /// a per-file staging UI is a git client, which this is not.
+    /// This is `git add`, including deletions (`git add` has staged a removed
+    /// file since 2.0) and files created outside the editor, so one operation
+    /// covers every row a source-control view can show a `+` against.
+    ///
+    /// A path is a **pathspec**, checked by [`pathspecs`] before it reaches git:
+    /// what arrives is a client's idea of a file in this working tree, and a
+    /// working tree is not the place to discover that `../../etc` was one.
+    pub async fn stage(&self, paths: &[String]) -> Result<GitOutput> {
+        let paths = pathspecs(paths)?;
+        let mut args = vec!["add".to_owned()];
+        if paths.is_empty() {
+            args.push("--all".to_owned());
+        }
+        args.push("--".to_owned());
+        args.extend(paths);
+        self.checked_owned(&args, "add").await
+    }
+
+    /// Take `paths` out of the index, or **everything** when `paths` is empty,
+    /// leaving the working tree alone.
+    ///
+    /// `git reset -q` rather than `git restore --staged`, for one reason worth
+    /// writing down: in a repository with no commits there is no `HEAD` for
+    /// `restore` to resolve and it fails, while `reset` empties the index entry
+    /// and the first file ever added becomes untracked again — which is what
+    /// pressing `−` on it means.
+    pub async fn unstage(&self, paths: &[String]) -> Result<GitOutput> {
+        let paths = pathspecs(paths)?;
+        let mut args = vec!["reset".to_owned(), "-q".to_owned(), "--".to_owned()];
+        args.extend(paths);
+        self.checked_owned(&args, "reset").await
+    }
+
+    /// Commit with `message`: the whole working tree when `stage_all`, and
+    /// otherwise **only what is in the index**.
+    ///
+    /// Both callers are real. The admin screen has no per-file view, so its
+    /// button says "commit all changes" and means it; the IDE's Source Control
+    /// view has an index in front of the admin, and a Commit there that swept up
+    /// the files they had deliberately left unstaged would make staging a lie.
     ///
     /// An identity is supplied for the commit only when the repository has none
     /// configured, so an admin's own `user.name`/`user.email` wins where they
     /// have set one and a bare machine can still commit where they have not.
-    pub async fn commit_all(&self, message: &str) -> Result<CommitOutcome> {
+    pub async fn commit(&self, message: &str, stage_all: bool) -> Result<CommitOutcome> {
         let message = message.trim();
         if message.is_empty() {
             return Err(Error::invalid("a commit needs a message"));
         }
         self.require_cloned()?;
 
-        let staged = self.run(&self.root, &["add", "-A"]).await?;
-        if !staged.success {
-            return Err(Error::invalid(format!(
-                "staging changes failed: {}",
-                staged.output
-            )));
+        if stage_all {
+            let staged = self.run(&self.root, &["add", "-A"]).await?;
+            if !staged.success {
+                return Err(Error::invalid(format!(
+                    "staging changes failed: {}",
+                    staged.output
+                )));
+            }
         }
 
         let mut args: Vec<String> = Vec::new();
@@ -737,6 +777,17 @@ impl GitRepo {
         Ok(out)
     }
 
+    /// [`checked`](GitRepo::checked) for an argument list built at runtime — a
+    /// pathspec list is as many arguments as the admin selected files.
+    async fn checked_owned(&self, args: &[String], what: &str) -> Result<GitOutput> {
+        self.require_cloned()?;
+        let out = self.run(&self.root, args).await?;
+        if !out.success {
+            return Err(Error::invalid(format!("git {what} failed: {}", out.output)));
+        }
+        Ok(out)
+    }
+
     /// The error for an operation on a store that has never been cloned, which
     /// says what to do about it rather than letting git report a directory that
     /// is not a repository.
@@ -771,6 +822,80 @@ impl GitRepo {
     }
 }
 
+/// Check client-supplied paths before they become git pathspecs, dropping the
+/// blank ones.
+///
+/// Four rejections, each for something a pathspec can do that a path in a
+/// working tree cannot. An **absolute** path (including a `C:\` drive) and a
+/// `..` **segment** both name somewhere else — git would usually refuse them
+/// itself ("is outside repository"), but a store whose working tree contains a
+/// symlinked directory is exactly the case where it would not, and the traversal
+/// rule here is the same one [`LocalFileStore`] applies to every read. A
+/// **leading `-`** would be read as an option: `--` is passed before the list for
+/// that reason, and this rejects it anyway, because a defence that only works
+/// when the caller remembers the separator is not one. A **leading `:`** is
+/// git's pathspec magic (`:(exclude)`, `:/`), which is a small query language
+/// where a file name is wanted.
+///
+/// Blank entries are dropped rather than refused: the list arrives as lines of
+/// text (see [`ARG_PATHS`]), and a trailing newline is not an error. An all-blank
+/// list therefore means *everything*, which is what each caller of this already
+/// means by an empty one.
+fn pathspecs(paths: &[String]) -> Result<Vec<String>> {
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        let path = path.trim();
+        if path.is_empty() {
+            continue;
+        }
+        if path.starts_with('/') || path.starts_with('\\') || drive_prefixed(path) {
+            return Err(Error::invalid(format!(
+                "{path:?} is not a path inside the working copy"
+            )));
+        }
+        if path.split(['/', '\\']).any(|segment| segment == "..") {
+            return Err(Error::invalid(format!(
+                "path {path:?} escapes the file store root"
+            )));
+        }
+        if path.starts_with('-') {
+            return Err(Error::invalid(format!(
+                "{path:?} would be read as a git option, not a path"
+            )));
+        }
+        if path.starts_with(':') {
+            return Err(Error::invalid(format!(
+                "{path:?} would be read as a git pathspec pattern, not a path"
+            )));
+        }
+        out.push(path.to_owned());
+    }
+    Ok(out)
+}
+
+/// Whether a path begins with a Windows drive letter, which makes it absolute
+/// there and is not something a store-relative path ever is.
+fn drive_prefixed(path: &str) -> bool {
+    let mut chars = path.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some(letter), Some(':')) if letter.is_ascii_alphabetic()
+    )
+}
+
+/// Drop the blank lines at either end of some git output, and **only** those.
+///
+/// A plain `trim` is what this used to be, and it was wrong in one specific
+/// place: `git status --porcelain` writes the index column first, so a file that
+/// is modified but unstaged is ` M README.md` — and trimming the whole output
+/// eats that leading space on the *first* line only, turning it into `M ` and
+/// telling a reader the file is staged. A code that means the opposite of the
+/// truth is worse than no code, and it was invisible while there was one group
+/// to put every change in.
+fn trim_blank_lines(text: &str) -> &str {
+    text.trim_start_matches(['\n', '\r']).trim_end()
+}
+
 /// The `GIT_SSH_COMMAND` that makes git use one specific key and ask nothing.
 ///
 /// - `IdentitiesOnly=yes` — otherwise ssh offers every key an agent holds
@@ -800,7 +925,7 @@ fn combined(stdout: &[u8], stderr: &[u8]) -> String {
     let out = String::from_utf8_lossy(stdout);
     let err = String::from_utf8_lossy(stderr);
     let mut joined = String::new();
-    for part in [out.trim(), err.trim()] {
+    for part in [trim_blank_lines(&out), trim_blank_lines(&err)] {
         if part.is_empty() {
             continue;
         }
@@ -913,10 +1038,30 @@ pub const OP_CLONE: &str = "clone";
 pub const OP_PULL: &str = "pull";
 /// The name of the operation that pushes the branch.
 pub const OP_PUSH: &str = "push";
-/// The name of the operation that stages and commits everything.
+/// The name of the operation that adds paths to the index.
+pub const OP_STAGE: &str = "stage";
+/// The name of the operation that takes paths back out of the index.
+pub const OP_UNSTAGE: &str = "unstage";
+/// The `paths` argument of [`OP_STAGE`] and [`OP_UNSTAGE`]: one path per line,
+/// relative to the store root, and empty for *everything*.
+///
+/// Lines of text rather than a JSON array because an operation's arguments are
+/// [`FormField`]s and the admin screen renders one control per field (§6.2): a
+/// textarea of paths is something an admin can fill in, and a JSON array is
+/// something they would have to hand-write brackets for. The IDE joins the
+/// files it selected with newlines and is no worse off.
+pub const ARG_PATHS: &str = "paths";
+/// The name of the operation that commits.
 pub const OP_COMMIT: &str = "commit";
 /// The `message` argument of [`OP_COMMIT`].
 pub const ARG_MESSAGE: &str = "message";
+/// The `staged_only` argument of [`OP_COMMIT`]: commit what is in the index
+/// rather than staging the working copy first.
+///
+/// Absent means *no*, which is the admin screen's meaning — its button says
+/// "commit all changes" — and the IDE's Source Control view, which has an index
+/// on display, sends `true`.
+pub const ARG_STAGED_ONLY: &str = "staged_only";
 /// The name of the operation that switches branch.
 pub const OP_CHECKOUT: &str = "checkout";
 /// The `branch` argument of [`OP_CHECKOUT`].
@@ -973,12 +1118,37 @@ pub fn git_operations() -> Vec<Operation> {
         Operation::new(OP_PUSH, OperationScope::Instance)
             .label("Push")
             .description("Sends committed changes to the remote."),
+        Operation::new(OP_STAGE, OperationScope::Instance)
+            .label("Stage changes")
+            .description(
+                "Adds changes to the index, ready to be committed. \
+                 Leave the paths empty to stage everything.",
+            )
+            .input([FormField::new(ARG_PATHS, BasicType::Text)
+                .label("Paths, one per line")
+                .multiline()]),
+        Operation::new(OP_UNSTAGE, OperationScope::Instance)
+            .label("Unstage changes")
+            .description(
+                "Takes changes back out of the index, leaving the files themselves alone. \
+                 Leave the paths empty to unstage everything.",
+            )
+            .input([FormField::new(ARG_PATHS, BasicType::Text)
+                .label("Paths, one per line")
+                .multiline()]),
         Operation::new(OP_COMMIT, OperationScope::Instance)
             .label("Commit all changes")
-            .description("Stages everything in the working copy and commits it.")
-            .input([FormField::new(ARG_MESSAGE, BasicType::Text)
-                .label("Commit message")
-                .required()]),
+            .description(
+                "Stages everything in the working copy and commits it — or, with \
+                 `staged_only`, commits just what has been staged.",
+            )
+            .input([
+                FormField::new(ARG_MESSAGE, BasicType::Text)
+                    .label("Commit message")
+                    .required(),
+                FormField::new(ARG_STAGED_ONLY, BasicType::Bool)
+                    .label("Commit only what is staged"),
+            ]),
         Operation::new(OP_CHECKOUT, OperationScope::Instance)
             .label("Switch branch")
             .description(
@@ -1038,6 +1208,32 @@ pub(crate) async fn run_git_operation(
         }
         OP_PULL => repo.pull().await?.output,
         OP_PUSH => repo.push().await?.output,
+        OP_STAGE | OP_UNSTAGE => {
+            let paths = lines(input.get(ARG_PATHS));
+            let out = if operation == OP_STAGE {
+                repo.stage(&paths).await?
+            } else {
+                repo.unstage(&paths).await?
+            };
+            // `git add` and `git reset` say nothing when they work, and silence
+            // is the one answer an operation whose whole output is git's cannot
+            // pass on. The status rides back alongside regardless (below), so
+            // this line is for the admin screen that shows only `output`.
+            if out.output.trim().is_empty() {
+                let what = if operation == OP_STAGE {
+                    "Staged"
+                } else {
+                    "Unstaged"
+                };
+                match paths.len() {
+                    0 => format!("{what} every change."),
+                    1 => format!("{what} {}.", paths[0]),
+                    n => format!("{what} {n} paths."),
+                }
+            } else {
+                out.output
+            }
+        }
         OP_CHECKOUT => {
             let branch = input
                 .get(ARG_BRANCH)
@@ -1054,14 +1250,22 @@ pub(crate) async fn run_git_operation(
                 .get(ARG_MESSAGE)
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
-            let outcome = repo.commit_all(message).await?;
+            let staged_only = input
+                .get(ARG_STAGED_ONLY)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let outcome = repo.commit(message, !staged_only).await?;
             if outcome.committed {
                 outcome.output
             } else {
                 // Not a failure — see `CommitOutcome`. Said plainly, because
                 // git's own "nothing to commit, working tree clean" arrives
                 // through an error path and would read as one.
-                "Nothing to commit — the working copy has no changes.".to_owned()
+                if staged_only {
+                    "Nothing to commit — nothing is staged.".to_owned()
+                } else {
+                    "Nothing to commit — the working copy has no changes.".to_owned()
+                }
             }
         }
         other => return Err(Error::invalid(format!("unknown git operation `{other}`"))),
@@ -1078,6 +1282,25 @@ pub(crate) async fn run_git_operation(
         Ok(status) => outcome.with_data(status_payload(&status)),
         Err(_) => outcome,
     })
+}
+
+/// The [`ARG_PATHS`] argument as the list of paths it stands for.
+///
+/// Anything that is not text is no paths at all, which means *everything* to both
+/// operations that take it — the same answer a missing argument gives, and the
+/// only one available, since the alternative is to refuse a request whose
+/// declared validation has already passed.
+fn lines(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A [`GitStatus`] as the data an SCM view can draw: the same facts as
@@ -1368,6 +1591,30 @@ mod tests {
         assert!(cmd.contains("IdentitiesOnly=yes"), "{cmd}");
         assert!(cmd.contains("BatchMode=yes"), "{cmd}");
         assert!(cmd.contains("StrictHostKeyChecking=accept-new"), "{cmd}");
+    }
+
+    #[test]
+    fn a_porcelain_line_keeps_its_index_column() {
+        // ` M` is "modified, not staged" and `M ` is "staged"; the first line's
+        // leading space is the difference, and a trim would have eaten it.
+        let out = combined(b" M README.md\n?? notes/today.md\n", b"");
+        assert_eq!(out, " M README.md\n?? notes/today.md");
+        assert_eq!(
+            parse_change(out.lines().next().unwrap()).unwrap().status,
+            " M"
+        );
+    }
+
+    #[test]
+    fn a_path_is_checked_before_it_becomes_a_pathspec() {
+        assert_eq!(
+            pathspecs(&["src/App.tsx".to_owned(), "  ".to_owned()]).unwrap(),
+            ["src/App.tsx"]
+        );
+        assert!(pathspecs(&["../etc/passwd".to_owned()]).is_err());
+        assert!(pathspecs(&["C:\\Windows".to_owned()]).is_err());
+        assert!(pathspecs(&["-n".to_owned()]).is_err());
+        assert!(pathspecs(&[":/".to_owned()]).is_err());
     }
 
     #[test]

@@ -631,15 +631,17 @@ fn the_design_records_what_the_ide_milestone_actually_built() {
     let root = workspace_root();
     let design = read(&root, "docs/TECHNICAL_DESIGN.md");
     for fragment in [
-        "IDE_CONTENT_SECURITY_POLICY",          // the relaxed policy, by name
-        "SC_BUILD_ADMIN=0",                     // …and no `--ide-dir` to decide
-        "before `initialize`",                  // the ordering the contributions depend on
-        "monaco-languageclient` is not used",   // the language client deviation
-        "does not match the server's root",     // …and the URI bridge it forced
-        "close frame",                          // where a refusal is carried
-        "Source control: the minimal SCM view", // the subset, and
-        "Left out",                             // …what it leaves out
-        "a diff against nothing",               // …for a stated reason
+        "IDE_CONTENT_SECURITY_POLICY",        // the relaxed policy, by name
+        "SC_BUILD_ADMIN=0",                   // …and no `--ide-dir` to decide
+        "before `initialize`",                // the ordering the contributions depend on
+        "monaco-languageclient` is not used", // the language client deviation
+        "does not match the server's root",   // …and the URI bridge it forced
+        "close frame",                        // where a refusal is carried
+        "Source control: the SCM view, with an index", // the subset, and
+        "Left out",                           // …what it leaves out
+        "a diff against nothing",             // …for a stated reason
+        "Staged Changes",                     // the index, which is in
+        "staged_only",                        // …and the flag that is the whole of it
     ] {
         assert!(
             design.contains(fragment),

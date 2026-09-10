@@ -14,6 +14,7 @@
   "dependencies": {
     "@codingame/monaco-vscode-accessibility-service-override": "^36.2.7",
     "@codingame/monaco-vscode-api": "^36.2.7",
+    "@codingame/monaco-vscode-base-service-override": "^36.2.7",
     "@codingame/monaco-vscode-chat-service-override": "^36.2.7",
     "@codingame/monaco-vscode-configuration-service-override": "^36.2.7",
     "@codingame/monaco-vscode-css-default-extension": "^36.2.7",

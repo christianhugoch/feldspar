@@ -69,6 +69,22 @@ export function toStorePath(store: string, uriPath: string): string {
   return uriPath.slice(root.length + 1).replace(/\/+$/, "");
 }
 
+/**
+ * The same, for a URI that **might not** be in the store: the path, or `null`.
+ *
+ * [`toStorePath`] throws because its callers are the filesystem provider, which
+ * is only ever asked about URIs inside the workspace it registered. A menu
+ * command is not in that position — what it receives is whatever the workbench
+ * put in the argument list — so for that caller "not one of ours" is an answer
+ * rather than a bug.
+ */
+export function toStorePathOrNull(store: string, uriPath: string): string | null {
+  const prefix = `/${store}/`;
+  if (!uriPath.startsWith(prefix)) return null;
+  const path = uriPath.slice(prefix.length).replace(/\/+$/, "");
+  return path === "" ? null : path;
+}
+
 /** The workspace URI path a store-relative path has. The inverse of the above. */
 export function toUriPath(store: string, storePath: string): string {
   return storePath === "" ? `/${store}` : `/${store}/${storePath}`;
