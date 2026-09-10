@@ -524,6 +524,185 @@ cannot loop for ever: a trigger that runs a trigger that runs a trigger is a *ch
 deep it is refused with the whole chain in the message — including the case where a body runs
 the trigger it is itself the code of.
 
+## Step 6 — Code you are bringing from Saltcorn 1
+
+If this application is being moved from Saltcorn 1, the bodies you are pasting in do not say
+`db.tasks.where(…)`. They say this:
+
+```js
+const Table = require("@saltcorn/data/models/table");
+const books = Table.findOne({ name: "books" });
+const recent = await books.getRows({ published: { gt: 2000 } }, { orderBy: "title", limit: 10 });
+await books.updateRow({ read: true }, recent[0].id, user);
+```
+
+That works here, with **one line deleted**. `Table` and `Field` are already in scope in a code
+body — they are handed to it the way `db` is — so the `require` is the one thing to take out,
+and it says so itself if you leave it in:
+
+```
+require(`@saltcorn/data/models/table`) is not available in a code body: a code body is not a
+module, and this server loads no packages into one. Saltcorn 1's `Table` and `Field` are
+already in scope here — delete the line that requires them
+```
+
+(Inside an *installed module* the `require` is real and the line stays — see
+[tutorial-modules.md](tutorial-modules.md). It is the same `Table`, from the same source; only
+the way you get hold of it differs.)
+
+**The metadata is already here, and answers without `await`.** This is the half of v1's API that
+most plugin code leans on, and it costs nothing: the server hands the isolate a snapshot of the
+schema before your body starts, so
+
+```js
+const books = Table.findOne("books");    // not awaited — a table, not a promise
+books.pk_name;                           // "id"
+books.fields.map((f) => f.name);         // ["id", "title", "published", "read", "author"]
+books.getField("author").is_fkey;        // true
+books.getField("author").reftable_name;  // "authors"
+books.getField("author.name").type;      // the *author's* name field, one hop away
+```
+
+is not one database call. `Table.findOne` of a table this server does not have is `undefined`,
+as it is in v1. A `Field` is the schema **as it is**, not a record to edit: assigning to one
+throws rather than changing a copy of a snapshot that nothing will ever save.
+
+**The rows are the same rows `db` reads.** Every read and write below is one plan — the same
+object `db.books.rows()` sends — so it goes through the same name resolution, the same
+ownership rule, the same row cap, the same 200-call budget, and a write is **an event the
+target table's triggers see**. There is no second path to the database here; this is v1's
+vocabulary over the one Step 5 describes.
+
+```js
+await books.getRows({ author: "Tolstoy" }, { orderBy: "title", limit: 10 });
+await books.getRow({ id: 7 });
+await books.countRows({ read: false });
+await books.distinctValues("author");
+await books.aggregationQuery({ n: { aggregate: "count" }, newest: { field: "published", aggregate: "max" } });
+const id = await books.insertRow({ title: "Anathem", published: 2008 });
+const error = await books.updateRow({ read: true }, id);   // a string is the error, undefined is success
+await books.deleteRows({ read: true });
+await books.toggleBool(id, "read");
+await books.run_trigger("send_invoice", { id });
+```
+
+**v1's `where` vocabulary is translated, and what cannot be translated is refused by name.**
+`{ author: "Tolstoy" }`, `{ author: null }`, `{ pages: { gt: 100, lt: 500 } }`,
+`{ pages: { gt: 100, equal: true } }`, `{ id: { in: [1, 2] } }`, `{ id: { not: { in: […] } } }`,
+`{ author: { ilike: "tol" } }` (v1's implicit `%…%`, and `fullMatch: true` when the pattern is
+already whole), `{ or: […] }`, `{ and: […] }`, `{ not: {…} }`, an array of conditions on one
+field, and `{ _false: true }` all mean here what they mean there. What is refused —
+`inSelect`, `inSelectWithLevels`, `json`, `slugify`, `_fts`, `day_only`, `eq`'s
+two-expression form, a `RegExp` value and a `Symbol` value (v1's raw-SQL escape) — says which
+key it was and what to write instead, because a condition quietly dropped would compute the
+wrong answer inside your trigger rather than fail. The same rule holds for the options object:
+an unknown `selopts` key is an error naming the options that exist, not silence.
+
+**Whose data it is** is said with v1's own argument. Left out, a read or a write is the
+**admin's**, exactly as everything else an action does is (Step 5); given, it is that person's,
+narrowed by the table's ownership formula through the very same check `db.asUser()` goes
+through:
+
+```js
+await books.getRows({}, { forUser: user });      // the rows that user may see
+await books.getRows({}, { forPublic: true });    // the public role, nobody signed in
+await books.updateRow({ read: true }, id, user); // refused if they may not write that row
+```
+
+A refused delegated write comes back as v1's error *string* rather than a rejection, because
+that is what eight years of plugins are written to read (`const err = await t.updateRow(…); if
+(err) …`), and a row that person may not see reports the same "no row was updated" a row that
+does not exist does — telling those two apart is exactly what the ownership rule declines to
+do. Naming a user can only ever **narrow**: the body already runs as the admin and could write
+anything by leaving the argument out.
+
+**A joined read is one statement.** v1's `joinFields` become key paths and its `aggregations`
+become child-table aggregates — the same `Ⱶ` and `Ↄ` projections Step 5 writes by hand:
+
+```js
+await patients.getJoinedRows({
+  joinFields:   { town: { ref: "home", target: "name" } },
+  aggregations: { avg_temp: { table: "readings", ref: "patient_id",
+                              field: "temperature", aggregate: "avg" } },
+  orderBy: "name", limit: 20,
+});
+```
+
+`aggregate` takes v1's own words — `count`, `count distinct`, `sum`, `avg`, `min`, `max`, and
+`Latest <field>` / `Earliest <field>`. `getJoinedQuery` answers v1's `{ sql, values }` for the
+same options, and one thing about it is worth knowing before you build anything on it: **this
+server will not run that SQL for you.** There is no v1 `db` module here, so the statement is
+for inspecting and logging, and `db.sql()` (Step 5) is how you run one you wrote.
+
+### The Saltcorn 1 `Table` and `Field` compatibility table
+
+Every method of v1's two classes, and what it does here. *Implemented* means what v1's
+documentation says it means unless the note says otherwise; *refused* means it is reachable and
+throws when called, naming itself and why — never a quiet `undefined`.
+
+| v1 method | Here | Notes |
+|---|---|---|
+| `Table.findOne` | implemented | Synchronous. A name, `{ name }`, or any object of table properties; `undefined` when there is no such table |
+| `Table.find` | implemented | Synchronous. `orderBy` and `limit` are its only options; this server's own `_fd_*` tables are never listed |
+| `table.getRows`, `table.getRow` | implemented | `fields`, `orderBy` (string or `{ field, desc }`), `orderDesc`, `limit`, `offset`, `forUser`, `forPublic` |
+| `table.countRows` | implemented | Counted in the database, so the 1000-row read cap does not apply |
+| `table.distinctValues` | implemented | The plain array of values v1 answers |
+| `table.aggregationQuery` | implemented | `{ where, groupBy, forUser, forPublic }`; one object ungrouped, an array grouped |
+| `table.getJoinedRows`, `table.getJoinedRow` | implemented | `joinFields` and `aggregations` as above; `through`, `ontable`, `rename_object`, `lookupFunction`, `valueFormula`, `subselect` and an aggregation `where` are refused by name |
+| `table.getJoinedQuery` | different | Answers `{ sql, values }`, which **nothing here will run**; `{ notAuthorized: true }` where the ownership rule says so |
+| `table.insertRow` | implemented | Answers the primary key. The write is an event the table's triggers see |
+| `table.tryInsertRow` | implemented | `{ success: id }` or `{ error }` |
+| `table.updateRow` | implemented | v1's convention: a **string is the error**, `undefined` is success. v1's fourth argument (`noTrigger`, `resultCollector`, `restore_of_version`, `syncTimestamp`) is refused by name |
+| `table.tryUpdateRow` | implemented | `{ success: true }` or `{ error }` |
+| `table.deleteRows` | implemented | Each matched row is its own event. A delete with no condition is refused |
+| `table.toggleBool` | different | Two round trips rather than v1's one `SET f = NOT f`, so two toggles of one row at the same moment can cancel out; `db.sql()` is the fix if that matters |
+| `table.run_trigger` | implemented | Through the same dispatcher the Run button uses, so `only_if`, the role floor and the chain bound all apply |
+| `table.getFields` | different | Answers the array rather than a promise of it — `await table.getFields()` is the same line either way |
+| `table.getField` | implemented | Walks a dotted path: `getField("author.name")` is the author's field |
+| `table.getForeignKeys` | implemented | |
+| `table.owner_fieldname` | different | Answers a field name only where the ownership formula says exactly what v1's owner field said; a formula this server can evaluate and v1 could not express is not reduced to one |
+| `table.to_json` | implemented | |
+| `Field.find`, `Field.findOne`, `Field.findCached` | implemented | Synchronous, from the snapshot. Everything here is cached, so `findCached` and `find` answer alike |
+| `Field.labelToName`, `Field.nameToLabel` | implemented | |
+| `field.distinct_values` | different | Takes the `where` alone: v1's first argument is a v1 web request, which this server does not have |
+| `Table.create`, `Table.update`, `Table.rename`, `Table.delete` | refused | This server introspects the schema it is given: a table is created and altered in the database itself |
+| `table.update`, `table.rename`, `table.delete` | refused | Likewise |
+| `table.add_unique_constraint`, `table.remove_unique_constraint`, `table.enable_fkey_constraint` | refused | Likewise — constraints are the table's, in **Tables → Constraints** |
+| `table.resetSequence`, `table.repairCompositePrimary` | refused | Likewise |
+| `Field.create`, `field.update`, `field.delete` | refused | Likewise |
+| `field.alter_sql_type`, `field.toggle_not_null`, `field.enable_fkey_constraint` | refused | Likewise |
+| `field.add_unique_constraint`, `field.remove_unique_constraint` | refused | Likewise |
+| `table.get_history`, `table.insert_history_row`, `table.restore_row_version`, `table.undo_row_changes`, `table.redo_row_changes`, `table.compress_history` | refused | This server keeps no row history to read, restore or compress |
+| `table.latestSyncInfo`, `table.latestSyncInfos` | refused | v1's mobile offline sync has no counterpart here |
+| `table.update_stored_calculateds`, `table.recalculate_for_stored` | refused | Calculated fields are recomputed by the server, on read; there is nothing to drive by hand |
+| `Table.create_from_csv`, `table.import_csv_file`, `table.import_json_file`, `table.dump_to_json` | refused | Import and export are this server's own, through the API and the admin UI |
+| `table.get_join_field_options`, `table.get_relation_options`, `table.get_relation_data`, `table.get_parent_relations`, `table.get_child_relations`, `table.field_options`, `table.slug_options`, `table.delete_url`, `table.getTags`, `table.getFormulaExamples` | refused | v1's view builder talking to itself; this server builds its views another way |
+| `field.fill_fkey_options`, `field.generate`, `field.validate` | refused | Likewise |
+
+The properties come with v1's names too — `table.name`, `label`, `description`,
+`min_role_read`, `min_role_write`, `pk_name`, `pk_type`, `fields`, `sql_name`,
+`ownership_formula`, `ownership_field_id`; `field.name`, `label`, `type`, `typename`,
+`required`, `is_unique`, `primary_key`, `calculated`, `stored`, `expression`, `is_fkey`,
+`reftable_name`, `reftype`, `refname`, `attributes`, `fieldview`, `sublabel`, `table_id`,
+`table`, `type_name`, `pretty_type`, `sql_type`, `form_name` — with four differences worth
+knowing:
+
+- **an id is a name.** `table.id` and `field.id` are the table's and the field's *name*, and so
+  is `field.table_id`, because this server identifies both by name. A plugin keying a map by
+  `f.id` gets a stable key either way;
+- **`stored` is always false.** There are no stored calculated fields here; a `calculated`
+  field is v1's non-stored kind exactly;
+- **`sql_name` is the bare quoted name.** No tenant schema qualifies it — and nothing here will
+  run SQL you build out of it anyway;
+- **`composite_pk_names` is not v1's**, and is there because a table on this server may have a
+  composite primary key. `pk_name` is the first of them, and the methods that address a row by
+  its id say so by name when there is more than one.
+
+What is **not** here at all: v1's `db` module (`db.query`, `db.select`, `db.insert` …),
+`File`, `User`, `getState()`, `eval_expression` and v1's `View`. Each is reachable and throws
+naming itself, so a plugin or a body that needs one fails where it needs it rather than
+computing something wrong.
+
 ## The actions you have
 
 Every action declares its own settings, and the form is rendered from that declaration — so an
@@ -543,11 +722,13 @@ comes back as the trigger's result — so a `none` trigger exposed on your app c
 front end to somebody else's API.
 
 `run_js_code` is the escape hatch for a computation no combination of the others expresses. It
-sees `row`, `old`, `user` and `payload` — and four ways out: `db`, your tables (Step 5),
-`fetch`, an HTTP request (Step 5 again), `fs`, your file stores (Step 5 once more), and
-`trigger`, your other triggers (Step 5 once more again). That is the whole host surface: no
+sees `row`, `old`, `user` and `payload` — and five ways out: `db`, your tables (Step 5),
+`fetch`, an HTTP request (Step 5 again), `fs`, your file stores (Step 5 once more), `trigger`,
+your other triggers (Step 5 once more again), and `modfn`, the functions an installed module
+supplies ([tutorial-modules.md](tutorial-modules.md)). That is the whole host surface: no
 subprocess, no timers, no schema changes, and no way to a file that is not a store you
-connected.
+connected. Saltcorn 1's `Table` and `Field` are in scope beside them (Step 6), and are that
+same surface in v1's words rather than a sixth way out.
 
 The `fetch` **action** and a body's `fetch` are the same capability, and which to reach for is a
 question of what you do with the answer: the action is one configured request whose response

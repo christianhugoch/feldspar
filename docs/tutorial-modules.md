@@ -230,12 +230,65 @@ arguments they declared. They are reachable from two places:
   nobody may read anything, and a rule that called a geocoder would turn somebody else's outage
   into exactly that.
 
+## Step 6 — A module that reads and writes tables
+
+A v1 plugin's first line is usually this one, and it works here:
+
+```js
+const Table = require("@saltcorn/data/models/table");
+const Field = require("@saltcorn/data/models/field");
+
+module.exports = {
+  sc_plugin_api_version: 1,
+  plugin_name: "books",
+  actions: {
+    mark_recent_read: {
+      run: async ({ user }) => {
+        const books = Table.findOne({ name: "books" });
+        const recent = await books.getRows({ published: { gt: 2000 } },
+                                           { orderBy: "title", limit: 10 });
+        await books.updateRow({ read: true }, recent[0].id, user);
+        return { pk: books.pk_name, titles: recent.map((b) => b.title) };
+      },
+    },
+  },
+};
+```
+
+`@saltcorn/data/models/table` and `@saltcorn/data/models/field` are answered by the server
+itself — the package is never installed, and nothing about the module says which Saltcorn it is
+running on. What the two classes do is written up once, in
+[tutorial-triggers.md](tutorial-triggers.md)'s **Step 6**, because a code body gets the same two
+from the same source: the same `where` translation, the same `forUser`, the same joined reads,
+and the same compatibility table saying what is implemented and what throws.
+
+Three things are worth knowing here that are not true in a code body:
+
+- **`Table.findOne` is synchronous inside a module too**, which is what makes a plugin's first
+  line work at all. The schema travels with the call and the worker keeps it, so a plugin
+  reading `books.fields` in a loop makes no requests of the server.
+- **Your action's writes are the caller's event.** A module's action is handed the same host
+  surfaces a `run_js_code` body gets, so an `insertRow` from a plugin is coerced and validated
+  like any other write, carries the user who caused the event, and **fires the target table's
+  triggers**. It is counted against the same 200-call budget, too: a plugin looping a query per
+  row hits the same wall a body does.
+- **A load has nobody's authority, and says so.** `onLoad`, a `configuration_workflow`, a module
+  *function* (which is hoisted into formulas) and a table provider are each called with no
+  caller to borrow authority from, so a `Table` reached from one throws — synchronously, naming
+  the method and why. A plugin whose `onLoad` reads rows still installs and still loads: the
+  throw is an issue on its card, and every action it supplies goes on working.
+
 ## Developing a module against a running server
 
 Point the **local directory** source at your checkout. The package is copied into the modules
-directory, so an edit reaches the server when you press **Install** again — that is the loop.
-(It is a copy rather than a link because npm does not install a linked package's dependencies,
-which is a module that does not load at all.)
+directory, so pressing **Install** again is the loop. (It is a copy rather than a link because
+npm does not install a linked package's dependencies, which is a module that does not load at
+all.)
+
+**Bump the version in `package.json` with the edit.** npm is what copies the directory in, and
+npm compares versions: re-installing `0.1.0` over `0.1.0` leaves the copy that is already there,
+so the server reloads the *old* code and reports no problem — the confusing shape of this is a
+module that works and a change that does nothing. Any change to the version number is enough.
 
 ## When something goes wrong
 
@@ -256,13 +309,15 @@ And one that is not a failure: a module using an API this version does not imple
 **when it is used**, naming it —
 
 ```
-the Saltcorn v1 API data/models/table.findOne is not available to modules in this
-version of Saltcorn.
+the Saltcorn v1 API data/models/file.findOne is not available to modules in this
+version of Saltcorn. This module needs an API that has not been implemented yet; the
+actions that do not use it still work.
 ```
 
-Only `Workflow`, `Form` and `utils.interpolate` are real so far. A module whose actions do not
-touch v1's models — which is most modules that talk to something outside Saltcorn — never meets
-that message.
+What *is* real is `Table` and `Field` (step 6 below), `Workflow`, `Form` and
+`utils.interpolate`. `File`, `User`, `getState()`, `eval_expression` and v1's `View` are not,
+and neither is anything that changes a table's schema. A module whose actions talk to something
+outside Saltcorn — which is most of them — never meets that message.
 
 And one more that is neither: a module that calls `process.exit()`. In v1 that took the server
 down. Here it costs the module's own worker — the call in flight fails saying so, the next call
@@ -286,3 +341,7 @@ quietly doing nothing.
 - **No sandboxed install, and no store.** A module that is *running* is fenced (step 3); the
   `npm install` that put it there is not. And you type a package name — nothing browses or rates
   modules for you.
+- **Half of v1's API.** `Table` and `Field` are real (step 6); `File`, `User`, `getState()`,
+  v1's `db` module and `eval_expression` are not, and neither is anything that edits a schema.
+  Each throws naming itself where it is used, and the compatibility table in
+  [tutorial-triggers.md](tutorial-triggers.md) says which is which.

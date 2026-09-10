@@ -388,16 +388,70 @@ Three levels, because the failure modes are at three levels:
 
 ## Phase 7 — Documentation and the definition of done
 
-- [ ] 7.1 `docs/TECHNICAL_DESIGN.md` §15.1's third tier rewritten: what is real now, what is
+- [x] 7.1 `docs/TECHNICAL_DESIGN.md` §15.1's third tier rewritten: what is real now, what is
       still a stub, and the two mechanisms (the snapshot, the ask channel).
-- [ ] 7.2 `docs/tutorial-modules.md` and `docs/tutorial-triggers.md`: the v1 `Table` in a
+- [x] 7.2 `docs/tutorial-modules.md` and `docs/tutorial-triggers.md`: the v1 `Table` in a
       module and in a code body, with the refusal list and what to write instead.
-- [ ] 7.3 A compatibility table in the tutorial: every v1 `Table` and `Field` method, and
+- [x] 7.3 A compatibility table in the tutorial: every v1 `Table` and `Field` method, and
       whether it is implemented, refused, or means something different here.
-- [ ] 7.4 The definition of done, run by hand on a real server, and what it found written
+- [x] 7.4 The definition of done, run by hand on a real server, and what it found written
       down.
 
 ---
+
+## The definition of done, run by hand (7.4)
+
+Run on 2026-09-10 against a release build and a fresh Postgres database, driven through the
+admin API as an admin would drive the screens: create `authors` and `books` (`id`, `title`,
+`published`, `read`, `author` → a key to `authors`), three rows, then a `run_js_code` trigger
+and an installed local module, each asked to do the six lines. Both halves do what the
+milestone says they do. What the run found, in the order it found it:
+
+- **The six lines, in a code body, are five lines and a refusal.** Pasted verbatim, the body
+  fails on line 1 — `require(…) is not available in a code body … Saltcorn 1's Table and Field
+  are already in scope here — delete the line that requires them`. That is §8's amended
+  behaviour and not a defect, but it *is* the first thing an admin bringing v1 code will meet,
+  so the tutorial now opens on it. With the line deleted the other five run: `pk_name` is
+  `"id"`, `fields` is the five names, `getField("author").is_fkey` is `true` and its
+  `reftable_name` is `"authors"` — none of it awaited — the read answers `["Anathem", "Zero K"]`
+  in title order, and the write is in the database.
+- **In a module the six lines are six lines.** The same source, installed as a local-directory
+  plugin whose action is the definition of done, answers the same object and lands the same
+  write. Nothing in the package says which Saltcorn it is on.
+- **A schema change reaches a worker that is already holding a snapshot.** Adding
+  `books.rating` between two runs of the *same* installed module: the second call's `fields`
+  has it. The generation stamp does what it is for.
+- **Ownership narrows, but only where the floor does not already grant.** With
+  `min_role_read`/`min_role_write` left at Member and an ownership formula, `forUser` changed
+  nothing and looked broken — because §7.3's rule is *meets the floor **or** the formula grants
+  it*, and a Member reading a Member-readable table meets the floor. With the floor closed to
+  Admin and the formula `user && owner === user.email`, a `getRows({}, { forUser: member })`
+  answered the one row they own out of three, `forPublic: true` answered none,
+  `updateRow(…, theirs, member)` succeeded, and `updateRow(…, another, member)` answered v1's
+  error string. This is the ownership rule behaving as documented rather than a finding about
+  this milestone, and it is the shape of the first support question about `forUser`.
+- **Every refusal named itself**, through the real classes and through the stub tier beside
+  them: `table.add_unique_constraint`, `Table.create` and `table.dump_to_json` each with their
+  own reason; `File.findOne` and `getState` with the modules' "not implemented yet, the actions
+  that do not use it still work"; `inSelect` in a where with what to write instead; `cached` as
+  a `selopts` key with the seven that exist; and an assignment to a `Field` property with "would
+  change a copy and nothing else".
+- **A joined read is one statement and the SQL is legible.** `getJoinedQuery` answered
+  `SELECT *, (SELECT "_fd_j1"."name" FROM "authors" AS "_fd_j1" WHERE ("_fd_j1"."id" =
+  "books"."author")) AS "who" FROM "books" LIMIT $1` with `[1]` — a correlated subquery rather
+  than a join, which is what the Ⱶ-path projection renders. An aggregation whose `ref` does not
+  point at the table being read is refused naming both tables (`` `author` on `books` points at
+  `authors`, not `books` ``), which is the error a v1 `getJoinedRows` most often earns.
+- **One real defect, and it is not this milestone's.** Re-installing a **local directory**
+  module whose `package.json` version has not changed leaves the previously installed copy in
+  place: npm considers the dependency satisfied, the server loads the old code, and nothing
+  reports a problem — an edited action simply does not change. Bumping the version installs it.
+  `docs/tutorial-modules.md` now says so; the fix (installing a local directory over itself
+  regardless of version) belongs to the modules milestone.
+- **A `updateRow` that succeeds answers `undefined`**, so an object built as
+  `{ allowed: await t.updateRow(…) }` loses the key entirely to `JSON.stringify`. v1's
+  convention, working exactly as v1's convention works, and worth knowing before reading a
+  trigger's result and concluding the write did not happen.
 
 ## Explicitly OUT of scope for this milestone
 

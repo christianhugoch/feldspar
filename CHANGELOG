@@ -2,6 +2,67 @@
 
 Changes in reverse chronological order.
 
+## The v1 `Table` written down, and the definition of done run by hand
+
+The seventh and last phase of the v1 `Table` API: **the documentation, and the
+run that proves the milestone**. Nothing in the surface changed; what changed is
+that a reader can now find out what it does without reading `v1_api.js`, and that
+the six lines the milestone is defined by have been typed into a real server
+rather than only into a test.
+
+- **§15.1's tier boundary is where it actually is now.** The design said the
+  `@saltcorn` API was answered in three tiers with `Table` on the stub one; it is
+  two, and what is still a stub is `File`, `User`, `getState`, `eval_expression`,
+  v1's `View`, and — on the real classes themselves — schema editing, row
+  history, offline sync and import/export. The paragraph says so, says the list
+  is generated from one place that refuses to hold a name it also implements, and
+  points at the two mechanisms rather than restating them.
+- **The code-body half has a section of its own** (§10.1, beside `db`, `fetch`,
+  `fs` and `trigger`), which it did not have: the snapshot and the generation
+  stamp, the run parameters and why they are minted per run, the reserved names,
+  the `require` that says what to write instead, v1's `user` argument lowering to
+  `Authority::User`, joins as projections, and the refusal tier. §10.1's
+  `run_js_code` bullet also stops saying "four host surfaces" — `modfn` has been
+  the fifth since the modules milestone.
+- **Step 6 of the triggers tutorial is the v1 code an admin is pasting in.** The
+  six lines, the one line to delete, the metadata that answers without `await`,
+  v1's `where` vocabulary and what it refuses, `forUser`/`forPublic` and the
+  user argument, and joined reads — followed by **the compatibility table**:
+  every method of both classes, marked implemented, refused, or *different*, with
+  the note saying how. The four properties that mean something else here (an id
+  is a name, `stored` is always false, `sql_name` is unqualified,
+  `composite_pk_names` is not v1's) are under it.
+- **The table cannot drift from the surface it describes**, because a test reads
+  it: `the_tutorial_compatibility_table_names_every_v1_method` walks the isolate's
+  own `__scV1Refused()` and every function on `Table`, `table`, `Field` and
+  `field`, and fails when the document names a member that is neither or misses
+  one that is. It fails on the *addition* of a method as loudly as on a rename,
+  which is the direction a compatibility table normally rots in. The same test
+  pins the `require` sentence the tutorial quotes.
+- **The modules tutorial had gone stale in the way that matters most.** It said
+  "only `Workflow`, `Form` and `utils.interpolate` are real so far" and printed a
+  `table.findOne` refusal as the example of what a plugin does not get — the one
+  thing that is now real. It has a step 6 of its own instead: the plugin whose
+  first line is `require("@saltcorn/data/models/table")`, and the three things
+  that are true in a module and not in a body (a synchronous `findOne` over a
+  schema the worker keeps, an action's write being the caller's event, and a load
+  having nobody's authority to lend).
+- **The definition of done, run by hand on a real server** — a release build, a
+  fresh database, the admin API, `books` and `authors`, a `run_js_code` trigger
+  and an installed local module — is written up in `TODO.md` with everything it
+  found. Both halves do what the milestone says: in a module the six lines run
+  verbatim, in a code body the `require` refuses and the other five run, the
+  metadata answers with no host call, `forUser` narrows three rows to the one
+  that user owns, a delegated write they may not make comes back as v1's error
+  string, and every refusal named itself. Two things came out of it that are
+  worth having in writing: the ownership rule is *floor **or** formula*, so a
+  `forUser` on a table whose floor already grants narrows nothing and looks
+  broken; and **re-installing a local-directory module whose version has not
+  changed silently keeps the old code** — npm considers the dependency satisfied,
+  the server loads what is already there, and an edited action simply does not
+  change. The modules tutorial now says to bump the version with the edit; the
+  fix belongs to the modules milestone rather than this one.
+
 ## A trigger's code body is handed Saltcorn 1's `Table` and `Field`
 
 The sixth phase of the v1 `Table` API: **code bodies**. A `run_js_code` body —

@@ -1625,12 +1625,14 @@ exactly like an API caller's write. A second write path would quietly skip all o
   configuration is validated against. The transport is handed in through `ActionContext`,
   exactly as the JavaScript engine is, which is what lets its tests assert *what would have
   been sent*.
-- `run_js_code` runs a JavaScript body with `row`/`old`/`user`/`payload` in scope — and four
+- `run_js_code` runs a JavaScript body with `row`/`old`/`user`/`payload` in scope — and five
   host surfaces: `db`, the tables (below), `fetch`, an HTTP request (below), `fs`, the file
-  stores (below), and `trigger`, this server's other triggers (below). Those four are exactly
-  the surface: no subprocess, no timers, no schema changes, no path to a file that is not a
-  store an admin connected, and no way to fire an event except by being one more caller of the
-  dispatcher every event already goes through. It runs on its
+  stores (below), `trigger`, this server's other triggers (below), and `modfn`, an installed
+  module's functions (§15.1). Those five are exactly the surface: no subprocess, no timers, no
+  schema changes, no path to a file that is not a store an admin connected, and no way to fire
+  an event except by being one more caller of the dispatcher every event already goes through.
+  Beside them a body is handed Saltcorn 1's `Table` and `Field` (below), which are not a sixth
+  surface but v1's vocabulary over the first and the fourth. It runs on its
   **own pool of isolates**, not the single pure isolate every ownership formula shares, which
   is what lets it suspend on a host call and carry a configurable `timeout_ms` (default 5s,
   max 60s) without either becoming a property of every authorization decision in the process.
@@ -2090,6 +2092,96 @@ set and the authority is re-checked, since what the guest sends is what a body c
 **Deliberately not in it**: firing an *event* by kind and channel (a body that wants a table's
 triggers writes the row); fire-and-forget, which needs §18's queue and is otherwise a run nobody
 waits for or reports; and a transaction spanning parent and child.
+
+#### `Table` and `Field`: Saltcorn 1's API in a code body
+
+An application that is being moved from Saltcorn 1 arrives with bodies already written, and
+they do not say `db.books.where(…)`. They say:
+
+```js
+const Table = require("@saltcorn/data/models/table");
+const books = Table.findOne({ name: "books" });
+const recent = await books.getRows({ published: { gt: 2000 } }, { orderBy: "title", limit: 10 });
+await books.updateRow({ read: true }, recent[0].id, user);
+```
+
+So `Table` and `Field` are bound in a code body as **v1 spells them**, and they are the same
+classes an installed v1 plugin gets, from the same text — `sc_expr::V1_API_JS`, compiled into
+the code isolates' prelude and concatenated into `sc-module`'s host script (§15.1). Two
+implementations of v1's `Where` translation would disagree by the third bug fixed in one of
+them.
+
+**They are v1's vocabulary over `db` and `trigger`, not a second seam.** Every read and write
+is one `Plan` — the object `db.books.rows()` sends — over *this run's* `db` handle, and
+`run_trigger` goes over this run's `trigger` handle. One sender, one call budget, one row cap,
+one authority default, one ownership rule: a v1 `insertRow` inside a trigger is an event that
+says who caused it and how deep in a cascade it already is, because it is the same write.
+Nothing in the file assembles SQL, and the only method that answers any — `getJoinedQuery` —
+answers a statement the *host* rendered from the plan, which nothing here will take back.
+
+**Metadata is local and synchronous; data is a host call.** That is v1's own division and it
+is what makes the port possible: `Table.findOne` returns a table rather than a promise, and
+eight years of plugins read `pk_name` and `fields` off it on the next line. The local half is
+the **schema snapshot** (`sc_api::code_host::schema`): every table and field this catalog has,
+in v1's property names, built from the same `Catalog` a plan is resolved against and stamped
+with the catalog's generation. A run carries the *generation*; the JSON crosses only when the
+isolate does not hold that generation yet, which is once per catalog reload rather than once
+per run (`__scDefineSchema`). So `books.getField("author").is_fkey` costs nothing, and cannot
+disagree with the server's own answer, because one is computed from the other.
+
+**Run parameters, minted per run**, beside `db`, `fetch`, `fs`, `trigger` and `modfn` and for
+the same reason (decision 5): a body that assigns to `Table` poisons nothing, because the next
+run is handed its own. They are bound **only where the `db` host is** — a body in a context
+with no host names `Table` and gets the `ReferenceError` it already gets for `db`, rather than
+a class that fails on use — and they are **reserved names** on `db`'s terms wherever they are
+bound, so a caller whose bindings include one is refused naming it rather than emitting a
+redeclaration deep inside the generated wrapper. A run with a host but *no* snapshot gets
+classes that refuse by name: a `Table.findOne` answering `undefined` for every table would
+have a body compute the wrong answer instead of failing.
+
+**`require` is a refusal that says what to write instead.** A body's own
+`const Table = require("@saltcorn/data/models/table")` is legal JavaScript — the wrapper
+compiles a body as a *nested* function, so it shadows the parameter rather than redeclaring it
+— and while `require` was one of the shadowed node globals what an admin saw was
+`require is not a function` on line 1, a message about the wrong thing. It is now a function
+whose whole body throws, naming the specifier it was given and, where the classes really are
+in scope, saying to delete the line. It is the first line of most v1 bodies and the one an
+admin will paste.
+
+**Whose data it is, in v1's spelling.** v1 says it with an argument — `getRows(where, {
+forUser: u })`, `insertRow(row, user)`, `deleteRows(where, user)` — where omitted means
+unrestricted. Omitted is therefore the plan's default authority, the admin's, which is what
+every other action has (§10.1); given, it lowers to `Authority::User(id)`: that user loaded
+where users live and checked through **the same `*_as` functions** `db.asUser()` goes through.
+There is no second implementation of "meets the floor OR the formula grants it". It can only
+narrow — the body already runs as admin and could read everything by leaving the argument out
+— so naming somebody is a body volunteering to be treated as them, and a named user who does
+not exist is an error naming them rather than a silent fall back to admin. `forPublic: true`
+is the public role with no user.
+
+**Joins are projections.** v1's `getJoinedRows` is the method whose vocabulary looks least
+like this server's and lowers to it most exactly: a `joinFields` entry becomes a Ⱶ-path
+projection (`{ ref: "home", target: "name" }` is the formula `homeⱵname`) and an `aggregations`
+entry an inverse relation (`readingsↃpatient_id.avg("temperature")`, docs/AGG_EXPRS.md). Both
+are `Selection`s of an ordinary select plan, so a joined read is **one** statement, goes
+through `ownership::join_guard` like every other path, and needed no host operation of its own.
+
+**What is not implemented is fatal on call, naming itself.** Schema editing (`Table.create`,
+`field.alter_sql_type`), row history, offline sync, stored-calculated recomputation, CSV and
+JSON import/export and v1's view-builder helpers are reachable as properties and throw when
+called, from **one list** in `v1_api.js` — a list that refuses at build time to hold a name
+that is also implemented, so the two can never disagree. The same rule runs through the
+translations: an unknown `selopts` key, an unknown `getJoinedRows` option, `inSelect`, a
+`RegExp` or `Symbol` value in a where, `noTrigger` on a write — each is refused by name with
+what to write instead, because a `Table.findOne` that answered `undefined`, or a where-clause
+that quietly dropped a condition, would not fail; it would compute the wrong answer inside
+somebody's trigger. The compatibility table is in
+[docs/tutorial-triggers.md](tutorial-triggers.md).
+
+**Deliberately not in it**: v1's `db` module (`db.query`, `db.select`, `db.insert`), which is
+why `getJoinedQuery`'s SQL is for reading rather than running; `File`, `User` and `getState`,
+which are stubs still (§15.1); and everything about *changing* a table, because a schema here
+is introspected from the database (§9) and a plugin that edits one is a different argument.
 
 ### 10.2 Triggers
 
@@ -5596,16 +5688,21 @@ itself. What resolves a `require("async-mqtt")` at run time is
 against a directory somebody else installed. No Deno npm cache, no lockfile and no registry
 client inside the server: the modules directory on disk is the npm project it always was.
 
-**The `@saltcorn` API is answered in three tiers** (`sc_module`'s `module-host.mjs`).
+**The `@saltcorn` API is answered in two tiers** (`sc_module`'s `module-host.mjs`).
 `Workflow` and `Form` are real, because a v1 `configuration_workflow` is written in them and
 its first form *is* the module's settings form here; `utils.interpolate` is real, because a
 module that names a snapshot `{{ name }}-{{ id }}` needs the real thing. **`Table` and `Field`
-are real too**, over the ask channel below: a module's action reads and writes rows through
-v1's own methods, against the same plan seam `db` speaks. Everything still left — `File`,
-`User`, `getState`, `eval_expression`, and v1's schema-editing methods on `Table` and `Field`
-itself — is a stub whose properties are reachable and whose **calls throw**, naming the API.
-That last is principle 5 rather than politeness: a `Table.findOne` that answered `undefined`
-would not fail, it would compute the wrong answer inside somebody's trigger.
+are real**, over the two mechanisms below — the snapshot for the metadata, the ask channel for
+the rows — so `require("@saltcorn/data/models/table")` answers the classes described in
+§10.1's *Saltcorn 1's API in a code body*, and a module's action reads and writes through v1's
+own methods against the same plan seam `db` speaks. What is still a **stub** is `File`, `User`,
+`getState`, `eval_expression`, v1's `View`, and — on the real `Table` and `Field` themselves —
+v1's schema editing, row history, offline sync and import/export: reachable as properties, and
+**fatal on call**, naming the API. That last is principle 5 rather than politeness: a
+`Table.findOne` that answered `undefined` would not fail, it would compute the wrong answer
+inside somebody's trigger. It is also **one list**, in `v1_api.js`, which refuses at build time
+to carry a name that is also implemented — so a method built later leaves the refusal list in
+the edit that implements it, and the two can never disagree.
 
 **A module can ask this server for things, which is what makes `Table` possible.** The worker
 seam used to run one way only — `__scDone`, `__scFail`, `__scLog`, all answers — so nothing
@@ -5968,8 +6065,9 @@ free — Python has `inspect.signature` and JavaScript does not.
 **Module code gets the real `db`.** `sc.db`, `sc.fetch`, `sc.fs` and `sc.trigger` are the same
 five surfaces a code body has, built by the same `sc_core_actions::CodeSurfaces`, so a plugin's
 write carries the event's caller and this trigger's chain and its `fetch` is counted on the run's
-budget. §15.1's `Table`/`File`/`User` stubs exist because v1's API is v1's; a Python plugin has no
-v1 to be compatible with, so it is handed the plans directly. An **action** gets the five
+budget. §15.1's `File`/`User`/`getState` stubs, and the v1 `Table` and `Field` beside them, exist
+because v1's API is v1's; a Python plugin has no v1 to be compatible with, so it is handed the
+plans directly. An **action** gets the five
 surfaces; a **function** and a **table provider** get none, and say so at the call site — the
 first is hoisted into a formula and the second is called from inside a query, and neither has a
 caller's authority to lend. Lending the admin's would make `db` inside a formula's helper a way

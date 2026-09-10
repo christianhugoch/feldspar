@@ -9881,6 +9881,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_tutorial_compatibility_table_names_every_v1_method() {
+        // Phase 7.3's table, checked against the thing it describes. A
+        // compatibility table is a promise about a surface, and a surface that
+        // grows a method is a promise that quietly stops being true — so the
+        // document is read here and matched against the api itself: every
+        // refusal on §9's one list is named in the table, every method the api
+        // really implements is named in the table, and the table names nothing
+        // that is neither.
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            &format!(
+                r#"{MAKE}
+                   const books = Table.findOne("books");
+                   const owners = {{
+                     Table: Table, table: books,
+                     Field: Field, field: books.getField("title"),
+                   }};
+                   const refused = __scV1Refused();
+                   const implemented = [];
+                   for (const prefix of Object.keys(owners)) {{
+                     const owner = owners[prefix];
+                     for (const name of Object.getOwnPropertyNames(owner)) {{
+                       const path = prefix + "." + name;
+                       if (refused.indexOf(path) >= 0) continue;
+                       if (typeof owner[name] !== "function") continue;
+                       implemented.push(path);
+                     }}
+                   }}
+                   return {{ refused: refused, implemented: implemented }};"#
+            ),
+        )
+        .await;
+
+        // And the sentence the tutorial prints for the line an admin will
+        // paste is the sentence this crate throws (`REQUIRE`), because a
+        // document that quotes an error is a document that can quote a stale
+        // one.
+        let doc = tutorial_triggers();
+        for fragment in [
+            "is not available in a code body",
+            "delete the line that requires them",
+        ] {
+            assert!(
+                doc.contains(fragment),
+                "docs/tutorial-triggers.md no longer quotes `{fragment}`"
+            );
+        }
+
+        let listed = compatibility_table();
+        let named = |key: &str| -> Vec<String> {
+            out[key]
+                .as_array()
+                .expect("an array of method paths")
+                .iter()
+                .map(|v| v.as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        for path in named("refused") {
+            assert!(
+                listed.contains(&path),
+                "`{path}` is refused and is not in the compatibility table in \
+                 docs/tutorial-triggers.md"
+            );
+        }
+        for path in named("implemented") {
+            assert!(
+                listed.contains(&path),
+                "`{path}` is implemented and is not in the compatibility table in \
+                 docs/tutorial-triggers.md"
+            );
+        }
+        let real: Vec<String> = named("refused")
+            .into_iter()
+            .chain(named("implemented"))
+            .collect();
+        for path in &listed {
+            assert!(
+                real.contains(path),
+                "the compatibility table in docs/tutorial-triggers.md names `{path}`, \
+                 which is neither implemented nor refused"
+            );
+        }
+    }
+
+    /// The triggers tutorial, read from the repository this crate is in.
+    fn tutorial_triggers() -> String {
+        let mut dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
+        while !dir.join("docs/tutorial-triggers.md").is_file() {
+            assert!(dir.pop(), "no docs/tutorial-triggers.md above this crate");
+        }
+        std::fs::read_to_string(dir.join("docs/tutorial-triggers.md"))
+            .expect("read docs/tutorial-triggers.md")
+    }
+
+    /// The method paths the tutorial's compatibility table lists: every
+    /// backticked `Table.`/`table.`/`Field.`/`field.` name in its first column,
+    /// which is one row per member and several members to a row where they
+    /// refuse for the same reason.
+    fn compatibility_table() -> Vec<String> {
+        let doc = tutorial_triggers();
+        let start = doc
+            .find("### The Saltcorn 1 `Table` and `Field` compatibility table")
+            .expect("the compatibility table's heading");
+        let rest = &doc[start..];
+        // The table ends where the prose about the properties begins.
+        let end = rest
+            .find("\nThe properties come with")
+            .unwrap_or(rest.len());
+        let mut out = Vec::new();
+        for row in rest[..end].lines().filter(|l| l.starts_with('|')) {
+            let cell = row.split('|').nth(1).unwrap_or_default();
+            for part in cell.split('`').skip(1).step_by(2) {
+                let path = part.trim();
+                let owner = path.split('.').next().unwrap_or_default();
+                if matches!(owner, "Table" | "table" | "Field" | "field")
+                    && path.split('.').count() == 2
+                {
+                    out.push(path.to_string());
+                }
+            }
+        }
+        assert!(
+            out.len() > 40,
+            "the compatibility table did not parse: {out:?}"
+        );
+        out
+    }
+
+    #[tokio::test]
     async fn a_run_with_no_snapshot_gets_a_table_that_says_why() {
         // Phase 5's `onLoad` and any other context with no schema. A
         // `Table.findOne` that answered `undefined` for every table would have
