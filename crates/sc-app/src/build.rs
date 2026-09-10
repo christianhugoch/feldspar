@@ -28,14 +28,16 @@ use tokio::sync::Mutex;
 
 use crate::api::app_endpoints_with;
 use crate::application::{Application, FrameworkRef};
+use crate::declared::{FrameworkDecl, FrameworkSet, installed_frameworks};
 use crate::framework::{
     AssetBundle, BuildSpec, CFG_CLIENT, CFG_COMMAND, CFG_OUTPUT, CFG_SOURCE, CFG_STORE,
-    CODE_FRAMEWORK, CodeFramework, code_config_spec, validate_framework_config_structure,
+    CODE_FRAMEWORK, CodeFramework, code_config_spec, validate_config_structure_in,
+    validate_framework_config_structure,
 };
 use crate::react::{
     CFG_PROJECT, REACT_FRAMEWORK, react_build_spec, react_client_path, react_config_spec,
 };
-use crate::scaffold::emit_react_runtime;
+use crate::scaffold::{emit_app_runtime, has_generated_runtime};
 
 /// How much of a failed build's output to quote in the error. A bundler can emit
 /// a great deal on failure; the tail holds the actual error, and the whole of it
@@ -103,14 +105,51 @@ impl AppSource {
 /// *derived* from the project name (see [`crate::react`]). Nothing downstream can
 /// tell which framework it is building.
 pub fn app_source_from_config(fw: &FrameworkRef) -> Result<AppSource> {
+    app_source_in(&installed_frameworks(), fw)
+}
+
+/// [`app_source_from_config`] against an explicit framework set.
+///
+/// A **declared** framework resolves here too, and produces the same
+/// [`AppSource`] the two built-ins do: its store, source, output and client are
+/// its own path templates rendered against the settings the admin filled in
+/// (`sc-app`'s `declared` module). So the sentence above — nothing downstream can
+/// tell which framework it is building — survives a framework arriving from a
+/// module, which is the whole reason the seam is shaped this way.
+pub fn app_source_in(set: &FrameworkSet, fw: &FrameworkRef) -> Result<AppSource> {
     match fw.name.as_str() {
         CODE_FRAMEWORK => code_source_from_config(fw),
         REACT_FRAMEWORK => react_source_from_config(fw),
-        other => Err(Error::config(format!(
-            "framework `{other}` has no build step; only `{CODE_FRAMEWORK}` and \
-             `{REACT_FRAMEWORK}` build from a file store"
-        ))),
+        other => match set.find(other) {
+            Some(decl) => declared_source_from_config(set, decl, fw),
+            None => Err(Error::config(format!(
+                "framework `{other}` has no build step; only `{CODE_FRAMEWORK}`, \
+                 `{REACT_FRAMEWORK}` and the frameworks this server's modules declare \
+                 build from a file store"
+            ))),
+        },
     }
+}
+
+/// A declared framework's resolution: its own settings in, its own path
+/// templates rendered, the same [`AppSource`] out.
+fn declared_source_from_config(
+    set: &FrameworkSet,
+    decl: &FrameworkDecl,
+    fw: &FrameworkRef,
+) -> Result<AppSource> {
+    // The same structural check the built-ins do first, and for the same reason:
+    // a missing or ill-typed setting is reported as the setting it is, not as a
+    // template that rendered to nothing several layers down.
+    validate_config_structure_in(set, fw)?;
+    let source = AppSource::new(
+        FileStoreId(decl.store(&fw.config)?),
+        decl.build_spec(&fw.config)?,
+    );
+    Ok(match decl.client_path(&fw.config)? {
+        Some(path) => source.with_client(path),
+        None => source,
+    })
 }
 
 /// The `code` framework's resolution: every path and the command come from the
@@ -336,14 +375,15 @@ pub async fn build_application(
         .await?
         .into_iter()
         .next();
-    // A `react` app's generated runtime is more than the client: its hooks are
-    // typed from this app's tables, so they are regenerated on the same schedule
-    // and for the same reason (§2.1/§2.3). Adding a table in the admin UI makes
-    // `useNewTable()` exist at the next build, with nobody regenerating anything
-    // by hand. `emit_react_runtime` rewrites the client too, which is harmless
-    // and keeps "the runtime is one directory" true.
-    if app.framework.name == REACT_FRAMEWORK {
-        emit_react_runtime(cat, app, source, dispatcher).await?;
+    // An app whose framework generates a runtime gets more than the client: its
+    // hooks (or its composables) are typed from this app's tables, so they are
+    // regenerated on the same schedule and for the same reason (§2.1/§2.3).
+    // Adding a table in the admin UI makes `useNewTable()` exist at the next
+    // build, with nobody regenerating anything by hand. `emit_app_runtime`
+    // rewrites the client too, which is harmless and keeps "the runtime is one
+    // directory" true.
+    if has_generated_runtime(app) {
+        emit_app_runtime(cat, app, source, dispatcher).await?;
     }
     let mut report = build_app(cat, source).await?;
     report.client_path = client_path;
@@ -427,12 +467,12 @@ pub async fn emit_app_client(
     dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
 ) -> Result<Vec<String>> {
     let source = app_source_from_config(&app.framework)?;
-    // A `react` app's client is one file of a generated *directory* whose hooks
-    // are typed from the same endpoint set, so rewriting only the client would
-    // leave the two disagreeing. `emit_react_runtime` writes the client too,
-    // which is why this is an either/or rather than both.
-    if app.framework.name == REACT_FRAMEWORK {
-        return emit_react_runtime(cat, app, &source, dispatcher).await;
+    // Such an app's client is one file of a generated *directory* whose hooks are
+    // typed from the same endpoint set, so rewriting only the client would leave
+    // the two disagreeing. `emit_app_runtime` writes the client too, which is why
+    // this is an either/or rather than both.
+    if has_generated_runtime(app) {
+        return emit_app_runtime(cat, app, &source, dispatcher).await;
     }
     let endpoints = app_endpoints_with(app, cat, dispatcher)?;
     emit_client(cat, app, &source, &endpoints).await

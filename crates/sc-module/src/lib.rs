@@ -42,6 +42,7 @@
 //! - [`action`] — a module's action as an `Action`.
 //! - [`functions`] — a module's functions, as `sc-expr`'s fifth host surface.
 //! - [`table_providers`] — a module's table providers, as `sc-catalog`'s seam.
+//! - [`frameworks`] — a module's application frameworks, as `sc-app`'s seam.
 //! - [`modules`] — the loaded set: every stored module, its actions, its issues.
 //!
 //! ## What is *not* here
@@ -55,6 +56,7 @@ pub mod bounds;
 pub mod bundled;
 #[cfg(feature = "deno-host")]
 pub mod deno;
+pub mod frameworks;
 pub mod functions;
 pub mod host;
 pub mod install;
@@ -74,10 +76,12 @@ pub use bounds::{
 pub use bundled::{BUNDLED_IN_CHECKOUT, BundledModule, BundledModules};
 #[cfg(feature = "deno-host")]
 pub use deno::{DenoModuleHost, PoolBounds};
+pub use frameworks::ModuleFrameworks;
 pub use functions::ModuleFunctions;
 pub use host::{
-    ActionManifest, CallHosts, FunctionArg, FunctionManifest, ModelProviderManifest, ModuleHost,
-    ModuleManifest, TableProviderManifest, UnsupportedEntity, prime_v8,
+    ActionManifest, CallHosts, FrameworkManifest, FunctionArg, FunctionManifest,
+    ModelProviderManifest, ModuleHost, ModuleManifest, TableProviderManifest, UnsupportedEntity,
+    prime_v8,
 };
 pub use install::{
     InstalledPackage, Installer, MIN_NPM_VERSION, have_node, have_npm, npm_too_old, npm_version,

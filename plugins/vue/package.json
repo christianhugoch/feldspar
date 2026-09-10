@@ -1,0 +1,8 @@
+{
+  "name": "@feldspar/vue",
+  "version": "0.1.0",
+  "description": "The Vue 3 application framework for Saltcorn Feldspar.",
+  "main": "index.js",
+  "license": "MIT",
+  "private": true
+}

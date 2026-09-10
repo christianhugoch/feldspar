@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use sc_app::{
     ApiConfig, Application, FrameworkRef, app_source_from_config, build_application,
-    emit_react_runtime, scaffold_app,
+    emit_app_runtime, scaffold_app,
 };
 use sc_catalog::{Catalog, FileStoreId, TableId};
 use sc_db::DatabaseDriver;
@@ -253,7 +253,7 @@ async fn losing_the_auth_provider_is_refused_before_it_can_fail_in_tsc() -> sc_e
 
     let graphql_only = staff_app(vec![ApiConfig::new("graphql", "/graphql")]);
     let source = app_source_from_config(&graphql_only.framework)?;
-    let err = emit_react_runtime(&cat, &graphql_only, &source, None)
+    let err = emit_app_runtime(&cat, &graphql_only, &source, None)
         .await
         .expect_err("the app can no longer serve the auth layer in its own source");
     let msg = err.to_string();
@@ -266,7 +266,7 @@ async fn losing_the_auth_provider_is_refused_before_it_can_fail_in_tsc() -> sc_e
     // A project with no auth layer is not caught by that check: it has nothing
     // that calls the missing endpoints.
     std::fs::remove_file(tmp.path().join("staff/src/auth.tsx"))?;
-    emit_react_runtime(&cat, &graphql_only, &source, None).await?;
+    emit_app_runtime(&cat, &graphql_only, &source, None).await?;
     Ok(())
 }
 
@@ -294,16 +294,16 @@ async fn the_schema_is_rewritten_on_every_build() -> sc_error::Result<()> {
     cat.reload().await?;
 
     let source = app_source_from_config(&app.framework)?;
-    let written = emit_react_runtime(&cat, &app, &source, None).await?;
+    let written = emit_app_runtime(&cat, &app, &source, None).await?;
     assert_eq!(
         written,
         [
-            "staff/src/feldspar/client.ts",
-            "staff/src/feldspar/helper.ts",
             "staff/src/feldspar/hooks.ts",
             "staff/src/feldspar/store.ts",
-            "staff/src/feldspar/schema.sql",
             "staff/src/feldspar/README.md",
+            "staff/src/feldspar/client.ts",
+            "staff/src/feldspar/helper.ts",
+            "staff/src/feldspar/schema.sql",
             "staff/src/feldspar/SKILL.md",
             "staff/src/feldspar/graphql.ts",
             "staff/src/feldspar/schema.graphql",

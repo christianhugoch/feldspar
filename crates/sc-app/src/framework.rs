@@ -18,6 +18,7 @@ use sc_error::{Error, Repr, Result};
 use sc_types::{BasicType, FormField, validate_attrs};
 
 use crate::application::{CspPolicy, FrameworkRef};
+use crate::declared::{FrameworkSet, installed_frameworks};
 use crate::react::{
     CFG_PROJECT, REACT_FRAMEWORK, check_project_name, react_config_spec, react_csp,
 };
@@ -244,6 +245,36 @@ pub fn registered_frameworks() -> Vec<String> {
         .collect()
 }
 
+/// The built-in frameworks alone — the two written in Rust, before whatever the
+/// modules add.
+///
+/// Split out so every lookup below is a pure function of an explicit list: the
+/// registry's behaviour is asserted against a set a test builds, and the
+/// installed set ([`installed_frameworks`](crate::installed_frameworks)) is only
+/// ever the argument it is called with in production.
+fn builtin_framework_info() -> Vec<FrameworkInfo> {
+    vec![
+        FrameworkInfo {
+            name: REACT_FRAMEWORK.to_owned(),
+            label: "React".to_owned(),
+            description: "Saltcorn creates the project, generates a typed client and \
+                          hooks for your tables, installs its dependencies and builds \
+                          it. Pick a file store and a name."
+                .to_owned(),
+            serves_ui: true,
+        },
+        FrameworkInfo {
+            name: CODE_FRAMEWORK.to_owned(),
+            label: "Code (bring your own build)".to_owned(),
+            description: "Any bundler, any layout. You create the project and state \
+                          where its source, output and build command are — for a \
+                          project React's conventions do not fit."
+                .to_owned(),
+            serves_ui: true,
+        },
+    ]
+}
+
 /// How a framework presents itself to an admin choosing one: a human name and a
 /// sentence saying who it is for.
 ///
@@ -272,26 +303,26 @@ pub struct FrameworkInfo {
 /// should be offered them — the single place both the list and the editorial
 /// ordering live.
 pub fn registered_framework_info() -> Vec<FrameworkInfo> {
-    vec![
-        FrameworkInfo {
-            name: REACT_FRAMEWORK.to_owned(),
-            label: "React".to_owned(),
-            description: "Saltcorn creates the project, generates a typed client and \
-                          hooks for your tables, installs its dependencies and builds \
-                          it. Pick a file store and a name."
-                .to_owned(),
-            serves_ui: true,
-        },
-        FrameworkInfo {
-            name: CODE_FRAMEWORK.to_owned(),
-            label: "Code (bring your own build)".to_owned(),
-            description: "Any bundler, any layout. You create the project and state \
-                          where its source, output and build command are — for a \
-                          project React's conventions do not fit."
-                .to_owned(),
-            serves_ui: true,
-        },
-    ]
+    framework_info_in(&installed_frameworks())
+}
+
+/// The registry as it stands given `set` — the built-ins first, then whatever the
+/// modules declare.
+///
+/// **The built-ins come first and a declared name never displaces one**: `react`
+/// is the path an admin should take, and a module that shipped a framework called
+/// `react` must not be able to take that sentence over. The module loader refuses
+/// such a name outright (with an issue on the module's card), so this ordering is
+/// belt and braces — but it is the belt that decides what the picker shows.
+pub fn framework_info_in(set: &FrameworkSet) -> Vec<FrameworkInfo> {
+    let mut out = builtin_framework_info();
+    for decl in set.declarations() {
+        if out.iter().any(|f| f.name == decl.name) {
+            continue;
+        }
+        out.push(decl.info());
+    }
+    out
 }
 
 /// Whether the framework registered under `name` serves a UI — the registry
@@ -303,7 +334,12 @@ pub fn registered_framework_info() -> Vec<FrameworkInfo> {
 /// an API may claim `/`, and assuming there is a UI to protect is the safe
 /// direction to be wrong in.
 pub fn framework_serves_ui(name: &str) -> bool {
-    registered_framework_info()
+    serves_ui_in(&installed_frameworks(), name)
+}
+
+/// [`framework_serves_ui`] against an explicit set.
+pub fn serves_ui_in(set: &FrameworkSet, name: &str) -> bool {
+    framework_info_in(set)
         .into_iter()
         .find(|f| f.name == name)
         .is_none_or(|f| f.serves_ui)
@@ -317,17 +353,25 @@ pub fn framework_serves_ui(name: &str) -> bool {
 /// mirroring how [`app_providers`](crate::app_providers) treats an unknown API
 /// provider.
 pub fn framework_config_spec(name: &str) -> Result<Vec<FormField>> {
+    config_spec_in(&installed_frameworks(), name)
+}
+
+/// [`framework_config_spec`] against an explicit set.
+pub fn config_spec_in(set: &FrameworkSet, name: &str) -> Result<Vec<FormField>> {
     match name {
         CODE_FRAMEWORK => Ok(code_config_spec()),
         REACT_FRAMEWORK => Ok(react_config_spec()),
-        other => Err(Error::config(format!(
-            "unknown framework `{other}`; this server registers {}",
-            registered_frameworks()
-                .iter()
-                .map(|n| format!("`{n}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
+        other => match set.find(other) {
+            Some(decl) => Ok(decl.config_spec.clone()),
+            None => Err(Error::config(format!(
+                "unknown framework `{other}`; this server registers {}",
+                framework_info_in(set)
+                    .iter()
+                    .map(|f| format!("`{}`", f.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        },
     }
 }
 
@@ -340,9 +384,17 @@ pub fn framework_config_spec(name: &str) -> Result<Vec<FormField>> {
 /// baseline. A framework that does not answer gets the baseline too, which is the
 /// safe direction to fail in.
 pub fn framework_default_csp(name: &str) -> CspPolicy {
+    default_csp_in(&installed_frameworks(), name)
+}
+
+/// [`framework_default_csp`] against an explicit set.
+pub fn default_csp_in(set: &FrameworkSet, name: &str) -> CspPolicy {
     match name {
         REACT_FRAMEWORK => react_csp(),
-        _ => CspPolicy::strict(),
+        other => match set.find(other) {
+            Some(decl) => decl.default_csp(),
+            None => CspPolicy::strict(),
+        },
     }
 }
 
@@ -354,7 +406,16 @@ pub fn framework_default_csp(name: &str) -> CspPolicy {
 /// the admin is standing in front of the form. Discovering it at build time means
 /// a bundler error, and at serve time means a broken app.
 pub async fn validate_framework_config(catalog: &Catalog, fw: &FrameworkRef) -> Result<()> {
-    let spec = framework_config_spec(&fw.name)?;
+    validate_config_in(&installed_frameworks(), catalog, fw).await
+}
+
+/// [`validate_framework_config`] against an explicit set.
+pub async fn validate_config_in(
+    set: &FrameworkSet,
+    catalog: &Catalog,
+    fw: &FrameworkRef,
+) -> Result<()> {
+    let spec = config_spec_in(set, &fw.name)?;
     // Resolve any server-query options first, so a setting restricted to "the
     // stores that exist" is checked against the stores that actually exist. This
     // is what turns an unknown store name from a build-time failure into a
@@ -379,7 +440,12 @@ pub async fn validate_framework_config(catalog: &Catalog, fw: &FrameworkRef) -> 
 /// [`ServerQuery`](sc_types::OptionsSource::ServerQuery) has no static options,
 /// and `validate_attrs` only checks membership against options it has.
 pub fn validate_framework_config_structure(fw: &FrameworkRef) -> Result<()> {
-    let spec = framework_config_spec(&fw.name)?;
+    validate_config_structure_in(&installed_frameworks(), fw)
+}
+
+/// [`validate_framework_config_structure`] against an explicit set.
+pub fn validate_config_structure_in(set: &FrameworkSet, fw: &FrameworkRef) -> Result<()> {
+    let spec = config_spec_in(set, &fw.name)?;
     validate_against(fw, &spec)
 }
 

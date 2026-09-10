@@ -45,6 +45,7 @@
 //! and a text body render as text while an HTML body renders as HTML. `{{! }}`
 //! and `{{= }}` mean the same in both.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -52,6 +53,7 @@ use sc_error::{Error, Result};
 use serde_json::Value as Json;
 
 use crate::analyze::Analysis;
+use crate::ast::Ast;
 use crate::eval::{FormulaCall, JsEvaluator};
 use crate::formula::Formula;
 use crate::shape::SchemaShape;
@@ -227,6 +229,86 @@ impl Template {
         call: impl Fn(&Formula) -> FormulaCall + Sync,
     ) -> Result<String> {
         self.render(RenderMode::Text, evaluator, call).await
+    }
+
+    /// The identifier every token of this template is — `Err` naming the first
+    /// token that is anything else.
+    ///
+    /// A template whose scope is a **flat set of names** rather than a row: a
+    /// framework's path templates (`{{ project }}/dist`), where the names in
+    /// scope are that framework's own settings and there is no evaluator to
+    /// call. Asking for them up front is what lets a caller check, once, that
+    /// every name it will be asked for is one it can answer — and refuse the
+    /// declaration where its author can still fix it, rather than at the moment
+    /// a path is needed.
+    ///
+    /// This is not a second expression language: the template is parsed by
+    /// [`Template::parse`] exactly as any other, and this is a **restriction**
+    /// of what it may contain, stated as an error rather than by a second
+    /// grammar.
+    pub fn identifiers(&self) -> Result<Vec<&str>> {
+        self.tokens()
+            .map(|token| match token.formula.ast() {
+                Ast::Ident(name) => Ok(name.as_str()),
+                _ => Err(Error::invalid(format!(
+                    "`{}`: this template interpolates names only, so a token has to be \
+                     one name and nothing else",
+                    token.source
+                ))),
+            })
+            .collect()
+    }
+
+    /// Render with every token replaced by its value in `bindings` — no
+    /// evaluator, and therefore only the tokens [`identifiers`](Template::
+    /// identifiers) accepts.
+    ///
+    /// Nothing is escaped ([`RenderMode::Text`]'s rule): what this renders is a
+    /// path or a prompt, never markup, so `{{ x }}` and `{{! x }}` mean the same
+    /// thing. `{{= x }}` is refused rather than re-interpolated — there is no
+    /// second pass over a path, and silently not making one would be worse than
+    /// saying so.
+    ///
+    /// An unbound name is an error naming it and what *is* bound, for the reason
+    /// the async render gives: reaching here with a name nothing answers means
+    /// the declaration and the scope disagree, and an empty string in the middle
+    /// of a path would turn that into a directory nobody meant.
+    pub fn render_static(&self, bindings: &BTreeMap<String, String>) -> Result<String> {
+        let mut out = String::new();
+        for part in &self.parts {
+            match part {
+                Part::Literal(text) => out.push_str(text),
+                Part::Token(token) => {
+                    if token.escape == Escape::Reinterpolate {
+                        return Err(Error::invalid(format!(
+                            "`{}`: `{{{{= }}}}` re-interpolates its own result, which this \
+                             template is not rendered often enough to do",
+                            token.source
+                        )));
+                    }
+                    let Ast::Ident(name) = token.formula.ast() else {
+                        return Err(Error::invalid(format!(
+                            "`{}`: this template interpolates names only, so a token has to \
+                             be one name and nothing else",
+                            token.source
+                        )));
+                    };
+                    let value = bindings.get(name.as_str()).ok_or_else(|| {
+                        Error::invalid(format!(
+                            "`{}`: there is no `{name}` here; the names in scope are {}",
+                            token.source,
+                            if bindings.is_empty() {
+                                "none".to_owned()
+                            } else {
+                                bindings.keys().cloned().collect::<Vec<_>>().join(", ")
+                            }
+                        ))
+                    })?;
+                    out.push_str(value);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Render in `mode`, evaluating each token through `evaluator`.
@@ -505,6 +587,56 @@ mod tests {
         // Compound values are JSON, not `[object Object]`.
         assert_eq!(render_value(&serde_json::json!([1, 2])), "[1,2]");
         assert_eq!(render_value(&serde_json::json!({ "a": 1 })), r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn a_flat_scope_renders_without_an_evaluator() {
+        let bindings = |pairs: &[(&str, &str)]| -> std::collections::BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect()
+        };
+        let t = Template::parse("{{ project }}/dist").unwrap();
+        assert_eq!(t.identifiers().unwrap(), ["project"]);
+        assert_eq!(
+            t.render_static(&bindings(&[("project", "todo")])).unwrap(),
+            "todo/dist"
+        );
+        // The blank value is a blank run, not a refusal: what to do with the
+        // `/` it leaves behind is the caller's rule, not this one's.
+        assert_eq!(
+            t.render_static(&bindings(&[("project", "")])).unwrap(),
+            "/dist"
+        );
+        // Nothing is escaped, and `{{! }}` says the same thing here as `{{ }}`.
+        let t = Template::parse("{{! app }} & {{ app }}").unwrap();
+        assert_eq!(
+            t.render_static(&bindings(&[("app", "Tea & Coffee")]))
+                .unwrap(),
+            "Tea & Coffee & Tea & Coffee"
+        );
+    }
+
+    #[test]
+    fn a_flat_scope_refuses_what_it_cannot_answer() {
+        let empty = std::collections::BTreeMap::new();
+        // An expression: one name and nothing else is the whole vocabulary.
+        let t = Template::parse("{{ project + 1 }}").unwrap();
+        let msg = t.identifiers().unwrap_err().to_string();
+        assert!(msg.contains("{{ project + 1 }}"), "{msg}");
+        assert!(t.render_static(&empty).is_err());
+        // Re-interpolation, which there is no second pass for.
+        let t = Template::parse("{{= project }}").unwrap();
+        let msg = t.render_static(&empty).unwrap_err().to_string();
+        assert!(msg.contains("{{= project }}"), "{msg}");
+        // And an unbound name says what is in scope.
+        let t = Template::parse("{{ projekt }}").unwrap();
+        let msg = t
+            .render_static(&[("project".to_owned(), "todo".to_owned())].into())
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("projekt") && msg.contains("project"), "{msg}");
     }
 
     #[test]

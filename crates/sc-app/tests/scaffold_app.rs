@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use sc_app::{
     ApiConfig, AppRequest, Application, ClientUpdate, CodeFramework, FrameworkRef,
-    app_source_from_config, build_application, emit_react_runtime, save_application, scaffold_app,
+    app_source_from_config, build_application, emit_app_runtime, save_application, scaffold_app,
     update_app_client,
 };
 use sc_catalog::{Catalog, FileStoreId, TableId};
@@ -310,16 +310,16 @@ async fn a_blank_project_directory_scaffolds_into_the_store_root() -> sc_error::
     );
 
     // A re-emit rewrites the generated directory in place, at the root.
-    let written = emit_react_runtime(&cat, &app, &source, None).await?;
+    let written = emit_app_runtime(&cat, &app, &source, None).await?;
     assert_eq!(
         written,
         [
-            "src/feldspar/client.ts",
-            "src/feldspar/helper.ts",
             "src/feldspar/hooks.ts",
             "src/feldspar/store.ts",
-            "src/feldspar/schema.sql",
             "src/feldspar/README.md",
+            "src/feldspar/client.ts",
+            "src/feldspar/helper.ts",
+            "src/feldspar/schema.sql",
             "src/feldspar/SKILL.md",
         ]
     );
@@ -384,16 +384,16 @@ async fn the_generated_runtime_is_rewritten_on_build_and_nothing_else_is() -> sc
     app.tables.push(TableId("notes".to_owned()));
 
     let source = app_source_from_config(&app.framework)?;
-    let written = emit_react_runtime(&cat, &app, &source, None).await?;
+    let written = emit_app_runtime(&cat, &app, &source, None).await?;
     assert_eq!(
         written,
         [
-            "todo/src/feldspar/client.ts",
-            "todo/src/feldspar/helper.ts",
             "todo/src/feldspar/hooks.ts",
             "todo/src/feldspar/store.ts",
-            "todo/src/feldspar/schema.sql",
             "todo/src/feldspar/README.md",
+            "todo/src/feldspar/client.ts",
+            "todo/src/feldspar/helper.ts",
+            "todo/src/feldspar/schema.sql",
             "todo/src/feldspar/SKILL.md",
         ]
     );
@@ -452,12 +452,12 @@ async fn the_update_button_rescaffolds_an_empty_directory_and_re_emits_a_populat
     assert_eq!(
         files,
         &[
-            "todo/src/feldspar/client.ts",
-            "todo/src/feldspar/helper.ts",
             "todo/src/feldspar/hooks.ts",
             "todo/src/feldspar/store.ts",
-            "todo/src/feldspar/schema.sql",
             "todo/src/feldspar/README.md",
+            "todo/src/feldspar/client.ts",
+            "todo/src/feldspar/helper.ts",
+            "todo/src/feldspar/schema.sql",
             "todo/src/feldspar/SKILL.md",
         ]
     );

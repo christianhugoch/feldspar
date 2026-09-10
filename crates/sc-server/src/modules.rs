@@ -27,14 +27,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use sc_action::TriggerDispatcher;
+use sc_app::{FrameworkSet, install_frameworks};
 use sc_catalog::{Catalog, TableProviderHosts};
 use sc_core_actions::CodeSurfaces;
 use sc_error::{Context, Error, Result};
 use sc_expr::ModuleFnHosts;
 use sc_model::builtin_registry;
 use sc_module::{
-    BundledModules, Installer, ModuleFunctions, ModuleHost, ModuleModelProviders, ModuleSet,
-    ModuleTableProviders, bootstrap_modules,
+    BundledModules, Installer, ModuleFrameworks, ModuleFunctions, ModuleHost, ModuleModelProviders,
+    ModuleSet, ModuleTableProviders, bootstrap_modules,
 };
 use sc_python::pymodule::{
     PyModuleFunctions, PyModuleHost, PyModuleModelProviders, PyModuleSet, PyModuleTableProviders,
@@ -206,6 +207,29 @@ impl ModuleServices {
                     python.modules(),
                 )),
             ])))?;
+        // And the **application frameworks** a module declares (§13.3), installed
+        // into `sc-app`'s registry so the application form offers them beside
+        // `react` and `code`, and so an application already stored on one is
+        // configurable, buildable and scaffoldable again after a restart.
+        //
+        // Installed **whole** on every module change, like the action registry
+        // and the table providers, and for the same reason: a framework that has
+        // just been uninstalled must stop being offered, and an application on it
+        // must start saying so rather than half-working.
+        //
+        // A declaration that could not be translated costs that framework and is
+        // reported here — the module still loaded, and its actions still run.
+        let frameworks = ModuleFrameworks::new(&self.host, &set);
+        for issue in frameworks.issues() {
+            eprintln!("feldspar: {issue}");
+        }
+        if let Err(e) = install_frameworks(FrameworkSet::new(Arc::new(frameworks))) {
+            eprintln!(
+                "feldspar: the frameworks the modules declare could not be installed, so the \
+                 framework list was left as it was: {}",
+                sc_error::format_chain(&e)
+            );
+        }
         // And the **model providers**, which is the third source the model
         // registry composes: the built-ins, whatever the JavaScript modules
         // supply, and whatever the Python ones do. Rebuilt from the built-ins

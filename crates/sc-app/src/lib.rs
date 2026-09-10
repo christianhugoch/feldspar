@@ -47,6 +47,9 @@ mod application;
 mod applications;
 mod build;
 mod builder_agent;
+// The frameworks a module declares (§13.3, §15.1): the same registry answers,
+// written down as data instead of compiled.
+mod declared;
 mod diagnostics;
 mod framework;
 // The application third of the administrative tool surface (§13.6), and the one
@@ -72,21 +75,26 @@ pub use applications::{
     COL_TRIGGERS, bootstrap,
 };
 pub use build::{
-    AppSource, BuildReport, app_source_from_config, build_app, build_application,
+    AppSource, BuildReport, app_source_from_config, app_source_in, build_app, build_application,
     build_code_framework, emit_app_client, emit_client, load_app_bundle, run_build,
 };
 pub use builder_agent::{
     BuilderAgentSpec, BuilderTrait, TRAIT_BUILD_APPLICATION, TRAIT_CFG_APPLICATION,
     TRAIT_CFG_MAY_EDIT, TRAIT_CFG_MAY_RUN_SCRIPTS, TRAIT_CFG_ROOT, TRAIT_CFG_STORE, TRAIT_CODING,
-    builder_agent_name, framework_builder_agent,
+    builder_agent_in, builder_agent_name, framework_builder_agent,
+};
+pub use declared::{
+    BuildTemplate, DeclaredFile, FilePhase, FrameworkDecl, FrameworkHost, FrameworkSet,
+    PathTemplate, clean_path, declared_framework, install_frameworks, installed_frameworks,
 };
 pub use diagnostics::build_diagnostics;
 pub use framework::{
     AppRequest, AppResponse, Asset, AssetBundle, BuildSpec, CFG_CLIENT, CFG_COMMAND, CFG_OUTPUT,
     CFG_SOURCE, CFG_STORE, CODE_FRAMEWORK, CodeFramework, Framework, FrameworkInfo, InstallSpec,
-    Method, code_config_spec, framework_config_spec, framework_default_csp, framework_serves_ui,
-    registered_framework_info, registered_frameworks, validate_framework_config,
-    validate_framework_config_structure,
+    Method, code_config_spec, config_spec_in, default_csp_in, framework_config_spec,
+    framework_default_csp, framework_info_in, framework_serves_ui, registered_framework_info,
+    registered_frameworks, serves_ui_in, validate_config_in, validate_config_structure_in,
+    validate_framework_config, validate_framework_config_structure,
 };
 pub use react::{
     CFG_PROJECT, REACT_BUILD_ARGS, REACT_BUILD_COMMAND, REACT_CLIENT_FILE, REACT_FRAMEWORK,
@@ -95,8 +103,9 @@ pub use react::{
     react_runtime_dir, valid_project_name,
 };
 pub use scaffold::{
-    ClientUpdate, GeneratedFile, ScaffoldReport, emit_react_runtime, require_api_provider,
-    require_scaffoldable, scaffold_app, update_app_client,
+    ClientUpdate, GeneratedFile, ScaffoldReport, emit_app_runtime, has_generated_runtime,
+    require_api_provider, require_scaffoldable, require_scaffoldable_in, scaffold_app,
+    update_app_client,
 };
 pub use skill::{SKILL_FILE, generate_skill};
 pub use store::{

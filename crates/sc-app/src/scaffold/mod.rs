@@ -19,6 +19,7 @@
 //!   the useful part of it is what `npm` or `git` said, not that something
 //!   "failed".
 
+mod context;
 mod files;
 
 use bytes::Bytes;
@@ -30,7 +31,10 @@ use tokio::process::Command;
 use crate::api::{app_endpoints_with, app_graphql, app_schema_sql, app_tables};
 use crate::application::Application;
 use crate::build::{AppSource, app_source_from_config};
-use crate::react::{REACT_FRAMEWORK, project_description, project_path};
+use crate::declared::{
+    FilePhase, FrameworkDecl, FrameworkSet, declared_framework, installed_frameworks,
+};
+use crate::react::{REACT_CLIENT_FILE, REACT_FRAMEWORK, project_description, project_path};
 
 pub use files::GeneratedFile;
 
@@ -74,7 +78,8 @@ pub async fn scaffold_app(
     app: &Application,
     dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
 ) -> Result<ScaffoldReport> {
-    require_scaffoldable(app)?;
+    let set = installed_frameworks();
+    require_scaffoldable_in(&set, app)?;
     require_api_provider(app)?;
     let source = app_source_from_config(&app.framework)?;
     let project = source.build.source_dir.clone();
@@ -90,28 +95,7 @@ pub async fn scaffold_app(
         )));
     }
 
-    let tables = app_tables(app, cat)?;
-    let endpoints = app_endpoints_with(app, cat, dispatcher)?;
-    let graphql = app_graphql(app, cat)?;
-    let schema_sql = app_schema_sql(app, cat)?;
-    // This installation's roles, for the documentation that says how to get a
-    // session: `feldspar auth token --role NAME` takes a name, and nothing inside
-    // a project directory knows what this server calls its roles.
-    let roles = documented_roles(cat).await?;
-    let skill = crate::generate_skill(cat, app, crate::REACT_CLIENT_FILE);
-    let generated = files::project_files(&files::ProjectContext {
-        project: &project,
-        app,
-        tables: &tables,
-        endpoints: &endpoints,
-        graphql: graphql.as_ref(),
-        schema_sql: &schema_sql,
-        // Where this deployment serves its apps, so the generated documentation
-        // names the URL to open. `None` when nobody told this process.
-        origin: cat.public_origin(),
-        roles: &roles,
-        skill: &skill,
-    });
+    let generated = generate(cat, app, &set, &source, dispatcher, FilePhase::Scaffold).await?;
 
     let mut written = Vec::with_capacity(generated.len());
     for file in &generated {
@@ -138,6 +122,125 @@ pub async fn scaffold_app(
     })
 }
 
+/// The files one phase of one framework's generator produces — the join between
+/// "an application is rows in a catalog" and "a project is text on a disk".
+///
+/// **Both frameworks come out of here**, which is the point: the caller gathers
+/// the application once, writes what comes back, and cannot tell whether the
+/// generator was `files.rs` or a module's `scaffold` function on a worker.
+///
+/// A declared framework's runtime is written in two halves. Saltcorn writes the
+/// half that is generated from the application's own API — the typed client, its
+/// helper, the schema, the `SKILL.md` — because those come out of the same
+/// generator the admin SPA's client does, and a module regenerating them would be
+/// a module free to disagree with this server about this server's API. The module
+/// writes the half that is the framework's idiom: React's hooks, Vue's
+/// composables.
+async fn generate(
+    cat: &Catalog,
+    app: &Application,
+    set: &FrameworkSet,
+    source: &AppSource,
+    dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
+    phase: FilePhase,
+) -> Result<Vec<files::GeneratedFile>> {
+    let project = source.build.source_dir.clone();
+    let tables = app_tables(app, cat)?;
+    let endpoints = app_endpoints_with(app, cat, dispatcher)?;
+    let graphql = app_graphql(app, cat)?;
+    let schema_sql = app_schema_sql(app, cat)?;
+    // This installation's roles, for the documentation that says how to get a
+    // session: `feldspar auth token --role NAME` takes a name, and nothing inside
+    // a project directory knows what this server calls its roles.
+    let roles = documented_roles(cat).await?;
+    let client_file = runtime_client_file(set, app);
+    let skill = crate::generate_skill(cat, app, &client_file);
+    let ctx = files::ProjectContext {
+        project: &project,
+        app,
+        tables: &tables,
+        endpoints: &endpoints,
+        graphql: graphql.as_ref(),
+        schema_sql: &schema_sql,
+        // Where this deployment serves its apps, so the generated documentation
+        // names the URL to open. `None` when nobody told this process.
+        origin: cat.public_origin(),
+        roles: &roles,
+        skill: &skill,
+    };
+
+    let Some(decl) = declared(set, app) else {
+        return Ok(match phase {
+            FilePhase::Scaffold => files::project_files(&ctx),
+            FilePhase::Runtime => files::runtime_files(&ctx),
+        });
+    };
+
+    let runtime = project_relative(&project, &decl.runtime_dir(&app.framework.config)?)?;
+    let runtime = runtime.ok_or_else(|| {
+        Error::config(format!(
+            "framework `{}` generates a project but declares no runtime directory, \
+             so there is nowhere to put the typed client its project would import",
+            decl.name
+        ))
+    })?;
+    let client = crate::declared::clean_path(&format!("{runtime}/{client_file}"));
+    let mut files = set
+        .files(
+            &decl.name,
+            phase,
+            context::context_json(&ctx, &runtime, &client),
+        )
+        .await?
+        .into_iter()
+        .map(|f| files::GeneratedFile::new(crate::declared::clean_path(&f.path), f.contents))
+        .collect::<Vec<_>>();
+    files.extend(files::common_runtime_files(&ctx, &runtime, &client_file));
+    Ok(files)
+}
+
+/// The framework `app` is on, when a module declared it.
+fn declared(set: &FrameworkSet, app: &Application) -> Option<FrameworkDecl> {
+    set.find(&app.framework.name).cloned()
+}
+
+/// The generated client's file name for `app` — `client.ts` unless a declared
+/// framework calls it something else.
+///
+/// Its own function because two things need it and must agree: the `SKILL.md`
+/// names the file a coding agent should read, and the runtime writes it.
+fn runtime_client_file(set: &FrameworkSet, app: &Application) -> String {
+    match set.find(&app.framework.name) {
+        Some(decl) => decl.build.client_file.clone(),
+        None => REACT_CLIENT_FILE.to_owned(),
+    }
+}
+
+/// A store-relative path expressed relative to the project directory.
+///
+/// `None` in, `None` out. A path **outside** the project is refused rather than
+/// silently written outside it: a framework whose runtime directory is not inside
+/// the project it scaffolds has said two things that cannot both be true, and
+/// writing generated files somewhere the project cannot import them would be the
+/// least useful way to find that out.
+fn project_relative(project: &str, path: &Option<String>) -> Result<Option<String>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    if project.is_empty() {
+        return Ok(Some(path.clone()));
+    }
+    match path.strip_prefix(&format!("{project}/")) {
+        Some(rest) => Ok(Some(rest.to_owned())),
+        None if path == project => Ok(Some(String::new())),
+        None => Err(Error::config(format!(
+            "this framework puts its generated code in `{path}`, which is not inside \
+             the project directory `{project}` it builds — the project could not \
+             import it"
+        ))),
+    }
+}
+
 /// The roles the generated documentation names, or none when this database has
 /// no roles table.
 ///
@@ -161,12 +264,28 @@ async fn documented_roles(cat: &Catalog) -> Result<Vec<sc_auth::Role>> {
 /// — generating one over it is precisely the overwrite this module exists not to
 /// do — and a build-less framework has no project at all.
 pub fn require_scaffoldable(app: &Application) -> Result<()> {
+    require_scaffoldable_in(&installed_frameworks(), app)
+}
+
+/// [`require_scaffoldable`] against an explicit framework set.
+///
+/// A **declared** framework is scaffoldable when it declared a scaffold — which
+/// is the same rule stated for a framework that is not Rust: `react` has a
+/// project Saltcorn writes, `code` has one the admin brought, and a module says
+/// which of the two it is by supplying a `scaffold` function or not.
+pub fn require_scaffoldable_in(set: &FrameworkSet, app: &Application) -> Result<()> {
     if app.framework.name == REACT_FRAMEWORK {
+        return Ok(());
+    }
+    if let Some(decl) = set.find(&app.framework.name)
+        && decl.scaffolds
+    {
         return Ok(());
     }
     Err(Error::config(format!(
         "application `{}` uses framework `{}`, which brings its own project; \
-         only `{REACT_FRAMEWORK}` is scaffolded",
+         only `{REACT_FRAMEWORK}` and a module framework that declares a scaffold \
+         are scaffolded",
         app.name, app.framework.name
     )))
 }
@@ -265,7 +384,7 @@ async fn require_auth_endpoints_for_source(
 /// `useNewTable()` exist without anyone regenerating anything by hand. It is also
 /// why the runtime is generated rather than shipped as a package (§2.1) — it is
 /// shaped by this app's endpoints.
-pub async fn emit_react_runtime(
+pub async fn emit_app_runtime(
     cat: &Catalog,
     app: &Application,
     source: &AppSource,
@@ -275,42 +394,14 @@ pub async fn emit_react_runtime(
     // application saved before the check existed arrives on — and a build that
     // fails with the reason beats one that fails with its consequences.
     require_api_provider(app)?;
+    let set = installed_frameworks();
     let project = &source.build.source_dir;
     let store = cat.require_file_store(&source.store.0)?;
-    let tables = app_tables(app, cat)?;
     let endpoints = app_endpoints_with(app, cat, dispatcher)?;
     require_auth_endpoints_for_source(app, &endpoints, store.as_ref(), project).await?;
-    // Regenerated on every build for the same reason the hooks are: an admin who
-    // enables the GraphQL provider, or adds a table to the app, gets a schema
-    // describing what is actually mounted at the next build — with nobody
-    // exporting an SDL by hand.
-    let graphql = app_graphql(app, cat)?;
-    // Rewritten on the same schedule and for the same reason as the client: the
-    // tables it describes are the ones this app declares, and a column added in
-    // the admin UI has to reach the file a coding agent writes SQL against.
-    let schema_sql = app_schema_sql(app, cat)?;
-
-    // Re-read on every build rather than cached, for the same reason the tables
-    // are: an admin who adds a role gets a README that names it at the next
-    // build, with nobody re-scaffolding anything.
-    let roles = documented_roles(cat).await?;
-    // The map of the half of the application this project cannot see (§13.6),
-    // rewritten with the rest of the generated directory because the tool
-    // surface it names is the one this server is currently offering.
-    let skill = crate::generate_skill(cat, app, crate::REACT_CLIENT_FILE);
 
     let mut written = Vec::new();
-    for file in files::runtime_files(&files::ProjectContext {
-        project,
-        app,
-        tables: &tables,
-        endpoints: &endpoints,
-        graphql: graphql.as_ref(),
-        schema_sql: &schema_sql,
-        origin: cat.public_origin(),
-        roles: &roles,
-        skill: &skill,
-    }) {
+    for file in generate(cat, app, &set, source, dispatcher, FilePhase::Runtime).await? {
         let path = project_path(project, &file.path);
         store
             .write(&path, Bytes::from(file.contents.into_bytes()))
@@ -319,6 +410,22 @@ pub async fn emit_react_runtime(
         written.push(path);
     }
     Ok(written)
+}
+
+/// Whether `app`'s framework has a generated runtime to rewrite at all — a
+/// `react` app, or a declared framework that named a runtime directory.
+///
+/// The question `build_application` and `emit_app_client` ask before calling
+/// [`emit_app_runtime`]: an app whose framework generates nothing gets the plain
+/// client emission, and one whose framework generates a directory must not have
+/// the client written twice by two different rules.
+pub fn has_generated_runtime(app: &Application) -> bool {
+    if app.framework.name == REACT_FRAMEWORK {
+        return true;
+    }
+    declared_framework(&app.framework.name)
+        .and_then(|decl| decl.runtime_dir(&app.framework.config).ok().flatten())
+        .is_some()
 }
 
 /// What [`update_app_client`] did — and it matters which, because the two

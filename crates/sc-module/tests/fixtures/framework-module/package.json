@@ -1,0 +1,8 @@
+{
+  "name": "@saltcorn-test/framework",
+  "version": "0.1.0",
+  "description": "A module supplying application frameworks, for the framework seam's tests: one that works, and three that are deliberately broken.",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT"
+}

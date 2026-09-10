@@ -2,6 +2,78 @@
 
 Changes in reverse chronological order.
 
+## Application frameworks declared by a module, and Vue as one
+
+An application's UI framework no longer has to be written in Rust. A JavaScript
+module may export **`frameworks`**, beside `actions`, `table_providers` and
+`modelproviders`, and `plugins/vue` is the bundled one: an admin installs it,
+picks **Vue** in the framework list, and gets a Vue 3 + Vite project Saltcorn
+wrote, with typed composables for their tables, installed and built.
+
+- **The declaration is data; only the generator is a call.** Everything the admin
+  UI asks a framework — its settings, its default CSP, where its source is, which
+  builder agent it declares — is asked synchronously, on the path that renders a
+  form or resolves a build, and none of it depends on anything a module learns at
+  run time. So it crosses **once, when the module loads**, and is installed as
+  values (`sc-app`'s new `declared` module: `FrameworkDecl`, `FrameworkSet`,
+  `install_frameworks`). Making it a call instead would have made
+  `framework_config_spec` async and taken `app_source_from_config` and
+  `framework_builder_agent` with it, into most of the admin API. The one real
+  computation — the files a scaffold writes — stays a call (`FrameworkHost`,
+  implemented by `sc-module`'s `ModuleFrameworks`, on the path that was already
+  asynchronous and already had a worker).
+- **The paths are `{{ }}` templates over the framework's own settings**, parsed
+  by `sc-expr`'s one template parser — the same one an email subject and an
+  ownership rule go through. Two new methods make it renderable without an
+  evaluator: `Template::identifiers` and `Template::render_static`, a flat scope
+  in which a token must be one name and nothing else. That is a *restriction* of
+  the one language stated as an error, not a second grammar, and it is checked
+  when the module loads: a `build` naming a setting the framework has not got is
+  refused on the module's card, with the settings it does have listed, rather
+  than at the moment an admin presses Build.
+- **`react`'s conventions fell out rather than being copied.** A blank setting
+  collapses the path segment it would have filled, so "blank means the store
+  root" is now a property of deriving paths from a project name (`clean_path`)
+  and not a `react` rule. A rendered path containing `..` is refused on save —
+  `check_project_name` asked the other way round, since a declared framework's
+  templates may be built from any of its settings in any arrangement.
+- **A module writes the framework's idiom, and nothing that is Saltcorn's.**
+  `client.ts`, its helper, `schema.sql`, `SKILL.md` and the GraphQL client come
+  from the application's own `EndpointSet`, through the generator the admin SPA's
+  client comes from, and are now written into whichever `runtime` directory the
+  framework declared — for `react` too (`files::common_runtime_files`, split out
+  of `runtime_files`). A module reproducing them would be a module free to
+  disagree with this server about this server's API.
+- **The context carries the derivations, not the evidence** (`scaffold::context`).
+  Whether a page may offer a delete button, what a table hangs off the client as,
+  which columns a create form asks for and which the database issues — each is a
+  question this crate answers by asking the endpoint set, and each has a wrong
+  answer that looks right. They cross as answers (`ops`, `client`, `form.inputs`,
+  `form.minted`, `pk_ts_type`, `control`), so a generator writes an idiom over
+  facts rather than re-deriving them and agreeing only by coincidence.
+- **One namespace, because an application stores a name.** The row says `vue`,
+  not `@feldspar/vue:vue`. A module claiming `react`, `code`, or a name another
+  loaded module already has loses **that framework** with the reason on its card,
+  and keeps its actions — the rule every facility key here follows. A framework
+  with no `build` is refused for the same kind of reason: this version serves a
+  built bundle and nothing else, so serving stays `CodeFramework`'s and is not
+  something a module can take over.
+- **`plugins/vue`.** A real project: Vite, vue-router, a shell with a nav, a
+  login page and a route guard for an app that can sign people in and neither for
+  one that cannot, a single-file component per exposed table with a create form
+  and a delete button only where the API offers them, and generated composables
+  over one version-counter-per-table cache. `scaffold_app` → `npm install` →
+  `vue-tsc --noEmit` → `vite build` → served, end to end, is a test
+  (`bundled_vue.rs`, behind `SC_TEST_NPM=1`); the npm-free half of that file
+  checks that **every relative import in the generated project resolves**, which
+  is the class of mistake a scaffold makes.
+- Tests: `sc-expr`'s flat-scope render and what it refuses; `sc-app`'s
+  `declared_framework.rs` — a declared framework in the registry, resolving to
+  the same `AppSource` the built-ins do, its CSP, its builder agent, and a
+  scaffold that writes both halves; `sc-module`'s `frameworks.rs` — a fixture
+  declaring four frameworks of which three are broken on purpose, on a real
+  worker; and `bundled_vue.rs` for the module that ships.
+
 ## An index in the IDE's Source Control view
 
 The file-store IDE's SCM view (§12.1) had one group and a Commit that swept up the

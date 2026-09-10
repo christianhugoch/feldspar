@@ -23,8 +23,12 @@ mod common;
 mod bundled_catalog;
 #[path = "bundled_rss.rs"]
 mod bundled_rss;
+#[path = "bundled_vue.rs"]
+mod bundled_vue;
 #[path = "deno_host.rs"]
 mod deno_host;
+#[path = "frameworks.rs"]
+mod frameworks;
 #[path = "host.rs"]
 mod host;
 #[path = "install.rs"]

@@ -70,6 +70,12 @@ sc-core-actions.workspace = true
 # the reason `TableProviderHost` is declared in `sc-catalog` below it: a trait a
 # module implements has to be declared somewhere a module can see.
 sc-model.workspace = true
+# And a module supplies **application frameworks** (§13.3), whose `FrameworkHost`
+# seam is declared in `sc-app` for the same reason again: a trait a module
+# implements has to be declared somewhere a module can see. `sc-app` depends on
+# neither this crate nor `sc-core-actions`, so the edge is acyclic — it is the
+# same shape as the one to `sc-model`, one layer higher.
+sc-app.workspace = true
 async-trait.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
@@ -117,6 +123,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 sc-expr = { workspace = true, features = ["eval"] }
 sc-db.workspace = true
 sc-db-postgres.workspace = true
+# The file store a scaffolded application's project is written into, for the
+# bundled Vue module's end-to-end test.
+sc-files.workspace = true
 sc-test-harness.workspace = true
 
 [lints]

@@ -235,6 +235,79 @@ pub struct ModelProviderManifest {
     pub standardise: bool,
 }
 
+/// One **application framework** a module supplies (§13.3, §15.1).
+///
+/// A module exports `frameworks` beside its `actions` and `table_providers`:
+///
+/// ```js
+/// frameworks: {
+///   vue: {
+///     label: "Vue",
+///     description: "A Vue 3 + Vite project, scaffolded and built for you.",
+///     config_fields: [{ name: "store", type: "String", required: true },
+///                     { name: "project", type: "String", default: "" }],
+///     build: {
+///       store: "{{ store }}", source: "{{ project }}",
+///       output: "{{ project }}/dist", command: "npm run build",
+///       install: { command: "npm install", marker: "node_modules" },
+///       runtime: "{{ project }}/src/feldspar", client: "client.ts",
+///     },
+///     csp: { "img-src": ["'self'", "data:"] },
+///     builder_prompt: "You maintain {{ app }} …",
+///     scaffold: async (ctx) => [{ path: "package.json", contents: "…" }],
+///     runtime: async (ctx) => [{ path: `${ctx.runtime}/composables.ts`, contents: "…" }],
+///   },
+/// }
+/// ```
+///
+/// **What crosses is the declaration**, and that is the whole design decision:
+/// every question the admin UI asks a framework — its settings, its default CSP,
+/// where its source is — is asked synchronously, on the path that renders a form
+/// or resolves a build, and none of the answers depends on anything the module
+/// learns at run time. So they cross once, here, and are installed as values
+/// (`sc_app::FrameworkDecl`). The two functions stay in the worker and are
+/// reached again through [`ModuleHost::framework_files`], on the path that was
+/// already asynchronous.
+///
+/// The paths are `{{ }}` templates over the framework's own settings, parsed by
+/// `sc-expr`'s one template parser — the same one an email subject goes through.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FrameworkManifest {
+    /// The registry key and what an application's framework reference stores —
+    /// `vue`. Unqualified, sharing one namespace with the built-ins and with
+    /// every other module's, exactly as an action's name does.
+    pub name: String,
+    /// The human name the framework picker shows.
+    #[serde(default)]
+    pub label: String,
+    /// One sentence: what it does for the admin, and what it asks in return.
+    #[serde(default)]
+    pub description: String,
+    /// Its settings, as v1 `configFields` — translated by [`crate::spec`], never
+    /// interpreted here.
+    #[serde(default)]
+    pub config_fields: Vec<Json>,
+    /// Where its source is and how it builds, as templates. Carried as JSON for
+    /// the reason a model provider's `outcome` is: a module with one
+    /// mis-declared framework is a module with one mis-declared framework, and
+    /// reading it where the framework set is built keeps somebody's typo from
+    /// costing the module its actions.
+    #[serde(default)]
+    pub build: Json,
+    /// The widenings its output needs on top of the strict CSP baseline:
+    /// directive name → source list.
+    #[serde(default)]
+    pub csp: Json,
+    /// Its builder agent's system prompt, as a template. Empty for a framework
+    /// that declares no builder agent.
+    #[serde(default)]
+    pub builder_prompt: String,
+    /// Whether it exported a `scaffold` function — whether an application of it
+    /// has a project Saltcorn writes, or one the admin brought.
+    #[serde(default)]
+    pub scaffolds: bool,
+}
+
 /// An entity type the module exports and this version does not load.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UnsupportedEntity {
@@ -272,6 +345,10 @@ pub struct ModuleManifest {
     /// built-in regressions.
     #[serde(default)]
     pub model_providers: Vec<ModelProviderManifest>,
+    /// The application frameworks it supplies (§13.3) — what the application
+    /// form offers beside `react` and `code`.
+    #[serde(default)]
+    pub frameworks: Vec<FrameworkManifest>,
     /// The fields of its `configuration_workflow`'s forms, flattened (§5).
     #[serde(default)]
     pub config_fields: Vec<Json>,
@@ -620,6 +697,33 @@ impl ModuleHost {
         #[cfg(not(feature = "deno-host"))]
         {
             let _ = (module, provider, frame, configuration, hyperparameters);
+            Err(no_runtime())
+        }
+    }
+
+    /// The files one of a module's frameworks generates for an application —
+    /// the whole project (`scaffold`), or the framework's own generated code
+    /// (`runtime`).
+    ///
+    /// The one part of a framework declaration that is a *call* rather than a
+    /// value: it depends on the application's tables, its API surface and its
+    /// roles, none of which the plugin author knew.
+    pub async fn framework_files(
+        &self,
+        module: &str,
+        framework: &str,
+        phase: &str,
+        context: &Json,
+    ) -> Result<Json> {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool
+                .framework_files(module, framework, phase, context)
+                .await
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = (module, framework, phase, context);
             Err(no_runtime())
         }
     }

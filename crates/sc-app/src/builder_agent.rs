@@ -25,11 +25,14 @@
 //! Assembling a spec into an [`Agent`](sc_agent::Agent) and storing it is the
 //! server's, for the same layering reason: this crate does not know agents exist.
 
+use std::collections::BTreeMap;
+
 use sc_types::Attrs;
 use serde_json::Value as Json;
 
 use crate::application::{Application, FrameworkRef};
-use crate::build::app_source_from_config;
+use crate::build::app_source_in;
+use crate::declared::{FrameworkDecl, FrameworkSet, installed_frameworks};
 use crate::framework::CODE_FRAMEWORK;
 use crate::react::REACT_FRAMEWORK;
 
@@ -123,11 +126,72 @@ pub fn builder_agent_name(app: &Application) -> String {
 /// client must not be hand-edited, while a `code` app is whatever the admin
 /// brought.
 pub fn framework_builder_agent(fw: &FrameworkRef, app: &Application) -> Option<BuilderAgentSpec> {
+    builder_agent_in(&installed_frameworks(), fw, app)
+}
+
+/// [`framework_builder_agent`] against an explicit framework set.
+///
+/// A declared framework's prompt is a [`Template`](sc_expr::Template) over its
+/// own settings plus the application's name, subdomain, store and project root —
+/// the same four a built-in's prompt interpolates, which is why they are named
+/// rather than positional. A framework that declares no prompt declares no agent,
+/// exactly as a framework with no source tree does: "this application has no
+/// builder" is an answer, and the one a framework serving something it does not
+/// own should give.
+pub fn builder_agent_in(
+    set: &FrameworkSet,
+    fw: &FrameworkRef,
+    app: &Application,
+) -> Option<BuilderAgentSpec> {
     match fw.name.as_str() {
-        REACT_FRAMEWORK => coding_agent(fw, app, react_prompt),
-        CODE_FRAMEWORK => coding_agent(fw, app, code_prompt),
-        _ => None,
+        REACT_FRAMEWORK => coding_agent(set, fw, app, react_prompt),
+        CODE_FRAMEWORK => coding_agent(set, fw, app, code_prompt),
+        other => {
+            let decl = set.find(other)?.clone();
+            coding_agent(set, fw, app, move |app, store, root| {
+                declared_prompt(&decl, &fw_config(app, store, root), app, store, root)
+            })
+        }
     }
+}
+
+/// The names a declared framework's prompt has in scope beyond its own settings.
+fn fw_config(app: &Application, store: &str, root: &str) -> BTreeMap<String, String> {
+    [
+        ("app", app.name.as_str()),
+        ("subdomain", app.subdomain.trim()),
+        ("store", store),
+        ("root", root),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect()
+}
+
+/// A declared framework's prompt, rendered — or the shared one alone when its
+/// template will not render, which is a declaration problem the module's card
+/// already reports and not a reason for the application to have no builder.
+fn declared_prompt(
+    decl: &FrameworkDecl,
+    extra: &BTreeMap<String, String>,
+    app: &Application,
+    store: &str,
+    root: &str,
+) -> String {
+    let declared = decl
+        .prompt(&app.framework.config, extra)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            format!(
+                "You build the `{}` application, served at the `{}` subdomain. Its \
+                 source is in the `{store}` file store under `{root}`, and your file \
+                 tools are scoped to exactly that directory.",
+                app.name,
+                app.subdomain.trim()
+            )
+        });
+    format!("{declared}\n\n{SHARED_PROMPT}")
 }
 
 /// A coding agent over the framework's source tree, plus the build of this one
@@ -137,11 +201,12 @@ pub fn framework_builder_agent(fw: &FrameworkRef, app: &Application) -> Option<B
 /// on a saved application means the config was rejected on save, so there is
 /// nothing to point an agent at and nothing to report either.
 fn coding_agent(
+    set: &FrameworkSet,
     fw: &FrameworkRef,
     app: &Application,
-    prompt: fn(&Application, &str, &str) -> String,
+    prompt: impl FnOnce(&Application, &str, &str) -> String,
 ) -> Option<BuilderAgentSpec> {
-    let source = app_source_from_config(fw).ok()?;
+    let source = app_source_in(set, fw).ok()?;
     let store = source.store.0;
     let root = source.build.source_dir;
     Some(BuilderAgentSpec {

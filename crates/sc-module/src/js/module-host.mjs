@@ -485,6 +485,7 @@ const supportedKeys = new Set([
   "functions",
   "table_providers",
   "modelproviders",
+  "frameworks",
 ]);
 
 /** Keys that are metadata rather than an entity type — including `onLoad`,
@@ -713,6 +714,143 @@ async function evalModelProviders(plugin, configuration) {
     });
   }
   return { providers, set, issues };
+}
+
+/** The names this version will not let a module claim for a framework.
+ *
+ * The built-ins. Framework names share one namespace — an application stores
+ * `vue`, not `@feldspar/vue:vue` — and `react` is the path an admin should be
+ * offered, so a module must not be able to take that sentence over. The refusal
+ * is per framework: the module still loads, its actions still run, and its card
+ * says which name was refused and why. */
+const reservedFrameworks = new Set(["react", "code"]);
+
+/** v1 has no `frameworks`; this is **this** system's key (§13.3, §15.1).
+ *
+ * ```js
+ * frameworks: {
+ *   vue: {
+ *     label: "Vue",
+ *     description: "A Vue 3 + Vite project, scaffolded and built for you.",
+ *     config_fields: [{ name: "store", type: "String", required: true }],
+ *     build: { store: "{{ store }}", source: "{{ project }}",
+ *              output: "{{ project }}/dist", command: "npm run build",
+ *              install: { command: "npm install", marker: "node_modules" },
+ *              runtime: "{{ project }}/src/feldspar", client: "client.ts" },
+ *     csp: { "img-src": ["'self'", "data:"] },
+ *     builder_prompt: "You maintain {{ app }} …",
+ *     scaffold: async (ctx) => [{ path: "package.json", contents: "…" }],
+ *     runtime: async (ctx) => [{ path: `${ctx.runtime}/composables.ts`, contents: "…" }],
+ *   },
+ * }
+ * ```
+ *
+ * Read the two ways every other facility key is read — a plain object, and a
+ * function of the module's own configuration — because that is v1's `withCfg`
+ * rule and a plugin author should not have to learn a third.
+ *
+ * What crosses is the **declaration**, evaluated once: the settings, the path
+ * templates, the CSP, the prompt. `scaffold` and `runtime` stay here and are
+ * called again through the `framework_files` op — they are the only part that
+ * depends on the application, which is a thing the plugin author did not know.
+ *
+ * A framework with no `build` is **reported and skipped**: this version serves a
+ * framework's built bundle and nothing else, so one that cannot say how to build
+ * one could never serve anything, and an admin who can see why can ask its author
+ * for a version that does.
+ */
+async function evalFrameworks(plugin, configuration) {
+  const exported = plugin.frameworks;
+  let raw = {};
+  const issues = [];
+  if (typeof exported === "function") {
+    try {
+      raw = (await exported(configuration || {})) || {};
+    } catch (e) {
+      issues.push(`its frameworks could not be built: ${e.message}`);
+      raw = {};
+    }
+  } else if (exported && typeof exported === "object") {
+    raw = exported;
+  }
+
+  const frameworks = [];
+  const set = {};
+  for (const [frameworkName, value] of Object.entries(raw)) {
+    const impl = value || {};
+    if (reservedFrameworks.has(frameworkName)) {
+      issues.push(
+        `the framework "${frameworkName}" is not available: that name belongs to one of ` +
+          `this server's own frameworks, and an application stores a framework by name`,
+      );
+      continue;
+    }
+    if (!impl.build || typeof impl.build !== "object") {
+      issues.push(
+        `the framework "${frameworkName}" is not available: it declares no build, and this ` +
+          `version serves a framework's built bundle`,
+      );
+      continue;
+    }
+    const { fields, issues: workflowIssues } = await workflowFields(
+      impl.configuration_workflow,
+      `the framework "${frameworkName}"'s`,
+    );
+    issues.push(...workflowIssues);
+    set[frameworkName] = impl;
+    frameworks.push({
+      name: frameworkName,
+      label: impl.label || "",
+      description: impl.description || "",
+      config_fields: [...fields, ...(Array.isArray(impl.config_fields) ? impl.config_fields : [])],
+      build: impl.build,
+      csp: impl.csp && typeof impl.csp === "object" ? impl.csp : {},
+      builder_prompt: typeof impl.builder_prompt === "string" ? impl.builder_prompt : "",
+      scaffolds: typeof impl.scaffold === "function",
+    });
+  }
+  return { frameworks, set, issues };
+}
+
+/** The files one framework generates for one application.
+ *
+ * `phase` is `scaffold` (the whole project, written once) or `runtime` (the
+ * framework's own generated code, rewritten on every build). A phase the
+ * framework does not implement answers **no files**, which is a legitimate
+ * declaration rather than a failure: a framework that brings its own project
+ * exports no `scaffold`, and one whose runtime is entirely Saltcorn's exports no
+ * `runtime`.
+ *
+ * Every answer is checked here rather than trusted: a generator that returns
+ * something other than a list of `{ path, contents }` has made a mistake whose
+ * consequence would otherwise be a project directory full of `undefined`. */
+async function frameworkFiles({ module: name, framework: frameworkName, phase, context }) {
+  const entry = loaded.get(name);
+  if (!entry) throw new Error(`the module ${name} is not loaded in this host`);
+  const impl = entry.frameworks && entry.frameworks[frameworkName];
+  if (!impl) throw new Error(`the module ${name} has no framework ${frameworkName}`);
+  const generate = impl[phase];
+  if (typeof generate !== "function") return [];
+  const answer = await generate(context || {});
+  if (!Array.isArray(answer))
+    throw new Error(
+      `the ${phase} of framework ${frameworkName} of module ${name} answered ` +
+        `${JSON.stringify(answer)}, which is not a list of files`,
+    );
+  return answer.map((file, index) => {
+    const path = file && typeof file.path === "string" ? file.path.trim() : "";
+    if (!path)
+      throw new Error(
+        `the ${phase} of framework ${frameworkName} of module ${name} answered a file at ` +
+          `position ${index} with no path`,
+      );
+    if (typeof file.contents !== "string")
+      throw new Error(
+        `the ${phase} of framework ${frameworkName} of module ${name} answered "${path}" ` +
+          `with contents that are not text`,
+      );
+    return { path, contents: file.contents };
+  });
 }
 
 /** The loaded model provider, or a sentence naming what is missing. */
@@ -1053,6 +1191,13 @@ async function loadModule({ module: name, dir, configuration }) {
   } = await evalModelProviders(plugin, configuration);
   issues.push(...modelProviderIssues);
 
+  const {
+    frameworks,
+    set: frameworkSet,
+    issues: frameworkIssues,
+  } = await evalFrameworks(plugin, configuration);
+  issues.push(...frameworkIssues);
+
   const unsupported = [];
   for (const [key, value] of Object.entries(plugin)) {
     if (supportedKeys.has(key) || metadataKeys.has(key)) continue;
@@ -1065,6 +1210,7 @@ async function loadModule({ module: name, dir, configuration }) {
     functions: functionSet,
     providers: providerSet,
     modelProviders: modelProviderSet,
+    frameworks: frameworkSet,
     configuration: configuration || {},
   });
 
@@ -1076,6 +1222,7 @@ async function loadModule({ module: name, dir, configuration }) {
     functions,
     table_providers: providers,
     model_providers: modelProviders,
+    frameworks,
     config_fields: configFields,
     unsupported,
     issues,
@@ -1184,6 +1331,11 @@ async function handle(request) {
       const pending = loading.get(request.module);
       if (pending) await pending;
       return await modelPredict(request);
+    }
+    case "framework_files": {
+      const pending = loading.get(request.module);
+      if (pending) await pending;
+      return await frameworkFiles(request);
     }
     default:
       throw new Error(`unknown module-host operation ${request.op}`);

@@ -47,7 +47,7 @@ pub struct GeneratedFile {
 }
 
 impl GeneratedFile {
-    fn new(path: impl Into<String>, contents: impl Into<String>) -> GeneratedFile {
+    pub(super) fn new(path: impl Into<String>, contents: impl Into<String>) -> GeneratedFile {
         GeneratedFile {
             path: path.into(),
             contents: contents.into(),
@@ -163,7 +163,7 @@ impl ProjectContext<'_> {
     /// from somewhere — and the subdomain is the app's other machine-readable
     /// identity, already a DNS label and so already a legal package name, unlike
     /// [`Application::name`](crate::Application::name) (`"My Blog"`).
-    fn project_name(&self) -> &str {
+    pub(super) fn project_name(&self) -> &str {
         if !self.project.is_empty() {
             return self.project;
         }
@@ -194,7 +194,7 @@ impl ProjectContext<'_> {
     /// Never a guess. A generated document that said `http://localhost:3032`
     /// because that is the usual answer would be wrong on every deployment that
     /// is not this one, and wrong in the file a reader trusts most.
-    fn app_url_or_placeholder(&self) -> String {
+    pub(super) fn app_url_or_placeholder(&self) -> String {
         match &self.origin {
             Some(origin) => origin.url_for(&self.app.subdomain),
             None => format!("http://{}.<the server's base domain>", self.app.subdomain),
@@ -268,14 +268,6 @@ impl ProjectContext<'_> {
 pub fn runtime_files(ctx: &ProjectContext<'_>) -> Vec<GeneratedFile> {
     let mut files = vec![
         GeneratedFile::new(
-            format!("{REACT_RUNTIME_SUBDIR}/{REACT_CLIENT_FILE}"),
-            generate_client(ctx.endpoints),
-        ),
-        GeneratedFile::new(
-            format!("{REACT_RUNTIME_SUBDIR}/{CLIENT_HELPER_FILE}"),
-            client_helper(),
-        ),
-        GeneratedFile::new(
             format!("{REACT_RUNTIME_SUBDIR}/hooks.ts"),
             hooks_ts(ctx.tables, ctx.endpoints),
         ),
@@ -284,25 +276,66 @@ pub fn runtime_files(ctx: &ProjectContext<'_>) -> Vec<GeneratedFile> {
             store_ts(ctx.tables, ctx.endpoints),
         ),
         GeneratedFile::new(
-            format!("{REACT_RUNTIME_SUBDIR}/{RUNTIME_SCHEMA_FILE}"),
-            format!("{GENERATED_SQL_HEADER}{}", ctx.schema_sql),
-        ),
-        GeneratedFile::new(
             format!("{REACT_RUNTIME_SUBDIR}/{RUNTIME_README_FILE}"),
             runtime_readme(ctx),
         ),
+    ];
+    files.extend(common_runtime_files(
+        ctx,
+        REACT_RUNTIME_SUBDIR,
+        REACT_CLIENT_FILE,
+    ));
+    files
+}
+
+/// The half of the generated runtime that is **not** the framework's: the typed
+/// client, the helper it imports, the schema of the tables the app declares, the
+/// map of the administrative half — and, for an app that enables the GraphQL
+/// provider, its client and its schema.
+///
+/// Split out from [`runtime_files`] because a framework declared by a module
+/// needs exactly these files and must not write them itself. Every one of them is
+/// generated from the application's own [`EndpointSet`] by the same generator the
+/// admin SPA's client comes from; a module reproducing that would be a module
+/// free to disagree with this server about this server's API, and the disagreement
+/// would surface as a project that does not compile against its own client.
+///
+/// `runtime` is the directory they go in, relative to the **project**, and
+/// `client_file` what the client is called in it — both the framework's, so a
+/// declared one can put its generated code where its own conventions expect.
+///
+/// The GraphQL schema is written **only** for an app that enables the provider:
+/// an app without one has no GraphQL contract, and a `schema.graphql` sitting in
+/// its tree describing an API it does not serve would be a lie its editor
+/// believed.
+pub fn common_runtime_files(
+    ctx: &ProjectContext<'_>,
+    runtime: &str,
+    client_file: &str,
+) -> Vec<GeneratedFile> {
+    let at = |name: &str| {
+        if runtime.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{runtime}/{name}")
+        }
+    };
+    let mut files = vec![
+        GeneratedFile::new(at(client_file), generate_client(ctx.endpoints)),
+        GeneratedFile::new(at(CLIENT_HELPER_FILE), client_helper()),
         GeneratedFile::new(
-            format!("{REACT_RUNTIME_SUBDIR}/{RUNTIME_SKILL_FILE}"),
-            ctx.skill.to_owned(),
+            at(RUNTIME_SCHEMA_FILE),
+            format!("{GENERATED_SQL_HEADER}{}", ctx.schema_sql),
         ),
+        GeneratedFile::new(at(RUNTIME_SKILL_FILE), ctx.skill.to_owned()),
     ];
     if let Some(graphql) = ctx.graphql {
         files.push(GeneratedFile::new(
-            format!("{REACT_RUNTIME_SUBDIR}/{GRAPHQL_CLIENT_FILE}"),
+            at(GRAPHQL_CLIENT_FILE),
             generate_graphql_client(&graphql.mount),
         ));
         files.push(GeneratedFile::new(
-            format!("{REACT_RUNTIME_SUBDIR}/{GRAPHQL_SCHEMA_FILE}"),
+            at(GRAPHQL_SCHEMA_FILE),
             format!("{GENERATED_SDL_HEADER}{}", graphql.sdl),
         ));
     }
@@ -320,7 +353,7 @@ pub fn runtime_files(ctx: &ProjectContext<'_>) -> Vec<GeneratedFile> {
 /// value the client is generated from makes that class of mismatch unable to
 /// occur, where re-deriving it from the tables only made the two agree *by
 /// coincidence* while they happened to be computed the same way.
-fn exposed_tables<'a>(tables: &'a [Table], endpoints: &EndpointSet) -> Vec<&'a Table> {
+pub(super) fn exposed_tables<'a>(tables: &'a [Table], endpoints: &EndpointSet) -> Vec<&'a Table> {
     tables
         .iter()
         .filter(|t| endpoints.find(&op_name("list", &t.name)).is_some())
@@ -1528,14 +1561,14 @@ export default function {pascal}Page() {{
 /// required key with nothing behind it is now either minted in the browser, when
 /// it is a UUID and any client can produce one, or asked for, when it is
 /// anything else and only the person filling the form knows it.
-struct CreateForm<'a> {
+pub(super) struct CreateForm<'a> {
     /// The columns the form draws a control for, in declaration order.
-    inputs: Vec<&'a sc_catalog::DataField>,
+    pub(super) inputs: Vec<&'a sc_catalog::DataField>,
     /// Required key columns the page mints at submit time rather than asking
     /// for: `crypto.randomUUID()`. Typing a UUID into a text box is not a thing
     /// anyone should have to do, and a `const empty` holding one would hand
     /// every row the same key.
-    minted: Vec<&'a sc_catalog::DataField>,
+    pub(super) minted: Vec<&'a sc_catalog::DataField>,
 }
 
 impl<'a> CreateForm<'a> {
@@ -1546,7 +1579,7 @@ impl<'a> CreateForm<'a> {
     /// A table with no model (an API that registered none) falls back to the
     /// same rules read off the catalog, which is what the model is computed from
     /// in the first place.
-    fn of(table: &'a Table, endpoints: &EndpointSet) -> CreateForm<'a> {
+    pub(super) fn of(table: &'a Table, endpoints: &EndpointSet) -> CreateForm<'a> {
         let resource = endpoints.resource(&table.name);
         let mut form = CreateForm {
             inputs: Vec::new(),
@@ -1617,7 +1650,7 @@ impl<'a> CreateForm<'a> {
 
 /// Whether the app's API exposes `op` on `table` — the single question every
 /// "should this be generated?" decision here reduces to.
-fn has_op(endpoints: &EndpointSet, op: &str, table: &str) -> bool {
+pub(super) fn has_op(endpoints: &EndpointSet, op: &str, table: &str) -> bool {
     endpoints.find(&op_name(op, table)).is_some()
 }
 
@@ -2018,7 +2051,7 @@ fn store_ts(tables: &[Table], endpoints: &EndpointSet) -> String {
 
 /// Whether a table can have a store: one that cannot address, insert or delete a
 /// row cannot have a write applied to it locally either.
-fn storable(table: &Table, endpoints: &EndpointSet) -> bool {
+pub(super) fn storable(table: &Table, endpoints: &EndpointSet) -> bool {
     single_pk(table).is_some()
         && ["create", "update", "delete"]
             .iter()
@@ -2341,7 +2374,7 @@ fn used_row_types(table: &Table, endpoints: &EndpointSet) -> Vec<String> {
 /// from the column: this is the type the generated `update(id, …)` takes, and a
 /// second mapping here would be free to disagree with it — which is a hook that
 /// does not compile against the client it calls.
-fn key_ts_type(endpoints: &EndpointSet, table: &str) -> &'static str {
+pub(super) fn key_ts_type(endpoints: &EndpointSet, table: &str) -> &'static str {
     endpoints
         .resource(table)
         .and_then(|r| r.key_field())
@@ -2352,7 +2385,7 @@ fn key_ts_type(endpoints: &EndpointSet, table: &str) -> &'static str {
 ///
 /// Asked of the client generator rather than assumed, because it is the one that
 /// resolves a table whose name collides with an endpoint's.
-fn client_object(endpoints: &EndpointSet, table: &str) -> String {
+pub(super) fn client_object(endpoints: &EndpointSet, table: &str) -> String {
     client_property(endpoints, table).unwrap_or_else(|| table.to_owned())
 }
 
@@ -2365,7 +2398,7 @@ pub fn pascal(name: &str) -> String {
 }
 
 /// A human-facing heading for a table: `blog_posts` → `Blog posts`.
-fn title(name: &str) -> String {
+pub(super) fn title(name: &str) -> String {
     let mut words = name
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty());
@@ -2386,14 +2419,14 @@ fn title(name: &str) -> String {
 
 /// The table's single primary-key column, or `None` when its rows are not
 /// addressable (no key, or a composite one).
-fn single_pk(table: &Table) -> Option<String> {
+pub(super) fn single_pk(table: &Table) -> Option<String> {
     match table.primary_key.as_slice() {
         [pk] => Some(pk.clone()),
         _ => None,
     }
 }
 
-fn basic_type(field: &sc_catalog::DataField) -> BasicType {
+pub(super) fn basic_type(field: &sc_catalog::DataField) -> BasicType {
     field
         .base
         .type_
@@ -2403,7 +2436,7 @@ fn basic_type(field: &sc_catalog::DataField) -> BasicType {
 }
 
 /// The empty value a create form starts a column at.
-fn ts_empty(field: &sc_catalog::DataField) -> &'static str {
+pub(super) fn ts_empty(field: &sc_catalog::DataField) -> &'static str {
     match basic_type(field) {
         BasicType::Bool => "false",
         BasicType::Int | BasicType::Float | BasicType::Decimal => "0",

@@ -7,7 +7,9 @@ an Install button each.
 
 That is the whole idea. A Saltcorn server should not carry an RSS parser, a
 Markdown renderer, scikit-learn and a dozen other libraries on the chance that
-an application wants one — but an admin who wants one should not have to know a package name,
+an application wants one — and it should not have to carry a second front-end
+framework's opinions on the chance that somebody prefers them — but an admin who
+wants one should not have to know a package name,
 find it on a registry, or trust it. So the *code* travels with the server and
 the **dependencies do not**: `plugins/rss` is two files and a `package.json`
 naming `rss-parser`, and `rss-parser` is downloaded by npm at the moment the
@@ -19,6 +21,7 @@ runs nothing extra.
 | directory | package | language | supplies |
 |---|---|---|---|
 | `rss/` | `@feldspar/rss` | JavaScript | a table provider: an RSS or Atom feed as a read-only table |
+| `vue/` | `@feldspar/vue` | JavaScript | an application framework: build an app's UI in Vue 3 instead of React |
 | `markdown/` | `feldspar-markdown` | Python | two functions: Markdown to HTML, and a plain-text summary |
 | `sklearn/` | `feldspar-sklearn` | Python | five model providers: ridge, gradient boosting, SVM, DBSCAN and t-SNE |
 

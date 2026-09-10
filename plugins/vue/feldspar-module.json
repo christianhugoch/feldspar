@@ -1,0 +1,11 @@
+{
+  "name": "@feldspar/vue",
+  "language": "javascript",
+  "title": "Vue",
+  "description": "Build an application's UI in Vue 3 instead of React: the same scaffold, typed client and build, in Vue's idiom.",
+  "supplies": [
+    "An application framework, \"Vue\": pick it when creating an application, and Saltcorn writes a Vue 3 + Vite project with a page and typed composables for every table the app exposes."
+  ],
+  "installs": [],
+  "permissions": {}
+}

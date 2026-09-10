@@ -599,7 +599,10 @@ fn the_route_is_the_path_the_spa_connects_to() {
     // speak the same protocol, so each spells the route for itself and a page
     // connecting to the wrong path looks exactly like an agent that never
     // answers.
-    for client in ["../../ui/admin/src/agentChat.ts", "../../ui/ide/src/agentChat.ts"] {
+    for client in [
+        "../../ui/admin/src/agentChat.ts",
+        "../../ui/ide/src/agentChat.ts",
+    ] {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(client);
         let source = std::fs::read_to_string(&path).expect("read agentChat.ts");
         assert!(

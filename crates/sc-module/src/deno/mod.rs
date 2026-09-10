@@ -605,6 +605,35 @@ impl DenoModuleHost {
         .map_err(|e| denial(module, e))
     }
 
+    /// The files one of a module's **frameworks** generates for an application.
+    ///
+    /// Routed like [`run`](DenoModuleHost::run) for the same reason: the
+    /// generator is a closure the module built at load time, and a scaffold that
+    /// ran on another isolate would run against another copy of whatever the
+    /// module set up.
+    pub async fn framework_files(
+        &self,
+        module: &str,
+        framework: &str,
+        phase: &str,
+        context: &Json,
+    ) -> Result<Json> {
+        let index = self.worker_for(module).await;
+        self.send(
+            index,
+            json!({
+                "op": "framework_files",
+                "module": module,
+                "framework": framework,
+                "phase": phase,
+                "context": context,
+            }),
+            None,
+        )
+        .await
+        .map_err(|e| denial(module, e))
+    }
+
     /// **Predict** with one, over a frame of any height.
     pub async fn model_predict(
         &self,

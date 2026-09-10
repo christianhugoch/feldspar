@@ -349,12 +349,12 @@ async fn the_update_client_endpoint_regenerates_and_rescaffolds() -> sc_error::R
     assert_eq!(
         files,
         [
-            "todo/src/feldspar/client.ts",
-            "todo/src/feldspar/helper.ts",
             "todo/src/feldspar/hooks.ts",
             "todo/src/feldspar/store.ts",
-            "todo/src/feldspar/schema.sql",
             "todo/src/feldspar/README.md",
+            "todo/src/feldspar/client.ts",
+            "todo/src/feldspar/helper.ts",
+            "todo/src/feldspar/schema.sql",
             "todo/src/feldspar/SKILL.md",
         ],
         "{body}"

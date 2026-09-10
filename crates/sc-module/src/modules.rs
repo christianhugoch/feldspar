@@ -297,6 +297,7 @@ mod tests {
             functions: Vec::new(),
             table_providers: Vec::new(),
             model_providers: Vec::new(),
+            frameworks: Vec::new(),
             config_fields: Vec::new(),
             unsupported: vec![UnsupportedEntity {
                 key: "eventTypes".into(),

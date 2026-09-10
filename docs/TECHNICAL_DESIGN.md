@@ -148,6 +148,7 @@ graph TD
   python --> module
   python --> coreact
   module --> coreact
+  module --> app
   server --> workflow["sc-workflow"]
   workflow --> agent
   module --> action["sc-action"]
@@ -203,7 +204,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-llm` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
 | `sc-action` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-model` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
-| `sc-module` | `sc-action` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-model` `sc-query` `sc-types` |
+| `sc-module` | `sc-action` `sc-app` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-model` `sc-query` `sc-types` |
 | `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-model` `sc-module` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
 | `sc-workflow` | `sc-action` `sc-agent` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
@@ -4245,6 +4246,88 @@ A framework also supplies the **default CSP** for an app that does not state one
 (`framework_default_csp`), because a framework that chooses the build tooling knows what that
 tooling's output needs — `react` supplies the policy below, `code` and anything unrecognised
 get the strict baseline. A stated policy always wins.
+
+#### Frameworks a module declares
+
+The two frameworks above are Rust. §15.1's rule — every extension point but a database driver
+may be implemented in a guest language — applies to frameworks too, and the key is
+`frameworks`, beside `actions`, `table_providers` and `modelproviders`. `plugins/vue` is the
+bundled one: an application whose row says `framework = "vue"` is configured, validated,
+scaffolded, built, mounted and served by exactly the code that does all six for a `react` app.
+
+**The declaration is data; only the generator is a call.** Every question the admin UI asks a
+framework — its settings, its default CSP, where its source is — is asked *synchronously*, on
+the path that renders a form or resolves a build, and none of the answers depends on anything
+the module learns at run time. So they cross once, when the module loads, land in its manifest
+and are installed as values (`FrameworkDecl`, `sc-app`'s `declared` module); making them calls
+instead would have made `framework_config_spec` async and taken `app_source_from_config` and
+`framework_builder_agent` with it, into most of the admin API. The one genuine computation —
+the files a scaffold writes — stays a call (`FrameworkHost::framework_files`), on the path that
+was already asynchronous and already had a worker.
+
+```js
+frameworks: {
+  vue: {
+    label: "Vue",
+    description: "…",                       // the framework picker's sentence
+    config_fields: [ … ],                   // or a v1 `configuration_workflow`
+    build: {
+      store: "{{ store }}",                 // which setting names the file store
+      source: "{{ project }}",
+      output: "{{ project }}/dist",
+      command: "npm run build",
+      install: { command: "npm install", marker: "node_modules" },
+      runtime: "{{ project }}/src/feldspar",
+      client: "client.ts",
+    },
+    csp: { "img-src": ["'self'", "data:"] },  // widenings on the strict baseline
+    builder_prompt: "You maintain {{ app }} in {{ root }} …",
+    scaffold: async (ctx) => [{ path, contents }, …],  // the project, written once
+    runtime:  async (ctx) => [{ path, contents }, …],  // rewritten on every build
+  },
+}
+```
+
+The paths and the prompt are **`{{ }}` templates over the framework's own settings**, parsed by
+`sc-expr`'s one template parser — the same one an email subject, an ownership rule and a
+trigger's `only_if` go through — and rendered in a flat scope (`Template::render_static`,
+`Template::identifiers`), because the names in scope are settings rather than a row's columns.
+That is a *restriction* of the one language stated as an error, not a second grammar: a token
+that is anything but one name is refused when the module loads. A blank setting collapses the
+path segment it would have filled, so `react`'s "blank means the store root" is a property of
+deriving paths from a project name rather than a `react` rule, and a rendered path containing
+`..` is refused on save — `check_project_name` asked the other way round, since a declared
+framework's templates may be built from any of its settings.
+
+**What a module does not write.** `client.ts`, its helper, `schema.sql`, `SKILL.md` and the
+GraphQL client are generated from the application's own `EndpointSet` by the same generator the
+admin SPA's client comes from, and Saltcorn writes them into the framework's declared `runtime`
+directory for every framework. A module reproducing them would be a module free to disagree
+with this server about this server's API, and the disagreement would surface as a project that
+does not compile against its own client. What the module writes is the framework's idiom:
+React's `hooks.ts`, Vue's `composables.ts`, and the pages.
+
+Nor does a module serve. A built Vue app is a static bundle with an SPA fallback, which is what
+a built React app is, so `CodeFramework` serves both; a declared framework with no `build` is
+refused when the module loads, because this version serves a built bundle and nothing else.
+
+**The context the generator receives carries the derivations, not just the data.** Whether a
+page may offer a delete button, what a table hangs off the client as, which columns a create
+form asks for and which the database issues — each is a question answered *by asking the
+endpoint set*, and each has a wrong answer that looks right. A module re-deriving them from
+table shapes would agree with the generated client only by coincidence, and stop agreeing at
+the first table whose name collides with an endpoint or whose key is a UUID. So `ops`,
+`client`, `form.inputs`, `form.minted`, `pk_ts_type` and `control` cross as answers
+(`sc-app`'s `scaffold::context`).
+
+**Names are unqualified and share one namespace**, exactly as module actions and functions do,
+because an application *stores* one: the row says `vue`, not `@feldspar/vue:vue`. A module
+claiming `react`, `code`, or a name another loaded module already has loses **that framework**,
+with the reason on its card — and keeps its actions, which is the rule every facility key here
+follows.
+
+The registry is installed whole on every module change, beside the action registry and the
+table providers, so a framework that has just been uninstalled stops being offered.
 
 #### The agent that builds the application
 

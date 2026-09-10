@@ -23,6 +23,8 @@ mod app_store;
 mod build_app;
 #[path = "custom_query_store.rs"]
 mod custom_query_store;
+#[path = "declared_framework.rs"]
+mod declared_framework;
 #[path = "graphql_scaffold.rs"]
 mod graphql_scaffold;
 #[path = "scaffold_app.rs"]
