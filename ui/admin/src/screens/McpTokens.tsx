@@ -81,7 +81,7 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
       setForm(emptyMint(fields));
       setTokens(await api.listApiTokens());
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not mint the token.");
+      setError(e instanceof Error ? e.message : "Could not generate the token.");
     } finally {
       setBusy(false);
     }
@@ -119,7 +119,7 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
           <p className="card-subtitle text-secondary mb-0">
             Bearer credentials for the MCP server above, so a coding agent can read and change
             this installation's schema, triggers and applications. Each one runs with{" "}
-            <strong>your</strong> authority, bounded by the boxes ticked when it is minted.
+            <strong>your</strong> authority, bounded by the boxes ticked when it is generated.
           </p>
         </div>
       </div>
@@ -135,8 +135,7 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
             <AlertBody>
               The administration MCP server is turned off, so <code>{mcpUrl(origin)}</code>{" "}
               answers 404 and no token is looked at. Tick{" "}
-              <strong>Administration MCP server</strong> above and save before minting one —
-              a token minted now would authenticate against nothing.
+              <strong>Administration MCP server</strong> above and save before generating one .
             </AlertBody>
           </Alert>
         )}
@@ -147,7 +146,7 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
               <p className="mb-2">
                 <strong>This is the only time this token is shown.</strong> It is stored as a
                 hash, so nothing — not this screen, not the log, not the database — can read it
-                back. Copy the line below now; if you lose it, revoke the token and mint
+                back. Copy the line below now; if you lose it, revoke the token and generate
                 another.
               </p>
               <pre className="border rounded p-3 mb-2 text-wrap">{command}</pre>
@@ -167,7 +166,7 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
           <div className="mb-3">
             <p className="text-secondary mb-2">
               Register this server with a coding agent by running this, with a token of its own
-              in place of the placeholder — a minted token is shown in full exactly once, and
+              in place of the placeholder — a generated token is shown in full exactly once, and
               this line is shown with it.
             </p>
             <pre className="border rounded p-3 mb-2 text-wrap">{command}</pre>
@@ -222,8 +221,7 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
                   onChange={(e) => setForm({ ...form, expiresInDays: e.target.value })}
                 />
                 <Form.Text muted>
-                  Leave empty for a token that never lapses — which is a credential nobody has
-                  to remember to take away.
+                  Leave empty for a token that never lapses.
                 </Form.Text>
               </Form.Group>
 
@@ -231,13 +229,13 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
                 <div className="text-danger mb-2">{problem}</div>
               )}
               <Button type="submit" variant="outline-primary" disabled={busy || !!problem}>
-                {busy ? "Minting…" : "Mint token"}
+                {busy ? "Generating…" : "Generate token"}
               </Button>
             </form>
 
             <h4 className="mt-4 mb-2">Tokens</h4>
             {tokens.length === 0 ? (
-              <p className="text-secondary mb-0">No tokens have been minted.</p>
+              <p className="text-secondary mb-0">No active tokens.</p>
             ) : (
               <div className="table-responsive">
                 <table className="table table-vcenter">
@@ -292,12 +290,7 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
                 </table>
               </div>
             )}
-
-            <p className="text-secondary mt-3 mb-0">
-              A token is an administrator: it can do anything the boxes above allow, to
-              anything in this installation, for as long as it lasts. Revoking it is the only
-              way to take that back — changing your password does not.
-            </p>
+            
           </>
         )}
       </div>

@@ -338,11 +338,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                   value={name}
                   required
                   onChange={(e) => setName(e.target.value)}
-                />
-                <Form.Text muted>
-                  How everything else refers to this trigger — an application&apos;s API, a
-                  run button. Renaming it breaks those references deliberately.
-                </Form.Text>
+                />                
               </Form.Group>
             </Col>
             <Col md={6}>
@@ -353,9 +349,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                 roles={roles}
                 blank="Admin only"
                 onChange={setMinRole}
-              >
-                Who may run this trigger through an application&apos;s API: the least
-                privileged role still allowed.
+              >               
               </OptionalRoleSelect>
             </Col>
           </Row>
@@ -505,9 +499,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                   <option value="workflow">A workflow</option>
                 </Form.Select>
                 <Form.Text muted>
-                  A workflow is a program — steps, branches, loops, waits and human
-                  approvals — drawn on its own canvas and versioned, so a run that has
-                  been waiting since yesterday finishes on the version it started with.
+                  A workflow is a graphical representation of a durable program
                 </Form.Text>
               </Form.Group>
 

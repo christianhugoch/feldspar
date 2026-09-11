@@ -687,12 +687,7 @@ function Constraints({
     <Card className="mb-4">
       <Card.Header>Constraints and indexes</Card.Header>
       <Card.Body>
-        {error && <Alert variant="danger">{error}</Alert>}
-        <p className="text-muted">
-          Rules the database keeps this table&apos;s rows to, and indexes that make reading it
-          faster. They are enforced by the database itself, so they hold whichever way a row
-          is written.
-        </p>
+        {error && <Alert variant="danger">{error}</Alert>}        
         {listed.length > 0 && (
           <Table size="sm" hover responsive className="table-vcenter">
             <thead>
@@ -1234,7 +1229,7 @@ function Settings({
             <Col md={6}>
               <RoleSelect
                 id="tableReadRole"
-                label="Who can read rows"
+                label="Minimum role for full read access"
                 value={read}
                 roles={roles}
                 onChange={setRead}
@@ -1243,7 +1238,7 @@ function Settings({
             <Col md={6}>
               <RoleSelect
                 id="tableWriteRole"
-                label="Who can create, update and delete rows"
+                label="Minimum role for full write access"
                 value={write}
                 roles={roles}
                 onChange={setWrite}
@@ -1521,11 +1516,7 @@ function Fields({
             <AlertBody>
               <Alert.Heading className="h6">This table has no primary key</Alert.Heading>
               <p className="mb-0">
-                Its rows cannot be edited or deleted one at a time, no other table can
-                reference it, and an import cannot replace a row it already has. Add a field
-                and tick <strong>Primary key</strong> — an <code>int</code> key numbers itself
-                and a <code>uuid</code> key generates itself — or tick it on a field that is
-                already unique for every row.
+                Create a field and tick <strong>Primary key</strong> to enable table edits and keys fields ferencing this table.
               </p>
             </AlertBody>
           </Alert>

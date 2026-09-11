@@ -168,11 +168,7 @@ export function Agents() {
             </tbody>
           </Table>
         </div>
-
-        <p className="text-muted small mt-3">
-          Every tool an agent runs — reading a table, running a trigger — runs as the person
-          chatting with it. An agent is not a way around who may see what.
-        </p>
+        
       </PageBody>
     </>
   );

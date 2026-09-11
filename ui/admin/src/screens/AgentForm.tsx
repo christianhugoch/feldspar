@@ -217,11 +217,7 @@ export function AgentForm({ agentId }: { agentId?: string }) {
                 <Form.Label>
                   Name<span className="text-danger"> *</span>
                 </Form.Label>
-                <Form.Control value={name} required onChange={(e) => setName(e.target.value)} />
-                <Form.Text muted>
-                  How a trigger and the chat panel refer to this agent. Renaming it breaks
-                  those references deliberately.
-                </Form.Text>
+                <Form.Control value={name} required onChange={(e) => setName(e.target.value)} />                
               </Form.Group>
             </Col>
             <Col md={6}>
@@ -233,7 +229,6 @@ export function AgentForm({ agentId }: { agentId?: string }) {
                 blank="Admin only"
                 onChange={setMinRole}
               >
-                Who may chat with this agent: the least privileged role still allowed.
               </OptionalRoleSelect>
             </Col>
           </Row>

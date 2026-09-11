@@ -42,19 +42,13 @@ pub fn development_section() -> ConfigSection {
     ConfigSection {
         name: "development",
         label: "Development",
-        description: "What this server prints while it runs, and whether an external coding \
-                      agent may administer it. Every setting here takes effect immediately — \
-                      nothing needs a restart — and every one of them is for working on an \
-                      installation, not for leaving on.",
+        description: "Settings for logging and MCP server availability",
         fields: vec![
             ConfigDef::help(
                 FormField::new(LOG_SQL, BasicType::Bool)
                     .label("Log SQL")
                     .default_value(false),
-                "Print every statement this server sends to the database — with its bind \
-                 parameters — to stdout. Those parameters are the data: password hashes, \
-                 session tokens and every row that passes through. Leave it off on anything \
-                 whose output is kept.",
+                "Print executed SQL to stdout",
             ),
             ConfigDef::help(
                 FormField::new(LOG_VERBOSITY, BasicType::Text)
@@ -62,12 +56,9 @@ pub fn development_section() -> ConfigSection {
                     .options(Verbosity::ALL.map(Verbosity::as_str))
                     .default_value(sc_log::DEFAULT_VERBOSITY.as_str()),
                 "How much is printed to stderr. error is failures only; warning adds what is \
-                 about to fail; info logs every server request — one line each with its \
-                 method, path, status and duration — and every LLM call with its token cost; \
-                 verbose also logs a request and a model call as they start, so one that hangs \
-                 is visible before it finishes; trace adds the whole of what an LLM was sent \
-                 and answered and every tool call's arguments and result, which is a \
-                 transcript of what the people using an agent typed.",
+                 about to fail; info logs every server request; \
+                 verbose also logs a request and a model call as they starts; trace adds full LLM \
+                 request and response",
             ),
             // §13.6. Off by default, and off means *absent*: the route answers
             // 404 and never reads the token table, so a disabled feature is not
@@ -77,22 +68,13 @@ pub fn development_section() -> ConfigSection {
                     .label("Administration MCP server")
                     .default_value(false),
                 "Serve POST /mcp, so an external coding agent holding an API token can read \
-                 and change this installation's schema, triggers and applications. A token is \
-                 an administrator: it runs with the full authority of the admin who minted it, \
-                 bounded only by the grants ticked when it was made. Off means the route \
-                 answers 404 and no token is looked at. Mint and revoke tokens below.",
+                 and change this installation's schema, triggers and applications. Generate and revoke tokens below.",
             ),
             ConfigDef::help(
                 FormField::new(MCP_LOOPBACK_ONLY, BasicType::Bool)
                     .label("MCP from this machine only")
                     .default_value(true),
-                "Refuse an MCP request whose peer is not on this machine. The usual \
-                 arrangement is an agent running beside the server or reaching it down a \
-                 tunnel the developer made, and an installation that will never be \
-                 administered from elsewhere should be able to say so here rather than in a \
-                 reverse proxy. Turn it off only if the agent genuinely runs on another host — \
-                 and note that a proxy in front of this server is itself a local peer, so the \
-                 check protects nothing an untrusted proxy forwards.",
+                "Refuse an MCP request whose peer is not on this machine.",
             ),
         ],
     }

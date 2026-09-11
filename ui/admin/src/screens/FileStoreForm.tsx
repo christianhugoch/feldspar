@@ -206,23 +206,18 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
                   required
                   onChange={(e) => setName(e.target.value)}
                 />
-                <Form.Text muted>
-                  How everything else refers to this store — a field, an application, the file
-                  manager.
-                </Form.Text>
+                
               </Form.Group>
             </Col>
             <Col md={6}>
               <OptionalRoleSelect
                 id="storeMinRole"
-                label="Minimum role"
+                label="Minimum role to access"
                 value={minRole}
                 roles={roles}
                 blank="Unrestricted"
                 onChange={setMinRole}
-              >
-                The least privileged role still allowed. Unrestricted means no store-wide
-                rule. Applies before any per-file rule.
+              >               
               </OptionalRoleSelect>
             </Col>
           </Row>

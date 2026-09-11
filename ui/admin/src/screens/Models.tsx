@@ -205,13 +205,7 @@ export function Models() {
             </tbody>
           </Table>
         </div>
-
-        <p className="text-muted small mt-3">
-          A dataset belongs to its model rather than standing on its own, so two models over
-          the same columns are two models — copy one by opening it and saving it under a new
-          name. One fit per model may be <strong>active</strong>, which is what lets a trigger
-          name the model rather than the fit.
-        </p>
+       
       </PageBody>
     </>
   );
