@@ -264,8 +264,13 @@ function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) 
               colours to keep. */}
           <div className="navbar-brand">
             <a href="#/tables" className="d-flex align-items-center gap-2" aria-label="Saltcorn">
-              <SaltcornLogo />
-              <span>Saltcorn</span>
+              <div className="d-flex">
+                <SaltcornLogo />
+                <div className="ms-2">
+                <div className="saltcorn-label">Saltcorn</div>
+                <div className="feldspar-label">Feldspar</div>
+                </div>
+              </div>
             </a>
           </div>
           {/* On a narrow screen the collapse is shut by default, so the account

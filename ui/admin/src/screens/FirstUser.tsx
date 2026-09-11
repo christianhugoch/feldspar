@@ -36,7 +36,10 @@ export function FirstUser({ onCreated }: { onCreated: () => void }) {
       <div className="text-center mb-4">
         <span className="navbar-brand d-inline-flex align-items-center gap-2">
           <SaltcornLogo className="h-6" />
-          <span className="h1 mb-0">Saltcorn</span>
+            <div className="ms-2 login-logo">
+              <div className="saltcorn-label">Saltcorn</div>
+              <div className="feldspar-label">Feldspar</div>
+            </div>
         </span>
       </div>
       <Card className="card-md">
