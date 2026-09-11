@@ -153,7 +153,7 @@ fn user_tables(catalog: &Catalog) -> Vec<Table> {
         .tables()
         .unwrap_or_default()
         .into_iter()
-        .filter(|t| !t.is_system())
+        .filter(|t| !t.is_hidden())
         .collect()
 }
 

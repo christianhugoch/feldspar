@@ -190,7 +190,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let tables = catalog.tables()?;
                 let out: Vec<Json> = tables
                     .iter()
-                    .filter(|t| !t.is_system())
+                    .filter(|t| !t.is_hidden())
                     .map(|t| table_json(&catalog, t, rls))
                     .collect();
                 Ok(HandlerResponse::ok(Json::Array(out)))
@@ -285,6 +285,12 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     sc_api::provided_tables::forget(&catalog, &table).await?;
                     return Ok(HandlerResponse::ok(json!({ "dropped": table })));
                 }
+                // A **metadata** table is Saltcorn's and is never dropped:
+                // "delete" takes it off the tables list, and nothing else.
+                if catalog.get(&table)?.is_some_and(|t| t.is_metadata()) {
+                    sc_api::metadata_tables::remove(&catalog, &table).await?;
+                    return Ok(HandlerResponse::ok(json!({ "dropped": table })));
+                }
                 schema_edit::apply(
                     &catalog,
                     &[schema_edit::Operation::DropTable {
@@ -332,6 +338,35 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     &catalog.require(&table.name)?,
                     rls,
                 )))
+            }
+        }
+    });
+
+    // --- metadata tables ------------------------------------------------------
+
+    reg.register("listMetadataTables", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let names = sc_api::metadata_tables::available(&catalog)?;
+                Ok(HandlerResponse::ok(json!(names)))
+            }
+        }
+    });
+
+    reg.register("createMetadataTable", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let obj = require_object(&ctx.body)?;
+                let name = non_empty_str_field(obj, "name")?.to_owned();
+                // No DDL and no settings: the table is already there, and this
+                // writes the row that puts it in the list.
+                let table = sc_api::metadata_tables::add(&catalog, &name).await?;
+                let rls = catalog.primary().capabilities().row_level_security;
+                Ok(HandlerResponse::ok(table_json(&catalog, &table, rls)).with_status(201))
             }
         }
     });
@@ -842,6 +877,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     Some(&admin_caller(ctx.user.as_ref())),
                 )
                 .await?;
+                sc_api::metadata_tables::after_row_write(&catalog, &table).await?;
                 Ok(HandlerResponse::ok(row).with_status(201))
             }
         }
@@ -862,6 +898,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     Some(&admin_caller(ctx.user.as_ref())),
                 )
                 .await?;
+                sc_api::metadata_tables::after_row_write(&catalog, &table).await?;
                 Ok(HandlerResponse::ok(row))
             }
         }
@@ -878,6 +915,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // acknowledges, as it does for every other delete it serves.
                 rows::delete_row_ctx(&catalog, &table, id, Some(&admin_caller(ctx.user.as_ref())))
                     .await?;
+                sc_api::metadata_tables::after_row_write(&catalog, &table).await?;
                 Ok(HandlerResponse::ok(json!({ "deleted": true })))
             }
         }
@@ -926,6 +964,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     Some(&admin_caller(ctx.user.as_ref())),
                 )
                 .await?;
+                // An import is row by row, so any row that went in counts.
+                if outcome.inserted + outcome.updated > 0 {
+                    sc_api::metadata_tables::after_row_write(&catalog, &table).await?;
+                }
                 Ok(HandlerResponse::ok(json!({
                     "inserted": outcome.inserted,
                     "updated": outcome.updated,
@@ -6712,13 +6754,15 @@ pub(crate) fn table_json(catalog: &Catalog, table: &Table, rls_available: bool) 
         // toggle that can only ever be refused is not a setting, it is a trap.
         "rls_available": rls_available
             && table.database == sc_catalog::DbId::primary()
-            && table.provider().is_none(),
+            && table.provider().is_none()
+            && !table.is_metadata(),
         // Which database hosts it: `primary` for Saltcorn's own, otherwise the
         // name of the connection an admin added. The list screen shows anything
         // that is not the primary as a badge beside the table's name, because a
         // list mixing two databases and saying so nowhere would be a list an
         // admin could act on wrongly.
         "database": table.database.0,
+        "metadata": table.is_metadata(),
         // The table provider serving its rows, or null (§8.3).
         "provider": provided_json(catalog, table),
     })

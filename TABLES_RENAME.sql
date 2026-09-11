@@ -77,6 +77,12 @@ ALTER TABLE IF EXISTS "_sc_sessions"          RENAME TO "_fd_sessions";
 ALTER TABLE IF EXISTS "_sc_api_tokens"        RENAME TO "_fd_api_tokens";
 ALTER TABLE IF EXISTS "_sc_db_connections"    RENAME TO "_fd_db_connections";
 ALTER TABLE IF EXISTS "_sc_file_stores"       RENAME TO "_fd_file_stores";
+-- Left behind by the one-time session grants `feldspar auth token` used to
+-- need (removed; see TECHNICAL_DESIGN "It writes the session itself"). Nothing
+-- reads it any more, but a database that ever had it still does, and an
+-- `_sc_*` table is an ordinary table to Feldspar — so it would be listed as
+-- one. Renamed with the rest, it is a hidden metadata table like them.
+ALTER TABLE IF EXISTS "_sc_session_grants"    RENAME TO "_fd_session_grants";
 -- Present only in a SQLite database (Postgres has native COMMENT ON), listed
 -- here so the set is complete; it is a no-op on Postgres.
 ALTER TABLE IF EXISTS "_sc_object_comments"   RENAME TO "_fd_object_comments";
@@ -211,6 +217,7 @@ COMMIT;
 --   ALTER TABLE "_sc_api_tokens"        RENAME TO "_fd_api_tokens";
 --   ALTER TABLE "_sc_db_connections"    RENAME TO "_fd_db_connections";
 --   ALTER TABLE "_sc_file_stores"       RENAME TO "_fd_file_stores";
+--   ALTER TABLE "_sc_session_grants"    RENAME TO "_fd_session_grants";
 --   ALTER TABLE "_sc_object_comments"   RENAME TO "_fd_object_comments";
 --   COMMIT;
 

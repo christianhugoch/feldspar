@@ -42,6 +42,7 @@ pub mod filter;
 // build an application's configuration half, shared by the built-in copilot
 // agent and the administration MCP server.
 pub mod mcp;
+pub mod metadata_tables;
 pub mod provided_tables;
 pub mod query_string;
 pub mod rows;

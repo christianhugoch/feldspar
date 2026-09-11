@@ -10,11 +10,17 @@
 // because the *name* is asked for in all three cases, so three buttons on the
 // list page would have been three places to ask it.
 //
+// A fourth choice does not make a table at all: a **metadata table** is one of
+// Saltcorn's own `_fd_*` tables, already in the database, added to the tables
+// list so its rows and settings can be edited. It is here because it ends in the
+// same place — a table on the list — but it asks nothing, not even a name: the
+// table already has one, and a label can be given on its settings page.
+//
 // The rules here are the ones a test can pin without a browser: when the Create
 // button may be pressed, and what a chosen file suggests the table be called.
 
-/** Which of the three things the dialog is making. */
-export type NewTableSource = "blank" | "csv" | "provider";
+/** Which of the four things the dialog is making. */
+export type NewTableSource = "blank" | "csv" | "provider" | "metadata";
 
 /** What the dialog holds while it is open. */
 export type NewTableForm = {
@@ -35,6 +41,8 @@ export type NewTableForm = {
   /** The values typed into the provider's own settings form, keyed by setting
    * name, as `SettingsFields` holds them. */
   providerConfig: Record<string, string>;
+  /** For `source === "metadata"`: which `_fd_*` table to add to the list. */
+  metadataTable: string;
 };
 
 /** The `database` that means Saltcorn's own. */
@@ -48,6 +56,7 @@ export const EMPTY_NEW_TABLE_FORM: NewTableForm = {
   database: PRIMARY_DATABASE,
   provider: "",
   providerConfig: {},
+  metadataTable: "",
 };
 
 /** The separator inside a `NewTableForm["provider"]` — see the field. */
@@ -102,6 +111,10 @@ export function databaseLabel(name: string): string {
  * failure mode of every dialog that only returns the boolean.
  */
 export function newTableError(form: NewTableForm): string | null {
+  // A metadata table already has its name and is in Saltcorn's own database,
+  // so the one question is which.
+  if (form.source === "metadata")
+    return form.metadataTable ? null : "Choose the metadata table to add.";
   if (!form.name.trim()) return "The table needs a name.";
   if (form.source === "csv" && !form.file) return "Choose a CSV file to create the table from.";
   if (form.source === "provider" && !splitProviderKey(form.provider))

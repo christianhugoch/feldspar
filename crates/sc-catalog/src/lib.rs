@@ -86,7 +86,8 @@ pub use rls::{
 };
 pub use table::{AccessRules, FieldMergeIssue, Table, TableSource};
 pub use table_meta::{
-    ATTR_OWNERSHIP_FORMULA, ATTR_PROVIDER_CONFIG, ATTR_PROVIDER_MODULE, ATTR_PROVIDER_NAME,
+    ATTR_METADATA_TABLE, ATTR_OWNERSHIP_FORMULA, ATTR_PROVIDER_CONFIG, ATTR_PROVIDER_MODULE,
+    ATTR_PROVIDER_NAME,
     ATTR_RLS_ENABLED, ProvidedTableDef, TABLE_META_TABLE, TableMeta, TableMetaId,
     bootstrap_table_meta, delete_table_meta, list_table_meta, load_table_meta,
     load_table_meta_by_name, orphan_table_meta, save_table_meta, save_table_meta_row,

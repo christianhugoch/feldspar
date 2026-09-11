@@ -635,6 +635,15 @@ pub async fn forget_table_settings(catalog: &Catalog, table: &str) -> Result<boo
             def.provider, def.module
         )));
     }
+    // A **metadata** table's row is what puts it in the tables list, so
+    // forgetting it is removing the table from the list — the other verb again.
+    if meta.is_metadata_table() {
+        return Err(Error::invalid(format!(
+            "`{table}` is one of Saltcorn's metadata tables, and its stored row is what puts it \
+             in the tables list: forgetting it would remove it from the list. Remove the table \
+             from the list instead if that is what you meant."
+        )));
+    }
     if !sc_catalog::delete_table_meta(catalog, meta.id).await? {
         return Ok(false);
     }
@@ -986,7 +995,7 @@ impl Plan {
         table: &str,
         settings: &TableSettings,
     ) -> Result<()> {
-        self.require_editable(table)?;
+        self.require_configurable(table)?;
         if settings.is_empty() {
             return Err(Error::invalid(
                 "nothing to change; name at least one setting",
@@ -1078,6 +1087,15 @@ impl Plan {
                     "table `{table}` is served by the table provider `{provider}` of \
                      `{module}`; row-level security is enforced by the database, and this \
                      table's rows are not in one. Its ownership formula still applies."
+                )));
+            }
+            // Nor on a **metadata** table: the policies are `FORCE`d on every
+            // reader, and Saltcorn is one of this table's readers.
+            if enabled && self.projection.get(table).is_some_and(|t| t.is_metadata()) {
+                return Err(Error::invalid(format!(
+                    "table `{table}` is one of Saltcorn's metadata tables: row-level security \
+                     is forced on every reader, Saltcorn included, so enabling it would lock \
+                     the server out of its own metadata. Its ownership formula still applies."
                 )));
             }
             meta.set_rls_enabled(enabled);
@@ -1670,6 +1688,17 @@ impl Plan {
 
     // --- shared checks --------------------------------------------------------
 
+    /// What `alter_table` needs: [`require_editable`](Self::require_editable),
+    /// except that a system table an admin has added as a **metadata table** may
+    /// have its settings changed — its settings are the admin's, its schema is
+    /// not.
+    fn require_configurable(&self, table: &str) -> Result<()> {
+        if self.projection.get(table).is_some_and(|t| t.is_metadata()) {
+            return Ok(());
+        }
+        self.require_editable(table)
+    }
+
     /// The table exists, is not a system table, and is not one this batch has
     /// already dropped.
     fn require_editable(&self, table: &str) -> Result<()> {
@@ -1855,7 +1884,7 @@ impl Plan {
         self.projection
             .tables()
             .iter()
-            .filter(|t| !t.is_system())
+            .filter(|t| !t.is_hidden())
             .map(|t| t.name.clone())
             .collect()
     }

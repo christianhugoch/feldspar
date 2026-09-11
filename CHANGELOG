@@ -2,6 +2,71 @@
 
 Changes in reverse chronological order.
 
+## Metadata tables in the tables list
+
+The **New table** dialog has a fourth type, **Metadata table**: a second
+dropdown lists Saltcorn's own `_fd_*` tables (`_fd_triggers`, `_fd_file_stores`,
+…) not yet on the list, and Create puts the chosen one there. Nothing else is
+asked — no name, no database, no settings — because the table already exists.
+On its page the admin can then set its label, description, read/write roles and
+ownership formula, edit its rows, and download or upload CSV. Its fields and
+constraints are read-only, and it has no RLS toggle.
+
+- **It is the system table itself, not an alias.** A `_fd_tables` row for an
+  `_fd_*` table used to be refused. It is now allowed when it carries the new
+  `metadata_table: true` attribute (`sc_catalog::ATTR_METADATA_TABLE`), and
+  `Table::apply_overlay` merges such a row onto the introspected system table.
+  An alias under a user-chosen name would have needed every query path (row
+  layer, transactions, GraphQL, REST, RLS) to translate the name. Using the real
+  name needs none of that.
+- **"Hidden" and "schema locked" are now two questions.** `Table::is_system()`
+  still means "the schema is Saltcorn's", so the schema editor and
+  `save_field_meta` still refuse every field, constraint and drop operation.
+  The new `Table::is_hidden()` (system and not exposed) decides what the tables
+  listing, the MCP schema tools and the schema editor's table-name list leave
+  out. `Table::is_metadata()` is the exposed case.
+- **Settings go through the ordinary `updateTable`.** The schema editor's
+  `alter_table` accepts a metadata table (`require_configurable`). Everything
+  else keeps `require_editable`.
+- **No row-level security on a metadata table.** RLS policies are installed with
+  `FORCE ROW LEVEL SECURITY`, so they would also apply to the server's own reads
+  of its metadata. The schema editor refuses the setting with that reason, and
+  `save_table_meta_row` refuses to store it. `rls_available` is false for these
+  tables, so the toggle is not shown.
+- **Removing is not dropping.** `dropTable` on a metadata table calls
+  `sc_api::metadata_tables::remove`, which deletes the exposing row. The table
+  returns to hidden and admin-only, and its rows stay. The page's menu calls
+  this "Remove from tables list", and "Forget settings" is refused for these
+  tables because it would do the same thing.
+- New endpoints: `listMetadataTables` (`GET /api/metadata-tables`) and
+  `createMetadataTable` (`POST /api/tables/metadata`). The table listing gains
+  a `metadata` flag, shown as a badge in the list.
+- Tests: `sc-server/tests/metadata_tables_api.rs` covers the flow end to end
+  over HTTP (add, configure, the RLS refusal, row insert/count/CSV, the field
+  refusal, the forget refusal, removal). A `table_meta` unit test covers the
+  save rules, and `newTable.test.ts` covers the dialog's validation.
+- **Edits to the rows the catalog is built from take effect immediately.**
+  After a create, update, delete or CSV import through the admin row endpoints,
+  `sc_api::metadata_tables::after_row_write` reloads the catalog when the table
+  is a metadata table that `Catalog::reload` reads. The new
+  `Catalog::reload_reads` says which ones: `_fd_tables` and `_fd_fields`. There
+  is no partial reload, so this reloads the whole catalog. A write to any other
+  metadata table (`_fd_runs`, `_fd_file_stores`, …) or to an ordinary table
+  reloads nothing. The test asserts both with `Catalog::generation`.
+- **Known gaps.** A row edited here skips the validation the dedicated screens
+  do. State built from the other metadata tables is not refreshed: an edited
+  trigger waits for the next trigger reload. The same goes for
+  `_fd_file_stores` and `_fd_db_connections`: their catalog registries are
+  filled by `connect_all_*`, which `reload` does not call and which never drops
+  a store or connection whose row is gone. A backup does not carry the exposing
+  row, because backups skip system tables.
+- **`TABLES_RENAME.sql` now also renames `_sc_session_grants`.** The table is
+  left over from the removed session-grant feature and the rename script missed
+  it. Feldspar treats `_sc_*` as ordinary (v1) tables, so a database that still
+  had it showed it in the tables list no matter what. After the rename it is
+  `_fd_session_grants`: hidden, and offered in the "Metadata table" dropdown
+  like the other `_fd_*` tables.
+
 ## Application frameworks declared by a module, and Vue as one
 
 An application's UI framework no longer has to be written in Rust. A JavaScript

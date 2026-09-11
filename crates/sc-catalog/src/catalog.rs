@@ -502,6 +502,17 @@ impl Catalog {
         Ok(())
     }
 
+    /// Whether [`reload`](Self::reload) reads the system table `name` — that is,
+    /// whether a change to its rows changes what the catalog presents. Only the
+    /// two overlay tables: everything else `reload` knows, it introspects.
+    ///
+    /// A caller writing such a table's rows directly (not through
+    /// `save_table_meta` / `save_field_meta`, which reload themselves) reloads
+    /// when this says so, and not otherwise.
+    pub fn reload_reads(name: &str) -> bool {
+        name == TABLE_META_TABLE || name == FIELD_META_TABLE
+    }
+
     /// How many times this catalog has been loaded — the **generation stamp**
     /// (see [`generation`](Catalog::generation)). One past the last reload, and
     /// therefore never 0 on a catalog that [`init`](Catalog::init) built.

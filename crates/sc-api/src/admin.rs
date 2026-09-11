@@ -166,6 +166,37 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- metadata tables ------------------------------------------------------
+    //
+    // One of Saltcorn's own `_fd_*` tables, added to the tables list so that its
+    // rows and settings can be edited — never its schema. Listing what could be
+    // added, and adding one; removing one is `dropTable`, which forgets the row
+    // that put it in the list rather than dropping anything.
+
+    set.register(
+        Endpoint::new(
+            "listMetadataTables",
+            Method::Get,
+            api().lit("metadata-tables"),
+        )
+        .output(TypeSchema::array(TypeSchema::text()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "createMetadataTable",
+            Method::Post,
+            api().lit("tables").lit("metadata"),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "name",
+            TypeSchema::text(),
+        )]))
+        .output(table_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- table providers (§8.3) ---------------------------------------------
     //
     // A **provided** table is one whose rows come from a module rather than from
@@ -2680,6 +2711,9 @@ fn table_schema() -> TypeSchema {
     // it came from (§5's Connections). Reported on every table rather than only
     // on foreign ones, so a client never has to read absence as "the primary".
     fields.push(StructField::new("database", TypeSchema::text()));
+    // Whether this is one of Saltcorn's own metadata tables, added to the list:
+    // its rows and settings are editable, its fields and constraints are not.
+    fields.push(StructField::new("metadata", TypeSchema::bool()));
     // The table provider serving its rows, or null for a table in a database
     // (§8.3). Present on every table rather than only on provided ones, so a
     // client never has to read absence as "it is in a database".

@@ -53,6 +53,21 @@
 //! is no fact of the database for its row to contradict. The design anticipated
 //! it — §9's `_fd_tables` line reads "access rules, label/description,
 //! attributes, **provided-table defs**".
+//!
+//! ## The other exception: a **metadata table** is a system table made visible
+//!
+//! A row naming an `_fd_*` table is refused — unless it carries
+//! [`ATTR_METADATA_TABLE`]. Such a row is how an admin puts one of Saltcorn's
+//! own metadata tables (`_fd_triggers`, `_fd_file_stores`, …) in the tables
+//! list, with its rows editable and its access rules, ownership formula, label
+//! and description theirs to set like any other table's. What it does *not*
+//! make configurable is the table's shape: the schema is Saltcorn's, so its
+//! fields take no overlay ([`save_field_meta`](crate::save_field_meta) still
+//! refuses them) and the schema editor still refuses every DDL operation. Nor
+//! can it switch on row-level security, which is enforced with
+//! `FORCE ROW LEVEL SECURITY` and would therefore apply to the server's own
+//! reads of its metadata. Deleting the row hides the table again; the table
+//! itself, being Saltcorn's, is never dropped.
 
 use sc_db::Row;
 use sc_error::{Error, Result};
@@ -97,6 +112,11 @@ pub const ATTR_PROVIDER_NAME: &str = "provider_name";
 /// Attribute key holding the provider's configuration — the object handed to
 /// v1's `fields(cfg)` and `get_table(cfg)`.
 pub const ATTR_PROVIDER_CONFIG: &str = "provider_config";
+
+/// Attribute key marking a row for an `_fd_*` table as the admin's choice to
+/// show that **metadata table** in the tables list (see the module docs).
+/// `true` when set; absent otherwise.
+pub const ATTR_METADATA_TABLE: &str = "metadata_table";
 
 /// What makes a `_fd_tables` row a **definition** rather than an overlay: the
 /// module, the provider within it, and the configuration an admin filled in.
@@ -338,6 +358,34 @@ impl TableMeta {
             }
         }
     }
+
+    // --- metadata tables ----------------------------------------------------
+
+    /// Whether this row exposes a system (`_fd_*`) table as a **metadata
+    /// table** an admin can see and configure.
+    pub fn is_metadata_table(&self) -> bool {
+        is_metadata_flag(&self.attributes)
+    }
+
+    /// Mark or unmark the row as exposing a metadata table (`false` removes the
+    /// key — absence is the false state).
+    pub fn set_metadata_table(&mut self, exposed: bool) {
+        if exposed {
+            self.attributes
+                .insert(ATTR_METADATA_TABLE.into(), Json::Bool(true));
+        } else {
+            self.attributes.remove(ATTR_METADATA_TABLE);
+        }
+    }
+}
+
+/// Whether a set of table attributes carries the metadata-table flag — shared
+/// by the stored row and the merged [`Table`], whose attributes are the row's.
+pub(crate) fn is_metadata_flag(attributes: &Attrs) -> bool {
+    attributes
+        .get(ATTR_METADATA_TABLE)
+        .and_then(Json::as_bool)
+        .unwrap_or(false)
 }
 
 /// A non-empty string attribute, or `None` — the shape both provider names have
@@ -398,9 +446,12 @@ pub async fn bootstrap_table_meta(catalog: &Catalog) -> Result<Table> {
 /// - **Roles in `1..=100`** — the role scale is fixed (`sc-auth`), so an
 ///   out-of-range role is not a value to clamp; clamping would silently decide
 ///   who can reach the data.
-/// - **Not a system table** — `_fd_*` tables are hidden from users (§9); their
-///   access is not the admin's to configure, and refusing the row means the
-///   merge never has to decide what to do with one.
+/// - **Not a system table**, unless the row exposes it as a metadata table —
+///   `_fd_*` tables are hidden from users (§9) until an admin chooses to show
+///   one, and refusing any other row means the merge never has to decide what
+///   to do with one. An exposed row may not turn on RLS (see the module docs)
+///   nor name a table provider, and the flag means nothing on a table that is
+///   not a system table, so it is refused there rather than stored as residue.
 /// - **The name is not already claimed by another row** — the database's
 ///   `UNIQUE` constraint remains the authority, but this check names the
 ///   conflict rather than surfacing a raw constraint violation.
@@ -429,11 +480,7 @@ pub async fn save_table_meta_row(catalog: &Catalog, meta: &TableMeta) -> Result<
     if name.is_empty() {
         return Err(Error::invalid("a table overlay needs a table name"));
     }
-    if name.starts_with("_fd_") {
-        return Err(Error::invalid(format!(
-            "`{name}` is a system table; its access rules are not configurable"
-        )));
-    }
+    check_metadata_rules(name, meta)?;
     validate_access(name, &meta.access)?;
 
     if let Some(other) = load_table_meta_by_name(catalog, name).await?
@@ -546,6 +593,31 @@ pub(crate) async fn delete_table_meta_row(catalog: &Catalog, id: TableMetaId) ->
     let delete = Delete::from(TABLE_META_TABLE).filter(Expr::col(COL_ID).eq(Expr::lit(id.0)));
     run(catalog, Statement::from(delete)).await?;
     Ok(true)
+}
+
+/// The system-table half of [`save_table_meta_row`]'s checks: a row for an
+/// `_fd_*` table must expose it as a metadata table, and a row exposing one
+/// must be for an `_fd_*` table, carry no provider and leave RLS off.
+fn check_metadata_rules(name: &str, meta: &TableMeta) -> Result<()> {
+    let system = name.starts_with("_fd_");
+    match (system, meta.is_metadata_table()) {
+        (true, false) => Err(Error::invalid(format!(
+            "`{name}` is a system table; its access rules are not configurable until it is \
+             added as a metadata table"
+        ))),
+        (false, true) => Err(Error::invalid(format!(
+            "`{name}` is not one of Saltcorn's metadata tables, so it cannot be added as one"
+        ))),
+        (true, true) if meta.provider().is_some() => Err(Error::invalid(format!(
+            "`{name}` is a metadata table; it cannot also be served by a table provider"
+        ))),
+        (true, true) if meta.rls_enabled() => Err(Error::invalid(format!(
+            "`{name}` is a metadata table: row-level security is forced on every reader, \
+             Saltcorn included, so enabling it would lock the server out of its own metadata. \
+             Its roles and ownership formula still apply."
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// Check both roles are on the `1..=100` scale, naming the table and which role
@@ -856,6 +928,36 @@ mod tests {
         meta.attributes
             .insert(ATTR_PROVIDER_NAME.into(), Json::String("  ".into()));
         assert_eq!(meta.provider(), None);
+    }
+
+    #[test]
+    fn a_system_table_takes_a_row_only_as_a_metadata_table() {
+        let mut meta = TableMeta::new("_fd_triggers");
+        let err = check_metadata_rules("_fd_triggers", &meta).unwrap_err();
+        assert!(err.to_string().contains("system table"), "{err}");
+
+        meta.set_metadata_table(true);
+        assert!(meta.is_metadata_table());
+        assert!(check_metadata_rules("_fd_triggers", &meta).is_ok());
+
+        // RLS is FORCE'd on every reader, the server included.
+        meta.set_rls_enabled(true);
+        let err = check_metadata_rules("_fd_triggers", &meta).unwrap_err();
+        assert!(err.to_string().contains("row-level security"), "{err}");
+        meta.set_rls_enabled(false);
+
+        meta.set_provider(Some(&ProvidedTableDef::new("@saltcorn/rss", "RSS feed")));
+        assert!(check_metadata_rules("_fd_triggers", &meta).is_err());
+        meta.set_provider(None);
+
+        // The flag on an ordinary table names nothing to expose.
+        let mut books = TableMeta::new("books");
+        books.set_metadata_table(true);
+        assert!(check_metadata_rules("books", &books).is_err());
+
+        // Clearing leaves no residue.
+        meta.set_metadata_table(false);
+        assert!(meta.attributes.is_empty(), "{:?}", meta.attributes);
     }
 
     #[test]

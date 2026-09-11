@@ -109,6 +109,19 @@ describe("which database a new table goes in", () => {
   });
 });
 
+describe("the metadata-table choice", () => {
+  it("asks only which metadata table — not a name, and not a database", () => {
+    expect(newTableError(form({ source: "metadata" }))).toMatch(/metadata table/);
+    expect(
+      newTableError(form({ source: "metadata", metadataTable: "_fd_triggers", database: "" })),
+    ).toBe(null);
+  });
+
+  it("starts with nothing chosen", () => {
+    expect(EMPTY_NEW_TABLE_FORM.metadataTable).toBe("");
+  });
+});
+
 describe("the table-provider choice", () => {
   it("will not create a provided table until a provider is chosen", () => {
     expect(newTableError(form({ name: "headlines", source: "provider" }))).toMatch(/provider/);

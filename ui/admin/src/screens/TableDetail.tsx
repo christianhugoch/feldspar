@@ -266,6 +266,7 @@ export function TableDetail({ table }: { table: string }) {
           tables={tables}
           inbound={inbound}
           provided={Boolean(settings?.provider)}
+          metadata={settings?.metadata ?? false}
           onChange={load}
         />
 
@@ -274,11 +275,14 @@ export function TableDetail({ table }: { table: string }) {
           rowCount={rowCount}
           configured={settings?.configured ?? false}
           provided={Boolean(settings?.provider)}
+          metadata={settings?.metadata ?? false}
           writes={settings?.provider?.writes ?? null}
           onChange={load}
         />
 
-        {!settings?.provider && (
+        {/* Constraints are schema, and neither a provider's nor Saltcorn's own
+            metadata tables have a schema the admin may change. */}
+        {!settings?.provider && !settings?.metadata && (
           <Constraints
             table={table}
             fields={fields}
@@ -309,6 +313,7 @@ function TableData({
   rowCount,
   configured,
   provided,
+  metadata,
   writes,
   onChange,
 }: {
@@ -316,6 +321,9 @@ function TableData({
   rowCount: number | null;
   /** Whether a module's table provider serves the rows (§8.3). */
   provided?: boolean;
+  /** Whether this is one of Saltcorn's own metadata tables, on the list by the
+   * admin's choice: "delete" takes it off the list and drops nothing. */
+  metadata?: boolean;
   /** Which writes that provider answers **for the settings this table has**
    * (§8.3) — `null` on a table in a database, where writing is the driver's.
    * The same provider configured read-only answers none of them, so it is read
@@ -409,9 +417,11 @@ function TableData({
     // the definition and leaves the feed, the remote database or whatever else
     // is behind it exactly where it was — so the warning says what actually
     // happens rather than the one a database table gets.
-    const question = provided
-      ? `Delete the table "${table}"? Saltcorn forgets it. The data it was reading is not touched.`
-      : `Drop the table "${table}" and every row in it? This cannot be undone.`;
+    const question = metadata
+      ? `Remove "${table}" from the tables list? Its settings are forgotten; the table and its rows are Saltcorn's and are not touched.`
+      : provided
+        ? `Delete the table "${table}"? Saltcorn forgets it. The data it was reading is not touched.`
+        : `Drop the table "${table}" and every row in it? This cannot be undone.`;
     if (!window.confirm(question)) {
       return;
     }
@@ -504,11 +514,13 @@ function TableData({
                   to a table, it *is* the table, so forgetting it would be
                   deleting it — which is the item below, with the confirmation
                   that says so. */}
-              {configured && !provided && (
+              {/* Nor for a metadata table, whose row is what puts it on the
+                  list: forgetting it is the "remove" below. */}
+              {configured && !provided && !metadata && (
                 <Dropdown.Item onClick={() => void forget()}>Forget settings</Dropdown.Item>
               )}
               <Dropdown.Item className="text-danger" onClick={() => void dropTable()}>
-                {provided ? "Delete table" : "Drop table"}
+                {metadata ? "Remove from tables list" : provided ? "Delete table" : "Drop table"}
               </Dropdown.Item>
             </Dropdown.Menu>
           </Dropdown>
@@ -1323,6 +1335,7 @@ function Fields({
   tables,
   inbound,
   provided,
+  metadata,
   onChange,
 }: {
   table: string;
@@ -1336,8 +1349,13 @@ function Fields({
    * shown, because they are what the table *is*; they are not editable, because
    * there is no column in any database to edit. */
   provided?: boolean;
+  /** Whether this is one of Saltcorn's own metadata tables. Its columns are
+   * shown and are not editable: the schema is the server's. */
+  metadata?: boolean;
   onChange: () => void;
 }) {
+  // Either way the columns are someone else's to decide.
+  const readOnly = provided || metadata;
   /** What the modal is open on, or `null` when it is closed. */
   const [editing, setEditing] = useState<Editing | null>(null);
   const [form, setForm] = useState<FieldForm>(newFieldForm(""));
@@ -1549,7 +1567,7 @@ function Fields({
                   )}
                 </td>
                 <td className="text-end">
-                  {!provided && (
+                  {!readOnly && (
                     <div className="btn-list justify-content-end flex-nowrap">
                       <Button
                         size="sm"
@@ -1574,7 +1592,12 @@ function Fields({
             ))}
           </tbody>
         </Table>
-        {provided ? (
+        {metadata ? (
+          <div className="text-muted small">
+            This is one of Saltcorn&rsquo;s own metadata tables. Its rows and settings can be
+            edited; its columns are Saltcorn&rsquo;s and cannot be.
+          </div>
+        ) : provided ? (
           <div className="text-muted small">
             These columns are the table provider&rsquo;s. Change what it presents in its settings
             above, or in the module itself.

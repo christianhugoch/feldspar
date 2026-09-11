@@ -329,15 +329,15 @@ impl Table {
     /// this method's correctness, which is why `table_meta`'s column list is
     /// asserted in full by a test rather than spot-checked.
     ///
-    /// A **system table never takes an overlay**. `save_table_meta` refuses to
-    /// write one, so this only fires on a row inserted behind the API's back —
-    /// and the answer there is to ignore it, because `_fd_*` tables are hidden
-    /// from users (§9) and their access is not configurable by anyone.
+    /// A **system table takes an overlay only as a metadata table** — a row an
+    /// admin wrote to show it (see [`table_meta`](crate::table_meta)). Any other
+    /// row for one is refused by `save_table_meta`, so it only exists if it was
+    /// inserted behind the API's back, and the answer there is to ignore it.
     ///
     /// An empty label or description in the row means "none given", so the
     /// table's own name stays its label rather than becoming blank.
     pub fn apply_overlay(&mut self, meta: &TableMeta) {
-        if self.is_system() {
+        if self.is_system() && !meta.is_metadata_table() {
             return;
         }
         if !meta.label.is_empty() {
@@ -522,6 +522,20 @@ impl Table {
     /// callers can filter consistently.
     pub fn is_system(&self) -> bool {
         self.name.starts_with("_fd_")
+    }
+
+    /// Whether this is a system table an admin has added to the tables list as
+    /// a **metadata table**: its rows and settings are theirs to edit, its
+    /// schema is still Saltcorn's.
+    pub fn is_metadata(&self) -> bool {
+        self.is_system() && crate::table_meta::is_metadata_flag(&self.attributes)
+    }
+
+    /// Whether this table is kept out of the user-facing lists: a system table
+    /// nobody has added as a metadata table. What [`is_system`](Table::is_system)
+    /// alone still decides is that the schema is not editable.
+    pub fn is_hidden(&self) -> bool {
+        self.is_system() && !self.is_metadata()
     }
 
     /// The field with the given name, if present.

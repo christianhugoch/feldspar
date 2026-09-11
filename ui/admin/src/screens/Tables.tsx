@@ -54,6 +54,7 @@ export function Tables() {
   const [orphans, setOrphans] = useState<ListOrphanTableSettingsResponse>([]);
   const [connections, setConnections] = useState<ListDatabaseConnectionsResponse>([]);
   const [providers, setProviders] = useState<ListTableProvidersResponse>([]);
+  const [metadataTables, setMetadataTables] = useState<string[]>([]);
   const [creating, setCreating] = useState<NewTableForm | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -85,6 +86,12 @@ export function Tables() {
       setProviders(await api.listTableProviders());
     } catch {
       setProviders([]);
+    }
+    // The metadata tables not yet on the list, on the same terms again.
+    try {
+      setMetadataTables(await api.listMetadataTables());
+    } catch {
+      setMetadataTables([]);
     }
   };
 
@@ -124,7 +131,11 @@ export function Tables() {
     try {
       const database = creating.database;
       const chosen = splitProviderKey(creating.provider);
-      if (creating.source === "provider" && chosen) {
+      if (creating.source === "metadata") {
+        // Nothing is created: the table is Saltcorn's and already there, and
+        // this puts it on the list.
+        await api.createMetadataTable({ name: creating.metadataTable });
+      } else if (creating.source === "provider" && chosen) {
         // No database and no DDL: this writes the table's definition, and the
         // module is asked for its columns as part of creating it.
         await api.createProvidedTable({
@@ -253,6 +264,15 @@ export function Tables() {
                         RLS
                       </StatusBadge>
                     )}
+                    {t.metadata && (
+                      <StatusBadge
+                        tone="secondary"
+                        className="ms-2"
+                        title="One of Saltcorn's own metadata tables. Its rows and settings can be edited; its fields cannot."
+                      >
+                        metadata
+                      </StatusBadge>
+                    )}
                     {/* Which database it came from, whenever that is not
                         Saltcorn's own. Unbadged means primary — the common case,
                         and the one an installation with no connections is
@@ -290,6 +310,7 @@ export function Tables() {
         form={creating}
         databases={creatableDatabases(connections)}
         providers={providers}
+        metadataTables={metadataTables}
         busy={busy}
         onChange={setCreating}
         onCancel={() => setCreating(null)}
@@ -311,6 +332,7 @@ function NewTableModal({
   form,
   databases,
   providers,
+  metadataTables,
   busy,
   onChange,
   onCancel,
@@ -319,6 +341,8 @@ function NewTableModal({
   form: NewTableForm | null;
   databases: string[];
   providers: ListTableProvidersResponse;
+  /** The metadata tables not yet on the list. */
+  metadataTables: string[];
   busy: boolean;
   onChange: (form: NewTableForm) => void;
   onCancel: () => void;
@@ -337,21 +361,25 @@ function NewTableModal({
             <Modal.Title className="h4">New table</Modal.Title>
           </Modal.Header>
           <Modal.Body>
-            <Form.Group className="mb-3" controlId="new-table-name">
-              <Form.Label>Name</Form.Label>
-              <Form.Control
-                autoFocus
-                placeholder="e.g. invoice"
-                value={form.name}
-                onChange={(e) => onChange({ ...form, name: e.target.value })}
-              />
-            </Form.Group>
+            {/* A metadata table already has a name; a label can be given on its
+                settings page. */}
+            {form.source !== "metadata" && (
+              <Form.Group className="mb-3" controlId="new-table-name">
+                <Form.Label>Name</Form.Label>
+                <Form.Control
+                  autoFocus
+                  placeholder="e.g. invoice"
+                  value={form.name}
+                  onChange={(e) => onChange({ ...form, name: e.target.value })}
+                />
+              </Form.Group>
+            )}
 
             {/* Only when there is a choice. An installation with no
                 connections has exactly one database, and asking which one to
                 use would be a question with one answer — the same reason the
                 CSV file input appears only for the CSV choice. */}
-            {databases.length > 1 && form.source !== "provider" && (
+            {databases.length > 1 && form.source !== "provider" && form.source !== "metadata" && (
               <Form.Group className="mb-3" controlId="new-table-database">
                 <Form.Label>Database</Form.Label>
                 <Form.Select
@@ -387,8 +415,32 @@ function NewTableModal({
                     entry is "there are none" is a question with no answer, and
                     an installation with no modules is most of them. */}
                 {providers.length > 0 && <option value="provider">From a table provider</option>}
+                {/* On the same terms: offered while there is one left to add. */}
+                {metadataTables.length > 0 && <option value="metadata">Metadata table</option>}
               </Form.Select>
             </Form.Group>
+
+            {form.source === "metadata" && (
+              <Form.Group className="mb-3" controlId="new-table-metadata">
+                <Form.Label>Metadata table</Form.Label>
+                <Form.Select
+                  value={form.metadataTable}
+                  onChange={(e) => onChange({ ...form, metadataTable: e.target.value })}
+                >
+                  <option value="">Choose a metadata table…</option>
+                  {metadataTables.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </Form.Select>
+                <Form.Text className="text-muted">
+                  One of Saltcorn&rsquo;s own tables, added to this list so its rows and
+                  settings can be edited. It starts admin-only. Its fields are Saltcorn&rsquo;s
+                  and cannot be changed, and removing it from the list never drops it.
+                </Form.Text>
+              </Form.Group>
+            )}
 
             {form.source === "provider" && (
               <>
