@@ -118,6 +118,9 @@ serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 rust_decimal.workspace = true
+# A Saltcorn 1 backup lists its files in `files.csv` (`backup::v1`), so importing
+# one means reading a CSV with the same parser the table import reads one with.
+csv.workspace = true
 
 [dev-dependencies]
 sc-test-harness.workspace = true
@@ -141,9 +144,6 @@ reqwest.workspace = true
 # The scripted provider (`sc-agent`'s `testing` feature, decision 7): the chat
 # socket is driven through a whole turn without a vendor and without a token.
 sc-agent = { workspace = true, features = ["testing"] }
-# The CSV round-trip test reshapes an exported document before importing it, and
-# reads it with the same parser the server wrote it with.
-csv.workspace = true
 
 [lints]
 workspace = true

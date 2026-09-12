@@ -2,6 +2,77 @@
 
 Changes in reverse chronological order.
 
+## Restoring a Saltcorn 1 backup
+
+The Restore button on the Backup tab now takes a **Saltcorn 1 backup file** as
+well as one of ours. The archive is translated into this system's own backup
+layout on the way in (`sc_server::backup::v1`), so the upload, the "what should
+be restored?" dialog, the selection and the report are the same ones a Feldspar
+backup goes through — there is no second restore path, and nothing downstream
+knows which kind of file it was handed.
+
+- **Only the kinds this system has**: tables, their fields, their rows, triggers
+  (v1's actions), files and users — plus the roles users point at, since a user
+  whose role names nothing cannot be restored. v1's views, pages, page groups,
+  library entries, tags, models, plugins and code pages describe a
+  server-rendered UI and a plugin system this system does not have, and each of
+  them becomes a line in the restore report rather than a silence. So does a
+  column whose v1 type has no counterpart, a calculated column (a v1 formula is
+  JavaScript, not `sc-expr`), a v1 workflow, and an event this system has no
+  name for.
+- **Types are translated, not assumed.** A v1 `String` becomes `string` with the
+  `max_length`, pattern and option-set attributes it can express (v1's
+  comma-separated options become the JSON array this system takes); `Integer`
+  becomes `integer` with its bounds; a **day-only** `Date` becomes a `date` and
+  its values lose the midnight v1 stored them with, while an ordinary one stays a
+  `timestamp`; a `Key` keeps its target table, target column and summary field
+  and takes no type of its own, because a reference's storage is its target's.
+- **Users are renumbered, and every reference with them.** v1 numbers users and
+  this system gives them UUIDs (§7.1), so each imported account gets a UUID and
+  keeps its old number in a new `legacy_id` column — the only way to recognise
+  the same person in the v1 database afterwards. Every `Key` onto the users table
+  in every other table is rewritten to the new UUID in the same pass; one
+  pointing at a user the backup does not carry becomes null.
+- **Password hashes are deliberately left behind.** v1 hashes with bcrypt and
+  this system verifies argon2id, so a carried hash would not be a password that
+  works, it would be a login that fails with an error. The accounts arrive
+  without one and the report says how many, and what to do about it.
+- **The files become a local store named after the application** (v1's
+  `site_name`), rooted at the directory this system suggests for a local store of
+  that name and created on connect. A store of that name that is already here
+  keeps its definition and takes the files, exactly as a restore of one of our own
+  backups does. A v1 `File` column becomes a `File` field pointing into that
+  store.
+- **v1's actions keep their names.** Where this system has the same action the
+  settings mean the same thing (`run_js_code`); where it does not, the ordinary
+  trigger validation refuses it by name — "unknown action `modify_row`" — rather
+  than guessing at the nearest thing that exists. A table event keeps its table;
+  every other kind drops v1's, which this system would refuse.
+
+Three changes to the backup format come with it:
+
+- **A backup says it is a Feldspar backup, and which one.** The manifest's
+  `format` is now `feldspar-backup` (it was `saltcorn-backup`), and it carries
+  `feldspar_version` beside the layout `version` — what Saltcorn 1 records as
+  `saltcorn_version` in its `backup-info.json`, and for the same reason. A
+  translated v1 archive additionally carries `imported_from`. Downloads are named
+  `feldspar-backup-<date>.zip`. There is no compatibility path for a backup taken
+  before this change; the system is a prototype and reads only its current format.
+- **The restore dialog says what it is looking at**: `uploadBackup` answers a
+  `source` line — "Feldspar 0.1.0", or "Saltcorn 1.7.0, imported" — and the date
+  shown for an imported file is the date *v1 took its backup*, which is the age of
+  the data.
+- **A column an admin added to the users table now travels with the accounts.**
+  `users.json` carries a `fields` list (the non-system columns only), and the
+  restore adds the ones the users table here has not got before inserting the
+  rows. Without it the rows arrived carrying a value for a column that was not
+  there, and the insert dropped it silently.
+
+One restore fix fell out of the import: **columns are restored in two passes**,
+everything that is not a reference and then the references. A `Key` takes its
+storage type from the column it points at, so one pass per table made a backup's
+table order decide whether a reference onto a later table survived.
+
 ## Metadata tables in the tables list
 
 The **New table** dialog has a fourth type, **Metadata table**: a second

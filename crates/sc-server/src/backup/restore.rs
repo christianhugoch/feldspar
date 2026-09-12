@@ -78,12 +78,12 @@ impl RestoreReport {
 /// borrow of the archive is not: holding one across an `await` is not expressible.
 /// The cost is that a restore holds the uncompressed backup in memory, which is
 /// the same trade the writer makes and for a rarer operation.
-type Entries = BTreeMap<String, Vec<u8>>;
+pub(super) type Entries = BTreeMap<String, Vec<u8>>;
 
 /// Read a backup's manifest without restoring anything: what the dialog is built
 /// from after the file is uploaded.
 pub fn inspect(archive: &[u8]) -> Result<(Available, Json)> {
-    let entries = read_zip(archive)?;
+    let entries = read_backup(archive)?;
     let manifest = manifest_of(&entries)?;
     let contents = manifest
         .get("contents")
@@ -98,7 +98,7 @@ pub async fn restore_backup(
     archive: &[u8],
     selection: &Selection,
 ) -> Result<RestoreReport> {
-    let entries = read_zip(archive)?;
+    let entries = read_backup(archive)?;
     let manifest = manifest_of(&entries)?;
     let contents = Available::from_json(
         manifest
@@ -110,6 +110,13 @@ pub async fn restore_backup(
     // reported, because it is the dialog's own list that was edited.
     let selection = selection.intersect(&contents);
     let mut report = RestoreReport::default();
+    // What the archive could not offer in the first place — everything a
+    // Saltcorn 1 import left behind (`super::v1`), and nothing at all for a backup
+    // this system wrote. Reported before the restore rather than after, because
+    // they are facts about the *file*, not about what happened to it.
+    for note in super::v1::notes_of(&manifest) {
+        report.skipped(note);
+    }
 
     // --- roles and users, before anything points at them --------------------
     if selection.users {
@@ -131,8 +138,16 @@ pub async fn restore_backup(
             Err(e) => report.skipped(format!("table `{name}`: {}", e.causes())),
         }
     }
-    for name in &restored_tables {
-        restore_fields(catalog, &entries, name, &mut report).await;
+    // Columns in two passes over every table: everything that is not a reference,
+    // and then the references. A `Key` takes its storage type from the column it
+    // points at (the schema editor resolves it), and that column may be in a table
+    // further down the list — or in this same table, when a row points at its own
+    // kind. One pass per table would make a backup's column order decide whether
+    // half its references survived.
+    for references in [false, true] {
+        for name in &restored_tables {
+            restore_fields(catalog, &entries, name, references, &mut report).await;
+        }
     }
 
     // Rows in dependency order, so a row holding a foreign key is inserted after
@@ -200,7 +215,7 @@ pub async fn restore_backup(
 
 // --- the parts -----------------------------------------------------------------
 
-/// Roles, then accounts.
+/// Roles, then the columns an admin added to the users table, then accounts.
 ///
 /// **An account that is already here is left exactly as it is**, matched by id or
 /// by email address. That rule is what makes the restore safe to run on a server
@@ -227,6 +242,37 @@ async fn restore_users(catalog: &Catalog, entries: &Entries, report: &mut Restor
     }
 
     let users = array_field(&document, "users");
+    if catalog.require(sc_auth::USERS_TABLE).is_err() {
+        report.skipped("users: this server has no users table");
+        return;
+    }
+
+    // The columns an admin added to the users table where the backup was taken —
+    // and, for a Saltcorn 1 import, the `legacy_id` its integer keys land in.
+    // Before the rows, because a row carrying a value for a column that is not
+    // there loses it: `insert_row` writes the columns the table has.
+    for value in array_field(&document, "fields") {
+        let Some(field) = value.as_object() else {
+            continue;
+        };
+        let Some(name) = field.get("name").and_then(Json::as_str) else {
+            continue;
+        };
+        let name = name.to_owned();
+        match catalog.require(sc_auth::USERS_TABLE) {
+            // Already here — an admin-added column of the same name, or a second
+            // restore. Left exactly as it is, like every other existing column.
+            Ok(live) if live.field(&name).is_some() => continue,
+            Ok(_) => {}
+            Err(e) => {
+                report.skipped(format!("columns of `users`: {}", e.causes()));
+                break;
+            }
+        }
+        let result = add_field(catalog, sc_auth::USERS_TABLE, field).await;
+        report.outcome(&format!("column `users.{name}`"), result);
+    }
+
     let Ok(table) = catalog.require(sc_auth::USERS_TABLE) else {
         report.skipped("users: this server has no users table");
         return;
@@ -338,7 +384,8 @@ async fn restore_table(catalog: &Catalog, entries: &Entries, name: &str) -> Resu
     })
 }
 
-/// Add the columns the backup describes and this table has not got.
+/// Add the columns the backup describes and this table has not got — the
+/// references (`references == true`) or everything else.
 ///
 /// A column that is already here is left alone rather than altered: its type is
 /// the database's answer, and a restore that rewrote a live column's type would
@@ -347,6 +394,7 @@ async fn restore_fields(
     catalog: &Catalog,
     entries: &Entries,
     name: &str,
+    references: bool,
     report: &mut RestoreReport,
 ) {
     let Ok(document) = json_entry(entries, &format!("tables/{name}/table.json")) else {
@@ -356,6 +404,14 @@ async fn restore_fields(
         let Some(field) = value.as_object() else {
             continue;
         };
+        let is_reference = field
+            .get("kind")
+            .and_then(|kind| kind.get("type"))
+            .and_then(Json::as_str)
+            == Some("key");
+        if is_reference != references {
+            continue;
+        }
         let field_name = field
             .get("name")
             .and_then(Json::as_str)
@@ -966,6 +1022,21 @@ async fn restore_ssl(catalog: &Catalog, entries: &Entries) -> Result<String> {
 
 // --- reading the file ----------------------------------------------------------
 
+/// The entries to restore from: the zip's own, or — for a **Saltcorn 1** backup —
+/// what [`super::v1::convert`] makes of them.
+///
+/// The one place the two kinds of file meet. Everything downstream reads this
+/// system's layout and cannot tell which it was handed, which is the point: a v1
+/// import is inspected, chosen from, restored and reported by the same code as
+/// any other backup.
+fn read_backup(archive: &[u8]) -> Result<Entries> {
+    let entries = read_zip(archive)?;
+    if !entries.contains_key(MANIFEST_FILE) && super::v1::is_v1_backup(&entries) {
+        return super::v1::convert(&entries);
+    }
+    Ok(entries)
+}
+
 /// Expand a zip into path → bytes, refusing anything that is not a zip.
 fn read_zip(archive: &[u8]) -> Result<Entries> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).map_err(|e| {
@@ -999,7 +1070,7 @@ fn read_zip(archive: &[u8]) -> Result<Entries> {
 fn manifest_of(entries: &Entries) -> Result<Map<String, Json>> {
     let manifest = json_entry(entries, MANIFEST_FILE).map_err(|_| {
         Error::invalid(format!(
-            "this zip has no `{MANIFEST_FILE}`, so it is not a Saltcorn backup"
+            "this zip has no `{MANIFEST_FILE}` and is not a Saltcorn 1 backup either,              so it is not a backup this server can read"
         ))
     })?;
     let obj = manifest
@@ -1009,7 +1080,7 @@ fn manifest_of(entries: &Entries) -> Result<Map<String, Json>> {
         Some(format) if format == super::FORMAT => {}
         Some(other) => {
             return Err(Error::invalid(format!(
-                "this is a `{other}` archive, not a Saltcorn backup"
+                "this is a `{other}` archive, not a Feldspar backup"
             )));
         }
         None => return Err(Error::invalid("this backup does not say what format it is")),

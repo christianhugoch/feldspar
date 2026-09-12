@@ -21,7 +21,7 @@
 //! applications/<subdomain>.json       one application
 //! file-stores/<store>/store.json      { definition, files: [ { path, meta } ] }
 //! file-stores/<store>/files/<path>    the bytes, as they are
-//! users.json                          { roles, users } — password hashes included
+//! users.json                          { roles, users, fields } — hashes included
 //! agents.json                         [ agent, … ]
 //! triggers.json                       [ trigger, … ]
 //! settings/ssl.json                   the SSL section's stored values
@@ -41,8 +41,14 @@
 //! - **A row's data cannot be included without its table's metadata.** Rows
 //!   restored into a table whose columns nobody described would be rows nothing
 //!   could read.
+//!
+//! A **Saltcorn 1** backup can be restored too, and nothing above changes for it:
+//! [`v1`] translates such an archive into the layout described here before the
+//! restorer sees it, so the upload, the dialog, the selection and the report are
+//! the same ones a Feldspar backup goes through.
 
 mod restore;
+mod v1;
 mod write;
 
 use std::sync::{Arc, Mutex};
@@ -75,11 +81,24 @@ pub const MANIFEST_FILE: &str = "manifest.json";
 pub const SSL_SECTION: &str = "ssl";
 /// The `format` a manifest carries, so a zip that is not one of ours is refused
 /// by name rather than by a confusing missing-entry error.
-pub const FORMAT: &str = "saltcorn-backup";
+///
+/// It names the *product*, not the company: a Saltcorn 1 backup says
+/// `saltcorn_version` in its own `backup-info.json`, and the two files have to be
+/// told apart by something an admin can see when they unzip either of them.
+pub const FORMAT: &str = "feldspar-backup";
 /// The layout version. The system is a prototype and reads only its own current
 /// format (there is no compatibility path, by project policy), so this exists to
 /// *refuse* an older or newer file clearly rather than to migrate one.
 pub const FORMAT_VERSION: i64 = 1;
+/// The Feldspar that wrote the archive, recorded in the manifest beside the
+/// format.
+///
+/// The format version says what the *layout* is; this says what wrote it, which
+/// is the question asked of a file that arrives six months later with something
+/// odd in it. Saltcorn 1 records `saltcorn_version` in `backup-info.json` for the
+/// same reason, and a backup imported from one of those records where it came
+/// from beside these two.
+pub const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// How long an uploaded backup waits to be restored before it is forgotten.
 ///

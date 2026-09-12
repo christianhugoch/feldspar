@@ -11,8 +11,12 @@
 //! zip — because "the rows are in the file" is not the claim; "the second server
 //! has them" is.
 //!
-//! Around that, four things the screen depends on and that are easy to get wrong:
+//! Around that, six things the screen depends on and that are easy to get wrong:
 //!
+//! - a **Saltcorn 1** backup is restored by the same two requests, translated on
+//!   the way in — its tables, rows, users, files and actions arrive, and what v1
+//!   has and this system does not is *reported* rather than silently dropped;
+//! - a column an admin added to the **users** table travels with the accounts;
 //! - the **choice is remembered** as what was left out, so a table added later is
 //!   in the next backup, and the dialog reopens on the admin's tuned selection;
 //! - **rows cannot be backed up without their table's metadata**, whatever a
@@ -457,7 +461,7 @@ async fn backup_everything(server: &mut Server) -> Vec<u8> {
         .to_str()
         .unwrap();
     assert!(
-        disposition.starts_with("attachment; filename=\"saltcorn-backup-"),
+        disposition.starts_with("attachment; filename=\"feldspar-backup-"),
         "{disposition}"
     );
     bytes
@@ -488,7 +492,11 @@ async fn a_backup_restores_into_a_second_installation() -> sc_error::Result<()> 
 
     // The file is a zip an unarchiver can open, and it says what it holds.
     let manifest: Value = serde_json::from_str(&entry(&archive, "manifest.json")).unwrap();
-    assert_eq!(manifest["format"], json!("saltcorn-backup"));
+    assert_eq!(manifest["format"], json!("feldspar-backup"));
+    assert_eq!(
+        manifest["feldspar_version"],
+        json!(env!("CARGO_PKG_VERSION"))
+    );
     assert_eq!(manifest["contents"]["users"], json!(1));
     assert_eq!(
         entry(&archive, "file-stores/assets/files/notes/readme.txt"),
@@ -750,6 +758,254 @@ async fn a_backup_restores_into_a_second_installation() -> sc_error::Result<()> 
             .contains("already on this server")),
         "the kept account is reported: {report}"
     );
+    Ok(())
+}
+
+/// A column an admin added to the users table (§7.1 invites them to) travels with
+/// the accounts, and arrives as a column on the other server.
+///
+/// Its own test because the failure it guards against is silent: the rows carry
+/// the value either way, and a restore into a users table without the column
+/// inserts the rest of the row and drops it — so the account arrives looking
+/// complete, minus whatever the admin added it for.
+#[tokio::test]
+async fn a_column_added_to_the_users_table_travels_with_the_accounts() -> sc_error::Result<()> {
+    let mut source = setup().await?;
+    let (status, body) = source
+        .client
+        .send(
+            "POST",
+            "/api/tables/users/fields",
+            Some(json!({ "name": "nickname", "type": "string" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = source
+        .client
+        .send(
+            "POST",
+            "/api/users",
+            Some(json!({
+                "email": "sam@example.com",
+                "password": "sams-password",
+                "role": 100,
+                "extra": { "nickname": "Sam" },
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let archive = backup_everything(&mut source).await;
+
+    let mut target = setup().await?;
+    let (status, bytes, _) = target
+        .client
+        .raw(
+            "POST",
+            "/backup/upload",
+            Some((archive.clone(), "application/zip")),
+        )
+        .await;
+    let uploaded: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::OK, "{uploaded}");
+    let (status, report) = target
+        .client
+        .send(
+            "POST",
+            "/api/backup/restore",
+            Some(json!({ "id": uploaded["id"], "include": uploaded["include"] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+
+    let (status, users) = target.client.send("GET", "/api/users", None).await;
+    assert_eq!(status, StatusCode::OK, "{users}");
+    let sam = users
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["email"] == json!("sam@example.com"))
+        .unwrap_or_else(|| panic!("the restored account: {users}"));
+    assert_eq!(sam["extra"]["nickname"], json!("Sam"));
+    Ok(())
+}
+
+/// A real Saltcorn 1 backup, as `saltcorn backup` wrote it: the sample BooksDB
+/// application, with three tables, an account, a file and two v1 actions.
+///
+/// Checked in rather than built here, because the claim is about *the file a v1
+/// server produces* — a fixture assembled in this test would only assert that the
+/// converter agrees with this test's idea of v1.
+const V1_BACKUP: &[u8] = include_bytes!("fixtures/saltcorn-v1-BooksDB.zip");
+
+/// Restoring a **Saltcorn 1** backup, through the same two requests the Backup
+/// screen makes for one of ours.
+///
+/// The point of the test is that it goes through those two requests and reads the
+/// result back through the ordinary admin API: an import is not a separate
+/// feature with a separate screen, it is the same restore over an archive that
+/// was translated on the way in. What is asserted is the half-dozen things that
+/// translation has to get right — v1's types, its numbering of users, its one file
+/// area, its actions — and, just as much, that everything it left behind is *said*.
+#[tokio::test]
+async fn a_saltcorn_1_backup_is_imported() -> sc_error::Result<()> {
+    let mut server = setup().await?;
+    // The store the import would create points into this machine's data
+    // directory, so it is defined here first, at this test's own temp path. That
+    // is also the arrangement an admin who prepared the server has, and the
+    // restore keeps the definition it finds.
+    sc_catalog::save_file_store(
+        &server.catalog,
+        &FileStoreDef::local("BooksDB", server.files.to_string_lossy()),
+    )
+    .await?;
+    sc_catalog::connect_file_store_def(
+        &server.catalog,
+        &sc_catalog::load_file_store_by_name(&server.catalog, "BooksDB")
+            .await?
+            .expect("the store just saved"),
+    )?;
+
+    let (status, bytes, _) = server
+        .client
+        .raw(
+            "POST",
+            "/backup/upload",
+            Some((V1_BACKUP.to_vec(), "application/zip")),
+        )
+        .await;
+    let uploaded: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::OK, "{uploaded}");
+    // The dialog is told what it is looking at, and when the data is from.
+    assert_eq!(
+        uploaded["source"],
+        json!("Saltcorn 1.7.0-alpha.1, imported")
+    );
+    assert_eq!(uploaded["created_at"], json!("2026-09-12T16:50:42.895Z"));
+    let tables: Vec<&str> = uploaded["available"]["tables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert_eq!(tables, vec!["Books", "Authors", "Publishers"]);
+    assert_eq!(uploaded["available"]["users"], json!(1));
+    assert_eq!(
+        uploaded["available"]["file_stores"][0]["name"],
+        json!("BooksDB")
+    );
+
+    let (status, report) = server
+        .client
+        .send(
+            "POST",
+            "/api/backup/restore",
+            Some(json!({ "id": uploaded["id"], "include": uploaded["include"] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    let warned = |text: &str| {
+        report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap_or_default().contains(text))
+    };
+
+    // --- the tables, read back through the admin API -------------------------
+    let (status, fields) = server
+        .client
+        .send("GET", "/api/tables/Books/fields", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{fields}");
+    let field = |name: &str| -> Value {
+        fields
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == json!(name))
+            .unwrap_or_else(|| panic!("no `{name}` column: {fields}"))
+            .clone()
+    };
+    // A v1 day-only Date is a date here, and a v1 Key is a reference to the table
+    // it named, with the summary field it was displayed by.
+    assert_eq!(field("published_on")["type"], json!("date"));
+    assert_eq!(field("author")["kind"]["target_table"], json!("Authors"));
+    assert_eq!(field("author")["kind"]["summary_field"], json!("last_name"));
+    assert_eq!(field("author")["required"], json!(true));
+
+    let (status, rows) = server
+        .client
+        .send("GET", "/api/tables/Books/rows", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{rows}");
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0]["title"], json!("Moby Dick"));
+    assert_eq!(rows[0]["published_on"], json!("2026-09-02"));
+    // The foreign key still points at the author it pointed at, which is only
+    // true because the rows kept the keys they had.
+    assert_eq!(rows[0]["author"], json!(1));
+
+    // …and the numbering was wound past them, so the next book written does not
+    // collide with a restored one.
+    let (status, added) = server
+        .client
+        .send(
+            "POST",
+            "/api/tables/Books/rows",
+            Some(json!({ "title": "Solaris", "author": 1 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{added}");
+    assert_eq!(added["id"], json!(3), "{added}");
+
+    // --- the account ---------------------------------------------------------
+    let (status, users) = server.client.send("GET", "/api/users", None).await;
+    assert_eq!(status, StatusCode::OK, "{users}");
+    let imported = users
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["email"] == json!("admin@foo.com"))
+        .unwrap_or_else(|| panic!("the imported account: {users}"));
+    // v1 numbers its users and this system gives them UUIDs, so the number it had
+    // is the only way to recognise it in the v1 database afterwards.
+    assert_eq!(imported["extra"]["legacy_id"], json!(1));
+    assert_eq!(imported["role"], json!(1));
+    assert!(warned("account was imported with no password"), "{report}");
+
+    // --- the file ------------------------------------------------------------
+    let (status, listing) = server
+        .client
+        .send(
+            "POST",
+            "/api/file-stores/BooksDB/browse",
+            Some(json!({ "dir": "" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listing}");
+    assert!(
+        listing
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["path"] == json!("Each+session+is+30+mins.png")),
+        "{listing}"
+    );
+    assert!(
+        server.files.join("Each+session+is+30+mins.png").exists(),
+        "the v1 upload is in this server's own directory"
+    );
+
+    // --- and what v1 has and this system does not ----------------------------
+    //
+    // Every one of these is a line an admin reads on the screen that ran the
+    // restore, which is the difference between an import and a surprise.
+    assert!(warned("7 views were not imported"), "{report}");
+    assert!(warned("`AddBook`") && warned("workflow"), "{report}");
+    // A v1 action this system does not have is refused by name by the ordinary
+    // trigger validation, not quietly turned into the nearest thing that exists.
+    assert!(warned("TrimPages") && warned("modify_row"), "{report}");
     Ok(())
 }
 

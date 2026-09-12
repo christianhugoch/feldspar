@@ -209,10 +209,33 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
             .iter()
             .map(role_json)
             .collect();
+        // The columns an admin added to the users table (§7.1 invites them to),
+        // and only those: the five the system owns are created by the bootstrap on
+        // any server worth restoring onto. Without this the rows would arrive
+        // carrying a `nickname` no column accepts, and the restore would drop that
+        // value silently — a row is inserted with the columns the table has.
+        let metas = if has_field_meta {
+            list_field_meta_for_table(catalog, &users_table.name).await?
+        } else {
+            Vec::new()
+        };
+        let fields: Vec<Json> = users_table
+            .fields
+            .iter()
+            .filter(|f| !sc_auth::is_system_user_column(&f.base.name))
+            .map(|f| {
+                let description = metas
+                    .iter()
+                    .find(|m| m.field_name == f.base.name)
+                    .map(|m| m.description.clone())
+                    .unwrap_or_default();
+                field_json(f, &description)
+            })
+            .collect();
         contents.users = i64::try_from(users.len()).unwrap_or(i64::MAX);
         zip.json(
             "users.json",
-            &json!({ "roles": roles, "users": Json::Array(users) }),
+            &json!({ "roles": roles, "fields": fields, "users": Json::Array(users) }),
         )?;
     }
 
@@ -265,7 +288,15 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
         &json!({
             "format": super::FORMAT,
             "version": super::FORMAT_VERSION,
+            // What wrote it, as Saltcorn 1 records `saltcorn_version` in its own
+            // `backup-info.json`: the layout version says how to read the file,
+            // this says which build produced it, which is the question asked of an
+            // archive that turns up later with something unexpected in it.
+            "feldspar_version": super::PRODUCT_VERSION,
             "created_at": chrono::Utc::now().to_rfc3339(),
+            // One line for a person — the restore dialog shows it, so an admin
+            // about to press Restore can see what they picked up.
+            "source": format!("Feldspar {}", super::PRODUCT_VERSION),
             "contents": contents.to_json(),
         }),
     )?;

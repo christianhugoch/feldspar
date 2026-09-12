@@ -114,7 +114,7 @@ export async function createBackup(include: unknown): Promise<void> {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = filenameFrom(res.headers.get("content-disposition")) ?? "saltcorn-backup.zip";
+  link.download = filenameFrom(res.headers.get("content-disposition")) ?? "feldspar-backup.zip";
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -134,6 +134,9 @@ function filenameFrom(header: string | null): string | null {
 export type UploadedBackup = {
   id: string;
   created_at: string | null;
+  /** What wrote the file — "Feldspar 0.1.0", or "Saltcorn 1.7.0, imported" for a
+   * Saltcorn 1 backup the server translated on the way in. */
+  source: string | null;
   available: GetBackupOptionsResponse["available"];
   include: GetBackupOptionsResponse["include"];
 };

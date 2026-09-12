@@ -175,7 +175,9 @@ export function BackupTab() {
           <div>
             <h3 className="card-title">Restore</h3>
             <p className="card-subtitle text-secondary mb-0">
-              Read a backup file and put back the parts of it you choose. Nothing already
+              Read a backup file and put back the parts of it you choose. A Saltcorn 1
+              backup works too: its tables, rows, users, files and actions are imported,
+              and the restore says what it could not bring across. Nothing already
               on this server is deleted or overwritten: tables, users and file stores that
               are already here are left as they are, and the restore says what it skipped.
               Restored applications are built and start serving straight away, so a restore
@@ -238,11 +240,7 @@ export function BackupTab() {
         <IncludeDialog
           show
           title="What should be restored?"
-          subtitle={
-            restore.uploaded.created_at
-              ? `Backup taken ${new Date(restore.uploaded.created_at).toLocaleString()}.`
-              : undefined
-          }
+          subtitle={restoreSubtitle(restore.uploaded)}
           confirm="Restore"
           busy={busy}
           contents={restore.uploaded.available}
@@ -254,6 +252,21 @@ export function BackupTab() {
       )}
     </>
   );
+}
+
+/** What the restore dialog says above the tick boxes: when the backup was taken
+ * and what wrote it.
+ *
+ * The source is worth a line of its own because one answer to it is "Saltcorn
+ * 1.7.0, imported" — a file this server translated, which carries tables, rows,
+ * files, users and actions and leaves v1's views and pages behind. An admin
+ * should see that before they press Restore, not afterwards in the report. */
+function restoreSubtitle(uploaded: UploadedBackup): string | undefined {
+  const parts: string[] = [];
+  if (uploaded.created_at)
+    parts.push(`Backup taken ${new Date(uploaded.created_at).toLocaleString()}.`);
+  if (uploaded.source) parts.push(`From ${uploaded.source}.`);
+  return parts.length > 0 ? parts.join(" ") : undefined;
 }
 
 /** The tick boxes and pickers, over whatever is on offer.

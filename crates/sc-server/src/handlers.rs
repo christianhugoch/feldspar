@@ -3431,6 +3431,13 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 Ok(HandlerResponse::ok(json!({
                     "id": id.to_string(),
                     "created_at": manifest.get("created_at"),
+                    // What wrote the file, in one line — "Feldspar 0.1.0", or
+                    // "Saltcorn 1.7.0, imported" for a v1 archive this server
+                    // translated on the way in. The restore dialog shows it,
+                    // because a v1 import leaves things behind and the admin
+                    // should know which kind of file they picked before they
+                    // press the button.
+                    "source": manifest.get("source"),
                     "available": contents.to_json(),
                     // Everything the file holds, ticked: the admin excludes from
                     // there, which is the same direction the backup dialog works
@@ -6258,7 +6265,7 @@ async fn stored_backup_preferences(catalog: &Catalog) -> Result<crate::backup::B
 /// afternoon do not overwrite each other.
 fn backup_filename() -> String {
     format!(
-        "saltcorn-backup-{}.zip",
+        "feldspar-backup-{}.zip",
         chrono::Utc::now().format("%Y-%m-%d-%H%M%S")
     )
 }
