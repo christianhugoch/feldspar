@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 
 use sc_error::{Error, Result};
 use sc_expr::{CodeHosts, SchemaSnapshot};
+use sc_viewpattern::ViewSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
@@ -57,6 +58,10 @@ pub struct CallHosts<'a> {
     /// This server's tables as the guest sees them without asking — what v1's
     /// synchronous `Table.findOne` is answered from.
     pub schema: Option<&'a SchemaSnapshot>,
+    /// An application's views and pages, when the call renders one of them —
+    /// what v1's synchronous `View.findOne` is answered from (TODO "Saltcorn
+    /// UI" §4). Sent to a worker once per generation, like the schema.
+    pub views: Option<&'a ViewSnapshot>,
 }
 
 impl<'a> CallHosts<'a> {
@@ -64,7 +69,18 @@ impl<'a> CallHosts<'a> {
     /// `sc_core_actions::code_body::Hosts` supplies them.
     #[must_use]
     pub fn new(hosts: CodeHosts<'a>, schema: Option<&'a SchemaSnapshot>) -> CallHosts<'a> {
-        CallHosts { hosts, schema }
+        CallHosts {
+            hosts,
+            schema,
+            views: None,
+        }
+    }
+
+    /// The same, carrying an application's view snapshot.
+    #[must_use]
+    pub fn with_views(mut self, views: &'a ViewSnapshot) -> CallHosts<'a> {
+        self.views = Some(views);
+        self
     }
 }
 
@@ -434,6 +450,29 @@ impl ModuleHost {
         }
     }
 
+    /// A host whose workers can load Saltcorn UI's view runtime from `runtime` —
+    /// the bundle's `view-runtime.js` — or cannot, for `None`.
+    ///
+    /// Every worker is told, not only the one views render on: the bundle is
+    /// also the **library** a v1 plugin's `require("@saltcorn/markup/tags")` is
+    /// answered from, and a plugin granted a host lives on a worker of its own
+    /// (TODO "Saltcorn UI" §5).
+    #[must_use]
+    pub fn with_view_runtime(self, runtime: Option<PathBuf>) -> ModuleHost {
+        #[cfg(feature = "deno-host")]
+        {
+            ModuleHost {
+                root: self.root,
+                pool: self.pool.with_view_runtime(runtime),
+            }
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = runtime;
+            self
+        }
+    }
+
     /// The modules root.
     pub fn root(&self) -> &Path {
         &self.root
@@ -747,6 +786,24 @@ impl ModuleHost {
         #[cfg(not(feature = "deno-host"))]
         {
             let _ = (module, provider, state, frame);
+            Err(no_runtime())
+        }
+    }
+
+    /// One call into Saltcorn UI's view runtime (TODO "Saltcorn UI" §3): `op` is
+    /// the host script's `view_*` operation and `request` its fields.
+    ///
+    /// Routed to the one worker the built-in runtime is pinned to, over the
+    /// surfaces and snapshots `call` carries. [`crate::ModuleViewRuntime`] is
+    /// what names these, and the rest of the server names that.
+    pub async fn view_call(&self, op: &str, request: Json, call: CallHosts<'_>) -> Result<Json> {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool.view_call(op, request, call).await
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = (op, request, call);
             Err(no_runtime())
         }
     }

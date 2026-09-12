@@ -28,6 +28,12 @@ sc-auth.workspace = true
 # `Framework` (§13.3), and `sc-module` implements this crate's runtime seam from
 # above — the shape `sc-model` and `sc-app` already have with `sc-module`.
 sc-app.workspace = true
+# The render seam (§3) carries the viewer's surfaces and the schema snapshot,
+# both of which are `sc-expr`'s — the same pair a code body and a module's action
+# are handed, so a view reads rows under exactly the authority they do.
+sc-expr.workspace = true
+async-trait.workspace = true
+serde = { workspace = true }
 serde_json.workspace = true
 uuid.workspace = true
 

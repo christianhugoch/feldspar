@@ -113,6 +113,9 @@ pub struct Job {
     /// whether the JSON crosses: it knows which generation its isolate already
     /// holds, and the caller does not.
     pub schema: Option<sc_expr::SchemaSnapshot>,
+    /// An application's views and pages, when the call renders one — crossing
+    /// on the same rule as the schema: the worker decides whether the JSON goes.
+    pub views: Option<sc_viewpattern::ViewSnapshot>,
 }
 
 /// One ask, on its way from a module to the caller of its call.
@@ -159,6 +162,10 @@ pub struct WorkerConfig {
     /// inside one. That is why the pool pins a module to a worker whose set
     /// matches its own, and starts a worker when none does.
     pub permissions: ModulePermissions,
+    /// Saltcorn UI's view runtime bundle, as a file URL, when this server has
+    /// one. Put on the isolate's global for the host script, which imports it
+    /// the first time a module load or a view call needs it.
+    pub view_runtime: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -447,6 +454,10 @@ struct Host {
     /// wrong: a fresh isolate holds nothing, and only this side knows there was
     /// one.
     schema_generation: Option<u64>,
+    /// The view snapshot generation this isolate holds, per application — one
+    /// entry each, because two applications render on one worker (TODO
+    /// "Saltcorn UI" §4). Reset by a restart for the schema's reason.
+    view_generations: HashMap<String, u64>,
     watchdog: Arc<Watchdog>,
 }
 
@@ -526,7 +537,7 @@ impl Host {
 
         // **Before** the script is evaluated, because its first lines read the
         // three functions off the global and hold them.
-        install_seam(&mut worker)?;
+        install_seam(&mut worker, config.view_runtime.as_deref())?;
 
         watchdog.tick();
         worker
@@ -544,6 +555,7 @@ impl Host {
             settled,
             asked,
             schema_generation: None,
+            view_generations: HashMap::new(),
             watchdog,
         })
     }
@@ -624,8 +636,9 @@ impl Host {
 }
 
 /// Install `__scDone`, `__scFail`, `__scLog` and `__scAsk` on the isolate's
-/// global.
-fn install_seam(worker: &mut MainWorker) -> Result<()> {
+/// global — and `__scViewRuntime`, the view runtime bundle's URL, when there is
+/// one.
+fn install_seam(worker: &mut MainWorker, view_runtime: Option<&str>) -> Result<()> {
     deno_core::scope!(scope, worker.js_runtime);
     let context = scope.get_current_context();
     let global = context.global(scope);
@@ -633,6 +646,13 @@ fn install_seam(worker: &mut MainWorker) -> Result<()> {
     define(scope, global, "__scFail", host_fail)?;
     define(scope, global, "__scLog", host_log)?;
     define(scope, global, "__scAsk", host_ask)?;
+    if let Some(url) = view_runtime {
+        let key = v8::String::new(scope, "__scViewRuntime")
+            .ok_or_else(|| Error::msg("the module worker could not name `__scViewRuntime`"))?;
+        let value = v8::String::new(scope, url)
+            .ok_or_else(|| Error::msg("the module worker could not hold the view runtime's URL"))?;
+        global.set(scope, key.into(), value.into());
+    }
     Ok(())
 }
 
@@ -941,6 +961,7 @@ fn submit(host: &mut Host, next_id: &mut u64, pending: &mut HashMap<u64, Pending
         reply,
         asks,
         schema,
+        views,
     } = job;
     // The generation always, the JSON only the first time (§2). The caller
     // cannot make this decision — it does not know which isolate this is, nor
@@ -958,6 +979,18 @@ fn submit(host: &mut Host, next_id: &mut u64, pending: &mut HashMap<u64, Pending
             defined = Some(generation);
         }
     }
+    // And an application's view snapshot, on the same rule, per application.
+    let mut views_defined = None;
+    if let (Some(snapshot), Json::Object(map)) = (&views, &mut request) {
+        let application = snapshot.application().0.to_string();
+        let generation = snapshot.generation();
+        map.insert("viewsApplication".to_owned(), json!(application));
+        map.insert("viewsGeneration".to_owned(), json!(generation));
+        if host.view_generations.get(&application) != Some(&generation) {
+            map.insert("views".to_owned(), Json::String(snapshot.json().to_owned()));
+            views_defined = Some((application, generation));
+        }
+    }
     if let Err(e) = host.call(id, &request) {
         let _ = reply.send(Err(e));
         return;
@@ -968,6 +1001,9 @@ fn submit(host: &mut Host, next_id: &mut u64, pending: &mut HashMap<u64, Pending
     // generation it does not have.
     if let Some(generation) = defined {
         host.schema_generation = Some(generation);
+    }
+    if let Some((application, generation)) = views_defined {
+        host.view_generations.insert(application, generation);
     }
     pending.insert(
         id,

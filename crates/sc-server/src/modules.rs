@@ -35,7 +35,7 @@ use sc_expr::ModuleFnHosts;
 use sc_model::builtin_registry;
 use sc_module::{
     BundledModules, Installer, ModuleFrameworks, ModuleFunctions, ModuleHost, ModuleModelProviders,
-    ModuleSet, ModuleTableProviders, bootstrap_modules,
+    ModuleSet, ModuleTableProviders, ModuleViewRuntime, bootstrap_modules,
 };
 use sc_python::pymodule::{
     PyModuleFunctions, PyModuleHost, PyModuleModelProviders, PyModuleSet, PyModuleTableProviders,
@@ -94,6 +94,12 @@ impl ModuleServices {
     /// `plugins/` directory, which the binary knows the path of. `None` falls
     /// back to the checkout's, and a directory that is not there is an empty
     /// catalog rather than a failure to start.
+    ///
+    /// `saltcorn_ui` is the Saltcorn UI bundle directory, when this server was
+    /// built with one. Its view runtime runs on this pool as the built-in
+    /// `@feldspar/saltcorn-ui` and is installed as the server's view runtime
+    /// (TODO "Saltcorn UI" §3) — installed, not started: nothing is imported
+    /// until a view or a module needs it.
     // Eight, because eight things a server assembled before this one have to
     // reach it: three services, two directories, a worker count and a runtime.
     // Grouping them would invent a struct whose only purpose is this call.
@@ -107,6 +113,7 @@ impl ModuleServices {
         plugins: Option<PathBuf>,
         workers: usize,
         python: Arc<sc_python::PythonRuntime>,
+        saltcorn_ui: Option<PathBuf>,
     ) -> Result<Arc<ModuleServices>> {
         bootstrap_modules(catalog)
             .await
@@ -126,6 +133,11 @@ impl ModuleServices {
             },
         };
 
+        // A directory without its runtime file is refused on mount, with the
+        // sentence naming the file; here it is simply a server with no runtime.
+        let view_runtime = saltcorn_ui
+            .as_deref()
+            .and_then(|dir| sc_viewpattern::require_view_runtime(Some(dir)).ok());
         let services = Arc::new(ModuleServices {
             catalog: Arc::clone(catalog),
             dispatcher: Arc::clone(dispatcher),
@@ -136,10 +148,17 @@ impl ModuleServices {
             python_host: Arc::new(PyModuleHost::new(Arc::clone(&python))),
             python,
             surfaces: Arc::new(CodeSurfaces::new()?),
-            host: Arc::new(ModuleHost::with_workers(&root, workers)),
+            host: Arc::new(
+                ModuleHost::with_workers(&root, workers).with_view_runtime(view_runtime.clone()),
+            ),
             loaded: RwLock::new(Arc::new(ModuleSet::empty())),
         });
         services.reload().await?;
+        // The view runtime is the bundle's and not a stored module's, so it is
+        // installed once here rather than on every module reload.
+        if view_runtime.is_some() {
+            sc_viewpattern::install_view_runtime(Arc::new(ModuleViewRuntime::new(&services.host)))?;
+        }
         for issue in services.bundled.issues() {
             eprintln!("feldspar: a bundled module could not be read: {issue}");
         }

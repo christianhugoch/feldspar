@@ -1,0 +1,8 @@
+{
+  "name": "@feldspar/saltcorn-ui",
+  "version": "0.1.0",
+  "description": "A package that happens to carry the name of this server's built-in Saltcorn UI view runtime, for the test that it loads as an ordinary module and takes nothing.",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT"
+}

@@ -533,35 +533,35 @@ Five levels, because the failure modes are at five levels:
 
 ## Phase 3 — Where it runs: the built-in module and the render seam
 
-- [ ] 3.1 `sc_viewpattern::ViewRuntime` — the object-safe seam, declared here and implemented
+- [x] 3.1 `sc_viewpattern::ViewRuntime` — the object-safe seam, declared here and implemented
       one layer up (the `TableProviderHost`/`FrameworkHost` shape): `patterns()`,
       `render(view, state, ctx)`, `render_page(page, ctx)`, `post(view, body, ctx)`,
       `route(view, route, body, ctx)`, and `config_step(pattern, table, step, context)` — a
       **call per step carrying the accumulated context**, not load-time data (§6).
-- [ ] 3.2 `sc-module`: the reserved built-in module `@feldspar/saltcorn-ui`, loaded from the
+- [x] 3.2 `sc-module`: the reserved built-in module `@feldspar/saltcorn-ui`, loaded from the
       bundle directory rather than the modules root, with an empty `ModulePermissions`. The
       name is refused to an installed module, on its card, like `react` is refused to a
       declared framework.
-- [ ] 3.3 `module-host.mjs` gains the view entry points, dispatching into the bundle, and
+- [x] 3.3 `module-host.mjs` gains the view entry points, dispatching into the bundle, and
       `viewPatterns()` — the registry manifest that crosses **once, at load**: name, label,
       description, `table_required`, `view_quantity`, whether it has `routes`, and the *names*
       of its configuration steps. Data, for the reason §13.3 gives about frameworks: the admin
       UI asks these on the path that renders a form. A step's **fields** are not on it, for
       the reason §6 gives: they do not exist without a table.
-- [ ] 3.3a `saltcornModule()` resolves §5's left-hand column into the bundle's library exports
+- [x] 3.3a `saltcornModule()` resolves §5's left-hand column into the bundle's library exports
       instead of into a stub namespace, and the **absent tier** (§5) is a named list answering
       `undefined`. One `require` table, for the built-in patterns and for every installed
       module alike — an action that reaches for `@saltcorn/markup/tags` today gets stubs and
       gets the real thing after this item.
-- [ ] 3.4 `ViewSnapshot` (§4): built from the application row and its `ViewSet`, serialised
+- [x] 3.4 `ViewSnapshot` (§4): built from the application row and its `ViewSet`, serialised
       once, cached on the worker behind its generation, re-sent only when it moves.
       `__scDefineViews(generation, json)` beside `__scDefineSchema`.
-- [ ] 3.5 The bounds: a render runs under the module call timeout; the embed depth cap (16)
+- [x] 3.5 The bounds: a render runs under the module call timeout; the embed depth cap (16)
       names the cycle it broke; a pattern that throws produces an *Application* error carrying
       the view's name, not a 500 with a stack.
-- [ ] 3.6 `sc_module::ModuleViewRuntime` implements the seam, installed at boot beside
+- [x] 3.6 `sc_module::ModuleViewRuntime` implements the seam, installed at boot beside
       `ModuleFrameworks`.
-- [ ] 3.7 Tests: the built-in module loads with no modules root at all; an installed module
+- [x] 3.7 Tests: the built-in module loads with no modules root at all; an installed module
       claiming the reserved name keeps its actions and loses nothing else; the snapshot is
       sent once for two renders at one generation.
 

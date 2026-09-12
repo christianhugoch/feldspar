@@ -76,6 +76,10 @@ sc-model.workspace = true
 # neither this crate nor `sc-core-actions`, so the edge is acyclic — it is the
 # same shape as the one to `sc-model`, one layer higher.
 sc-app.workspace = true
+# And Saltcorn UI's **view runtime** (TODO "Saltcorn UI" §3): `sc-viewpattern`
+# declares the render seam, and this crate implements it over the worker a v1
+# view pattern runs on — the `sc-app` shape again, one layer higher still.
+sc-viewpattern.workspace = true
 async-trait.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true

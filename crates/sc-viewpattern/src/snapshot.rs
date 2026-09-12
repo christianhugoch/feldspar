@@ -1,0 +1,223 @@
+//! [`ViewSnapshot`]: an application's views and pages as the worker sees them
+//! (TODO "Saltcorn UI" §4).
+//!
+//! v1's `View.findOne` is synchronous, and so are `getState().getConfig(…)` and
+//! `getState().roles`, so none of them can be a host call. They are answered from
+//! a snapshot instead — the rule the previous milestone made for `Table` —
+//! serialised **once** per [`ViewSet`] generation and sent to a worker only when
+//! the worker does not already hold that generation.
+//!
+//! The registries a `getState()` exposes (`types`, `viewtemplates`, …) are not in
+//! it: they are the bundle's own objects and never change while a worker lives.
+
+use std::sync::Arc;
+
+use sc_app::{AppId, Application};
+use sc_auth::Role;
+use sc_error::{Error, Result};
+use serde_json::{Value as Json, json};
+
+use crate::view::{Page, View};
+use crate::view_set::ViewSet;
+
+/// The framework setting the application's menu is kept in — v1's own config
+/// key, so a restored backup's menu crosses unrenamed.
+pub const MENU_CONFIG_KEY: &str = "menu_items";
+
+/// One application's views, pages and settings, serialised at one generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewSnapshot {
+    application: AppId,
+    generation: u64,
+    json: Arc<str>,
+}
+
+impl ViewSnapshot {
+    /// The snapshot of `application`'s `set`, with the server's `roles` and the
+    /// application's own origin.
+    ///
+    /// The set must be the application's: a snapshot mixing one application's
+    /// row with another's views would render views under the wrong name, menu
+    /// and settings, so it is refused rather than built.
+    pub fn build(
+        application: &Application,
+        set: &ViewSet,
+        roles: &[Role],
+        base_url: &str,
+    ) -> Result<ViewSnapshot> {
+        if set.application != application.id {
+            return Err(Error::msg(format!(
+                "the view set of application {} cannot be the snapshot of `{}` ({})",
+                set.application.0, application.name, application.id.0
+            )));
+        }
+        let config = &application.framework.config;
+        let value = json!({
+            "application": {
+                "id": application.id.0.to_string(),
+                "name": application.name,
+                "description": application.description,
+                "subdomain": application.subdomain,
+                "base_url": base_url,
+            },
+            "generation": set.generation,
+            "config": config,
+            "menu": config.get(MENU_CONFIG_KEY).filter(|m| m.is_array()).cloned().unwrap_or_else(|| json!([])),
+            // v1's `getState().roles` shape: the number is the id.
+            "roles": roles.iter().map(|r| json!({ "id": r.role, "role": r.name })).collect::<Vec<_>>(),
+            "views": set.views.iter().map(view_json).collect::<Vec<_>>(),
+            "pages": set.pages.iter().map(page_json).collect::<Vec<_>>(),
+        });
+        let json = serde_json::to_string(&value)
+            .map_err(|e| Error::serde(format!("serialising the view snapshot: {e}")))?;
+        Ok(ViewSnapshot::from_json(
+            application.id,
+            set.generation,
+            json,
+        ))
+    }
+
+    /// A snapshot of already-serialised JSON — what a test that wants to say
+    /// exactly what the worker is handed uses.
+    pub fn from_json(
+        application: AppId,
+        generation: u64,
+        json: impl Into<Arc<str>>,
+    ) -> ViewSnapshot {
+        ViewSnapshot {
+            application,
+            generation,
+            json: json.into(),
+        }
+    }
+
+    /// The application it is of.
+    pub fn application(&self) -> AppId {
+        self.application
+    }
+
+    /// The [`ViewSet`] generation it was built at — what a call carries, and
+    /// what a worker compares against what it already holds.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The serialised snapshot, as the worker parses it.
+    pub fn json(&self) -> &str {
+        &self.json
+    }
+}
+
+/// A view as v1's `View` is shaped. `table_id` is the table's **name**, because
+/// that is what the v1 `Table` over the schema snapshot is keyed by.
+fn view_json(view: &View) -> Json {
+    json!({
+        "id": view.id.0.to_string(),
+        "name": view.name,
+        "description": view.description,
+        "viewtemplate": view.viewpattern,
+        "table_name": view.table_name,
+        "table_id": view.table_name,
+        "configuration": view.configuration,
+        "min_role": view.min_role,
+        "slug": view.slug,
+        "attributes": view.attributes,
+    })
+}
+
+/// A page as v1's `Page` is shaped.
+fn page_json(page: &Page) -> Json {
+    json!({
+        "id": page.id.0.to_string(),
+        "name": page.name,
+        "title": page.title,
+        "description": page.description,
+        "layout": page.layout,
+        "min_role": page.min_role,
+        "attributes": page.attributes,
+    })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use sc_app::FrameworkRef;
+
+    fn app() -> Application {
+        let mut framework = FrameworkRef::new(crate::SALTCORN_UI_FRAMEWORK);
+        framework.config.insert(
+            MENU_CONFIG_KEY.into(),
+            json!([{ "label": "Books", "type": "Page" }]),
+        );
+        framework
+            .config
+            .insert("site_name".into(), json!("BooksDB"));
+        Application::new("BooksDB", "books", framework)
+    }
+
+    fn role(role: u8, name: &str) -> Role {
+        Role {
+            id: uuid::Uuid::new_v4(),
+            role,
+            name: name.into(),
+            description: String::new(),
+            attributes: Default::default(),
+        }
+    }
+
+    #[test]
+    fn the_snapshot_carries_what_a_synchronous_v1_lookup_needs() {
+        let app = app();
+        let set = ViewSet {
+            application: app.id,
+            generation: 7,
+            views: vec![View::new(app.id, "List Books", "List", "books").min_role(1)],
+            pages: vec![Page::new(app.id, "BooksOverview").title("Books")],
+        };
+        let snapshot = ViewSnapshot::build(
+            &app,
+            &set,
+            &[role(1, "admin"), role(100, "public")],
+            "https://books.example",
+        )
+        .unwrap();
+        assert_eq!(snapshot.generation(), 7);
+        assert_eq!(snapshot.application(), app.id);
+
+        let value: Json = serde_json::from_str(snapshot.json()).unwrap();
+        assert_eq!(value["application"]["name"], json!("BooksDB"));
+        assert_eq!(
+            value["application"]["base_url"],
+            json!("https://books.example")
+        );
+        assert_eq!(value["config"]["site_name"], json!("BooksDB"));
+        assert_eq!(value["menu"][0]["label"], json!("Books"));
+        assert_eq!(
+            value["roles"],
+            json!([{ "id": 1, "role": "admin" }, { "id": 100, "role": "public" }])
+        );
+        let view = &value["views"][0];
+        assert_eq!(view["name"], json!("List Books"));
+        // v1's own field names, because v1's own code reads them.
+        assert_eq!(view["viewtemplate"], json!("List"));
+        assert_eq!(view["table_id"], json!("books"));
+        assert_eq!(view["min_role"], json!(1));
+        assert_eq!(value["pages"][0]["title"], json!("Books"));
+    }
+
+    #[test]
+    fn a_snapshot_of_another_applications_views_is_refused() {
+        let app = app();
+        let set = ViewSet {
+            application: AppId::new(),
+            generation: 1,
+            views: Vec::new(),
+            pages: Vec::new(),
+        };
+        let msg = ViewSnapshot::build(&app, &set, &[], "")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("BooksDB"), "{msg}");
+    }
+}

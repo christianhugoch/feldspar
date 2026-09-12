@@ -2,6 +2,115 @@
 
 Changes in reverse chronological order.
 
+## Saltcorn UI, Phase 3: where it runs — the built-in module and the render seam
+
+v1's view patterns now run. They run on the module worker every other piece of
+v1 JavaScript on this server already runs on, as a built-in module, behind a
+seam the framework (Phase 5) will render through. Nothing serves a view over
+HTTP yet, and a List still cannot read its rows until Phase 4 gives it `View`,
+`getState()` and a full `req`. What exists is the plumbing, tested end to end
+through a real worker.
+
+- **`sc_viewpattern::ViewRuntime`**, an object-safe async seam. It is declared
+  in `sc-viewpattern` and implemented one layer up, like `FrameworkHost`.
+  - Methods: `patterns`, `render`, `render_page`, `post`, `route` and
+    `config_step`. `config_step` is one call per step, carrying the context
+    gathered so far, because a step's form does not exist without a table.
+  - Every call carries a `ViewContext`: the application's `ViewSnapshot`, a
+    `ViewRequest` (v1's `req` as data), the viewer's `CodeHosts` and the schema
+    snapshot. A view reads rows under whatever authority the caller hands it.
+  - It answers a `ViewOutput`: what the pattern returned, plus what it did to
+    `res` (status, redirect, `json`, `send`, flashes).
+  - `install_view_runtime` / `view_runtime()` is the process-wide registry,
+    shaped like `sc-app`'s framework registry.
+  - **Deviation:** `patterns()` is async, not the synchronous data the TODO
+    describes. The manifest still crosses once and is kept, but it is fetched
+    on first use. A synchronous answer would have to start a worker and
+    evaluate a 2 MB bundle at every boot, including on servers that never
+    render a view.
+- **`ViewSnapshot`** (§4) is built from the application row, its `ViewSet` and
+  the role table, and serialised once. It contains:
+  - the application's id, name, subdomain and base URL;
+  - its framework config, and the menu from its `menu_items` setting;
+  - v1-shaped roles;
+  - every view and page, with v1's field names. `viewtemplate`, and `table_id`
+    is the table's name, which is what the v1 `Table` is keyed by.
+
+  A set belonging to another application is refused.
+- **The built-in `@feldspar/saltcorn-ui` runtime** (`sc_module::ModuleViewRuntime`).
+  - It is closed (no permissions), pinned to one worker for the pool's life,
+    and counted as a resident so the worker is never retired from under it.
+  - It is not stored and not replayed: the worker imports the bundle itself the
+    first time a view or a module load needs it, and again after a restart.
+  - It is pinned **beside** the installed modules, not among them. An
+    installed package that happens to be named `@feldspar/saltcorn-ui` loads
+    as an ordinary module, keeps everything it supplies, and gets a line on its
+    card saying it is not what renders views.
+- **Every worker is told where the bundle is**: `ModuleHost::with_view_runtime`
+  sets `__scViewRuntime` on the isolate. A plugin granted a host lives on its
+  own worker and still needs the library.
+- **The snapshot crosses once per generation, per application.** A call always
+  carries `viewsApplication` and `viewsGeneration`. It carries the JSON only
+  when that worker does not already hold that generation, and the worker
+  decides, as it does for the schema. A worker asked for a generation it does
+  not hold fails naming it.
+- **`module-host.mjs`:**
+  - **The view operations:** `view_patterns`, `view_render`,
+    `view_render_page`, `view_post`, `view_route` and `view_config_step`.
+  - **A minimal `req`/`res`**, completed in Phase 4.4.
+  - **Page rendering:** a page renders each `type: "view"` segment in place,
+    then runs `@saltcorn/markup`'s own `renderLayout`.
+  - **The pattern manifest:** it adds each pattern's label and its
+    configuration step *names*, which need a `req` and nothing else.
+- **The library (3.3a).** `require` of a `@saltcorn/*` specifier the bundle
+  answers now gets the bundle's export. This is the same object for the
+  built-in patterns and for any installed plugin, so a plugin's `div` renders.
+  - Module loads await the bundle first, because a plugin's first line is a
+    `require`.
+  - A bundle that will not evaluate is logged once, and modules fall back to
+    stubs.
+  - **One exception, commented:** `@saltcorn/data/models/form` stays this
+    host's `Form` until Phase 4.5. v1's `Form` constructs a `Field` per field,
+    and `new Field` is refused here, so every module's `configuration_workflow`
+    would lose its settings.
+- **The absent tier.** `absentExports` names the v1 exports that answer
+  `undefined`, not a truthy stub, each beside the feature-detection idiom that
+  needs it. Today that is `db/state`'s `features`, for kanban's
+  `features?.public_user_role || 10`. plugin-helper's `runCollabEvents` was
+  already absent in the library.
+- **Bounds (3.5).**
+  - A view call runs under the module call timeout, JS slice and heap cap.
+  - Views embedding views more than 16 deep stop, and the error names the
+    cycle (`A → B → A`). A depth error is not re-wrapped at each level. The
+    depth cap has no test yet: nothing can embed a view until Phase 4's `View`,
+    so its test is 4.8's.
+  - A pattern's throw comes back as an **Application** error naming the view
+    and its pattern, with the worker's sentence and no stack. A System failure
+    stays System.
+- **Boot.** `ModuleServices::install` takes the Saltcorn UI bundle directory,
+  as a new last argument. `main.rs` passes `config.saltcorn_ui_dir`. When the
+  directory holds a runtime, the view runtime is installed once. Installing
+  starts nothing.
+- **Tests.**
+  - `sc-module`'s `view_runtime`, through a real worker, skipping without a
+    built bundle (and without npm, for the two that install a fixture):
+    - The built-in loads over a modules root that does not exist. Its manifest
+      is the six patterns, with List's `Columns` step and `run_action` route.
+      A configuration step comes back as a call, and a page renders through
+      `renderLayout`.
+    - The snapshot crosses once. The same generation carrying different JSON
+      still answers from what the worker holds; the next generation does not.
+      A render failure is an Application error naming `List Books` (List),
+      with no stack.
+    - A package named `@feldspar/saltcorn-ui` loads with its action and the
+      reserved-name issue, and the built-in still lists six patterns.
+    - A plugin (`library-module` fixture, kanban's opening lines) gets v1's real
+      `div`, sees `features` present-and-undefined and `runCollabEvents`
+      absent. The same plugin on a host without the runtime throws naming
+      `markup/tags.div`.
+  - Unit tests for the snapshot's shape and refusal, the answer parsing, and a
+    failure keeping its kind.
+
 ## Saltcorn UI, Phase 2: v1's source, vendored and bundled
 
 The rendering half of Saltcorn 1 is now in this repository and builds into one

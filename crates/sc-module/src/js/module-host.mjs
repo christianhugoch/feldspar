@@ -63,16 +63,25 @@
 // not installed, so `Module._load` is patched to answer every `@saltcorn/*`
 // specifier from the table below.
 //
-// Three tiers. `Table` and `Field` are the **real** v1 classes — the shared
+// Four tiers. `Table` and `Field` are the **real** v1 classes — the shared
 // `v1_api.js` this file is concatenated after, over the ask channel above and
 // the schema snapshot the call carried. `Workflow`, `Form` and `interpolate`
 // are real too, because the first two are what a `configuration_workflow` is
 // written in and the third is called on every `proxmox_snapshot` run.
+//
+// The **library** is real as well: `@saltcorn/markup` and its siblings, v1's
+// plugin-helper, fieldviews and view patterns, answered by Saltcorn UI's view
+// runtime bundle — v1's own source, vendored — when this server was built with
+// it. One `require` table, so a built-in view pattern and an installed plugin
+// reach the same objects (TODO "Saltcorn UI" §5).
+//
 // Everything else is a stub whose properties are reachable and whose **calls
 // throw**, naming the API. A silent no-op was the alternative and is refused on
 // the same grounds the rest of this system refuses silent failures: a
 // `Table.findOne` that returns `undefined` does not fail, it computes the wrong
-// answer, inside somebody's trigger.
+// answer, inside somebody's trigger. Except for the **absent** names, which are
+// `undefined` on purpose, each beside the feature-detection idiom that needs it:
+// a plugin testing `features?.public_user_role` is testing for exactly that.
 
 import { createRequire } from "node:module";
 import Module from "node:module";
@@ -94,6 +103,11 @@ const fail = globalThis.__scFail;
 const log = globalThis.__scLog;
 /** One host call, out: `(callId, askId, requestJson)`. */
 const askHost = globalThis.__scAsk;
+/** Where Saltcorn UI's view runtime bundle is, as a file URL — or nothing, on a
+ * server built without it. Set by the worker before this script ran, because
+ * every worker needs it and only some are ever told about a view. */
+const viewRuntimeUrl =
+  typeof globalThis.__scViewRuntime === "string" ? globalThis.__scViewRuntime : null;
 
 // ---------------------------------------------------------------------------
 // Which module is speaking
@@ -405,27 +419,61 @@ function callApi(what) {
   return store.api;
 }
 
-/** The `@saltcorn/*` specifiers this host answers itself, and with what. */
+/** The `@saltcorn/*` specifiers this host answers, and with what.
+ *
+ * In order: the v1 classes this host implements itself; then the **library** —
+ * the view runtime bundle's exports, keyed by the specifier v1 names them with,
+ * so `require("@saltcorn/markup/tags")` is v1's own `div` for an installed
+ * plugin exactly as it is for the built-in patterns; then a named stub. */
 function saltcornModule(specifier) {
-  switch (specifier) {
+  const bare = specifier.replace(/\.js$/, "");
+  switch (bare) {
     case "@saltcorn/data/models/table":
-    case "@saltcorn/data/models/table.js":
       return v1Classes.Table;
     case "@saltcorn/data/models/field":
-    case "@saltcorn/data/models/field.js":
       return v1Classes.Field;
+    // The library has v1's own `Form`, and it constructs a `Field` for every
+    // field it is given — which `new Field` refuses here, because to this host
+    // that is schema editing. So a module's `configuration_workflow` keeps this
+    // host's `Form`, whose fields are all the manifest reads, until a `Field` a
+    // form builds is constructible.
     case "@saltcorn/data/models/form":
-    case "@saltcorn/data/models/form.js":
       return Form;
     case "@saltcorn/data/models/workflow":
-    case "@saltcorn/data/models/workflow.js":
       return Workflow;
     case "@saltcorn/data/utils":
-    case "@saltcorn/data/utils.js":
       return { ...namedNamespace(specifier), interpolate };
-    default:
-      return namedNamespace(specifier);
+    default: {
+      const answered = libraryModule(bare);
+      return answered !== undefined ? answered : namedNamespace(specifier);
+    }
   }
+}
+
+/** The v1 exports that answer `undefined` rather than a stub: the **absent**
+ * tier (TODO "Saltcorn UI" §5).
+ *
+ * A stub is truthy, so a plugin that feature-detects — which v1 plugins do,
+ * because they are written against eight years of v1 versions — takes the
+ * branch for a feature it does not have and then throws. Against `undefined` it
+ * degrades the way its author meant. A list and not a default: an unknown name
+ * still refuses, and a name is added here only with the idiom that needs it
+ * written beside it. (plugin-helper's absent names are the library's, and are
+ * `undefined` there.) */
+const absentExports = {
+  "@saltcorn/data/db/state": {
+    // `const public_user_role = features?.public_user_role || 10;`
+    // — @saltcorn/kanban. v1's feature flags, read with a default.
+    features: "v1's feature flags",
+  },
+};
+
+/** One specifier of the view runtime's library, or `undefined` when there is no
+ * runtime or it does not answer that specifier. */
+function libraryModule(bare) {
+  const library = viewRuntime && viewRuntime.library;
+  if (!library || !Object.prototype.hasOwnProperty.call(library, bare)) return undefined;
+  return library[bare];
 }
 
 /** A stub *namespace*: a plain object whose every property is a named stub, so
@@ -433,12 +481,14 @@ function saltcornModule(specifier) {
  * without complaint and `getState()` throws naming `getState`. */
 function namedNamespace(specifier) {
   const short = specifier.replace(/^@saltcorn\//, "").replace(/\.js$/, "");
+  const absent = absentExports[specifier.replace(/\.js$/, "")] || {};
   return new Proxy(
     {},
     {
       get(_t, prop) {
         if (typeof prop === "symbol") return undefined;
         if (passThrough.has(prop)) return undefined;
+        if (Object.prototype.hasOwnProperty.call(absent, prop)) return undefined;
         if (prop === "__esModule") return false;
         if (prop === "default") return namedStub(`${short}.default`);
         return namedStub(`${short}.${prop}`);
@@ -1098,6 +1148,9 @@ async function evalFunctions(plugin, configuration) {
 
 /** Load (or reload) one module, and report what it supplies. */
 async function loadModule({ module: name, dir, configuration }) {
+  // The library has to be there before the plugin's first line runs: that line
+  // is `require("@saltcorn/markup/tags")`, and `require` cannot wait.
+  await ensureViewRuntime();
   purgeCache(dir);
   let plugin;
   try {
@@ -1118,6 +1171,13 @@ async function loadModule({ module: name, dir, configuration }) {
     throw e;
   }
   const issues = [];
+  if (name === VIEW_RUNTIME) {
+    issues.push(
+      `the name ${VIEW_RUNTIME} belongs to this server's built-in Saltcorn UI view runtime, so ` +
+        `this package is loaded as an ordinary module: everything it supplies works, and it is ` +
+        `not what renders views`,
+    );
+  }
 
   // v1's `onLoad(configuration)`, which is where a plugin builds the state its
   // actions close over. `@saltcorn/mqtt` is the whole argument for calling it:
@@ -1263,6 +1323,311 @@ async function callFunction({ module: name, function: fnName, args }) {
 }
 
 // ---------------------------------------------------------------------------
+// Saltcorn UI: the view runtime
+// ---------------------------------------------------------------------------
+
+/** The name the built-in view runtime speaks under (TODO "Saltcorn UI" §3).
+ *
+ * It is not a module in `loaded` and not an entry in the pool's pins: it lives
+ * beside them, so an installed package that happens to carry the name loads as
+ * the ordinary module it is and neither can displace the other. */
+const VIEW_RUNTIME = "@feldspar/saltcorn-ui";
+
+/** How deep views may embed views before a render is stopped (§3). */
+const MAX_VIEW_DEPTH = 16;
+
+/** The bundle's namespace once imported, the import in flight, and why it
+ * failed if it did. Imported **once per worker, on first need** — a module load
+ * or a view call — so a worker that is never asked for either never pays for a
+ * 2 MB evaluation. */
+let viewRuntime = null;
+let viewRuntimeLoad = null;
+let viewRuntimeError = null;
+
+/** The view runtime, importing it if this is the first time. Never rejects: a
+ * bundle that will not evaluate is logged once and answered as `null`, so every
+ * module on this worker still loads — against stubs, as it would on a server
+ * built without the bundle — and a view call says why there is nothing to
+ * render with. */
+function ensureViewRuntime() {
+  if (!viewRuntimeUrl) return Promise.resolve(null);
+  if (!viewRuntimeLoad) {
+    viewRuntimeLoad = import(viewRuntimeUrl).then(
+      (namespace) => {
+        viewRuntime = namespace;
+        return namespace;
+      },
+      (e) => {
+        viewRuntimeError = (e && e.message) || String(e);
+        log("error", null, `the Saltcorn UI view runtime could not be loaded: ${viewRuntimeError}`);
+        return null;
+      },
+    );
+  }
+  return viewRuntimeLoad;
+}
+
+/** The view runtime, or the sentence saying why there is none. */
+async function requireViewRuntime() {
+  const runtime = await ensureViewRuntime();
+  if (runtime) return runtime;
+  throw new Error(
+    viewRuntimeUrl
+      ? `the Saltcorn UI view runtime could not be loaded: ${viewRuntimeError}`
+      : "this server was started without the Saltcorn UI bundle, so there is no view runtime " +
+          "to render a view with",
+  );
+}
+
+/** The view snapshots this worker holds, by application id (§4).
+ *
+ * One per application rather than one in all, because two applications render
+ * on one worker, and an entry is replaced when its application's generation
+ * moves. A call carries the generation always and the JSON only when the worker
+ * did not hold it — the Rust side decides that, as it does for the schema. */
+const viewSets = new Map();
+
+/** The snapshot one call names — a **named failure** when this worker does not
+ * hold that generation, never an empty application. */
+function viewSetFor(application, generation) {
+  const held = viewSets.get(application);
+  if (!held || held.generation !== generation) {
+    throw new Error(
+      `the view snapshot of application ${application} at generation ${generation} is not on ` +
+        `this module worker`,
+    );
+  }
+  return held.set;
+}
+
+/** The snapshot of the view call in flight. */
+function currentViews() {
+  const store = running.getStore();
+  if (!store || !store.views) throw new Error("this view call carried no view snapshot");
+  return store.views;
+}
+
+/** v1's `__`: the identity translation, with v1's `%s` substitution. */
+function translate(text, ...args) {
+  let next = 0;
+  return String(text).replace(/%s/g, () => (next < args.length ? String(args[next++]) : "%s"));
+}
+
+/** v1's `req` and `res` for one call, built from the request the host sent, and
+ * the record of what the pattern did to `res` — which is what crosses back. */
+function viewRequest(incoming, set) {
+  const r = incoming || {};
+  const headers = r.headers || {};
+  const response = { status: null, redirect: null, flashes: [] };
+  const req = {
+    method: r.method || "GET",
+    path: r.path || "/",
+    originalUrl: r.path || "/",
+    query: r.query || {},
+    body: r.body || {},
+    params: {},
+    headers,
+    user: r.user || undefined,
+    xhr: String(headers["x-requested-with"] || "").toLowerCase() === "xmlhttprequest",
+    csrfToken: () => r.csrf_token || "",
+    flash: (kind, message) => {
+      response.flashes.push({ kind: String(kind), message: String(message) });
+    },
+    getLocale: () => "en",
+    __: translate,
+    get_base_url: () =>
+      r.base_url || (set && set.application && set.application.base_url) || "/",
+  };
+  const res = {
+    status(code) {
+      response.status = code;
+      return res;
+    },
+    redirect(first, second) {
+      if (typeof first === "number") {
+        response.status = first;
+        response.redirect = String(second);
+      } else {
+        response.redirect = String(first);
+      }
+      return res;
+    },
+    json(value) {
+      response.json = value === undefined ? null : value;
+      return res;
+    },
+    send(value) {
+      response.sent = value === undefined ? null : value;
+      return res;
+    },
+    sendWrap(_title, ...body) {
+      response.sent = body.length === 1 ? body[0] : body;
+      return res;
+    },
+  };
+  return { req, res, response };
+}
+
+/** One view of the snapshot, as the object a pattern is handed — a copy, because
+ * patterns write into their configuration and the snapshot is the next call's. */
+function viewRecord(set, name) {
+  const view = (set.views || []).find((v) => v.name === name);
+  if (!view) {
+    throw new Error(
+      `the application ${(set.application && set.application.name) || "?"} has no view named ${name}`,
+    );
+  }
+  return structuredClone(view);
+}
+
+/** The views being rendered, outermost first, for the call in flight. Its own
+ * storage rather than a field of the call's, because two views embedded side by
+ * side are two trails, not one. */
+const viewTrail = new AsyncLocalStorage();
+
+/** Run `render` as the view `name`, inside whatever is already being rendered —
+ * and stop, **naming the cycle**, when views embed views more than
+ * [`MAX_VIEW_DEPTH`] deep. A view that embeds itself is otherwise a worker that
+ * renders until its call's clock runs out. */
+function withinView(name, render) {
+  const trail = viewTrail.getStore() || [];
+  if (trail.length >= MAX_VIEW_DEPTH) {
+    const from = trail.lastIndexOf(name);
+    const error = new Error(
+      from >= 0
+        ? `views embed views more than ${MAX_VIEW_DEPTH} deep, so rendering was stopped; this ` +
+            `cycle embeds itself: ${[...trail.slice(from), name].join(" → ")}`
+        : `views embed views more than ${MAX_VIEW_DEPTH} deep, so rendering was stopped: ` +
+            [...trail, name].join(" → "),
+    );
+    error.viewDepth = true;
+    throw error;
+  }
+  return viewTrail.run([...trail, name], render);
+}
+
+/** What a view call answers. */
+function viewAnswer(value, response) {
+  return { value: value === undefined ? null : value, response };
+}
+
+/** The pattern manifest (§3.3): the bundle's registry, with each pattern's
+ * configuration step **names** — which need a `req` to be built, and nothing
+ * else — and never a step's fields, which need a table. */
+async function viewPatternsOp() {
+  const runtime = await requireViewRuntime();
+  const { req } = viewRequest({}, null);
+  return runtime.viewPatterns().map((pattern) => {
+    const vt = runtime.viewtemplates[pattern.name];
+    const workflow =
+      typeof vt.configuration_workflow === "function" ? vt.configuration_workflow(req) : null;
+    return {
+      ...pattern,
+      label: vt.label || pattern.name,
+      steps: ((workflow && workflow.steps) || []).map((step) => String(step.name)),
+    };
+  });
+}
+
+/** v1's `View.run`. */
+async function viewRender({ view: name, state, request }) {
+  const runtime = await requireViewRuntime();
+  const set = currentViews();
+  const { req, res, response } = viewRequest(request, set);
+  const value = await withinView(name, () =>
+    runtime.runView(viewRecord(set, name), state || {}, { req, res }),
+  );
+  return viewAnswer(value, response);
+}
+
+/** v1's `View.runPost`: the state is the query, as v1's route builds it. */
+async function viewPost({ view: name, body, request }) {
+  const runtime = await requireViewRuntime();
+  const set = currentViews();
+  const { req, res, response } = viewRequest(request, set);
+  const value = await withinView(name, () =>
+    runtime.runPost(viewRecord(set, name), req.query, body || {}, { req, res }),
+  );
+  return viewAnswer(value, response);
+}
+
+/** v1's `View.runRoute`. */
+async function viewRoute({ view: name, route, body, request }) {
+  const runtime = await requireViewRuntime();
+  const set = currentViews();
+  const { req, res, response } = viewRequest(request, set);
+  const value = await withinView(name, () =>
+    runtime.runRoute(viewRecord(set, name), route, body || {}, { req, res }),
+  );
+  return viewAnswer(value, response);
+}
+
+/** v1's `Page.run` then `renderLayout`: every view the layout embeds rendered
+ * into its segment's `contents`, then the layout rendered by `@saltcorn/markup`.
+ * A view in `shared` state sees the page's query; any other its own fixed
+ * state. */
+async function viewRenderPage({ page: name, request }) {
+  const runtime = await requireViewRuntime();
+  const set = currentViews();
+  const page = (set.pages || []).find((p) => p.name === name);
+  if (!page) {
+    throw new Error(
+      `the application ${(set.application && set.application.name) || "?"} has no page named ${name}`,
+    );
+  }
+  const { req, res, response } = viewRequest(request, set);
+  const layout = structuredClone(page.layout || {});
+  await embedViews(runtime, set, layout, req, res);
+  const renderLayout = runtime.library["@saltcorn/markup/layout"];
+  const value = renderLayout({
+    blockDispatch: {},
+    layout,
+    role: req.user ? req.user.role_id : 100,
+    req,
+    is_owner: false,
+  });
+  return viewAnswer(value, response);
+}
+
+/** Render every `{ type: "view" }` segment under `segment`, in place. */
+async function embedViews(runtime, set, segment, req, res) {
+  if (!segment || typeof segment !== "object") return;
+  if (Array.isArray(segment)) {
+    for (const inner of segment) await embedViews(runtime, set, inner, req, res);
+    return;
+  }
+  if (segment.type === "view" && typeof segment.view === "string") {
+    const state = segment.state === "shared" ? { ...req.query } : { ...(segment.configuration || {}) };
+    try {
+      segment.contents = await withinView(segment.view, () =>
+        runtime.runView(viewRecord(set, segment.view), state, { req, res }),
+      );
+    } catch (e) {
+      if (e && e.viewDepth) throw e;
+      throw new Error(`the view ${segment.view} embedded here failed: ${(e && e.message) || e}`);
+    }
+    return;
+  }
+  for (const inner of Object.values(segment)) {
+    if (inner && typeof inner === "object") await embedViews(runtime, set, inner, req, res);
+  }
+}
+
+/** One step of a pattern's configuration workflow (§6): a call per step, over
+ * the context gathered so far, with the table named. */
+async function viewConfigStep({ pattern, table, step, context, request }) {
+  const runtime = await requireViewRuntime();
+  const store = running.getStore();
+  const { req } = viewRequest(request, store && store.views);
+  const gathered = { ...(context || {}) };
+  if (table) {
+    gathered.table_id = table;
+    gathered.table_name = table;
+  }
+  return runtime.configStep(pattern, step || 0, gathered, req);
+}
+
+// ---------------------------------------------------------------------------
 // The entry point
 // ---------------------------------------------------------------------------
 
@@ -1337,6 +1702,20 @@ async function handle(request) {
       if (pending) await pending;
       return await frameworkFiles(request);
     }
+    // Saltcorn UI's view runtime (TODO "Saltcorn UI" §3). No module to wait
+    // on: the runtime is not a module in `loaded`, and imports itself.
+    case "view_patterns":
+      return await viewPatternsOp();
+    case "view_render":
+      return await viewRender(request);
+    case "view_render_page":
+      return await viewRenderPage(request);
+    case "view_post":
+      return await viewPost(request);
+    case "view_route":
+      return await viewRoute(request);
+    case "view_config_step":
+      return await viewConfigStep(request);
     default:
       throw new Error(`unknown module-host operation ${request.op}`);
   }
@@ -1378,6 +1757,7 @@ globalThis.__scModuleHost = (id, request) => {
     asks: !!(request && request.asks),
     schema: null,
     api: null,
+    views: null,
   };
   running.run(context, () => {
     let pending;
@@ -1392,6 +1772,17 @@ globalThis.__scModuleHost = (id, request) => {
         schemas.set(request.schemaGeneration, JSON.parse(request.schema));
       }
       context.schema = schemaFor(request && request.schemaGeneration);
+      // The same, for an application's views (§4): the JSON when the worker did
+      // not hold this generation, and the generation always.
+      if (request && request.viewsApplication) {
+        if (typeof request.views === "string") {
+          viewSets.set(request.viewsApplication, {
+            generation: request.viewsGeneration,
+            set: JSON.parse(request.views),
+          });
+        }
+        context.views = viewSetFor(request.viewsApplication, request.viewsGeneration);
+      }
       pending = handle(request);
     } catch (e) {
       fail(id, (e && e.message) || String(e), (e && e.stack) || null);

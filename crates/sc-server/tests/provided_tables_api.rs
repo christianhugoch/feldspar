@@ -173,6 +173,8 @@ async fn setup(tag: &str) -> sc_error::Result<Server> {
         None,
         1,
         sc_server::default_python_adapter(),
+        // No Saltcorn UI bundle: nothing here renders a view.
+        None,
     )
     .await?;
 

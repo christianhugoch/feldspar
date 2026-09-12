@@ -1,0 +1,8 @@
+{
+  "name": "@saltcorn-test/library",
+  "version": "0.1.0",
+  "description": "A v1-shaped plugin that requires the Saltcorn UI library the way @saltcorn/kanban does, and feature-detects the way it does.",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT"
+}

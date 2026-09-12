@@ -122,6 +122,8 @@ async fn the_server_serves_a_module_with_node_off_the_path() -> sc_error::Result
         None,
         1,
         sc_server::default_python_adapter(),
+        // No Saltcorn UI bundle: nothing here renders a view.
+        None,
     )
     .await?;
 

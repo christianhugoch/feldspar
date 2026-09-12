@@ -97,6 +97,7 @@ use crate::bounds::{
 };
 use crate::host::{CallHosts, ModuleManifest};
 use crate::permissions::ModulePermissions;
+use crate::view_runtime::BUILTIN_VIEW_RUNTIME;
 
 pub use worker::{Control, HostAsk, Job, LoadRequest, WorkerConfig};
 
@@ -234,6 +235,11 @@ struct WorkerHandle {
 struct Pool {
     workers: Vec<Option<WorkerHandle>>,
     pinned: BTreeMap<String, usize>,
+    /// The worker Saltcorn UI's view runtime is pinned to, once a view has been
+    /// asked for. Beside `pinned` rather than in it, so an installed package
+    /// carrying the runtime's name is pinned as the module it is and neither
+    /// displaces the other.
+    view_worker: Option<usize>,
 }
 
 /// The module pool: Deno workers over one modules root, one permission set each.
@@ -262,6 +268,8 @@ pub struct DenoModuleHost {
     /// How many workers modules sharing one permission set may spread over.
     per_set: usize,
     pool: Mutex<Pool>,
+    /// The view runtime bundle, as the file URL a worker imports it from.
+    view_runtime: Option<String>,
 }
 
 impl DenoModuleHost {
@@ -285,6 +293,7 @@ impl DenoModuleHost {
             bounds,
             per_set: workers.max(1),
             pool: Mutex::new(Pool::default()),
+            view_runtime: None,
         }
     }
 
@@ -292,6 +301,30 @@ impl DenoModuleHost {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> DenoModuleHost {
         self.bounds.timeout = timeout;
+        self
+    }
+
+    /// Workers that can import Saltcorn UI's view runtime from `runtime`.
+    ///
+    /// A path that cannot be a file URL is logged and dropped — the workers then
+    /// answer the library with stubs and a view call with the sentence for a
+    /// server built without the bundle, which is the truth about this one.
+    #[must_use]
+    pub fn with_view_runtime(mut self, runtime: Option<PathBuf>) -> DenoModuleHost {
+        self.view_runtime = runtime.and_then(|path| {
+            let path = path.canonicalize().unwrap_or(path);
+            match deno_core::url::Url::from_file_path(&path) {
+                Ok(url) => Some(url.to_string()),
+                Err(()) => {
+                    sc_log::log_error!(
+                        "feldspar: the Saltcorn UI view runtime at {} is not an absolute path, so \
+                         no module worker will load it",
+                        path.display()
+                    );
+                    None
+                }
+            }
+        });
         self
     }
 
@@ -679,6 +712,28 @@ impl DenoModuleHost {
         }
     }
 
+    /// One call into Saltcorn UI's view runtime: the host script's `view_*`
+    /// operation `op`, with `request`'s fields, over what `call` carries.
+    ///
+    /// Under the same wall clock, JS slice and heap as a module's action, and for
+    /// the same reason: a view pattern is v1 JavaScript on the same worker.
+    pub async fn view_call(
+        &self,
+        op: &str,
+        mut request: Json,
+        call: CallHosts<'_>,
+    ) -> Result<Json> {
+        let index = self.view_worker().await;
+        if let Json::Object(map) = &mut request {
+            map.insert("op".to_owned(), json!(op));
+            // The log tag: a `console.log` in a view pattern is the runtime's.
+            map.insert("module".to_owned(), json!(BUILTIN_VIEW_RUNTIME));
+        }
+        self.send_with(index, request, None, call)
+            .await
+            .map_err(|e| denial(BUILTIN_VIEW_RUNTIME, e))
+    }
+
     /// Ask a worker to say hello — what a test and a diagnostics screen use to
     /// find out whether the pool starts at all.
     pub async fn ping(&self) -> Result<Json> {
@@ -713,6 +768,7 @@ impl DenoModuleHost {
         let workers: Vec<WorkerHandle> = {
             let mut pool = self.pool.lock().await;
             pool.pinned.clear();
+            pool.view_worker = None;
             pool.workers.drain(..).flatten().collect()
         };
         let mut acks = Vec::new();
@@ -755,20 +811,47 @@ impl DenoModuleHost {
             pool.release(index);
             moved_from = Some(index);
         }
+        let index = self.choose(&mut pool, permissions);
+        pool.pinned.insert(name.to_owned(), index);
+        (index, moved_from)
+    }
+
+    /// A worker of `permissions` for one more resident — a new one while the set
+    /// has fewer than it may spread over, else its emptiest — counted onto it.
+    fn choose(&self, pool: &mut Pool, permissions: &ModulePermissions) -> usize {
         let group: Vec<usize> = pool.group(permissions);
         let index = if group.len() < self.per_set {
-            self.spawn(&mut pool, permissions)
+            self.spawn(pool, permissions)
         } else {
             group
                 .into_iter()
                 .min_by_key(|index| pool.workers[*index].as_ref().map_or(0, |w| w.modules))
                 .unwrap_or(0)
         };
-        pool.pinned.insert(name.to_owned(), index);
         if let Some(worker) = pool.workers.get_mut(index).and_then(Option::as_mut) {
             worker.modules += 1;
         }
-        (index, moved_from)
+        index
+    }
+
+    /// The worker the built-in view runtime is pinned to, pinning it on first
+    /// use.
+    ///
+    /// **Closed**, like a module nobody granted anything: the runtime reaches
+    /// data only through the surfaces a call carries. Counted as a resident, so
+    /// the worker is not stopped when the last module on it is uninstalled — and
+    /// pinned for the pool's life, because the snapshots a worker holds are
+    /// what make the second render of a generation cheap.
+    async fn view_worker(&self) -> usize {
+        let mut pool = self.pool.lock().await;
+        if let Some(index) = pool.view_worker
+            && pool.workers.get(index).is_some_and(Option::is_some)
+        {
+            return index;
+        }
+        let index = self.choose(&mut pool, &ModulePermissions::closed());
+        pool.view_worker = Some(index);
+        index
     }
 
     /// The worker a call is routed to: the module's own, or any running one so
@@ -801,6 +884,7 @@ impl DenoModuleHost {
             js_slice: self.bounds.js_slice,
             max_heap: self.bounds.max_heap,
             permissions: permissions.clone(),
+            view_runtime: self.view_runtime.clone(),
         };
         let thread = std::thread::Builder::new()
             .name(format!("sc-module-{index}"))
@@ -922,6 +1006,7 @@ impl DenoModuleHost {
                 reply,
                 asks: can_ask.then_some(asks),
                 schema: call.schema.cloned(),
+                views: call.views.cloned(),
             })))
             .map_err(|_| Error::config("the module pool's worker has stopped"))?;
 

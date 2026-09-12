@@ -255,6 +255,8 @@ async fn serve_command(args: &[String]) -> Result<()> {
         // interpreter per process, so a Python module and a Python body share
         // it, and one environment, which is what pip installs into.
         python.clone(),
+        // Saltcorn UI's view runtime runs on the same pool, as a built-in.
+        config.saltcorn_ui_dir.clone(),
     )
     .await?;
 

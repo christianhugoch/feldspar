@@ -27,9 +27,17 @@
 //! - Where the view runtime is ([`require_view_runtime`]): the `ui/saltcorn-ui`
 //!   bundle, and the sentence an application that needs it fails to mount with
 //!   when this server was built without it.
+//! - [`ViewSnapshot`] — an application's views, pages and settings serialised at
+//!   one generation, which is what v1's synchronous `View.findOne` is answered
+//!   from on the worker (§4).
+//! - [`ViewRuntime`] — the seam a view is rendered, posted to and configured
+//!   through, declared here and implemented by `sc-module` over its worker
+//!   (§3), and the one installed at boot ([`view_runtime`]).
 
 mod bundle;
 mod patterns;
+mod runtime;
+mod snapshot;
 mod store;
 mod tables;
 mod validate;
@@ -43,6 +51,11 @@ pub use patterns::{
     BUILTIN_PATTERNS, PatternInfo, builtin_patterns, find_pattern, install_patterns,
     registered_patterns,
 };
+pub use runtime::{
+    ConfigStep, Flash, PatternManifest, ViewContext, ViewOutput, ViewRequest, ViewRuntime,
+    ViewUser, install_view_runtime, view_runtime,
+};
+pub use snapshot::{MENU_CONFIG_KEY, ViewSnapshot};
 pub use store::{
     delete_application_views_and_pages, delete_page, delete_view, list_pages, list_views,
     load_page, load_view, save_page, save_view,

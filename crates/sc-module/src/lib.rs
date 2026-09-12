@@ -44,6 +44,8 @@
 //! - [`table_providers`] — a module's table providers, as `sc-catalog`'s seam.
 //! - [`frameworks`] — a module's application frameworks, as `sc-app`'s seam.
 //! - [`modules`] — the loaded set: every stored module, its actions, its issues.
+//! - [`view_runtime`] — Saltcorn UI's view runtime, the built-in
+//!   `@feldspar/saltcorn-ui`, as `sc-viewpattern`'s render seam.
 //!
 //! ## What is *not* here
 //!
@@ -68,6 +70,7 @@ pub mod permissions;
 pub mod spec;
 pub mod store;
 pub mod table_providers;
+pub mod view_runtime;
 
 pub use action::ModuleAction;
 pub use bounds::{
@@ -99,3 +102,4 @@ pub use store::{
     load_module, load_module_by_name, require_module, save_module,
 };
 pub use table_providers::ModuleTableProviders;
+pub use view_runtime::{BUILTIN_VIEW_RUNTIME, ModuleViewRuntime};
