@@ -477,24 +477,24 @@ Five levels, because the failure modes are at five levels:
 
 ## Phase 1 — The view, the page, and where they live
 
-- [ ] 1.1 `crates/sc-viewpattern`: a new crate. It sits **above** `sc-app` rather than at
+- [x] 1.1 `crates/sc-viewpattern`: a new crate. It sits **above** `sc-app` rather than at
       §2's layer 8, because it implements `Framework`; `sc-module` implements its runtime
       seam from above, which is the same acyclic shape `sc-model` and `sc-app` already have
       with `sc-module`. §2's tree is corrected in Phase 12.
-- [ ] 1.2 `View` and `ViewId`, and `_fd_views`: `id`, `application`, `name`, `description`,
+- [x] 1.2 `View` and `ViewId`, and `_fd_views`: `id`, `application`, `name`, `description`,
       `viewpattern`, `table_name`, `configuration` (json, v1-shaped), `min_role`, `slug`,
       `attributes`. Unique on (`application`, `name`). Bootstrapped idempotently, like
       `_fd_applications`.
-- [ ] 1.3 `Page` and `PageId`, and `_fd_pages`: `id`, `application`, `name`, `title`,
+- [x] 1.3 `Page` and `PageId`, and `_fd_pages`: `id`, `application`, `name`, `title`,
       `description`, `layout` (json), `min_role`, `attributes` (carrying
       `root_page_for_roles`). Unique on (`application`, `name`).
-- [ ] 1.4 `save_view` / `load_view` / `list_views` / `delete_view` and the page four, all
+- [x] 1.4 `save_view` / `load_view` / `list_views` / `delete_view` and the page four, all
       scoped by `AppId`. Validation (§1, §11): the pattern is registered; the table is in the
       application's subset; `min_role` is a role that exists; the name is unique in the app
       and is URL-safe.
-- [ ] 1.5 `ViewSet` — every view and page of one application, loaded once and re-loaded on a
+- [x] 1.5 `ViewSet` — every view and page of one application, loaded once and re-loaded on a
       write, with a `generation` counter for §4.
-- [ ] 1.6 Live tests against Postgres: the round trip, the four refusals each naming what is
+- [x] 1.6 Live tests against Postgres: the round trip, the four refusals each naming what is
       wrong, two applications holding same-named views over the same table, and a generation
       that moves on write and not on read.
 

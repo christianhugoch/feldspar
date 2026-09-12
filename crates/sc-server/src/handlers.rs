@@ -3591,6 +3591,9 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // is the definition's end, unmounting is what stops it serving.
                 let existing = load_application(&catalog, id).await?;
                 let deleted = delete_application(&catalog, id).await?;
+                // `_fd_views.application` is not a foreign key (the schema layer
+                // renders no `ON DELETE`), so the views and pages go here.
+                sc_viewpattern::delete_application_views_and_pages(&catalog, id).await?;
                 if let Some(app) = &existing {
                     apps.unmount(&app.subdomain);
                 }

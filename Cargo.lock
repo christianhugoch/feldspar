@@ -8189,6 +8189,7 @@ dependencies = [
  "sc-server",
  "sc-test-harness",
  "sc-types",
+ "sc-viewpattern",
  "serde_json",
  "tokio",
  "tokio-postgres",
@@ -8560,6 +8561,7 @@ dependencies = [
  "sc-query",
  "sc-test-harness",
  "sc-types",
+ "sc-viewpattern",
  "sc-workflow",
  "serde",
  "serde_json",
@@ -8594,6 +8596,25 @@ dependencies = [
  "sc-query",
  "serde",
  "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "sc-viewpattern"
+version = "0.1.0"
+dependencies = [
+ "sc-app",
+ "sc-auth",
+ "sc-catalog",
+ "sc-db",
+ "sc-db-postgres",
+ "sc-error",
+ "sc-files",
+ "sc-query",
+ "sc-test-harness",
+ "sc-types",
+ "serde_json",
+ "tokio",
  "uuid",
 ]
 

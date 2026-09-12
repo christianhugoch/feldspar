@@ -1,0 +1,45 @@
+[package]
+name = "sc-viewpattern"
+description = "Saltcorn UI: v1-style views and pages, owned by an application (layer 8)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# One integration-test binary per crate rather than one per file: every test
+# target in this workspace statically links V8, so ~400 MB of binary and a
+# multi-second link were being paid per *file*. `tests/it.rs` aggregates them.
+autotests = false
+
+[dependencies]
+sc-error.workspace = true
+sc-query.workspace = true
+sc-db.workspace = true
+sc-types.workspace = true
+# `_fd_views` and `_fd_pages` are bootstrapped through the catalog, like every
+# other `_fd_*` table, and read back out of the driver.
+sc-catalog.workspace = true
+# A view's `min_role` must be a role that exists (§11): the roles table is
+# `sc-auth`'s.
+sc-auth.workspace = true
+# A view belongs to an application and may only name a table in its subset
+# (§1). Above `sc-app` rather than beside it, because Saltcorn UI is a
+# `Framework` (§13.3), and `sc-module` implements this crate's runtime seam from
+# above — the shape `sc-model` and `sc-app` already have with `sc-module`.
+sc-app.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+sc-db-postgres.workspace = true
+sc-files.workspace = true
+sc-test-harness.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it.rs"

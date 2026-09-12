@@ -64,6 +64,9 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
     sc_app::bootstrap(&catalog)
         .await
         .context("ensuring the applications table exists")?;
+    sc_viewpattern::bootstrap(&catalog)
+        .await
+        .context("ensuring the views and pages tables exist")?;
     sc_catalog::bootstrap_file_stores(&catalog)
         .await
         .context("ensuring the file stores table exists")?;

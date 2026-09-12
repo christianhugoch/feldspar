@@ -31,6 +31,8 @@ sc-server.workspace = true
 sc-api.workspace = true
 sc-auth.workspace = true
 sc-app.workspace = true
+# `_fd_views` and `_fd_pages`, bootstrapped beside `_fd_applications`.
+sc-viewpattern.workspace = true
 sc-catalog.workspace = true
 sc-files.workspace = true
 # `_fd_llm_providers` is bootstrapped alongside the other stored-metadata tables

@@ -53,6 +53,10 @@ members = [
     # Layer 8 — applications & API
     "crates/sc-api",
     "crates/sc-app",
+    # Saltcorn UI: v1-style views and pages, owned by an application. Above
+    # `sc-app` because it implements `Framework`; `sc-module` implements its
+    # runtime seam from above.
+    "crates/sc-viewpattern",
     # Layer 9 — the core built-in actions (above the row layer, because three of
     # them write rows through it), the core built-in agent traits (above it for
     # exactly the same reason) and the server
@@ -114,6 +118,7 @@ sc-agent = { path = "crates/sc-agent" }
 sc-workflow = { path = "crates/sc-workflow" }
 sc-api = { path = "crates/sc-api" }
 sc-app = { path = "crates/sc-app" }
+sc-viewpattern = { path = "crates/sc-viewpattern" }
 sc-core-actions = { path = "crates/sc-core-actions" }
 sc-core-traits = { path = "crates/sc-core-traits" }
 sc-server = { path = "crates/sc-server" }

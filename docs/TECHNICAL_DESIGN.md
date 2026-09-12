@@ -142,6 +142,8 @@ graph TD
   coretraits --> app["sc-app"]
   coreact --> api["sc-api"]
   server --> module["sc-module"]
+  server --> viewpattern["sc-viewpattern"]
+  viewpattern --> app
   server --> model["sc-model"]
   coreact --> model
   server --> python["sc-python"]
@@ -210,10 +212,11 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-workflow` | `sc-action` `sc-agent` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
 | `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
 | `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
+| `sc-viewpattern` | `sc-app` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-query` `sc-types` |
 | `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-model` `sc-query` `sc-types` |
 | `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
-| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-types` `sc-workflow` |
-| `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-types` |
+| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-types` `sc-viewpattern` `sc-workflow` |
+| `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-types` `sc-viewpattern` |
 
 Three things the graph is worth reading for:
 
@@ -232,7 +235,7 @@ Three things the graph is worth reading for:
   AST it compiles into and nothing about tables.
 
 Crates planned in the tree above but **not yet created**: `sc-bus`,
-`sc-fieldview`, `sc-viewpattern`, `sc-copilot`. `sc-test-harness`
+`sc-fieldview`, `sc-copilot`. `sc-test-harness`
 (under `tests/`) is a dev-dependency of most crates and depends only on `sc-config-file` and
 `sc-error`; it is left out of the graph because a dev-only edge is not part of the layering.
 
@@ -1477,6 +1480,28 @@ erDiagram
     json csp
     json attributes
   }
+  VIEWS["_fd_views"] {
+    uuid id PK
+    uuid application "the app, by value; UNIQUE (application, name)"
+    text name "a URL path segment"
+    text description
+    text viewpattern "a registered pattern: List, Show, ..."
+    text table_name "in the app's subset; null if tableless"
+    json configuration "v1-shaped, untouched"
+    int min_role "checked on save, NOT a foreign key"
+    json slug "nullable"
+    json attributes
+  }
+  PAGES["_fd_pages"] {
+    uuid id PK
+    uuid application "the app, by value; UNIQUE (application, name)"
+    text name "a URL path segment"
+    text title
+    text description
+    json layout "v1-shaped, untouched"
+    int min_role "checked on save, NOT a foreign key"
+    json attributes "root_page_for_roles"
+  }
   MODULES["_fd_modules"] {
     uuid id PK
     text name UK "the npm package name"
@@ -1511,6 +1536,9 @@ erDiagram
   APPS }o--o{ TABLES : "tables[] -- by name"
   APPS }o--o{ STORES : "file_stores[] -- by name"
   APPS }o--o{ TRIGGERS : "triggers[] -- by name"
+  APPS ||--o{ VIEWS : "application -- by value, deleted with the app"
+  APPS ||--o{ PAGES : "application -- by value, deleted with the app"
+  VIEWS }o--o| TABLES : "table_name -- by name"
   MODULES |o--o{ TRIGGERS : "action -- by name, an action the module supplies"
 ```
 

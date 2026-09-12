@@ -1,0 +1,50 @@
+//! Saltcorn UI: v1-style views and pages, owned by an application (layer 8;
+//! TODO "Saltcorn UI" §1, §4).
+//!
+//! A **view** is a view pattern (v1 calls it a view template) configured over one
+//! table; a **page** is a layout that places views. In Saltcorn 1 both are global
+//! to a tenant. Here the unit of multi-tenancy is the [`Application`](sc_app::Application),
+//! so both belong to one: `_fd_views.application` and `_fd_pages.application` are
+//! columns, a name is unique **per application**, and a view may only name a table
+//! in its application's subset. Everything else about a view is v1's — the
+//! pattern name, the `min_role`, the slug, and a `configuration` that is
+//! **v1-shaped and deliberately untouched**, because it is what v1's own
+//! `list.ts` reads.
+//!
+//! What is here:
+//!
+//! - [`View`] / [`Page`], their ids, and the two tables ([`bootstrap`]).
+//! - The row path, scoped by [`AppId`](sc_app::AppId): [`save_view`],
+//!   [`load_view`], [`list_views`], [`delete_view`] and the page four, with the
+//!   save-time validation of §1 and §11 — the pattern is registered, the table is
+//!   in the application's subset, `min_role` is a role that exists, and the name
+//!   is unique in the application and usable as a URL path segment.
+//! - The pattern registry ([`registered_patterns`]): v1's six built-in patterns,
+//!   and whatever an installed module declares (Phase 11).
+//! - [`ViewSet`] — every view and page of one application, loaded once — and
+//!   [`ViewSets`], the cache that reloads a set on a write and stamps it with the
+//!   **generation** the worker's view snapshot is keyed on (§4).
+
+mod patterns;
+mod store;
+mod tables;
+mod validate;
+mod view;
+mod view_set;
+
+pub use patterns::{
+    BUILTIN_PATTERNS, PatternInfo, builtin_patterns, find_pattern, install_patterns,
+    registered_patterns,
+};
+pub use store::{
+    delete_application_views_and_pages, delete_page, delete_view, list_pages, list_views,
+    load_page, load_view, save_page, save_view,
+};
+pub use tables::{
+    COL_APPLICATION, COL_ATTRIBUTES, COL_CONFIGURATION, COL_DESCRIPTION, COL_ID, COL_LAYOUT,
+    COL_MIN_ROLE, COL_NAME, COL_SLUG, COL_TABLE_NAME, COL_TITLE, COL_VIEWPATTERN, PAGES_TABLE,
+    VIEWS_TABLE, bootstrap,
+};
+pub use validate::check_name;
+pub use view::{Page, PageId, View, ViewId};
+pub use view_set::{ViewSet, ViewSets};

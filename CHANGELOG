@@ -2,6 +2,55 @@
 
 Changes in reverse chronological order.
 
+## Saltcorn UI, Phase 1: views and pages, owned by an application
+
+The first step of the Saltcorn UI milestone: somewhere for v1's views and pages
+to live. Nothing renders them yet.
+
+- **A new crate, `sc-viewpattern`**, above `sc-app` (it will implement
+  `Framework`) with `sc-module` to implement its runtime seam from above. It is
+  in the design document's dependency table and crate diagram, and no longer in
+  the "not yet created" list. `_fd_views` and `_fd_pages` are in §9.2's ER
+  diagram.
+- **`_fd_views` and `_fd_pages`.** A view is `application`, `name`,
+  `description`, `viewpattern`, `table_name`, `configuration`, `min_role`,
+  `slug` and `attributes`; a page is `application`, `name`, `title`,
+  `description`, `layout`, `min_role` and `attributes` (which carry
+  `root_page_for_roles`). Both are unique on (`application`, `name`) in the
+  database, so two applications can each have a `List Books` over the same
+  table. `configuration` and `layout` are stored exactly as v1 shaped them.
+  Both tables are created at boot beside `_fd_applications`, and running that
+  again changes nothing.
+- **`application` is not a foreign key**, for the same reason
+  `_fd_workflow_versions.workflow` is not: the schema layer has no
+  `ON DELETE`. So the server's `deleteApplication` now deletes the
+  application's views and pages itself.
+- **`save_view` / `load_view` / `list_views` / `delete_view`** and the same
+  four for pages, all taking the `AppId`. Saving refuses, and the message says
+  what is wrong:
+  - a pattern that is not registered;
+  - a table that is not in the application's table subset;
+  - a `min_role` that no role defines;
+  - a name the application already uses;
+  - a name that cannot be a URL path segment;
+  - an application that does not exist;
+  - an id that belongs to a view in a different application.
+
+  **Spaces are allowed in names.** v1 calls its views `List Books`, and a
+  restored backup has to be accepted; `/`, `\`, `?`, `#`, `%`, control
+  characters, `.` and `..` are refused.
+- **A pattern registry**: v1's six built-in patterns (`List`, `Show`, `Edit`,
+  `Feed`, `Filter`, `ListShowList`), plus `install_patterns` for the ones
+  modules will declare in Phase 11. A pattern records whether it is tableless,
+  so a built-in pattern with no table is refused.
+- **`ViewSet` and `ViewSets`.** A `ViewSet` is every view and page of one
+  application. `ViewSets` caches one per application and gives each a
+  generation number. Reading returns the cached set with its generation
+  unchanged. A save or delete through `ViewSets` reloads the set with a larger
+  generation. The generation number is reserved before the reload reads the
+  database, so if two writes race, the cache cannot end up holding the older
+  read.
+
 ## Restoring a Saltcorn 1 backup
 
 The Restore button on the Backup tab now takes a **Saltcorn 1 backup file** as
