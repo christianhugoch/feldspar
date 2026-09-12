@@ -1,0 +1,108 @@
+// Vendored from Saltcorn 1: packages/saltcorn-types/model-abstracts/abstract_field.ts
+// at @saltcorn/data 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/saltcorn-ui/vendor/README.md.
+/**
+ * @category saltcorn-types
+ * @module model-abstracts/abstract_field
+ * @subcategory model-abstracts
+ */
+import { PrimaryKeyValue, Row, Value } from "@saltcorn/db-common/internal";
+import type { GenObj, Type } from "../common_types.js";
+import type { AbstractTable } from "./abstract_table.js";
+
+/** A table field/column, with its type, display, and input settings. */
+export interface AbstractField {
+  label: string;
+  name: string;
+  input_type: InputType;
+  sourceURL?: string;
+  fieldview?: string;
+  attributes: any;
+  required?: boolean;
+  primary_key?: boolean;
+  // actually getters:
+  form_name?: string;
+  type_name?: string | undefined;
+  is_fkey: boolean;
+  reftable_name?: string;
+  pretty_type?: string;
+  id?: PrimaryKeyValue;
+  options?: string[];
+  showIf?: Record<string, any>;
+  copilot_description?: string;
+}
+
+/** Configuration for creating/updating an {@link AbstractField}. */
+export type FieldCfg = {
+  label?: string;
+  name?: string;
+  fieldview?: string;
+  validator?: (
+    value: any,
+    whole_rec?: Row,
+    field?: { required: boolean }
+  ) => boolean | string | undefined;
+  showIf?: { [field_name: string]: string | boolean | string[] };
+  parent_field?: string;
+  postText?: string;
+  class?: string | string[];
+  id?: number;
+  default?: any;
+  sublabel?: string;
+  help?: { topic: string; context?: Row; dynContext?: string[] };
+  description?: string;
+  copilot_description?: string;
+  type?: string | Type;
+  options?: Array<string | { label: string; value: string }>;
+  required?: boolean;
+  is_unique?: boolean;
+  hidden?: boolean;
+  disabled?: boolean;
+  calculated?: boolean;
+  primary_key?: boolean;
+  stored?: boolean;
+  expression?: string;
+  sourceURL?: string;
+  input_type?: InputType;
+  reftable_name?: string;
+  reftable?: AbstractTable;
+  attributes?: GenObj;
+  table_id?: number;
+  reftype?: string | Type;
+  refname?: string;
+  tab?: string;
+  table?: AbstractTable | null;
+  in_auto_save?: boolean;
+  exclude_from_mobile?: boolean;
+};
+
+/** A repeating group of fields, e.g. for a Multiple Values field. */
+export interface AbstractFieldRepeat {
+  name: string;
+  isRepeat: true;
+  fields: FieldCfg[];
+}
+
+/**
+ * Type guard for {@link AbstractField}.
+ * @param object - the value to test
+ * @returns true if object is an {@link AbstractField}
+ */
+export const instanceOfField = (object: any): object is AbstractField => {
+  return object && "name" in object && "input_type" in object;
+};
+
+/** How a field's value is entered in a form. */
+export type InputType =
+  | "hidden"
+  | "file"
+  | "select"
+  | "fromtype"
+  | "search"
+  | "text"
+  | "password"
+  | "section_header"
+  | "textarea"
+  | "custom_html"
+  | "code"
+  | "time_of_day"
+  | "time_of_week";

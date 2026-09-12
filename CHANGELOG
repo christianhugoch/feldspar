@@ -2,6 +2,94 @@
 
 Changes in reverse chronological order.
 
+## Saltcorn UI, Phase 2: v1's source, vendored and bundled
+
+The rendering half of Saltcorn 1 is now in this repository and builds into one
+file. Nothing loads it yet (that is Phase 3); what exists is the bundle, the
+build wiring, and a test that holds the bundle to v1's shape.
+
+- **`ui/saltcorn-ui/vendor/`: v1's source, copied.** The six view patterns
+  (`list`, `show`, `edit`, `feed`, `filter`, `listshowlist`; not `room` or
+  `workflow-room`), `plugin-helper.ts`, `viewable_fields.ts`, `base-plugin/types.ts`,
+  `fieldviews.ts`, `fileviews.ts`, `models/form.ts`, `fieldrepeat.ts`, `expression.ts`,
+  and the whole of `@saltcorn/markup`. Also the pure files those import, which the
+  TODO's list did not name: `utils.ts`, `models/layout.ts`, `diagram/node_extract_utils.ts`
+  and its nodes, `tests/mocks.ts` (whose `mockReqRes` a fieldview renders with),
+  `@saltcorn/common-code`, the pure parts of `@saltcorn/db-common`, `@saltcorn/types`
+  and `@saltcorn/plain-date`, and four of v1's own mobile-build mocks.
+  - Taken at `@saltcorn/data` 1.7.0-alpha.1 (saltcorn/saltcorn `0508c45ac2`).
+    Every file has a two-line header naming its upstream path and that version,
+    and is otherwise unedited.
+  - `vendor/refresh.sh <checkout>` does the copy and regenerates
+    `vendor/v1-exports.json`: the export names each library specifier has
+    under a real v1 `require`, taken from the checkout. `vendor/README.md` lists
+    what is copied, where the line between vendored and host-supplied falls, and
+    how to refresh.
+- **`plugin-helper` partitioned per export** (`src/plugin-helper.ts`).
+  - 26 exports are kept.
+  - Three are refused, each fatal on call with its name and reason:
+    `generate_joined_query`, `json_list_to_external_table`, `build_schema_data`.
+  - `runCollabEvents` is **absent**: `undefined` to a plugin, because
+    `@saltcorn/kanban` feature-detects it. Inside the bundle it is a named
+    refusal, so `edit.ts` calling it gives a sentence, not "is not a function".
+  - The build sends every import of plugin-helper through the partition,
+    including the vendored patterns' own imports.
+- **`ui/saltcorn-ui/src/index.ts` and `build.mjs`: the bundle.** esbuild writes
+  one unminified ESM file, `dist/view-runtime.js`. It exports:
+  - the registries (`viewtemplates`, `types`, `keyFieldviews`, `fileviews`),
+    built the way v1's `registerPlugin` builds them;
+  - the **library**: 27 v1 specifiers, each shaped as a v1 `require` shapes it
+    (saltcorn-data's CJS shim ported, markup's `.default` shims, and Node's
+    `require(esm)` namespaces);
+  - entry points that call a pattern with the arguments v1's `View` passes
+    (`runView`, `runPost`, `runRoute`, `configStep`, `viewPatterns`).
+- **Everything across the line goes through one `require`.** The bundle's only
+  import is `createRequire` from `node:module`. The host-supplied modules become
+  lazy `require("<specifier>")` calls, the one `Module._load` a plugin goes
+  through: `models/table`, `field`, `view`, `page`, `trigger`, `file`, `user`,
+  `crash`, `library`, `page_group`, `workflow`, `tag`, `config`, `discovery`,
+  `multi_node_mutex`, `db/state`, `db/index`, and Node's built-ins. Server-only
+  packages go to v1's own mobile mocks or to four shims in `src/shims/`, each with
+  its reason:
+  - `module`: utils' lazy `require` of `db/*`;
+  - `os`: `homedir()` at load, which an empty permission set refuses;
+  - `vm2`: formulas run with `vm.runInNewContext`, the branch v1 takes when not on Node;
+  - `https-proxy-agent`.
+  npm packages are pinned to the versions v1's lock file resolved.
+- **`ui/saltcorn-ui/public/`**: Bootstrap 5.3.3 (js from v1's sbadmin2, css
+  from Saltcorn's `any-bootstrap-theme`, since the monorepo only ships it
+  compiled into a theme), jQuery 3.6.0, `saltcorn-common.js`, `saltcorn.js`,
+  `saltcorn.css` and Font Awesome Free 5.15.3. All are copied into `dist/public/`.
+- **The third bundle.** `crates/sc-cli/build.rs` builds `ui/saltcorn-ui` beside
+  `ui/admin` and `ui/ide` (each bundle now declares its own inputs and output
+  marker) and records `SC_SALTCORN_UI_BUNDLE_DIR`. `ServerConfig::saltcorn_ui_dir`
+  carries it, and is not a flag. `main.rs` fills it in and hands it to
+  `AppMounts::with_saltcorn_ui_dir`. `scripts/build-static.sh` and the static-build
+  Dockerfile stage `ui/saltcorn-ui/dist`; `install.sh` already copies all of `ui/`.
+- **A build without it says so on mount.** `SC_BUILD_ADMIN=0` records no
+  directory. A `saltcorn-ui` application then fails in `build_and_mount`, once,
+  and is not mounted. The error names the application, the missing bundle and
+  `SC_BUILD_ADMIN`; a directory without `view-runtime.js` names that file
+  instead (`sc_viewpattern::require_view_runtime`). With the bundle present the
+  mount still refuses, saying Saltcorn UI does not serve applications yet, until
+  Phase 5.
+- **Tests.**
+  - `sc-viewpattern`'s `bundle_shape` runs `tests/bundle_shape.mjs` under `node`
+    over the real bundle. Node's built-ins are real; every `@saltcorn/*` module
+    is a stub that throws when called, so loading asserts nothing on the host
+    is called. It checks 168 things: the six patterns under v1's names, the
+    registries, every library specifier's type and v1 export names against
+    `v1-exports.json`, every plugin-helper export on exactly one side of the
+    partition (refused ones refuse by name, absent ones are present and
+    `undefined`), and that `div` renders.
+  - It skips, saying so, when no bundle is built.
+  - Also: `bundle.rs`'s unit tests for the two sentences, sc-server's
+    `saltcorn_ui_mount` over Postgres, the config flag test, and the prefix case
+    in `build_script.rs`.
+  - `repo_hygiene`'s `_sc_` sweep now skips `ui/saltcorn-ui/vendor/` and
+    `ui/saltcorn-ui/public/`. They are v1's own code (`_sc_globalCsrf`,
+    `_sc_lightmode`), copied unedited, so every `_sc_` in them is v1's.
+
 ## Saltcorn UI, Phase 1: views and pages, owned by an application
 
 The first step of the Saltcorn UI milestone: somewhere for v1's views and pages

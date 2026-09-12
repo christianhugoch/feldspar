@@ -65,6 +65,7 @@ fn a_prefix_re_roots_each_bundle_under_the_install_directory() {
     for (subdir, expected) in [
         ("ui/admin", "/opt/feldspar/ui/admin/dist"),
         ("ui/ide", "/opt/feldspar/ui/ide/dist"),
+        ("ui/saltcorn-ui", "/opt/feldspar/ui/saltcorn-ui/dist"),
     ] {
         let built = PathBuf::from("/home/dev/feldspar")
             .join(subdir)

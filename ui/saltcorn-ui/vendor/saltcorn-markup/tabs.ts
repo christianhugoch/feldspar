@@ -1,0 +1,57 @@
+// Vendored from Saltcorn 1: packages/saltcorn-markup/tabs.ts
+// at @saltcorn/data 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/saltcorn-ui/vendor/README.md.
+/**
+ * @category saltcorn-markup
+ * @module tabs
+ */
+
+import tags from "./tags.js";
+const { a, text, div, ul, li } = tags;
+
+/**
+ * @param {string} str
+ * @returns {string}
+ */
+const mkId = (str: string): string => text(str.split(" ").join("_"));
+
+/**
+ * @param {object} obj
+ * @returns {object}
+ */
+const tabs = (obj: any | any[]) => {
+  const entries = Array.isArray(obj) ? obj : Object.entries(obj);
+  const lis = entries.map((e, ix) =>
+    li(
+      { class: "nav-item" },
+      a(
+        {
+          class: ["nav-link", ix == 0 && "active"],
+          "data-bs-toggle": "tab",
+          href: `#${mkId(e[0])}`,
+          id: `${mkId(e[0])}-tab`,
+          role: "tab",
+          "aria-controls": "home",
+          "aria-selected": "true",
+        },
+        text(e[0])
+      )
+    )
+  );
+  const divs = entries.map((e, ix) =>
+    div(
+      {
+        class: ["tab-pane fade", ix == 0 && "show active"],
+        id: `${mkId(e[0])}`,
+        role: "tabpanel",
+        "aria-labelledby": `${mkId(e[0])}-tab`,
+      },
+      e[1]
+    )
+  );
+  return (
+    ul({ class: "nav nav-tabs", role: "tablist" }, lis) +
+    div({ class: "tab-content" }, divs)
+  );
+};
+
+export default tabs;

@@ -1,0 +1,3605 @@
+// Vendored from Saltcorn 1: packages/server/public/saltcorn-common.js
+// at @saltcorn/data 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/saltcorn-ui/vendor/README.md.
+//https://stackoverflow.com/a/698386
+jQuery.fn.swapWith = function (to) {
+  return this.each(function () {
+    var copy_to = $(to).clone(true);
+    var copy_from = $(this).clone(true);
+    $(to).replaceWith(copy_from);
+    $(this).replaceWith(copy_to);
+  });
+};
+
+function monospace_block_click(e) {
+  let e1 = $(e).next("pre");
+  let mine = $(e).html();
+  $(e).html($(e1).html());
+  $(e1).html(mine);
+}
+
+function copy_monospace_block(e) {
+  let e1 = $(e).next("pre");
+  let e2 = $(e1).next("pre");
+  if (!e2.length) return navigator.clipboard.writeText($(e1).text());
+  const e1t = e1.text();
+  const e2t = e2.text();
+  if (e1t.length > e2t.length) return navigator.clipboard.writeText(e1t);
+  else return navigator.clipboard.writeText(e2t);
+}
+
+function setScreenInfoCookie() {
+  document.cookie = `_sc_screen_info_=${JSON.stringify({
+    width: window.screen.width,
+    height: window.screen.height,
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+  })}; expires=Thu, 01 Jan 2100 00:00:00 GMT; path=/; domain=.${
+    window.location.hostname
+  }; samesite=strict`;
+}
+setScreenInfoCookie();
+$(window).resize(() => {
+  setScreenInfoCookie();
+});
+
+function get_current_state_url(e) {
+  const localizer = e ? $(e).closest("[data-sc-local-state]") : [];
+  let $modal = $("#scmodal");
+  if (localizer.length) {
+    const localState = localizer.attr("data-sc-local-state") || "";
+    return localState;
+  } else if ($modal.length === 0 || !$modal.hasClass("show"))
+    return getIsNode()
+      ? window.location.href
+      : parent.saltcorn.mobileApp.navigation.currentUrl();
+  else return $modal.prop("data-modal-state");
+}
+
+function set_header_filter(elem) {
+  $(elem).closest("div.hdrfiltdrop").hide();
+}
+
+//avoids hiding in overflow:hidden
+function init_bs5_dropdowns() {
+  $("body").on(
+    "show.bs.dropdown",
+    "table [data-bs-toggle=dropdown]",
+    function () {
+      let target;
+      if (!$("#page-inner-content").length) target = $("body");
+      else target = $("#page-inner-content");
+      let dropdown = bootstrap.Dropdown.getInstance(this);
+      $(dropdown._menu).insertAfter(target);
+    }
+  );
+}
+
+function reset_nearest_form(that) {
+  const form = $(that).closest("form");
+  form.trigger("reset");
+  form.find("select").trigger("change");
+}
+
+function clear_cloned_file_input(e) {
+  const $e = $(e);
+  $e.val("");
+  $e.parent().find(".file-upload-exising").html("");
+}
+
+function add_repeater(nm, add_link) {
+  const outer_repeat = $(add_link).prev();
+  var es = outer_repeat.find("div.form-repeat.repeat-" + nm);
+  const ncopy = es.length - 1;
+  var e = es.last();
+  var newix = es.length;
+  var newe = $(e).clone();
+  newe.find("[name]").each(function (ix, element) {
+    if ($(element).hasClass("omit-repeater-clone")) $(element).remove();
+    const oldnm = element.name || "";
+    var newnm = (element.name || "").replace(
+      new RegExp("_" + ncopy + "$"),
+      "_" + newix
+    );
+    var newid = (element.id || "").replace(
+      new RegExp("_" + ncopy + "$"),
+      "_" + newix
+    );
+    $(element).attr("name", newnm).attr("id", newid);
+    if (element.tagName === "SELECT") {
+      const original = document.getElementsByName(oldnm)[0];
+      if (original) element.selectedIndex = original.selectedIndex;
+    }
+  });
+  newe.appendTo(outer_repeat);
+  newe.find("[data-on-cloned]").each(function (ix, element) {
+    (function (str) {
+      return eval(str);
+    }).call(element, $(element).attr("data-on-cloned"));
+  });
+}
+
+function rep_del(e) {
+  var myrep = $(e).closest(".form-repeat");
+  var ix = myrep.index();
+  var parent = myrep.parent();
+  parent.children().each(function (childix, element) {
+    if (childix > ix) {
+      reindex(element, childix, childix - 1);
+    }
+  });
+  myrep.remove();
+}
+
+function reindex(element, oldix, newix) {
+  $(element)
+    .find("input,textarea")
+    .each(function () {
+      $(this).attr("value", $(this).val());
+    });
+  $(element)
+    .find("select")
+    .each(function () {
+      $(this).find(":selected").attr("selected", "selected");
+    });
+
+  $(element).html(
+    $(element)
+      .html()
+      .split("_" + oldix + '"')
+      .join("_" + newix + '"')
+  );
+}
+
+const _apply_showif_plugins = [];
+
+const add_apply_showif_plugin = (p) => {
+  _apply_showif_plugins.push(p);
+};
+
+const nubBy = (prop, xs) => {
+  const vs = new Set();
+  return xs.filter((x) => {
+    if (vs.has(x[prop])) return false;
+    vs.add(x[prop]);
+    return true;
+  });
+};
+
+function valid_js_var_name(s) {
+  if (!s) return false;
+  return !!s.match(/^[a-zA-Z_$][a-zA-Z_$0-9]*$/);
+}
+
+function add_extra_state(base_url, extra_state_fml, row, outerState = {}) {
+  //console.log("add_extra_state", { base_url, extra_state_fml, row });
+  if (!extra_state_fml && !Object.keys(outerState).length) return base_url;
+  let extra_state = new Function(
+    "row",
+    `{${Object.keys(row).join(",")}}`,
+    "return " + extra_state_fml || "{}"
+  )(row, row);
+  let qs = Object.entries({ ...outerState, ...extra_state })
+    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+    .join("&");
+  let sepChar = base_url.includes("?") ? "&" : "?";
+  return base_url + sepChar + qs;
+}
+
+const apply_showif_fetching_urls = new Set();
+
+const global_fetch_options_cache = {};
+const global_calc_field_cache = {};
+
+function apply_showif() {
+  const isNode = getIsNode();
+  $(".toggle-password-vis")
+    .off("click")
+    .on("click", function (event) {
+      const $e = $(event.target);
+      const eyeIcon = $e.prop("tagName") === "I" ? $e : $e.find("i");
+      const passwordInput = eyeIcon.parent().prev();
+
+      const isPassword = passwordInput.attr("type") === "password";
+      passwordInput.attr("type", isPassword ? "text" : "password");
+      eyeIcon.toggleClass("fa-eye fa-eye-slash");
+    });
+  $("[data-show-if]").each(function (ix, element) {
+    var e = $(element);
+    try {
+      if (e.prop("disabled")) return;
+      let to_show = e.data("data-show-if-fun");
+      if (!to_show) {
+        to_show = new Function(
+          "e",
+          "return " + decodeURIComponent(e.attr("data-show-if"))
+        );
+        e.data("data-show-if-fun", to_show);
+      }
+      if (!e.data("data-closest-form-ns"))
+        e.data("data-closest-form-ns", e.closest(".form-namespace"));
+      if (to_show(e)) {
+        e.find("input, textarea, button, select, [data-show-if]").prop(
+          "disabled",
+          e.attr("data-disabled") || false
+        );
+        element.style.display = "";
+      } else {
+        e.find(
+          "input:enabled, textarea:enabled, button:enabled, select:enabled, [data-show-if]:not([disabled])"
+        ).prop("disabled", true);
+        element.style.setProperty("display", "none", "important");
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  });
+  $("[data-dyn-href]").each(function (ix, element) {
+    try {
+      const e = $(element);
+      const rec = get_form_record(e);
+      const href = new Function(
+        `{${Object.keys(rec).filter(valid_js_var_name).join(",")}}`,
+        "return " + e.attr("data-dyn-href")
+      )(rec);
+      e.attr("href", href);
+    } catch (e) {
+      if (window._sc_loglevel > 4) console.error(e);
+    }
+  });
+  $("[data-calc-options]").each(function (ix, element) {
+    var e = $(element);
+    var data = JSON.parse(decodeURIComponent(e.attr("data-calc-options")));
+
+    var val = e
+      .closest(".form-namespace")
+      .find(`[data-fieldname=${data[0]}]`)
+      .val();
+
+    var options = data[1][val];
+    var current = e.attr("data-selected") || e.val();
+    //console.log({ field: e.attr("name"), target: data[0], val, current });
+    e.empty();
+    //TODO clean repetition in following cose
+    (options || []).forEach((o) => {
+      if (o && o.optgroup) {
+        const opts = o.options
+          .map(
+            (innero) =>
+              `<option ${
+                `${current}` === `${innero.value || innero}` ? "selected " : ""
+              }value="${innero.value || innero}">${
+                innero.label || innero
+              }</option>`
+          )
+          .join("");
+        e.append($(`<optgroup label="${o.label}">` + opts + "</optgroup>"));
+      } else if (
+        !(o && typeof o.label !== "undefined" && typeof o.value !== "undefined")
+      ) {
+        if (`${current}` === `${o}`)
+          e.append($("<option selected>" + o + "</option>"));
+        else e.append($("<option>" + o + "</option>"));
+      } else {
+        e.append(
+          $(
+            `<option ${o.disabled? "disabled ":""}${
+              `${current}` === `${o.value}` ? "selected" : ""
+            } value="${o.value}">${o.label}</option>`
+          )
+        );
+      }
+    });
+    e.change(function (ec) {
+      e.attr("data-selected", ec.target.value);
+    });
+  });
+  $("[data-fetch-options]").each(function (ix, element) {
+    const e = $(element);
+    const rec = get_form_record(e);
+    const dynwhere = JSON.parse(
+      decodeURIComponent(e.attr("data-fetch-options"))
+    );
+    if (window._sc_loglevel > 4) console.log("dynwhere", dynwhere);
+    const kvToQs = ([k, v], is_or, no_blanks) => {
+      return k === "or" && Array.isArray(v)
+        ? v
+            .map((v1) =>
+              Object.entries(v1)
+                .map((kv) => kvToQs(kv, true))
+                .join("&")
+            )
+            .join("&")
+        : k === "not"
+          ? Object.entries(v)
+              .map((kv) => {
+                const q = kvToQs(kv, false, true);
+                return q ? `_not_${q}` : "";
+              })
+              .join("&")
+          : v[0] === "$" && rec[v.substring(1)] === "" && no_blanks
+            ? ""
+            : typeof v === "object" && v !== null
+              ? Object.entries(v)
+                  .map(([k1, v1]) => {
+                    const q = v1[0] === "$" ? rec[v1.substring(1)] : v1;
+                    return k1 === "equal" || !q
+                      ? ""
+                      : `_${k1}${v.equal ? "e" : ""}_${k}=${q}`;
+                  })
+                  .filter(Boolean)
+                  .join("&")
+              : `${k}=${v[0] === "$" ? rec[v.substring(1)] : v}${
+                  is_or ? "&_or_field=" + k : ""
+                }`;
+    };
+    const qss = Object.entries(dynwhere.whereParsed).map((kv) => kvToQs(kv));
+    if (dynwhere.existingValue) {
+      qss.push(`id=${dynwhere.existingValue}`);
+      qss.push(`_or_field=id`);
+    }
+    if (dynwhere.dereference) {
+      if (Array.isArray(dynwhere.dereference))
+        qss.push(...dynwhere.dereference.map((d) => `dereference=${d}`));
+      else qss.push(`dereference=${dynwhere.dereference}`);
+    }
+    if (!dynwhere.label_formula && dynwhere.summary_field && dynwhere.refname) {
+      qss.push(`fields=${dynwhere.summary_field},${dynwhere.refname}`);
+    }
+    const qs = qss.join("&");
+    let current = e.attr("data-selected");
+    if (current === "null") current = null;
+    e.change(function (ec) {
+      e.attr("data-selected", ec.target.value);
+    });
+
+    const currentOptionsSet = e.prop("data-fetch-options-current-set");
+    if (currentOptionsSet === qs) return;
+
+    const activate = (success, qs) => {
+      //re-fetch current, because it may have changed
+      let current = e.attr("data-selected");
+      if (current === "null") current = null;
+      if (e.prop("data-fetch-options-current-set") === qs) return;
+      e.empty();
+      e.prop("data-fetch-options-current-set", qs);
+      const toAppend = [];
+
+      let currentDataOption = undefined;
+      const dataOptions = [];
+      //console.log(success);
+      const success1 = dynwhere.nubBy
+        ? nubBy(dynwhere.nubBy, success)
+        : success;
+      success1.forEach((r) => {
+        const label = dynwhere.label_formula
+          ? new Function(
+              `{${Object.keys(r).join(",")}}`,
+              "return " + dynwhere.label_formula
+            )(r)
+          : r[dynwhere.summary_field];
+        const value = r[dynwhere.refname];
+        //console.log("lv", label, value, r, dynwhere.summary_field);
+        const selected = `${current}` === `${r[dynwhere.refname]}`;
+        dataOptions.push({ text: label, value });
+        if (selected) currentDataOption = value;
+        toAppend.push({ selected, value, label });
+      });
+      toAppend.sort((a, b) =>
+        a.label === dynwhere.neutral_label
+          ? -1
+          : b.label === dynwhere.neutral_label
+            ? 1
+            : (a.label?.toLowerCase?.() || a.label) >
+                (b.label?.toLowerCase?.() || b.label)
+              ? 1
+              : -1
+      );
+      if (!dynwhere.required)
+        toAppend.unshift({ label: dynwhere.neutral_label || "", value: "" });
+      if (dynwhere.required && dynwhere.placeholder)
+        toAppend.unshift({
+          disabled: true,
+          label: dynwhere.placeholder,
+          value: "",
+          selected: !current,
+        });
+      e.html(
+        toAppend
+          .map(
+            ({ label, value, selected, disabled }) =>
+              `<option${selected ? ` selected` : ""}${
+                disabled ? ` disabled` : ""
+              }${typeof value !== "undefined" ? ` value="${value}"` : ""}>${
+                label || ""
+              }</option>`
+          )
+          .join("")
+      );
+
+      //TODO: also sort inserted HTML options
+      dataOptions.sort((a, b) =>
+        (a.text?.toLowerCase?.() || a.text) >
+        (b.text?.toLowerCase?.() || b.text)
+          ? 1
+          : -1
+      );
+      element.dispatchEvent(new Event("RefreshSelectOptions"));
+      if (e.hasClass("selectized") && $().selectize) {
+        e.selectize()[0].selectize.clearOptions(true);
+        e.selectize()[0].selectize.addOption(dataOptions);
+        if (typeof currentDataOption !== "undefined")
+          e.selectize()[0].selectize.setValue(currentDataOption);
+      }
+    };
+    if (!global_fetch_options_cache[dynwhere.table])
+      global_fetch_options_cache[dynwhere.table] = {};
+    const cache = global_fetch_options_cache[dynwhere.table] || {};
+    if (cache[qs] === "fetching") {
+      // do nothing, this will be activated by someone else
+    } else if (cache[qs]) {
+      activate(cache[qs], qs);
+    } else {
+      cache[qs] = "fetching";
+      apply_showif_fetching_urls.add(`/api/${dynwhere.table}?${qs}`);
+      const respHandler = (resp) => {
+        const cacheNow = global_fetch_options_cache[dynwhere.table] || {};
+        if (resp.success) {
+          if (window._sc_loglevel > 4)
+            console.log("dynwhere fetch", qs, resp.success);
+          activate(resp.success, qs);
+          cacheNow[qs] = resp.success;
+          apply_showif();
+        } else {
+          cacheNow[qs] = undefined;
+        }
+      };
+      if (isNode) {
+        $.ajax(`/api/${dynwhere.table}?${qs}`)
+          .then((resp) => {
+            respHandler(resp);
+          })
+          .fail(checkNetworkError)
+          .always(() => {
+            apply_showif_fetching_urls.delete(`/api/${dynwhere.table}?${qs}`);
+          });
+      } else {
+        parent.saltcorn.mobileApp.api
+          .apiCall({
+            path: `/api/${dynwhere.table}?${qs}`,
+            method: "GET",
+          })
+          .then((resp) => {
+            try {
+              respHandler(resp.data);
+            } finally {
+              apply_showif_fetching_urls.delete(`/api/${dynwhere.table}?${qs}`);
+            }
+          });
+      }
+    }
+  });
+  $("[data-filter-table]").each(function (ix, element) {
+    const e = $(element);
+    const target = $(e.attr("data-filter-table"));
+    $(e).on("keyup", function () {
+      const value = $(this).val().toLowerCase();
+      target.find("tr").filter(function () {
+        $(this).toggle($(this).text().toLowerCase().indexOf(value) > -1);
+      });
+    });
+  });
+  $("[data-view-source]").each(function (ix, element) {
+    const e = $(element);
+    const rec = get_form_record(e);
+    const current = e.attr("data-view-source-current");
+    const encFml = e.attr("data-view-source");
+    const needFields = e.attr("data-view-source-need-fields");
+    if (needFields) {
+      const isSet = (v) => v !== null && v !== "" && typeof v !== "undefined";
+      if (needFields.split(",").some((k) => !isSet(rec[k]))) return;
+    }
+    const fml = decodeURIComponent(encFml);
+    //console.log("fml", fml);
+
+    const viewname = e.attr("data-sc-embed-viewname");
+
+    const newUrl = new Function("row", "return " + fml)(rec);
+    //console.log("current-new", current, newUrl);
+
+    if (current && current == newUrl) return;
+
+    e.attr("data-view-source-current", newUrl); // to prevent concurrent fetches
+    $.ajax(newUrl, {
+      headers: {
+        pjaxpageload: "true",
+        localizedstate: "true", //no admin bar
+      },
+      success: function (res, textStatus, request) {
+        const newE = `<div class="d-inline" 
+        data-sc-embed-viewname="${viewname}" 
+        data-sc-view-source="${newUrl}" 
+        data-view-source-current="${newUrl}"
+        data-view-source-need-fields="${needFields}"
+        data-view-source="${encFml}">${res}</div>`;
+
+        e.replaceWith(newE);
+        initialize_page();
+      },
+      error: function (res) {
+        if (!checkNetworkError(res))
+          notifyAlert({ type: "danger", text: res.responseText });
+      },
+    });
+  });
+  $("[data-source-url]").each(function (ix, element) {
+    const e = $(element);
+    const rec0 = get_form_record(e);
+
+    const relevantFieldsStr = e.attr("data-relevant-fields");
+    let rec;
+    if (relevantFieldsStr) {
+      rec = {};
+      relevantFieldsStr.split(",").forEach((k) => {
+        rec[k] = rec0[k];
+      });
+    } else rec = rec0;
+    const recS = JSON.stringify(rec);
+
+    const shown = e.prop("data-source-url-current");
+    if (shown === recS) return;
+
+    const cache = e.prop("data-source-url-cache") || {};
+
+    const activate_onchange_coldef = () => {
+      e.closest(".form-namespace")
+        .find("input,select, textarea")
+        .on("change", (ec) => {
+          const $ec = $(ec.target);
+          const k = $ec.attr("name");
+          if (!k || k === "_columndef") return;
+          const v = ec.target.value;
+          const $def = e
+            .closest(".form-namespace")
+            .find("input[name=_columndef]");
+          try {
+            const defval = $def.val();
+            const def =
+              typeof defval === "undefined" ? undefined : JSON.parse(defval);
+            if (def) {
+              def[k] = v;
+              $def.val(JSON.stringify(def));
+            }
+          } catch (e) {
+            console.error("Invalid json", e);
+          }
+        });
+    };
+
+    if (typeof cache[recS] !== "undefined") {
+      e.html(cache[recS]);
+      e.prop("data-source-url-current", recS);
+      activate_onchange_coldef();
+      return;
+    }
+    const srcurl = e.attr("data-source-url");
+    const cachekey = srcurl + JSON.stringify(rec);
+
+    const cb = {
+      success: (data) => {
+        e.html(data);
+        global_calc_field_cache[cachekey] = data;
+        const cacheNow = e.prop("data-source-url-cache") || {};
+        e.prop("data-source-url-cache", {
+          ...cacheNow,
+          [recS]: data,
+        });
+        e.prop("data-source-url-current", recS);
+        activate_onchange_coldef();
+      },
+      error: (err) => {
+        console.error(err);
+        global_calc_field_cache[cachekey] = null;
+
+        const cacheNow = e.prop("data-source-url-cache") || {};
+        e.prop("data-source-url-cache", {
+          ...cacheNow,
+          [recS]: "",
+        });
+        e.html("");
+      },
+    };
+    if (global_calc_field_cache[cachekey] === "fetching") {
+      //do nothing
+    } else if (global_calc_field_cache[cachekey])
+      cb.success(global_calc_field_cache[cachekey]);
+    else {
+      global_calc_field_cache[cachekey] = "fetching";
+      if (isNode) ajax_post_json(srcurl, rec, cb);
+      else {
+        local_post_json(srcurl, rec, cb);
+      }
+    }
+  });
+  const locale =
+    navigator.userLanguage ||
+    (navigator.languages &&
+      navigator.languages.length &&
+      navigator.languages[0]) ||
+    navigator.language ||
+    navigator.browserLanguage ||
+    navigator.systemLanguage ||
+    "en";
+  window.detected_locale = locale;
+  const parse = (s, def = {}) => {
+    try {
+      return JSON.parse(decodeURIComponent(s));
+    } catch (e) {
+      console.error("failed to parse time format", e);
+      return def;
+    }
+  };
+  $("time[locale-time-options]").each(function () {
+    var el = $(this);
+    var date = new Date(el.attr("datetime"));
+    const options = parse(el.attr("locale-time-options"));
+    el.text(date.toLocaleTimeString(locale, options));
+  });
+  $("time[locale-options]").each(function () {
+    var el = $(this);
+    var date = new Date(el.attr("datetime"));
+    const options = parse(el.attr("locale-options"));
+    el.text(date.toLocaleString(locale, options));
+  });
+  $("time[locale-date-options]").each(function () {
+    var el = $(this);
+    var date = new Date(el.attr("datetime"));
+    const options = parse(el.attr("locale-date-options"));
+    options.timeZone = "UTC";
+    el.text(date.toLocaleDateString(locale, options));
+  });
+  $("time[locale-date-format]").each(function () {
+    var el = $(this);
+    var date = el.attr("datetime");
+    const format = parse(el.attr("locale-date-format"), "");
+    if (format) el.text(dayjs(date).format(format));
+    else el.text(dayjs(date));
+  });
+
+  _apply_showif_plugins.forEach((p) => p());
+}
+
+function splitTargetMatch(elemValue, target, keySpec) {
+  if (!elemValue) return false;
+  const [fld, keySpec1] = keySpec.split("|_");
+  const [sep, pos] = keySpec1.split("_");
+  const elemValueShort = elemValue.split(sep)[pos];
+  return elemValueShort === target;
+}
+
+function get_form_data(e_in, rndid) {
+  const e = e_in.viewname
+    ? $(`form[data-viewname="${e_in.viewname}"]`)
+    : $(e_in).closest(".form-namespace");
+  const form = $(e).closest("form");
+  const data = new FormData(form[0]);
+  data.append("rndid", rndid);
+  const rec = get_form_record(e_in);
+  Object.keys(rec).forEach((k) => {
+    if (data.has(k)) return;
+    data.append(k, rec[k]);
+  });
+  return data;
+}
+
+let global_join_vals_cache = {};
+
+function get_form_record(e_in, select_labels) {
+  const rec = {};
+
+  const e = e_in.viewname
+    ? $(`form[data-viewname="${e_in.viewname}"]`)
+    : $(e_in).closest(".form-namespace");
+
+  const form = $(e).closest("form");
+
+  const rowVals = form.attr("data-row-values");
+  if (rowVals)
+    try {
+      const initRow = JSON.parse(decodeURIComponent(rowVals));
+      Object.assign(rec, initRow);
+    } catch (error) {
+      console.error(error);
+    }
+
+  e.find("input[name],select[name],textarea[name]").each(function () {
+    const $this = $(this);
+    if ($this.prop("disabled")) return;
+    const name = $this.attr("data-fieldname") || $this.attr("name");
+    if (select_labels && $this.prop("tagName").toLowerCase() === "select")
+      rec[name] = $this.find("option:selected").text();
+    else if ($this.prop("type") === "checkbox")
+      rec[name] = $this.prop("checked");
+    else if ($this.prop("type") === "radio" && !$this.prop("checked")) {
+      //do nothing
+    } else rec[name] = $this.val();
+    //postprocess
+    if ($this.attr("data-postprocess")) {
+      const f = new Function(
+        "it",
+        "$e",
+        "return " + $this.attr("data-postprocess")
+      );
+      rec[name] = f(rec[name], $this);
+    }
+  });
+
+  const joinFieldsStr =
+    typeof e_in !== "string" && $(e_in).attr("data-show-if-joinfields");
+  if (joinFieldsStr) {
+    const joinFields = JSON.parse(decodeURIComponent(joinFieldsStr));
+    for (const { ref, target, refTable, refTablePK } of joinFields) {
+      const pk = refTablePK || "id";
+      const keyval = rec[ref]?.[pk] || rec[ref]; // TODO pk name
+
+      if (!keyval) continue;
+
+      const url = `/api/${refTable}?${pk}=${keyval}`;
+      if (global_join_vals_cache[url] === "fetching") continue;
+      if (global_join_vals_cache[url]) {
+        rec[ref] = global_join_vals_cache[url];
+        continue;
+      }
+      global_join_vals_cache[url] = "fetching";
+      $.ajax(url, {
+        success: (val) => {
+          global_join_vals_cache[url] = val.success[0];
+          setTimeout(() => {
+            global_join_vals_cache = {};
+          }, 5000);
+          apply_showif();
+        },
+        error: checkNetworkError,
+      });
+    }
+  }
+  return rec;
+}
+function showIfFormulaInputs(e, fml) {
+  const rec = get_form_record(e);
+
+  try {
+    const result = new Function(
+      "row",
+      `{${Object.keys(rec).join(",")}}`,
+      "return " + fml
+    )(rec, rec);
+    if (window._sc_loglevel > 4)
+      console.log(`show if fml ${fml} form_record`, result, rec);
+    return result;
+  } catch (e) {
+    throw new Error(
+      `Error in evaluating showIf formula ${fml} with values ${JSON.stringify(
+        rec
+      )}: ${e.message}`
+    );
+  }
+}
+
+function get_form_subset_record(e) {
+  const rec = {};
+  e.find("input[name],select[name]").each(function () {
+    rec[$(this).attr("name")] = $(this).val();
+  });
+  return rec;
+}
+
+function apply_form_subset_record(e, vals) {
+  e.find("input[name],select[name]").each(function () {
+    var name = $(this).attr("name");
+    if (vals[name]) $(this).val(vals[name]);
+  });
+}
+
+function reindex_form_record(vals, oldix, newix) {
+  const rec = {};
+  Object.keys(vals).forEach((k) => {
+    const newkey = k.split("_" + oldix).join("_" + newix);
+    rec[newkey] = vals[k];
+  });
+  return rec;
+}
+
+function rep_up(e) {
+  var myrep = $(e).closest(".form-repeat");
+  var theform = $(e).closest("form");
+  var ix = myrep.index();
+  var parent = myrep.parent();
+  if (ix > 0) {
+    var swap_with = parent.children(".form-repeat").eq(ix - 1);
+    var vals1 = reindex_form_record(get_form_subset_record(myrep), ix, ix - 1);
+    var vals2 = reindex_form_record(
+      get_form_subset_record(swap_with),
+      ix - 1,
+      ix
+    );
+    reindex(myrep, ix, ix - 1);
+    reindex(swap_with, ix - 1, ix);
+    $(myrep).swapWith(swap_with);
+    apply_form_subset_record(theform, vals2);
+    apply_form_subset_record(theform, vals1);
+  }
+}
+
+function rep_down(e) {
+  var myrep = $(e).closest(".form-repeat");
+  var theform = $(e).closest("form");
+  var ix = myrep.index();
+  var parent = myrep.parent();
+  var nchildren = parent.children(".form-repeat").length;
+  if (ix < nchildren - 1) {
+    var swap_with = parent.children(".form-repeat").eq(ix + 1);
+    var vals1 = reindex_form_record(get_form_subset_record(myrep), ix, ix + 1);
+    var vals2 = reindex_form_record(
+      get_form_subset_record(swap_with),
+      ix + 1,
+      ix
+    );
+    reindex(myrep, ix, ix + 1);
+    reindex(swap_with, ix + 1, ix);
+    $(myrep).swapWith(swap_with);
+    apply_form_subset_record(theform, vals2);
+    apply_form_subset_record(theform, vals1);
+  }
+}
+//https://stackoverflow.com/a/4835406
+function escapeHtml(text) {
+  var map = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;",
+  };
+
+  return text.replace(/[&<>"']/g, function (m) {
+    return map[m];
+  });
+}
+
+function unescapeHtml(str) {
+  if (!str || !str.replace) return str;
+  return str
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&amp;", "&");
+}
+
+function reload_on_init() {
+  localStorage.setItem("reload_on_init", true);
+}
+
+function doMobileTransforms() {
+  const replaceAttr = (el, attr, web, mobile) => {
+    const jThis = $(el);
+    const skip = jThis.attr("skip-mobile-adjust");
+    if (!skip) {
+      const attrVal = jThis.attr(attr);
+      if (attrVal?.includes(web)) {
+        jThis.attr(attr, attrVal.replace(web, mobile));
+      }
+    }
+  };
+
+  const replacers = {
+    href: [
+      {
+        web: "javascript:history.back()",
+        mobile: "javascript:parent.saltcorn.mobileApp.navigation.goBack()",
+      },
+      {
+        web: "javascript:ajax_modal",
+        mobile: "javascript:mobile_modal",
+      },
+    ],
+    onclick: [
+      {
+        web: "history.back()",
+        mobile: "parent.saltcorn.mobileApp.navigation.goBack()",
+      },
+      {
+        web: "ajax_modal",
+        mobile: "mobile_modal",
+      },
+      {
+        web: "ajax_post_",
+        mobile: "local_post_",
+      },
+    ],
+  };
+
+  // change /plugins or plugins to sc_plugins
+  // capacitor reserves the plugins prefix for cordova plugins
+  const normalisePluginsPrefix = (path) => {
+    if (path.startsWith("/plugins/") || path.startsWith("plugins/"))
+      return path.replace(/\/?plugins\//, "sc_plugins/");
+    return null;
+  };
+  $("link").each(function () {
+    const path = $(this).attr("href");
+    if (path) {
+      const newPath = normalisePluginsPrefix(path);
+      if (newPath) {
+        $(this).attr("href", newPath);
+        console.log("transformed link", path, newPath);
+      }
+    }
+  });
+  $("script").each(function () {
+    const path = $(this).attr("src");
+    if (path) {
+      const newPath = normalisePluginsPrefix(path);
+      if (newPath) {
+        $(this).attr("src", newPath);
+        console.log("transformed script", path, newPath);
+      }
+    }
+  });
+
+  $("a").each(function () {
+    let path = $(this).attr("href") || "";
+    if (path.startsWith("http")) {
+      const url = new URL(path);
+      path = `${url.pathname}${url.search}`;
+    }
+    if (path.startsWith("/view/") || path.startsWith("/page/")) {
+      const jThis = $(this);
+      const skip = jThis.attr("skip-mobile-adjust");
+      if (!skip) {
+        jThis.removeAttr("href");
+        jThis.attr("onclick", `execLink('${path}')`);
+        if (jThis.find("i,img").length === 0 && !jThis.css("color")) {
+          jThis.css(
+            "color",
+            "rgba(var(--bs-link-color-rgb),var(--bs-link-opacity,1))"
+          );
+        }
+      }
+    } else if (path.includes("/files/serve/")) {
+      const tokens = path.split("/files/serve/");
+      // href is already percent-encoded (e.g. spaces as %20) - decode before
+      // handing it to openFile(), which encodes it itself, once, from raw.
+      if (tokens.length > 1) {
+        let decoded;
+        try {
+          decoded = decodeURIComponent(tokens[1]);
+        } catch {
+          decoded = tokens[1]; // malformed sequence - use as-is rather than break the loop
+        }
+        $(this).attr("href", `javascript:openFile('${decoded}')`);
+      }
+    } else if (path.includes("/files/download/")) {
+      const tokens = path.split("/files/download/");
+      if (tokens.length > 1)
+        $(this).attr(
+          "href",
+          `javascript:notifyAlert('File donwloads are not supported.')`
+        );
+    } else {
+      for (const [k, v] of Object.entries(replacers)) {
+        for ({ web, mobile } of v) replaceAttr(this, k, web, mobile);
+      }
+    }
+  });
+
+  $("[mobile-youtube-video]").each(function () {
+    const jThis = $(this);
+    const src = jThis.attr("src");
+    if (src) {
+      const rndid = `m-video-${Math.floor(Math.random() * 16777215).toString(
+        16
+      )}`;
+      const url = new URL(src);
+      const path = url.pathname;
+      const imageId = path.split("/").pop();
+      const thumbnailContainer = document.createElement("div");
+      thumbnailContainer.className = "mobile-thumbnail-container";
+      thumbnailContainer.id = rndid;
+      const img = document.createElement("img");
+      img.src = `https://img.youtube.com/vi/${imageId}/0.jpg`;
+      img.style = "width: 100%; max-width: 600px;";
+      img.id = rndid;
+      img.setAttribute(
+        "onclick",
+        `openInAppBrowser('${src.replace(
+          "com/embed",
+          "com/watch"
+        )}', '${rndid}')`
+      );
+      thumbnailContainer.appendChild(img);
+      const spinner = document.createElement("div");
+      spinner.className = "mobile-thumbnail-spinner-overlay";
+      const spinnerInner = document.createElement("div");
+      spinnerInner.className = "d-none spinner-border text-light";
+      spinnerInner.setAttribute("role", "status");
+      spinner.appendChild(spinnerInner);
+      thumbnailContainer.appendChild(spinner);
+      jThis.replaceWith(thumbnailContainer);
+    }
+  });
+
+  $("button").each(function () {
+    for (const [k, v] of Object.entries({ onclick: replacers.onclick })) {
+      for ({ web, mobile } of v) replaceAttr(this, k, v.web, v.mobile);
+    }
+  });
+
+  $("[mobile-img-path]").each(async function () {
+    const fileId = $(this).attr("mobile-img-path");
+    const base64Encoded =
+      await parent.saltcorn.mobileApp.common.loadEncodedFile(fileId);
+    this.src = base64Encoded;
+  });
+
+  $("[mobile-bg-img-path]").each(async function () {
+    const fileId = $(this).attr("mobile-bg-img-path");
+    if (fileId) {
+      const base64Encoded =
+        await parent.saltcorn.mobileApp.common.loadEncodedFile(fileId);
+      this.style.backgroundImage = `url("${base64Encoded}")`;
+    }
+  });
+
+  $("img:not([mobile-img-path]):not([mobile-bg-img-path])").each(
+    async function () {
+      const jThis = $(this);
+      const src = jThis.attr("src");
+      if (src?.includes("/files/serve/")) {
+        const tokens = src.split("/files/serve/");
+        if (tokens.length > 1) {
+          const fileId = tokens[1];
+          const base64Encoded =
+            await parent.saltcorn.mobileApp.common.loadEncodedFile(fileId);
+          this.src = base64Encoded;
+        }
+      } else if (src?.includes("/files/resize/")) {
+        const tokens = src.split("/files/resize/");
+        if (tokens.length > 1) {
+          const idAndDims = tokens[1].split("/");
+          const width = idAndDims[0];
+          const height = idAndDims.length > 2 ? idAndDims[1] : undefined;
+          const fileId = idAndDims[idAndDims.length - 1];
+          const style = { width: `${width || 50}px` };
+          if (height > 0) style.height = `${height}px`;
+          const base64Encoded =
+            await parent.saltcorn.mobileApp.common.loadEncodedFile(fileId);
+          this.src = base64Encoded;
+          jThis.css(style);
+        }
+      }
+    }
+  );
+}
+
+/**
+ * @param {any|string} targetOrVal either the target or the string to validate
+ * @param {any} ref the target when targetOrVal is a string (see builder/MonacoEditor)
+ */
+function validate_expression_elem(targetOrVal, ref = null) {
+  let val = null;
+  let target = null;
+  if (typeof targetOrVal === "string") {
+    val = targetOrVal;
+    target = $(ref);
+  } else {
+    target = targetOrVal;
+    val = target.val();
+  }
+
+  const next = target.next();
+  if (next.hasClass("expr-error")) next.remove();
+  if (target.hasClass("validate-expression-conditional")) {
+    const box = target
+      .closest(".form-namespace")
+      .find(`[name="${target.attr("name")}_formula"]`);
+    if (!box.prop("checked")) return;
+  }
+  if (!val) return;
+  try {
+    const AsyncFunction = Object.getPrototypeOf(
+      async function () {}
+    ).constructor;
+    AsyncFunction("return " + val);
+  } catch (error) {
+    target.after(`<small class="text-danger font-monospace d-block expr-error">
+    ${error.message}
+  </small>`);
+  }
+}
+
+/**
+ * Like validate_expression_elem but also checks the expression returns a boolean.
+ * @param {any|string} targetOrVal either the target or the string to validate
+ * @param {any} ref the target when targetOrVal is a string (see builder/MonacoEditor)
+ */
+function validate_bool_expression_elem(targetOrVal, ref = null) {
+  let val = null;
+  let target = null;
+  if (typeof targetOrVal === "string") {
+    val = targetOrVal;
+    target = $(ref);
+  } else {
+    target = targetOrVal;
+    val = target.val();
+  }
+
+  const next = target.next();
+  if (next.hasClass("expr-error")) next.remove();
+  if (!val) return;
+  try {
+    const AsyncFunction = Object.getPrototypeOf(
+      async function () {}
+    ).constructor;
+    AsyncFunction("return " + val);
+  } catch (error) {
+    target.after(`<small class="text-danger font-monospace d-block expr-error">
+    ${error.message}
+  </small>`);
+    return;
+  }
+  // For constant expressions (no runtime variables), check the result is boolean
+  try {
+    const result = Function("return " + val)();
+    if (typeof result !== "boolean") {
+      target.after(`<small class="text-danger font-monospace d-block expr-error">
+    Expression must return a boolean
+  </small>`);
+    }
+  } catch (e) {
+    // Expression uses runtime variables — skip bool type check
+  }
+}
+
+/**
+ * Like validate_expression_elem but also checks the expression returns a plain object.
+ * @param {any|string} targetOrVal either the target or the string to validate
+ * @param {any} ref the target when targetOrVal is a string (see builder/MonacoEditor)
+ */
+function validate_object_expression_elem(targetOrVal, ref = null) {
+  let val = null;
+  let target = null;
+  if (typeof targetOrVal === "string") {
+    val = targetOrVal;
+    target = $(ref);
+  } else {
+    target = targetOrVal;
+    val = target.val();
+  }
+
+  const next = target.next();
+  if (next.hasClass("expr-error")) next.remove();
+  if (!val) return;
+  try {
+    const AsyncFunction = Object.getPrototypeOf(
+      async function () {}
+    ).constructor;
+    AsyncFunction("return " + val);
+  } catch (error) {
+    target.after(`<small class="text-danger font-monospace d-block expr-error">
+    ${error.message}
+  </small>`);
+    return;
+  }
+  // For constant expressions (no runtime variables), check the result is a plain object
+  try {
+    const result = Function("return " + val)();
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      Array.isArray(result)
+    ) {
+      target.after(`<small class="text-danger font-monospace d-block expr-error">
+    Expression must return an object
+  </small>`);
+    }
+  } catch (e) {
+    // Expression uses runtime variables — skip object type check
+  }
+}
+
+function initialize_page() {
+  if (window._sc_locale && window.dayjs) dayjs.locale(window._sc_locale);
+  const isNode = getIsNode();
+  //console.log("init page");
+  $(".blur-on-enter-keypress").bind("keyup", function (e) {
+    if (e.keyCode === 13) e.target.blur();
+  });
+
+  const validate_identifier_elem = (target) => {
+    const next = target.next();
+    if (next.hasClass("expr-error")) next.remove();
+    const val = target.val();
+    if (!val) return;
+    try {
+      Function(val, "return 1");
+    } catch (error) {
+      target.after(`<small class="text-danger font-monospace d-block expr-error">
+      Invalid identifier
+    </small>`);
+    }
+  };
+  $(".validate-identifier").attr("spellcheck", false);
+  $(".validate-expression").attr("spellcheck", false);
+
+  $(".validate-identifier").bind("input", function (e) {
+    const target = $(e.target);
+    validate_identifier_elem(target);
+  });
+
+  $(".validate-expression").bind("input", function (e) {
+    const target = $(e.target);
+    validate_expression_elem(target);
+  });
+
+  if (isNode) {
+    const _debouncedOwnershipFormulaSave = $.debounce(
+      function (form) {
+        saveAndContinue(form);
+      },
+      800,
+      null,
+      true
+    );
+    $(document).on("input", "[name='ownership_formula']", function (e) {
+      e.stopPropagation();
+      _debouncedOwnershipFormulaSave($(this).closest("form")[0]);
+    });
+  }
+
+  $(".validate-expression-conditional").each(function () {
+    const theInput = $(this);
+    theInput
+      .closest(".form-namespace")
+      .find(`[name="${theInput.attr("name")}_formula"]`)
+      .bind("change", function (e) {
+        validate_expression_elem(theInput);
+      });
+  });
+
+  $("form").change(apply_showif);
+  // also change if we select same
+  $("form select").on("blur", (e) => {
+    if (!e || !e.target) return;
+    $(e.target).closest("form").trigger("change");
+  });
+  apply_showif();
+  apply_showif();
+  $("[data-inline-edit-dest-url]").each(function () {
+    if ($(this).find(".editicon").length === 0) {
+      var current = $(this).html();
+      $(this).html(
+        `<span class="current">${current}</span><i class="editicon ${
+          !isNode ? "visible" : ""
+        } fas fa-edit ms-1"></i>`
+      );
+    }
+  });
+  $("[data-inline-edit-dest-url]").click(function (event) {
+    event.stopPropagation();
+    var url = $(this).attr("data-inline-edit-dest-url");
+    var current =
+      $(this).attr("data-inline-edit-current") ||
+      $(this).children("span.current").html();
+    const resetHtml = this.outerHTML;
+
+    let fielddata = $(this).attr("data-inline-edit-fielddata");
+    if (fielddata) {
+      //fetch edit
+      $.ajax(`/field/edit-get-fieldview`, {
+        type: "POST",
+        headers: {
+          "CSRF-Token": _sc_globalCsrf,
+        },
+        contentType: "application/json",
+        data: decodeURIComponent(fielddata),
+      }).then((resp) => {
+        const opts = encodeURIComponent(
+          JSON.stringify({
+            resetHtml,
+          })
+        );
+        $(this).replaceWith(
+          `<form method="post" action="/field/save-click-edit" onclick="event.stopPropagation()" onsubmit="inline_ajax_submit_with_fielddata(event, '${opts}')"        
+      <input type="hidden" name="_csrf" value="${_sc_globalCsrf}">
+      <input type="hidden" name="_fielddata" value="${fielddata}">
+      <div class="input-group">
+      ${resp}
+      <button type="submit" class="btn btn-sm btn-primary">OK</button>
+      <button onclick="cancel_inline_edit(event, '${opts}')" type="button" class="btn btn-sm btn-danger"><i class="fas fa-times"></i></button>
+      </div>
+      </form>`
+        );
+      });
+      return;
+    }
+    var key = $(this).attr("data-inline-edit-field") || "value";
+    var ajax = !!$(this).attr("data-inline-edit-ajax");
+    var type = $(this).attr("data-inline-edit-type");
+    var schema = $(this).attr("data-inline-edit-schema");
+    var decimalPlaces = $(this).attr("data-inline-edit-decimal-places");
+    if (schema) {
+      schema = JSON.parse(decodeURIComponent(schema));
+    }
+    if (type === "Date") {
+      //console.log("timeelsems", $(this).find("span.current time"));
+      current =
+        $(this).attr("data-inline-edit-current") ||
+        $(this).find("span.current time").attr("datetime"); // ||
+      //$(this).children("span.current").html();
+    }
+    if (type === "Bool") {
+      current = current === "true";
+    }
+    var is_key = type?.startsWith("Key:");
+    const opts = encodeURIComponent(
+      JSON.stringify({
+        url,
+        key,
+        ajax,
+        current,
+        current_label: $(this).attr("data-inline-edit-current-label"),
+        type,
+        is_key,
+        schema,
+        resetHtml,
+        ...(decimalPlaces ? { decimalPlaces } : {}),
+      })
+    );
+    const doAjaxOptionsFetch = (tblName, target) => {
+      $.ajax(`/api/${tblName}`)
+        .then((resp) => {
+          if (resp.success) {
+            resp.success.sort((a, b) =>
+              a[target]?.toLowerCase?.() > b[target]?.toLowerCase?.() ? 1 : -1
+            );
+
+            const selopts = resp.success.map(
+              (r) =>
+                `<option ${current == r.id ? `selected ` : ``}value="${
+                  r.id
+                }">${escapeHtml(r[target])}</option>`
+            );
+            $(this).replaceWith(
+              `<form method="post" action="${url}" ${
+                ajax ? `onsubmit="inline_ajax_submit(event, '${opts}')"` : ""
+              }>
+          <input type="hidden" name="_csrf" value="${_sc_globalCsrf}">
+          <select name="${key}" value="${current}">${selopts}
+          </select>
+          <button type="submit" class="btn btn-sm btn-primary">OK</button>
+          <button onclick="cancel_inline_edit(event, '${opts}')" type="button" class="btn btn-sm btn-danger"><i class="fas fa-times"></i></button>
+          </form>`
+            );
+          }
+        })
+        .fail(checkNetworkError);
+    };
+    if (type === "JSON" && schema && schema.type.startsWith("Key to ")) {
+      const tblName = schema.type.replace("Key to ", "");
+      const target = schema.summary_field || "id";
+      doAjaxOptionsFetch(tblName, target);
+    } else if (is_key) {
+      const [tblName, target] = type.replace("Key:", "").split(".");
+      doAjaxOptionsFetch(tblName, target);
+    } else {
+      const parent = $(this).parent();
+      $(this).replaceWith(
+        `<form method="post" action="${url}" ${
+          ajax
+            ? `onsubmit="inline_${
+                isNode ? "ajax" : "local"
+              }_submit(event, '${opts}')"`
+            : ""
+        }>
+        ${
+          isNode
+            ? `<input type="hidden" name="_csrf" value="${_sc_globalCsrf}"></input>`
+            : ""
+        }
+        <input type="${
+          type === "Integer" || type === "Float"
+            ? "number"
+            : type === "Bool"
+              ? "checkbox"
+              : "text"
+        }" ${
+          type === "Float"
+            ? `step="${
+                decimalPlaces
+                  ? Math.round(
+                      Math.pow(10, -decimalPlaces) * Math.pow(10, decimalPlaces)
+                    ) / Math.pow(10, decimalPlaces)
+                  : "any"
+              }"`
+            : ""
+        } name="${key}" ${type === "Bool" ? (current ? "checked" : "") : ``}>
+      <button type="submit" class="btn btn-sm btn-primary">OK</button>
+      <button onclick="cancel_inline_edit(event, '${opts.replaceAll("'", "\\'")}')" type="button" class="btn btn-sm btn-danger"><i class="fas fa-times"></i></button>
+      </form>`
+      );
+      if (type !== "Bool") {
+        const newVal = $(this).attr("data-inline-edit-unescape")
+          ? unescapeHtml(current)
+          : current;
+        parent.find(`[name="${key}"]`).val(newVal);
+      }
+    }
+  });
+  if (!isNode) {
+    doMobileTransforms();
+    const anchor = parent.saltcorn.mobileApp.navigation.getAnchor();
+    if (anchor) $(`[href="#${anchor}"][data-bs-toggle="tab"]`).tab("show");
+  }
+  function setExplainer(that) {
+    var id = $(that).attr("id") + "_explainer";
+
+    var explainers = JSON.parse(
+      decodeURIComponent($(that).attr("data-explainers"))
+    );
+    var currentVal = explainers[$(that).val()];
+    $("#" + id).html(
+      `<strong>${
+        $(that).find("option:selected").text() || $(that).val()
+      }</strong>: ${currentVal}`
+    );
+    if (currentVal) $("#" + id).show();
+    else $("#" + id).hide();
+  }
+  $("[data-explainers]").each(function () {
+    var id = $(this).attr("id") + "_explainer";
+    if ($("#" + id).length === 0) {
+      $(this).after(`<div class="alert alert-info my-2" id="${id}"></div>`);
+      setExplainer(this);
+    }
+  });
+  $("[data-explainers]").change(function () {
+    setExplainer(this);
+  });
+  $(".card-max-full-screen").each(function () {
+    card_max_full_screen($(this));
+  });
+
+  const codes = [];
+  $("textarea.to-code").each(function () {
+    codes.push(this);
+  });
+  if (codes.length > 0)
+    enable_monaco(codes, (ts_ds) => {
+      codes.forEach((el) => {
+        if ($(el).hasClass("monaco-enabled")) return;
+        $(el).addClass("monaco-enabled");
+        let value = $(el).val();
+        const isExpression = el.getAttribute("is-expression") === "yes";
+        const virtualPrefix = "const prefix: Row =";
+        let valIsEmpty = value.trim() === "";
+        if (
+          isExpression &&
+          !(
+            new RegExp("^\\s*" + virtualPrefix).test(value) ||
+            new RegExp("^\\s*//\\s*" + virtualPrefix).test(value)
+          )
+        ) {
+          value = `${valIsEmpty ? "//" : ""} ${virtualPrefix}
+${value}`;
+        }
+        const enlarge = $(el).hasClass("enlarge-in-card");
+        const compact = $(el).attr("compact");
+        const singleline = $(el).attr("singleline");
+        const asInput = singleline || compact;
+        const div = document.createElement("div");
+        el.after(div);
+        if (asInput) {
+          div.classList.add("form-control", "monaco-input");
+          div.classList.add(
+            singleline ? "monaco-input-singleline" : "monaco-input-compact"
+          );
+        } else if (enlarge) {
+          enlarge_in_code(div);
+        } else div.classList.add("h-350");
+        let language = "typescript";
+        switch ($(el).attr("mode")) {
+          case "text/css":
+            language = "css";
+            break;
+          case "text/x-sql":
+            language = "sql";
+            break;
+          case "text/html":
+            language = "html";
+            break;
+          case "message/http":
+            language = "";
+            break;
+          case "application/x-python-code":
+          case "text/x-python":
+            language = "python";
+            break;
+          case "text/x-shellscript":
+            language = "shell";
+            break;
+          case "application/json":
+            language = "json";
+            break;
+        }
+        const codepages = $(el).attr("codepage");
+        let host = div;
+        let lineHeight = 0;
+        if (asInput) {
+          host = document.createElement("div");
+          host.className = "monaco-input-editor";
+          div.appendChild(host);
+          if (singleline)
+            lineHeight = parseFloat(getComputedStyle(div).lineHeight) || 0;
+        }
+        const editor = monaco.editor.create(host, {
+          value,
+          language,
+          theme: _sc_lightmode === "dark" ? "vs-dark" : "vs",
+          minimap: { enabled: false },
+          ...(asInput ? singleLineMonacoEditorOptions : {}),
+          ...(lineHeight ? { lineHeight } : {}),
+        });
+        $(div).data("monaco-editor", editor);
+        monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
+          noLib: true,
+          allowNonTsExtensions: true,
+        });
+        monaco.languages.typescript.typescriptDefaults.addExtraLib(ts_ds);
+        // Observe the container for changes
+        const resizeObserver = new ResizeObserver((entries) => {
+          editor.layout();
+        });
+        resizeObserver.observe(el.parentNode);
+        if (isExpression) {
+          // hide prefix line
+          editor.setHiddenAreas([
+            {
+              startLineNumber: 1,
+              endLineNumber: 1,
+            },
+          ]);
+          const model = editor.getModel();
+          // prevent cursor from going to line 1
+          editor.onDidChangeCursorPosition((e) => {
+            if (e.position.lineNumber < 2) {
+              editor.setPosition({
+                lineNumber: 2,
+                column: 1,
+              });
+            }
+          });
+          // no backspacing to line 1
+          editor.onKeyDown((e) => {
+            const position = editor.getPosition();
+            if (
+              position.lineNumber === 2 &&
+              position.column === 1 &&
+              e.keyCode === monaco.KeyCode.Backspace
+            ) {
+              e.preventDefault();
+              e.stopPropagation();
+            }
+          });
+          // copy without the prefix line
+          editor.addAction({
+            id: "copy-editable-only",
+            label: "Copy Only User Content",
+            keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyC],
+            run: (ed) => {
+              const selection = ed.getSelection();
+              if (selection.isEmpty()) return;
+              // intersect selected area with editable area
+              const safeSelection = selection.intersectRanges(
+                new monaco.Range(
+                  2,
+                  1,
+                  model.getLineCount(),
+                  model.getLineMaxColumn(model.getLineCount())
+                )
+              );
+              if (safeSelection) {
+                // write text in intersection to clipboard
+                navigator.clipboard.writeText(
+                  model.getValueInRange(safeSelection)
+                );
+              }
+            },
+          });
+
+          // select all without the prefix line
+          editor.addAction({
+            id: "select-editable-only",
+            label: "Select Only User Content",
+            keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyA],
+            run: (ed) => {
+              ed.setSelection(
+                new monaco.Range(
+                  2,
+                  1,
+                  model.getLineCount(),
+                  model.getLineMaxColumn(model.getLineCount())
+                )
+              );
+            },
+          });
+
+          const form = $(el).closest("form")[0];
+          form.addEventListener("formdata", (e) => {
+            // get the editor value without the prefix line
+            const fullModelRange = model.getFullModelRange();
+            const editableRange = new monaco.Range(
+              2,
+              1,
+              model.getLineCount(),
+              model.getLineMaxColumn(model.getLineCount())
+            );
+            const safeSelection = fullModelRange.intersectRanges(editableRange);
+            let editorValue = "";
+            if (safeSelection) {
+              editorValue = model.getValueInRange(safeSelection);
+            }
+            e.formData.set($(el).attr("name"), editorValue);
+          });
+
+          editor.onDidChangeModelContent(() => {
+            const rawVal = editor.getValue();
+            const userVal = rawVal.substring(rawVal.indexOf("\n") + 1);
+            const newValIsEmpty = userVal.trim().length === 0;
+            if (valIsEmpty && !newValIsEmpty) {
+              valIsEmpty = false;
+              editor.executeEdits("remove-comment-source", [
+                {
+                  range: new monaco.Range(1, 1, 1, 3),
+                  text: "",
+                  forceMoveMarkers: true,
+                },
+              ]);
+            } else if (!valIsEmpty && newValIsEmpty) {
+              valIsEmpty = true;
+              editor.executeEdits("add-comment-source", [
+                {
+                  range: new monaco.Range(1, 1, 1, 1),
+                  text: "// ",
+                  forceMoveMarkers: true,
+                },
+              ]);
+            }
+          });
+        }
+        //top level await and return, any, require
+        if (!codepages)
+          monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
+            diagnosticCodesToIgnore: [1108, 1378, 1375, 7044, 2580, 80005],
+          });
+        // any, require
+        else
+          monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
+            diagnosticCodesToIgnore: [7044, 2580, 80005],
+          });
+        editor.onDidChangeModelContent(
+          $.debounce(
+            async function (e) {
+              const txtval = editor.getValue();
+              const dispatchNativeEvents = () => {
+                if (!el || typeof el.dispatchEvent !== "function") return;
+                ["input", "change"].forEach((eventName) => {
+                  try {
+                    el.dispatchEvent(
+                      new Event(eventName, {
+                        bubbles: true,
+                        cancelable: true,
+                      })
+                    );
+                  } catch (err) {
+                    const fallbackEvt = document.createEvent("Event");
+                    fallbackEvt.initEvent(eventName, true, true);
+                    el.dispatchEvent(fallbackEvt);
+                  }
+                });
+              };
+              if ($(el).hasClass("validate-statements")) {
+                const doStrip = $(el).hasClass("strip-types");
+                const mkError = (errMsg) => {
+                  const form = $(el).closest("form");
+                  const errorArea = form.parent().find(".full-form-error");
+                  if (errorArea.length) errorArea.text(errMsg);
+                  else
+                    form
+                      .parent()
+                      .append(
+                        `<p class="text-danger full-form-error">${errMsg}</p>`
+                      );
+                };
+                const clientValidator = (txtval1) => {
+                  try {
+                    let AsyncFunction = Object.getPrototypeOf(
+                      async function () {}
+                    ).constructor;
+                    AsyncFunction(txtval1);
+                    $(el).val(txtval);
+                    $(el).trigger("change");
+                    dispatchNativeEvents();
+                  } catch (e) {
+                    mkError(e.message);
+                    return;
+                  }
+                };
+                if (doStrip) {
+                  const res = await fetch("/admin/strip-types", {
+                    method: "POST",
+                    body: JSON.stringify({ code: txtval }),
+                    headers: {
+                      "Content-Type": "application/json",
+                      "CSRF-Token": _sc_globalCsrf,
+                    },
+                  });
+                  const jres = await res.json();
+                  if (jres.error) mkError(jres.error);
+                  else clientValidator(jres.code);
+                } else clientValidator(txtval);
+              } else {
+                $(el).val(txtval);
+                $(el).trigger("change");
+                dispatchNativeEvents();
+              }
+            },
+            500,
+            null,
+            true
+          )
+        );
+
+        return;
+      });
+    });
+
+  if ($.fn.historyTabs && $.fn.tab)
+    setTimeout(() => {
+      $('a[data-bs-toggle="tab"].deeplink').historyTabs();
+    });
+  init_bs5_dropdowns();
+
+  // Initialize Sliders - https://stackoverflow.com/a/31083391
+  var sliderSections = document.getElementsByClassName("range-slider");
+  for (var x = 0; x < sliderSections.length; x++) {
+    var sliders = sliderSections[x].getElementsByTagName("input");
+    for (var y = 0; y < sliders.length; y++) {
+      if (sliders[y].type === "range") {
+        sliders[y].oninput = function () {
+          // Get slider values
+          var parent = this.parentNode;
+          var slides = parent.getElementsByTagName("input");
+          var slide1 = parseFloat(slides[0].value);
+          var slide2 = parseFloat(slides[1].value);
+          // Neither slider will clip the other, so make sure we determine which is larger
+          if (slide1 > slide2) {
+            var tmp = slide2;
+            slide2 = slide1;
+            slide1 = tmp;
+          }
+
+          var displayElement = parent.getElementsByClassName("rangeValues")[0];
+          displayElement.innerHTML = slide1 + " - " + slide2;
+        };
+        // Manually trigger event first time to display values
+        sliders[y].oninput();
+      }
+    }
+  }
+
+  setTimeout(() => {
+    $("#toasts-area")
+      .find(".show[rendered='server-side'][type='success']")
+      .removeClass("show");
+  }, 5000);
+
+  const lazyAccHandler = function (e) {
+    const $es = $(e.target).find("[data-sc-view-source]");
+    $es.each(function () {
+      const $e = $(this);
+      if ($.trim($e.html()) == "") {
+        const url = $e.attr("data-sc-view-source");
+        $e.html("Loading...");
+        $.ajax(url, {
+          headers: {
+            pjaxpageload: "true",
+            localizedstate: "true", //no admin bar
+          },
+          success: function (res, textStatus, request) {
+            $e.html(res);
+            initialize_page();
+          },
+          error: function (res) {
+            if (!checkNetworkError(res))
+              notifyAlert({ type: "danger", text: res.responseText });
+            if ($e.html() === "Loading...") $e.html("");
+          },
+        });
+      }
+    });
+    if (window.mermaid) {
+      $(e.target)
+        .find(".mermaid[mm-src]")
+        .each(function () {
+          $(this).html($(this).attr("mm-src"));
+        })
+        .removeAttr("data-processed");
+      mermaid.init(undefined, $(e.target).find(".mermaid"));
+    }
+  };
+  $(".lazy-accoordion").on("show.bs.collapse", lazyAccHandler);
+  $(".lazy-tabs").on("show.bs.tab", function (e) {
+    const link = $(e.target);
+    const container = $(link.attr("href"));
+    lazyAccHandler({ target: container });
+  });
+
+  $('input[type="file"].file-has-existing').on("change", (e) => {
+    const $elem = $(e.target);
+    $elem.removeClass("file-has-existing");
+    $elem.parent().find("span.file-upload-exising").remove();
+  });
+  if (window._sc_is_admin) {
+    $("[data-sc-embed-viewname]").each(function () {
+      const $this = $(this);
+      const viewname = $this.attr("data-sc-embed-viewname");
+      const outermost = !$this.parents("[data-sc-embed-viewname]").length;
+      const in_modal = $this.parents("#scmodal").length;
+      if ((outermost && !in_modal) || $this.parents("#saltcorn-builder").length)
+        return;
+      const url = `/viewedit/config/${viewname}`;
+
+      $(this).popover({
+        html: true,
+        content: `<a href="${url}" target="_blank">Configure ${viewname}<i class="ms-2 fas fa-external-link-alt"></i></a>`,
+        trigger: "hover",
+        placement: "auto",
+        delay: { show: 0, hide: 250 },
+        container: this,
+        offset: "0, 0",
+      });
+      $this.addClass("admin-cfglink-popover");
+    });
+  }
+} //initialize_page
+
+$(initialize_page);
+
+function enlarge_in_code(el) {
+  const $card = $(el).closest("div.card");
+  if (!$card.length) return;
+  const cardTop = $card.position().top;
+  const cardHeight = $card.height();
+  const vh = $(window).height();
+  const cmHeight = el.offsetHeight;
+  const newCardHeight = vh - cardTop - 35;
+  if (newCardHeight > cardHeight) {
+    const extending = newCardHeight - cardHeight;
+    el.style.height = `${cmHeight + extending}px`;
+    //cm.refresh();
+    $card.css("min-height", newCardHeight + "px");
+  }
+}
+function card_max_full_screen($card_outer) {
+  const $cardBody = $card_outer.find(".card-body");
+  const $scrollTarget = $card_outer
+    .find(".card-max-full-screen-scroll")
+    .first();
+  const cardFooterHeight = $card_outer.find(".card-footer").outerHeight() || 0;
+  const cardHeaderHeight = $card_outer.find(".card-header").outerHeight() || 0;
+  const origBodyHeight = $cardBody.outerHeight();
+
+  const computeHeights = () => {
+    const vh = $(window).height();
+    const cardTop = $card_outer.offset().top;
+
+    let available = vh - cardTop - cardFooterHeight - cardHeaderHeight - 20;
+
+    if ($scrollTarget.length) {
+      const transferKey = "cardMaxScrollPaddingTransferred";
+      const transferPaddingBottom = () => {
+        if ($cardBody.data(transferKey)) return;
+        if (!$cardBody.length || !$scrollTarget.length) return;
+        const bodyStyles = window.getComputedStyle($cardBody[0]);
+        const bodyPadBottom = parseFloat(bodyStyles.paddingBottom || "0") || 0;
+        if (!bodyPadBottom) {
+          $cardBody.data(transferKey, true);
+          return;
+        }
+        const scrollStyles = window.getComputedStyle($scrollTarget[0]);
+        const scrollPadBottom =
+          parseFloat(scrollStyles.paddingBottom || "0") || 0;
+        $cardBody.css("padding-bottom", "0px");
+        $scrollTarget.css(
+          "padding-bottom",
+          scrollPadBottom + bodyPadBottom + "px"
+        );
+        $cardBody.data(transferKey, true);
+      };
+
+      transferPaddingBottom();
+      $cardBody.css({
+        "max-height": "",
+        "overflow-y": "visible",
+      });
+
+      let innerAvailable = available;
+      if ($cardBody.length) {
+        const cs = window.getComputedStyle($cardBody[0]);
+        innerAvailable -=
+          (parseFloat(cs.paddingTop) || 0) +
+          (parseFloat(cs.paddingBottom) || 0);
+      }
+
+      const $siblings = $scrollTarget.siblings(":visible");
+      const siblingsHeight = $siblings
+        .toArray()
+        .reduce((acc, el) => acc + $(el).outerHeight(true), 0);
+
+      const $container = $scrollTarget.parent();
+      let gapsTotal = 0;
+      if ($container.length) {
+        const cs = window.getComputedStyle($container[0]);
+        const rowGap = parseFloat(cs.rowGap || cs.gap || "0") || 0;
+        const childrenCount = $container.children(":visible").length;
+        gapsTotal = rowGap * Math.max(childrenCount - 1, 0);
+      }
+
+      const scrollMax = innerAvailable - siblingsHeight - gapsTotal;
+
+      if (scrollMax > 50) {
+        $scrollTarget.css({
+          "max-height": scrollMax + "px",
+          "min-height": scrollMax + "px",
+          "overflow-y": "auto",
+        });
+      }
+
+      return;
+    }
+
+    $cardBody.css({
+      "max-height": available + "px",
+      "overflow-y": "auto",
+    });
+  };
+
+  computeHeights();
+
+  ($scrollTarget.length ? $scrollTarget : $cardBody).attr("tabindex", "-1");
+  window.addEventListener("resize", computeHeights, true);
+}
+
+function cancel_inline_edit(e, opts1) {
+  var opts = JSON.parse(decodeURIComponent(opts1 || "") || "{}");
+  var form = $(e.target).closest("form");
+  form.replaceWith(opts.resetHtml);
+  initialize_page();
+}
+
+function inline_submit_success(e, form, opts) {
+  const isNode = getIsNode();
+  const formDataArray = form.serializeArray();
+  if (opts) {
+    let fdEntry = formDataArray.find((f) => f.name == opts.key);
+    let rawVal = opts.type === "Bool" ? !!fdEntry : fdEntry.value;
+    let val =
+      opts.is_key || (opts.schema && opts.schema.type.startsWith("Key to "))
+        ? form.find("select").find("option:selected").text()
+        : rawVal;
+
+    $(e.target).replaceWith(`<div 
+  data-inline-edit-field="${opts.key}" 
+  ${opts.ajax ? `data-inline-edit-ajax="true"` : ""}
+  ${opts.type ? `data-inline-edit-type="${opts.type}"` : ""}
+  ${opts.current ? `data-inline-edit-current="${rawVal}"` : ""}
+  ${
+    opts.schema
+      ? `data-inline-edit-schema="${encodeURIComponent(
+          JSON.stringify(opts.schema)
+        )}"`
+      : ""
+  }
+  ${opts.current_label ? `data-inline-edit-current-label="${val}"` : ""}
+  ${
+    opts.decimalPlaces
+      ? `data-inline-edit-decimal-places="${opts.decimalPlaces}"`
+      : ""
+  }
+  data-inline-edit-dest-url="${opts.url}">
+    <span class="current">${val}</span>
+    <i class="editicon ${!isNode ? "visible" : ""} fas fa-edit ms-1"></i>
+  </div>`);
+    initialize_page();
+  } else location.reload();
+}
+
+function inline_ajax_submit_with_fielddata(e, opts1) {
+  var opts = JSON.parse(decodeURIComponent(opts1 || "") || "{}");
+  e.preventDefault();
+
+  var form = $(e.target).closest("form");
+  var form_data = form.serialize();
+  var url = form.attr("action");
+  if (opts.type === "Bool" && !form_data.includes(`${opts.key}=on`)) {
+    form_data += `&${opts.key}=off`;
+  }
+  $.ajax(url, {
+    type: "POST",
+    headers: {
+      "CSRF-Token": _sc_globalCsrf,
+    },
+    data: form_data,
+    success: function (res) {
+      var opts = JSON.parse(decodeURIComponent(opts1 || "") || "{}");
+      var form = $(e.target).closest("form");
+      form.replaceWith(res);
+      initialize_page();
+    },
+    error: function (e) {
+      if (!checkNetworkError(e))
+        ajax_done(
+          e.responseJSON || { error: "Unknown error: " + e.responseText }
+        );
+    },
+  });
+}
+
+function inline_ajax_submit(e, opts1) {
+  var opts = JSON.parse(decodeURIComponent(opts1 || "") || "{}");
+  e.preventDefault();
+
+  var form = $(e.target).closest("form");
+  var form_data = form.serialize();
+  var url = form.attr("action");
+  if (opts.type === "Bool" && !form_data.includes(`${opts.key}=on`)) {
+    form_data += `&${opts.key}=off`;
+  }
+  $.ajax(url, {
+    type: "POST",
+    headers: {
+      "CSRF-Token": _sc_globalCsrf,
+    },
+    data: form_data,
+    success: function (res) {
+      inline_submit_success(e, form, opts);
+    },
+    error: function (e) {
+      if (!checkNetworkError(e))
+        ajax_done(
+          e.responseJSON || { error: "Unknown error: " + e.responseText }
+        );
+    },
+  });
+}
+
+function ajax_indicator(show, e) {
+  const $ind = e
+    ? $(e).closest(".card,.modal").find(".sc-ajax-indicator")
+    : $(".sc-ajax-indicator");
+  $ind.find("svg").attr("data-icon", "save");
+  $ind.find("i").removeClass("fa-exclamation-triangle").addClass("fa-save");
+  $ind.css("color", "");
+  $ind.removeAttr("title");
+  if (show) $ind.show();
+  else $ind.fadeOut();
+}
+
+function ajax_indicate_error(e, resp) {
+  //console.error("ind error", resp);
+  const $ind = e
+    ? $(e).closest(".card,.modal").find(".sc-ajax-indicator")
+    : $(".sc-ajax-indicator");
+  $ind.css("color", "#e74a3b");
+  $ind.find("svg").attr("data-icon", "exclamation-triangle");
+  $ind.find("i").removeClass("fa-save").addClass("fa-exclamation-triangle");
+  $ind.attr(
+    "title",
+    "Save error: " + (resp ? resp.responseText || resp.statusText : "unknown")
+  );
+  $ind.show();
+}
+
+function enable_codemirror(f) {
+  $("<link/>", {
+    rel: "stylesheet",
+    type: "text/css",
+    href: `/static_assets/${_sc_version_tag}/codemirror.css`,
+  }).appendTo("head");
+  $.ajax({
+    url: `/static_assets/${_sc_version_tag}/codemirror.min.js`,
+    dataType: "script",
+    cache: true,
+    success: f,
+    error: checkNetworkError,
+  });
+}
+
+let monaco_enabled_declares = false;
+const monaco_init_queue = [];
+
+function enable_monaco(codes, f) {
+  const textarea = codes[0];
+  if (monaco_enabled_declares === "initializing") {
+    monaco_init_queue.push(f);
+    return;
+  }
+  if (monaco_enabled_declares) {
+    f(monaco_enabled_declares);
+    return;
+  }
+  monaco_enabled_declares = "initializing";
+  $("<link/>", {
+    rel: "stylesheet",
+    type: "text/css",
+    href: `/static_assets/${_sc_version_tag}/monaco/editor/editor.main.css`,
+  }).appendTo("head");
+  const tableName = $(textarea).attr("tableName");
+  const hasUser = codes
+    .find((c) => c.getAttribute("user"))
+    ?.getAttribute?.("user");
+  const nojoins = codes
+    .find((c) => c.getAttribute("nojoins"))
+    ?.getAttribute?.("nojoins");
+  const isWorkflow = codes
+    .find((c) => c.getAttribute("workflow"))
+    ?.getAttribute?.("workflow");
+  const codepage = $(textarea).attr("codepage");
+
+  $.ajax({
+    url: `/admin/ts-declares?${tableName ? `table=${tableName}` : ""}&${hasUser ? `user=${hasUser}` : ""}&${codepage ? `codepage=${codepage}` : ""}&${isWorkflow ? `workflow=${isWorkflow}` : ""}&${nojoins ? `nojoins=${nojoins}` : ""}`,
+    success: (ds) => {
+      $.ajax({
+        url: `/static_assets/${_sc_version_tag}/monaco/loader.js`,
+        dataType: "script",
+        cache: true,
+        success: () => {
+          require.config({
+            paths: {
+              vs: `/static_assets/${_sc_version_tag}/monaco`,
+            },
+          });
+          require(["vs/editor/editor.main"], function () {
+            monaco_enabled_declares = ds;
+            monaco_init_queue.forEach((qf) => qf(ds));
+            f(ds);
+          });
+        },
+        error: checkNetworkError,
+      });
+    },
+  });
+}
+
+function tristateClick(e, required) {
+  const btn = $(e);
+  const input = btn.prev();
+  var current = input.val();
+  switch (current) {
+    case "?":
+      btn
+        .html(btn.attr("data-true-label") || "T")
+        .removeClass(["btn-danger", "btn-secondary"])
+        .addClass("btn-success");
+      input.val("on").trigger("change");
+      break;
+    case "on":
+      btn
+        .html(btn.attr("data-false-label") || "F")
+        .removeClass(["btn-success", "btn-secondary"])
+        .addClass("btn-danger");
+      input.val("off").trigger("change");
+      break;
+    default:
+      if (required) {
+        btn
+          .html(btn.attr("data-true-label") || "T")
+          .removeClass(["btn-danger", "btn-secondary"])
+          .addClass("btn-success");
+        input.val("on").trigger("change");
+      } else {
+        btn
+          .html(btn.attr("data-null-label") || "?")
+          .removeClass(["btn-success", "btn-danger"])
+          .addClass("btn-secondary");
+        input.val("?").trigger("change");
+      }
+      break;
+  }
+}
+
+function thumbsUpDownClick(e, required) {
+  const clicked_btn = $(e);
+  const container = clicked_btn.parent();
+  const input = container.prev();
+  const btn_up = container.find("button.thumbsup");
+  const btn_down = container.find("button.thumbsdown");
+  const current = input.val();
+  const set_to = (val) => {
+    switch (val) {
+      case true:
+        btn_up.addClass("btn-success").removeClass("btn-outline-success");
+        btn_down.removeClass("btn-danger").addClass("btn-outline-danger");
+        input.val("on").trigger("change");
+        break;
+      case false:
+        btn_up.removeClass("btn-success").addClass("btn-outline-success");
+        btn_down.addClass("btn-danger").removeClass("btn-outline-danger");
+        input.val("off").trigger("change");
+        break;
+      default:
+        btn_up.removeClass("btn-success").addClass("btn-outline-success");
+        btn_down.removeClass("btn-danger").addClass("btn-outline-danger");
+        input.val("?").trigger("change");
+        break;
+    }
+  };
+  if (clicked_btn.hasClass("thumbsup"))
+    switch (current) {
+      case "?":
+      case "off":
+        return set_to(true);
+      case "on":
+        if (!required) return set_to(null);
+    }
+  // thumbs down clicked
+  else
+    switch (current) {
+      case "?":
+      case "on":
+        return set_to(false);
+      case "off":
+        if (!required) return set_to(null);
+    }
+}
+
+function getIsNode() {
+  try {
+    return typeof parent?.saltcorn?.data?.state === "undefined";
+  } catch (e) {
+    //probably in an iframe
+    return true;
+  }
+}
+
+function buildToast(txt, type, spin, title, set_id) {
+  const realtype = type === "error" ? "danger" : type;
+  const icon =
+    realtype === "success"
+      ? "fa-check-circle"
+      : realtype === "danger"
+        ? "fa-times-circle"
+        : realtype === "warning"
+          ? "fa-exclamation-triangle"
+          : "";
+  const isNode = getIsNode();
+  const rndid =
+    set_id || `tab${Math.floor(Math.random() * 16777215).toString(16)}`;
+  return {
+    id: rndid,
+    html: `
+    <div 
+      class="toast show"
+      id="${rndid}"
+      toast-title="${escapeHtml(title || "")}"
+      rendered="client-side",
+      role="alert"
+      aria-live="assertive"
+      aria-atomic="true"
+      style="min-width: 350px; max-width: 50vw; width: auto; z-index: 9999; ${
+        !isNode ? "transform: translateX(-50%);" : ""
+      }" 
+    >
+      <div class="toast-header bg-${realtype} text-white py-1 ">
+        <i class="fas ${icon} me-2"></i>
+        <strong class="me-auto" >
+          ${title || type}
+        </strong>
+        ${
+          spin
+            ? ""
+            : `<button 
+                type="button" 
+                class="btn-close btn-close-white" 
+                data-bs-dismiss="toast" 
+                aria-label="Close"
+                style="font-size: 12px;"
+                ></button>`
+        }
+      </div>
+      <div 
+        class="toast-body py-2 fs-6 fw-bold"
+      >
+        <div class="d-flex align-items-center">
+          <strong>${txt}</strong>
+          ${
+            spin
+              ? `<span 
+                  class="spinner-border ms-auto" 
+                  role="status" 
+                  aria-hidden="true" 
+                  style="width: 1.5rem; height: 1.5rem"></span>`
+              : ""
+          }
+        </div>
+      </div>
+    </div>
+  `,
+  };
+}
+
+function progress_toast_update({
+  id,
+  close,
+  title,
+  message,
+  percent,
+  blocking,
+  maxHeight,
+  popupWidth,
+}) {
+  if (close && blocking) {
+    $("#scmodal .modal-body .progress-message").html("");
+    close_saltcorn_modal();
+    return;
+  }
+  let existing = !blocking && id ? $("#toast-" + id) : $("#scmodal");
+  if (close && id) {
+    existing.remove();
+    return;
+  }
+
+  if (blocking) {
+    ensure_modal_exists_and_closed({ open: true, blocking: true }); // no close
+    $(".sc-modal-linkout").hide();
+    $("#scmodal .modal-header button.btn-close").css("display", "none");
+    if (popupWidth) $(".modal-dialog").css("max-width", popupWidth);
+    existing = $("#scmodal");
+    if (title) $("#scmodal .modal-title").html(title);
+    const exBody = $("#scmodal .modal-body .blocking-progress-modal");
+    if (!exBody.length) {
+      $("#scmodal .modal-body").html(
+        `<div class="blocking-progress-modal"><div class="progress-message"${maxHeight ? ` style="max-height: ${maxHeight}px"` : ""}><div>${message || ""}</div></div><div class="progress-bar">${
+          typeof percent === "undefined"
+            ? ""
+            : '<progress style="width: 100%" value="' +
+              percent +
+              '" max="100">' +
+              percent +
+              " %</progress>"
+        }</div></div>`
+      );
+    } else {
+      if (message) {
+        if (maxHeight)
+          $("#scmodal .modal-body .progress-message").prepend(
+            `<div>${message}</div>`
+          );
+        else $("#scmodal .modal-body .progress-message").html(message);
+      }
+      if (typeof percent !== "undefined")
+        $("#scmodal .modal-body progress").val(percent);
+    }
+    if (!$("#scmodal").hasClass("show"))
+      new bootstrap.Modal($("#scmodal"), {
+        focus: false,
+        backdrop: "static",
+        keyboard: false,
+      }).show();
+  } else {
+    if (id && !existing.length) {
+      const { html } = buildToast(message, "info", false, title, "toast-" + id);
+      $("#toasts-area").append(html);
+      existing = $("#toast-" + id);
+    } else {
+      $("#toast-" + id)
+        .find(".toast-body strong")
+        .html(message);
+    }
+
+    if (typeof percent !== "undefined") {
+      const exprogress = existing.find("progress");
+      if (!exprogress.length) {
+        $("#toast-" + id)
+          .find(".toast-body")
+          .append(
+            '<progress value="' +
+              percent +
+              '" max="100">' +
+              percent +
+              " %</progress>"
+          );
+      } else exprogress.val(percent);
+    }
+  }
+}
+
+function notifyAlert(note, spin) {
+  if (Array.isArray(note)) {
+    note.forEach(notifyAlert);
+    return;
+  }
+  var txt, type;
+  if (typeof note == "string") {
+    txt = note;
+    type = "info";
+  } else if (note.text) {
+    txt = note.text;
+    type = note.type || "info";
+  } else {
+    type = "info";
+    txt = JSON.stringify(note, null, 2);
+  }
+  if (window._sc_suppress_toasts) return;
+
+  const { id, html } = buildToast(txt, type, spin, note.toast_title);
+  let $modal = $("#scmodal");
+  if ($modal.length && $modal.hasClass("show"))
+    $("#modal-toasts-area").append(html);
+  else $("#toasts-area").append(html);
+  if (type === "success" || note.remove_delay) {
+    setTimeout(
+      () => {
+        $(`#${id}`).removeClass("show");
+      },
+      note.remove_delay ? note.remove_delay * 1000 : 5000
+    );
+  }
+}
+
+function emptyAlerts() {
+  $("#toasts-area").html("");
+}
+
+function spin_action_link(e) {
+  const $e = $(e);
+  const width = $e.width();
+  const height = $e.height();
+
+  $e.attr("data-innerhtml-prespin", $e.html());
+  $e.attr("data-previous-onclick", $e.attr("onclick"));
+  $e.attr("onclick", "void(0)");
+  $e.html('<i class="fas fa-spinner fa-spin"></i>').width(width).height(height);
+  $(document).trigger("activate-spinner", $e);
+  //null onclick
+  $e.trigger("spin");
+}
+
+function reset_spinners() {
+  $("[data-innerhtml-prespin]").each(function () {
+    $e = $(this);
+    $e.html($e.attr("data-innerhtml-prespin"));
+    $e.removeAttr("data-innerhtml-prespin");
+    const prevOnclick = $e.attr("data-previous-onclick");
+    if (prevOnclick && prevOnclick !== "void(0)") {
+      $e.attr("onclick", prevOnclick);
+      $e.removeAttr("data-previous-onclick");
+    }
+
+    //reset onclick
+  });
+}
+
+function press_store_button(clicked, keepOld, disable) {
+  let btn = clicked;
+  if ($(clicked).is("form")) btn = $(clicked).find("button[type=submit]");
+  if (keepOld) {
+    const oldText = $(btn).html();
+    $(btn).data("old-text", oldText);
+  }
+  const width = $(btn).width();
+  const height = $(btn).height();
+  $(btn)
+    .html('<i class="fas fa-spinner fa-spin"></i>')
+    .width(width)
+    .height(height);
+  $(document).trigger("activate-spinner", $(btn));
+  $(btn).trigger("spin");
+  setTimeout(() => {
+    $(btn).prop("disabled", true);
+  }, 50);
+}
+
+function restore_old_button(btnId) {
+  if (window.reset_spinners) reset_spinners();
+  const btn = btnId instanceof jQuery ? btnId : $(`#${btnId}`);
+  const oldText = $(btn).data("old-text");
+  if (!oldText.length) return;
+  btn.html(oldText);
+  btn.css({ width: "", height: "" }).prop("disabled", false);
+  btn.removeData("old-text");
+}
+
+async function common_done(res, viewnameOrElem0, isWeb = true) {
+  const viewnameOrElem =
+    viewnameOrElem0 === "undefined"
+      ? last_route_viewname
+      : viewnameOrElem0 || last_route_viewname;
+  const viewname =
+    typeof viewnameOrElem === "string"
+      ? viewnameOrElem
+      : $(viewnameOrElem)
+          .closest("[data-sc-embed-viewname]")
+          .attr("data-sc-embed-viewname") ||
+        $(viewnameOrElem).closest("form[data-viewname]").attr("data-viewname");
+  if (window._sc_loglevel > 4)
+    console.log("ajax result directives", viewname, res);
+
+  if (res.page_load_tag && res.page_load_tag !== _sc_pageloadtag) return;
+
+  const handle = async (element, fn) => {
+    if (Array.isArray(element))
+      for (const current of element) await fn(current);
+    else await fn(element);
+  };
+  //TODO what if something else is spinning?
+  //if (window.reset_spinners) reset_spinners();
+
+  const eval_it = async (s) => {
+    if (res.row && res.field_names) {
+      const f = new Function(`viewname, row, {${res.field_names}}`, s);
+      const evalres = await f(viewname, res.row, res.row);
+      if (evalres) await common_done(evalres, viewnameOrElem, isWeb);
+    } else if (res.row) {
+      const f = new Function(`viewname, row`, s);
+      const evalres = await f(viewname, res.row);
+      if (evalres) await common_done(evalres, viewnameOrElem, isWeb);
+    } else {
+      const f = new Function(`viewname`, s);
+      const evalres = await f(viewname);
+      if (evalres) await common_done(evalres, viewnameOrElem, isWeb);
+    }
+  };
+  if (res.notify)
+    await handle(res.notify, (text) =>
+      notifyAlert({
+        type: res.notify_type || "info",
+        text,
+        toast_title: res.toast_title,
+        remove_delay: res.remove_delay,
+      })
+    );
+  if (res.error) {
+    if (window._sc_loglevel > 4) console.trace("error response", res.error);
+    await handle(res.error, (text) =>
+      notifyAlert({
+        type: "danger",
+        text,
+        toast_title: res.toast_title,
+        remove_delay: res.remove_delay,
+      })
+    );
+  }
+  if (res.notify_success)
+    await handle(res.notify_success, (text) =>
+      notifyAlert({
+        type: "success",
+        text,
+        toast_title: res.toast_title,
+        remove_delay: res.remove_delay,
+      })
+    );
+  if (res.set_fields && (viewname || res.set_fields._viewname)) {
+    let form =
+      typeof viewnameOrElem === "string" || res.set_fields._viewname
+        ? $(`form[data-viewname="${res.set_fields._viewname || viewname}"]`)
+        : $(viewnameOrElem).closest("form[data-viewname]");
+    if (form.length === 0 && viewnameOrElem?.querySelector) {
+      const temp = viewnameOrElem.querySelector("form[data-viewname]");
+      if (temp) form = $(temp);
+    }
+    if (form.length === 0 && set_state_fields) {
+      // assume this is a filter
+      set_state_fields(
+        res.set_fields,
+        false
+        // $(`[data-sc-embed-viewname="${viewname}"]`)
+      );
+    } else {
+      Object.keys(res.set_fields).forEach((k) => {
+        if (k === "_viewname") return;
+        const input = form.find(
+          `input[name=${k}], textarea[name=${k}], select[name=${k}]`
+        );
+        if (k === "id" && input.length === 0) {
+          //TODO table.pk_name instead of id
+          form.append(
+            `<input type="hidden" name="id" value="${res.set_fields[k]}">`
+          );
+          apply_showif();
+          return;
+        }
+        if (input.attr("type") === "checkbox")
+          input.prop("checked", res.set_fields[k]);
+        else input.val(res.set_fields[k]);
+        if (input.attr("data-selected")) {
+          input.attr("data-selected", res.set_fields[k]);
+        }
+
+        input.trigger("set_form_field", { no_onchange: res.no_onchange });
+      });
+    }
+    if (!res.no_onchange) form.trigger("change");
+  }
+
+  if (res.download) {
+    await handle(res.download, (download) => {
+      const dataurl = `data:${
+        download.mimetype || "application/octet-stream"
+      };base64,${download.blob}`;
+      fetch(dataurl)
+        .then((res) => res.blob())
+        .then((blob) => {
+          const link = document.createElement("a");
+          link.href = window.URL.createObjectURL(blob);
+          if (download.filename) link.download = download.filename;
+          else link.target = "_blank";
+          link.click();
+        });
+    });
+  }
+
+  if (res.popup) {
+    ajax_modal(res.popup);
+  }
+  if (res.suppressed) {
+    notifyAlert({
+      type: "warning",
+      text: res.suppressed,
+    });
+  }
+  if (res.reload_embedded_view) {
+    let new_state = res.new_state || undefined;
+    reload_embedded_view(res.reload_embedded_view, new_state);
+  }
+  if (res.progress_bar_update) {
+    progress_toast_update(res.progress_bar_update);
+  }
+  if (res.eval_js) await handle(res.eval_js, eval_it);
+  /// TODO got and resume_workflow - use localStorage
+  if (res.goto) {
+    if (!isWeb) {
+      const next = new URL(res.goto, "http://localhost");
+      const pathname = next.pathname;
+      if (pathname.startsWith("/view/") || pathname.startsWith("/page/")) {
+        const route = `get${pathname}${next.search ? "?" + next.search : ""}`;
+        await parent.saltcorn.mobileApp.navigation.handleRoute(route);
+      } else parent.cordova.InAppBrowser.open(res.goto, "_system"); // TODO
+    } else if (res.target === "_blank") window.open(res.goto, "_blank").focus();
+    else {
+      const prev = new URL(window.location.href);
+      const next = new URL(res.goto, prev.origin);
+      window.location.href = res.goto;
+      if (
+        prev.origin === next.origin &&
+        prev.pathname === next.pathname &&
+        prev.searchParams.toString() === next.searchParams.toString() &&
+        next.hash !== prev.hash
+      )
+        location.reload();
+    }
+  }
+  if (res.resume_workflow) {
+    if (dynamic_update_connection_status === "connecting") {
+      let retries = 0;
+      let delay = 50;
+      let go = () => {
+        setTimeout(() => {
+          if (
+            retries < 8 &&
+            dynamic_update_connection_status === "connecting"
+          ) {
+            delay = delay * 2;
+            retries += 1;
+            go();
+          } else
+            ajax_post_json(
+              `/actions/resume-workflow/${res.resume_workflow}`,
+              {}
+            );
+        }, delay);
+      };
+      go();
+    } else
+      ajax_post_json(`/actions/resume-workflow/${res.resume_workflow}`, {});
+  }
+  if (res.reload_page) {
+    (isWeb ? location : parent.saltcorn.mobileApp.navigation).reload(); //TODO notify to cookie if reload or goto
+  }
+}
+
+function editAllowedAuthByRole(id, event) {
+  ajax_post_json(
+    `/roleadmin/setrole_allowed_auth_methods/${id}`,
+    {
+      enabled: event.target.checked,
+      method: event.target.value,
+    },
+    {
+      complete() {
+        location.reload();
+      },
+    }
+  );
+}
+
+const repeaterCopyValuesToForm = (form, editor, noTriggerChange) => {
+  const vs = JSON.parse(editor.getString());
+
+  const setVal = (k, ix, v) => {
+    const $e = form.find(`input[name="${k}_${ix}"]`);
+    if ($e.length) $e.val(v);
+    else {
+      const $ne = $(
+        `<input type="hidden" data-repeater-ix="${ix}" name="${k}_${ix}"></input>`
+      );
+      $ne.val(v);
+      form.append($ne);
+    }
+  };
+  vs.forEach((v, ix) => {
+    Object.entries(v).forEach(([k, v]) => {
+      //console.log(ix, k, typeof v, v)
+      if (typeof v === "boolean") setVal(k, ix, v ? "on" : "");
+      else setVal(k, ix, v);
+    });
+  });
+  //delete
+  //for (let ix = vs.length; ix < vs.length + 5; ix++) {
+  //  $(`input[data-repeater-ix="${ix}"]`).remove();
+  //}
+  $(`input[type=hidden]`).each(function () {
+    const name = $(this).attr("name");
+    if (!name) return;
+    const m = name.match(/_(\d+)$/);
+    if (!m || !m[1]) return;
+    const ix = parseInt(m[1], 10);
+    if (typeof ix !== "number" || isNaN(ix)) return;
+    if (ix >= vs.length) $(this).remove();
+  });
+  !noTriggerChange && form.trigger("change");
+};
+function align_dropdown(id) {
+  setTimeout(() => {
+    if ($("#dm" + id).hasClass("show")) {
+      var inputWidth = $("#search-input-group-" + id).outerWidth();
+      $("#dm" + id).css("width", inputWidth);
+      var d0pos = $("#search-input-group-" + id).offset();
+      $("#dm" + id).offset({ left: d0pos.left });
+      $(document).on("click", "#dm" + id, function (e) {
+        e.stopPropagation();
+      });
+    }
+  }, 0);
+}
+
+function remove_outline(form) {
+  $(form)
+    .find("button[type=submit]")
+    .removeClass("btn-outline-primary")
+    .addClass("btn-primary");
+}
+
+const columnSummary = (col) => {
+  if (!col) return "Unknown";
+  switch (col.type) {
+    case "Field":
+      return `Field ${col.field_name} ${col.fieldview || ""}`;
+    case "Link":
+      return `Link ${col.link_text}`;
+    case "FormulaValue":
+      return `Formula ${col.formula}`;
+    case "JoinField":
+      return `Join ${col.join_field}`;
+    case "ViewLink":
+      return `View link ${col.view_label || col.view.split(":")[1] || ""}`;
+    case "Action":
+      return `Action ${col.action_label || col.action_name}`;
+    case "Aggregation":
+      return `${col.stat} ${col.agg_field.split("@")[0]} ${col.agg_relation}`;
+    default:
+      return "Unknown";
+  }
+};
+
+function submitWithEmptyAction(form) {
+  var formAction = form.getAttribute("action");
+  form.setAttribute("action", "javascript:void(0)");
+  form.submit();
+  form.setAttribute("action", formAction);
+}
+
+function unique_field_from_rows(
+  rows,
+  id,
+  field_name,
+  space,
+  start,
+  always_append,
+  char_type,
+  value
+) {
+  const gen_char = (i) => {
+    switch (char_type) {
+      case "Lowercase Letters":
+        return String.fromCharCode("a".charCodeAt(0) + i);
+      case "Uppercase Letters":
+        return String.fromCharCode("A".charCodeAt(0) + i);
+      default:
+        return i;
+    }
+  };
+  const char_to_i = (s) => {
+    switch (char_type) {
+      case "Lowercase Letters":
+        return s.charCodeAt(0) - "a".charCodeAt(0);
+      case "Uppercase Letters":
+        return s.charCodeAt(0) - "A".charCodeAt(0);
+      default:
+        return +s;
+    }
+  };
+  const value_wspace = `${value}${space ? " " : ""}`;
+  const vals = rows
+    .map((o) => o[field_name])
+    .filter((s) => s.startsWith(value));
+  const numtype =
+    char_type !== "Lowercase Letters" && char_type !== "Uppercase Letters";
+  if (vals.includes(value) || always_append) {
+    let newname;
+    const stripped = vals
+      .filter((v) => v !== value)
+      .map((s) => s.replace(value_wspace, ""))
+      .map((s) => (numtype ? +s : s))
+      .filter((s) => (numtype ? !isNaN(s) : true))
+      .sort((a, b) => a - b);
+    if (stripped.length === 0) newname = `${value_wspace}${gen_char(start)}`;
+    else {
+      const i = char_to_i(stripped[stripped.length - 1]);
+      const last_i = numtype ? Math.max(i, start - 1) : i;
+
+      newname = `${value_wspace}${gen_char(last_i + 1)}`;
+    }
+    $("#" + id).val(newname);
+  }
+}
+
+function room_msglist(room_id) {
+  return $(`.msglist-${room_id}`);
+}
+
+// true when the list is not a scroll container (the page scrolls, so new
+// messages should always be followed) or the reader is already at the end
+function room_at_bottom($list) {
+  const el = $list[0];
+  if (!el || el.scrollHeight <= el.clientHeight) return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+}
+
+// gap left between the bottom of a viewport-filling room and the window edge
+const sc_room_bottom_gap = 16;
+
+// A pinned room with no configured height runs from wherever it starts down to
+// the bottom of the window. That distance depends on what is above it on the
+// page, which CSS cannot see, so measure it here; the stylesheet's 70vh is the
+// fallback until this runs.
+function room_fit_height(room_id) {
+  const room = room_msglist(room_id).closest(".sc-room-fill")[0];
+  if (!room) return;
+  const top = room.getBoundingClientRect().top;
+  const avail = window.innerHeight - top - sc_room_bottom_gap;
+  room.style.height = Math.max(avail, 200) + "px";
+}
+
+function room_animate_msg(el, $list) {
+  const name = $list.attr("data-msg-animate");
+  if (!name || !el) return;
+  const duration = $list.attr("data-msg-animate-duration");
+  const delay = $list.attr("data-msg-animate-delay");
+  if (duration) el.style.animationDuration = duration + "s";
+  if (delay) el.style.animationDelay = delay + "s";
+  el.style.animationName = name;
+  el.style.animationFillMode = "both";
+  el.removeAttribute("data-animate-initial-hide");
+}
+
+function room_animate_existing(room_id) {
+  const $list = room_msglist(room_id);
+  if (!$list.attr("data-msg-animate")) return;
+  $list.children(".sc-room-msg").each(function () {
+    room_animate_msg(this, $list);
+  });
+}
+
+function room_scroll_bottom($list) {
+  const el = $list[0];
+  if (el && el.scrollHeight > el.clientHeight) el.scrollTop = el.scrollHeight;
+}
+
+// append newly arrived messages, keeping the reader at the end of the list if
+// they were already there. force is set for messages we sent ourselves.
+function room_append(room_id, html, force) {
+  const $list = room_msglist(room_id);
+  if (!$list.length) return;
+  const follow = force || room_at_bottom($list);
+  const $msg = $("<div>").addClass("sc-room-msg").html(html);
+  $list.append($msg);
+  room_animate_msg($msg[0], $list);
+  if (follow) room_scroll_bottom($list);
+}
+
+// history is prepended without animation, holding the reader's position:
+// growing the list above the viewport would otherwise jump them to the top
+function room_prepend(room_id, html) {
+  const $list = room_msglist(room_id);
+  const el = $list[0];
+  if (!el) return;
+  const anchor = el.firstElementChild;
+  $list.prepend(html);
+  if (!anchor) return;
+  const anchor_bottom =
+    anchor.getBoundingClientRect().bottom -
+    el.getBoundingClientRect().top +
+    el.scrollTop;
+  el.scrollTop = Math.max(anchor_bottom - el.clientHeight, 0);
+}
+
+function room_older(viewname, room_id, btn) {
+  view_post(
+    viewname,
+    "fetch_older_msg",
+    { room_id, lt_msg_id: +$(btn).attr("data-lt-msg-id") },
+    (res) => {
+      if (res.prepend) room_prepend(room_id, res.prepend);
+      if (res.new_fetch_older_lt)
+        $(btn).attr("data-lt-msg-id", res.new_fetch_older_lt);
+      if (res.remove_fetch_older) $(btn).remove();
+    }
+  );
+}
+
+function get_shared_socket() {
+  let socket = window.sharedSocket || null;
+  if (!socket) {
+    if (parent?.saltcorn?.data?.state) {
+      const { server_path } =
+        parent.saltcorn.data.state.getState().mobileConfig;
+      socket = io(server_path, { transports: ["websocket"] });
+    } else socket = io({ transports: ["websocket"] });
+    window.sharedSocket = socket;
+  }
+  return socket;
+}
+
+function init_room(viewname, room_id) {
+  room_animate_existing(room_id);
+  let socket = get_shared_socket();
+  socket.emit("join_room", [viewname, room_id]);
+  socket.on("message", (msg) => {
+    if (msg.not_for_user_id) {
+      const my_user_id = $(`.msglist-${room_id}`).attr("data-user-id");
+      if (+my_user_id === +msg.not_for_user_id) return;
+    }
+    if (msg.append) room_append(room_id, msg.append);
+    if (msg.pls_ack_msg_id)
+      view_post(viewname, "ack_read", { room_id, id: msg.pls_ack_msg_id });
+  });
+
+  $(`form.room-${room_id}`).submit((e) => {
+    e.preventDefault();
+    var form_data = $(`form.room-${room_id}`).serialize();
+    view_post(viewname, "submit_msg_ajax", form_data, (vpres) => {
+      if (vpres.append) room_append(room_id, vpres.append, true);
+      $(`form.room-${room_id}`).trigger("reset");
+    });
+  });
+  room_fit_height(room_id);
+  $(window).on("resize", () => room_fit_height(room_id));
+  room_scroll_bottom(room_msglist(room_id));
+}
+
+function init_collab_room(viewname, eventCfgs) {
+  let socket = get_shared_socket();
+  for (const [event, callback] of Object.entries(eventCfgs.events)) {
+    socket.on(event, callback);
+  }
+  const joinFn = () => {
+    socket.emit("join_collab_room", viewname, (ack) => {
+      if (ack?.status === "ok")
+        console.log(`Joined collaboration room for view '${viewname}'`);
+      else if (ack?.status === "already_joined") {
+        if (window._sc_loglevel > 5)
+          console.log(
+            `Already joined collaboration room for view '${viewname}'`
+          );
+      } else console.error("Failed to join collaboration room:", ack);
+    });
+  };
+  if (socket.connected) joinFn();
+  else socket.on("connect", joinFn);
+  socket.on("disconnect", function () {
+    console.log("Disconnected from the server");
+  });
+}
+
+let dynamic_update_connection_status = "not_connected";
+
+function init_dynamic_update_room() {
+  const isNode = getIsNode();
+  if (
+    !window.io ||
+    navigator.userAgent.includes("jsdom") ||
+    (isNode && !dynamic_updates_cfg?.enabled)
+  )
+    return;
+  if (!isNode) {
+    const state = parent.saltcorn.data.state.getState();
+    if (!state.getConfig("enable_dynamic_updates", true)) return;
+  }
+  let socket = get_shared_socket();
+  socket.on("dynamic_update", async (data) => {
+    await common_done(data);
+  });
+  const joinFn = () => {
+    socket.emit("join_dynamic_update_room", (ack) => {
+      if (ack && ack.status === "ok") {
+        dynamic_update_connection_status = "connected";
+        if (window._sc_loglevel > 5) console.log("Joined dynamic update room");
+      } else {
+        dynamic_update_connection_status = "failed";
+        console.error("Failed to join dynamic update room:", ack);
+      }
+    });
+  };
+  dynamic_update_connection_status = "connecting";
+  if (socket.connected) {
+    joinFn();
+  } else {
+    socket.on("connect", joinFn);
+  }
+}
+
+function cancel_form(form) {
+  if (!form) return;
+  $(form).trigger("reset");
+  $(form).trigger("change");
+  $(form).append(`<input type="hidden" name="_cancel" value="on">`);
+  $(form).submit();
+}
+
+function split_paste_handler(e) {
+  let clipboardData =
+    e.clipboardData || window.clipboardData || e.originalEvent.clipboardData;
+
+  const lines = clipboardData.getData("text").split(/\r\n/g);
+
+  // do normal thing if not multiline - do not interfere with ordinary copy paste
+  if (lines.length < 2) return;
+  e.preventDefault();
+  const form = $(e.target).closest("form");
+
+  let matched = false;
+
+  form
+    .find("input:not(:disabled):not([readonly]):not(:hidden)")
+    .each(function (ix, element) {
+      if (!matched && element === e.target) matched = true;
+      if (matched && lines.length > 0) {
+        const $elem = $(element);
+        if (ix === 0 && $elem.attr("type") !== "number") {
+          //const existing = $elem.val()
+          //const pasted =
+          $elem.val(lines.shift());
+        } else $elem.val(lines.shift());
+        $elem.trigger("change");
+      }
+    });
+}
+
+function is_paging_param(key) {
+  return key.endsWith("_page") || key.endsWith("_pagesize");
+}
+function check_saltcorn_notifications() {
+  $.ajax(`/notifications/count-unread`)
+    .then((resp) => {
+      if (resp.success) {
+        const n = resp.success;
+        const menu_item = $('a[href="/notifications"]');
+
+        menu_item.html(
+          `<i class="fa-fw mr-05 fas fa-bell"></i>Notifications (${n})`
+        );
+        $(".user-nav-section").html(
+          `<i class="fa-fw mr-05 fas fa-user"></i>User (${n})`
+        );
+        $(".user-nav-section-with-span").html(
+          `<i class="fa-fw mr-05 fas fa-user"></i><span>User (${n})</span>`
+        );
+        window.update_theme_notification_count &&
+          window.update_theme_notification_count(n);
+      }
+    })
+    .fail(checkNetworkError);
+}
+
+function disable_inactive_tab_inputs(id) {
+  setTimeout(() => {
+    const isAccordion = $(`#${id}`).hasClass("accordion");
+    const iterElem = isAccordion
+      ? `#${id} div.accordion-item .accordion-button`
+      : `#${id} li a`;
+    $(iterElem).each(function () {
+      const isActive = isAccordion
+        ? !$(this).hasClass("collapsed")
+        : $(this).hasClass("active");
+      const target = isAccordion
+        ? $(this).attr("data-bs-target")
+        : $(this).attr("href");
+      if (isActive) {
+        //activate previously disabled
+        $(target)
+          .find("[disabled-by-tab]")
+          .prop("disabled", false)
+          .removeAttr("disabled-by-tab");
+      } else {
+        //disable all input
+        $(target)
+          .find(
+            "input:not(:disabled), textarea:not(:disabled), button:not(:disabled), select:not(:disabled)"
+          )
+          .prop("disabled", true)
+          .attr("disabled-by-tab", "1");
+      }
+    });
+  }, 100);
+}
+
+function set_readonly_select(e) {
+  if (!e.target) return;
+  const $e = $(e.target);
+  if ($e.attr("type") !== "hidden") return;
+  const $disp = $e.prev();
+  const optionsS = decodeURIComponent(
+    $disp.attr("data-readonly-select-options")
+  );
+  if (!optionsS) return;
+  const options = JSON.parse(optionsS);
+  const option = options.find((o) => o.value == e.target.value);
+  if (option) $disp.val(option.label);
+}
+
+function close_saltcorn_modal() {
+  $("#scmodal").off("hidden.bs.modal");
+  var myModalEl = document.getElementById("scmodal");
+  if (!myModalEl) return;
+  var modal = bootstrap.Modal.getInstance(myModalEl);
+  if (modal) {
+    if (modal.hide) modal.hide();
+    if (modal.dispose) modal.dispose();
+  }
+}
+
+let _sc_currently_reloading;
+
+function reload_embedded_view(viewname, new_query_string) {
+  const isNode = getIsNode();
+  const updater = ($e, res) => {
+    const localState = $e.attr("data-sc-local-state");
+    const parent = $e.parent();
+    $e.replaceWith(res);
+    if (localState && !new_query_string) {
+      const newE = parent.find(`[data-sc-embed-viewname="${viewname}"]`);
+      newE.attr("data-sc-local-state", localState);
+    }
+    initialize_page();
+  };
+  if (window._sc_loglevel > 4)
+    console.log(
+      "reload_embedded_view",
+      viewname,
+      "found",
+      $(`[data-sc-embed-viewname="${viewname}"]`).length
+    );
+  $(`[data-sc-embed-viewname="${viewname}"]`).each(function () {
+    const $e = $(this);
+    let url = $e.attr("data-sc-local-state") || $e.attr("data-sc-view-source");
+    if (!url) return;
+    if (new_query_string) {
+      url = url.split("?")[0] + "?" + new_query_string;
+    }
+    if (isNode) {
+      if (url === _sc_currently_reloading) return;
+      _sc_currently_reloading = url;
+      $.ajax(url, {
+        headers: {
+          pjaxpageload: "true",
+          localizedstate: "true", //no admin bar
+        },
+        success: function (res, textStatus, request) {
+          _sc_currently_reloading = null;
+          updater($e, res);
+        },
+        error: function (res) {
+          _sc_currently_reloading = null;
+          if (!checkNetworkError(res))
+            notifyAlert({ type: "danger", text: res.responseText });
+        },
+      });
+    } else {
+      runUrl(url).then((html) => {
+        updater($e, html);
+      });
+    }
+  });
+}
+
+function update_time_of_week(nm) {
+  return function () {
+    const day = $(`#input${nm}__day`).val();
+    const flat = document.querySelector(`#input${nm}__time`)._flatpickr;
+
+    const time = flat.selectedDates?.[0];
+    let s;
+    if (time) {
+      const m = time.getMinutes();
+
+      s = `${day} ${time.getHours()} ${m < 10 ? `0${m}` : m}`;
+    } else s = day;
+    $(`#inputh${nm}`).val(s).trigger("change");
+  };
+}
+
+function select_by_view_click(element, event, required, multiple) {
+  const isAlreadySelected = $(element).hasClass("selected");
+  $(element)
+    .closest(".select-by-view-container")
+    .find(".select-by-view-option")
+    .removeClass("selected");
+  if (!required && isAlreadySelected) {
+    $(element)
+      .closest(".select-by-view-container")
+      .find("input[type=hidden]")
+      .val("")
+      .trigger("change");
+  } else {
+    $(element).addClass("selected");
+    $(element)
+      .closest(".select-by-view-container")
+      .find("input[type=hidden]")
+      .val($(element).attr("data-id"))
+      .trigger("change");
+  }
+}
+
+function restrict_options(selector, restriction) {
+  $(selector)
+    .find("option")
+    .each(function () {
+      const $o = $(this);
+      const val = $o.val();
+      if (Array.isArray(restriction))
+        if (val && !restriction.find((rid) => rid == val)) $o.remove();
+    });
+}
+
+// alternative to jQuery.closest
+// bubbles until the end of the item view of a feed
+// needed when don't want to bubble too far because the browser removed an invalid form
+function formInEmbed(event) {
+  let form = null;
+  let el = event.srcElement;
+  while (el) {
+    if (el.hasAttribute && el.hasAttribute("data-sc-embed-viewname")) {
+      break;
+    }
+    if (el.tagName && el.tagName.toLowerCase() === "form") {
+      form = el;
+      break;
+    }
+    el = el.parentElement;
+  }
+  return form;
+}
+
+function login_from_edit_view(e) {
+  e.stopPropagation();
+  e.preventDefault();
+  const form = $(e.target).closest("form");
+  form.attr("action", "/auth/login");
+  form.submit();
+}
+
+function signup_from_edit_view(e) {
+  e.stopPropagation();
+  e.preventDefault();
+  const form = $(e.target).closest("form");
+  form.attr("action", "/auth/signup");
+  form.submit();
+}
+
+function handle_identical_fields(event) {
+  let form = null;
+  if (event.srcElement) {
+    form = formInEmbed(event);
+    if (!form) {
+      console.warn("No form found");
+      return;
+    }
+  }
+  if (!form) {
+    if (event.currentTarget.tagName === "FORM") form = event.currentTarget;
+    else form = $(event.currentTarget).closest("form")[0];
+  }
+  if (!form) {
+    console.warn("No form found");
+  } else {
+    const name = event.target.name;
+    const newValue = event.target.value;
+    const tagName = event.target.tagName;
+    const isRadio = event.target.type === "radio";
+    if (tagName === "SELECT" || isRadio) {
+      form.querySelectorAll(`select[name="${name}"]`).forEach((select) => {
+        const closestEmbed = select.closest("[data-sc-embed-viewname]");
+        if (!closestEmbed || !form.contains(closestEmbed)) {
+          $(select).val(newValue);
+        }
+      });
+      form
+        .querySelectorAll(`input[type="radio"][name="${name}"]`)
+        .forEach((input) => {
+          const closestEmbed = input.closest("[data-sc-embed-viewname]");
+          if (!closestEmbed || !form.contains(closestEmbed)) {
+            input.checked = input.value === newValue;
+          }
+        });
+    } else if (tagName === "INPUT") {
+      form.querySelectorAll(`input[name="${name}"]`).forEach((input) => {
+        const closestEmbed = input.closest("[data-sc-embed-viewname]");
+        if (!closestEmbed || !form.contains(closestEmbed)) {
+          if (input.type !== "file") input.value = newValue;
+        }
+      });
+    }
+  }
+}
+
+function toggle_header_filters(toggle_icon_elem) {
+  //console.log("toggle headers", elem);
+
+  const r = $(toggle_icon_elem).closest("thead").find("tr.header-filters")[0];
+
+  //var r = document.getElementById("${filterRowId}");
+  if (r) {
+    var hidden =
+      r.style.display === "none" ||
+      window.getComputedStyle(r).display === "none";
+    if (hidden) {
+      r.style.display = "table-row";
+      var ic = toggle_icon_elem.querySelector("i");
+      if (ic) {
+        ic.classList.remove("fa-chevron-down");
+        ic.classList.add("fa-chevron-up");
+      }
+    } else {
+      r.style.display = "none";
+      var ic2 = toggle_icon_elem.querySelector("i");
+      if (ic2) {
+        ic2.classList.remove("fa-chevron-up");
+        ic2.classList.add("fa-chevron-down");
+      }
+    }
+  }
+  return false;
+}
+
+const observer = new IntersectionObserver(
+  (entries, observer) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) {
+        const delay = entry.target.getAttribute("data-animate-delay"); // delay is optional
+        const duration = entry.target.getAttribute("data-animate-duration"); // delay is optional
+        const animationClass = entry.target.getAttribute("data-animate");
+        if (animationClass) {
+          if (delay) entry.target.style.animationDelay = delay + "s";
+          if (duration) entry.target.style.animationDuration = duration + "s";
+          entry.target.style.animationName = animationClass;
+          entry.target.style.animationFillMode = "both";
+        }
+
+        if (entry.target.getAttribute("data-animate-initial-hide") === "")
+          entry.target.removeAttribute("data-animate-initial-hide");
+
+        observer.unobserve(entry.target);
+      }
+    });
+  },
+  {
+    threshold: 0.2,
+  }
+);
+
+document.querySelectorAll("[data-animate]").forEach((element) => {
+  observer.observe(element);
+});
+
+function isPWA() {
+  if (!window.matchMedia) return false;
+  const isStandaloneDisplay = window.matchMedia(
+    "(display-mode: standalone)"
+  ).matches;
+  const isStandaloneNavigator = window.navigator.standalone === true; // iOS Safari
+  const isTrustedDisplayMode = ["fullscreen", "standalone", "minimal-ui"].some(
+    (mode) => window.matchMedia(`(display-mode: ${mode})`).matches
+  );
+  return isStandaloneDisplay || isStandaloneNavigator || isTrustedDisplayMode;
+}
+
+const subscribeHelper = (config, swReg) => {
+  if (!config.vapidPublicKey) throw new Error("VAPID public key is missing");
+
+  function urlBase64ToUint8Array(base64String) {
+    const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding)
+      .replace(/\-/g, "+")
+      .replace(/_/g, "/");
+
+    const rawData = atob(base64);
+    const outputArray = new Uint8Array(rawData.length);
+
+    for (let i = 0; i < rawData.length; ++i) {
+      outputArray[i] = rawData.charCodeAt(i);
+    }
+    return outputArray;
+  }
+
+  const subscribe = async () => {
+    const subscription = await swReg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(config.vapidPublicKey),
+    });
+    return subscription;
+  };
+
+  const uploadSubscription = async (subscription) => {
+    const response = await fetch("/notifications/subscribe", {
+      method: "POST",
+      body: JSON.stringify(subscription),
+      headers: {
+        "Content-Type": "application/json",
+        "CSRF-Token": _sc_globalCsrf,
+      },
+    });
+    if (response.status === 200) {
+      const data = await response.json();
+      console.log("Subscription uploaded successfully:", data);
+    } else console.error("Failed to upload subscription:", response.statusText);
+  };
+
+  const removeSubscription = async (subscription) => {
+    const response = await fetch("/notifications/remove-subscription", {
+      method: "POST",
+      body: JSON.stringify(subscription),
+      headers: {
+        "Content-Type": "application/json",
+        "CSRF-Token": _sc_globalCsrf,
+      },
+    });
+    if (response.status === 200) {
+      console.log("Subscription removed successfully");
+    } else {
+      console.error("Failed to remove subscription:", response.statusText);
+    }
+  };
+
+  return {
+    handle: async () => {
+      const enabled = config?.enabled && config.userEnabled;
+      let currentSub = await swReg.pushManager.getSubscription();
+      if (!enabled) {
+        if (currentSub) {
+          await currentSub.unsubscribe();
+          await removeSubscription(currentSub);
+        }
+      } else {
+        if (
+          currentSub &&
+          !config.endpoints.find((endpoint) => endpoint === currentSub.endpoint)
+        ) {
+          console.log(
+            "Current subscription does not exist server-side, renewing..."
+          );
+          await currentSub.unsubscribe();
+          currentSub = null;
+        }
+
+        if (!currentSub) {
+          const permission = await Notification.requestPermission();
+          if (permission !== "granted")
+            throw new Error(`Push permission denied ${permission}`);
+          const newSub = await subscribe();
+          await uploadSubscription(newSub);
+        }
+      }
+    },
+  };
+};
+
+async function initPushNotify() {
+  try {
+    const webPushConfig = window.push_notify_cfg;
+    if (webPushConfig) {
+      const swReg = await navigator.serviceWorker.ready;
+      await subscribeHelper(webPushConfig, swReg).handle();
+    }
+  } catch (error) {
+    console.error("Push notification initialization failed:", error);
+  }
+}
+
+if (document.readyState !== "loading") {
+  init_dynamic_update_room();
+} else {
+  document.addEventListener("DOMContentLoaded", init_dynamic_update_room);
+}
+
+//https://codesandbox.io/p/sandbox/react-monaco-single-line-forked-nsmhp6?file=%2Fsrc%2FApp.js%3A28%2C31
+const singleLineMonacoEditorOptions = {
+  fontSize: "14px",
+  fontWeight: "normal",
+  wordWrap: "off",
+  lineNumbers: "off",
+  lineNumbersMinChars: 0,
+  overviewRulerLanes: 0,
+  overviewRulerBorder: false,
+  hideCursorInOverviewRuler: true,
+  lineDecorationsWidth: 10,
+  glyphMargin: false,
+  folding: false,
+  scrollBeyondLastColumn: 0,
+  scrollbar: {
+    horizontal: "hidden",
+    vertical: "hidden",
+    // avoid can not scroll page when hover monaco
+    alwaysConsumeMouseWheel: false,
+  },
+  // disable `Find`
+  find: {
+    addExtraSpaceOnTop: false,
+    autoFindInSelection: "never",
+    seedSearchStringFromSelection: false,
+  },
+  minimap: { enabled: false },
+  // see: https://github.com/microsoft/monaco-editor/issues/1746
+  wordBasedSuggestions: false,
+  // avoid links underline
+  links: false,
+  // avoid highlight hover word
+  occurrencesHighlight: false,
+  cursorStyle: "line-thin",
+  // hide current row highlight grey border
+  // see: https://microsoft.github.io/monaco-editor/api/interfaces/monaco.editor.ieditoroptions.html#renderlinehighlight
+  renderLineHighlight: "none",
+  contextmenu: false,
+  // default selection is rounded
+  roundedSelection: false,
+  hover: {
+    // unit: ms
+    // default: 300
+    delay: 100,
+  },
+  acceptSuggestionOnEnter: "on",
+  // auto adjust width and height to parent
+  // see: https://github.com/Microsoft/monaco-editor/issues/543#issuecomment-321767059
+  automaticLayout: true,
+  // if monaco is inside a table, hover tips or completion may casue table body scroll
+  fixedOverflowWidgets: true,
+};

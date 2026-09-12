@@ -1,0 +1,83 @@
+// Vendored from Saltcorn 1: packages/saltcorn-markup/emergency_layout.ts
+// at @saltcorn/data 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/saltcorn-ui/vendor/README.md.
+/**
+ * @category saltcorn-markup
+ * @module emergency_layout
+ */
+
+import tags from "./tags.js";
+const { ul, li, a, span, hr, div, text, i, h6, h1, p, header, img, footer } =
+  tags;
+import renderLayout from "./layout.js";
+import { renderForm, link } from "./index.js";
+import layoutUtils from "./layout_utils.js";
+import { Req } from "@saltcorn/types/base_types";
+const { navbar, alert } = layoutUtils;
+
+/**
+ * @param {string} title
+ * @param {string|object} body
+ * @param {object[]} alerts
+ * @returns {string}
+ */
+const renderBody = ({
+  title,
+  body,
+  alerts,
+  req,
+}: {
+  title: string;
+  body: string | any;
+  alerts: any[];
+  req: Req;
+}): string =>
+  renderLayout({
+    blockDispatch: {},
+    req,
+    layout:
+      typeof body === "string" ? { type: "card", title, contents: body } : body,
+    alerts,
+  });
+
+// declaration merging
+namespace EmergencyLayoutExports {
+  export type WrapParams = {
+    title: string;
+    menu: any;
+    brand: any;
+    req: Req;
+    alerts: any[];
+    currentUrl: string;
+    body: string | any;
+    headers: any[];
+  };
+}
+type WrapParams = EmergencyLayoutExports.WrapParams;
+
+/**
+ * @param {object} opts
+ * @param {string} opts.title
+ * @param {object} opts.menu
+ * @param {object} opts.brand
+ * @param {object[]} opts.alerts
+ * @param {string} opts.currentUrl
+ * @param {string|object} opts.body
+ * @param {object[]} opts.headers
+ * @param {object} opts.req
+ * @returns {string}
+ */
+const wrap = ({
+  title,
+  menu,
+  brand,
+  alerts,
+  currentUrl,
+  body,
+  headers,
+  req,
+}: WrapParams): string =>
+  navbar(brand, menu, currentUrl) + renderBody({ title, body, alerts, req });
+
+const EmergencyLayoutExports = { wrap, renderBody };
+export { wrap, renderBody };
+export default EmergencyLayoutExports;

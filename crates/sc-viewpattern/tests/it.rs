@@ -5,5 +5,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "bundle_shape.rs"]
+mod bundle_shape;
 #[path = "view_store.rs"]
 mod view_store;

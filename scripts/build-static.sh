@@ -45,6 +45,7 @@
 #   /opt/feldspar/bin/feldspar        the binary
 #   /opt/feldspar/ui/admin/dist       the admin SPA it serves
 #   /opt/feldspar/ui/ide/dist         the file-store IDE it serves
+#   /opt/feldspar/ui/saltcorn-ui/dist Saltcorn UI's view runtime and assets
 #   /opt/feldspar/plugins/            the modules it ships with, installable in
 #                                     one click from Settings -> Modules
 #   /opt/feldspar/install.sh          copies the tree into place
@@ -423,7 +424,7 @@ build_native() {
     cp "${REPO_ROOT}/target/${TARGET}/release/feldspar" "${STAGE}/bin/feldspar"
     stage_plugins
     if [[ ${BUILD_UI} -eq 1 ]]; then
-        for bundle in admin ide; do
+        for bundle in admin ide saltcorn-ui; do
             local dist="${REPO_ROOT}/ui/${bundle}/dist"
             [[ -d "${dist}" ]] || { echo "error: ${dist} was not built" >&2; exit 1; }
             mkdir -p "${STAGE}/ui/${bundle}"
@@ -646,6 +647,8 @@ $(if [[ ${BUILD_UI} -eq 1 ]]; then
 cat <<INNER
   ui/admin/dist         the admin SPA, served by \`feldspar serve\`
   ui/ide/dist           the file-store IDE, reached from the admin UI
+  ui/saltcorn-ui/dist   Saltcorn UI: the view runtime and browser assets that
+                        serve Saltcorn 1 views
 INNER
 else
 cat <<INNER
@@ -654,9 +657,9 @@ cat <<INNER
 INNER
 fi)
 
-Both bundle paths are compiled into the binary as ${PREFIX}/ui/<name>/dist, which
+The bundle paths are compiled into the binary as ${PREFIX}/ui/<name>/dist, which
 is why the tree has to be installed at ${PREFIX}. --static-dir overrides the admin
-bundle at run time; the IDE's path has no flag.
+bundle at run time; the IDE's and Saltcorn UI's paths have no flag.
 
 What the target machine still needs
   Nothing to run the server: this binary has no library dependencies, and none of

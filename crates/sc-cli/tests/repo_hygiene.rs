@@ -1410,9 +1410,14 @@ fn the_metadata_namespace_is_fd_and_only_v1_is_still_called_sc() {
         // Historical records describe the work as it was done (see
         // `the_binary_and_everything_it_owns_are_named_feldspar`), and this
         // file is the sweep itself, which has to write the word to look for it.
+        // Saltcorn UI's vendored files and browser assets *are* v1 — its
+        // `_sc_globalCsrf` and `_sc_lightmode` globals — copied unedited, so
+        // every line of them is talking about v1 by construction.
         if rel.contains("TODO")
             || rel.contains("Saltcorn1_description")
             || rel.ends_with("repo_hygiene.rs")
+            || rel.starts_with("ui/saltcorn-ui/vendor/")
+            || rel.starts_with("ui/saltcorn-ui/public/")
         {
             continue;
         }

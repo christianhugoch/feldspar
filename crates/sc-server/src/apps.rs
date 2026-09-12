@@ -15,6 +15,7 @@
 //! to the database at all.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use sc_api::ApiProvider;
@@ -147,6 +148,10 @@ pub struct AppMounts {
     /// adapters, where the screen says the same thing it says for a binary built
     /// without Python: nothing about Python is available here.
     python: Option<Arc<sc_python::PythonRuntime>>,
+    /// Where Saltcorn UI's built bundle is (`ServerConfig::saltcorn_ui_dir`).
+    /// `None` is a binary built without it, where an application whose framework
+    /// is `saltcorn-ui` fails to mount — once, naming the bundle.
+    saltcorn_ui_dir: Option<PathBuf>,
     /// Subdomain → the app served there. Behind an `RwLock` for live mutation.
     by_subdomain: RwLock<HashMap<String, Arc<MountedApp>>>,
 }
@@ -167,6 +172,7 @@ impl AppMounts {
             modules: None,
             models: None,
             python: None,
+            saltcorn_ui_dir: None,
             by_subdomain: RwLock::new(HashMap::new()),
         }
     }
@@ -237,6 +243,18 @@ impl AppMounts {
     pub fn with_python(mut self, python: Arc<sc_python::PythonRuntime>) -> AppMounts {
         self.python = Some(python);
         self
+    }
+
+    /// Say where Saltcorn UI's bundle is, so a `saltcorn-ui` application can
+    /// mount; `None` is a build without it.
+    pub fn with_saltcorn_ui_dir(mut self, dir: Option<PathBuf>) -> AppMounts {
+        self.saltcorn_ui_dir = dir;
+        self
+    }
+
+    /// Where Saltcorn UI's bundle is, if this server was built with one.
+    pub fn saltcorn_ui_dir(&self) -> Option<&Path> {
+        self.saltcorn_ui_dir.as_deref()
     }
 
     /// The Python runtime, if this server built one.
@@ -514,6 +532,18 @@ pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_ap
     let catalog = apps.catalog().ok_or_else(|| {
         Error::config("this server was built with no catalog, so it cannot mount applications")
     })?;
+    if app.framework.name == sc_viewpattern::SALTCORN_UI_FRAMEWORK {
+        // Checked here, on the mount, so a missing bundle is one line at boot
+        // (or one error on save) rather than a failure on every request.
+        let bundle = sc_viewpattern::require_view_runtime(apps.saltcorn_ui_dir())
+            .map_err(|e| Error::config(format!("application `{}`: {e}", app.subdomain)))?;
+        return Err(Error::config(format!(
+            "application `{}` uses Saltcorn UI, whose runtime is at {} but which does not \
+             serve applications yet",
+            app.subdomain,
+            bundle.display()
+        )));
+    }
     let source = app_source_from_config(&app.framework)?;
     let report = build_application(catalog, &app, &source, apps.triggers()).await?;
     // The build step travels onto the mounted framework, as

@@ -49,6 +49,16 @@ pub struct ServerConfig {
     /// the bundle it was built with, or from the checkout it was built in (see
     /// `sc-cli`); a test points it at a directory of its own.
     pub ide_dir: Option<PathBuf>,
+    /// Directory holding the built `ui/saltcorn-ui` bundle — Saltcorn UI's view
+    /// runtime (`view-runtime.js`) and the browser assets its pages load (TODO
+    /// "Saltcorn UI" §9).
+    ///
+    /// **Not a command-line setting**, for the reason `ide_dir` is not. The
+    /// binary fills it in from the directory its build recorded, and a build with
+    /// `SC_BUILD_ADMIN=0` records none: `None` is a server with no Saltcorn UI,
+    /// where an application whose framework is `saltcorn-ui` fails to mount with
+    /// a sentence naming the missing bundle.
+    pub saltcorn_ui_dir: Option<PathBuf>,
     /// Directory holding the **bundled modules** — `plugins/`, the modules this
     /// server ships with and can install from itself (`sc_module::bundled`).
     ///
@@ -178,6 +188,7 @@ impl Default for ServerConfig {
                 .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 3032))),
             static_dir: None,
             ide_dir: None,
+            saltcorn_ui_dir: None,
             plugins_dir: None,
             session_ttl_hours: sc_auth::DEFAULT_TTL_HOURS,
             secure_cookies: false,
@@ -478,6 +489,13 @@ mod tests {
     #[test]
     fn the_ide_bundle_is_not_a_flag() {
         assert!(ServerConfig::from_args(["--ide-dir", "/srv/ide"]).is_err());
+    }
+
+    /// Nor is Saltcorn UI's: it is a property of the build, not of the host.
+    #[test]
+    fn the_saltcorn_ui_bundle_is_not_a_flag() {
+        assert!(ServerConfig::from_args(["--saltcorn-ui-dir", "/srv/sui"]).is_err());
+        assert!(ServerConfig::default().saltcorn_ui_dir.is_none());
     }
 
     #[test]

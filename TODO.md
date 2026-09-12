@@ -500,32 +500,32 @@ Five levels, because the failure modes are at five levels:
 
 ## Phase 2 — v1's source, vendored and bundled
 
-- [ ] 2.1 `ui/saltcorn-ui/vendor/`: the copied files, each with a header naming its upstream
+- [x] 2.1 `ui/saltcorn-ui/vendor/`: the copied files, each with a header naming its upstream
       path and the v1 version, and `vendor/README.md` — the list, the line §2 draws, and the
       refresh procedure. The six patterns, `plugin-helper.ts`, `viewable_fields.ts`,
       `base-plugin/types.ts`, `fieldviews.ts`, `fileviews.ts`, `models/form.ts`,
       `models/fieldrepeat.ts`, `models/expression.ts`, and `@saltcorn/markup`. Not `room.ts`,
       not `workflow-room.ts`.
-- [ ] 2.2 `plugin-helper.ts` partitioned per export (§2): the rendering half kept, the
+- [x] 2.2 `plugin-helper.ts` partitioned per export (§2): the rendering half kept, the
       querying half (`generate_joined_query`, `json_list_to_external_table`,
       `build_schema_data`, and whatever else the partition finds) replaced by the refusal that
       names it — with a test that walks the module's exports and asserts each is on exactly
       one side.
-- [ ] 2.3 `ui/saltcorn-ui/src/index.ts`: the bundle's entry — the pattern registry, the
+- [x] 2.3 `ui/saltcorn-ui/src/index.ts`: the bundle's entry — the pattern registry, the
       fieldview/fileview registries, the **library exports keyed by v1 specifier** (§5,
       `@saltcorn/markup/tags`, `@saltcorn/data/plugin-helper`, …), and the entry points §3.3
       calls — and its esbuild config, with every host-supplied specifier (§5's right-hand
       column) marked external. Output `dist/view-runtime.js`, one ESM file.
-- [ ] 2.4 `ui/saltcorn-ui/public/`: Bootstrap 5.3, jQuery, `saltcorn-common.js`,
+- [x] 2.4 `ui/saltcorn-ui/public/`: Bootstrap 5.3, jQuery, `saltcorn-common.js`,
       `saltcorn.js`, `saltcorn.css` and the icon font, vendored from v1's
       `packages/server/public` with the same header rule, staged into `dist/public/`.
-- [ ] 2.5 `crates/sc-cli/build.rs` builds it as the third bundle and records
+- [x] 2.5 `crates/sc-cli/build.rs` builds it as the third bundle and records
       `SC_SALTCORN_UI_BUNDLE_DIR`; `ServerConfig::saltcorn_ui_dir` and `main.rs` carry it;
       `scripts/build-static.sh`, `install.sh` and the Dockerfile stage it beside the other two.
-- [ ] 2.6 A build with `SC_BUILD_ADMIN=0` records no directory, and an application whose
+- [x] 2.6 A build with `SC_BUILD_ADMIN=0` records no directory, and an application whose
       framework is `saltcorn-ui` then fails to **mount** with a sentence naming the missing
       bundle — once, on the mount, not once per request.
-- [ ] 2.7 A test that the bundle exists and evaluates: `sc-viewpattern`'s `bundle_shape` test
+- [x] 2.7 A test that the bundle exists and evaluates: `sc-viewpattern`'s `bundle_shape` test
       reads the real `dist/view-runtime.js`, asserts the six patterns are exported with the
       names v1 gives them and that every v1 specifier §5's left-hand column promises resolves
       to an object with the exports v1 has on it, and runs in every `cargo test` that has a

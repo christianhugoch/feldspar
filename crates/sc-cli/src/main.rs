@@ -100,6 +100,10 @@ async fn serve_command(args: &[String]) -> Result<()> {
         }
     }
     config.ide_dir = ide_bundle_dir();
+    // Saltcorn UI's view runtime, when this binary was built with it. Unlike the
+    // IDE there is no fallback to the checkout: a build with `SC_BUILD_ADMIN=0`
+    // records no directory, and an application that needs one says so on mount.
+    config.saltcorn_ui_dir = option_env!("SC_SALTCORN_UI_BUNDLE_DIR").map(std::path::PathBuf::from);
     // The bundled modules, from wherever this binary was packaged to look for
     // them. `build.rs` always records a path; whether the directory is there is
     // a property of the artifact, and a missing one is an empty catalog rather
@@ -262,7 +266,8 @@ async fn serve_command(args: &[String]) -> Result<()> {
             .with_agents(agents)
             .with_models(models)
             .with_modules(modules)
-            .with_python(python),
+            .with_python(python)
+            .with_saltcorn_ui_dir(config.saltcorn_ui_dir.clone()),
     );
     if config.base_domain.is_some() {
         mount_all(&apps).await;

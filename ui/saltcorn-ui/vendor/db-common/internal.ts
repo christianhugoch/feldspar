@@ -1,0 +1,864 @@
+// Vendored from Saltcorn 1: packages/db-common/internal.ts
+// at @saltcorn/data 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/saltcorn-ui/vendor/README.md.
+/**
+ * @category db-common
+ * @module internal
+ */
+
+import type {
+  Value,
+  JsonPath,
+  JsonPathElem,
+  Where,
+  CoordOpts,
+  Operator,
+  SelectOptions,
+  JoinField,
+  JoinFields,
+  JoinOptions,
+  AggregationOptions,
+  SubselectOptions,
+  DatabaseClient,
+  Row,
+  StrongRow,
+  PrimaryKeyValue,
+  PartialSome,
+  FieldLikeForFTS,
+} from "./dbtypes.js";
+
+export * from "./dbtypes.js";
+
+//https://stackoverflow.com/questions/15300704/regex-with-my-jquery-function-for-sql-variable-name-validation
+/**
+ * Transform value to correct sql name.
+ * Note! Dont use other symbols than ^A-Za-z_0-9
+ * @function
+ * @param {string} nm
+ * @returns {string}
+ */
+export const sqlsanitize = (nm: string | symbol): string => {
+  if (typeof nm === "symbol") {
+    return nm.description ? sqlsanitize(nm.description) : "";
+  }
+  // https://stackoverflow.com/a/70273329/19839414
+  // \p{Letter}/u
+  const s = nm.replace(/[^\p{Letter}_0-9]*/gu, "");
+  if (s[0] >= "0" && s[0] <= "9") return `_${s}`;
+  else return s;
+};
+/**
+ * Transform value to correct sql name.
+ * Instead of sqlsanitize also allows .
+ * For e.g. table name
+ * Note! Dont use other symbols than ^A-Za-z_0-9.
+ * @function
+ * @param {string} nm
+ * @returns {string}
+ */
+export const sqlsanitizeAllowDots = (nm: string | symbol): string => {
+  if (typeof nm === "symbol") {
+    return nm.description ? sqlsanitizeAllowDots(nm.description) : "";
+  }
+  const s = nm.replace(/[^A-Za-z_0-9."]*/g, "");
+  if (s[0] >= "0" && s[0] <= "9") return `_${s}`;
+  else return s;
+};
+
+/**
+ * Owns everything that differs syntactically between database engines, so the
+ * query builders below (whereClause, mkWhere, ...) never branch on the engine.
+ * Each driver package (postgres, sqlite, mysql-backend, ...) provides one.
+ *
+ * `is_sqlite` is kept because many call sites use it as a proxy for "no
+ * schema/tenant prefix" (true only for sqlite).
+ */
+export type SqlDialect = {
+  name: string;
+  is_sqlite: boolean;
+  push: (x: Value) => string; //push value, return placeholder
+  getValues: () => Value[];
+  // placeholder text for the nth pushed value, without pushing
+  placeholderAt: (n: number) => string;
+  // operator for a case-insensitive substring match ("ilike" Where key)
+  like: () => string;
+  // operator for a regular expression match
+  regexOperator: () => string;
+  // wrap an already-quoted column/expression in a date cast/truncation
+  castDateExpr: (doCast: boolean, s: string) => string;
+  // fieldExpr already quote()d, jsonPath an already-escaped `$...` path
+  jsonExtractExpr: (
+    fieldExpr: string,
+    jsonPath: string,
+    asText: boolean
+  ) => string;
+  // full clause for a `_fts` Where key
+  ftsWhereClause: (v: {
+    fields: FieldLikeForFTS[];
+    table?: string;
+    searchTerm: string;
+    schema?: string;
+    language?: string;
+    use_websearch?: boolean;
+    disable_fts?: boolean;
+  }) => string;
+  // full "= ANY (...)" / "IN (...)" fragment (pushes its own placeholders)
+  arrayInClause: (values: Value[]) => string;
+  // full clause for the "slugify" Where key
+  slugifyWhereClause: (k: string, s: string) => string;
+  // cast suffix after a pushed placeholder in the "eq" Where key
+  textCastSuffix: () => string;
+  // random-ordering expression for `order by RANDOM()` (postgres/sqlite use
+  // RANDOM(), mysql uses RAND()). Optional so an older driver falls back below.
+  randomOrderExpr?: () => string;
+};
+
+// push each array element and return that many placeholders
+const prepInList = (v: any[], phs: SqlDialect) =>
+  v.map((current) => phs.push(current)).join(", ");
+
+/*
+ * Dialect used by the boolean-signature mkWhere/mkSelectOptions when
+ * is_sqlite is false. Defaults to postgres; a pluggable driver registers its
+ * own (see db/index.ts in saltcorn-data) so the many call sites passing
+ * db.isSQLite positionally emit SQL for the active driver.
+ */
+let defaultDialectFactory: (initCount?: number) => SqlDialect = (
+  initCount = 0
+) => postgresPlaceHolderStack(initCount);
+
+export const setDefaultDialectFactory = (
+  f: (initCount?: number) => SqlDialect
+): void => {
+  defaultDialectFactory = f;
+};
+
+const postgresPlaceHolderStack = (init: number = 0): SqlDialect => {
+  let values: Value[] = [];
+  let i = init;
+  const push = (x: Value): string => {
+    values.push(x);
+    i += 1;
+    return `$${i}`;
+  };
+  return {
+    name: "postgres",
+    is_sqlite: false,
+    push,
+    getValues() {
+      return values;
+    },
+    placeholderAt(n: number) {
+      return `$${n}`;
+    },
+    like() {
+      return "ILIKE";
+    },
+    regexOperator() {
+      return "~";
+    },
+    castDateExpr(doCast: boolean, s: string) {
+      return !doCast ? s : `${s}::date`;
+    },
+    jsonExtractExpr(fieldExpr: string, jsonPath: string, asText: boolean) {
+      return `${asText ? "jsonb_build_array(" : ""}jsonb_path_query_first(${fieldExpr}, '${jsonPath}')${asText ? ")->>0" : ""}`;
+    },
+    ftsWhereClause(v) {
+      const { fields, table, schema } = v;
+      const prefixMatch = !v.searchTerm?.includes(" ");
+      const actually_use_websearch = v.use_websearch && !prefixMatch;
+      const searchTerm =
+        prefixMatch && !v.disable_fts ? `${v.searchTerm}:*` : v.searchTerm;
+      let flds = ftsFieldsSqlExpr(fields, table, schema);
+      if (v.disable_fts)
+        return `${flds} ILIKE '%' || ${push(v.searchTerm)} || '%'`;
+      else if (actually_use_websearch)
+        return `to_tsvector('${v.language || "english"}', ${flds}) @@ websearch_to_tsquery('${v.language || "english"}', ${push(searchTerm)})`;
+      else if (prefixMatch) {
+        // Guard against stop words: to_tsquery('english','on:*') raises a syntax error
+        // because stop words are stripped to an empty query. Use websearch_to_tsquery as
+        // a probe — it returns ''::tsquery for stop words without erroring. When that
+        // happens, fall back to ILIKE so common words like "on", "by", "a" still match.
+        const lang = v.language || "english";
+        const rawTermPh = push(v.searchTerm);
+        const prefixTermPh = push(searchTerm);
+        return `CASE WHEN websearch_to_tsquery('${lang}', ${rawTermPh}) = ''::tsquery THEN ${flds} ILIKE '%' || ${rawTermPh} || '%' ELSE to_tsvector('${lang}', ${flds}) @@ to_tsquery('${lang}', ${prefixTermPh}) END`;
+      } else
+        return `to_tsvector('${v.language || "english"}', ${flds}) @@ plainto_tsquery('${v.language || "english"}', ${push(searchTerm)})`;
+    },
+    arrayInClause(vals: Value[]) {
+      return `= ANY (${push(vals)})`;
+    },
+    slugifyWhereClause(k: string, s: string) {
+      return `REGEXP_REPLACE(REPLACE(LOWER(${quote(
+        sqlsanitizeAllowDots(k)
+      )}),' ','-'),'[^\\w-]','','g')=${push(s)}`;
+    },
+    textCastSuffix() {
+      return "::text";
+    },
+  };
+};
+
+const sqlitePlaceHolderStack = (): SqlDialect => {
+  let values: Value[] = [];
+  const push = (x: Value): string => {
+    values.push(x);
+    return `?`;
+  };
+  const self: SqlDialect = {
+    name: "sqlite",
+    is_sqlite: true,
+    push,
+    getValues() {
+      return values.map((v) =>
+        v?.constructor?.name === "PlainDate" ? (v.valueOf() as number) : v
+      );
+    },
+    placeholderAt() {
+      return "?";
+    },
+    like() {
+      return "LIKE";
+    },
+    regexOperator() {
+      return "REGEXP";
+    },
+    castDateExpr(doCast: boolean, s: string) {
+      return !doCast ? s : `date(${s})`;
+    },
+    jsonExtractExpr(fieldExpr: string, jsonPath: string) {
+      return `json_extract(${fieldExpr}, '${jsonPath}')`;
+    },
+    ftsWhereClause(v) {
+      const { fields, table, schema } = v;
+      let flds = ftsFieldsSqlExpr(fields, table, schema);
+      return `${flds} LIKE '%' || ${push(v.searchTerm)} || '%'`;
+    },
+    arrayInClause(vals: Value[]) {
+      return `IN (${prepInList(vals, self)})`;
+    },
+    slugifyWhereClause(k: string, s: string) {
+      return `REPLACE(LOWER(${quote(sqlsanitizeAllowDots(k))}),' ','-')=${push(s)}`;
+    },
+    textCastSuffix() {
+      return "::text";
+    },
+  };
+  return self;
+};
+
+export const ftsFieldsSqlExpr = (
+  fields: FieldLikeForFTS[],
+  table?: string,
+  schema?: string
+) => {
+  let fldsArray = fields
+    .filter(
+      (f: any) =>
+        f.type && f.type.sql_name === "text" && (!f.calculated || f.stored)
+    )
+    .map((f: any) => {
+      const fname = table
+        ? `"${sqlsanitize(table)}"."${sqlsanitize(f.name)}"`
+        : `"${sqlsanitize(f.name)}"`;
+
+      return `coalesce(${
+        f.type?.searchModifier ? f.type.searchModifier(fname) : fname
+      },'')`;
+    });
+  fields
+    .filter((f: any) => f.is_fkey && f?.attributes?.include_fts)
+    .forEach((f) => {
+      fldsArray.push(
+        `coalesce((select "${f.attributes.summary_field}" from ${
+          schema ? `"${schema}".` : ""
+        }"${sqlsanitize(f.reftable_name!)}" rt where rt."${f.refname}"=${
+          table ? `"${sqlsanitize(table)}".` : ""
+        }"${f.name}"),'')`
+      );
+    });
+  fldsArray.sort();
+  let flds = fldsArray.join(" || ' ' || ");
+  if (flds === "") flds = "''";
+  return flds;
+};
+
+export /**
+ *
+ * @param {boolean} is_sqlite
+ * @param {string} i
+ * @returns {function}
+ */
+const subSelectWhere =
+  (phs: SqlDialect) =>
+  (
+    k: string,
+    v: {
+      inSelect: {
+        where: Where;
+        field: string;
+        table: string;
+        tenant?: string;
+        through?: string;
+        through_pk?: string;
+        valField?: string;
+      };
+    }
+  ): string => {
+    const tenantPrefix =
+      !phs.is_sqlite && v.inSelect.tenant ? `"${v.inSelect.tenant}".` : "";
+    if (v.inSelect.through && v.inSelect.valField) {
+      const whereObj = prefixFieldsInWhere(v.inSelect.where, "ss2");
+      const wheres = whereObj ? Object.entries(whereObj) : [];
+      const where =
+        whereObj && wheres.length > 0
+          ? "where " + wheres.map(whereClause(phs)).join(" and ")
+          : "";
+      return `${quote(sqlsanitizeAllowDots(k))} in (select ss1."${
+        v.inSelect.valField
+      }" from ${tenantPrefix}"${sqlsanitize(v.inSelect.table)}" ss1 join ${tenantPrefix}"${sqlsanitize(
+        v.inSelect.through
+      )}" ss2 on ss2."${v.inSelect.through_pk || "id"}" = ss1."${v.inSelect.field}" ${where})`;
+    } else {
+      const whereObj = v.inSelect.where;
+      const wheres = whereObj ? Object.entries(whereObj) : [];
+      const where =
+        whereObj && wheres.length > 0
+          ? "where " + wheres.map(whereClause(phs)).join(" and ")
+          : "";
+      return `${quote(sqlsanitizeAllowDots(k))} in (select "${
+        v.inSelect.field
+      }" from ${tenantPrefix}"${sqlsanitize(v.inSelect.table)}" ${where})`;
+    }
+  };
+
+/**
+ * creates an in select sql string with joins for joinLevels
+ * and the where gets an alias prefix to the first table of the joinLevels
+ * @param phs
+ * @returns in select sql command
+ */
+const inSelectWithLevels =
+  (phs: SqlDialect) =>
+  (
+    k: string,
+    v: {
+      inSelectWithLevels: {
+        where: Where;
+        schema?: string;
+        joinLevels: {
+          table: string;
+          fkey?: string;
+          inboundKey?: string;
+          pk_name?: string;
+          ref_name?: string;
+        }[];
+      };
+    }
+  ): string => {
+    let lastAlias = null;
+    let inColumn = null;
+    let whereObj = null;
+    const selectParts = [];
+    const joinLevels = v.inSelectWithLevels.joinLevels;
+    const schema =
+      v.inSelectWithLevels.schema && !phs.is_sqlite
+        ? `${quote(sqlsanitize(v.inSelectWithLevels.schema))}.`
+        : "";
+
+    for (let i = 0; i < joinLevels.length; i++) {
+      const { table, fkey, inboundKey, pk_name, ref_name } = joinLevels[i];
+      const pk = pk_name || "id";
+      const refname = ref_name || "id";
+      const alias = quote(sqlsanitize(`${table}SubJ${i}`));
+      if (i === 0) {
+        selectParts.push(
+          `from ${schema}${quote(sqlsanitize(`${table}`))} ${quote(
+            sqlsanitize(`${alias}`)
+          )}`
+        );
+        whereObj = prefixFieldsInWhere(v.inSelectWithLevels.where, alias);
+        if (joinLevels.length === 1) inColumn = quote(`${alias}."${pk}"`);
+      } else if (i < joinLevels.length - 1) {
+        if (fkey) {
+          selectParts.push(
+            `join ${schema}${quote(
+              sqlsanitize(`${table}`)
+            )} ${alias} on ${quote(
+              `${lastAlias}.${sqlsanitize(fkey)}`
+            )} = ${alias}."${pk}"`
+          );
+        } else {
+          selectParts.push(
+            `join ${schema}${quote(
+              sqlsanitize(`${table}`)
+            )} ${alias} on ${quote(`${lastAlias}."${refname}"`)} = ${quote(
+              `${alias}.${sqlsanitize(inboundKey!)}`
+            )}`
+          );
+        }
+      } else {
+        if (fkey) {
+          inColumn = quote(`${lastAlias}.${sqlsanitize(fkey)}`);
+        } else {
+          selectParts.push(
+            `join ${schema}${quote(
+              sqlsanitize(`${table}`)
+            )} ${alias} on ${quote(`${lastAlias}."${refname}"`)} = ${quote(
+              `${alias}.${sqlsanitize(`${inboundKey}`)}`
+            )}`
+          );
+          inColumn = quote(`${alias}."${pk}"`);
+        }
+      }
+      lastAlias = alias;
+    }
+    const wheres = whereObj ? Object.entries(whereObj) : [];
+    const where =
+      whereObj && wheres.length > 0
+        ? "where " + wheres.map(whereClause(phs)).join(" and ")
+        : "";
+    const sqlPart = `${quote(sqlsanitizeAllowDots(k))} in (select ${quote(
+      sqlsanitizeAllowDots(inColumn!)
+    )} ${selectParts.join(" ")} ${where})`;
+    return sqlPart;
+  };
+
+/**
+ * @param {string} s
+ * @returns {string}
+ */
+const wrapParens = (s: string): string => (s ? `(${s})` : s);
+/**
+ * @param {string} s
+ * @returns {string}
+ */
+const quote = (s: string): string =>
+  s.includes(".")
+    ? s.split(".").map(quote).join(".")
+    : s.includes('"')
+      ? s
+      : `"${s}"`;
+/**
+ * @param {boolean} is_sqlite
+ * @param {string} i
+ * @returns {function}
+ */
+const whereOr =
+  (phs: SqlDialect): ((ors: any[]) => string) =>
+  (ors: any[]): string =>
+    wrapParens(
+      ors
+        .map((vi) =>
+          Object.entries(vi)
+            .map((kv) => whereClause(phs)(kv))
+            .join(" and ")
+        )
+        .join(" or ")
+    );
+
+const whereAnd =
+  (phs: SqlDialect): ((ors: any[]) => string) =>
+  (ors: any[]): string =>
+    wrapParens(
+      ors
+        .map((vi) =>
+          Object.entries(vi)
+            .map((kv) => whereClause(phs)(kv))
+            .join(" and ")
+        )
+        .join(" and ")
+    );
+
+const equals = ([v1, v2]: [any, any], phs: SqlDialect) => {
+  const pVal = (v: any) =>
+    typeof v === "symbol"
+      ? quote(sqlsanitizeAllowDots(v))
+      : phs.push(v) + (typeof v === "string" ? phs.textCastSuffix() : "");
+  const isNull = (v: any) => `${pVal(v)} is null`;
+  if (v1 === null && v2 === null) return "null is null";
+  if (v1 === null) return isNull(v2);
+  if (v2 === null) return isNull(v1);
+  return `${pVal(v1)}=${pVal(v2)}`;
+};
+
+/**
+ * @param {boolean} is_sqlite
+ * @param {string} i
+ * @returns {function}
+ */
+
+/*
+ * add elements of the array as single items to the placeholder stack
+ * and return the same amount of placeholders
+ */
+
+const whereClause =
+  (phs: SqlDialect): (([k, v]: [string, any | [any, any]]) => string) =>
+  ([k, v]: [string, any | [any, any]]): string =>
+    k === "_fts"
+      ? phs.ftsWhereClause(v)
+      : typeof (v || {}).not !== "undefined" && v.not.in
+        ? // empty list: "not in ()" is always true (and "IN ()" is invalid
+          // outside Postgres)
+          v.not.in.length === 0
+          ? "TRUE"
+          : `not (${quote(sqlsanitizeAllowDots(k))} ${phs.arrayInClause(v.not.in)})`
+        : typeof (v || {}).in !== "undefined"
+          ? v.in.length === 0
+            ? "FALSE"
+            : `${quote(sqlsanitizeAllowDots(k))} ${phs.arrayInClause(v.in)}`
+          : k === "or" && Array.isArray(v)
+            ? whereOr(phs)(v)
+            : k === "and" && Array.isArray(v)
+              ? whereAnd(phs)(v)
+              : typeof (v || {}).slugify !== "undefined"
+                ? phs.slugifyWhereClause(k, v.slugify)
+                : k === "not" && typeof v === "object"
+                  ? `not (${Object.entries(v)
+                      .map((kv) => whereClause(phs)(kv))
+                      .join(" and ")})`
+                  : k === "_false" && v
+                    ? "FALSE"
+                    : k === "eq" && Array.isArray(v)
+                      ? // @ts-ignore
+                        equals(v, phs)
+                      : v && v.or && Array.isArray(v.or)
+                        ? wrapParens(
+                            v.or
+                              .map((vi: any) => whereClause(phs)([k, vi]))
+                              .join(" or ")
+                          )
+                        : Array.isArray(v)
+                          ? v
+                              .map((vi) => whereClause(phs)([k, vi]))
+                              .join(" and ")
+                          : typeof (v || {}).ilike !== "undefined" &&
+                              v.fullMatch
+                            ? `${quote(sqlsanitizeAllowDots(k))} ${phs.like()} ${phs.push(v.ilike)}`
+                            : typeof (v || {}).ilike !== "undefined"
+                              ? `${quote(sqlsanitizeAllowDots(k))} ${phs.like()} '%' || ${phs.push(v.ilike)} || '%'`
+                              : v instanceof RegExp ||
+                                  v?.constructor?.name === "RegExp"
+                                ? `${quote(sqlsanitizeAllowDots(k))} ${phs.regexOperator()} ${phs.push(v.source)}`
+                                : typeof (v || {}).gt !== "undefined" &&
+                                    typeof (v || {}).lt !== "undefined"
+                                  ? `${phs.castDateExpr(
+                                      v.day_only,
+                                      quote(sqlsanitizeAllowDots(k))
+                                    )}>${v.equal ? "=" : ""}${phs.castDateExpr(
+                                      v.day_only,
+                                      phs.push(v.gt)
+                                    )} and ${phs.castDateExpr(
+                                      v.day_only,
+                                      quote(sqlsanitizeAllowDots(k))
+                                    )}<${v.equal ? "=" : ""}${phs.castDateExpr(
+                                      v.day_only,
+                                      phs.push(v.lt)
+                                    )}`
+                                  : typeof (v || {}).gt !== "undefined"
+                                    ? `${phs.castDateExpr(
+                                        v.day_only,
+                                        quote(sqlsanitizeAllowDots(k))
+                                      )}>${v.equal ? "=" : ""}${phs.castDateExpr(
+                                        v.day_only,
+                                        phs.push(v.gt)
+                                      )}`
+                                    : typeof (v || {}).lt !== "undefined"
+                                      ? `${phs.castDateExpr(
+                                          v.day_only,
+                                          quote(sqlsanitizeAllowDots(k))
+                                        )}<${v.equal ? "=" : ""}${phs.castDateExpr(
+                                          v.day_only,
+                                          phs.push(v.lt)
+                                        )}`
+                                      : typeof (v || {}).inSelect !==
+                                          "undefined"
+                                        ? subSelectWhere(phs)(k, v)
+                                        : typeof (v || {})
+                                              .inSelectWithLevels !==
+                                            "undefined"
+                                          ? inSelectWithLevels(phs)(k, v)
+                                          : typeof (v || {}).json !==
+                                              "undefined"
+                                            ? jsonWhere(k, v.json, phs)
+                                            : v === null
+                                              ? `${quote(sqlsanitizeAllowDots(k))} is null`
+                                              : k === "not"
+                                                ? `not (${typeof v === "symbol" ? v.description : phs.push(v)})`
+                                                : `${quote(sqlsanitizeAllowDots(k))}=${
+                                                    typeof v === "symbol"
+                                                      ? v.description
+                                                      : phs.push(v)
+                                                  }`;
+
+function isdef(x: any) {
+  return typeof x !== "undefined";
+}
+
+function jsonWhere(k: string, v: any[] | Object, phs: SqlDialect): string {
+  const jsonpathElemEscape = (sf: JsonPathElem): string =>
+    typeof sf == "number"
+      ? `[${sf}]`
+      : `.${
+          /[\x00-\x08\x0A-\x1F\x22\x27\x7F.[\]]/.test(String(sf))
+            ? JSON.stringify(String(sf))
+            : sf
+        }`;
+  const jsonpathPrepare = (sf: JsonPath): string =>
+    (/^\$[[.]/.test(String(sf)) && !/[\n\r\v\0]/.test(String(sf))
+      ? String(sf)
+      : `\$${
+          Array.isArray(sf)
+            ? sf.map(jsonpathElemEscape).join("")
+            : jsonpathElemEscape(sf)
+        }`
+    ).replace(/'/g, "''");
+  const lhs = (f: string, sf: JsonPath, convText: boolean): string =>
+    phs.jsonExtractExpr(
+      quote(sqlsanitizeAllowDots(f)),
+      jsonpathPrepare(sf),
+      convText
+    );
+
+  if (Array.isArray(v)) return `${lhs(k, v[0], true)}=${phs.push(v[1])}`;
+  else {
+    return andArray(
+      Object.entries(v).map(([kj, vj]) =>
+        vj.ilike
+          ? `${lhs(k, kj, true)} ${phs.like()} '%' || ${phs.push(vj.ilike as Value)} || '%'`
+          : isdef(vj.gte) || isdef(vj.lte)
+            ? andArray(
+                [
+                  isdef(vj.gte)
+                    ? `${lhs(k, kj, false)} >= ${phs.push(vj.gte as Value)}`
+                    : "",
+                  isdef(vj.lte)
+                    ? `${lhs(k, kj, false)} <= ${phs.push(vj.lte as Value)}`
+                    : "",
+                ].filter((s) => s)
+              )
+            : `${lhs(k, kj, true)}=${phs.push(vj as Value)}`
+      )
+    );
+  }
+}
+
+function andArray(ss: string[]): string {
+  if (ss.length === 1) return ss[0];
+  else return ss.join(" and ");
+}
+
+type WhereAndVals = {
+  where: string;
+  values: Value[];
+};
+
+/**
+ * Build a where-clause and its bound values for an arbitrary SqlDialect.
+ * @param whereObj
+ * @param dialect
+ * @returns {object}
+ */
+export const mkWhereForDialect = (
+  whereObj: Where | undefined,
+  dialect: SqlDialect
+): WhereAndVals => {
+  const wheres = whereObj ? Object.entries(whereObj) : [];
+  const whereClauses = wheres.map(whereClause(dialect)).join(" and ");
+  const where =
+    whereObj && wheres.length > 0 && whereClauses.length
+      ? "where " + whereClauses
+      : "";
+  const values = dialect.getValues();
+  return { where, values };
+};
+
+/**
+ * @param {object} whereObj
+ * @param {boolean} is_sqlite
+ * @param {number} initCount
+ * @returns {object}
+ */
+export const mkWhere = (
+  whereObj: Where | undefined,
+  is_sqlite: boolean = false,
+  initCount: number = 0
+): WhereAndVals =>
+  mkWhereForDialect(
+    whereObj,
+    is_sqlite ? sqlitePlaceHolderStack() : defaultDialectFactory(initCount)
+  );
+
+/**
+ * @param {number|string} x
+ * @returns {number|null}
+ */
+const toInt = (x: number | string): number | null =>
+  typeof x === "number"
+    ? Math.round(x)
+    : typeof x === "string"
+      ? parseInt(x)
+      : null;
+
+/**
+ * @param {object} opts
+ * @param {string} opts.latField
+ * @param {string} opts.longField
+ * @param {number} opts.lat
+ * @param {number} opts.long
+ * @returns {string}
+ */
+const getDistanceOrder = ({ latField, longField, lat, long }: CoordOpts) => {
+  const cos_lat_2 = Math.pow(Math.cos((+lat * Math.PI) / 180), 2);
+  const latf = `"${sqlsanitizeAllowDots(`${latField}`)}"`;
+  const longf = `"${sqlsanitizeAllowDots(`${longField}`)}"`;
+  return `((${latf} - ${+lat})*(${latf} - ${+lat})) + ((${longf} - ${+long})*(${longf} - ${+long})*${cos_lat_2})`;
+};
+
+type PlaceholderFormatter = { placeholderAt: (n: number) => string };
+
+const getOperatorOrder = (
+  {
+    operator,
+    target,
+    field,
+  }: {
+    operator: Operator;
+    target: string;
+    field: string;
+  },
+  values: any[],
+  fmt: PlaceholderFormatter
+) => {
+  const validOp = (s: string) => {
+    if (s.includes("--")) return "";
+    if (s.includes(";")) return "";
+    if (s.includes("/*")) return "";
+    if (s.includes("*/")) return "";
+    if (s.includes("'")) return "";
+    if (s.includes('"')) return "";
+    if (s.includes("(")) return "";
+    if (s.includes(")")) return "";
+    if (s.includes(" ")) return "";
+    return s;
+  };
+  const ppOp = (ast: Operator): string => {
+    if (ast === "target") {
+      values.push(target);
+      return fmt.placeholderAt(values.length);
+    }
+    if (ast === "field") return sqlsanitize(field);
+    const { type, name, args } = ast;
+    switch (type) {
+      case "SqlFun":
+        return `${sqlsanitize(name)}(${args.map(ppOp).join(",")})`;
+      case "SqlBinOp":
+        const [arg1, arg2] = args;
+        return `${ppOp(arg1)}${validOp(name)}${ppOp(arg2)}`;
+    }
+    return "";
+  };
+  return ppOp(operator);
+};
+
+export const orderByIsObject = (
+  object: any
+): object is { distance: CoordOpts } => {
+  return object && object.distance;
+};
+
+export const orderByIsOperator = (
+  object: any
+): object is { operator: Operator; target: string; field: string } => {
+  return object && object.operator && typeof object.operator !== "string";
+};
+
+/**
+ * Build the "order by / limit / offset / for update" tail of a select for a
+ * given dialect. Only fmt.placeholderAt is used (rare operator-orderBy case).
+ * @returns {string}
+ */
+export const mkSelectOptionsForDialect = (
+  selopts: SelectOptions,
+  values: any[],
+  fmt: PlaceholderFormatter
+): string => {
+  const orderby =
+    selopts.orderBy === "RANDOM()"
+      ? `order by ${(fmt as SqlDialect).randomOrderExpr?.() ?? "RANDOM()"}`
+      : selopts.orderBy &&
+          typeof selopts.orderBy === "object" &&
+          "distance" in selopts.orderBy
+        ? `order by ${getDistanceOrder(selopts.orderBy.distance)}`
+        : selopts.orderBy &&
+            typeof selopts.orderBy === "string" &&
+            selopts.nocase
+          ? `order by lower(${quote(sqlsanitizeAllowDots(selopts.orderBy))})${
+              selopts.orderDesc ? " DESC" : ""
+            }`
+          : selopts.orderBy && typeof selopts.orderBy === "string"
+            ? `order by ${quote(sqlsanitizeAllowDots(selopts.orderBy))}${
+                selopts.orderDesc ? " DESC" : ""
+              }`
+            : selopts.orderBy &&
+                typeof selopts.orderBy === "object" &&
+                "operator" in selopts.orderBy &&
+                typeof selopts.orderBy.operator === "object"
+              ? `order by ${getOperatorOrder(selopts.orderBy as any, values, fmt)}`
+              : "";
+  const limit = selopts.limit ? `limit ${toInt(selopts.limit)}` : "";
+  const offset = selopts.offset ? `offset ${toInt(selopts.offset)}` : "";
+  const forupdate = selopts.forupdate ? "FOR UPDATE" : "";
+  return [orderby, limit, offset, forupdate].filter((s) => s).join(" ");
+};
+
+/**
+ * @param {object} selopts
+ * @returns {string}
+ */
+export const mkSelectOptions = (
+  selopts: SelectOptions,
+  values: any[],
+  isSQLite: boolean
+): string =>
+  mkSelectOptionsForDialect(
+    selopts,
+    values,
+    isSQLite ? sqlitePlaceHolderStack() : defaultDialectFactory()
+  );
+
+export const prefixFieldsInWhere = (inputWhere: any, tablePrefix: string) => {
+  if (!inputWhere) return {};
+  const whereObj: Where = {};
+  Object.keys(inputWhere).forEach((k) => {
+    if (k === "_fts") whereObj[k] = { table: tablePrefix, ...inputWhere[k] };
+    else if (k === "not") {
+      whereObj.not = prefixFieldsInWhere(inputWhere[k], tablePrefix);
+    } else if (k === "or") {
+      whereObj.or = Array.isArray(inputWhere[k])
+        ? inputWhere[k].map((w: Where) => prefixFieldsInWhere(w, tablePrefix))
+        : [prefixFieldsInWhere(inputWhere[k], tablePrefix)];
+    } else if (k === "and") {
+      whereObj.and = Array.isArray(inputWhere[k])
+        ? inputWhere[k].map((w: Where) => prefixFieldsInWhere(w, tablePrefix))
+        : prefixFieldsInWhere(inputWhere[k], tablePrefix);
+    } else if (k === "eq") {
+      whereObj[k] = inputWhere[k]; // TODO check for fieldnames
+    } else whereObj[`${tablePrefix}."${k}"`] = inputWhere[k];
+  });
+  return whereObj;
+};
+
+export const sqlFun = (name: string, ...args: any[]) => ({
+  type: "SqlFun",
+  name,
+  args,
+});
+export const sqlBinOp = (name: string, ...args: any[]) => ({
+  type: "SqlBinOp",
+  name,
+  args,
+});
+
+export const dbCommonModulePath = import.meta.dirname;

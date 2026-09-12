@@ -1,0 +1,27 @@
+{
+  "name": "@feldspar/saltcorn-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Saltcorn UI's view runtime: Saltcorn 1's view patterns, fieldviews and @saltcorn/markup, vendored and bundled into one ESM file for the module worker (TODO Phase 2).",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "acorn": "8.16.0",
+    "astring": "1.9.0",
+    "buffer": "6.0.3",
+    "contractis": "0.1.0",
+    "escape-html": "1.0.3",
+    "estraverse": "5.3.0",
+    "html-tags": "3.3.1",
+    "moment": "2.30.1",
+    "pluralize": "8.0.0",
+    "underscore": "1.13.7",
+    "unidecode": "1.1.0",
+    "xss": "1.0.15"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

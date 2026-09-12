@@ -1,0 +1,489 @@
+// Vendored from Saltcorn 1: packages/saltcorn-markup/table.ts
+// at @saltcorn/data 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/saltcorn-ui/vendor/README.md.
+/**
+ * @category saltcorn-markup
+ * @module table
+ */
+
+import tags from "./tags.js";
+const {
+  a,
+  td,
+  tr,
+  th,
+  text,
+  div,
+  table,
+  thead,
+  tbody,
+  tfoot,
+  ul,
+  li,
+  span,
+  h4,
+  style,
+  i,
+  button,
+} = tags;
+import helpers from "./helpers.js";
+import type { SearchBarOpts, RadioGroupOpts } from "./helpers.js";
+import { GenObj } from "@saltcorn/types/common_types";
+const { pagination } = helpers;
+
+/**
+ * @param {any} hdr
+ * @returns {th}
+ */
+const headerCell = (hdr: any, opts: any, ix: number): string => {
+  const is_open =
+    opts.header_filters_open?.has?.(hdr.row_key) ||
+    opts.header_filters_open?.has?.(hdr.statekey) ||
+    opts.header_filters_open?.has?.(`_fromdate_${hdr.row_key}`) ||
+    opts.header_filters_open?.has?.(`_todate_${hdr.row_key}`) ||
+    opts.header_filters_open?.has?.(`_gte_${hdr.row_key}`) ||
+    opts.header_filters_open?.has?.(`_lte_${hdr.row_key}`);
+  const rndid =
+    opts.header_filters_dropdown &&
+    `hfdd${Math.floor(Math.random() * 16777215).toString(16)}`;
+
+  return th(
+    (hdr.align ||
+      hdr.width ||
+      (opts.header_filters_dropdown && hdr.header_filter)) && {
+      style: {
+        width: hdr.width || null,
+        position:
+          opts.header_filters_dropdown && hdr.header_filter ? "relative" : null,
+      },
+      ...(hdr.align ? { class: `text-align-${hdr.align}` } : {}),
+    },
+    hdr.sortlink
+      ? span({ onclick: hdr.sortlink, class: "link-style" }, hdr.label)
+      : hdr.header_underline
+        ? span({ style: "text-decoration: underline" }, hdr.label)
+        : hdr.label,
+    opts.header_filters_dropdown &&
+      hdr.header_filter &&
+      span(
+        { class: "dropdown float-end" },
+        button({
+          class: [
+            `btn btn-${is_open ? "" : "outline-"}secondary btn-sm btn-xs dropdown-toggle`,
+            is_open && "hdr-open",
+          ],
+          "data-boundary": "viewport",
+          type: "button",
+          "data-bs-toggle": "dropdown",
+          "aria-haspopup": "true",
+          "aria-expanded": "false",
+          id: rndid,
+        }),
+        div(
+          {
+            class: ["hdrfiltdrop dropdown-menu", ix > 0 && "dropdown-menu-end"],
+            "aria-labelledby": rndid,
+          },
+          div(
+            { class: "p-2" },
+            div("Filter ", hdr.row_label || ""),
+            hdr.header_filter(rndid),
+            button(
+              {
+                type: "button",
+                class: "btn btn-secondary btn-sm mt-1",
+                onclick: `clear_state('', ${rndid ? `document.getElementById('${rndid}')` : "this"})`,
+              },
+              "Clear all"
+            )
+          )
+        )
+      )
+  );
+};
+const headerFilter = (hdr: any, isLast: boolean): string =>
+  th(
+    (hdr.align || hdr.width) && {
+      style: hdr.width ? `width: ` + hdr.width : "",
+      ...(hdr.align ? { class: `text-align-${hdr.align}` } : {}),
+    },
+    isLast
+      ? div(
+          { class: "d-flex" },
+          hdr.header_filter?.() || null,
+          button(
+            {
+              type: "button",
+              class: "btn btn-xs btn-outline-secondary",
+              onclick: "clear_state('', this)",
+            },
+            i({ class: "fas fa-times" })
+          )
+        )
+      : hdr.header_filter?.() || null
+  );
+
+const headerCellWithToggle = (
+  hdr: any,
+  opts: any,
+  isLast: boolean,
+  ix: number
+): string => {
+  if (!(isLast && opts.header_filters && opts.header_filters_toggle))
+    return headerCell(hdr, opts, ix);
+  const content = hdr.sortlink
+    ? span({ onclick: hdr.sortlink, class: "link-style" }, hdr.label)
+    : hdr.header_underline
+      ? span({ style: "text-decoration: underline" }, hdr.label)
+      : hdr.label;
+  const toggleIcon = span(
+    {
+      class: "header-filter-toggle link-style float-end",
+      title: "Show/Hide filters",
+      onclick: `toggle_header_filters(this)`,
+      style:
+        "cursor:pointer;margin-left:1rem;display:inline-flex;align-items:center;",
+    },
+    i({ class: "fas fa-chevron-down" })
+  );
+  return th(
+    (hdr.align || hdr.width) && {
+      style: hdr.width ? `width: ` + hdr.width : "",
+      ...(hdr.align ? { class: `text-align-${hdr.align}` } : {}),
+    },
+    content,
+    toggleIcon
+  );
+};
+
+// declaration merging
+namespace TableExports {
+  export type HeadersParams = {
+    label: string;
+    key: string | Function;
+    width?: string;
+    align?: string;
+    header_filter?: (id?: string) => string;
+    row_key?: string;
+    cell_class_fn?: Function;
+    sortlink?:string
+  };
+
+  export type OptsParams = {
+    pagination?: {
+      current_page: number;
+      pages: number;
+      get_page_link: Function;
+      noMaxPage?: boolean;
+    };
+    noHeader?: boolean;
+    hover?: boolean;
+    transpose?: boolean;
+    tableClass?: string;
+    tableId?: string;
+    grouped?: string;
+    header_filters?: boolean;
+    header_filters_toggle?: boolean;
+    responsiveCollapse?: boolean;
+    collapse_breakpoint_px?: number;
+    row_color_function?: Function;
+    level_indicator?: boolean;
+  };
+}
+type HeadersParams = TableExports.HeadersParams;
+type OptsParams = TableExports.OptsParams;
+
+/**
+ * @function
+ * @param {object[]} hdrs
+ * @param {object[]} vs
+ * @param {object} [opts]
+ * @returns {string}
+ */
+const transposedBody = (
+  hdrs: HeadersParams[],
+  vs: any[],
+  opts: OptsParams | any = {}
+): string[] =>
+  hdrs.map((hdr: HeadersParams, ix) => {
+    const row_key =
+      hdr.row_key || (typeof hdr.key === "string" ? hdr.key : null);
+    return tr(
+      row_key ? { "row-key": row_key } : {},
+      !opts.noHeader && th(hdr.label),
+      (vs || []).map((v: any) =>
+        td(
+          ix === 0 && opts.transpose_width
+            ? {
+                style: {
+                  width: `${opts.transpose_width}${opts.transpose_width_units}`,
+                },
+              }
+            : null,
+          typeof hdr.key === "string" ? text(v[hdr.key]) : hdr.key(v)
+        )
+      )
+    );
+  });
+
+/**
+ * @function
+ * @param {object[]} hdrs
+ * @param {object[]} vs
+ * @param {object} [opts]
+ * @returns {string}
+ */
+const mkTable = (
+  hdrs: HeadersParams[],
+  vs: any[],
+  opts: OptsParams | any = {}
+): string => {
+  const pk_name = opts.pk_name || "id";
+
+  const val_row = (v: GenObj) => {
+    let rowColor: string | undefined;
+    if (opts.row_color_function) {
+      try {
+        rowColor = opts.row_color_function?.(v);
+      } catch {
+        rowColor = undefined;
+      }
+    }
+    const cellWrapper = opts.rowAnchorLink
+      ? (val: any) => {
+          const href = opts.onRowSelect(v);
+          if (!href) return val;
+          return a({ class: "anchor-row-link", href }, val || "&nbsp;");
+        }
+      : (val: any) => val;
+    return tr(
+      {
+        ...(v[pk_name] ? { "data-row-id": v[pk_name] } : {}),
+        ...mkClickHandler(opts, v),
+        ...(rowColor ? { style: { backgroundColor: rowColor } } : {}),
+      },
+      hdrs.map((hdr: HeadersParams, hdr_ix) => {
+        const cellClass = hdr.cell_class_fn ? hdr.cell_class_fn(v) : null;
+        return td(
+          {
+            style: {
+              ...(hdr.width && opts.noHeader ? { width: hdr.width } : {}),
+              ...(rowColor ? { backgroundColor: rowColor } : {}),
+            },
+            class: [
+              hdr.align ? `text-align-${hdr.align}` : null,
+              cellClass || null,
+            ],
+          },
+          hdr_ix == 0 && opts.level_indicator && v._level
+            ? "&nbsp;&nbsp;".repeat(v._level) + "└&nbsp;&nbsp;"
+            : null,
+          cellWrapper(
+            typeof hdr.key === "string" ? text(v[hdr.key]) : hdr.key(v)
+          )
+        );
+      })
+    );
+  };
+  const makeTotalRow = (rows: any[], label: string): string => {
+    const sums: Record<string, number> = {};
+    const isNumericCol: Record<string, boolean> = {};
+    for (const hdr of hdrs) {
+      const rk = hdr.row_key;
+      if (!rk) continue;
+      let sum = 0;
+      let numeric = false;
+      for (const row of rows) {
+        const v = row[rk];
+        if (v === null || v === undefined) continue;
+        const n = Number(v);
+        if (!isFinite(n)) {
+          numeric = false;
+          break;
+        }
+        sum += n;
+        numeric = true;
+      }
+      if (numeric) {
+        sums[rk] = sum;
+        isNumericCol[rk] = true;
+      }
+    }
+    return tr(
+      { class: "fw-bold table-group-divider" },
+      hdrs.map((hdr: HeadersParams, ix: number) => {
+        const rk = hdr.row_key;
+        if (ix === 0)
+          return td(
+            { class: hdr.align ? `text-align-${hdr.align}` : null },
+            label
+          );
+        if (rk && isNumericCol[rk]) {
+          const syntheticRow = { [rk]: sums[rk] };
+          const rendered =
+            typeof hdr.key === "function"
+              ? hdr.key(syntheticRow)
+              : String(sums[rk]);
+          return td(
+            { class: hdr.align ? `text-align-${hdr.align}` : null },
+            rendered
+          );
+        }
+        return td("");
+      })
+    );
+  };
+
+  const groupedBody = (groups: any) =>
+    Object.entries(groups).map(
+      ([group, rows]: [string, any]) =>
+        tr(td({ colspan: "1000" }, h4({ class: "list-group-header" }, group))) +
+        rows.map(val_row).join("") +
+        (opts.show_subtotals ? makeTotalRow(rows, "Subtotal") : "")
+    );
+
+  return div(
+    {
+      class: [!opts.sticky_header && "table-responsive", opts.tableClass],
+      id: opts.tableId,
+    },
+    table(
+      {
+        class: [
+          "table table-sm",
+          opts.class,
+          ((hdrs.some((h: HeadersParams) => h.width) &&
+            opts.table_layout !== "Auto") ||
+            opts.table_layout === "Fixed") &&
+            "table-layout-fixed",
+          (opts.onRowSelect || (opts.hover && vs && vs.length > 1)) &&
+            "table-hover",
+        ],
+        style: opts.style,
+      },
+      !opts.noHeader &&
+        !opts.transpose &&
+        thead(
+          opts.sticky_header || opts.header_filters_dropdown
+            ? {
+                class: [
+                  opts.sticky_header && "sticky-top",
+                  opts.header_filters_dropdown && "header-filter-dropdown",
+                ],
+              }
+            : "",
+          tr(
+            hdrs.map((hdr: HeadersParams, ix: number) =>
+              headerCellWithToggle(hdr, opts, ix === hdrs.length - 1, ix)
+            )
+          ),
+          opts.header_filters && !opts.header_filters_dropdown
+            ? tr(
+                {
+                  class: "header-filters",
+                  id: opts.header_filters_toggle
+                    ? `${opts.tableId || "table"}_header_filters_row`
+                    : null,
+                  ...(opts.header_filters_toggle &&
+                  !opts.header_filters_open?.size
+                    ? { style: "display:none;" }
+                    : {}),
+                },
+                hdrs.map((hdr: HeadersParams, ix: number) =>
+                  headerFilter(hdr, ix === hdrs.length - 1)
+                )
+              )
+            : null
+        ),
+      tbody(
+        opts.transpose
+          ? transposedBody(hdrs, vs, opts)
+          : opts.grouped
+            ? groupedBody(vs)
+            : (vs || []).map(val_row)
+      ),
+      opts.show_grand_total &&
+        tfoot(
+          makeTotalRow(
+            opts.grouped ? (Object.values(vs) as any[]).flat() : vs || [],
+            "Grand Total"
+          )
+        )
+    ),
+    opts.pagination && pagination(opts.pagination),
+    //https://css-tricks.com/responsive-data-tables/
+    opts.responsiveCollapse &&
+      opts.tableId &&
+      style(`@media 
+only screen and (max-width: ${opts.collapse_breakpoint_px || 760}px) {
+	#${opts.tableId} table, #${opts.tableId} thead, #${opts.tableId} tbody, #${opts.tableId} th, #${opts.tableId} td, #${opts.tableId} tr { 
+		display: block; 
+	}
+
+  #${opts.tableId} tr.header-filter {
+    display: none;
+  }
+  #${opts.tableId} td.text-align-right,
+  #${opts.tableId} td.text-align-center,
+  #${opts.tableId} th.text-align-right,
+  #${opts.tableId} th.text-align-center {
+     text-align: left !important;
+  }
+
+	#${opts.tableId} thead tr { 
+		position: absolute;
+		top: -9999px;
+		left: -9999px;
+	}
+    
+	
+	#${opts.tableId} tr { border: 1px solid #ccc; }
+	#${opts.tableId} tr:not(:first-child) { border-top-width: 3px }
+	
+	#${opts.tableId} td { 
+		border: none;
+		border-bottom: 1px solid #eee; 
+		position: relative;
+		padding-left: 50%;
+    min-height: 1.5lh;
+	}
+	
+	#${opts.tableId} td:before { 
+		position: absolute;
+		top: 6px;
+		left: 6px;
+		width: 45%; 
+		padding-right: 10px; 
+		white-space: nowrap;
+	}
+
+  ${hdrs.map((hdr: HeadersParams, ix: number) => `#${opts.tableId} td:nth-of-type(${ix + 1}):before { content: "${hdr.label}"; }`).join("\n")}	
+}`),
+    opts.header_filters_toggle &&
+      style(
+        `#${opts.tableId || "table"} .header-filter-toggle i{transition:transform .2s;}
+#${opts.tableId || "table"} .header-filter-toggle .fa-chevron-up{transform:rotate(0deg);}
+#${opts.tableId || "table"} .header-filter-toggle .fa-chevron-down{transform:rotate(180deg);}`
+      )
+  );
+};
+
+/**
+ * @param {object} opts
+ * @param {object} v
+ * @returns {object}
+ */
+const mkClickHandler = (opts: any, v: any): any => {
+  var attrs: any = {};
+  if (opts.onRowSelect && !opts.rowAnchorLink)
+    attrs.onclick =
+      typeof opts.onRowSelect === "function"
+        ? opts.onRowSelect(v)
+        : opts.onRowSelect;
+  if (opts.selectedId && v.id && +v.id === +opts.selectedId)
+    attrs.class = "table-active";
+  return attrs;
+};
+
+// declaration merging
+const TableExports = mkTable;
+export default TableExports;

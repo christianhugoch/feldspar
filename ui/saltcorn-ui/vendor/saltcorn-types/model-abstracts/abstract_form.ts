@@ -1,0 +1,50 @@
+// Vendored from Saltcorn 1: packages/saltcorn-types/model-abstracts/abstract_form.ts
+// at @saltcorn/data 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/saltcorn-ui/vendor/README.md.
+/**
+ * @category saltcorn-types
+ * @module model-abstracts/abstract_form
+ * @subcategory model-abstracts
+ */
+import type { Layout, Req } from "../base_types.js";
+import type { AbstractField, AbstractFieldRepeat } from "./abstract_field.js";
+
+/** An extra button rendered alongside a form's submit button. */
+export type AdditionalButton = {
+  label: string;
+  id?: string;
+  class: string;
+  onclick?: string;
+  type?: string;
+  disabled?: boolean
+};
+
+/** A form: a set of fields plus rendering/submission options. */
+export interface AbstractForm {
+  fields: Array<AbstractField | AbstractFieldRepeat>;
+  errors: any;
+  values: any;
+  action?: string;
+  viewname?: string;
+  layout?: Layout;
+  id?: string;
+  labelCols?: number;
+  formStyle: string;
+  class?: string;
+  methodGET: boolean;
+  blurb?: string | string[];
+  submitLabel?: string;
+  submitButtonClass?: string;
+  noSubmitButton?: boolean;
+  noLabelCols?: boolean;
+  additionalButtons?: Array<AdditionalButton>;
+  onChange?: string;
+  xhrSubmit: boolean;
+  splitPaste?: boolean;
+  isOwner?: boolean;
+  onSubmit?: string;
+  tabs?: any;
+  req?: Req;
+  __?: (s: string, ...args: any[]) => string;
+  isWorkflow?: boolean;
+  pk_name?: string;
+}

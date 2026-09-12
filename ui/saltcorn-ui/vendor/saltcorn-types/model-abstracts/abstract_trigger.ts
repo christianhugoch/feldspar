@@ -1,0 +1,57 @@
+// Vendored from Saltcorn 1: packages/saltcorn-types/model-abstracts/abstract_trigger.ts
+// at @saltcorn/data 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/saltcorn-ui/vendor/README.md.
+/**
+ * @category saltcorn-types
+ * @module model-abstracts/abstract_trigger
+ * @subcategory model-abstracts
+ */
+import { Row } from "@saltcorn/db-common/internal";
+import type { AbstractTable } from "./abstract_table.js";
+import type { AbstractTag } from "./abstract_tag.js";
+import type { WorkflowStepCfg } from "./abstract_workflow_step.js";
+
+/** An action (or multi-step workflow) run when an event fires. */
+export interface AbstractTrigger {
+  name?: string;
+  action: string;
+  description?: string;
+  table_id?: number | null;
+  table_name?: string;
+  when_trigger: string;
+  channel?: string;
+  id?: number | null;
+  configuration: any;
+  min_role?: number;
+
+  toJson(): any;
+  delete(): Promise<void>;
+  clone(): Promise<AbstractTrigger>;
+
+  runWithoutRow(runargs: any): Promise<boolean>;
+  getTags(): Promise<Array<AbstractTag>>;
+  haltOnOnlyIf: (row: Row, user?: Row) => boolean;
+  authorize(
+    user: any,
+    opts: { action: "get" | "post"; req: any; state?: Row; body?: Row }
+  ): Promise<boolean>;
+}
+
+/** Configuration for creating/updating an {@link AbstractTrigger}. */
+export type TriggerCfg = {
+  name?: string;
+  action: string;
+  description?: string;
+  table_id?: number | null;
+  table_name?: string;
+  table?: AbstractTable;
+  when_trigger: string;
+  channel?: string;
+  id?: number | null;
+  configuration?: any;
+  min_role?: number;
+  steps?: Array<WorkflowStepCfg>;
+  updated_at?: Date;
+};
+
+/** A portable (import/export) representation of a {@link TriggerCfg}. */
+export type TriggerPack = {} & TriggerCfg;

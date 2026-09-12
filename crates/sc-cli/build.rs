@@ -1,10 +1,13 @@
-//! Wire the admin UI into the server binary's build: the `ui/admin` SPA **and**
-//! the `ui/ide` file-store IDE (design §12.1), which are one thing to an operator.
+//! Wire the admin UI into the server binary's build: the `ui/admin` SPA, the
+//! `ui/ide` file-store IDE (design §12.1), which are one thing to an operator,
+//! and `ui/saltcorn-ui` — Saltcorn UI's view runtime and browser assets, the
+//! framework that serves Saltcorn 1's views (TODO Phase 2, §9).
 //!
-//! The build is **on by default**: `cargo build -p sc-cli` runs both production
-//! builds (`npm ci && npm run build`) and records the output directories in the
-//! `SC_ADMIN_BUNDLE_DIR` and `SC_IDE_BUNDLE_DIR` compile-time envs, so the binary
-//! serves both with no flags at all (see `main.rs`). A binary that does not serve
+//! The build is **on by default**: `cargo build -p sc-cli` runs the three
+//! production builds (`npm ci && npm run build`) and records the output
+//! directories in the `SC_ADMIN_BUNDLE_DIR`, `SC_IDE_BUNDLE_DIR` and
+//! `SC_SALTCORN_UI_BUNDLE_DIR` compile-time envs, so the binary serves all three
+//! with no flags at all (see `main.rs`). A binary that does not serve
 //! its own admin UI is the surprising outcome, not the expected one, which is why
 //! it is the default rather than something to remember.
 //!
@@ -19,8 +22,9 @@
 //! *packaged* — copied to another machine, where the checkout does not exist.
 //! **`SC_BUNDLE_PREFIX`** is that case: set it to the directory the artifact will
 //! be installed under (`scripts/build-static.sh` sets it to the install prefix) and
-//! the recorded paths become `$SC_BUNDLE_PREFIX/ui/admin/dist` and
-//! `$SC_BUNDLE_PREFIX/ui/ide/dist` — the same `ui/<name>/dist` layout, rooted where
+//! the recorded paths become `$SC_BUNDLE_PREFIX/ui/admin/dist`,
+//! `$SC_BUNDLE_PREFIX/ui/ide/dist` and `$SC_BUNDLE_PREFIX/ui/saltcorn-ui/dist` —
+//! the same `ui/<name>/dist` layout, rooted where
 //! the bundles will actually be. The bundles are still built here; only the path
 //! compiled into the binary moves.
 //!
@@ -29,6 +33,12 @@
 //! UI, and a build that produced the admin UI without it would leave a button
 //! leading nowhere. It costs a slower build, which is the right price for not
 //! having a half-built admin UI as a state anyone can be in.
+//!
+//! Saltcorn UI rides on the same variable for the reason it needs a Node
+//! toolchain too (esbuild over v1's vendored source), and a `--no-ui` build is
+//! the same statement about it: no directory is recorded, and an application
+//! whose framework is `saltcorn-ui` then fails to mount naming the missing
+//! bundle, rather than failing on every request.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -38,8 +48,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SC_BUILD_ADMIN");
     println!("cargo:rerun-if-env-changed=SC_BUNDLE_PREFIX");
     let build = build_requested(std::env::var("SC_BUILD_ADMIN").ok().as_deref());
-    build_bundle("ui/admin", "SC_ADMIN_BUNDLE_DIR", "admin UI", build);
-    build_bundle("ui/ide", "SC_IDE_BUNDLE_DIR", "file-store IDE", build);
+    for bundle in &BUNDLES {
+        build_bundle(bundle, build);
+    }
     record_plugins_dir();
 }
 
@@ -127,23 +138,68 @@ pub fn build_requested(value: Option<&str>) -> bool {
     !matches!(value, Some("0" | "false" | "False" | "FALSE"))
 }
 
+/// One UI bundle the binary carries.
+struct Bundle {
+    /// The package directory, relative to the workspace root.
+    subdir: &'static str,
+    /// The compile-time env its `dist` path is recorded in.
+    env_var: &'static str,
+    /// What a build failure calls it.
+    label: &'static str,
+    /// The package's inputs, beside `package.json` and `package-lock.json`: what
+    /// a change to should rebuild it.
+    inputs: &'static [&'static str],
+    /// The output whose absence means the build did not happen. A file with a
+    /// fixed name — the Vite bundles' entry scripts carry a content hash, so for
+    /// them it is `index.html`, which is also the file the server serves.
+    marker: &'static str,
+}
+
+const BUNDLES: [Bundle; 3] = [
+    Bundle {
+        subdir: "ui/admin",
+        env_var: "SC_ADMIN_BUNDLE_DIR",
+        label: "admin UI",
+        inputs: &["src", "vite.config.ts", "index.html"],
+        marker: "index.html",
+    },
+    Bundle {
+        subdir: "ui/ide",
+        env_var: "SC_IDE_BUNDLE_DIR",
+        label: "file-store IDE",
+        inputs: &["src", "vite.config.ts", "index.html"],
+        marker: "index.html",
+    },
+    Bundle {
+        subdir: "ui/saltcorn-ui",
+        env_var: "SC_SALTCORN_UI_BUNDLE_DIR",
+        label: "Saltcorn UI view runtime",
+        inputs: &["src", "vendor", "public", "build.mjs"],
+        marker: "view-runtime.js",
+    },
+];
+
 /// Build one UI bundle and export its `dist` path, when asked to.
 ///
 /// The `rerun-if-changed` lines are printed either way: they are what tells cargo
 /// a bundle needs rebuilding, and they must not depend on whether this particular
 /// build was the one that built it.
-fn build_bundle(subdir: &str, env_var: &str, label: &str, build: bool) {
+fn build_bundle(bundle: &Bundle, build: bool) {
+    let Bundle {
+        subdir,
+        env_var,
+        label,
+        inputs,
+        marker,
+    } = bundle;
     let ui = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(subdir);
 
-    for entry in [
-        "src",
-        "package.json",
-        "package-lock.json",
-        "vite.config.ts",
-        "index.html",
-    ] {
+    for entry in ["package.json", "package-lock.json"]
+        .iter()
+        .chain(inputs.iter())
+    {
         println!("cargo:rerun-if-changed={}", ui.join(entry).display());
     }
 
@@ -161,15 +217,11 @@ fn build_bundle(subdir: &str, env_var: &str, label: &str, build: bool) {
     run(&ui, ["ci"]);
     run(&ui, ["run", "build"]);
 
-    // `index.html` is what is checked for, rather than an entry script: entry
-    // filenames carry a content hash, so `index.html` is the one output whose
-    // name this script can know — and it is also the file the server serves, so
-    // its absence is exactly the failure worth catching here.
     let dist = ui.join("dist");
-    if !dist.join("index.html").exists() {
+    if !dist.join(marker).exists() {
         panic!(
             "the {label} build did not produce {}",
-            dist.join("index.html").display()
+            dist.join(marker).display()
         );
     }
     // Canonicalize so the embedded path is absolute regardless of run-time CWD.

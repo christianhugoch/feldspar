@@ -24,7 +24,11 @@
 //! - [`ViewSet`] — every view and page of one application, loaded once — and
 //!   [`ViewSets`], the cache that reloads a set on a write and stamps it with the
 //!   **generation** the worker's view snapshot is keyed on (§4).
+//! - Where the view runtime is ([`require_view_runtime`]): the `ui/saltcorn-ui`
+//!   bundle, and the sentence an application that needs it fails to mount with
+//!   when this server was built without it.
 
+mod bundle;
 mod patterns;
 mod store;
 mod tables;
@@ -32,6 +36,9 @@ mod validate;
 mod view;
 mod view_set;
 
+pub use bundle::{
+    BUNDLE_DIR_IN_CHECKOUT, SALTCORN_UI_FRAMEWORK, VIEW_RUNTIME_FILE, require_view_runtime,
+};
 pub use patterns::{
     BUILTIN_PATTERNS, PatternInfo, builtin_patterns, find_pattern, install_patterns,
     registered_patterns,
