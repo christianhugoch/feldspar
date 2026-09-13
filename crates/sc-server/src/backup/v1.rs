@@ -17,13 +17,17 @@
 //!
 //! ## What is imported, and what is not
 //!
-//! Only the kinds this system has: **tables**, their **fields**, their **rows**,
-//! **triggers** (v1 calls them actions), **files** and **users**. v1's views,
-//! pages, page groups, libraries, tags, models, plugins and event logs describe a
-//! server-rendered UI and a plugin system that Feldspar does not have, and a
-//! half-translation of them would be worse than their absence. Everything left
-//! out — and every field whose type has no counterpart — becomes a line in the
-//! restore report rather than a silence.
+//! The kinds this system has: **tables**, their **fields**, their **rows**,
+//! **triggers** (v1 calls them actions), **files** and **users** — and the
+//! **views**, **pages** and **menu**, which become one **Saltcorn UI
+//! application** named after the site (TODO "Saltcorn UI" §13). A view's
+//! configuration and a page's layout cross unchanged: they are what v1's own
+//! `list.ts` reads, and the Saltcorn UI framework runs v1's own `list.ts`.
+//! v1's page groups, libraries, tags, models, plugins and event logs have no
+//! counterpart, and a half-translation of them would be worse than their absence.
+//! Everything left out — every field whose type has no counterpart, every menu
+//! entry that opens v1's admin UI — becomes a line in the restore report rather
+//! than a silence.
 //!
 //! ## Two translations that are not mechanical
 //!
@@ -49,8 +53,11 @@ use sc_error::{Error, Result};
 use serde_json::{Map, Value as Json, json};
 use uuid::Uuid;
 
+use sc_viewpattern::{CFG_SITE_NAME, MENU_CONFIG_KEY, SALTCORN_UI_FRAMEWORK, saltcorn_ui_csp};
+
 use super::restore::Entries;
 use super::{Available, Item, MANIFEST_FILE};
+use crate::handlers::csp_json;
 
 /// The entry every v1 backup has and no Feldspar backup has: the application's
 /// metadata. What [`is_v1_backup`] recognises a file by.
@@ -152,9 +159,15 @@ pub(super) fn convert(entries: &Entries) -> Result<Entries> {
 
     let triggers = convert_triggers(pack, &mut notes);
     contents.triggers = i64::try_from(triggers.len()).unwrap_or(i64::MAX);
+    let trigger_names: Vec<String> = triggers
+        .iter()
+        .filter_map(|t| t.get("name").and_then(Json::as_str).map(str::to_owned))
+        .collect();
     out.insert("triggers.json".to_owned(), pretty(&Json::Array(triggers))?);
 
+    let mut store_name = None;
     if let Some(store) = convert_files(entries, &site, wants_store, &user_keys, &mut notes)? {
+        store_name = Some(store.name.clone());
         for (path, bytes) in store.files {
             out.insert(format!("file-stores/{}/files/{path}", store.name), bytes);
         }
@@ -166,6 +179,35 @@ pub(super) fn convert(entries: &Entries) -> Result<Entries> {
             pretty(&store.document)?,
         );
     }
+
+    let tables: Vec<String> = contents.tables.iter().map(|t| t.name.clone()).collect();
+    let application = convert_application(
+        entries,
+        pack,
+        &site,
+        &tables,
+        store_name.as_deref(),
+        &trigger_names,
+        &mut notes,
+    );
+    let subdomain = &application.subdomain;
+    out.insert(
+        format!("applications/{subdomain}.json"),
+        pretty(&application.document)?,
+    );
+    out.insert(
+        format!("applications/{subdomain}/views.json"),
+        pretty(&Json::Array(application.views.clone()))?,
+    );
+    out.insert(
+        format!("applications/{subdomain}/pages.json"),
+        pretty(&Json::Array(application.pages.clone()))?,
+    );
+    contents
+        .applications
+        .push(Item::new(subdomain.clone()).labelled(site.clone()));
+    contents.views = i64::try_from(application.views.len()).unwrap_or(i64::MAX);
+    contents.pages = i64::try_from(application.pages.len()).unwrap_or(i64::MAX);
 
     note_what_was_left_out(pack, &mut notes);
 
@@ -897,14 +939,285 @@ fn convert_event(when: &str) -> Option<&'static str> {
     })
 }
 
+// --- the application: views, pages and the menu ---------------------------------
+
+/// The Saltcorn UI application a v1 backup becomes, as the entries a Feldspar
+/// backup of one would hold.
+struct ConvertedApplication {
+    subdomain: String,
+    document: Json,
+    views: Vec<Json>,
+    pages: Vec<Json>,
+}
+
+/// **One application per backup** (§13): named after the site, framework
+/// `saltcorn-ui`, every imported table, store and trigger in its subsets, the
+/// Saltcorn UI CSP, and v1's menu less what points at v1's own screens.
+///
+/// The triggers are in the subset because v1's views name them: an action column
+/// running `TrimPages` is refused on save unless the application declares a
+/// trigger of that name (§12.3), and a v1 trigger is global, so every one the
+/// backup carries is one its views may run.
+///
+/// The document has **no `id`**. The restore matches an imported application by
+/// its name instead, which is what a second import of the same backup has in
+/// common with the first (8.6) — and it is also where the subdomain derived here
+/// is de-duplicated, since only the restore can see which ones are taken.
+fn convert_application(
+    entries: &Entries,
+    pack: &Map<String, Json>,
+    site: &str,
+    tables: &[String],
+    store: Option<&str>,
+    triggers: &[String],
+    notes: &mut Vec<String>,
+) -> ConvertedApplication {
+    let subdomain = subdomain_for(site);
+    let mut config = Map::new();
+    config.insert(CFG_SITE_NAME.to_owned(), json!(site));
+    config.insert(
+        MENU_CONFIG_KEY.to_owned(),
+        Json::Array(convert_menu(entries, notes)),
+    );
+    let document = json!({
+        "name": site,
+        "description": "Imported from a Saltcorn 1 backup.",
+        "subdomain": subdomain,
+        "framework": { "name": SALTCORN_UI_FRAMEWORK, "config": config },
+        "extra_frameworks": [],
+        "tables": tables,
+        "file_stores": store.into_iter().collect::<Vec<_>>(),
+        "triggers": triggers,
+        "apis": [],
+        "static_dirs": [],
+        "csp": csp_json(&saltcorn_ui_csp()),
+        "attributes": {},
+    });
+    let objects = |key: &str| -> Vec<Map<String, Json>> {
+        array(pack, key)
+            .into_iter()
+            .filter_map(|v| v.as_object().cloned())
+            .collect()
+    };
+    ConvertedApplication {
+        views: objects("views").iter().map(convert_view).collect(),
+        pages: objects("pages").iter().map(convert_page).collect(),
+        subdomain,
+        document,
+    }
+}
+
+/// A subdomain from an application's name: lower case, each run of anything but
+/// an ASCII letter or digit one hyphen, none at either end, and no longer than the
+/// 63 characters a DNS label may be. `saltcorn-import` for a name with nothing in
+/// it to keep.
+pub(super) fn subdomain_for(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.truncate(63);
+    let out = out.trim_end_matches('-');
+    if out.is_empty() {
+        "saltcorn-import".to_owned()
+    } else {
+        out.to_owned()
+    }
+}
+
+/// One v1 view, in the shape a Feldspar backup carries a view in. The
+/// configuration crosses **unchanged** (§1): it is v1-shaped on purpose, and
+/// translating it would be inventing a second format to keep in step with a file
+/// this system does not own.
+///
+/// Nothing is checked here. Whether the pattern is registered and the table came
+/// are questions about the server the backup is restored onto and what was
+/// chosen, so the restore asks them and reports each refusal by the view's name.
+fn convert_view(view: &Map<String, Json>) -> Json {
+    let mut attributes = view
+        .get("attributes")
+        .and_then(Json::as_object)
+        .cloned()
+        .unwrap_or_default();
+    // v1 keeps this beside the attributes; here a view has one place for its
+    // sparse settings.
+    if let Some(page) = view
+        .get("default_render_page")
+        .and_then(Json::as_str)
+        .filter(|p| !p.is_empty())
+    {
+        attributes.insert("default_render_page".to_owned(), json!(page));
+    }
+    // A view over a v1 table provider names it in `exttable_name`. Such a table
+    // is never imported, and naming it lets the restore say so by name.
+    let table = view
+        .get("table")
+        .and_then(Json::as_str)
+        .or_else(|| view.get("exttable_name").and_then(Json::as_str))
+        .filter(|t| !t.is_empty());
+    json!({
+        "name": name_of(view),
+        "description": text(view, "description"),
+        "viewpattern": text(view, "viewtemplate"),
+        "table_name": table,
+        "configuration": view
+            .get("configuration")
+            .filter(|c| c.is_object())
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        "min_role": role(view, "min_role"),
+        "slug": view.get("slug").cloned().unwrap_or(Json::Null),
+        "attributes": attributes,
+    })
+}
+
+/// One v1 page. The layout crosses unchanged; `root_page_for_roles` — what makes
+/// `/` resolve — and a non-empty `fixed_states` move into the attributes, which
+/// is where a page's sparse settings live here.
+fn convert_page(page: &Map<String, Json>) -> Json {
+    let mut attributes = page
+        .get("attributes")
+        .and_then(Json::as_object)
+        .cloned()
+        .unwrap_or_default();
+    attributes.insert(
+        "root_page_for_roles".to_owned(),
+        page.get("root_page_for_roles")
+            .filter(|r| r.is_array())
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    );
+    if let Some(fixed) = page
+        .get("fixed_states")
+        .filter(|f| f.as_object().is_some_and(|o| !o.is_empty()))
+    {
+        attributes.insert("fixed_states".to_owned(), fixed.clone());
+    }
+    json!({
+        "name": name_of(page),
+        "title": text(page, "title"),
+        "description": text(page, "description"),
+        "layout": page.get("layout").cloned().unwrap_or_else(|| json!({})),
+        "min_role": role(page, "min_role"),
+        "attributes": attributes,
+    })
+}
+
+/// What was taken out of v1's menu, for the notes.
+#[derive(Default)]
+struct MenuDropped {
+    admin_pages: usize,
+    user_pages: usize,
+    untyped: usize,
+    /// Headers left with nothing under them, by label.
+    emptied: Vec<String>,
+}
+
+/// v1's `menu_items` config, less every `Admin Page` and `User Page` entry
+/// (§13) — the one opens v1's admin UI, which is not here, and the other v1's
+/// user screens, of which Saltcorn UI has its own Login, Sign up and Logout in
+/// the menu already. What remains keeps its `Header`/`subitems` nesting; a header
+/// left with nothing under it goes too, since a heading over nothing is not a
+/// menu entry. Each kind taken out is a note.
+fn convert_menu(entries: &Entries, notes: &mut Vec<String>) -> Vec<Json> {
+    let items = entries
+        .get("config/menu_items")
+        .and_then(|bytes| serde_json::from_slice::<Json>(bytes).ok())
+        // v1 wraps every stored config value as `{ "v": … }`.
+        .and_then(|value| value.get("v").and_then(Json::as_array).cloned())
+        .unwrap_or_default();
+    let mut dropped = MenuDropped::default();
+    let menu = strip_menu(&items, &mut dropped);
+    if dropped.admin_pages > 0 {
+        notes.push(format!(
+            "{} not imported: they open Saltcorn 1's admin screens, which this system \
+             does not have",
+            plural(
+                dropped.admin_pages,
+                "Admin Page menu entry was",
+                "Admin Page menu entries were"
+            )
+        ));
+    }
+    if dropped.user_pages > 0 {
+        notes.push(format!(
+            "{} not imported: they open Saltcorn 1's user screens, and Saltcorn UI's menu \
+             has its own Login, Sign up and Logout entries",
+            plural(
+                dropped.user_pages,
+                "User Page menu entry was",
+                "User Page menu entries were"
+            )
+        ));
+    }
+    if dropped.untyped > 0 {
+        notes.push(format!(
+            "{} not imported: it says neither what it links to nor what kind of entry it is",
+            plural(dropped.untyped, "menu entry was", "menu entries were")
+        ));
+    }
+    for header in dropped.emptied {
+        notes.push(format!(
+            "the menu header `{header}` was not imported: everything under it was"
+        ));
+    }
+    menu
+}
+
+fn strip_menu(items: &[Json], dropped: &mut MenuDropped) -> Vec<Json> {
+    let mut out = Vec::new();
+    for item in items {
+        let Some(entry) = item.as_object() else {
+            continue;
+        };
+        match entry.get("type").and_then(Json::as_str) {
+            Some("Admin Page") => {
+                dropped.admin_pages += 1;
+                continue;
+            }
+            Some("User Page") => {
+                dropped.user_pages += 1;
+                continue;
+            }
+            Some(_) => {}
+            None => {
+                dropped.untyped += 1;
+                continue;
+            }
+        }
+        let mut entry = entry.clone();
+        if let Some(Json::Array(subitems)) = entry.get("subitems").cloned()
+            && !subitems.is_empty()
+        {
+            let kept = strip_menu(&subitems, dropped);
+            if kept.is_empty() {
+                dropped.emptied.push(
+                    entry
+                        .get("label")
+                        .or_else(|| entry.get("text"))
+                        .and_then(Json::as_str)
+                        .unwrap_or("")
+                        .to_owned(),
+                );
+                continue;
+            }
+            entry.insert("subitems".to_owned(), Json::Array(kept));
+        }
+        out.push(Json::Object(entry));
+    }
+    out
+}
+
 // --- what is not imported --------------------------------------------------------
 
 /// One note per kind of thing the pack carries that this system has no counterpart
 /// for, so the report says what was left rather than leaving the admin to notice.
 fn note_what_was_left_out(pack: &Map<String, Json>, notes: &mut Vec<String>) {
     for (key, one, many) in [
-        ("views", "view was", "views were"),
-        ("pages", "page was", "pages were"),
         ("page_groups", "page group was", "page groups were"),
         ("library", "library entry was", "library entries were"),
         ("tags", "tag was", "tags were"),
@@ -1074,7 +1387,25 @@ mod tests {
                 { "name": "Onboard", "action": "Workflow", "when_trigger": "Never",
                   "configuration": {}, "steps": [] },
             ],
-            "views": [ { "name": "BookList" } ],
+            "views": [
+                { "name": "BookList", "description": "", "viewtemplate": "List", "table": "Books",
+                  "min_role": 80, "slug": null, "attributes": null,
+                  "default_render_page": null, "exttable_name": null,
+                  "configuration": { "columns": [
+                      { "type": "ViewLink", "view": "Own:BookShow", "view_name": "BookShow" },
+                  ] } },
+                { "name": "Chat", "viewtemplate": "Room", "table": "Books", "min_role": 1,
+                  "slug": { "label": "", "steps": [] },
+                  "attributes": { "page_title": "Talk" }, "default_render_page": "Home",
+                  "configuration": {} },
+            ],
+            "pages": [
+                { "name": "Home", "title": "Welcome", "description": "", "min_role": 100,
+                  "layout": { "type": "view", "view": "BookList", "state": "shared" },
+                  "attributes": { "no_menu": false }, "root_page_for_roles": [100],
+                  "fixed_states": {} },
+            ],
+            "page_groups": [ { "name": "Responsive" } ],
         });
         let mut entries = Entries::new();
         entries.insert(PACK.to_owned(), serde_json::to_vec(&pack).unwrap());
@@ -1118,6 +1449,22 @@ mod tests {
                 .to_vec(),
         );
         entries.insert("files/whale.png".to_owned(), b"\x89PNG".to_vec());
+        entries.insert(
+            "config/menu_items".to_owned(),
+            serde_json::to_vec(&json!({ "v": [
+                { "type": "Admin Page", "label": "Tables", "admin_page": "Tables" },
+                { "type": "Header", "label": "Library", "subitems": [
+                    { "type": "View", "label": "Books", "viewname": "BookList", "min_role": 80 },
+                    { "type": "User Page", "label": "Notifications", "user_page": "Notifications" },
+                ] },
+                { "type": "Header", "label": "Settings", "subitems": [
+                    { "type": "Admin Page", "label": "Files", "admin_page": "Files" },
+                ] },
+                { "type": "Link", "label": "Docs", "url": "https://example.com/docs" },
+                { "type": "User Page", "label": "Login", "user_page": "Login" },
+            ] }))
+            .unwrap(),
+        );
         entries
     }
 
@@ -1251,8 +1598,17 @@ mod tests {
                 .any(|n| n.contains("`Books.pages_left`") && n.contains("JavaScript")),
             "{notes:?}"
         );
+        // Views and pages are imported now; page groups still are not.
         assert!(
-            notes.iter().any(|n| n.contains("1 view was not imported")),
+            !notes
+                .iter()
+                .any(|n| n.contains("view was not") || n.contains("page was not")),
+            "{notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("1 page group was not imported")),
             "{notes:?}"
         );
     }
@@ -1379,6 +1735,146 @@ mod tests {
                 .any(|n| n.contains("`Onboard`") && n.contains("workflow")),
             "{notes:?}"
         );
+    }
+
+    /// One application per backup (§13), in exactly the shape a Feldspar backup
+    /// carries an application in — which is why it is read back here through the
+    /// admin API's own parser.
+    #[test]
+    fn the_backup_becomes_one_saltcorn_ui_application_named_after_the_site() {
+        let out = convert(&v1_archive()).expect("a conversion");
+        let document = document(&out, "applications/booksdb.json");
+        // No id: the restore matches an import by its name (8.6).
+        assert!(document.get("id").is_none(), "{document}");
+        let app = crate::handlers::application_from_body(sc_app::AppId::new(), &document)
+            .expect("the admin API's parser reads it");
+        assert_eq!(app.name, "BooksDB");
+        assert_eq!(app.subdomain, "booksdb");
+        assert_eq!(app.framework.name, SALTCORN_UI_FRAMEWORK);
+        assert_eq!(app.framework.config[CFG_SITE_NAME], json!("BooksDB"));
+        sc_viewpattern::check_saltcorn_ui_config(&app.framework.config)
+            .expect("settings the framework accepts");
+        // Every imported table (not `users`, which is not an ordinary table
+        // here), the store, and every trigger the views may name.
+        let names = |ids: Vec<String>| ids;
+        assert_eq!(
+            names(app.tables.iter().map(|t| t.0.clone()).collect()),
+            vec!["Books"]
+        );
+        assert_eq!(
+            names(app.file_stores.iter().map(|s| s.0.clone()).collect()),
+            vec!["BooksDB"]
+        );
+        assert_eq!(
+            names(app.triggers.iter().map(|t| t.0.clone()).collect()),
+            vec!["Trim", "Nightly"]
+        );
+        assert_eq!(app.csp, saltcorn_ui_csp());
+
+        let manifest = document_of_manifest(&out);
+        let contents = Available::from_json(&manifest["contents"]).expect("contents");
+        assert_eq!(contents.applications[0].name, "booksdb");
+        assert_eq!(contents.applications[0].label, "BooksDB");
+        assert_eq!((contents.views, contents.pages), (2, 1));
+    }
+
+    fn document_of_manifest(entries: &Entries) -> Json {
+        document(entries, MANIFEST_FILE)
+    }
+
+    /// §13's "configuration crosses unchanged", and 8.5's `min_role`, `slug`,
+    /// `attributes` and `root_page_for_roles`. A pattern this server may not have
+    /// (`Room`) is carried all the same: whether it is registered is the restore's
+    /// question.
+    #[test]
+    fn views_and_pages_cross_with_their_configuration_unchanged() {
+        let archive = v1_archive();
+        let pack: Json = serde_json::from_slice(&archive[PACK]).unwrap();
+        let out = convert(&archive).expect("a conversion");
+        let id = sc_app::AppId::new();
+
+        let views = document(&out, "applications/booksdb/views.json");
+        let views: Vec<sc_viewpattern::View> = views
+            .as_array()
+            .expect("views")
+            .iter()
+            .map(|v| {
+                crate::handlers::view_from_body(sc_viewpattern::ViewId::new(), id, v)
+                    .expect("the parser reads it")
+            })
+            .collect();
+        assert_eq!(views.len(), 2);
+        let list = &views[0];
+        assert_eq!(list.name, "BookList");
+        assert_eq!(list.viewpattern, "List");
+        assert_eq!(list.table_name.as_deref(), Some("Books"));
+        assert_eq!(list.min_role, 80);
+        assert_eq!(
+            Json::Object(list.configuration.clone()),
+            pack["views"][0]["configuration"]
+        );
+        // v1's `null`s: no slug, no attributes.
+        assert_eq!(list.slug, None);
+        assert!(list.attributes.is_empty());
+        let chat = &views[1];
+        assert_eq!(chat.viewpattern, "Room");
+        assert_eq!(chat.slug, Some(json!({ "label": "", "steps": [] })));
+        assert_eq!(chat.attributes["page_title"], json!("Talk"));
+        assert_eq!(chat.attributes["default_render_page"], json!("Home"));
+
+        let pages = document(&out, "applications/booksdb/pages.json");
+        let page = crate::handlers::page_from_body(sc_viewpattern::PageId::new(), id, &pages[0])
+            .expect("the parser reads it");
+        assert_eq!(page.name, "Home");
+        assert_eq!(page.title, "Welcome");
+        assert_eq!(page.min_role, 100);
+        assert_eq!(page.layout, pack["pages"][0]["layout"]);
+        assert_eq!(page.attributes["root_page_for_roles"], json!([100]));
+        assert_eq!(page.attributes["no_menu"], json!(false));
+        // An empty `fixed_states` is no fixed states.
+        assert!(page.attributes.get("fixed_states").is_none());
+    }
+
+    /// 8.3: the admin and user pages go, each kind with a note; a header left
+    /// empty goes with them; the rest keeps its nesting.
+    #[test]
+    fn the_menu_loses_v1s_own_screens_and_keeps_its_nesting() {
+        let out = convert(&v1_archive()).expect("a conversion");
+        let document = document(&out, "applications/booksdb.json");
+        assert_eq!(
+            document["framework"]["config"][MENU_CONFIG_KEY],
+            json!([
+                { "type": "Header", "label": "Library", "subitems": [
+                    { "type": "View", "label": "Books", "viewname": "BookList", "min_role": 80 },
+                ] },
+                { "type": "Link", "label": "Docs", "url": "https://example.com/docs" },
+            ])
+        );
+        let notes = notes(&out);
+        let noted = |text: &str| notes.iter().any(|n| n.contains(text));
+        assert!(
+            noted("2 Admin Page menu entries were not imported"),
+            "{notes:?}"
+        );
+        assert!(
+            noted("2 User Page menu entries were not imported"),
+            "{notes:?}"
+        );
+        assert!(
+            noted("the menu header `Settings` was not imported"),
+            "{notes:?}"
+        );
+        assert!(!noted("`Library`"), "{notes:?}");
+    }
+
+    #[test]
+    fn a_subdomain_is_derived_from_any_name() {
+        assert_eq!(subdomain_for("BooksDB"), "booksdb");
+        assert_eq!(subdomain_for("  My Books & Stuff! "), "my-books-stuff");
+        assert_eq!(subdomain_for("Café 2"), "caf-2");
+        assert_eq!(subdomain_for("日本"), "saltcorn-import");
+        let long = subdomain_for(&"a-".repeat(60));
+        assert!(long.len() <= 63 && !long.ends_with('-'), "{long}");
     }
 
     /// An archive with no `site_name` still has to name its store something, and

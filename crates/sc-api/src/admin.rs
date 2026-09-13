@@ -2633,6 +2633,11 @@ fn backup_contents_schema() -> TypeSchema {
         StructField::new("users", TypeSchema::int()),
         StructField::new("agents", TypeSchema::int()),
         StructField::new("triggers", TypeSchema::int()),
+        // The views and pages of every application on offer. They travel with
+        // their application: a view restored without the application it belongs
+        // to has nowhere to go.
+        StructField::new("views", TypeSchema::int()),
+        StructField::new("pages", TypeSchema::int()),
         StructField::new("ssl", TypeSchema::bool()),
     ])
 }
@@ -2652,6 +2657,8 @@ fn backup_selection_schema() -> TypeSchema {
         StructField::new("users", TypeSchema::bool()),
         StructField::new("agents", TypeSchema::bool()),
         StructField::new("triggers", TypeSchema::bool()),
+        StructField::new("views", TypeSchema::bool()),
+        StructField::new("pages", TypeSchema::bool()),
         StructField::new("ssl", TypeSchema::bool()),
     ])
 }

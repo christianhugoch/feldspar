@@ -170,6 +170,72 @@ pub fn configured_actions(configuration: &sc_types::Attrs) -> Vec<String> {
     out
 }
 
+/// The relation prefixes a v1 view reference may carry — `Own:Show Books`,
+/// `ChildList:List Books.books.author` — ahead of the view's name. `Own` and
+/// `Independent` are followed by the name alone; the others by the name, a dot,
+/// and the path the related rows are found along.
+const RELATION_PREFIXES: [&str; 5] = [
+    "Own",
+    "Independent",
+    "ChildList",
+    "ParentShow",
+    "OneToOneShow",
+];
+
+/// The keys under which a v1 configuration or layout names another view: an
+/// embedded view segment or a view link (`view`, `view_name`), a List's
+/// `view_to_create`, an Edit's `view_when_done`, and the views a Feed or a
+/// ListShowList shows (`show_view`, `list_view`).
+const VIEW_REFERENCE_KEYS: [&str; 6] = [
+    "view",
+    "view_name",
+    "view_to_create",
+    "view_when_done",
+    "show_view",
+    "list_view",
+];
+
+/// Every view a view's configuration or a page's layout names, by name, sorted
+/// and without repeats — what a restore checks against the views it brought, so
+/// a link to a view that did not come is reported rather than found by clicking
+/// it (TODO "Saltcorn UI" 8.4).
+pub fn referenced_views(value: &Json) -> Vec<String> {
+    fn name_of(raw: &str) -> Option<String> {
+        let raw = raw.trim();
+        let name = match raw.split_once(':') {
+            Some((prefix @ ("Own" | "Independent"), rest))
+                if RELATION_PREFIXES.contains(&prefix) =>
+            {
+                rest
+            }
+            Some((prefix, rest)) if RELATION_PREFIXES.contains(&prefix) => {
+                rest.split('.').next().unwrap_or(rest)
+            }
+            _ => raw,
+        };
+        (!name.is_empty()).then(|| name.to_owned())
+    }
+    fn walk(out: &mut std::collections::BTreeSet<String>, value: &Json) {
+        match value {
+            Json::Object(item) => {
+                for (key, child) in item {
+                    if VIEW_REFERENCE_KEYS.contains(&key.as_str())
+                        && let Some(name) = child.as_str().and_then(name_of)
+                    {
+                        out.insert(name);
+                    }
+                    walk(out, child);
+                }
+            }
+            Json::Array(items) => items.iter().for_each(|i| walk(out, i)),
+            _ => {}
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    walk(&mut out, value);
+    out.into_iter().collect()
+}
+
 /// Refuse a view that names an action this server will not run (§12.3): every
 /// action it names is one of v1's [`VIEW_ACTIONS`] or a trigger in the
 /// application's declared subset. A v1 state action, a plugin's action, a
@@ -263,6 +329,34 @@ mod tests {
         assert!(
             msg.contains("`Notify`") && msg.contains("application `Books`"),
             "{msg}"
+        );
+    }
+
+    /// The ways BooksDB's views name one another: a List's view links, in both
+    /// the relation-prefixed and the plain spelling, and a Filter's embedded List.
+    #[test]
+    fn the_views_a_configuration_names_are_found_wherever_v1_puts_them() {
+        let list = serde_json::json!({
+            "columns": [
+                { "type": "ViewLink", "view": "Own:Show Authors", "view_name": "Show Authors" },
+                { "type": "ViewLink", "view": "ChildList:List Books.Books.author" },
+                { "type": "Action", "action_name": "Delete" },
+            ],
+            "view_to_create": "Edit Authors",
+            "view_when_done": "",
+        });
+        assert_eq!(
+            referenced_views(&list),
+            ["Edit Authors", "List Books", "Show Authors"]
+        );
+        let filter = serde_json::json!({
+            "layout": { "above": [{ "type": "view", "view": "List Books", "state": "shared" }] },
+        });
+        assert_eq!(referenced_views(&filter), ["List Books"]);
+        // A name that merely contains a colon is a name.
+        assert_eq!(
+            referenced_views(&serde_json::json!({ "show_view": "Books: detail" })),
+            ["Books: detail"]
         );
     }
 

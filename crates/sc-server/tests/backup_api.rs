@@ -169,6 +169,7 @@ async fn setup() -> sc_error::Result<Server> {
     sc_catalog::bootstrap_field_meta(&catalog).await?;
     sc_catalog::bootstrap_file_stores(&catalog).await?;
     sc_llm::bootstrap_llm_providers(&catalog).await?;
+    sc_viewpattern::bootstrap(&catalog).await?;
     let agents = install_agents(&catalog).await?;
     let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
     let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents, &models).await?;
@@ -865,6 +866,18 @@ async fn a_saltcorn_1_backup_is_imported() -> sc_error::Result<()> {
             .expect("the store just saved"),
     )?;
 
+    // Somebody is already served on `booksdb`, so the import has to find the
+    // application a subdomain of its own (8.2).
+    sc_app::save_application(
+        &server.catalog,
+        &sc_app::Application::new(
+            "Squatter",
+            "booksdb",
+            sc_app::FrameworkRef::new(sc_viewpattern::SALTCORN_UI_FRAMEWORK),
+        ),
+    )
+    .await?;
+
     let (status, bytes, _) = server
         .client
         .raw(
@@ -875,6 +888,16 @@ async fn a_saltcorn_1_backup_is_imported() -> sc_error::Result<()> {
         .await;
     let uploaded: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     assert_eq!(status, StatusCode::OK, "{uploaded}");
+    // The application the backup becomes is on offer like any other, with its
+    // views and pages (8.5).
+    assert_eq!(
+        uploaded["available"]["applications"],
+        json!([{ "name": "booksdb", "label": "BooksDB", "count": null }])
+    );
+    assert_eq!(uploaded["available"]["views"], json!(7));
+    assert_eq!(uploaded["available"]["pages"], json!(1));
+    assert_eq!(uploaded["include"]["views"], json!(true));
+    assert_eq!(uploaded["include"]["pages"], json!(true));
     // The dialog is told what it is looking at, and when the data is from.
     assert_eq!(
         uploaded["source"],
@@ -1001,11 +1024,193 @@ async fn a_saltcorn_1_backup_is_imported() -> sc_error::Result<()> {
     //
     // Every one of these is a line an admin reads on the screen that ran the
     // restore, which is the difference between an import and a surprise.
-    assert!(warned("7 views were not imported"), "{report}");
     assert!(warned("`AddBook`") && warned("workflow"), "{report}");
     // A v1 action this system does not have is refused by name by the ordinary
     // trigger validation, not quietly turned into the nearest thing that exists.
     assert!(warned("TrimPages") && warned("modify_row"), "{report}");
+
+    // --- the application its views and page became (§13) --------------------
+    let did = |report: &Value, text: &str| {
+        report["restored"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap_or_default().contains(text))
+    };
+    assert!(
+        did(
+            &report,
+            "application `booksdb-2`: `booksdb` is another application's subdomain"
+        ),
+        "{report}"
+    );
+    assert!(
+        did(&report, "7 views into application `booksdb-2`"),
+        "{report}"
+    );
+    assert!(
+        did(&report, "1 page into application `booksdb-2`"),
+        "{report}"
+    );
+    // Every view came, and nothing links to a view that did not.
+    assert!(!warned("view `"), "{report}");
+    assert!(!warned("page `"), "{report}");
+    // v1's menu is admin and user pages only; each kind is said (8.3).
+    assert!(
+        warned("Admin Page menu entries were not imported"),
+        "{report}"
+    );
+    assert!(
+        warned("User Page menu entries were not imported"),
+        "{report}"
+    );
+    assert!(
+        warned("the menu header `Settings` was not imported"),
+        "{report}"
+    );
+    assert!(warned("1 tag was not imported"), "{report}");
+    // This server was built with no Saltcorn UI bundle, so the application is
+    // saved and not serving — and the report says which.
+    assert!(
+        warned("application `booksdb-2` is restored but did not build"),
+        "{report}"
+    );
+
+    let app = sc_app::load_application_by_subdomain(&server.catalog, "booksdb-2")
+        .await?
+        .unwrap_or_else(|| panic!("the imported application: {report}"));
+    assert_eq!(app.name, "BooksDB");
+    assert_eq!(app.framework.name, sc_viewpattern::SALTCORN_UI_FRAMEWORK);
+    assert_eq!(app.framework.config["site_name"], json!("BooksDB"));
+    assert_eq!(app.framework.config["menu_items"], json!([]));
+    let names = |ids: Vec<&String>| ids.into_iter().cloned().collect::<Vec<_>>();
+    assert_eq!(
+        names(app.tables.iter().map(|t| &t.0).collect()),
+        vec!["Books", "Authors", "Publishers"]
+    );
+    assert_eq!(
+        names(app.file_stores.iter().map(|s| &s.0).collect()),
+        vec!["BooksDB"]
+    );
+    assert_eq!(app.csp, sc_viewpattern::saltcorn_ui_csp());
+
+    let pack: Value = serde_json::from_str(&entry(V1_BACKUP, "pack.json")).unwrap();
+    let views = sc_viewpattern::list_views(&server.catalog, app.id).await?;
+    assert_eq!(
+        views.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+        vec![
+            "Edit Authors",
+            "Edit Books",
+            "Filter books",
+            "List Authors",
+            "List Books",
+            "Show Authors",
+            "Show Books",
+        ]
+    );
+    let view = |name: &str| views.iter().find(|v| v.name == name).unwrap();
+    let v1_view = |name: &str| -> Value {
+        pack["views"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == json!(name))
+            .unwrap()
+            .clone()
+    };
+    // The configuration crosses unchanged, and so do the role, the slug and the
+    // attributes (8.5).
+    for v in &views {
+        assert_eq!(
+            Value::Object(v.configuration.clone()),
+            v1_view(&v.name)["configuration"],
+            "{}",
+            v.name
+        );
+        assert_eq!(v.min_role, 1, "{}", v.name);
+    }
+    assert_eq!(view("List Books").viewpattern, "List");
+    assert_eq!(view("List Books").table_name.as_deref(), Some("Books"));
+    assert_eq!(
+        view("Filter books").slug,
+        Some(json!({ "label": "", "steps": [] }))
+    );
+    assert_eq!(
+        view("Filter books").attributes["popup_link_out"],
+        json!(false)
+    );
+    assert_eq!(view("List Books").slug, None);
+
+    let pages = sc_viewpattern::list_pages(&server.catalog, app.id).await?;
+    assert_eq!(pages.len(), 1);
+    assert_eq!(pages[0].name, "BooksOverview");
+    assert_eq!(pages[0].min_role, 1);
+    assert_eq!(pages[0].layout, pack["pages"][0]["layout"]);
+    assert_eq!(pages[0].attributes["root_page_for_roles"], json!([]));
+
+    // --- and again, over an application an admin has changed since (8.6) ----
+    let mut changed = app.clone();
+    changed
+        .framework
+        .config
+        .insert("allow_signup".to_owned(), json!(true));
+    changed.csp = sc_app::CspPolicy::strict();
+    sc_app::save_application(&server.catalog, &changed).await?;
+    // A view deleted since comes back: the backup's views replace the app's.
+    sc_viewpattern::delete_view(&server.catalog, app.id, "Show Books").await?;
+
+    let (status, bytes, _) = server
+        .client
+        .raw(
+            "POST",
+            "/backup/upload",
+            Some((V1_BACKUP.to_vec(), "application/zip")),
+        )
+        .await;
+    let uploaded: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::OK, "{uploaded}");
+    let (status, again) = server
+        .client
+        .send(
+            "POST",
+            "/api/backup/restore",
+            Some(json!({ "id": uploaded["id"], "include": uploaded["include"] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert!(
+        did(&again, "application `booksdb-2`: already here as `BooksDB`"),
+        "{again}"
+    );
+    assert!(
+        did(&again, "7 views into application `booksdb-2`"),
+        "{again}"
+    );
+
+    let imported: Vec<sc_app::Application> = sc_app::list_applications(&server.catalog)
+        .await?
+        .into_iter()
+        .filter(|a| a.name == "BooksDB")
+        .collect();
+    assert_eq!(imported.len(), 1, "one application, not two");
+    let kept = &imported[0];
+    assert_eq!(kept.id, app.id);
+    assert_eq!(kept.subdomain, "booksdb-2");
+    assert_eq!(kept.framework.config["allow_signup"], json!(true));
+    assert_eq!(kept.csp, sc_app::CspPolicy::strict());
+    assert_eq!(
+        sc_viewpattern::list_views(&server.catalog, app.id)
+            .await?
+            .len(),
+        7,
+        "seven views, not fourteen"
+    );
+    assert_eq!(
+        sc_viewpattern::list_pages(&server.catalog, app.id)
+            .await?
+            .len(),
+        1
+    );
     Ok(())
 }
 

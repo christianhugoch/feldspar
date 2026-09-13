@@ -39,8 +39,8 @@ use super::{Available, MANIFEST_FILE, SSL_SECTION, Selection};
 use crate::apps::AppMounts;
 use crate::handlers::{
     agent_from_body, agents_of, application_from_body, backup_file_meta_from_json,
-    field_spec_from_body, file_store_from_body, table_settings_from_body, trigger_from_body,
-    trigger_table, triggers_of,
+    field_spec_from_body, file_store_from_body, page_from_body, table_settings_from_body,
+    trigger_from_body, trigger_table, triggers_of, view_from_body,
 };
 
 /// What a restore did, and what it declined to do.
@@ -195,7 +195,7 @@ pub async fn restore_backup(
     // Applications after the file stores, deliberately: building one is a bundler
     // run over its source tree, and that tree is what the stores just restored.
     for subdomain in &selection.applications {
-        restore_application(catalog, apps, &entries, subdomain, &mut report).await;
+        restore_application(catalog, apps, &entries, subdomain, &selection, &mut report).await;
     }
     if selection.agents {
         restore_agents(catalog, apps, &entries, &mut report).await;
@@ -839,33 +839,51 @@ async fn define_store(catalog: &Catalog, definition: Option<&Json>) -> Result<St
 /// A build failure is a **warning against a saved application**, not a lost one:
 /// the definition is already stored, the reason is the bundler's own message, and
 /// pressing Build after fixing it is exactly the repair.
+/// One application, then its views and pages, then its build.
+///
+/// `key` is the subdomain the file keys the application by. It is the one it is
+/// served on, except for a Saltcorn 1 import whose subdomain was taken
+/// ([`import_application`]).
 async fn restore_application(
     catalog: &Catalog,
     apps: &AppMounts,
     entries: &Entries,
-    subdomain: &str,
+    key: &str,
+    selection: &Selection,
     report: &mut RestoreReport,
 ) {
     let saved = async {
-        let document = json_entry(entries, &format!("applications/{subdomain}.json"))?;
-        let id = document
+        let document = json_entry(entries, &format!("applications/{key}.json"))?;
+        match document
             .get("id")
             .and_then(Json::as_str)
             .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
-            .map(sc_app::AppId)
-            .unwrap_or_else(sc_app::AppId::new);
-        let app = application_from_body(id, &document)?;
-        sc_app::save_application(catalog, &app).await
+        {
+            Some(id) => {
+                let app = application_from_body(sc_app::AppId(id), &document)?;
+                Ok((
+                    sc_app::save_application(catalog, &app).await?,
+                    String::new(),
+                ))
+            }
+            None => import_application(catalog, &document).await,
+        }
     }
     .await;
     let app = match saved {
-        Ok(app) => app,
+        Ok((app, detail)) => {
+            report.outcome(&format!("application `{}`", app.subdomain), Ok(detail));
+            app
+        }
         Err(e) => {
-            report.skipped(format!("application `{subdomain}`: {}", e.causes()));
+            report.skipped(format!("application `{key}`: {}", e.causes()));
             return;
         }
     };
-    report.did(format!("application `{subdomain}`"));
+    let subdomain = app.subdomain.clone();
+
+    // Before the build: mounting a Saltcorn UI application is reading its views.
+    restore_views_and_pages(catalog, entries, key, &app, selection, report).await;
 
     match crate::apps::build_and_mount(apps, app).await {
         Ok(built) => report.did(format!(
@@ -882,6 +900,285 @@ async fn restore_application(
             e.causes()
         )),
     }
+}
+
+/// An application a **Saltcorn 1 import** describes (§13) — the one kind of
+/// application document with no `id`, and so matched by **name** among the
+/// Saltcorn UI applications already here, since the name is what a second import
+/// of the same backup has in common with the first (8.6).
+///
+/// Found, it keeps its row as it is — its subdomain, its settings, its CSP, all of
+/// which an admin may have changed since the first import — and gains only the
+/// tables, file stores and triggers this import lists that it does not, so the
+/// views about to be restored can name them. Not found, it is created on the
+/// subdomain the import derived, or on the first free one after it.
+///
+/// Returns the application and what the report should add about it.
+async fn import_application(
+    catalog: &Catalog,
+    document: &Json,
+) -> Result<(sc_app::Application, String)> {
+    let incoming = application_from_body(sc_app::AppId::new(), document)?;
+    let existing = sc_app::list_applications(catalog)
+        .await?
+        .into_iter()
+        .find(|a| a.name == incoming.name && a.framework.name == incoming.framework.name);
+    if let Some(mut app) = existing {
+        for table in incoming.tables {
+            if !app.tables.contains(&table) {
+                app.tables.push(table);
+            }
+        }
+        for store in incoming.file_stores {
+            if !app.file_stores.contains(&store) {
+                app.file_stores.push(store);
+            }
+        }
+        for trigger in incoming.triggers {
+            if !app.triggers.contains(&trigger) {
+                app.triggers.push(trigger);
+            }
+        }
+        let app = sc_app::save_application(catalog, &app).await?;
+        let detail = format!(
+            "already here as `{}`, so its settings are kept and the imported views and \
+             pages replace its own",
+            app.name
+        );
+        return Ok((app, detail));
+    }
+    let mut app = incoming;
+    let wanted = app.subdomain.clone();
+    app.subdomain = free_subdomain(catalog, &wanted).await?;
+    let detail = if app.subdomain == wanted {
+        String::new()
+    } else {
+        format!("`{wanted}` is another application's subdomain")
+    };
+    Ok((sc_app::save_application(catalog, &app).await?, detail))
+}
+
+/// `wanted`, or `wanted-2`, `wanted-3`, … — the first no application is served on.
+async fn free_subdomain(catalog: &Catalog, wanted: &str) -> Result<String> {
+    for n in 1..=1000 {
+        let candidate = if n == 1 {
+            wanted.to_owned()
+        } else {
+            let suffix = format!("-{n}");
+            // Still one DNS label.
+            let stem: String = wanted.chars().take(63 - suffix.len()).collect();
+            format!("{}{suffix}", stem.trim_end_matches('-'))
+        };
+        if sc_app::load_application_by_subdomain(catalog, &candidate)
+            .await?
+            .is_none()
+        {
+            return Ok(candidate);
+        }
+    }
+    Err(Error::invalid(format!(
+        "every subdomain from `{wanted}` to `{wanted}-1000` is taken"
+    )))
+}
+
+/// An application's views and pages (TODO "Saltcorn UI" 8.4–8.6).
+///
+/// **They replace the application's own.** This is the one place a restore
+/// deletes anything, and what it deletes is the content of the application whose
+/// row was just written from the same file, not something else on the server:
+/// re-importing a backup must leave seven views, not fourteen. A kind is replaced
+/// only when it was chosen and the file carries it for this application.
+///
+/// Each view and page is saved on its own and a refusal is a line naming it — a
+/// pattern this server has not got, a table that did not come, anything
+/// `save_view` refuses. Then each link from what was saved to a view the
+/// application does not have is a line too: the view is imported, and the admin
+/// is told its link leads nowhere before somebody clicks it.
+async fn restore_views_and_pages(
+    catalog: &Catalog,
+    entries: &Entries,
+    key: &str,
+    app: &sc_app::Application,
+    selection: &Selection,
+    report: &mut RestoreReport,
+) {
+    let wanted = |kind: &str, chosen: bool| {
+        let path = format!("applications/{key}/{kind}.json");
+        (chosen && entries.contains_key(&path)).then_some(path)
+    };
+    let mut views = Vec::new();
+    if let Some(path) = wanted("views", selection.views) {
+        let replaced = async {
+            let document = json_entry(entries, &path)?;
+            for view in sc_viewpattern::list_views(catalog, app.id).await? {
+                sc_viewpattern::delete_view(catalog, app.id, &view.name).await?;
+            }
+            Ok::<_, Error>(document)
+        }
+        .await;
+        match replaced {
+            Ok(document) => {
+                let patterns = sc_viewpattern::registered_patterns();
+                for value in array_list(&document) {
+                    let name = value
+                        .get("name")
+                        .and_then(Json::as_str)
+                        .unwrap_or("a view")
+                        .to_owned();
+                    match restore_view(catalog, app, &patterns, &value).await {
+                        Ok(view) => views.push(view),
+                        Err(e) => {
+                            report
+                                .skipped(format!("view `{name}` was not imported: {}", e.causes()));
+                        }
+                    }
+                }
+                report.did(format!(
+                    "{} into application `{}`",
+                    counted(views.len(), "view", "views"),
+                    app.subdomain
+                ));
+            }
+            Err(e) => report.skipped(format!(
+                "the views of application `{}`: {}",
+                app.subdomain,
+                e.causes()
+            )),
+        }
+    }
+
+    let mut pages = Vec::new();
+    if let Some(path) = wanted("pages", selection.pages) {
+        let replaced = async {
+            let document = json_entry(entries, &path)?;
+            for page in sc_viewpattern::list_pages(catalog, app.id).await? {
+                sc_viewpattern::delete_page(catalog, app.id, &page.name).await?;
+            }
+            Ok::<_, Error>(document)
+        }
+        .await;
+        match replaced {
+            Ok(document) => {
+                for value in array_list(&document) {
+                    let name = value
+                        .get("name")
+                        .and_then(Json::as_str)
+                        .unwrap_or("a page")
+                        .to_owned();
+                    let result = async {
+                        let page = page_from_body(
+                            record_id(&value)
+                                .map_or_else(sc_viewpattern::PageId::new, sc_viewpattern::PageId),
+                            app.id,
+                            &value,
+                        )?;
+                        sc_viewpattern::save_page(catalog, &page).await
+                    }
+                    .await;
+                    match result {
+                        Ok(page) => pages.push(page),
+                        Err(e) => {
+                            report
+                                .skipped(format!("page `{name}` was not imported: {}", e.causes()));
+                        }
+                    }
+                }
+                report.did(format!(
+                    "{} into application `{}`",
+                    counted(pages.len(), "page", "pages"),
+                    app.subdomain
+                ));
+            }
+            Err(e) => report.skipped(format!(
+                "the pages of application `{}`: {}",
+                app.subdomain,
+                e.causes()
+            )),
+        }
+    }
+
+    if views.is_empty() && pages.is_empty() {
+        return;
+    }
+    // Against every view the application has now, not only the ones just
+    // restored: pages restored with the views left alone may name the old ones.
+    let known: BTreeSet<String> = match sc_viewpattern::list_views(catalog, app.id).await {
+        Ok(all) => all.into_iter().map(|v| v.name).collect(),
+        Err(e) => {
+            report.skipped(format!(
+                "the links between application `{}`'s views were not checked: {}",
+                app.subdomain,
+                e.causes()
+            ));
+            return;
+        }
+    };
+    for view in &views {
+        for target in sc_viewpattern::referenced_views(&Json::Object(view.configuration.clone())) {
+            if !known.contains(&target) {
+                report.skipped(format!(
+                    "view `{}` links to the view `{target}`, which was not imported",
+                    view.name
+                ));
+            }
+        }
+    }
+    for page in &pages {
+        for target in sc_viewpattern::referenced_views(&page.layout) {
+            if !known.contains(&target) {
+                report.skipped(format!(
+                    "page `{}` shows the view `{target}`, which was not imported",
+                    page.name
+                ));
+            }
+        }
+    }
+}
+
+/// One view, refused in the import's own words where the import knows why.
+///
+/// The two refusals checked here first are ones `save_view` would also make, but
+/// in words for somebody building an application ("add it to the application
+/// first"). Here the pattern is missing from this *server*, and the table from
+/// this *restore*.
+async fn restore_view(
+    catalog: &Catalog,
+    app: &sc_app::Application,
+    patterns: &[sc_viewpattern::PatternInfo],
+    value: &Json,
+) -> Result<sc_viewpattern::View> {
+    let id = record_id(value).map_or_else(sc_viewpattern::ViewId::new, sc_viewpattern::ViewId);
+    let view = view_from_body(id, app.id, value)?;
+    if sc_viewpattern::find_pattern(patterns, &view.viewpattern).is_none() {
+        return Err(Error::invalid(format!(
+            "it uses the view pattern `{}`, which this server does not have (Room and \
+             WorkflowRoom are realtime and not supported, and a pattern a Saltcorn 1 plugin \
+             supplied needs that plugin installed as a module)",
+            view.viewpattern
+        )));
+    }
+    if let Some(table) = &view.table_name
+        && catalog.get(table)?.is_none()
+    {
+        return Err(Error::invalid(format!(
+            "it is over the table `{table}`, which was not imported"
+        )));
+    }
+    sc_viewpattern::save_view(catalog, &view).await
+}
+
+/// A record's `id`, when it carries one — a Feldspar backup's views and pages
+/// do, a Saltcorn 1 import's do not.
+fn record_id(value: &Json) -> Option<uuid::Uuid> {
+    value
+        .get("id")
+        .and_then(Json::as_str)
+        .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+}
+
+/// `1 view` / `7 views`.
+fn counted(count: usize, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
 }
 
 async fn restore_agents(

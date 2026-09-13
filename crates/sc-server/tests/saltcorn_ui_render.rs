@@ -35,9 +35,9 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use sc_api::admin_endpoints;
-use sc_app::{Application, FrameworkRef, TriggerRef, save_application};
+use sc_app::{Application, save_application};
 use sc_auth::{SessionStore, create_user};
-use sc_catalog::{Catalog, FileStoreId, TableId};
+use sc_catalog::Catalog;
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_files::FileStoreDef;
@@ -47,7 +47,7 @@ use sc_server::{
     install_triggers,
 };
 use sc_test_harness::TestDb;
-use sc_viewpattern::{Page, SALTCORN_UI_FRAMEWORK, View};
+use sc_viewpattern::View;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -363,44 +363,28 @@ async fn setup(tag: &str, bundle: PathBuf) -> sc_error::Result<Server> {
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
 
-    // --- The application, and the backup's own views and page.
-    let mut app = Application::new(
-        "BooksDB",
-        "booksdb",
-        FrameworkRef::new(SALTCORN_UI_FRAMEWORK)
-            .with("site_name", "BooksDB")
-            .with(
-                "menu_items",
-                json!([
-                    { "type": "Page", "label": "Overview", "pagename": "BooksOverview", "min_role": 1 },
-                    { "type": "View", "label": "Books", "viewname": "List Books", "min_role": 1 },
-                    { "type": "Admin Page", "label": "Tables", "admin_page": "Tables", "min_role": 1 },
-                ]),
-            ),
-    )
-    .with_file_store(FileStoreId("BooksDB".to_owned()))
-    .with_trigger(TriggerRef::new("TrimPages"));
-    for table in ["Books", "Authors", "Publishers"] {
-        app = app.with_table(TableId(table.to_owned()));
-    }
-    app.csp = sc_app::framework_default_csp(SALTCORN_UI_FRAMEWORK);
+    // --- The application the restore made of the backup, its views and its page
+    // (Phase 8) — with this test's own menu, and the two patterns BooksDB has no
+    // view of.
+    let mut app = sc_app::load_application_by_subdomain(&catalog, "booksdb")
+        .await?
+        .unwrap_or_else(|| panic!("the restore made BooksDB an application: {report}"));
+    assert!(
+        app.triggers.iter().any(|t| t.0 == "TrimPages"),
+        "{:?}",
+        app.triggers
+    );
+    app.framework.config.insert(
+        "menu_items".to_owned(),
+        json!([
+            { "type": "Page", "label": "Overview", "pagename": "BooksOverview", "min_role": 1 },
+            { "type": "View", "label": "Books", "viewname": "List Books", "min_role": 1 },
+            { "type": "Admin Page", "label": "Tables", "admin_page": "Tables", "min_role": 1 },
+        ]),
+    );
     let app = save_application(&catalog, &app).await?;
+    assert_eq!(sc_viewpattern::list_views(&catalog, app.id).await?.len(), 7);
 
-    let pack: Value = serde_json::from_str(&zip_entry(V1_BACKUP, "pack.json")).unwrap();
-    for v in pack["views"].as_array().unwrap() {
-        let mut view = View::new(
-            app.id,
-            v["name"].as_str().unwrap(),
-            v["viewtemplate"].as_str().unwrap(),
-            v["table"].as_str().unwrap(),
-        )
-        .min_role(u8::try_from(v["min_role"].as_u64().unwrap()).unwrap())
-        .configuration(v["configuration"].as_object().cloned().unwrap_or_default());
-        view.slug = Some(v["slug"].clone()).filter(|s| !s.is_null());
-        view.attributes = v["attributes"].as_object().cloned().unwrap_or_default();
-        sc_viewpattern::save_view(&catalog, &view).await?;
-    }
-    // The two patterns BooksDB has no view of.
     let feed = View::new(app.id, "Feed Books", "Feed", "Books")
         .min_role(1)
         .configuration(object(json!({
@@ -414,17 +398,6 @@ async fn setup(tag: &str, bundle: PathBuf) -> sc_error::Result<Server> {
             "list_view": "List Books", "show_view": "Show Books", "list_width": 4, "subtables": {},
         })));
     sc_viewpattern::save_view(&catalog, &lsl).await?;
-    for p in pack["pages"].as_array().unwrap() {
-        let mut page = Page::new(app.id, p["name"].as_str().unwrap())
-            .title(p["title"].as_str().unwrap_or_default())
-            .layout(p["layout"].clone())
-            .min_role(u8::try_from(p["min_role"].as_u64().unwrap()).unwrap());
-        page.attributes.insert(
-            "root_page_for_roles".to_owned(),
-            p["root_page_for_roles"].clone(),
-        );
-        sc_viewpattern::save_page(&catalog, &page).await?;
-    }
 
     // Saving the rows is not deploying them; the mount re-reads them.
     build_and_mount(&apps, app).await?;

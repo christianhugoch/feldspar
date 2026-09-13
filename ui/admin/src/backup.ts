@@ -36,6 +36,8 @@ export const NO_CONTENTS: BackupContents = {
   users: 0,
   agents: 0,
   triggers: 0,
+  views: 0,
+  pages: 0,
   ssl: false,
 };
 
@@ -54,6 +56,8 @@ export function everything(contents: BackupContents): BackupSelection {
     users: contents.users > 0,
     agents: contents.agents > 0,
     triggers: contents.triggers > 0,
+    views: contents.views > 0,
+    pages: contents.pages > 0,
     ssl: contents.ssl,
   };
 }
@@ -133,8 +137,13 @@ export function summarise(selection: BackupSelection, contents: BackupContents):
     else if (selection.table_data.length < selection.tables.length)
       parts.push(`rows of ${selection.table_data.length}`);
   }
-  if (selection.applications.length > 0)
+  if (selection.applications.length > 0) {
     parts.push(count(selection.applications.length, "application", "applications"));
+    // Views and pages live inside applications, so they are only worth saying
+    // when some application is ticked to carry them.
+    if (selection.views && contents.views > 0) parts.push("views");
+    if (selection.pages && contents.pages > 0) parts.push("pages");
+  }
   if (selection.file_stores.length > 0)
     parts.push(count(selection.file_stores.length, "file store", "file stores"));
   if (selection.users) parts.push("users");

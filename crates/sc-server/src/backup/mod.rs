@@ -19,6 +19,8 @@
 //! tables/<table>/table.json           { table, fields } — the overlay + columns
 //! tables/<table>/rows.json            [ { column: value, … }, … ]
 //! applications/<subdomain>.json       one application
+//! applications/<subdomain>/views.json its Saltcorn UI views, when chosen
+//! applications/<subdomain>/pages.json its Saltcorn UI pages, when chosen
 //! file-stores/<store>/store.json      { definition, files: [ { path, meta } ] }
 //! file-stores/<store>/files/<path>    the bytes, as they are
 //! users.json                          { roles, users, fields } — hashes included
@@ -262,6 +264,11 @@ pub struct Available {
     pub agents: i64,
     /// How many triggers.
     pub triggers: i64,
+    /// How many Saltcorn UI views, over every application on offer. They travel
+    /// inside their applications, so only a chosen application's are included.
+    pub views: i64,
+    /// How many Saltcorn UI pages, likewise.
+    pub pages: i64,
     /// Whether there are SSL settings to include.
     pub ssl: bool,
 }
@@ -276,6 +283,8 @@ impl Available {
             "users": self.users,
             "agents": self.agents,
             "triggers": self.triggers,
+            "views": self.views,
+            "pages": self.pages,
             "ssl": self.ssl,
         })
     }
@@ -292,6 +301,8 @@ impl Available {
             users: obj.get("users").and_then(Json::as_i64).unwrap_or(0),
             agents: obj.get("agents").and_then(Json::as_i64).unwrap_or(0),
             triggers: obj.get("triggers").and_then(Json::as_i64).unwrap_or(0),
+            views: obj.get("views").and_then(Json::as_i64).unwrap_or(0),
+            pages: obj.get("pages").and_then(Json::as_i64).unwrap_or(0),
             ssl: obj.get("ssl").and_then(Json::as_bool).unwrap_or(false),
         })
     }
@@ -333,6 +344,12 @@ pub struct Selection {
     /// Whether triggers are included. A trigger on a table whose metadata is
     /// *not* included is left out even so — see [`Selection::includes_trigger`].
     pub triggers: bool,
+    /// Whether the included applications' views are. On restore they **replace**
+    /// the views the application has, which is what makes a second import of
+    /// one backup leave the views it had rather than twice as many.
+    pub views: bool,
+    /// Whether the included applications' pages are, with the same rule.
+    pub pages: bool,
     /// Whether the SSL settings are included.
     pub ssl: bool,
 }
@@ -364,6 +381,8 @@ impl Selection {
             users: available.users > 0,
             agents: available.agents > 0,
             triggers: available.triggers > 0,
+            views: available.views > 0,
+            pages: available.pages > 0,
             ssl: available.ssl,
         }
     }
@@ -391,6 +410,8 @@ impl Selection {
             users: flag(obj, "users"),
             agents: flag(obj, "agents"),
             triggers: flag(obj, "triggers"),
+            views: flag(obj, "views"),
+            pages: flag(obj, "pages"),
             ssl: flag(obj, "ssl"),
         })
     }
@@ -405,6 +426,8 @@ impl Selection {
             "users": self.users,
             "agents": self.agents,
             "triggers": self.triggers,
+            "views": self.views,
+            "pages": self.pages,
             "ssl": self.ssl,
         })
     }
@@ -478,6 +501,8 @@ impl Selection {
             users: self.users && available.users > 0,
             agents: self.agents && available.agents > 0,
             triggers: self.triggers && available.triggers > 0,
+            views: self.views && available.views > 0,
+            pages: self.pages && available.pages > 0,
             ssl: self.ssl && available.ssl,
         }
     }
@@ -509,6 +534,10 @@ pub struct BackupPreferences {
     pub agents: bool,
     /// Whether triggers are included.
     pub triggers: bool,
+    /// Whether the chosen applications' views are included.
+    pub views: bool,
+    /// Whether the chosen applications' pages are included.
+    pub pages: bool,
     /// Whether the SSL settings are included.
     pub ssl: bool,
 }
@@ -525,6 +554,8 @@ impl Default for BackupPreferences {
             users: true,
             agents: true,
             triggers: true,
+            views: true,
+            pages: true,
             ssl: true,
         }
     }
@@ -559,6 +590,8 @@ impl BackupPreferences {
             users: on("users"),
             agents: on("agents"),
             triggers: on("triggers"),
+            views: on("views"),
+            pages: on("pages"),
             ssl: on("ssl"),
         }
     }
@@ -573,6 +606,8 @@ impl BackupPreferences {
             "users": self.users,
             "agents": self.agents,
             "triggers": self.triggers,
+            "views": self.views,
+            "pages": self.pages,
             "ssl": self.ssl,
         })
     }
@@ -626,6 +661,8 @@ impl BackupPreferences {
             users: selection.users,
             agents: selection.agents,
             triggers: selection.triggers,
+            views: selection.views,
+            pages: selection.pages,
             ssl: selection.ssl,
         }
     }
@@ -652,6 +689,8 @@ impl BackupPreferences {
             users: self.users && available.users > 0,
             agents: self.agents && available.agents > 0,
             triggers: self.triggers && available.triggers > 0,
+            views: self.views && available.views > 0,
+            pages: self.pages && available.pages > 0,
             ssl: self.ssl && available.ssl,
         }
     }
@@ -694,6 +733,8 @@ mod tests {
             users: 2,
             agents: 1,
             triggers: 4,
+            views: 7,
+            pages: 1,
             ssl: true,
         }
     }
@@ -705,6 +746,7 @@ mod tests {
         assert_eq!(selection.tables, vec!["books", "authors"]);
         assert_eq!(selection.table_data, vec!["books", "authors"]);
         assert!(selection.users && selection.agents && selection.triggers && selection.ssl);
+        assert!(selection.views && selection.pages);
     }
 
     /// The round trip the dialog makes: untick two things, save, come back.
@@ -798,6 +840,8 @@ mod tests {
             users: true,
             agents: true,
             triggers: true,
+            views: true,
+            pages: true,
             ssl: true,
         };
         let narrowed = asked.intersect(&available);
@@ -808,6 +852,7 @@ mod tests {
         // …and against a manifest holding nothing, the flags go off too.
         let empty = asked.intersect(&Available::default());
         assert!(!empty.users && !empty.agents && !empty.triggers && !empty.ssl);
+        assert!(!empty.views && !empty.pages);
     }
 
     /// A backup can hold a table's definition and not its rows, and the restore

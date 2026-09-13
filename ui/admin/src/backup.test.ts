@@ -38,6 +38,8 @@ const contents: BackupContents = {
   users: 2,
   agents: 1,
   triggers: 4,
+  views: 7,
+  pages: 1,
   ssl: true,
 };
 
@@ -51,6 +53,7 @@ describe("what a backup includes", () => {
     expect(selection.users && selection.agents && selection.triggers && selection.ssl).toBe(
       true,
     );
+    expect(selection.views && selection.pages).toBe(true);
     expect(isEmpty(selection)).toBe(false);
   });
 
@@ -64,6 +67,8 @@ describe("what a backup includes", () => {
       users: 0,
       agents: 0,
       triggers: 0,
+      views: 0,
+      pages: 0,
       ssl: false,
     });
     expect(isEmpty(selection)).toBe(true);
@@ -124,12 +129,16 @@ describe("what a backup includes", () => {
 
   it("says what is ticked in a sentence", () => {
     expect(summarise(everything(contents), contents)).toBe(
-      "all 2 tables, 1 application, 1 file store, users, agents, triggers, SSL settings.",
+      "all 2 tables, 1 application, views, pages, 1 file store, users, agents, triggers, SSL settings.",
     );
 
     const narrowed = withTableData(withTables(everything(contents), ["books"]), []);
-    expect(summarise({ ...narrowed, agents: false, ssl: false }, contents)).toBe(
-      "1 table, no rows, 1 application, 1 file store, users, triggers.",
+    expect(summarise({ ...narrowed, agents: false, ssl: false, pages: false }, contents)).toBe(
+      "1 table, no rows, 1 application, views, 1 file store, users, triggers.",
+    );
+    // With no application to carry them, views and pages are not worth a word.
+    expect(summarise({ ...narrowed, applications: [], file_stores: [] }, contents)).toBe(
+      "1 table, no rows, users, agents, triggers, SSL settings.",
     );
 
     expect(
@@ -142,6 +151,8 @@ describe("what a backup includes", () => {
           users: false,
           agents: false,
           triggers: false,
+          views: false,
+          pages: false,
           ssl: false,
         },
         contents,

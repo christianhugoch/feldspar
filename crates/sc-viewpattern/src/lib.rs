@@ -74,6 +74,8 @@ pub use tables::{
     COL_MIN_ROLE, COL_NAME, COL_SLUG, COL_TABLE_NAME, COL_TITLE, COL_VIEWPATTERN, PAGES_TABLE,
     VIEWS_TABLE, bootstrap,
 };
-pub use validate::{VIEW_ACTIONS, check_name, check_view_actions, configured_actions};
+pub use validate::{
+    VIEW_ACTIONS, check_name, check_view_actions, configured_actions, referenced_views,
+};
 pub use view::{Page, PageId, View, ViewId};
 pub use view_set::{ViewSet, ViewSets};

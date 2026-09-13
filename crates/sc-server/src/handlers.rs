@@ -4440,13 +4440,116 @@ fn app_source_json(app: &Application) -> Json {
     }
 }
 
+/// A Saltcorn UI view as `{ id, name, description, viewpattern, table_name,
+/// configuration, min_role, slug, attributes }`: the shape a backup carries one
+/// in, and the one the Views tab will list (TODO "Saltcorn UI" 9.1). The
+/// configuration is v1's, unchanged.
+pub(crate) fn view_json(view: &sc_viewpattern::View) -> Json {
+    json!({
+        "id": view.id.0.to_string(),
+        "name": view.name,
+        "description": view.description,
+        "viewpattern": view.viewpattern,
+        "table_name": view.table_name,
+        "configuration": Json::Object(view.configuration.clone()),
+        "min_role": view.min_role,
+        "slug": view.slug,
+        "attributes": Json::Object(view.attributes.clone()),
+    })
+}
+
+/// Parse a view in [`view_json`]'s shape into `application`. What it may name —
+/// the pattern, the table, the role, the actions — is `save_view`'s to check.
+pub(crate) fn view_from_body(
+    id: sc_viewpattern::ViewId,
+    application: sc_app::AppId,
+    body: &Json,
+) -> Result<sc_viewpattern::View> {
+    let obj = require_object(body)?;
+    let name = non_empty_str_field(obj, "name")?;
+    let viewpattern = non_empty_str_field(obj, "viewpattern")?;
+    let mut view = sc_viewpattern::View::new(application, name, viewpattern, "");
+    view.id = id;
+    view.description = obj
+        .get("description")
+        .and_then(Json::as_str)
+        .unwrap_or("")
+        .to_owned();
+    view.table_name = obj
+        .get("table_name")
+        .and_then(Json::as_str)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned);
+    view.configuration = object_member(obj, "configuration")?;
+    view.min_role = min_role_member(obj)?;
+    view.slug = obj.get("slug").filter(|s| !s.is_null()).cloned();
+    view.attributes = object_member(obj, "attributes")?;
+    Ok(view)
+}
+
+/// A Saltcorn UI page as `{ id, name, title, description, layout, min_role,
+/// attributes }` — [`view_json`]'s counterpart.
+pub(crate) fn page_json(page: &sc_viewpattern::Page) -> Json {
+    json!({
+        "id": page.id.0.to_string(),
+        "name": page.name,
+        "title": page.title,
+        "description": page.description,
+        "layout": page.layout,
+        "min_role": page.min_role,
+        "attributes": Json::Object(page.attributes.clone()),
+    })
+}
+
+/// Parse a page in [`page_json`]'s shape into `application`.
+pub(crate) fn page_from_body(
+    id: sc_viewpattern::PageId,
+    application: sc_app::AppId,
+    body: &Json,
+) -> Result<sc_viewpattern::Page> {
+    let obj = require_object(body)?;
+    let name = non_empty_str_field(obj, "name")?;
+    let mut page = sc_viewpattern::Page::new(application, name)
+        .title(obj.get("title").and_then(Json::as_str).unwrap_or(""))
+        .layout(obj.get("layout").cloned().unwrap_or_else(|| json!({})));
+    page.id = id;
+    page.description = obj
+        .get("description")
+        .and_then(Json::as_str)
+        .unwrap_or("")
+        .to_owned();
+    page.min_role = min_role_member(obj)?;
+    page.attributes = object_member(obj, "attributes")?;
+    Ok(page)
+}
+
+/// An object member, absent or `null` meaning the empty object.
+fn object_member(obj: &Map<String, Json>, key: &str) -> Result<Attrs> {
+    match obj.get(key) {
+        None | Some(Json::Null) => Ok(Attrs::new()),
+        Some(Json::Object(o)) => Ok(o.clone()),
+        Some(_) => Err(Error::invalid(format!("`{key}` must be an object"))),
+    }
+}
+
+/// A view's or page's `min_role`, absent meaning public.
+fn min_role_member(obj: &Map<String, Json>) -> Result<u8> {
+    match obj.get("min_role") {
+        None | Some(Json::Null) => Ok(ROLE_PUBLIC),
+        Some(value) => value
+            .as_u64()
+            .and_then(|r| u8::try_from(r).ok())
+            .ok_or_else(|| Error::invalid("`min_role` must be a role number from 1 to 100")),
+    }
+}
+
 /// A [`FrameworkRef`] as `{ name, config }`.
 fn framework_ref_json(fw: &FrameworkRef) -> Json {
     json!({ "name": fw.name, "config": Json::Object(fw.config.clone()) })
 }
 
 /// A [`CspPolicy`] as a directive→sources object.
-fn csp_json(csp: &CspPolicy) -> Json {
+pub(crate) fn csp_json(csp: &CspPolicy) -> Json {
     Json::Object(
         csp.directives
             .iter()

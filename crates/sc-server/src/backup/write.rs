@@ -30,7 +30,7 @@ use zip::write::SimpleFileOptions;
 use super::{Available, Item, MANIFEST_FILE, SSL_SECTION, Selection};
 use crate::handlers::{
     agent_json, application_json, backup_file_meta_json, backup_store_def_json, constraint_json,
-    field_json, role_json, table_json, trigger_json, trigger_table,
+    field_json, page_json, role_json, table_json, trigger_json, trigger_table, view_json,
 };
 
 /// What can be included in a backup of this server, right now.
@@ -53,11 +53,18 @@ pub async fn available(catalog: &Catalog) -> Result<Available> {
         );
     }
 
-    let applications = sc_app::list_applications(catalog)
-        .await?
+    let apps = sc_app::list_applications(catalog).await?;
+    let applications = apps
         .iter()
         .map(|app| Item::new(app.subdomain.clone()).labelled(app.name.clone()))
         .collect();
+    // Over every application: views and pages are one choice each, and travel
+    // inside whichever applications are chosen.
+    let (mut views, mut pages) = (0, 0);
+    for app in &apps {
+        views += views_of(catalog, app).await?.len();
+        pages += pages_of(catalog, app).await?.len();
+    }
 
     // Defined stores, not merely connected ones: a store whose directory is not
     // mounted right now is still a definition worth backing up, and its files
@@ -81,6 +88,8 @@ pub async fn available(catalog: &Catalog) -> Result<Available> {
         users,
         agents: i64::try_from(sc_agent::list_agents(catalog).await?.len()).unwrap_or(i64::MAX),
         triggers: i64::try_from(sc_action::list_triggers(catalog).await?.len()).unwrap_or(i64::MAX),
+        views: i64::try_from(views).unwrap_or(i64::MAX),
+        pages: i64::try_from(pages).unwrap_or(i64::MAX),
         // There is always an SSL section to include, even when every value in it
         // is the default — "serve plain HTTP" is a setting an admin may well want
         // restored onto a copy of a production server.
@@ -162,6 +171,32 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
         contents
             .applications
             .push(Item::new(app.subdomain.clone()).labelled(app.name.clone()));
+        // A Saltcorn UI application's content is rows rather than a source tree,
+        // so without these a restored one would serve nothing.
+        if selection.views {
+            let views: Vec<Json> = views_of(catalog, &app)
+                .await?
+                .iter()
+                .map(view_json)
+                .collect();
+            contents.views += i64::try_from(views.len()).unwrap_or(i64::MAX);
+            zip.json(
+                &format!("applications/{}/views.json", app.subdomain),
+                &Json::Array(views),
+            )?;
+        }
+        if selection.pages {
+            let pages: Vec<Json> = pages_of(catalog, &app)
+                .await?
+                .iter()
+                .map(page_json)
+                .collect();
+            contents.pages += i64::try_from(pages.len()).unwrap_or(i64::MAX);
+            zip.json(
+                &format!("applications/{}/pages.json", app.subdomain),
+                &Json::Array(pages),
+            )?;
+        }
     }
 
     // --- file stores: the definition, the metadata, and the bytes -----------
@@ -302,6 +337,29 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
     )?;
 
     zip.finish()
+}
+
+/// An application's views — none on a database whose views table was never
+/// bootstrapped, which is a server that has never served a Saltcorn UI app.
+async fn views_of(
+    catalog: &Catalog,
+    app: &sc_app::Application,
+) -> Result<Vec<sc_viewpattern::View>> {
+    if catalog.get(sc_viewpattern::VIEWS_TABLE)?.is_none() {
+        return Ok(Vec::new());
+    }
+    sc_viewpattern::list_views(catalog, app.id).await
+}
+
+/// An application's pages, with [`views_of`]'s rule.
+async fn pages_of(
+    catalog: &Catalog,
+    app: &sc_app::Application,
+) -> Result<Vec<sc_viewpattern::Page>> {
+    if catalog.get(sc_viewpattern::PAGES_TABLE)?.is_none() {
+        return Ok(Vec::new());
+    }
+    sc_viewpattern::list_pages(catalog, app.id).await
 }
 
 /// Every row of a table as JSON, ordered by its primary key where it has a

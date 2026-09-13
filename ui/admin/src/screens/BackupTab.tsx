@@ -433,6 +433,46 @@ function IncludeDialog({
               }
             />
           )}
+          {contents.views > 0 && (
+            <Form.Check
+              type="checkbox"
+              id="backup-views"
+              className="mb-2"
+              checked={selection.views}
+              disabled={selection.applications.length === 0}
+              onChange={(e) => onChange({ ...selection, views: e.target.checked })}
+              label={
+                <>
+                  <span className="fw-semibold">Views</span>
+                  <div className="text-muted small">
+                    {contents.views} Saltcorn UI {contents.views === 1 ? "view" : "views"}, in
+                    the applications chosen above. Restored, they replace the views the
+                    application has.
+                  </div>
+                </>
+              }
+            />
+          )}
+          {contents.pages > 0 && (
+            <Form.Check
+              type="checkbox"
+              id="backup-pages"
+              className="mb-2"
+              checked={selection.pages}
+              disabled={selection.applications.length === 0}
+              onChange={(e) => onChange({ ...selection, pages: e.target.checked })}
+              label={
+                <>
+                  <span className="fw-semibold">Pages</span>
+                  <div className="text-muted small">
+                    {contents.pages} Saltcorn UI {contents.pages === 1 ? "page" : "pages"}, in
+                    the applications chosen above. Restored, they replace the pages the
+                    application has.
+                  </div>
+                </>
+              }
+            />
+          )}
           {contents.ssl && (
             <Form.Check
               type="checkbox"

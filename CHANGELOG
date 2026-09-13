@@ -2,6 +2,114 @@
 
 Changes in reverse chronological order.
 
+## Saltcorn UI, Phase 8: a v1 backup becomes a Saltcorn UI application
+
+Restoring `saltcorn-v1-BooksDB.zip` now brings the application as well as its
+data. The report lists seven views and one page imported. The Applications list
+gains **BooksDB**, framework Saltcorn UI, over the four imported tables. Nothing
+has to be set up by hand before its views render. The admin screens for views
+and pages are Phase 9.
+
+- **The translation (8.1, 8.2)** is still `backup::v1::convert`: a v1 archive
+  becomes the entries a Feldspar backup would have held, and the ordinary
+  restore does the rest. It now writes one application:
+  - `applications/<subdomain>.json`, named from `site_name`, framework
+    `saltcorn-ui`, with `site_name` and `menu_items` as its settings.
+  - Its subsets: every imported table, the imported file store, and **every
+    imported trigger**.
+    - **Deviation:** §13 does not list the triggers. v1's views name them, and
+      `save_view` refuses an action column running a trigger the application
+      does not declare (§12.3). List Books runs `TrimPages`.
+  - The Saltcorn UI CSP.
+  - A subdomain derived from the name: lower case, runs of anything else one
+    hyphen, at most 63 characters. `saltcorn-import` when nothing is left.
+  - `applications/<subdomain>/views.json` and `pages.json`, one record per v1
+    view and page.
+  - The views and pages no longer go through `note_what_was_left_out`.
+- **Views and pages cross unchanged (8.5).**
+  - A view's `configuration` and a page's `layout` are copied as they are.
+  - `min_role`, `slug` and `attributes` are carried, with `null` read as none.
+  - v1's `default_render_page` moves into the view's attributes.
+  - A v1 `exttable_name` becomes the table name, so the refusal names the
+    provider's table.
+  - A page's `root_page_for_roles`, and a non-empty `fixed_states`, move into
+    its attributes.
+- **The menu (8.3)** is v1's `menu_items` minus every `Admin Page` and
+  `User Page` entry, with the `Header`/`subitems` nesting kept.
+  - A header left with nothing under it goes too.
+  - Each kind taken out is a note: "11 Admin Page menu entries were not
+    imported…", "5 User Page menu entries…", "the menu header `Settings` was
+    not imported…".
+  - BooksDB's v1 menu is entirely such entries, so its imported menu is empty.
+- **The restore.**
+  - **An import is matched by name (8.6).** A Feldspar backup's application
+    carries an `id`, and an import's does not. An import is matched against the
+    Saltcorn UI applications already here by name.
+    - Found: its row, subdomain, settings and CSP are kept. It gains only the
+      tables, stores and triggers it did not list.
+    - Not found: it is created on the derived subdomain, or the first free
+      `-2`, `-3`, ….
+    - The report line says which ("already here as `BooksDB`…", "`booksdb` is
+      another application's subdomain").
+  - **Views and pages replace the application's own.** This is the one deletion
+    a restore makes. It is what makes a second import leave seven views rather
+    than fourteen. It applies to a Feldspar backup's application as well, whose
+    row the same restore has just overwritten.
+  - They are saved **before** the build, since mounting a Saltcorn UI
+    application reads them.
+  - **The report lines (8.4)**, none of which fails the restore:
+    - "view `X` was not imported: it uses the view pattern `Room`, which this
+      server does not have…";
+    - "…it is over the table `T`, which was not imported";
+    - anything else `save_view` refuses, by the view's name;
+    - after saving, "view `X` links to the view `Y`, which was not imported"
+      and "page `P` shows the view `Y`, which was not imported".
+    - The links are found by `sc_viewpattern::referenced_views`: `view`,
+      `view_name`, `view_to_create`, `view_when_done`, `show_view` and
+      `list_view`, with v1's `Own:`/`ChildList:…` prefixes read.
+    - **Deviation:** a page has no table, so "a page on a table that did not
+      import" is reported as a page showing a view that did not.
+    - A summary line: "7 views into application `booksdb`".
+- **The selection covers views and pages (8.5), in every backup.**
+  - `Available`, `Selection` and `BackupPreferences` gain `views` and `pages`.
+  - A Feldspar backup now writes each chosen application's views and pages
+    beside it. Without them a restored Saltcorn UI application served nothing.
+  - The sc-api schemas carry the new fields, and both generated `client.ts`
+    files are regenerated.
+  - The Backup dialog has **Views** and **Pages** checkboxes. They are disabled
+    while no application is ticked, because they travel inside applications.
+  - The summary line names them only when an application carries them.
+- `handlers::view_json` / `view_from_body` / `page_json` / `page_from_body`: the
+  shapes a backup carries, ready for Phase 9's endpoints. `csp_json` is now
+  `pub(crate)`.
+- **Tests (8.7).**
+  - `backup_api::a_saltcorn_1_backup_is_imported`, over the real archive:
+    - the offer (one application, 7 views, 1 page);
+    - with `booksdb` already taken, the application on `booksdb-2`, with the
+      name, framework, `site_name`, empty menu, tables, store and CSP;
+    - the seven views by name, each configuration equal to the pack's and
+      `min_role` 1;
+    - Filter books' slug and attributes, and the page's layout and
+      `root_page_for_roles`;
+    - no view refused and no dangling link; the menu notes; the "did not
+      build" line (the test server has no bundle).
+  - The same archive restored again, after the admin changed a setting and the
+    CSP and deleted a view. Asserted:
+    - one BooksDB application, with the same id, subdomain, setting and CSP;
+    - seven views, not fourteen, and one page.
+  - v1 unit tests:
+    - the application document read back through `application_from_body` and
+      accepted by `check_saltcorn_ui_config`;
+    - views and pages through `view_from_body`/`page_from_body`, with the
+      configuration unchanged and a `Room` view carried;
+    - the menu stripped with its nesting and notes;
+    - subdomain derivation.
+  - `referenced_views` (sc-viewpattern); the selection and preference tests
+    cover the new flags; `backup.test.ts` covers the new fields and summary.
+  - `saltcorn_ui_render`'s setup now uses the application the restore made (its
+    menu replaced for the navbar assertions) instead of building BooksDB by
+    hand.
+
 ## Saltcorn UI, Phase 7: who is looking — roles, authority and signing in
 
 A Saltcorn UI application now knows who is looking. A visitor who opens a view

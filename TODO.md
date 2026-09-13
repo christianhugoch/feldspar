@@ -656,21 +656,21 @@ Five levels, because the failure modes are at five levels:
 
 ## Phase 8 — A v1 backup becomes a Saltcorn UI application
 
-- [ ] 8.1 `backup::v1` translates `views` and `pages` instead of counting them, and the two
+- [x] 8.1 `backup::v1` translates `views` and `pages` instead of counting them, and the two
       lines leave `note_what_was_left_out`.
-- [ ] 8.2 The application: named from `site_name`, framework `saltcorn-ui`, subdomain derived
+- [x] 8.2 The application: named from `site_name`, framework `saltcorn-ui`, subdomain derived
       and de-duplicated, every imported table in its subset, the imported file store in its
       list, and the row written through the ordinary `save_application`.
-- [ ] 8.3 The menu from `menu_items`, minus `Admin Page` and `User Page` entries, with a note
+- [x] 8.3 The menu from `menu_items`, minus `Admin Page` and `User Page` entries, with a note
       per kind dropped and the `Header`/subitem nesting kept.
-- [ ] 8.4 The report lines: a view whose pattern is not registered, a view or page on a table
+- [x] 8.4 The report lines: a view whose pattern is not registered, a view or page on a table
       that did not import, and a view referencing a view that did not import — each naming the
       view, and none of them failing the restore.
-- [ ] 8.5 `min_role`, `slug`, `attributes` and `root_page_for_roles` carried; the restore
+- [x] 8.5 `min_role`, `slug`, `attributes` and `root_page_for_roles` carried; the restore
       dialog's selection covers views and pages like every other kind.
-- [ ] 8.6 Re-importing into an existing application of the same name replaces its views and
+- [x] 8.6 Re-importing into an existing application of the same name replaces its views and
       pages and keeps its subdomain, settings and CSP.
-- [ ] 8.7 Tests over `saltcorn-v1-BooksDB.zip`: seven views, one page, the application row, the
+- [x] 8.7 Tests over `saltcorn-v1-BooksDB.zip`: seven views, one page, the application row, the
       menu, the subdomain — and the same archive restored twice leaving seven views, not
       fourteen.
 
