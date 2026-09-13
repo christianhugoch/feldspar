@@ -2,6 +2,81 @@
 
 Changes in reverse chronological order.
 
+## Saltcorn UI, Phase 9: the admin UI — an application's views and pages
+
+A Saltcorn UI application's screen now has **Views** and **Pages** tabs beside
+its settings. Each lists what the application serves: the pattern, the table,
+the role, and a link that opens it on the app's subdomain. Each row can be
+deleted. The Applications list shows such an application with no Build button,
+no Update code button and no "Not built yet" badge, since there is nothing to
+build. Creating and configuring a view is Phase 10.
+
+- **Endpoints (9.1)**, all admin-only, under
+  `/api/applications/:id/views` and `/api/applications/:id/pages`:
+  - `listViews`, `getView`, `saveView` (`PUT …/views/:name`) and `deleteView`,
+    and the same four for pages. A view is `{ id, name, description,
+    viewpattern, table_name, configuration, min_role, slug, attributes }`, the
+    shape Phase 8's backup carries; a page is `{ id, name, title, description,
+    layout, min_role, attributes }`.
+  - A save updates the record the path names and creates one when there is
+    none. A body with a different name renames it, keeping its id. The
+    validation is `save_view`/`save_page`'s, so an unknown pattern or a table
+    outside the subset is refused by name. Replaying the pattern's
+    configuration steps is Phase 10's.
+  - A save into an application that is not `saltcorn-ui` is refused, naming its
+    framework. A missing application, view or page is a 404 naming it.
+  - Every write goes through `view_sets()`, the cache the mounted app renders
+    from, so it is live on the next request.
+  - `listViewPatterns` (`GET /api/view-patterns`): the registry a save is
+    checked against, described by the view runtime's manifest (label,
+    description, `view_quantity`, routes, steps) when one is running. A server
+    without the bundle still lists the names.
+  - **A fix on the way:** the admin router hands path parameters over exactly as
+    they appear in the URL, so `List%20Books` never matched the view
+    `List Books`. `router::path_decode` percent-decodes the `name` parameter
+    (a `+` stays a plus). The generated client interpolates parameters raw, so
+    the screen encodes names itself (`nameParam`).
+- **Application rows gain `builds` and `has_views` (9.3).**
+  - `builds` is false for a framework constructed from `sc-app`'s factory
+    registry, which today means Saltcorn UI.
+  - `has_views` decides whether the tabs are offered, so no screen names a
+    framework.
+  - Both generated `client.ts` files are regenerated, and the IDE's two
+    application fixtures carry the new fields.
+- **The screens (9.2).**
+  - `ApplicationViews` (`#/applications/:id/views` and `…/pages`) shows the two
+    tables. A view whose pattern this server does not have carries a "not on
+    this server" badge.
+  - The empty Views tab says a Saltcorn UI application serves nothing until it
+    has views. The empty Pages tab says views are still served without pages.
+  - The Pages tab names the roles each page is the home page of, from
+    `root_page_for_roles`.
+  - Delete asks for confirmation naming the view and the application.
+  - `ApplicationTabs` (Tabler's `.nav-pills`, as links) sits above those tabs and
+    above the edit form of an application that has views.
+  - The list row of such an application gains a **Views** button.
+- **Tests (9.4).**
+  - `saltcorn_ui_admin_api::an_applications_views_and_pages_are_managed_over_http`,
+    over a real Postgres:
+    - the application row's `builds: false` / `has_views: true`;
+    - the six patterns listed;
+    - an empty list, then two views saved (one named with a space) and listed;
+    - one read back with its configuration unchanged;
+    - a save under the same path keeping the id, and a rename;
+    - the `Room` pattern and an out-of-subset table refused by name, with
+      nothing saved;
+    - a delete moving the view set's generation, and a second delete a 404
+      naming the view;
+    - a page saved, read with its layout and `root_page_for_roles`, and deleted;
+    - an unknown application a 404, and every read refused without a session.
+  - `views.test.ts` covers:
+    - which tabs an application gets;
+    - names with spaces in the subdomain link and as a path parameter;
+    - rows with the pattern label, table, role and link;
+    - the missing-pattern flag, which is not raised while the pattern list is
+      still loading;
+    - the home-page roles and the delete confirmation.
+
 ## Saltcorn UI, Phase 8: a v1 backup becomes a Saltcorn UI application
 
 Restoring `saltcorn-v1-BooksDB.zip` now brings the application as well as its

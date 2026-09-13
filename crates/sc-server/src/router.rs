@@ -1383,7 +1383,18 @@ pub(crate) fn parse_form(body: &str) -> Vec<(String, String)> {
 }
 
 fn form_decode(s: &str) -> String {
-    if !s.contains('%') && !s.contains('+') {
+    percent_decode(s, true)
+}
+
+/// One path segment, percent-decoded. `matchit` hands a parameter over exactly
+/// as it was in the URL, so a name with a space in it — v1's `List Books` —
+/// arrives as `List%20Books`. A `+` in a path is a plus.
+pub(crate) fn path_decode(s: &str) -> String {
+    percent_decode(s, false)
+}
+
+fn percent_decode(s: &str, plus_is_space: bool) -> String {
+    if !s.contains('%') && !(plus_is_space && s.contains('+')) {
         return s.to_owned();
     }
     let bytes = s.as_bytes();
@@ -1391,7 +1402,7 @@ fn form_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'+' => {
+            b'+' if plus_is_space => {
                 out.push(b' ');
                 i += 1;
             }

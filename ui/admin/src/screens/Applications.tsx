@@ -223,7 +223,14 @@ export function Applications() {
                       )}
                     </td>
                     <td>
-                      <BuildBadge status={state} />
+                      {app.builds ? (
+                        <BuildBadge status={state} />
+                      ) : (
+                        // Constructed rather than built (Saltcorn UI): saving
+                        // is the deployment, so there is no unbuilt state to
+                        // show.
+                        <span className="text-muted small">Nothing to build</span>
+                      )}
                     </td>
                     <td className="text-end">
                       <div className="btn-list justify-content-end flex-nowrap">
@@ -240,6 +247,15 @@ export function Applications() {
                             GraphQL
                           </Button>
                         )}
+                        {app.has_views && (
+                          <Button
+                            size="sm"
+                            variant="outline-secondary"
+                            href={`#/applications/${encodeURIComponent(app.id)}/views`}
+                          >
+                            Views
+                          </Button>
+                        )}
                         <Button
                           size="sm"
                           variant="outline-secondary"
@@ -247,23 +263,30 @@ export function Applications() {
                         >
                           Edit
                         </Button>
-                        <Button
-                          size="sm"
-                          variant="outline-secondary"
-                          disabled={updating === app.id}
-                          onClick={() => void updateClient(app)}
-                          title="Rewrite this application's generated client, hooks and schema from its current definition — no build"
-                        >
-                          {updating === app.id ? "Updating…" : "Update code"}
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline-primary"
-                          disabled={state === "building"}
-                          onClick={() => void build(app)}
-                        >
-                          {state === "building" ? "Building…" : "Build"}
-                        </Button>
+                        {/* Neither has anything to do for an application with
+                            no build: it has no generated client and no
+                            bundle, and saving it already deployed it. */}
+                        {app.builds && (
+                          <>
+                            <Button
+                              size="sm"
+                              variant="outline-secondary"
+                              disabled={updating === app.id}
+                              onClick={() => void updateClient(app)}
+                              title="Rewrite this application's generated client, hooks and schema from its current definition — no build"
+                            >
+                              {updating === app.id ? "Updating…" : "Update code"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline-primary"
+                              disabled={state === "building"}
+                              onClick={() => void build(app)}
+                            >
+                              {state === "building" ? "Building…" : "Build"}
+                            </Button>
+                          </>
+                        )}
                         <Button size="sm" variant="outline-danger" onClick={() => void remove(app)}>
                           Delete
                         </Button>

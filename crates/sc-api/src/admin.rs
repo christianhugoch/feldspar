@@ -1640,6 +1640,145 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- Saltcorn UI views and pages -----------------------------------------
+    // A Saltcorn UI application's source is rows rather than a file store
+    // (TODO "Saltcorn UI" §1): its views and pages, each addressed by name
+    // within the application. A save is the whole deployment — the mounted app
+    // reads the reloaded set on its next request — so there is no build to
+    // follow one with.
+    //
+    // `saveView`/`savePage` save the record the path names, creating it when
+    // there is none; a body naming something else renames it. What a view may
+    // name — the pattern, the table, the role, the actions — is refused on save
+    // with a sentence naming it. Replaying the pattern's configuration steps
+    // over the configuration is Phase 10's.
+    set.register(
+        Endpoint::new(
+            "listViews",
+            Method::Get,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("views"),
+        )
+        .output(TypeSchema::array(view_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "getView",
+            Method::Get,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("views")
+                .param("name", ValueType::Text),
+        )
+        .output(view_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "saveView",
+            Method::Put,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("views")
+                .param("name", ValueType::Text),
+        )
+        .input(view_input_schema())
+        .output(view_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "deleteView",
+            Method::Delete,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("views")
+                .param("name", ValueType::Text),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "listPages",
+            Method::Get,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("pages"),
+        )
+        .output(TypeSchema::array(page_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "getPage",
+            Method::Get,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("pages")
+                .param("name", ValueType::Text),
+        )
+        .output(page_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "savePage",
+            Method::Put,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("pages")
+                .param("name", ValueType::Text),
+        )
+        .input(page_input_schema())
+        .output(page_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "deletePage",
+            Method::Delete,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("pages")
+                .param("name", ValueType::Text),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // The view patterns a view may be saved with: the registry save checks
+    // against, described by the view runtime where one is running. Server-wide
+    // rather than per application, because a pattern is the server's.
+    set.register(
+        Endpoint::new("listViewPatterns", Method::Get, api().lit("view-patterns"))
+            .output(TypeSchema::array(view_pattern_schema()))
+            .auth(AuthRequirement::admin()),
+    );
+
     // --- frameworks ---------------------------------------------------------
     // The registered frameworks with their settings spec, so the create/edit
     // form can render controls for a framework it knows nothing about (§13.3).
@@ -3686,7 +3825,86 @@ fn application_schema() -> TypeSchema {
         "source",
         TypeSchema::optional(app_source_schema()),
     ));
+    // Whether the framework has a build step. `false` is a framework that is
+    // constructed rather than built (Saltcorn UI): saving the application is
+    // its deployment, so the list offers no Build button and shows no
+    // "not built yet" state.
+    fields.push(StructField::new("builds", TypeSchema::bool()));
+    // Whether the application's source is views and pages (Saltcorn UI), so
+    // the screen offers the Views and Pages tabs.
+    fields.push(StructField::new("has_views", TypeSchema::bool()));
     TypeSchema::Struct(fields)
+}
+
+/// A Saltcorn UI view's fields on the wire, less its id. `configuration` is
+/// v1's, unchanged; `slug` is v1's `{label, steps}` or absent.
+fn view_fields() -> Vec<StructField> {
+    vec![
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("viewpattern", TypeSchema::text()),
+        StructField::new("table_name", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("configuration", TypeSchema::json()),
+        StructField::new("min_role", TypeSchema::int()),
+        StructField::new("slug", TypeSchema::optional(TypeSchema::json())),
+        StructField::new("attributes", TypeSchema::json()),
+    ]
+}
+
+/// A Saltcorn UI view as returned: its id and [`view_fields`].
+fn view_schema() -> TypeSchema {
+    let mut fields = vec![StructField::new("id", TypeSchema::uuid())];
+    fields.extend(view_fields());
+    TypeSchema::Struct(fields)
+}
+
+/// The body `saveView` takes: the view less its id, which is the stored view's
+/// when the path names one and fresh otherwise.
+fn view_input_schema() -> TypeSchema {
+    TypeSchema::Struct(view_fields())
+}
+
+/// A Saltcorn UI page's fields on the wire, less its id. `attributes` carries
+/// `root_page_for_roles`.
+fn page_fields() -> Vec<StructField> {
+    vec![
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("title", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("layout", TypeSchema::json()),
+        StructField::new("min_role", TypeSchema::int()),
+        StructField::new("attributes", TypeSchema::json()),
+    ]
+}
+
+/// A Saltcorn UI page as returned: its id and [`page_fields`].
+fn page_schema() -> TypeSchema {
+    let mut fields = vec![StructField::new("id", TypeSchema::uuid())];
+    fields.extend(page_fields());
+    TypeSchema::Struct(fields)
+}
+
+/// The body `savePage` takes.
+fn page_input_schema() -> TypeSchema {
+    TypeSchema::Struct(page_fields())
+}
+
+/// A registered view pattern: the name a view's `viewpattern` holds, how the
+/// picker presents it, and what the runtime's manifest says about it. `label`,
+/// `description`, `view_quantity`, `routes` and `steps` come from the running
+/// view runtime; with none running they are the name and empty.
+fn view_pattern_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("label", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("table_required", TypeSchema::bool()),
+        StructField::new("view_quantity", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("routes", TypeSchema::array(TypeSchema::text())),
+        StructField::new("steps", TypeSchema::array(TypeSchema::text())),
+        // The module that declared it; absent for a built-in.
+        StructField::new("module", TypeSchema::optional(TypeSchema::text())),
+    ])
 }
 
 /// Where an application's source lives: a file store and a directory in it.

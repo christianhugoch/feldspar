@@ -42,6 +42,7 @@ import {
 } from "../apiRows";
 import { MultiSelect } from "../multiSelect";
 import { CustomQueries } from "./CustomQueries";
+import { ApplicationTabs } from "./ApplicationViews";
 
 type FrameworkInfo = ListFrameworksResponse[number];
 type AppItem = ListApplicationsResponse[number];
@@ -94,6 +95,9 @@ export function ApplicationForm({ appId }: { appId?: string }) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The stored application being edited, for the tabs above the form: an
+  // application whose source is views and pages has two more screens.
+  const [stored, setStored] = useState<AppItem | null>(null);
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -148,6 +152,7 @@ export function ApplicationForm({ appId }: { appId?: string }) {
         setAllTables(tbls);
         setAllFileStores(stores);
         if (existing) {
+          setStored(existing);
           setName(existing.name);
           setDescription(existing.description);
           setSubdomain(existing.subdomain);
@@ -276,6 +281,7 @@ export function ApplicationForm({ appId }: { appId?: string }) {
         }
       />
       <PageBody>
+        {stored && <ApplicationTabs app={stored} active="settings" />}
         {error && <Alert variant="danger">{error}</Alert>}
 
         <Form onSubmit={submit}>

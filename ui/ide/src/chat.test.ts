@@ -71,6 +71,8 @@ function application(
     csp: null,
     attributes: {},
     source,
+    builds: true,
+    has_views: false,
   };
 }
 

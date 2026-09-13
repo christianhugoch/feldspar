@@ -120,16 +120,27 @@ export type GetFileMetaRequest = { path: string };
 export type GetFileMetaResponse = { path: string; min_role?: number | null; effective_min_role?: number | null; attributes: unknown };
 export type SetFileMetaRequest = { path: string; min_role?: number | null; attributes: unknown };
 export type SetFileMetaResponse = { path: string; min_role?: number | null; effective_min_role?: number | null; attributes: unknown };
-export type ListApplicationsResponse = Array<{ id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown; source?: { store: string; path: string } | null }>;
+export type ListApplicationsResponse = Array<{ id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown; source?: { store: string; path: string } | null; builds: boolean; has_views: boolean }>;
 export type CreateApplicationRequest = { name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown };
-export type CreateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown; source?: { store: string; path: string } | null; scaffolded?: string | null; scaffold_error?: string | null; agent?: string | null; agent_error?: string | null };
+export type CreateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown; source?: { store: string; path: string } | null; builds: boolean; has_views: boolean; scaffolded?: string | null; scaffold_error?: string | null; agent?: string | null; agent_error?: string | null };
 export type UpdateApplicationRequest = { name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown };
-export type UpdateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown; source?: { store: string; path: string } | null };
+export type UpdateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown; source?: { store: string; path: string } | null; builds: boolean; has_views: boolean };
 export type DeleteApplicationResponse = { deleted: boolean; agent?: string | null };
 export type BuildApplicationResponse = { built: boolean; git_repo: boolean; log: string };
 export type UpdateApplicationClientResponse = { scaffolded: boolean; files: Array<string>; log: string };
 export type RunApplicationGraphqlRequest = { query: string; variables?: unknown | null; operationName?: string | null };
 export type RunApplicationGraphqlResponse = unknown;
+export type ListViewsResponse = Array<{ id: string; name: string; description: string; viewpattern: string; table_name?: string | null; configuration: unknown; min_role: number; slug?: unknown | null; attributes: unknown }>;
+export type GetViewResponse = { id: string; name: string; description: string; viewpattern: string; table_name?: string | null; configuration: unknown; min_role: number; slug?: unknown | null; attributes: unknown };
+export type SaveViewRequest = { name: string; description: string; viewpattern: string; table_name?: string | null; configuration: unknown; min_role: number; slug?: unknown | null; attributes: unknown };
+export type SaveViewResponse = { id: string; name: string; description: string; viewpattern: string; table_name?: string | null; configuration: unknown; min_role: number; slug?: unknown | null; attributes: unknown };
+export type DeleteViewResponse = { deleted: boolean };
+export type ListPagesResponse = Array<{ id: string; name: string; title: string; description: string; layout: unknown; min_role: number; attributes: unknown }>;
+export type GetPageResponse = { id: string; name: string; title: string; description: string; layout: unknown; min_role: number; attributes: unknown };
+export type SavePageRequest = { name: string; title: string; description: string; layout: unknown; min_role: number; attributes: unknown };
+export type SavePageResponse = { id: string; name: string; title: string; description: string; layout: unknown; min_role: number; attributes: unknown };
+export type DeletePageResponse = { deleted: boolean };
+export type ListViewPatternsResponse = Array<{ name: string; label: string; description: string; table_required: boolean; view_quantity?: string | null; routes: Array<string>; steps: Array<string>; module?: string | null }>;
 export type ListFrameworksResponse = Array<{ name: string; label: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>;
 export type ListApiProvidersResponse = Array<{ name: string; label: string; description: string; default_mount: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; supports_custom_queries: boolean }>;
 export type DescribeCustomQueryRequest = { name: string; description?: string | null; method: string; path: string; sql: string; params: Array<{ name: string; type: string; required?: boolean | null }>; min_role?: number | null; tables?: Array<string> | null };
@@ -284,6 +295,15 @@ export interface ApiClient {
   buildApplication(id: string): Promise<BuildApplicationResponse>;
   updateApplicationClient(id: string): Promise<UpdateApplicationClientResponse>;
   runApplicationGraphql(id: string, body: RunApplicationGraphqlRequest): Promise<RunApplicationGraphqlResponse>;
+  listViews(id: string): Promise<ListViewsResponse>;
+  getView(id: string, name: string): Promise<GetViewResponse>;
+  saveView(id: string, name: string, body: SaveViewRequest): Promise<SaveViewResponse>;
+  deleteView(id: string, name: string): Promise<DeleteViewResponse>;
+  listPages(id: string): Promise<ListPagesResponse>;
+  getPage(id: string, name: string): Promise<GetPageResponse>;
+  savePage(id: string, name: string, body: SavePageRequest): Promise<SavePageResponse>;
+  deletePage(id: string, name: string): Promise<DeletePageResponse>;
+  listViewPatterns(): Promise<ListViewPatternsResponse>;
   listFrameworks(): Promise<ListFrameworksResponse>;
   listApiProviders(): Promise<ListApiProvidersResponse>;
   describeCustomQuery(body: DescribeCustomQueryRequest): Promise<DescribeCustomQueryResponse>;
@@ -1049,6 +1069,80 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("runApplicationGraphql", res);
       return (await res.json()) as RunApplicationGraphqlResponse;
+    },
+    async listViews(id) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/views`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listViews", res);
+      return (await res.json()) as ListViewsResponse;
+    },
+    async getView(id, name) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/views/${name}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getView", res);
+      return (await res.json()) as GetViewResponse;
+    },
+    async saveView(id, name, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/views/${name}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("saveView", res);
+      return (await res.json()) as SaveViewResponse;
+    },
+    async deleteView(id, name) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/views/${name}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteView", res);
+      return (await res.json()) as DeleteViewResponse;
+    },
+    async listPages(id) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listPages", res);
+      return (await res.json()) as ListPagesResponse;
+    },
+    async getPage(id, name) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages/${name}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getPage", res);
+      return (await res.json()) as GetPageResponse;
+    },
+    async savePage(id, name, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages/${name}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("savePage", res);
+      return (await res.json()) as SavePageResponse;
+    },
+    async deletePage(id, name) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages/${name}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deletePage", res);
+      return (await res.json()) as DeletePageResponse;
+    },
+    async listViewPatterns() {
+      const res = await doFetch(`${baseUrl}/api/view-patterns`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listViewPatterns", res);
+      return (await res.json()) as ListViewPatternsResponse;
     },
     async listFrameworks() {
       const res = await doFetch(`${baseUrl}/api/frameworks`, {

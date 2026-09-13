@@ -39,6 +39,7 @@ import { AgentForm } from "./screens/AgentForm";
 import { Agents } from "./screens/Agents";
 import { Applications } from "./screens/Applications";
 import { ApplicationForm } from "./screens/ApplicationForm";
+import { ApplicationViews } from "./screens/ApplicationViews";
 import { DbConnections } from "./screens/DbConnections";
 import { FileManager } from "./screens/FileManager";
 import { FileStores } from "./screens/FileStores";
@@ -420,6 +421,15 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
   const graphqlMatch = route.match(/^\/applications\/([^/]+)\/graphql$/);
   if (graphqlMatch) {
     return <GraphqlExplorer appId={decodeURIComponent(graphqlMatch[1])} user={user} />;
+  }
+  const viewsMatch = route.match(/^\/applications\/([^/]+)\/(views|pages)$/);
+  if (viewsMatch) {
+    return (
+      <ApplicationViews
+        appId={decodeURIComponent(viewsMatch[1])}
+        tab={viewsMatch[2] as "views" | "pages"}
+      />
+    );
   }
   const editMatch = route.match(/^\/applications\/([^/]+)\/edit$/);
   if (editMatch) {

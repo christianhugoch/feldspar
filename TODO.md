@@ -676,15 +676,15 @@ Five levels, because the failure modes are at five levels:
 
 ## Phase 9 — The admin UI: an application's views and pages
 
-- [ ] 9.1 Endpoints: `listViews`, `getView`, `deleteView`, `listPages`, `getPage`,
+- [x] 9.1 Endpoints: `listViews`, `getView`, `deleteView`, `listPages`, `getPage`,
       `deletePage`, `listViewPatterns` — and `saveView`/`savePage`, which Phase 10 fills in.
-- [ ] 9.2 The Application screen's **Views** and **Pages** tabs: the list with pattern, table,
+- [x] 9.2 The Application screen's **Views** and **Pages** tabs: the list with pattern, table,
       role and a link that opens it on the app's subdomain; delete with the usual
       confirmation; and an empty state that says a Saltcorn UI application with no views
       serves nothing.
-- [ ] 9.3 The application list shows Saltcorn UI apps without a Build button and without a
+- [x] 9.3 The application list shows Saltcorn UI apps without a Build button and without a
       "saved but unbuilt" state, because there is nothing to build.
-- [ ] 9.4 Tests: the API round trip, and `views.test.ts` for the list's own logic.
+- [x] 9.4 Tests: the API round trip, and `views.test.ts` for the list's own logic.
 
 ## Phase 10 — Editing a view, without the builder
 

@@ -3642,6 +3642,177 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    // --- Saltcorn UI views and pages ------------------------------------------
+
+    // Every write goes through `view_sets()`, the cache the mounted application
+    // renders from, so a save or a delete is live on the app's next request with
+    // no build and no remount (TODO "Saltcorn UI" §1, §4).
+
+    reg.register("listViews", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_app(&catalog, ctx.path_param("id")?).await?;
+                let views = sc_viewpattern::list_views(&catalog, app.id).await?;
+                Ok(HandlerResponse::ok(Json::Array(
+                    views.iter().map(view_json).collect(),
+                )))
+            }
+        }
+    });
+
+    reg.register("getView", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_app(&catalog, ctx.path_param("id")?).await?;
+                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                let view = sc_viewpattern::load_view(&catalog, app.id, name)
+                    .await?
+                    .ok_or_else(|| no_such("view", &app, name))?;
+                Ok(HandlerResponse::ok(view_json(&view)))
+            }
+        }
+    });
+
+    reg.register("saveView", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                // The stored view's id when the path names one — so a body with
+                // another name renames it rather than adding a second view.
+                let id = sc_viewpattern::load_view(&catalog, app.id, name)
+                    .await?
+                    .map_or_else(sc_viewpattern::ViewId::new, |v| v.id);
+                let view = view_from_body(id, app.id, &ctx.body)?;
+                let saved = sc_viewpattern::view_sets()
+                    .save_view(&catalog, &view)
+                    .await?;
+                Ok(HandlerResponse::ok(view_json(&saved)))
+            }
+        }
+    });
+
+    reg.register("deleteView", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_app(&catalog, ctx.path_param("id")?).await?;
+                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                if !sc_viewpattern::view_sets()
+                    .delete_view(&catalog, app.id, name)
+                    .await?
+                {
+                    return Err(no_such("view", &app, name));
+                }
+                Ok(HandlerResponse::ok(json!({ "deleted": true })))
+            }
+        }
+    });
+
+    reg.register("listPages", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_app(&catalog, ctx.path_param("id")?).await?;
+                let pages = sc_viewpattern::list_pages(&catalog, app.id).await?;
+                Ok(HandlerResponse::ok(Json::Array(
+                    pages.iter().map(page_json).collect(),
+                )))
+            }
+        }
+    });
+
+    reg.register("getPage", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_app(&catalog, ctx.path_param("id")?).await?;
+                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                let page = sc_viewpattern::load_page(&catalog, app.id, name)
+                    .await?
+                    .ok_or_else(|| no_such("page", &app, name))?;
+                Ok(HandlerResponse::ok(page_json(&page)))
+            }
+        }
+    });
+
+    reg.register("savePage", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                let id = sc_viewpattern::load_page(&catalog, app.id, name)
+                    .await?
+                    .map_or_else(sc_viewpattern::PageId::new, |p| p.id);
+                let page = page_from_body(id, app.id, &ctx.body)?;
+                let saved = sc_viewpattern::view_sets()
+                    .save_page(&catalog, &page)
+                    .await?;
+                Ok(HandlerResponse::ok(page_json(&saved)))
+            }
+        }
+    });
+
+    reg.register("deletePage", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_app(&catalog, ctx.path_param("id")?).await?;
+                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                if !sc_viewpattern::view_sets()
+                    .delete_page(&catalog, app.id, name)
+                    .await?
+                {
+                    return Err(no_such("page", &app, name));
+                }
+                Ok(HandlerResponse::ok(json!({ "deleted": true })))
+            }
+        }
+    });
+
+    // The registry is what a save is checked against, so it is the list; the
+    // runtime's manifest only describes its entries. A server with no view
+    // runtime running (built without the bundle) still lists the names, since
+    // they are still what a view may be saved with.
+    reg.register("listViewPatterns", |_ctx| async move {
+        let manifests = match sc_viewpattern::view_runtime() {
+            Ok(runtime) => runtime.patterns().await.unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        let out: Vec<Json> = sc_viewpattern::registered_patterns()
+            .into_iter()
+            .map(|pattern| {
+                let manifest = manifests.iter().find(|m| m.name == pattern.name);
+                json!({
+                    "name": pattern.name,
+                    "label": manifest
+                        .map(|m| m.label.as_str())
+                        .filter(|l| !l.is_empty())
+                        .unwrap_or(&pattern.name),
+                    "description": manifest.map(|m| m.description.as_str()).unwrap_or(""),
+                    "table_required": !pattern.tableless,
+                    "view_quantity": manifest.and_then(|m| m.view_quantity.clone()),
+                    "routes": manifest.map(|m| m.routes.clone()).unwrap_or_default(),
+                    "steps": manifest.map(|m| m.steps.clone()).unwrap_or_default(),
+                    "module": pattern.module,
+                })
+            })
+            .collect();
+        Ok(HandlerResponse::ok(Json::Array(out)))
+    });
+
     reg.register("buildApplication", {
         let catalog = catalog.clone();
         let apps = apps.clone();
@@ -4416,6 +4587,10 @@ pub(crate) fn application_json(app: &Application) -> Json {
         "csp": csp_json(&app.csp),
         "attributes": Json::Object(app.attributes.clone()),
         "source": app_source_json(app),
+        // A framework constructed from `sc-app`'s factory registry has nothing
+        // to build: saving is its deployment (TODO "Saltcorn UI" 9.3).
+        "builds": sc_app::framework_factory(&app.framework.name).is_none(),
+        "has_views": app.framework.name == sc_viewpattern::SALTCORN_UI_FRAMEWORK,
     })
 }
 
@@ -6185,6 +6360,38 @@ fn parse_app_id(raw: &str) -> Result<AppId> {
     uuid::Uuid::parse_str(raw)
         .map(AppId)
         .map_err(|_| Error::invalid(format!("`{raw}` is not a valid application id")))
+}
+
+/// The application a path's `id` names, or the 404 saying there is none.
+async fn require_app(catalog: &Catalog, raw_id: &str) -> Result<Application> {
+    let id = parse_app_id(raw_id)?;
+    load_application(catalog, id)
+        .await?
+        .ok_or_else(|| Error::not_found(format!("no application with id {id}")))
+}
+
+/// [`require_app`], refusing an application whose framework has no views: a
+/// view saved into a React application would be a row nothing ever serves.
+async fn require_views_app(catalog: &Catalog, raw_id: &str) -> Result<Application> {
+    let app = require_app(catalog, raw_id).await?;
+    if app.framework.name != sc_viewpattern::SALTCORN_UI_FRAMEWORK {
+        return Err(Error::invalid(format!(
+            "application `{}` uses the `{}` framework; only a `{}` application has views and \
+             pages",
+            app.name,
+            app.framework.name,
+            sc_viewpattern::SALTCORN_UI_FRAMEWORK
+        )));
+    }
+    Ok(app)
+}
+
+/// The 404 for a view or page `name` that `app` does not have.
+fn no_such(kind: &str, app: &Application, name: &str) -> Error {
+    Error::not_found(format!(
+        "application `{}` has no {kind} named `{name}`",
+        app.name
+    ))
 }
 
 /// One stored API token on the wire (§13.6).

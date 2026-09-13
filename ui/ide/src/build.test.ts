@@ -34,6 +34,8 @@ function application(
     csp: null,
     attributes: null,
     source,
+    builds: true,
+    has_views: false,
   };
 }
 

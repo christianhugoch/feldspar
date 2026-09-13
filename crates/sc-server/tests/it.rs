@@ -99,6 +99,8 @@ mod rls_enforcement;
 mod router;
 #[path = "saltcorn_ui_mount.rs"]
 mod saltcorn_ui_mount;
+#[path = "saltcorn_ui_admin_api.rs"]
+mod saltcorn_ui_admin_api;
 #[path = "saltcorn_ui_render.rs"]
 mod saltcorn_ui_render;
 #[path = "schema_edit_api.rs"]
