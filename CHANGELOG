@@ -2,6 +2,171 @@
 
 Changes in reverse chronological order.
 
+## Saltcorn UI, Phase 12: documentation, and the definition of done run by hand
+
+Saltcorn UI is written down, and its definition of done was run by hand against
+a release build on a fresh database. The run found that a restored Saltcorn 1
+backup **did not serve at all**, which no test had caught. That is fixed, with a
+test, along with two smaller faults the run turned up.
+
+- **The design document (12.1).**
+  - §13.3 has a new subsection, *Saltcorn UI: v1's views, hosted rather than
+    reimplemented*, in place of the one-line "Saltcorn-v1 framework" bullet. It
+    covers what was built:
+    - the vendored source, and the line it draws;
+    - the reserved built-in module and the `ViewRuntime` seam;
+    - the snapshot rule extended to views, and the three-tier library that
+      plugins resolve into;
+    - per-application storage, the routes, one layout, and whose authority a
+      view runs under;
+    - actions, the CSP, the import, the admin screens, and the five levels of
+      tests.
+  - §18.5 is marked **answered**. It gives the framework's own CSP with
+    `script-src 'unsafe-inline'` and nothing else relaxed, says why
+    React-rendered views were not chosen, and names externalising the inline
+    handlers as the follow-up.
+  - §2: `sc-viewpattern` moves from layer 8 to 9, above `sc-app`, with
+    `sc-module` and `sc-python` added to the tree beside it.
+    - The dependency graph gains `sc-module → sc-viewpattern` and loses the two
+      arrows that edge implies.
+    - The dependency table's `sc-viewpattern` row is corrected: it had lost
+      `sc-action`, `sc-api`, `sc-expr` and `sc-files`. `sc-module`'s row gains
+      `sc-viewpattern`, and the rows are back in layer order.
+    - A fourth "worth reading for" note explains the position.
+  - §2.1's `ViewPattern` row becomes `ViewRuntime`, in v1's JavaScript.
+  - §9's table gains `_fd_views` and `_fd_pages`. §9.2's ER diagram already had
+    them (Phase 1).
+  - §12 names Saltcorn UI as the one stated CSP exception, says what
+    `ui/builder` is still for, and adds `ui/saltcorn-ui`.
+  - §15.2 no longer says JavaScript modules do not supply `viewtemplates` or
+    `headers`.
+- **`docs/tutorial-saltcorn-ui.md` (12.2).**
+  - Part A restores BooksDB: what the dialog and the report say, the
+    application, signing in, and filter, show, edit, add and delete. It ends
+    with the page source and the CSP.
+  - Part B starts from nothing: a table with its key, a List, a Show, an Edit
+    that returns to the list, an *Add a book* link, a page, a menu and a home
+    page.
+    - There is no page editor, so the page is saved from the browser console
+      through `savePage`.
+    - A new List has no per-row links, because they are its layout, and the
+      tutorial says so rather than offering layout JSON.
+  - Then: who sees what, actions, patterns from a module, and what trips people
+    up.
+  - Every step of Part B was run against the release build over the API, and
+    the step names, labels and option values are the ones the server returned.
+    Running it found that a table made with **Create table** has no primary key
+    and that v1's Edit then fails with a JavaScript error. Step B1 adds the key
+    first, and the symptom is under *Things that trip people up*.
+- **README and `docs/OPERATIONS.md` (12.3).**
+  - README §1 lists Saltcorn UI.
+  - README §3 says it needs npm at build time and nothing at run time.
+  - README §6 names `ui/saltcorn-ui` as the third bundle, and what
+    `SC_BUILD_ADMIN=0` costs: the application does not mount, and no run-time
+    flag supplies the bundle.
+  - OPERATIONS §1 says both artifacts carry the view runtime. `--no-ui` names
+    what it removes.
+  - OPERATIONS §5.3 has three bundles and `SC_SALTCORN_UI_BUNDLE_DIR`, plus a
+    paragraph on what the variable costs bundle by bundle.
+  - OPERATIONS §8.5 has two rows for the two mount sentences.
+  - `tutorial-modules.md` no longer says view templates are not loaded.
+- **The definition of done, run by hand (12.4).** `feldspar serve` ran on a
+  fresh database with `--base-domain localhost`. The steps were driven over HTTP
+  and, where no password was involved, in Chrome.
+  - Steps 1–4 pass after the fix below:
+    - the dialog says *Saltcorn 1.7.0-alpha.1, imported*;
+    - the report lists the tables and rows, 7 views, 1 page and
+      "application `booksdb` serving";
+    - BooksDB is listed with `builds: false`, seven views and one page.
+  - Step 5: `/` names the page and the views.
+  - Step 6: the page redirects to `/auth/login?dest=%2Fpage%2FBooksOverview`.
+  - Step 7: signed in through the application's form, the page renders the
+    Filter and List Books with the authors joined.
+  - Step 8: the ajax reload narrows on `author=1` and `_lte_pages=600`.
+  - Steps 9–11: Show renders; Edit has author and publisher selects; a save
+    lands back on the page with the new value; a new row is added; Delete
+    removes it.
+  - Step 12: the markup is v1's, every asset is under `/static_assets/`, and
+    the CSP header is exactly
+    `default-src 'self'; script-src 'self' 'unsafe-inline'`.
+  - **Where the fixture differs from the TODO's script** (recorded under 12.4):
+    - two books, not five, and no publishers on them;
+    - an author dropdown and two range inputs;
+    - two refused triggers;
+    - a tag and plugins, but no page group or library entry.
+- **Fixed: a restored Saltcorn 1 application did not mount.**
+  - The import puts every v1 trigger in the application's subset, so List Books
+    can be saved (Phase 8). BooksDB's `TrimPages` is a `modify_row`, which the
+    restore refuses.
+  - Mounting projected the application's API providers. That resolved the
+    trigger subset against the live triggers, and failed:
+    "application `BooksDB` exposes trigger `TrimPages`: not found".
+  - So the subdomain served the admin sign-in screen, and steps 5–12 could not
+    happen.
+  - Phase 8's test did not see it because its server had no bundle, so "did not
+    build" was the expected line. The rendering tests write `TrimPages` again by
+    hand.
+  - `sc_app::app_providers_with` now resolves the trigger subset only when the
+    application has an API. A trigger is exposed through an API, and an app
+    with none projects no endpoints.
+  - Code applications keep the strict rule, and
+    `an_app_naming_a_trigger_that_is_not_there_refuses_to_mount` still passes.
+- **Fixed: a declared trigger the server does not have crashed the action that
+  ran it.**
+  - The view snapshot listed every *declared* trigger, so v1's `Trigger.findOne`
+    found `TrimPages` with no action kind. The column answered "Cannot read
+    properties of undefined (reading 'run')".
+  - `application_snapshot` now leaves out a declared trigger the dispatcher does
+    not have. The column answers "Runnable action not found: TrimPages".
+- **Fixed: the restore's advice for Saltcorn UI.**
+  - A Saltcorn UI application that fails to mount is reported as "restored but
+    could not be mounted", not told to "build it from the Applications screen
+    once its source is in place".
+  - One that mounts is "application `x` serving".
+- **Fixed: a spurious log line on every Saltcorn UI change.**
+  - "its generated client could not be rewritten: framework `saltcorn-ui` has
+    no build step" was logged from both the save handler (`reemit_app_client`)
+    and the schema-change re-emit (`AppMounts::reemit_clients`).
+  - Both now skip a framework constructed from a factory.
+- **Tests.**
+  - `saltcorn_ui_render::a_restored_backup_serves_although_a_trigger_it_names_was_refused`
+    restores BooksDB as it comes, without writing `TrimPages` again. It asserts:
+    - the trigger refused by name;
+    - "application `booksdb` serving";
+    - no warning about the application;
+    - List Books rendering every book;
+    - the `TrimPages` column answering an error naming it, with the row
+      untouched.
+  - `setup` becomes `setup_with(tag, bundle, write_trim_pages)`, and `Server`
+    keeps the restore report.
+  - `backup_api::a_saltcorn_1_backup_is_imported` expects the new "could not be
+    mounted" line.
+- **`repo_hygiene`, green again.**
+  - **The `SALTCORN_` sweep** refused OPERATIONS §5.3's
+    `SC_SALTCORN_UI_BUNDLE_DIR`. That is the real variable naming Saltcorn UI's
+    bundle, not the old command's prefix, so `SALTCORN_` preceded by `SC_` is no
+    longer stale.
+  - **The `_sc_` sweep** was already failing before this phase. v1's page
+    globals in the Saltcorn UI document, a doc line in `security.rs`, an
+    assertion in `saltcorn_ui_render` and `_sc_files` in `module-host.mjs` used
+    v1's namespace without saying so.
+    - The globals moved into `v1_page_globals`, whose every line names v1. It
+      writes the same bytes, held by the new
+      `the_v1_page_globals_are_the_line_v1s_wrapper_writes`. The golden files
+      are fragments and would not have seen a difference.
+    - The other three lines say they are v1's.
+- **Notes for review.**
+  - The admin UI shows nothing when a Saltcorn UI application fails to mount on
+    create or save. `mount_error` is in the API response and no screen reads
+    it. README §6 says so; showing it is a small follow-up.
+  - A table with no primary key gets v1's raw JavaScript error from an Edit
+    view's post, not a sentence. A check on save or on post would name the
+    missing key.
+  - `feldspar serve --database-url …` prints "database configured from the
+    `production` environment of feldspar.toml" even though the flag won. It
+    connected to the database the flag named, confirmed by the bootstrap of
+    `_fd_*` there.
+
 ## Saltcorn UI, Phase 11: view patterns from an installed plugin
 
 A v1 plugin whose content is `viewtemplates` — `@saltcorn/kanban`,

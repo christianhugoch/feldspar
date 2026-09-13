@@ -1143,7 +1143,7 @@ impl SaltcornUiFramework {
     /// The document around a body (§9): Saltcorn UI's own head — v1's
     /// `wrapper.js`, ported — with the assets a v1 view needs to *work*.
     ///
-    /// `_sc_globalCsrf` is the viewer's CSRF token, which every ajax post
+    /// v1's `_sc_globalCsrf` is the viewer's CSRF token, which every ajax post
     /// `saltcorn.js` makes sends back as `CSRF-Token` (6.4).
     ///
     /// `patterns` are the view patterns the body rendered: the installed
@@ -1165,8 +1165,7 @@ impl SaltcornUiFramework {
              <script src=\"{common}\"></script>\n\
              <script src=\"{saltcorn}\"></script>\n\
              {plugins}\
-             <script>var _sc_globalCsrf = \"{csrf}\"; var _sc_version_tag = \"{ASSET_VERSION_TAG}\"; \
-             var _sc_pageloadtag = \"\"; var _sc_loglevel = 1; var _sc_lightmode = \"light\";</script>\n\
+             {v1_globals}\
              <title>{title}</title>\n\
              </head>\n\
              <body id=\"page-top\">\n\
@@ -1182,14 +1181,28 @@ impl SaltcornUiFramework {
             saltcorn = asset("saltcorn.js"),
             plugins = plugin_header_tags(&installed_plugin_assets(), patterns),
             title = escape(title),
-            // A token is hex; anything else in it is not put into a script.
-            csrf = req
-                .csrf_token
-                .chars()
-                .filter(char::is_ascii_alphanumeric)
-                .collect::<String>(),
+            v1_globals = v1_page_globals(&req.csrf_token),
         )
     }
+}
+
+/// The page globals v1's `saltcorn.js` and `saltcorn-common.js` read, written
+/// as v1's `wrapper.js` writes them. `_sc_` is v1's own browser namespace, not
+/// this server's metadata prefix, and each line says so.
+fn v1_page_globals(csrf_token: &str) -> String {
+    // A token is hex; anything else in it is not put into a script.
+    let csrf: String = csrf_token
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect();
+    let v1_globals = [
+        format!("var _sc_globalCsrf = \"{csrf}\";"), // v1's CSRF token
+        format!("var _sc_version_tag = \"{ASSET_VERSION_TAG}\";"), // v1's asset tag
+        "var _sc_pageloadtag = \"\";".to_owned(),    // v1
+        "var _sc_loglevel = 1;".to_owned(),          // v1
+        "var _sc_lightmode = \"light\";".to_owned(), // v1
+    ];
+    format!("<script>{}</script>\n", v1_globals.join(" "))
 }
 
 /// The surfaces one render reaches, on the viewer's terms — built the way
@@ -1388,7 +1401,21 @@ pub(crate) async fn application_snapshot(
                 .collect()
         })
         .unwrap_or_default();
-    ViewSnapshot::build_with_trigger_actions(app, set, &roles, base_url, &|name| {
+    // A declared trigger this server does not have (a v1 trigger the restore
+    // refused) is left out, so v1's `Trigger.findOne` finds nothing and
+    // `run_action_column` says the action was not found, naming it. Left in, it
+    // was found with no action kind and failed "Cannot read properties of
+    // undefined (reading 'run')". Without a trigger set nothing is known to be
+    // missing, and the declaration is sent as it is.
+    let app = match triggers {
+        Some(_) => {
+            let mut present = app.clone();
+            present.triggers.retain(|t| actions.contains_key(&t.0));
+            std::borrow::Cow::Owned(present)
+        }
+        None => std::borrow::Cow::Borrowed(app),
+    };
+    ViewSnapshot::build_with_trigger_actions(&app, set, &roles, base_url, &|name| {
         actions.get(name).cloned()
     })
 }
@@ -1790,5 +1817,22 @@ mod tests {
         for bad in ["..", ".", "", "a\\b", "a/b"] {
             assert!(!confined(&["x".into(), bad.to_owned()]), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn the_v1_page_globals_are_the_line_v1s_wrapper_writes() {
+        // Byte for byte what the document carried before the globals moved into
+        // their own function; the golden files are fragments and would not see it.
+        let v1_line = [
+            "<script>var _sc_globalCsrf = \"abc123\"; ", // v1
+            &format!("var _sc_version_tag = \"{ASSET_VERSION_TAG}\"; "), // v1
+            "var _sc_pageloadtag = \"\"; ",              // v1
+            "var _sc_loglevel = 1; ",                    // v1
+            "var _sc_lightmode = \"light\";</script>\n", // v1
+        ]
+        .concat();
+        assert_eq!(v1_page_globals("abc123"), v1_line);
+        // A token is hex, and nothing else in it reaches the script.
+        assert!(v1_page_globals("ab\"</script>").contains("_sc_globalCsrf = \"abscript\";")); // v1
     }
 }

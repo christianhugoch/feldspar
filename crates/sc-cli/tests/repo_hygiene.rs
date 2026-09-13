@@ -1691,8 +1691,17 @@ fn the_binary_and_everything_it_owns_are_named_feldspar() {
             "src/saltcorn",
             "SALTCORN_",
         ] {
+            // `SC_SALTCORN_UI_BUNDLE_DIR` names Saltcorn UI's bundle — the
+            // framework, not the command — so a `SALTCORN_` the build's own
+            // `SC_` prefix introduces is not the old variable namespace.
+            let found = if stale == "SALTCORN_" {
+                text.match_indices(stale)
+                    .any(|(i, _)| !text[..i].ends_with("SC_"))
+            } else {
+                text.contains(stale)
+            };
             assert!(
-                !text.contains(stale),
+                !found,
                 "{}: the command is `feldspar`, so `{stale}` is stale",
                 name
             );

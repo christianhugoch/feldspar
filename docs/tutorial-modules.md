@@ -35,18 +35,22 @@ module.exports = {
   }),
   functions: { md_to_html: (m) => … },  // also loaded — callable from formulas and code
   table_providers: { "RSS feed": … },   // also loaded — a table whose rows the module serves
+  viewtemplates: [ … ],                 // also loaded — view patterns for Saltcorn UI apps
   eventTypes: () => ({ … }),            // reported, not loaded (yet)
 };
 ```
 
-Four of those keys are read: `actions`, whose entries become actions your triggers can run;
+Five of those keys are read: `actions`, whose entries become actions your triggers can run;
 `functions`, whose entries become callable from a code body and a formula (step 5);
 `table_providers`, each of which becomes a kind of table you can create
-([tutorial-table-providers.md](tutorial-table-providers.md)); and `configuration_workflow`,
-whose form becomes the module's own settings. `onLoad` is called too — that is where a plugin
-opens its connection, and `@saltcorn/mqtt`'s action would have nothing to publish through
-without it. Everything else — view templates, types, field views, event types — is **counted
-and named** in the tab so you can see what you are not getting, and is a later milestone.
+([tutorial-table-providers.md](tutorial-table-providers.md)); `viewtemplates`, each of which
+becomes a view pattern a Saltcorn UI application can use, with the scripts and stylesheets
+its `headers` declare ([tutorial-saltcorn-ui.md](tutorial-saltcorn-ui.md)); and
+`configuration_workflow`, whose form becomes the module's own settings. `onLoad` is called
+too — that is where a plugin opens its connection, and `@saltcorn/mqtt`'s action would have
+nothing to publish through without it. Everything else — types, field views, event types —
+is **counted and named** in the tab so you can see what you are not getting, and is a later
+milestone.
 
 ## Step 0 — The ones that came with Saltcorn
 
@@ -331,8 +335,8 @@ quietly doing nothing.
 
 ## What this is not, yet
 
-- **Only actions, functions and table providers.** Views, types, field views and event types are
-  named in the tab and not loaded.
+- **Only actions, functions, table providers and view patterns.** Types, field views and event
+  types are named in the tab and not loaded.
 - **Not only JavaScript any more.** The Type dropdown now offers four pairs, because a module can
   also be a `pip`-installable **Python** distribution supplying the same three things — see
   [tutorial-python.md](tutorial-python.md), whose step 7 writes one from an empty directory. What

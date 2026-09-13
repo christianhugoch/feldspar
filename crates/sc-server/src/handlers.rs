@@ -4901,6 +4901,11 @@ async fn reemit_app_client(
     app: &Application,
     dispatcher: Option<&Arc<sc_action::TriggerDispatcher>>,
 ) {
+    // A framework constructed from a factory (Saltcorn UI) has no source tree,
+    // so there is no client to rewrite and nothing to report.
+    if sc_app::framework_factory(&app.framework.name).is_some() {
+        return;
+    }
     if let Err(e) = sc_app::emit_app_client(catalog, app, dispatcher).await {
         eprintln!(
             "feldspar: application `{}` was saved, but its generated client could \

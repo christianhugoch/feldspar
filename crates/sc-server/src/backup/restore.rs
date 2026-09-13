@@ -885,7 +885,12 @@ async fn restore_application(
     // Before the build: mounting a Saltcorn UI application is reading its views.
     restore_views_and_pages(catalog, entries, key, &app, selection, report).await;
 
+    // A framework constructed from a factory (Saltcorn UI) has no build and no
+    // Build button, so "build it once its source is in place" would send the
+    // admin looking for both.
+    let builds = sc_app::framework_factory(&app.framework.name).is_none();
     match crate::apps::build_and_mount(apps, app).await {
+        Ok(_) if !builds => report.did(format!("application `{subdomain}` serving")),
         Ok(built) => report.did(format!(
             "application `{subdomain}` built and serving{}",
             if built.installed {
@@ -893,6 +898,11 @@ async fn restore_application(
             } else {
                 ""
             }
+        )),
+        Err(e) if !builds => report.skipped(format!(
+            "application `{subdomain}` is restored but could not be mounted, so it is not \
+             serving: {}",
+            e.causes()
         )),
         Err(e) => report.skipped(format!(
             "application `{subdomain}` is restored but did not build, so it is not serving \

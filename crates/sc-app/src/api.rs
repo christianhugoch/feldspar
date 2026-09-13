@@ -458,6 +458,14 @@ pub fn app_providers(app: &Application, cat: &Catalog) -> Result<Vec<Box<dyn Api
 /// one; an app that declares triggers without a dispatcher is refused outright
 /// ([`app_triggers`]), because there its absence changes the app's API surface
 /// rather than one request's answer.
+///
+/// **A trigger is exposed through an API, so an app with no API resolves none.**
+/// The subset is still meaningful without one — a Saltcorn UI application's views
+/// may run only the triggers it declares — but there it is a bound checked when a
+/// view runs a trigger, which names a missing one then, not an endpoint whose
+/// absence changes a generated client. Resolving it here anyway made a Saltcorn 1
+/// import fail to mount whenever one of its triggers was refused on the way in
+/// (`TrimPages`, a v1 `modify_row`), taking every view down with that one column.
 pub fn app_providers_with(
     app: &Application,
     cat: &Catalog,
@@ -466,6 +474,9 @@ pub fn app_providers_with(
 ) -> Result<Vec<Box<dyn ApiProvider>>> {
     validate_api_mounts(app)?;
     let tables = app_tables(app, cat)?;
+    if app.apis.is_empty() {
+        return Ok(Vec::new());
+    }
     let triggers = app_triggers(app, dispatcher)?;
     app.apis
         .iter()

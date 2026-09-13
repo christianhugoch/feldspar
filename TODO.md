@@ -730,15 +730,23 @@ Five levels, because the failure modes are at five levels:
 
 ## Phase 12 — Documentation and the definition of done
 
-- [ ] 12.1 `docs/TECHNICAL_DESIGN.md`: §13.3's Saltcorn UI paragraph replaced with what was
+- [x] 12.1 `docs/TECHNICAL_DESIGN.md`: §13.3's Saltcorn UI paragraph replaced with what was
       built, §18.5 marked answered with §10's reasoning and the externalisation work named as
       the follow-up, §2's crate tree corrected for `sc-viewpattern`'s position, §9.2's ER
       diagram gaining `_fd_views` and `_fd_pages`.
-- [ ] 12.2 `docs/tutorial-saltcorn-ui.md`: restore a v1 backup, or start empty — a table, a
+- [x] 12.2 `docs/tutorial-saltcorn-ui.md`: restore a v1 backup, or start empty — a table, a
       List, a Show, an Edit, a page, a menu, and a link that works.
-- [ ] 12.3 README §3 and `docs/OPERATIONS.md` (the third bundle, the build-time variable, and
+- [x] 12.3 README §3 and `docs/OPERATIONS.md` (the third bundle, the build-time variable, and
       what `--no-ui` costs); the CHANGELOG.
-- [ ] 12.4 The definition of done, run by hand, against a real server.
+- [x] 12.4 The definition of done, run by hand, against a real server. It found that the
+      restored application did not mount at all (a declared trigger the restore refused), and
+      two smaller faults; all three are fixed and the first has a test. Where the fixture
+      differs from the script below: BooksDB has **two** books, not five, and neither has a
+      publisher, so the publisher column is empty; the Filter's dropdown is the **author** and
+      the range is two inputs; the report refuses **two** triggers (`TrimPages`, `AddBook`)
+      and names a tag and two plugins, since the pack has no page group or library entry.
+      Signing in (step 7) was done through the application's own form over HTTP rather than
+      typed into the browser.
 
 ---
 

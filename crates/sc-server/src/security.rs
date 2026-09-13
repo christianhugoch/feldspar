@@ -152,7 +152,7 @@ fn is_bearer_authenticated(request: &Request) -> bool {
 }
 
 /// The v1 spelling of the CSRF header: what `saltcorn.js` sends on every ajax
-/// POST a Saltcorn UI view makes (`"CSRF-Token": _sc_globalCsrf`).
+/// POST a Saltcorn UI view makes (v1's `"CSRF-Token": _sc_globalCsrf`).
 pub const V1_CSRF_HEADER: &str = "csrf-token";
 
 /// The form field a server-rendered form carries the token in — v1's

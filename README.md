@@ -37,6 +37,12 @@ own, for every other kind of box. (Design and planning docs live under
   the coefficients and metrics on a screen and a `predict_row` action to apply a fit to a
   row. The built-in providers are a **default-on cargo feature** (§3). See
   [`docs/tutorial-models.md`](docs/tutorial-models.md).
+- **Saltcorn 1's views, running.** An application whose framework is **Saltcorn UI** owns
+  views (List, Show, Edit, Feed, Filter, ListShowList — and any a v1 plugin such as
+  `@saltcorn/kanban` supplies) and pages, rendered on the server by v1's own view code. Restoring
+  a Saltcorn 1 backup creates one, with its views and pages. There is no build step; the
+  drag-and-drop layout builder is not here yet. See
+  [`docs/tutorial-saltcorn-ui.md`](docs/tutorial-saltcorn-ui.md).
 
 What is still out of scope, and what each milestone since the MVP added, is in
 [`TODO.md`](TODO.md) and the archived lists it links.
@@ -433,7 +439,7 @@ database (§7).
 | **Rust** (with `cargo`) | 1.85+ (edition 2024) | building the `feldspar` binary |
 | **PostgreSQL** | 13 or newer (16 recommended) | the primary data store — *or* SQLite, see §5 Option C |
 | **libclang** (`libclang-dev`) | any recent | building the module runtime (`deno_runtime` → `bindgen`); build time only |
-| **npm** (and the Node.js it ships with) | **npm 9.3.0+** (Node 18+) | building the admin UI bundle (optional; see §6), **and** *installing* modules (Settings → Modules). Debian's and Ubuntu's own package is npm 9.2.0, which cannot install a module at all — install Node from NodeSource (§2.1) or `npm install -g npm@latest` |
+| **npm** (and the Node.js it ships with) | **npm 9.3.0+** (Node 18+) | building the three front-end bundles — the admin UI, the IDE and Saltcorn UI (optional; see §6), **and** *installing* modules (Settings → Modules). Debian's and Ubuntu's own package is npm 9.2.0, which cannot install a module at all — install Node from NodeSource (§2.1) or `npm install -g npm@latest` |
 | **CPython** + `pip`, and `python3-dev` to build against | 3.11+ | **only** for a server that runs Python trigger bodies or installs Python modules — and only in a build that has the `python` feature (below) |
 
 **The built-in model providers are a cargo feature, and it is on.** `sc-model`'s
@@ -477,6 +483,15 @@ permission set an admin grants on the Modules tab, closed until they do; the
 [`docs/tutorial-modules.md`](docs/tutorial-modules.md), and
 [`docs/tutorial-table-providers.md`](docs/tutorial-table-providers.md) for a module
 that supplies a **table** rather than an action.
+
+**Saltcorn UI needs npm at build time and nothing at run time.** Its view runtime is
+Saltcorn 1's own rendering source, vendored in [`ui/saltcorn-ui`](ui/saltcorn-ui) and
+bundled by esbuild into one file, which `cargo build` makes as the third front-end bundle
+(§6). At run time that file is evaluated on the same in-process JavaScript worker modules
+use, so a Saltcorn UI application needs no `node`, no npm and no build step of its own:
+saving a view is the deployment. A binary built without the UI bundles (`SC_BUILD_ADMIN=0`,
+or `build-static.sh --no-ui`) has no Saltcorn UI, and there is no run-time flag that adds it
+back. See [`docs/tutorial-saltcorn-ui.md`](docs/tutorial-saltcorn-ui.md).
 
 ### Python, which is a build and not a flag
 
@@ -694,11 +709,12 @@ put it in a file store and add it under **Tables → Connections**, choosing
 The admin SPA lives in [`ui/admin`](ui/admin) and is compiled to a static bundle
 that the server serves. **`cargo build` builds it for you**: `sc-cli`'s build
 script runs `npm ci && npm run build` in `ui/admin` (and in [`ui/ide`](ui/ide),
-below), embeds the resulting paths in the binary, and `feldspar serve` then serves
-the UI with no `--static-dir` needed:
+below, and in [`ui/saltcorn-ui`](ui/saltcorn-ui), the view runtime Saltcorn UI
+applications render with), embeds the resulting paths in the binary, and
+`feldspar serve` then serves the UI with no `--static-dir` needed:
 
 ```bash
-cargo build --release -p sc-cli     # builds the Rust binary *and* both front ends
+cargo build --release -p sc-cli     # builds the Rust binary *and* all three front ends
 target/release/feldspar serve ...   # serves the admin UI, no flags
 ```
 
@@ -715,6 +731,13 @@ SC_BUILD_ADMIN=0 cargo build --release -p sc-cli   # Rust only, no bundles
 ```
 
 Any other value (including `1` and `true`) builds the UI, as does leaving it unset.
+
+**What that costs beyond the admin UI: Saltcorn UI.** The third bundle is skipped too,
+so an application whose framework is Saltcorn UI does not mount. The server logs one
+error per such application at boot, naming the application, the missing bundle and
+`SC_BUILD_ADMIN` (a save through the API answers the same sentence as `mount_error`;
+the admin UI does not show it yet); every other application is unaffected. Unlike the admin UI, it has no `--static-dir` equivalent: the only fix is
+a build with the variable unset.
 
 > **`SC_BUILD_ADMIN` is a _build-time_ variable, read by `cargo build` — not by
 > `feldspar serve`.** Putting it on the run command has **no effect** either way:

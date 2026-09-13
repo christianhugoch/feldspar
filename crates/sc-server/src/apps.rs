@@ -443,6 +443,12 @@ impl AppMounts {
         let triggers = self.triggers().cloned();
         handle.spawn(async move {
             for app in apps {
+                // A framework constructed from a factory (Saltcorn UI) has no
+                // source tree and so no client to rewrite; asking would log a
+                // "no build step" on every change to one.
+                if sc_app::framework_factory(&app.framework.name).is_some() {
+                    continue;
+                }
                 match sc_app::emit_app_client(&catalog, &app, triggers.as_ref()).await {
                     // An app with no generated client is a configuration, not a
                     // failure, and it says nothing.

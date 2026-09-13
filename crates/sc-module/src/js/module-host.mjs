@@ -2830,7 +2830,7 @@ class FormField {
   }
 
   get pretty_type() {
-    if (this.reftable_name === "_sc_files" || this.type === "File") return "File";
+    if (this.reftable_name === "_sc_files" || this.type === "File") return "File"; // v1's files table
     if (this.is_fkey) return `Key to ${this.reftable_name}`;
     return this.type && typeof this.type === "object" ? this.type.name : "?";
   }

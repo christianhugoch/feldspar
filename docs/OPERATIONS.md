@@ -63,7 +63,11 @@ Two consequences of the static build are worth knowing before you choose it:
   are invisible to it. A name it must reach — your database host, your SMTP
   relay, the ACME CA — has to be in DNS or in `/etc/hosts`.
 
-Both artifacts carry the admin SPA and the file-store IDE, and both need `npm` on
+Both artifacts carry the admin SPA, the file-store IDE and **Saltcorn UI's view
+runtime** (`ui/saltcorn-ui/dist`: Saltcorn 1's view code, bundled, and the browser
+assets its HTML loads) — three bundles, built together or not at all (§5.3). A
+Saltcorn UI application needs nothing on the host beyond that directory: no build,
+no npm, no `node`. Both artifacts need `npm` on
 the host *at run time* if applications will be built or modules installed there:
 the server shells out to npm for those, from the admin UI's **Build** button as
 much as from `feldspar build-app`. It never runs `node` — a module runs on a
@@ -204,7 +208,7 @@ Build-environment options worth knowing:
 | `--native` | build with this machine's toolchain. Needs the target added to rustup, clang/libclang, cmake, a C compiler, `libz.a` (`zlib1g-dev`) and, unless `--no-ui`, node and npm |
 | `--target aarch64-unknown-linux-gnu` | the other supported target. The **musl** targets are refused by name: V8 reaches this build as `rusty_v8`'s prebuilt static archive, which upstream publishes for gnu, darwin and Windows only |
 | `--prefix PATH` | the absolute directory the artifact will be installed to, compiled into the binary |
-| `--no-ui` | skip both front-end bundles (`SC_BUILD_ADMIN=0`), so no Node toolchain is needed |
+| `--no-ui` | skip the three front-end bundles (`SC_BUILD_ADMIN=0`), so no Node toolchain is needed — and the artifact has no admin UI, no IDE and **no Saltcorn UI** (§5.3) |
 | `-j N` | lower cargo's parallelism if the linker runs the machine out of memory. This workspace links V8 |
 | `--no-verify` | skip the post-build checks — static linkage, and a smoke run in Debian and Alpine containers |
 
@@ -591,9 +595,18 @@ effect.**
 
 | Variable | Effect |
 |---|---|
-| `SC_BUILD_ADMIN` | set to `0`, `false`, `False` or `FALSE` to skip building the two front-end bundles, leaving a Rust-only build that needs no JS toolchain. Any other value, and leaving it unset, builds them |
-| `SC_BUNDLE_PREFIX` | absolute path the artifact will be *installed* at. The recorded bundle paths become `$SC_BUNDLE_PREFIX/ui/admin/dist`, `.../ui/ide/dist` and `.../plugins`, so they describe the target machine rather than the build machine. This is what `build-static.sh --prefix` sets |
-| `SC_ADMIN_BUNDLE_DIR`, `SC_IDE_BUNDLE_DIR`, `SC_PLUGINS_DIR` | the compile-time paths the two bundles and the bundled-module catalog are recorded at, set by the build script |
+| `SC_BUILD_ADMIN` | set to `0`, `false`, `False` or `FALSE` to skip building the three front-end bundles, leaving a Rust-only build that needs no JS toolchain. Any other value, and leaving it unset, builds them |
+| `SC_BUNDLE_PREFIX` | absolute path the artifact will be *installed* at. The recorded bundle paths become `$SC_BUNDLE_PREFIX/ui/admin/dist`, `.../ui/ide/dist`, `.../ui/saltcorn-ui/dist` and `.../plugins`, so they describe the target machine rather than the build machine. This is what `build-static.sh --prefix` sets |
+| `SC_ADMIN_BUNDLE_DIR`, `SC_IDE_BUNDLE_DIR`, `SC_SALTCORN_UI_BUNDLE_DIR`, `SC_PLUGINS_DIR` | the compile-time paths the three bundles and the bundled-module catalog are recorded at, set by the build script |
+
+**What `SC_BUILD_ADMIN=0` (and `--no-ui`) costs, bundle by bundle.** The admin UI can
+be supplied at run time with `--static-dir`. The IDE and Saltcorn UI cannot: their
+paths have no flag. For Saltcorn UI that means every application whose framework is
+`saltcorn-ui` fails to **mount** — once, at boot or on save, with an error naming the
+application, the missing bundle and `SC_BUILD_ADMIN` — and is not served, while every
+other application is. The restore of a Saltcorn 1 backup still imports its views and
+pages (they are rows), and they render as soon as a binary with the bundle serves the
+same database.
 
 If the browser shows *"The Saltcorn admin UI is not built"*, the binary was built
 with `SC_BUILD_ADMIN=0`. Either restart with `--static-dir ui/admin/dist` (after
@@ -1059,6 +1072,8 @@ looking hung. Ctrl-C does the same interactively.
 | `error: connecting to database …` at startup | unreachable or wrong credentials. The message names the target without the password. Confirm `psql` reaches the same URL, and that the database exists — the server does not create it |
 | startup error about the `users` table or permissions | the connecting role cannot create tables. Make it the **owner** of the database |
 | "The Saltcorn admin UI is not built" | the binary was built with `SC_BUILD_ADMIN=0`. It is a build-time variable (§5.3): restart with `--static-dir ui/admin/dist`, or rebuild with it unset |
+| An application logs "this server was built without the Saltcorn UI bundle" at boot, and its subdomain serves nothing | its framework is Saltcorn UI and the binary was built with `SC_BUILD_ADMIN=0` or `--no-ui` (§5.3). No flag supplies the bundle at run time: rebuild with the variable unset. Other applications are served meanwhile |
+| "the Saltcorn UI bundle is missing its view runtime" | the recorded `ui/saltcorn-ui/dist` exists but has no `view-runtime.js` — an interrupted build or a partly copied release tree. Run `npm ci && npm run build` in `ui/saltcorn-ui`, or reinstall the tree, then `SIGHUP` |
 | `ETXTBSY` / `Text file busy` during an update | the service is running and holds its own executable open. `systemctl stop feldspar` first (§3.2), or use `--deploy`, which stops and starts it for you |
 | a Python trigger says the server was built without Python | it was. `--features python` is build-time and no flag substitutes for it. Settings → Development names which of the four states this process is in |
 | `error while loading shared libraries: libpython3.x.so` | a Python-feature binary on a host with no matching `libpython`. Install it, or run a binary built without the feature. `abi3` means any CPython 3.11+ will do, but the *soname* is version-specific |

@@ -215,6 +215,8 @@ impl Client {
 /// mounted with the backup's views, one Feed, one ListShowList and its page.
 struct Server {
     client: Client,
+    /// What `/api/backup/restore` answered: `{ restored, warnings }`.
+    restore_report: Value,
     apps: Arc<AppMounts>,
     _catalog: Arc<Catalog>,
     _modules: Arc<ModuleServices>,
@@ -232,6 +234,17 @@ impl Drop for TempDir {
 }
 
 async fn setup(tag: &str, bundle: PathBuf) -> sc_error::Result<Server> {
+    setup_with(tag, bundle, true).await
+}
+
+/// [`setup`], choosing whether to write `TrimPages` as this server's trigger.
+/// Without it the application declares a trigger the restore refused, which is
+/// what a real import of BooksDB leaves behind.
+async fn setup_with(
+    tag: &str,
+    bundle: PathBuf,
+    write_trim_pages: bool,
+) -> sc_error::Result<Server> {
     let db = TestDb::new().await?;
     db.client()
         .await?
@@ -346,24 +359,26 @@ async fn setup(tag: &str, bundle: PathBuf) -> sc_error::Result<Server> {
     // v1 `modify_row`, an action this server does not have, so the restore
     // leaves it out; this is the same trigger written as this server writes one,
     // so the view names a trigger its application declares (§12.3).
-    let (status, created) = client
-        .send(
-            "POST",
-            "/api/triggers",
-            Some(json!({
-                "name": "TrimPages",
-                "description": "",
-                "when": "none",
-                "channel": Value::Null,
-                "only_if": Value::Null,
-                "action": "run_js_code",
-                "configuration": { "code": TRIM_PAGES },
-                "min_role": Value::Null,
-                "enabled": true,
-            })),
-        )
-        .await;
-    assert_eq!(status, StatusCode::CREATED, "{created}");
+    if write_trim_pages {
+        let (status, created) = client
+            .send(
+                "POST",
+                "/api/triggers",
+                Some(json!({
+                    "name": "TrimPages",
+                    "description": "",
+                    "when": "none",
+                    "channel": Value::Null,
+                    "only_if": Value::Null,
+                    "action": "run_js_code",
+                    "configuration": { "code": TRIM_PAGES },
+                    "min_role": Value::Null,
+                    "enabled": true,
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+    }
 
     // --- The application the restore made of the backup, its views and its page
     // (Phase 8) — with this test's own menu, and the two patterns BooksDB has no
@@ -406,6 +421,7 @@ async fn setup(tag: &str, bundle: PathBuf) -> sc_error::Result<Server> {
 
     Ok(Server {
         client,
+        restore_report: report,
         apps: apps.clone(),
         _catalog: catalog,
         _modules: modules,
@@ -618,7 +634,7 @@ async fn the_views_save_forms_run_actions_filter_and_delete() -> sc_error::Resul
     );
     assert!(
         edit.body
-            .contains(&format!("var _sc_globalCsrf = \"{csrf}\"")),
+            .contains(&format!("var _sc_globalCsrf = \"{csrf}\"")), // v1's global
         "{}",
         edit.body
     );
@@ -889,6 +905,90 @@ async fn an_action_that_is_not_the_applications_is_refused_by_name() -> sc_error
     assert!(
         answer["error"].as_str().unwrap().contains("TrimPages"),
         "{answer}"
+    );
+    assert_eq!(book(client, &json!(1)).await.unwrap()["pages"], pages);
+    Ok(())
+}
+
+/// Found by running the definition of done by hand (12.4): BooksDB restored as it
+/// comes — its `TrimPages` refused, because `modify_row` is not an action here,
+/// and nobody writing it again — still mounts and serves. The application declares
+/// the trigger (the import puts every v1 trigger in its subset, so List Books can
+/// be saved), and an application with no API exposes no trigger, so the missing
+/// one is found when the action column runs it, not on the mount.
+#[tokio::test]
+async fn a_restored_backup_serves_although_a_trigger_it_names_was_refused() -> sc_error::Result<()>
+{
+    let Some(bundle) = bundle_dir() else {
+        eprintln!(
+            "skipping: the Saltcorn UI bundle is not built (npm ci && npm run build in ui/saltcorn-ui)"
+        );
+        return Ok(());
+    };
+    let mut server = setup_with("refused-trigger", bundle, false).await?;
+    let report = server.restore_report.clone();
+    let lines = |key: &str| -> Vec<String> {
+        report[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l.as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert!(
+        lines("warnings")
+            .iter()
+            .any(|l| l.starts_with("trigger `TrimPages`") && l.contains("modify_row")),
+        "{report}"
+    );
+    assert!(
+        lines("restored")
+            .iter()
+            .any(|l| l == "application `booksdb` serving"),
+        "the restore mounts the application: {report}"
+    );
+    assert!(
+        !lines("warnings")
+            .iter()
+            .any(|l| l.contains("application `booksdb`")),
+        "{report}"
+    );
+    let app = booksdb(&server._catalog).await;
+    assert!(app.triggers.iter().any(|t| t.0 == "TrimPages"));
+
+    // Every view renders, List Books with a row per book.
+    let client = &mut server.client;
+    let list = client.app_get("/view/List%20Books", &[]).await;
+    assert_eq!(list.status, StatusCode::OK, "{}", list.body);
+    for row in rows_of(client, "Books").await {
+        let title = row["title"].as_str().unwrap();
+        assert!(list.body.contains(title), "{title} in {}", list.body);
+    }
+
+    // Its TrimPages column answers naming the trigger, and changes nothing.
+    let csrf = client.cookies.get(CSRF_COOKIE).cloned().unwrap();
+    let pages = book(client, &json!(1)).await.unwrap()["pages"].clone();
+    let ran = client
+        .app_post(
+            "/view/List%20Books/run_action",
+            "application/json",
+            json!({ "rndid": "ce2dfa", "id": "1", "column_index": 8 })
+                .to_string()
+                .into_bytes(),
+            &[
+                ("CSRF-Token", csrf.as_str()),
+                ("X-Requested-With", "XMLHttpRequest"),
+            ],
+        )
+        .await;
+    let answer: Value = serde_json::from_str(&ran.body).unwrap_or(Value::Null);
+    assert!(
+        answer["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("TrimPages")),
+        "{}: {}",
+        ran.status,
+        ran.body
     );
     assert_eq!(book(client, &json!(1)).await.unwrap()["pages"], pages);
     Ok(())

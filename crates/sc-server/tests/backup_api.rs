@@ -1072,7 +1072,7 @@ async fn a_saltcorn_1_backup_is_imported() -> sc_error::Result<()> {
     // This server was built with no Saltcorn UI bundle, so the application is
     // saved and not serving — and the report says which.
     assert!(
-        warned("application `booksdb-2` is restored but did not build"),
+        warned("application `booksdb-2` is restored but could not be mounted"),
         "{report}"
     );
 

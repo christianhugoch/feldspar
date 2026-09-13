@@ -96,7 +96,6 @@ feldspar/
 │  │                              #    above the row layer it reads through, because a module
 │  │                              #    supplies model providers (TODO "Predictive models" §4)
 │  ├─ sc-fieldview/               # 6. FieldView trait, built-in fieldviews (React components)
-│  ├─ sc-viewpattern/             # 8. ViewPattern trait (v1-style views: Show/List/Edit/Filter…)
 │  ├─ sc-api/                     # 8. Endpoint model (typed Rust values) + API providers
 │  │                              #    (REST/GraphQL/gRPC/tRPC/MCP) + TypeScript consumer gen
 │  ├─ sc-app/                     # 8. Application, Framework provider trait, routing/subdomains
@@ -104,6 +103,14 @@ feldspar/
 │  │                              #    delete_rows, fetch, run_js_code, send_email) — above the
 │  │                              #    row layer, because a trigger's write goes *through* it
 │  │                              #    (§10.1)
+│  ├─ sc-viewpattern/             # 9. Saltcorn UI (§13.3): `_fd_views`/`_fd_pages`, the pattern
+│  │                              #    registry, the view snapshot, the `ViewRuntime` seam and
+│  │                              #    the `saltcorn-ui` framework. Above sc-app, because it
+│  │                              #    implements `Framework`; its runtime is implemented one
+│  │                              #    layer further up, by sc-module
+│  ├─ sc-module/                  # 9. v1 plugins on a Deno worker in this process (§15.1),
+│  │                              #    and the view runtime: v1's vendored patterns run there
+│  ├─ sc-python/                  # 9. the Python code adapter (§15.2), over sc-module's seams
 │  ├─ sc-core-traits/             # 9. the built-in agent traits (table, trigger and coding
 │  │                              #    traits) + the `run_agent` action — same layer, same
 │  │                              #    reason: their writes go through the row layer (§11.3)
@@ -142,15 +149,14 @@ graph TD
   coretraits --> app["sc-app"]
   coreact --> api["sc-api"]
   server --> module["sc-module"]
-  server --> viewpattern["sc-viewpattern"]
-  viewpattern --> app
+  viewpattern["sc-viewpattern"] --> app
   server --> model["sc-model"]
   coreact --> model
   server --> python["sc-python"]
   python --> module
   python --> coreact
   module --> coreact
-  module --> app
+  module --> viewpattern
   server --> workflow["sc-workflow"]
   workflow --> agent
   module --> action["sc-action"]
@@ -206,19 +212,19 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-llm` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
 | `sc-action` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-model` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
-| `sc-module` | `sc-action` `sc-app` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-model` `sc-query` `sc-types` |
-| `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-model` `sc-module` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
 | `sc-workflow` | `sc-action` `sc-agent` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
 | `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
 | `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
-| `sc-viewpattern` | `sc-app` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-query` `sc-types` |
 | `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-model` `sc-query` `sc-types` |
+| `sc-viewpattern` | `sc-action` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
+| `sc-module` | `sc-action` `sc-app` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-model` `sc-query` `sc-types` `sc-viewpattern` |
+| `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-model` `sc-module` `sc-types` |
 | `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
 | `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-types` `sc-viewpattern` `sc-workflow` |
 | `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-types` `sc-viewpattern` |
 
-Three things the graph is worth reading for:
+Four things the graph is worth reading for:
 
 - **The two concrete drivers are depended on only where a driver is *constructed***: `sc-cli`
   and `sc-server` at startup, and `sc-catalog` for the connections an admin adds in the UI, which
@@ -230,6 +236,13 @@ Three things the graph is worth reading for:
   and `sc-agent`.** The built-in action set and the built-in agent traits are *users* of the row
   layer, not part of it — a trigger's write goes through the same path an HTTP request does
   (§10.1, §11.3), so they must be above everything that path touches.
+- **`sc-viewpattern` is above `sc-app`, and `sc-module` is above it.** The tree once put view
+  patterns at layer 8 as a trait beside the API; what was built is a *framework* (§13.3,
+  Saltcorn UI), so it implements `sc-app`'s `Framework` and must sit above it. What renders a
+  view is v1's own JavaScript on `sc-module`'s worker, so the seam (`ViewRuntime`) is declared
+  in `sc-viewpattern` and implemented one layer up by `sc_module::ModuleViewRuntime` — the
+  shape `FrameworkHost` and `TableProviderHost` already have. `sc-server` installs the one into
+  the other at boot, and neither crate names the other's concrete type.
 - **`sc-expr` is reachable only through `sc-catalog`** and depends on nothing but `sc-query` (and
   `sc-error`). That is the deliberate cut described below: the formula language knows the query
   AST it compiles into and nothing about tables.
@@ -278,7 +291,7 @@ bundle that registers zero or more implementations of these into the catalog at 
 | `LlmProvider` | `sc-llm` | Rust | One configured chat model, streamed; hides the vendor's API |
 | `Importer` / `Exporter` | `sc-catalog` | any | Move table data to/from a format |
 | `ModelProvider` | `sc-model` | any | Fit/inspect/apply a predictive model over table data |
-| `ViewPattern` | `sc-viewpattern` | any | A v1-style view template over a table |
+| `ViewRuntime` | `sc-viewpattern` | JavaScript (v1's) | Render, post to and configure v1 view patterns — the six vendored ones and any a module's `viewtemplates` supplies (§13.3) |
 | `FileStore` | `sc-files` | any | A named directory/object store |
 | `ApiProvider` | `sc-api` | any | Expose tables, actions & custom routes over a protocol; emit a typed TS client |
 | `Framework` | `sc-app` | any | Own an application's primary UI (React/Next/Svelte/v1); declares its settings for the admin UI |
@@ -1185,6 +1198,8 @@ a sparse value goes into `attributes`.**
 | `_fd_config` | configuration | key + JSON value, one row per setting. Every key is **declared** as a `FormField` in `sc-config` (§6.2's vocabulary), which is what types it: a write is validated against the declaration and an undeclared key is refused, so the admin UI renders the settings screen from the declarations and knows nothing about any particular setting. Per-application scope is not built yet — today's keys are all installation-wide (§13.5). `feldspar get-cfg` / `set-cfg` read and write the same rows from a terminal — the value a terminal supplies is a string, so the declaration is what types it — for the reason `feldspar api` exists: a setting reachable only from a browser is unreachable from a deploy script |
 | `_fd_acme_cache` | ACME account + issued certificates | not configuration and not admin-visible: opaque bytes keyed by the digest of the domain list and the CA directory URL (§13.5), in the database so a renewal survives a restart and a second node does not order its own |
 | `_fd_applications` | applications | framework + its config, subdomain, table/store subset, API config, static dirs, CSP; **not an overlay** — the row is the app's only definition (§13.2), so this table is needed as soon as apps are (MVP) |
+| `_fd_views` | a Saltcorn UI application's views | **not an overlay**, and **per application** (§13.3): `(application, name)` is unique, so two applications may each have a `List Books` over one table. The pattern name, the table (which must be in the application's subset), `min_role`, `slug`, and a `configuration` that is **v1's shape, stored untouched** — it is what v1's own `list.ts` reads. `application` is by value, so deleting an application deletes its views itself |
+| `_fd_pages` | a Saltcorn UI application's pages | the same rules as `_fd_views`: per application, unique by name, a v1-shaped `layout` stored untouched, `min_role`, and `root_page_for_roles` in `attributes` |
 | `_fd_models` | model definitions | **not an overlay** — the row is the model's only definition (§14.2): the provider, the `dataset` (which rows and which derived values, as a list of `sc-expr` formulas), the provider's configuration, the hyperparameter *space* (per key a value or a list to search over) and the split's fractions and seed. `table_name` is derived from the dataset on the way out and checked against it on the way in, so the list can be filtered by table without reading every dataset |
 | `_fd_model_instances` | one fit each | the provider's serialised `state`, its `parameters` (structured for display), the **host's** `metrics` per split, and the `encoding` the fit was made with — which is the load-bearing one: a prediction is encoded the way its fit was, or it fails. `status` is a column because every row has one and it is what the list filters on; the failure **sentence** is in `attributes`, because it is present only on the rows that failed. `active` is a column and at most one row per model carries it |
 | `_fd_roles` | roles | **not an overlay** — a role is a row carrying a name and role-specific settings; `users.role` is a foreign key onto it (§7.4). Two built-ins (admin, public) seeded at bootstrap |
@@ -3506,7 +3521,8 @@ feedback → self-heal). For users who prefer an external coding agent, the copi
 ## 12. Admin UI, CSP, and the form runtime (`ui/admin`, `ui/form-runtime`)
 
 The admin UI and applications enforce a **strict Content-Security-Policy** (no inline
-scripts, no inline event handlers). v2 satisfies this **structurally through React** rather
+scripts, no inline event handlers). A Saltcorn UI application is the one stated exception, and
+only in `script-src` (§13.3, *Its CSP*). v2 satisfies this **structurally through React** rather
 than through a server-side HTML model: the admin UI is a **React + TypeScript SPA**
 (`ui/admin`) that talks to the server exclusively over a **typed JSON API** (§13), and every
 UI bundle is self-hosted with no inline handlers, so the CSP needs no `unsafe-inline` **script**
@@ -3552,8 +3568,14 @@ generated typed client (§13.1), so the API and the UI cannot drift.
 - **`ui/ide`** — the file-store IDE: the VS Code workbench embedded on its own admin route, for
   editing a store that holds an application's source. It is *not* part of the SPA, for reasons
   that are structural rather than stylistic (§12.1).
-- **`ui/builder`** — the Craft.js + react-flow drag-and-drop builder is *not* built into the
-  admin UI; it arrives with the Saltcorn-v1 view/page experience (post-MVP).
+- **`ui/builder`** — the Craft.js + react-flow drag-and-drop builder is *not* built yet. The
+  view/page experience it edits exists (§13.3, Saltcorn UI): views and pages render, and every
+  configuration step of a view but its layout is edited in the admin UI. The builder is what
+  will edit the layout step, and it is the next milestone.
+- **`ui/saltcorn-ui`** — not an SPA and not React: Saltcorn 1's rendering source, vendored,
+  bundled by esbuild into one file the module worker evaluates, plus the browser assets v1's
+  HTML needs (Bootstrap, jQuery, `saltcorn.js`). The third bundle `sc-cli`'s build script makes
+  (§13.3).
 
 The XSS-safety story is now the ordinary React one — values are escaped by the framework and
 `dangerouslySetInnerHTML` is banned by lint — pairing with the structural SQL-injection
@@ -4234,9 +4256,10 @@ would make a build fail for a reason unrelated to building.
   `output`, `command` and an optional `client`.
 - **The `react` framework** — the same serving path with the settings replaced by
   conventions and the project created by the server. See "Two code frameworks" below.
-- **Saltcorn-v1 framework**: the drag-and-drop views/pages experience, continuously
-  improved, using `sc-viewpattern` + `ui/builder`. How its rendered output stays CSP-safe
-  now that `sc-markup` is dropped is an open question (§18.5).
+- **The `saltcorn-ui` framework (Saltcorn UI)** — the v1 views/pages experience: an
+  application that owns views and pages, rendered on the server by **v1's own view patterns**
+  and served on its subdomain. No source tree and no build. See "Saltcorn UI" below; the
+  drag-and-drop layout editor (`ui/builder`) is the part still to come.
 
 #### Two code frameworks, and why
 
@@ -4356,6 +4379,131 @@ follows.
 
 The registry is installed whole on every module change, beside the action registry and the
 table providers, so a framework that has just been uninstalled stops being offered.
+
+#### Saltcorn UI: v1's views, hosted rather than reimplemented
+
+The third framework is what GOALS means by "applications can also be built in the saltcorn1
+experience": an application whose row says `framework = "saltcorn-ui"` owns **views** (a
+view pattern — v1 says view template — configured over one table) and **pages**, and the
+server renders them. Its tutorial is [`docs/tutorial-saltcorn-ui.md`](./tutorial-saltcorn-ui.md).
+
+**The patterns are v1's source, not a port.** `list.ts`, `show.ts`, `edit.ts`, `feed.ts`,
+`filter.ts`, `listshowlist.ts`, `viewable_fields.ts`, the fieldviews, `models/form.ts`,
+`fieldrepeat.ts`, `expression.ts` and the whole of `@saltcorn/markup` are copied into
+`ui/saltcorn-ui/vendor/` (from `@saltcorn/data` 1.7.0-alpha.1, each file headed with its
+upstream path, `vendor/refresh.sh` to take them again) and esbuilt into one file,
+`dist/view-runtime.js`. Reimplementing them would give a Saltcorn that renders *nearly* the
+same, and every difference would be a bug somebody's app used to not have. The line drawn is
+**everything that renders, and nothing that reaches a database, a tenant or a socket**.
+`plugin-helper.ts` straddles it and is split per export (26 kept; `generate_joined_query`,
+`json_list_to_external_table` and `build_schema_data` refused by name), with a test holding
+every export to exactly one side. `room` and `workflow-room` are not vendored.
+
+**Where it runs: `sc-module`'s worker, as a reserved built-in module.** The view runtime needs
+what a module already has — a `Module._load` patch answering `@saltcorn/*`, a call table, a
+timeout, a heap cap, a permission set — so it is the module `@feldspar/saltcorn-ui`, loaded
+from the bundle directory with an **empty** permission set and pinned to one worker. The seam
+is `sc_viewpattern::ViewRuntime` (`patterns`, `render`, `render_page`, `post`, `route`,
+`config_step`, `initial_config`, `references`), implemented by `sc_module::ModuleViewRuntime`.
+Not a second runtime and not a Rust renderer: two implementations of one thing disagree by
+the third bug fixed in one of them. **An embedded view does not cross the seam** — a page
+embeds a Filter which embeds a List, and `View.run` recurses inside the worker, under a depth
+cap of 16 that names the cycle it broke.
+
+**The snapshot rule, extended.** v1's `View.findOne` and `getState().getConfig` are
+synchronous, as `Table.findOne` is, so they are answered from a `ViewSnapshot` — the
+application, its menu and settings, the roles, its triggers, every view and page — sent
+beside the `SchemaSnapshot` behind a generation stamp and re-sent only when a view or page
+write, an application save or `SIGHUP` moves it. Rows are host calls. `getState()` is built
+**per application**, not per tenant: `site_name` is the app's, `base_url` its subdomain, and
+`getConfig` answers a declared key set (`CONFIG_KEYS`), which a test holds equal to the
+framework's `config_spec`. An undeclared key answers the caller's default, which is v1's
+contract and the one place this framework prefers it to a named failure.
+
+**The bundle is a library, not a private bundle.** Every v1 specifier the bundle answers
+(`@saltcorn/markup/tags`, `@saltcorn/data/plugin-helper`, `models/form`, …) resolves into its
+real exports **for every module on the worker**, and the models only a server can answer
+(`Table`, `Field`, `View`, `Page`, `Trigger`, `File`, `User`, `db`) are host shims. Between
+implemented and refused there is a third tier, **absent** — a named list of exports that answer
+`undefined`, because a plugin that writes `features?.public_user_role || 10` is feature-testing,
+and a truthy refusal would turn its graceful degradation into a crash. That is what lets an
+installed v1 plugin supply patterns (`viewtemplates` is a module facility key with the usual
+one-namespace rule, `headers` inject a plugin's scripts into the documents that render its
+patterns, and its `public/` is served at `/plugins/public/<name>@<version>/*`). `@saltcorn/kanban`
+installs and works. `@saltcorn/mind-map` installs, registers, and fails naming `db.query`:
+v1's raw SQL is refused as what it is, because it would go around the plan seam, the ownership
+rule and the row cap.
+
+**Storage** is `_fd_views` and `_fd_pages` (§9), **per application** — the one real departure
+from v1, whose views are global to a tenant. Here several applications share one data layer,
+each seeing its own table subset, so a global view would be reachable from every subdomain on
+tables half of them cannot see. A view may only name a table in its application's subset, and
+its `configuration` is stored exactly as v1 shaped it: translating it would be this server
+inventing a second configuration format to keep in step with a file it does not own.
+
+**Serving.** The framework is a `FrameworkFactory` — constructed in Rust outside `sc-app` and
+registered at boot, consulted after `react` and `code` and before a module's declarations.
+`build()` answers `None`: saving a view is the whole deployment, and saving the application
+mounts it. It routes `/` (the role's root page, else a document naming what exists),
+`/view/:name[/*slug]`, `/page/:name`, `POST` to a view (its `runPost`) and to a view's declared
+routes (`run_action`, `update_matching_rows`), `POST /delete/:table/:id`, `/auth/login`,
+`/auth/logout` and `/auth/signup` (the last only when `allow_signup` is on),
+`/static_assets/:tag/*`, `/files/serve/*` under the store's access rules, and a plugin's public
+files. `AppRequest` grew the query, the body, the headers a pattern reads, the user, the CSRF
+token and the origin; `AppResponse` grew headers and a session change, applied by the same
+`apply_session` an API provider's login goes through, so there is one session cookie story.
+**One built-in layout**: v1's `emergency_layout` (a Bootstrap navbar plus `renderLayout`),
+drawn in the same worker call as the view, in a document ported from v1's `wrapper.js`, with
+Bootstrap 5.3, jQuery, Font Awesome and `saltcorn.js` vendored and served from `/static_assets/`.
+Themes as plugins are not built.
+
+**Whose authority.** Two checks, not one. A view's `min_role` is checked before its pattern
+runs — an anonymous navigation is redirected to `/auth/login?dest=…`, a signed-in viewer below
+it gets a 403 naming the view. And every row the pattern reads or writes is the **viewer's**:
+the framework builds the view's table surface with `TableHost::viewer_only`, which makes the
+caller's authority a ceiling, so a pattern or plugin read that forgets `forUser` gets the
+viewer's rows rather than the admin's, and naming another user is refused. The table subset is
+checked on save and again on render, inside the worker, for embedded views too.
+
+**Actions.** A view's action column names one of three things, in this order: v1's fixed set of
+view actions (`Delete`, `Save`, `GoBack`, …, which no trigger can shadow); a trigger **the
+application declares**; or anything else, which is refused at save time where the configuration
+names it and at run time otherwise.
+
+**Its CSP**, which is §18.5's answer. v1's markup puts JavaScript in `onclick`, `onchange` and
+`href="javascript:…"` attributes throughout `viewable_fields.ts` and the patterns, and inline
+handlers cannot be nonced. So Saltcorn UI's `framework_default_csp` is the strict baseline with
+`script-src 'self' 'unsafe-inline'`, **and nothing else relaxed** — no `eval`, no `blob:`, no
+third-party origin, `default-src 'self'` (which also blocks v1's `style="…"` attributes). The
+relaxation is per framework, shown on the application's screen, and a policy the admin states
+still wins. Externalising the handlers — delegated listeners over `data-` attributes, in the
+vendored copy, checked against the golden HTML — is what would put the strict policy back, and
+it is the named follow-up rather than a prerequisite.
+
+**The import.** A Saltcorn 1 backup restores into **one application**: named from `site_name`,
+a subdomain derived from it, every imported table, file store and trigger in its subsets, v1's
+views and pages one-to-one with their configuration and layout unchanged, and the menu from
+`menu_items` minus the entries that point at v1's admin UI. A view whose pattern this server
+lacks, or whose table did not import, is a report line and not a failed restore. Restoring the
+same backup again matches the application by name and replaces its views and pages, keeping its
+subdomain, settings and CSP.
+
+**The admin UI** gives such an application **Views** and **Pages** tabs, and no Build button.
+A view is created from a table and a pattern (the pattern's `initial_config` supplies the first
+configuration) and configured through the pattern's own `configuration_workflow` as a wizard —
+one `config_step` call per step carrying what has been answered so far, because a step's form
+does not exist without a table — rendered by the same `FormField` form every other settings
+screen uses. A save **replays the steps**, so a configuration a step would refuse is refused
+naming the step and the field. The layout step is shown as read-only JSON; that is what
+`ui/builder` will edit. Pages have no editor yet: they are listed, deleted, restored, and saved
+through the `savePage` endpoint.
+
+**Tested at five levels**, because it fails at five: Rust units over a real Postgres; the
+compatibility layer's JavaScript through a real worker; golden HTML for each of the six patterns
+over the BooksDB fixture (the test that catches a shim returning a plausible wrong thing);
+the restored BooksDB driven over HTTP (sign in, page, filter, list, show, edit, save, delete);
+and an ignored-by-default test that installs `@saltcorn/kanban` from its checkout — the only
+test written, in effect, by somebody who did not know what was shimmed.
 
 #### The agent that builds the application
 
@@ -6422,8 +6570,11 @@ are one language, evaluated on the pure isolate, and a second one would be a sec
 "may this user read this row". No Python **database driver** (§15's own exclusion). No language
 service — the editor gets Monaco's Python grammar and four-space indentation, while completion is
 what Python does not get until a generated `saltcorn.pyi` and a `pyright` bridge exist. No entity
-types the JavaScript modules do not supply either (views, viewtemplates, types, fieldviews, event
-types, routes, headers, agent traits): they are reported in the manifest census, not loaded. And
+types the JavaScript modules do not supply either (views, types, fieldviews, event types, routes,
+agent traits): they are reported in the manifest census, not loaded. Nor `viewtemplates` and
+`headers`, which a JavaScript module *does* supply (§13.3): a view pattern is v1's JavaScript,
+run on the view runtime's worker beside the vendored library, and a Python object cannot be
+one. And
 no permission model for Python modules, which is the no-sandbox paragraph above — the obligation is
 to say so rather than to approximate one.
 
@@ -6666,10 +6817,21 @@ These are deliberately not settled here; they need prototyping or a product deci
    pure expression; assignment, `new`, `this`, function/class expressions and a long list of
    constructs refused by name) and running the reified path in a no-extensions, no-ops
    `deno_core` isolate with a watchdog. **The question is closed, not deferred.**
-5. **Server-rendered v1 views under strict CSP.** With the `sc-markup` symbolic-HTML model
-   dropped (§12), how the Saltcorn-v1 view/page experience renders CSP-safe HTML — server
-   templates with externalised JS, or React-rendered views driven by the builder — is an open
-   design question (post-MVP).
+5. **Server-rendered v1 views under strict CSP — ANSWERED: they do not, yet, and the
+   relaxation is one directive, per framework.** Saltcorn UI (§13.3) renders v1's own HTML,
+   which carries inline event handlers (`onclick`, `onchange`, `href="javascript:…"`) in
+   dozens of places; a handler attribute cannot be nonced, and only `'unsafe-hashes'` with a
+   hash per distinct handler or `'unsafe-inline'` permits one. So the framework supplies its
+   own default policy through `framework_default_csp` — the strict baseline with `script-src
+   'self' 'unsafe-inline'` — and nothing else moves: `default-src 'self'`, no `eval`, no
+   `blob:`, no third-party origin, the admin UI's policy untouched and still asserted character
+   for character, and a policy an admin states on the application still winning. React-rendered
+   views were not chosen because they would be a reimplementation of v1's patterns, which is
+   what hosting v1's source avoids.
+   **The follow-up is named**: externalising the handlers in the vendored copy — delegated
+   listeners over `data-` attributes in `viewable_fields.ts`, the patterns and `@saltcorn/markup`
+   — after which the framework's policy becomes the strict one. It is mechanical and large, and
+   it is testable against the golden HTML the Saltcorn UI milestone committed.
 
 ---
 
