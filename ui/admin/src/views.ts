@@ -34,7 +34,7 @@ export type PatternItem = ListViewPatternsResponse[number];
 export type StepItem = ViewConfigStepResponse;
 export type References = ViewReferencesResponse;
 
-export type AppTab = "settings" | "views" | "pages";
+export type AppTab = "settings" | "views" | "pages" | "app-settings";
 
 /** Where the page is, as much of `window.location` as a link needs. */
 export type Here = { protocol: string; host: string };
@@ -61,8 +61,24 @@ export function appTabs(
   if (app.has_views) {
     tabs.push({ id: "views", label: "Views", href: `${base}/views` });
     tabs.push({ id: "pages", label: "Pages", href: `${base}/pages` });
+    tabs.push({
+      id: "app-settings",
+      label: "App settings",
+      href: `${base}/app-settings`,
+    });
   }
   return tabs;
+}
+
+/** Whether a framework's own settings live on the App settings tab rather than
+ * on the application form. A framework whose applications have views and pages
+ * has settings that are the running application's — its menu, login form and
+ * languages — which nobody can fill in before the views they name exist, and
+ * which would bury the handful of fields that creating an application needs. */
+export function settingsOnOwnTab(
+  framework: { has_views: boolean } | undefined,
+): boolean {
+  return Boolean(framework?.has_views);
 }
 
 /** A view or page name as a path parameter: the generated client puts it in
@@ -160,7 +176,11 @@ export function pageRows(
 }
 
 /** The confirmation a delete asks for. */
-export function deleteConfirmation(kind: "view" | "page", name: string, appName: string): string {
+export function deleteConfirmation(
+  kind: "view" | "page",
+  name: string,
+  appName: string,
+): string {
   const consequence =
     kind === "view"
       ? "Pages and views that show or link to it will no longer find it."
@@ -215,7 +235,11 @@ export function applyStep(
   const key = step.context_field;
   const nested = key ? configuration[key] : undefined;
   const target: Configuration = key
-    ? { ...(nested && typeof nested === "object" && !Array.isArray(nested) ? (nested as Configuration) : {}) }
+    ? {
+        ...(nested && typeof nested === "object" && !Array.isArray(nested)
+          ? (nested as Configuration)
+          : {}),
+      }
     : { ...configuration };
   for (const field of step.fields) {
     if (field.name in built) target[field.name] = built[field.name];
@@ -234,7 +258,9 @@ export function layoutJson(configuration: Configuration): string {
 }
 
 /** `Step 2 of 5: Default state`. */
-export function stepTitle(step: Pick<StepItem, "index" | "count" | "name">): string {
+export function stepTitle(
+  step: Pick<StepItem, "index" | "count" | "name">,
+): string {
   return `Step ${step.index + 1} of ${step.count}: ${step.name}`;
 }
 
@@ -268,7 +294,10 @@ export type NewViewForm = {
 /** Why the new-view form cannot be submitted yet, or `null`. The server checks
  * everything again — the name's characters, the table's subset, the role — and
  * says so in its own words; this only stops the obviously incomplete. */
-export function newViewError(form: NewViewForm, patterns: PatternItem[] | null): string | null {
+export function newViewError(
+  form: NewViewForm,
+  patterns: PatternItem[] | null,
+): string | null {
   if (!form.name.trim()) return "A view needs a name.";
   if (!form.viewpattern) return "Choose a view pattern.";
   const pattern = patterns?.find((p) => p.name === form.viewpattern);
@@ -297,20 +326,31 @@ export function viewEditorHref(appId: string, name: string): string {
 /** What a rename will leave behind, one sentence per kind, said **before** the
  * rename: the views and pages that name the view keep the old name, and stop
  * finding it. Nothing is rewritten. */
-export function referencesReport(name: string, references: References): string[] {
+export function referencesReport(
+  name: string,
+  references: References,
+): string[] {
   const list = (names: string[]) => names.map((n) => `"${n}"`).join(", ");
   const lines: string[] = [];
   if (references.embedded_in.length) {
-    lines.push(`Embedded in ${plural(references.embedded_in.length, "view")} ${list(references.embedded_in)}.`);
+    lines.push(
+      `Embedded in ${plural(references.embedded_in.length, "view")} ${list(references.embedded_in)}.`,
+    );
   }
   if (references.linked_from.length) {
-    lines.push(`Linked to from ${plural(references.linked_from.length, "view")} ${list(references.linked_from)}.`);
+    lines.push(
+      `Linked to from ${plural(references.linked_from.length, "view")} ${list(references.linked_from)}.`,
+    );
   }
   if (references.pages.length) {
-    lines.push(`Shown on ${plural(references.pages.length, "page")} ${list(references.pages)}.`);
+    lines.push(
+      `Shown on ${plural(references.pages.length, "page")} ${list(references.pages)}.`,
+    );
   }
   if (!lines.length) {
-    return [`Nothing in this application refers to "${name}" by name, so nothing is left behind.`];
+    return [
+      `Nothing in this application refers to "${name}" by name, so nothing is left behind.`,
+    ];
   }
   lines.push(
     `These refer to the view as "${name}" and will not be updated: after the rename they will ` +

@@ -2,6 +2,31 @@
 
 Changes in reverse chronological order.
 
+## Saltcorn UI: an App settings tab
+
+Creating a Saltcorn UI application showed all thirteen of the framework's
+settings on the form: the menu, the login form, the languages, the home page per
+role, the layout and push policy per role, and so on. Most of them name views and
+pages that cannot exist before the application does. They now have a tab of
+their own.
+
+- **App settings**, a fourth tab after Settings, Views and Pages, at
+  `#/applications/<id>/app-settings`. It is `ApplicationForm` showing only the
+  framework's `config_spec`. Like the Settings tab, it saves the whole
+  application, so neither tab loses what the other holds.
+- **The Settings tab and the create form** no longer render those settings for
+  such a framework. The Framework card says where they are, with a link on an
+  existing application. A new application takes their defaults, as it did when
+  they were left untouched. A framework without views (`code`, `react`, `vue`)
+  keeps its settings on the form as before.
+- **The screen still knows no framework by name.** `GET /api/frameworks` gains
+  `has_views` beside each framework's `config_spec`, the same flag the
+  application row already carries. `settingsOnOwnTab` (`ui/admin/src/views.ts`)
+  decides from it. `client.ts` gains the field.
+- Tests: `views.test.ts` covers the new tab and `settingsOnOwnTab`.
+  `saltcorn_ui_admin_api.rs` asserts that the frameworks listing flags
+  `saltcorn-ui` and not `code`.
+
 ## Saltcorn UI, Phase 12: documentation, and the definition of done run by hand
 
 Saltcorn UI is written down, and its definition of done was run by hand against

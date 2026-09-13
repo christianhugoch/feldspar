@@ -239,6 +239,21 @@ async fn an_applications_views_and_pages_are_managed_over_http() -> sc_error::Re
     assert_eq!(row["builds"], false, "{row}");
     assert_eq!(row["has_views"], true, "{row}");
 
+    // The framework says so too, which is what keeps its settings off the
+    // create form and on the App settings tab.
+    let (_, frameworks) = client.send("GET", "/api/frameworks", None).await;
+    let has_views = |name: &str| {
+        frameworks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is listed: {frameworks}"))["has_views"]
+            .clone()
+    };
+    assert_eq!(has_views("saltcorn-ui"), true);
+    assert_eq!(has_views("code"), false);
+
     // The patterns a view may be saved with.
     let (status, patterns) = client.send("GET", "/api/view-patterns", None).await;
     assert_eq!(status, StatusCode::OK, "{patterns}");

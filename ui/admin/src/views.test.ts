@@ -29,6 +29,7 @@ import {
   newViewError,
   referencesReport,
   saveViewBody,
+  settingsOnOwnTab,
   stepFormValues,
   stepTitle,
   type PageItem,
@@ -44,7 +45,11 @@ const roles: Roles = [
   { role: 100, name: "public" },
 ] as Roles;
 
-function view(name: string, viewpattern: string, extra: Partial<ViewItem> = {}): ViewItem {
+function view(
+  name: string,
+  viewpattern: string,
+  extra: Partial<ViewItem> = {},
+): ViewItem {
   return {
     id: `id-${name}`,
     name,
@@ -73,15 +78,34 @@ function pattern(name: string, label = name): PatternItem {
 }
 
 describe("appTabs", () => {
-  it("gives a views-and-pages application its two tabs after Settings", () => {
+  it("gives a views-and-pages application Views, Pages and App settings after Settings", () => {
     const tabs = appTabs({ id: "a1", has_views: true });
-    expect(tabs.map((t) => t.id)).toEqual(["settings", "views", "pages"]);
+    expect(tabs.map((t) => t.id)).toEqual([
+      "settings",
+      "views",
+      "pages",
+      "app-settings",
+    ]);
     expect(tabs[1].href).toBe("#/applications/a1/views");
     expect(tabs[0].href).toBe("#/applications/a1/edit");
+    expect(tabs[3].href).toBe("#/applications/a1/app-settings");
   });
 
   it("gives any other application only Settings", () => {
-    expect(appTabs({ id: "a1", has_views: false }).map((t) => t.id)).toEqual(["settings"]);
+    expect(appTabs({ id: "a1", has_views: false }).map((t) => t.id)).toEqual([
+      "settings",
+    ]);
+  });
+});
+
+describe("settingsOnOwnTab", () => {
+  it("moves a views-and-pages framework's settings to the App settings tab", () => {
+    expect(settingsOnOwnTab({ has_views: true })).toBe(true);
+  });
+
+  it("keeps any other framework's settings on the application form", () => {
+    expect(settingsOnOwnTab({ has_views: false })).toBe(false);
+    expect(settingsOnOwnTab(undefined)).toBe(false);
   });
 });
 
@@ -105,7 +129,13 @@ describe("viewRows", () => {
   ];
 
   it("shows the pattern's label, the table, the role and the link", () => {
-    const [row] = viewRows(views, [pattern("List", "List view")], roles, "booksdb", here);
+    const [row] = viewRows(
+      views,
+      [pattern("List", "List view")],
+      roles,
+      "booksdb",
+      here,
+    );
     expect(row).toEqual({
       name: "List Books",
       description: "",
@@ -155,7 +185,12 @@ describe("pageRows", () => {
   });
 
   it("is nobody's home page without the attribute", () => {
-    const [row] = pageRows([{ ...page, attributes: {} }], roles, "booksdb", here);
+    const [row] = pageRows(
+      [{ ...page, attributes: {} }],
+      roles,
+      "booksdb",
+      here,
+    );
     expect(row.homeFor).toEqual([]);
   });
 });
@@ -173,7 +208,11 @@ describe("deleteConfirmation", () => {
 
 type StepField = StepItem["fields"][number];
 
-const field = (name: string, type: string, extra: Partial<StepField> = {}): StepField => ({
+const field = (
+  name: string,
+  type: string,
+  extra: Partial<StepField> = {},
+): StepField => ({
   name,
   label: name,
   type,
@@ -204,12 +243,28 @@ const stepOf = (over: Partial<StepItem>): StepItem => ({
 describe("a configuration step", () => {
   it("puts its answers at the top level, typed, and removes a setting that was emptied", () => {
     const step = stepOf({
-      fields: [field("list_view", "text"), field("list_width", "int"), field("in_card", "bool")],
+      fields: [
+        field("list_view", "text"),
+        field("list_width", "int"),
+        field("in_card", "bool"),
+      ],
     });
-    const before = { list_view: "List Books", list_width: 6, subtables: { a: true } };
-    const after = applyStep(before, step, { list_view: "", list_width: "4", in_card: "true" });
+    const before = {
+      list_view: "List Books",
+      list_width: 6,
+      subtables: { a: true },
+    };
+    const after = applyStep(before, step, {
+      list_view: "",
+      list_width: "4",
+      in_card: "true",
+    });
     // `subtables` is another step's, and untouched.
-    expect(after).toEqual({ list_width: 4, in_card: true, subtables: { a: true } });
+    expect(after).toEqual({
+      list_width: 4,
+      in_card: true,
+      subtables: { a: true },
+    });
     expect(before.list_view).toBe("List Books");
   });
 
@@ -224,27 +279,41 @@ describe("a configuration step", () => {
       step,
       { author: "2" },
     );
-    expect(after).toEqual({ columns: [1], default_state: { _descending: true, author: 2 } });
+    expect(after).toEqual({
+      columns: [1],
+      default_state: { _descending: true, author: 2 },
+    });
   });
 
   it("leaves the configuration alone on a layout step and on a skipped one", () => {
     const configuration = { layout: { above: [] } };
-    expect(applyStep(configuration, stepOf({ builder: true }), {})).toBe(configuration);
-    expect(applyStep(configuration, stepOf({ skip: true }), {})).toBe(configuration);
+    expect(applyStep(configuration, stepOf({ builder: true }), {})).toBe(
+      configuration,
+    );
+    expect(applyStep(configuration, stepOf({ skip: true }), {})).toBe(
+      configuration,
+    );
   });
 
   it("opens with what the configuration holds, else each field's default", () => {
     const step = stepOf({
-      fields: [field("list_width", "int", { default: 6 }), field("in_card", "bool")],
+      fields: [
+        field("list_width", "int", { default: 6 }),
+        field("in_card", "bool"),
+      ],
       values: { in_card: true },
     });
     expect(stepFormValues(step)).toEqual({ list_width: "6", in_card: "true" });
   });
 
   it("shows a layout step's layout and columns, and nothing else", () => {
-    const shown = JSON.parse(layoutJson({ layout: { type: "blank" }, columns: [], list_view: "x" }));
+    const shown = JSON.parse(
+      layoutJson({ layout: { type: "blank" }, columns: [], list_view: "x" }),
+    );
     expect(shown).toEqual({ layout: { type: "blank" }, columns: [] });
-    expect(stepTitle({ index: 1, count: 5, name: "Default state" })).toBe("Step 2 of 5: Default state");
+    expect(stepTitle({ index: 1, count: 5, name: "Default state" })).toBe(
+      "Step 2 of 5: Default state",
+    );
   });
 });
 
@@ -261,13 +330,28 @@ describe("creating and renaming a view", () => {
       module: null,
     },
   ] as PatternItem[];
-  const empty = { name: "", description: "", viewpattern: "", table_name: "", min_role: 100 };
+  const empty = {
+    name: "",
+    description: "",
+    viewpattern: "",
+    table_name: "",
+    min_role: 100,
+  };
 
   it("asks for a name, a pattern and, for a pattern over a table, a table", () => {
     expect(newViewError(empty, patterns)).toMatch(/name/);
-    expect(newViewError({ ...empty, name: "Books" }, patterns)).toMatch(/pattern/);
-    expect(newViewError({ ...empty, name: "Books", viewpattern: "List" }, patterns)).toMatch(/table/);
-    const complete = { ...empty, name: " Books ", viewpattern: "List", table_name: "books" };
+    expect(newViewError({ ...empty, name: "Books" }, patterns)).toMatch(
+      /pattern/,
+    );
+    expect(
+      newViewError({ ...empty, name: "Books", viewpattern: "List" }, patterns),
+    ).toMatch(/table/);
+    const complete = {
+      ...empty,
+      name: " Books ",
+      viewpattern: "List",
+      table_name: "books",
+    };
     expect(newViewError(complete, patterns)).toBeNull();
     expect(createViewBody(complete)).toEqual({
       name: "Books",
@@ -287,7 +371,11 @@ describe("creating and renaming a view", () => {
     expect(lines[0]).toContain('the view "Filter books"');
     expect(lines[1]).toContain('the page "BooksOverview"');
     expect(lines[lines.length - 1]).toContain("will not be updated");
-    const none = referencesReport("List Books", { embedded_in: [], linked_from: [], pages: [] });
+    const none = referencesReport("List Books", {
+      embedded_in: [],
+      linked_from: [],
+      pages: [],
+    });
     expect(none).toHaveLength(1);
     expect(none[0]).toContain("Nothing");
   });

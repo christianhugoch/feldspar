@@ -4082,6 +4082,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         "label": info.label,
                         "description": info.description,
                         "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                        "has_views": info.name == sc_viewpattern::SALTCORN_UI_FRAMEWORK,
                     }));
                 }
                 Ok(HandlerResponse::ok(Json::Array(out)))

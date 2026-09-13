@@ -4197,6 +4197,12 @@ fn framework_info_schema() -> TypeSchema {
         StructField::new("label", TypeSchema::text()),
         StructField::new("description", TypeSchema::text()),
         StructField::new("config_spec", TypeSchema::array(form_field_schema())),
+        // Whether an application on this framework has views and pages
+        // (Saltcorn UI), like the application row's own `has_views`. Its
+        // settings are then the running application's — the menu, the login
+        // form, the languages — so the screen keeps them off the create form
+        // and edits them on the application's App settings tab.
+        StructField::new("has_views", TypeSchema::bool()),
     ])
 }
 

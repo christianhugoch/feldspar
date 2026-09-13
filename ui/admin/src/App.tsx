@@ -170,7 +170,12 @@ export const NAV: NavItem[] = [
     icon: <IconApps />,
     matches: ["/applications"],
   },
-  { href: "#/triggers", label: "Triggers", icon: <IconBolt />, matches: ["/triggers"] },
+  {
+    href: "#/triggers",
+    label: "Triggers",
+    icon: <IconBolt />,
+    matches: ["/triggers"],
+  },
   {
     href: "#/file-stores",
     label: "Files",
@@ -218,7 +223,13 @@ export const NAV: NavItem[] = [
 ];
 
 /** The authenticated admin shell: Tabler's vertical layout around the screen. */
-function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) {
+function Shell({
+  user,
+  onLogout,
+}: {
+  user: CurrentUser;
+  onLogout: () => void;
+}) {
   const route = useHashRoute();
   const [menuOpen, setMenuOpen] = useState(false);
   const [theme, toggleTheme] = useTheme();
@@ -229,8 +240,11 @@ function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) 
   // own composer, so the page is told how much of the corner is taken and keeps
   // clear of it (`admin.css`). Minimized windows are two rows of pixels along
   // the very bottom and are not worth narrowing a transcript for.
-  const docked = useChatWindows().filter((chat) => chat.mode === "docked").length;
-  const corner = docked === 0 ? "" : ` chat-corner-taken chat-corner-${Math.min(docked, 3)}`;
+  const docked = useChatWindows().filter(
+    (chat) => chat.mode === "docked",
+  ).length;
+  const corner =
+    docked === 0 ? "" : ` chat-corner-taken chat-corner-${Math.min(docked, 3)}`;
 
   // A tap on a sidebar link should close the sidebar it was in; on a wide
   // screen the collapse is not rendered as a drawer, so this is a no-op there.
@@ -249,7 +263,10 @@ function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) 
     // because both the sidebar's width and the page wrapper's matching offset
     // hang off it (see `admin.css`), and they have to change together.
     <div className={`page${narrow ? " sidebar-narrow" : ""}${corner}`}>
-      <aside className="navbar navbar-vertical navbar-expand-lg" data-bs-theme="dark">
+      <aside
+        className="navbar navbar-vertical navbar-expand-lg"
+        data-bs-theme="dark"
+      >
         <div className="container-fluid">
           <button
             className="navbar-toggler"
@@ -265,12 +282,16 @@ function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) 
               logo to white for a dark sidebar, and this one has its own
               colours to keep. */}
           <div className="navbar-brand">
-            <a href="#/tables" className="d-flex align-items-center gap-2" aria-label="Saltcorn">
+            <a
+              href="#/tables"
+              className="d-flex align-items-center gap-2"
+              aria-label="Saltcorn"
+            >
               <div className="d-flex">
                 <SaltcornLogo />
                 <div className="ms-2">
-                <div className="saltcorn-label">Saltcorn</div>
-                <div className="feldspar-label">Feldspar</div>
+                  <div className="saltcorn-label">Saltcorn</div>
+                  <div className="feldspar-label">Feldspar</div>
                 </div>
               </div>
             </a>
@@ -293,14 +314,23 @@ function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) 
             </div>
           </div>
           <div
-            className={menuOpen ? "collapse navbar-collapse show" : "collapse navbar-collapse"}
+            className={
+              menuOpen
+                ? "collapse navbar-collapse show"
+                : "collapse navbar-collapse"
+            }
             id="sidebar-menu"
           >
             <ul className="navbar-nav pt-lg-3">
               {NAV.map((item) => {
-                const active = item.matches.some((prefix) => route.startsWith(prefix));
+                const active = item.matches.some((prefix) =>
+                  route.startsWith(prefix),
+                );
                 return (
-                  <li key={item.href} className={active ? "nav-item active" : "nav-item"}>
+                  <li
+                    key={item.href}
+                    className={active ? "nav-item active" : "nav-item"}
+                  >
                     <a
                       className={active ? "nav-link active" : "nav-link"}
                       href={item.href}
@@ -329,8 +359,12 @@ function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) 
                 className="btn btn-icon btn-ghost-secondary"
                 onClick={toggleNarrow}
                 aria-pressed={narrow}
-                aria-label={narrow ? "Widen the sidebar" : "Narrow the sidebar to icons"}
-                title={narrow ? "Widen the sidebar" : "Narrow the sidebar to icons"}
+                aria-label={
+                  narrow ? "Widen the sidebar" : "Narrow the sidebar to icons"
+                }
+                title={
+                  narrow ? "Widen the sidebar" : "Narrow the sidebar to icons"
+                }
               >
                 {narrow ? (
                   <IconChevronRight className="icon-2" />
@@ -385,7 +419,13 @@ function Shell({ user, onLogout }: { user: CurrentUser; onLogout: () => void }) 
 
 /** Light/dark switch. One button that shows the scheme it would switch *to*,
  * which is how Tabler's own header reads (it swaps two links; we swap an icon). */
-function ThemeToggle({ theme, onToggle }: { theme: string; onToggle: () => void }) {
+function ThemeToggle({
+  theme,
+  onToggle,
+}: {
+  theme: string;
+  onToggle: () => void;
+}) {
   const dark = theme === "dark";
   return (
     <div className="nav-item">
@@ -396,7 +436,11 @@ function ThemeToggle({ theme, onToggle }: { theme: string; onToggle: () => void 
         title={dark ? "Enable light mode" : "Enable dark mode"}
         aria-label={dark ? "Enable light mode" : "Enable dark mode"}
       >
-        {dark ? <IconSun className="icon-1" /> : <IconMoon className="icon-1" />}
+        {dark ? (
+          <IconSun className="icon-1" />
+        ) : (
+          <IconMoon className="icon-1" />
+        )}
       </button>
     </div>
   );
@@ -421,9 +465,16 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
   }
   const graphqlMatch = route.match(/^\/applications\/([^/]+)\/graphql$/);
   if (graphqlMatch) {
-    return <GraphqlExplorer appId={decodeURIComponent(graphqlMatch[1])} user={user} />;
+    return (
+      <GraphqlExplorer
+        appId={decodeURIComponent(graphqlMatch[1])}
+        user={user}
+      />
+    );
   }
-  const viewEditMatch = route.match(/^\/applications\/([^/]+)\/views\/([^/]+)$/);
+  const viewEditMatch = route.match(
+    /^\/applications\/([^/]+)\/views\/([^/]+)$/,
+  );
   if (viewEditMatch) {
     return (
       <ViewEditor
@@ -441,9 +492,16 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
       />
     );
   }
-  const editMatch = route.match(/^\/applications\/([^/]+)\/edit$/);
+  const editMatch = route.match(
+    /^\/applications\/([^/]+)\/(edit|app-settings)$/,
+  );
   if (editMatch) {
-    return <ApplicationForm appId={decodeURIComponent(editMatch[1])} />;
+    return (
+      <ApplicationForm
+        appId={decodeURIComponent(editMatch[1])}
+        tab={editMatch[2] === "app-settings" ? "app-settings" : "settings"}
+      />
+    );
   }
   if (route.startsWith("/applications")) {
     return <Applications />;
@@ -471,7 +529,9 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
   }
   const workflowRunsMatch = route.match(/^\/triggers\/([^/]+)\/runs$/);
   if (workflowRunsMatch) {
-    return <WorkflowRuns triggerId={decodeURIComponent(workflowRunsMatch[1])} />;
+    return (
+      <WorkflowRuns triggerId={decodeURIComponent(workflowRunsMatch[1])} />
+    );
   }
   if (route.startsWith("/triggers")) {
     return <Triggers />;
@@ -495,7 +555,9 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
       .filter((s) => s.length > 0)
       .map(decodeURIComponent)
       .join("/");
-    return <FileManager store={decodeURIComponent(filesMatch[1])} initialDir={dir} />;
+    return (
+      <FileManager store={decodeURIComponent(filesMatch[1])} initialDir={dir} />
+    );
   }
   if (route === "/agents/new") {
     return <AgentForm />;
@@ -519,7 +581,9 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
   }
   const providerEditMatch = route.match(/^\/llm-providers\/([^/]+)\/edit$/);
   if (providerEditMatch) {
-    return <LlmProviderForm providerId={decodeURIComponent(providerEditMatch[1])} />;
+    return (
+      <LlmProviderForm providerId={decodeURIComponent(providerEditMatch[1])} />
+    );
   }
   if (route.startsWith("/llm-providers")) {
     return <LlmProviders />;
