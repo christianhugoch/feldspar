@@ -388,7 +388,8 @@ async fn the_react_framework_is_offered_first_and_brings_its_own_defaults() -> s
         .iter()
         .map(|f| f["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["react", "code"]);
+    // Saltcorn UI follows them: compiled in, and constructed rather than built.
+    assert_eq!(names, ["react", "code", "saltcorn-ui"]);
 
     // Each carries the label and the sentence the picker shows. Without these the
     // admin UI could only distinguish the two by special-casing the name `react`,

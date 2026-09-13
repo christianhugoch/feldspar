@@ -468,7 +468,7 @@ pub fn declared_framework(name: &str) -> Option<FrameworkDecl> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use sc_types::BasicType;
     use serde_json::json;

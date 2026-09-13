@@ -3494,6 +3494,28 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    /// Mount an application whose framework has nothing to build (Saltcorn UI)
+    /// as part of saving it: there is no Build button for it to wait for, so
+    /// saving is the deployment (TODO "Saltcorn UI" §1, 5.7). Not fatal — the
+    /// row is saved — and reported on the response as `mounted` or
+    /// `mount_error`.
+    async fn mount_if_constructed(apps: &AppMounts, app: &sc_app::Application, body: &mut Json) {
+        if sc_app::framework_factory(&app.framework.name).is_none() {
+            return;
+        }
+        let outcome = build_and_mount(apps, app.clone()).await;
+        if let Some(obj) = body.as_object_mut() {
+            match outcome {
+                Ok(_) => {
+                    obj.insert("mounted".to_owned(), json!(true));
+                }
+                Err(e) => {
+                    obj.insert("mount_error".to_owned(), json!(e.causes()));
+                }
+            }
+        }
+    }
+
     reg.register("createApplication", {
         let catalog = catalog.clone();
         let apps = apps.clone();
@@ -3547,6 +3569,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         }
                     }
                 }
+                mount_if_constructed(&apps, &app, &mut body).await;
                 Ok(HandlerResponse::ok(body).with_status(201))
             }
         }
@@ -3574,7 +3597,9 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // application is already saved and an unreachable store is not a
                 // reason to report that it was not.
                 reemit_app_client(&catalog, &app, apps.triggers()).await;
-                Ok(HandlerResponse::ok(application_json(&app)))
+                let mut body = application_json(&app);
+                mount_if_constructed(&apps, &app, &mut body).await;
+                Ok(HandlerResponse::ok(body))
             }
         }
     });

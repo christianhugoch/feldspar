@@ -600,28 +600,28 @@ Five levels, because the failure modes are at five levels:
 
 ## Phase 5 — The framework, and rendering a view
 
-- [ ] 5.1 `AppRequest` and `AppResponse` grow (§8). `CodeFramework` ignores the new fields and
+- [x] 5.1 `AppRequest` and `AppResponse` grow (§8). `CodeFramework` ignores the new fields and
       a test asserts its bytes are unchanged; `router.rs` fills them from the live request and
       applies `session` through the existing `apply_response`.
-- [ ] 5.2 A framework **factory** registry in `sc-app`: a named constructor installed at boot,
+- [x] 5.2 A framework **factory** registry in `sc-app`: a named constructor installed at boot,
       the shape `installed_frameworks` already has, so a `Framework` implemented outside
       `sc-app` can be mounted without `sc-app` depending on it.
-- [ ] 5.3 `SaltcornUiFramework`: name `saltcorn-ui`, label and the picker's sentence,
+- [x] 5.3 `SaltcornUiFramework`: name `saltcorn-ui`, label and the picker's sentence,
       `serves_ui() == true`, `build() == None`, `framework_builder_agent` answering `None`
       (there is no source tree to code in), and `framework_default_csp` per §10.
-- [ ] 5.4 Its `config_spec`: site name, the menu (JSON for now), the root page per role, and
+- [x] 5.4 Its `config_spec`: site name, the menu (JSON for now), the root page per role, and
       the handful of `getConfig` keys §7 declares. Validated on save like every other
       framework's.
-- [ ] 5.5 The GET routes: `/` (the role's root page, else the first page, else a "nothing
+- [x] 5.5 The GET routes: `/` (the role's root page, else the first page, else a "nothing
       here yet" document), `/view/:name`, `/view/:name/*slug`, `/page/:name`,
       `/static_assets/:v/*` from the bundle, and `/files/serve/*` from the app's file stores
       through the existing access rules.
-- [ ] 5.6 The document (§9): doctype, head, the asset tags, `emergency_layout`'s `wrap` with
+- [x] 5.6 The document (§9): doctype, head, the asset tags, `emergency_layout`'s `wrap` with
       the app's menu and brand, alerts, and the `<title>` from the view's `page_title`
       attribute.
-- [ ] 5.7 Mounting: no build, so a save re-reads the view set and bumps the generation, and
+- [x] 5.7 Mounting: no build, so a save re-reads the view set and bumps the generation, and
       `reload_all` (SIGHUP) reloads views and pages with the application row.
-- [ ] 5.8 Golden-HTML tests (§15) for the six patterns over a fixture table, and a live test
+- [x] 5.8 Golden-HTML tests (§15) for the six patterns over a fixture table, and a live test
       rendering *List Books* over HTTP.
 
 ## Phase 6 — Posting: forms, routes and actions

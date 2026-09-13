@@ -151,7 +151,6 @@
     "table.get_child_relations": BUILDER,
     "table.field_options": BUILDER,
     "table.slug_options": BUILDER,
-    "table.delete_url": BUILDER,
     "table.getTags": BUILDER,
     "table.getFormulaExamples": BUILDER,
     "field.fill_fkey_options": BUILDER,
@@ -836,6 +835,11 @@
   const JOIN_OPTS = [
     "where", "joinFields", "aggregations",
     "orderBy", "orderDesc", "limit", "offset", "forUser", "forPublic",
+    // v1's `starFields` adds `a.*` to a query that otherwise names the table's
+    // columns — for the users table, whose extra columns v1 does not list. A
+    // joined read here is always the whole row (below), so it is accepted and
+    // there is nothing for it to add.
+    "starFields",
   ];
   const JOIN_SELOPTS = ["orderBy", "orderDesc", "limit", "offset", "forUser", "forPublic"];
 
@@ -971,8 +975,9 @@
       name: spec.name,
       label: spec.label,
       // v1's two type properties, both carried because v1 code reads both: an
-      // object for a plain field, the string `"Key to authors"` for a key.
-      type: spec.type,
+      // object for a plain field, the string `"Key to authors"` for a key —
+      // or, where the host resolves types, what an instantiated v1 `Field` has.
+      type: (api.typeOf && api.typeOf(spec)) || spec.type,
       typename: spec.typename,
       required: spec.required,
       is_unique: spec.is_unique,
@@ -1011,7 +1016,20 @@
       enumerable: false,
       value: (where) => api.Table.findOne(spec.table_id).distinctValues(spec.name, where),
     });
+    // v1's `listKey`: how a list shows the field when no fieldview is named —
+    // the type's `listAs`, else its `showAs`, else the value under its name.
+    Object.defineProperty(field, "listKey", {
+      enumerable: false,
+      get: () => {
+        const t = field.type;
+        if (t && typeof t.listAs === "function") return (r) => t.listAs(r[spec.name]);
+        if (t && typeof t.showAs === "function") return (r) => t.showAs(r[spec.name]);
+        return spec.name;
+      },
+    });
     installRefusals(field, "field.");
+    const hosted = api.fieldOf && api.fieldOf(field, spec);
+    if (hosted) return hosted;
     return readOnly(field, "a field of `" + table + "`");
   };
 
@@ -1108,6 +1126,18 @@
       // it, because this server allows a composite primary key and v1 did not.
       pk_name: pk.length ? pk[0] : undefined,
       composite_pk_names: Object.freeze(pk.slice()),
+      // v1's `constraints`: the unique keys, indexes and row constraints, as
+      // v1 shapes them (`{ type, configuration }`).
+      constraints: Object.freeze((spec.constraints || []).slice()),
+      // v1's `delete_url(row, moreQuery)`: where a Delete link posts. A URL, not
+      // a deletion — the route behind it is the application's.
+      delete_url: (row, moreQuery) =>
+        pk.length > 1
+          ? "/delete/" + spec.name + "?" +
+            pk.map((k) => encodeURIComponent(k) + "=" + encodeURIComponent(row[k])).join("&") +
+            (moreQuery ? "&" + moreQuery : "")
+          : "/delete/" + spec.name + "/" + encodeURIComponent(row[pk[0]]) +
+            (moreQuery ? "?" + moreQuery : ""),
       // What the table is called in SQL. No tenant schema qualifies it here,
       // and nothing on this server will run SQL a plugin builds from it.
       sql_name: '"' + spec.name + '"',
@@ -1480,8 +1510,25 @@
   // so by name rather than classes that know no tables: a `Table.findOne`
   // answering undefined for everything would have a plugin compute the wrong
   // answer instead of failing.
-  fixed("__scMakeV1Api", (send, snapshot, runTrigger) => {
+  fixed("__scMakeV1Api", (send, snapshot, runTrigger, typeOf, fieldOf) => {
     const api = {};
+    // What a table's field *is*, when the host has v1's own `Field` class: v1's
+    // patterns write to a table's fields (Filter sets a field's `fieldview`
+    // before it fills the field's options), which a read-only snapshot object
+    // refuses. A host without the class passes nothing, and a field stays the
+    // read-only record below.
+    Object.defineProperty(api, "fieldOf", {
+      value: typeof fieldOf === "function" ? fieldOf : null,
+      enumerable: false,
+    });
+    // How a field's `type` is resolved, when the host has v1's type registry: an
+    // instantiated v1 `Field` holds the type *object* (with its fieldviews), or
+    // `"Key"`, or `"File"` — not the snapshot's data. A code isolate has no
+    // registry and passes nothing, and a field keeps the snapshot's `type`.
+    Object.defineProperty(api, "typeOf", {
+      value: typeof typeOf === "function" ? typeOf : null,
+      enumerable: false,
+    });
     const absent = (what) => {
       throw new Error(
         what + " is not available here: this run was given no schema snapshot, " +

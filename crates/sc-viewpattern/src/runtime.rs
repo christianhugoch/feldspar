@@ -94,6 +94,22 @@ pub struct ViewRequest {
     pub base_url: String,
     /// What `req.csrfToken()` answers.
     pub csrf_token: String,
+    /// Wrap what the call renders in the application's layout — the navbar,
+    /// the menu, the alerts (§9) — or `None` for the HTML alone, which is what
+    /// an ajax reload of a view asks for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<Wrap>,
+}
+
+/// How a rendered view or page is wrapped in the layout (§9): v1's
+/// `res.sendWrap(title, …)`, decided before the call rather than inside it, so
+/// the layout is drawn in the same worker call as what it wraps.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Wrap {
+    /// The document's title.
+    pub title: String,
+    /// The path the navbar marks as current.
+    pub current_url: String,
 }
 
 /// Everything one call through the seam may reach.

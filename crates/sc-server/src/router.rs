@@ -809,24 +809,129 @@ async fn dispatch_app(
             &csp,
         );
     };
-    let req = AppRequest {
-        method: api_method,
-        path: path.to_owned(),
+    // What a server-rendered framework reads (TODO "Saltcorn UI" §8): who is
+    // looking, the query, the body, a few headers and the app's own origin. A
+    // code framework reads the method and the path and ignores the rest.
+    let session_token = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    let user = match &session_token {
+        Some(token) => match state.sessions.user_for(token).await {
+            Ok(user) => user,
+            Err(e) => {
+                log_failure("session lookup failed", &e);
+                return with_csp(
+                    json_error(StatusCode::INTERNAL_SERVER_ERROR, "session lookup failed"),
+                    &csp,
+                );
+            }
+        },
+        None => None,
+    };
+    let req = match app_request(state, api_method, uri, headers, body, user.clone()) {
+        Ok(req) => req,
+        Err(rejection) => return with_csp(*rejection, &csp),
     };
     match app.framework.handle(req, catalog).await {
         Ok(resp) => {
             let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
-            let mut out = (status, resp.body).into_response();
+            // The same session code an API provider's response goes through, so
+            // an application's rendered login sets the same cookie the same way.
+            let jar = match apply_session(state, jar, session_token, resp.session).await {
+                Ok(jar) => jar,
+                Err(rejection) => return with_csp(*rejection, &csp),
+            };
+            let mut out = (status, jar, resp.body).into_response();
             if let Ok(ct) = HeaderValue::from_str(&resp.content_type) {
                 out.headers_mut().insert(header::CONTENT_TYPE, ct);
+            }
+            for (name, value) in &resp.headers {
+                if let (Ok(name), Ok(value)) = (
+                    header::HeaderName::from_bytes(name.as_bytes()),
+                    HeaderValue::from_str(value),
+                ) {
+                    out.headers_mut().append(name, value);
+                }
             }
             with_csp(out, &csp)
         }
         Err(e) => with_csp(
-            error_out(state, &e, Audience::App, api_method.as_str(), path, None).await,
+            error_out(
+                state,
+                &e,
+                Audience::App,
+                api_method.as_str(),
+                path,
+                user.as_ref(),
+            )
+            .await,
             &csp,
         ),
     }
+}
+
+/// The headers an application framework is shown (§8): what v1's patterns read,
+/// and not the cookie, which is the router's.
+const APP_REQUEST_HEADERS: [&str; 3] = ["referer", "x-requested-with", "accept"];
+
+/// The [`AppRequest`] for one live request to an application's framework.
+///
+/// The body is read by its declared content type: a form's pairs, a JSON
+/// document, or nothing. A JSON body that does not parse is refused here, as it
+/// is for an API provider; any other body (an upload) is not a framework's yet.
+fn app_request(
+    state: &AppState,
+    method: ApiMethod,
+    uri: &Uri,
+    headers: &axum::http::HeaderMap,
+    body: &Bytes,
+    user: Option<User>,
+) -> std::result::Result<AppRequest, Box<Response>> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let body = if body.is_empty() {
+        sc_app::RequestBody::Empty
+    } else if content_type.starts_with("application/x-www-form-urlencoded") {
+        sc_app::RequestBody::Form(parse_form(&String::from_utf8_lossy(body)))
+    } else if content_type.starts_with("application/json") {
+        match serde_json::from_slice(body) {
+            Ok(value) => sc_app::RequestBody::Json(value),
+            Err(e) => {
+                return Err(Box::new(json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid JSON body: {e}"),
+                )));
+            }
+        }
+    } else {
+        sc_app::RequestBody::Empty
+    };
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let scheme = if state.secure_cookies {
+        "https"
+    } else {
+        "http"
+    };
+    let mut req = AppRequest::new(method, uri.path());
+    req.query = parse_query(uri).into_iter().collect();
+    req.body = body;
+    req.headers = APP_REQUEST_HEADERS
+        .iter()
+        .filter_map(|name| {
+            let value = headers.get(*name)?.to_str().ok()?;
+            Some(((*name).to_owned(), value.to_owned()))
+        })
+        .collect();
+    req.user = user;
+    req.base_url = if host.is_empty() {
+        String::new()
+    } else {
+        format!("{scheme}://{host}")
+    };
+    Ok(req)
 }
 
 /// Stamp an application's own CSP onto its response (design §13.2).
@@ -948,7 +1053,45 @@ async fn apply_response(
     resp: HandlerResponse,
 ) -> Response {
     let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
-    let jar = match resp.session {
+    let jar = match apply_session(state, jar, session_token, resp.session).await {
+        Ok(jar) => jar,
+        Err(rejection) => return *rejection,
+    };
+    // A response that *is* a file: the bytes under their own content type, named
+    // so a browser's save dialog offers the right thing. There is no JSON body to
+    // send alongside them, which is why this is a separate arm rather than a
+    // header on the one below.
+    if let Some(file) = resp.download {
+        let mut out = (status, jar, file.bytes).into_response();
+        if let Ok(value) = HeaderValue::from_str(&file.content_type) {
+            out.headers_mut().insert(header::CONTENT_TYPE, value);
+        }
+        // The filename is server-built (a timestamp and the host's own name), so
+        // it needs no escaping beyond the quotes — but it is still checked rather
+        // than trusted, because a header value that will not parse must not take
+        // the download with it.
+        if let Ok(value) =
+            HeaderValue::from_str(&format!("attachment; filename=\"{}\"", file.filename))
+        {
+            out.headers_mut().insert(header::CONTENT_DISPOSITION, value);
+        }
+        return out;
+    }
+    (status, jar, Json(resp.body)).into_response()
+}
+
+/// Apply a [`SessionAction`] to the cookie jar and the session store: the half of
+/// [`apply_response`] an application framework's response goes through too, so
+/// there is one session story (TODO "Saltcorn UI" §8).
+///
+/// `Err` is the response to send instead, when a session could not be started.
+async fn apply_session(
+    state: &AppState,
+    jar: CookieJar,
+    session_token: Option<String>,
+    session: SessionAction,
+) -> std::result::Result<CookieJar, Box<Response>> {
+    Ok(match session {
         SessionAction::Keep => jar,
         SessionAction::Start(user) => match state.sessions.login(user.clone()).await {
             Ok(token) => {
@@ -973,7 +1116,10 @@ async fn apply_response(
             }
             Err(e) => {
                 log_failure("could not start session", &e);
-                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "could not start session");
+                return Err(Box::new(json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not start session",
+                )));
             }
         },
         SessionAction::End => {
@@ -992,28 +1138,7 @@ async fn apply_response(
             }
             jar
         }
-    };
-    // A response that *is* a file: the bytes under their own content type, named
-    // so a browser's save dialog offers the right thing. There is no JSON body to
-    // send alongside them, which is why this is a separate arm rather than a
-    // header on the one below.
-    if let Some(file) = resp.download {
-        let mut out = (status, jar, file.bytes).into_response();
-        if let Ok(value) = HeaderValue::from_str(&file.content_type) {
-            out.headers_mut().insert(header::CONTENT_TYPE, value);
-        }
-        // The filename is server-built (a timestamp and the host's own name), so
-        // it needs no escaping beyond the quotes — but it is still checked rather
-        // than trusted, because a header value that will not parse must not take
-        // the download with it.
-        if let Ok(value) =
-            HeaderValue::from_str(&format!("attachment; filename=\"{}\"", file.filename))
-        {
-            out.headers_mut().insert(header::CONTENT_DISPOSITION, value);
-        }
-        return out;
-    }
-    (status, jar, Json(resp.body)).into_response()
+    })
 }
 
 /// Whether a path belongs to the file-store IDE (design §12.1).
@@ -1233,6 +1358,21 @@ fn parse_query(uri: &Uri) -> Vec<(String, String)> {
 /// than rejected: it is one character of one query parameter, and the endpoint
 /// that reads it is in a better position to say what is wrong with it than a
 /// parser that knows only that a `%` was not followed by two hex digits.
+/// The pairs of a form-encoded body, decoded as a query string's are: order and
+/// repeats kept.
+fn parse_form(body: &str) -> Vec<(String, String)> {
+    body.split('&')
+        .filter(|p| !p.is_empty())
+        .map(|pair| {
+            let mut kv = pair.splitn(2, '=');
+            (
+                form_decode(kv.next().unwrap_or("")),
+                form_decode(kv.next().unwrap_or("")),
+            )
+        })
+        .collect()
+}
+
 fn form_decode(s: &str) -> String {
     if !s.contains('%') && !s.contains('+') {
         return s.to_owned();

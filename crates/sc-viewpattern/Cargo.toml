@@ -32,7 +32,14 @@ sc-app.workspace = true
 # both of which are `sc-expr`'s — the same pair a code body and a module's action
 # are handed, so a view reads rows under exactly the authority they do.
 sc-expr.workspace = true
+# The framework (Phase 5) builds a viewer's surfaces the way a code body's are
+# built — `TableHost`, `FileStoreHost`, `TriggerRunHost` — and serves an
+# application's files under the stores' own access rules.
+sc-api.workspace = true
+sc-action.workspace = true
+sc-files.workspace = true
 async-trait.workspace = true
+bytes.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 uuid.workspace = true

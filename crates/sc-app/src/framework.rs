@@ -8,45 +8,103 @@
 //! implementation: it serves a pre-built [`AssetBundle`] of static files with an
 //! SPA fallback to `index.html`, so a client-routed React app resolves deep links.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use sc_api::SessionAction;
+use sc_auth::User;
 use sc_catalog::Catalog;
 use sc_error::{Error, Repr, Result};
 use sc_types::{BasicType, FormField, validate_attrs};
+use serde_json::Value as Json;
 
 use crate::application::{CspPolicy, FrameworkRef};
 use crate::declared::{FrameworkSet, installed_frameworks};
+use crate::factory::{FrameworkFactory, framework_factories, framework_factory};
 use crate::react::{
     CFG_PROJECT, REACT_FRAMEWORK, check_project_name, react_config_spec, react_csp,
 };
 
 pub use sc_api::Method;
 
-/// A request routed to an application's framework: an HTTP method and the request
-/// path **within the application** (e.g. `/`, `/assets/app.js`, `/posts/42`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A request routed to an application's framework: the method, the path **within
+/// the application** (e.g. `/`, `/assets/app.js`, `/posts/42`), and what a
+/// server-rendered framework needs beside them (TODO "Saltcorn UI" §8).
+///
+/// A static bundle reads the first two and nothing else. The rest is what v1's
+/// `req` is made of — the query, the body, the few headers a pattern reads, who
+/// is looking and the application's own origin — filled in by the router from
+/// the live request.
+#[derive(Debug, Clone, PartialEq)]
 pub struct AppRequest {
     /// The HTTP method.
     pub method: Method,
     /// The path within the app, with a leading slash.
     pub path: String,
+    /// The query string, decoded. A repeated key keeps its last value, which is
+    /// what v1's `req.query` does for a scalar.
+    pub query: BTreeMap<String, String>,
+    /// The body, as its content type describes it.
+    pub body: RequestBody,
+    /// The headers a framework may read, lower-cased — `referer`,
+    /// `x-requested-with`, `accept`. Not every header: a cookie is the router's.
+    pub headers: BTreeMap<String, String>,
+    /// Who is looking, from the application's session; `None` for nobody.
+    pub user: Option<User>,
+    /// The application's own origin, `https://books.example.com` — v1's
+    /// `req.get_base_url()`.
+    pub base_url: String,
 }
 
 impl AppRequest {
-    /// A `GET` for `path`.
+    /// An anonymous `GET` for `path`, with no query, body or headers.
     pub fn get(path: impl Into<String>) -> AppRequest {
+        AppRequest::new(Method::Get, path)
+    }
+
+    /// An anonymous request of `method` for `path`.
+    pub fn new(method: Method, path: impl Into<String>) -> AppRequest {
         AppRequest {
-            method: Method::Get,
+            method,
             path: path.into(),
+            query: BTreeMap::new(),
+            body: RequestBody::Empty,
+            headers: BTreeMap::new(),
+            user: None,
+            base_url: String::new(),
         }
+    }
+
+    /// The header `name` (lower-case), if the request carried it.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.get(name).map(String::as_str)
     }
 }
 
-/// A framework's response: an HTTP status, a `Content-Type`, and the body bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A request's body, as its content type describes it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum RequestBody {
+    /// No body.
+    #[default]
+    Empty,
+    /// `application/x-www-form-urlencoded`: the pairs in order, repeats kept.
+    Form(Vec<(String, String)>),
+    /// `application/json`.
+    Json(Json),
+}
+
+/// A framework's response: a status, a `Content-Type`, the body bytes, any other
+/// headers, and what to do to the application's session.
+///
+/// `session` is the one that matters structurally (§8): an application's REST
+/// provider can already sign somebody in with an `ApiResponse`, and a
+/// server-rendered login form must be able to do the same. It is the same
+/// [`SessionAction`], applied by the same code, so an application has one
+/// session story whichever of the two answered.
+#[derive(Debug, Clone, PartialEq)]
 pub struct AppResponse {
     /// The HTTP status code.
     pub status: u16,
@@ -54,34 +112,67 @@ pub struct AppResponse {
     pub content_type: String,
     /// The response body.
     pub body: Bytes,
+    /// Other headers — `Location`, and nothing exotic.
+    pub headers: Vec<(String, String)>,
+    /// The session change for the router to apply.
+    pub session: SessionAction,
 }
 
 impl AppResponse {
     /// A `200 OK` carrying `body` with the given content type.
     pub fn ok(content_type: impl Into<String>, body: Bytes) -> AppResponse {
+        AppResponse::with_status(200, content_type, body)
+    }
+
+    /// `body` under `status` and `content_type`, with no other headers and the
+    /// session untouched.
+    pub fn with_status(
+        status: u16,
+        content_type: impl Into<String>,
+        body: impl Into<Bytes>,
+    ) -> AppResponse {
         AppResponse {
-            status: 200,
+            status,
             content_type: content_type.into(),
-            body,
+            body: body.into(),
+            headers: Vec::new(),
+            session: SessionAction::Keep,
         }
+    }
+
+    /// An HTML document under `status`.
+    pub fn html(status: u16, document: impl Into<String>) -> AppResponse {
+        AppResponse::with_status(status, "text/html; charset=utf-8", document.into())
+    }
+
+    /// A `302 Found` to `location`.
+    pub fn redirect(location: impl Into<String>) -> AppResponse {
+        AppResponse::with_status(302, "text/plain; charset=utf-8", Bytes::new())
+            .header("Location", location)
+    }
+
+    /// Add a header, returning `self` for chaining.
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> AppResponse {
+        self.headers.push((name.into(), value.into()));
+        self
     }
 
     /// A `404 Not Found` with a short plain-text body.
     pub fn not_found() -> AppResponse {
-        AppResponse {
-            status: 404,
-            content_type: "text/plain; charset=utf-8".to_owned(),
-            body: Bytes::from_static(b"Not Found"),
-        }
+        AppResponse::with_status(
+            404,
+            "text/plain; charset=utf-8",
+            Bytes::from_static(b"Not Found"),
+        )
     }
 
     /// A `405 Method Not Allowed` with a short plain-text body.
     pub fn method_not_allowed() -> AppResponse {
-        AppResponse {
-            status: 405,
-            content_type: "text/plain; charset=utf-8".to_owned(),
-            body: Bytes::from_static(b"Method Not Allowed"),
-        }
+        AppResponse::with_status(
+            405,
+            "text/plain; charset=utf-8",
+            Bytes::from_static(b"Method Not Allowed"),
+        )
     }
 }
 
@@ -315,7 +406,26 @@ pub fn registered_framework_info() -> Vec<FrameworkInfo> {
 /// such a name outright (with an issue on the module's card), so this ordering is
 /// belt and braces — but it is the belt that decides what the picker shows.
 pub fn framework_info_in(set: &FrameworkSet) -> Vec<FrameworkInfo> {
+    framework_info_with(&framework_factories(), set)
+}
+
+/// [`framework_info_in`] with the factories named rather than read from the
+/// installed registry — the pure function the registry's order is tested on.
+///
+/// A factory comes after the built-ins and before every declaration: it is
+/// compiled into this server, and a module shipping a framework of the same name
+/// must not take its place in the picker.
+fn framework_info_with(
+    factories: &[Arc<dyn FrameworkFactory>],
+    set: &FrameworkSet,
+) -> Vec<FrameworkInfo> {
     let mut out = builtin_framework_info();
+    for factory in factories {
+        let info = factory.info();
+        if !out.iter().any(|f| f.name == info.name) {
+            out.push(info);
+        }
+    }
     for decl in set.declarations() {
         if out.iter().any(|f| f.name == decl.name) {
             continue;
@@ -361,6 +471,7 @@ pub fn config_spec_in(set: &FrameworkSet, name: &str) -> Result<Vec<FormField>> 
     match name {
         CODE_FRAMEWORK => Ok(code_config_spec()),
         REACT_FRAMEWORK => Ok(react_config_spec()),
+        other if let Some(factory) = framework_factory(other) => Ok(factory.config_spec()),
         other => match set.find(other) {
             Some(decl) => Ok(decl.config_spec.clone()),
             None => Err(Error::config(format!(
@@ -391,6 +502,7 @@ pub fn framework_default_csp(name: &str) -> CspPolicy {
 pub fn default_csp_in(set: &FrameworkSet, name: &str) -> CspPolicy {
     match name {
         REACT_FRAMEWORK => react_csp(),
+        other if let Some(factory) = framework_factory(other) => factory.default_csp(),
         other => match set.find(other) {
             Some(decl) => decl.default_csp(),
             None => CspPolicy::strict(),
@@ -469,6 +581,9 @@ fn framework_specific_checks(fw: &FrameworkRef) -> Result<()> {
         && let Some(project) = fw.config.get(CFG_PROJECT).and_then(|v| v.as_str())
     {
         check_project_name(project)?;
+    }
+    if let Some(factory) = framework_factory(&fw.name) {
+        factory.check_config(&fw.config)?;
     }
     Ok(())
 }
@@ -605,6 +720,12 @@ fn normalize_key(path: &str) -> String {
         normalized.push(part);
     }
     normalized.to_string_lossy().replace('\\', "/")
+}
+
+/// The `Content-Type` a static asset at `path` is served under — the one a
+/// [`CodeFramework`] uses, for a framework serving files of its own.
+pub fn asset_content_type(path: &str) -> &'static str {
+    content_type_for(path)
 }
 
 /// Guess a `Content-Type` from a file's extension, defaulting to
@@ -953,10 +1074,7 @@ mod tests {
         assert_eq!(fw.serve(&AppRequest::get("/missing")).status, 404);
 
         // Static bundles only answer GET.
-        let post = AppRequest {
-            method: Method::Post,
-            path: "/".to_owned(),
-        };
+        let post = AppRequest::new(Method::Post, "/");
         assert_eq!(fw.serve(&post).status, 405);
     }
 
@@ -970,6 +1088,72 @@ mod tests {
         // `handle` matches; it merely wraps `serve` in `Ok(..)`.
         assert_eq!(expected.status, 200);
         assert_eq!(expected.content_type, "text/css; charset=utf-8");
+    }
+
+    #[test]
+    fn a_code_framework_ignores_what_a_server_rendered_request_carries() {
+        // §8: the request grew for Saltcorn UI. A static bundle reads the method
+        // and the path, and the same bytes come back whatever else is on it.
+        let fw = CodeFramework::new("code", sample_bundle());
+        let mut full = AppRequest::get("/posts/42");
+        full.query.insert("id".to_owned(), "3".to_owned());
+        full.body = RequestBody::Form(vec![("title".to_owned(), "Dune".to_owned())]);
+        full.headers
+            .insert("x-requested-with".to_owned(), "XMLHttpRequest".to_owned());
+        full.user = Some(sc_auth::User::new(uuid::Uuid::new_v4(), 1).unwrap());
+        full.base_url = "https://blog.example.com".to_owned();
+
+        let plain = fw.serve(&AppRequest::get("/posts/42"));
+        let served = fw.serve(&full);
+        assert_eq!(served, plain);
+        assert_eq!(&served.body[..], b"<!doctype html><div id=root>");
+        assert!(served.headers.is_empty());
+        assert_eq!(served.session, SessionAction::Keep);
+    }
+
+    /// A factory as the registry sees it: a name, a spec, a policy.
+    struct FakeFactory(&'static str);
+
+    #[async_trait]
+    impl FrameworkFactory for FakeFactory {
+        fn info(&self) -> FrameworkInfo {
+            FrameworkInfo {
+                name: self.0.to_owned(),
+                label: "Fake".to_owned(),
+                description: "Constructed, not built.".to_owned(),
+                serves_ui: true,
+            }
+        }
+        fn config_spec(&self) -> Vec<FormField> {
+            Vec::new()
+        }
+        fn default_csp(&self) -> CspPolicy {
+            CspPolicy::strict()
+        }
+        async fn mount(
+            &self,
+            _app: &crate::Application,
+            _ctx: crate::MountContext<'_>,
+        ) -> Result<Arc<dyn Framework>> {
+            Err(Error::msg("not in this test"))
+        }
+    }
+
+    #[test]
+    fn a_factory_is_listed_after_the_built_ins_and_before_any_declaration() {
+        // 5.2: compiled in, so it outranks a module — including a module that
+        // declares a framework of the same name.
+        let mut vue = crate::declared::tests::vue_decl();
+        let mut shadow = vue.clone();
+        shadow.name = "fake".to_owned();
+        shadow.label = "A module's fake".to_owned();
+        vue.name = "vue".to_owned();
+        let set = FrameworkSet::from_declarations(vec![shadow, vue]);
+        let factories: Vec<Arc<dyn FrameworkFactory>> = vec![Arc::new(FakeFactory("fake"))];
+        let listed = framework_info_with(&factories, &set);
+        let names: Vec<&str> = listed.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, [REACT_FRAMEWORK, CODE_FRAMEWORK, "fake", "vue"]);
+        assert_eq!(listed[2].label, "Fake");
     }
 
     #[test]

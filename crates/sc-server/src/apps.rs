@@ -24,7 +24,7 @@ use sc_app::{
     list_applications,
 };
 use sc_catalog::{Catalog, ReprojectedApp, SchemaChanged, SchemaObserver};
-use sc_error::{Error, Result};
+use sc_error::{Error, Repr, Result};
 
 /// One application served by this process: its record, its UI framework, and its
 /// API providers.
@@ -164,6 +164,13 @@ impl AppMounts {
 
     /// A registry whose apps build and run against `catalog`.
     pub fn new(catalog: Arc<Catalog>) -> AppMounts {
+        // A server that can mount applications can mount every framework
+        // compiled into it. Saltcorn UI is constructed rather than built, so it
+        // is a factory in `sc-app`'s registry (TODO "Saltcorn UI" 5.2), and
+        // installing it twice is harmless.
+        if let Err(e) = sc_viewpattern::install_saltcorn_ui() {
+            eprintln!("feldspar: the Saltcorn UI framework could not be registered: {e}");
+        }
         AppMounts {
             catalog: Some(catalog),
             evaluator: None,
@@ -255,6 +262,14 @@ impl AppMounts {
     /// Where Saltcorn UI's bundle is, if this server was built with one.
     pub fn saltcorn_ui_dir(&self) -> Option<&Path> {
         self.saltcorn_ui_dir.as_deref()
+    }
+
+    /// The bundle this binary was built with for the framework `name`, which is
+    /// what a factory mounting it is handed.
+    pub fn framework_bundle(&self, name: &str) -> Option<&Path> {
+        (name == sc_viewpattern::SALTCORN_UI_FRAMEWORK)
+            .then(|| self.saltcorn_ui_dir())
+            .flatten()
     }
 
     /// The Python runtime, if this server built one.
@@ -521,6 +536,10 @@ impl sc_action::TriggerObserver for AppMounts {
 /// Build an application from its stored configuration and mount it live on its
 /// subdomain, with **no process restart** (design §13.2).
 ///
+/// An application whose framework is constructed rather than built — one with
+/// a factory in `sc-app`'s registry, like Saltcorn UI — is mounted by its
+/// factory and reports an empty build.
+///
 /// This is the runtime create/edit path: resolve the app's build step from its
 /// framework config, run the bundler, and [`remount`](AppMounts::remount) the
 /// resulting framework — replacing any earlier version on the same subdomain.
@@ -532,17 +551,44 @@ pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_ap
     let catalog = apps.catalog().ok_or_else(|| {
         Error::config("this server was built with no catalog, so it cannot mount applications")
     })?;
-    if app.framework.name == sc_viewpattern::SALTCORN_UI_FRAMEWORK {
-        // Checked here, on the mount, so a missing bundle is one line at boot
-        // (or one error on save) rather than a failure on every request.
-        let bundle = sc_viewpattern::require_view_runtime(apps.saltcorn_ui_dir())
-            .map_err(|e| Error::config(format!("application `{}`: {e}", app.subdomain)))?;
-        return Err(Error::config(format!(
-            "application `{}` uses Saltcorn UI, whose runtime is at {} but which does not \
-             serve applications yet",
-            app.subdomain,
-            bundle.display()
-        )));
+    if let Some(factory) = sc_app::framework_factory(&app.framework.name) {
+        // A framework with nothing to build (Saltcorn UI) is constructed. What
+        // it needs to serve anything — a bundle, a runtime — is checked by the
+        // factory here, on the mount, so a missing one is one line at boot (or
+        // one error on save) rather than a failure on every request.
+        let framework = factory
+            .mount(
+                &app,
+                sc_app::MountContext {
+                    catalog,
+                    evaluator: apps.evaluator(),
+                    triggers: apps.triggers().cloned(),
+                    bundle_dir: apps.framework_bundle(&app.framework.name),
+                },
+            )
+            .await
+            .map_err(|e| {
+                let reason = match e.repr() {
+                    Repr::Config(m) | Repr::Invalid(m) => m.clone(),
+                    _ => e.to_string(),
+                };
+                Error::config(format!("application `{}`: {reason}", app.subdomain))
+            })?;
+        let mounted =
+            MountedApp::new_with(app, framework, catalog, apps.evaluator(), apps.triggers())?;
+        apps.remount(mounted);
+        // Nothing was built, and the report says so: no bundle, no output, no
+        // log.
+        return Ok(sc_app::BuildReport {
+            bundle: sc_app::AssetBundle::new(),
+            output_dir: PathBuf::new(),
+            git_repo: false,
+            stdout: String::new(),
+            stderr: String::new(),
+            client_path: None,
+            installed: false,
+            install_log: None,
+        });
     }
     let source = app_source_from_config(&app.framework)?;
     let report = build_application(catalog, &app, &source, apps.triggers()).await?;

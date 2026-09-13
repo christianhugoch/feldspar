@@ -142,8 +142,31 @@ fn table_json(by_name: &HashMap<&str, &Table>, table: &Table) -> Json {
         // would put them in front of a plugin that only ever wanted the
         // application's tables.
         "is_system": table.is_system(),
+        // v1's `table.constraints`, in v1's shape: Edit finds the row a state
+        // names through a jointly-unique key as well as through a unique field.
+        "constraints": table.constraints.iter().map(constraint_json).collect::<Vec<_>>(),
         "fields": fields,
     })
+}
+
+/// One constraint as v1's `TableConstraint` is shaped: a `type` and a
+/// `configuration` — `fields` for a unique key, `field` for an index (v1's
+/// indexes are over one), `formula` for a row constraint.
+fn constraint_json(constraint: &sc_catalog::TableConstraint) -> Json {
+    use sc_catalog::ConstraintKind;
+    let errormsg = constraint.error_message.clone();
+    let (kind, configuration) = match &constraint.kind {
+        ConstraintKind::Unique { fields } => {
+            ("Unique", json!({ "fields": fields, "errormsg": errormsg }))
+        }
+        ConstraintKind::Index { fields, .. } => ("Index", json!({ "field": fields.first() })),
+        ConstraintKind::FullTextSearch { .. } => ("Index", json!({ "field": "_fts" })),
+        ConstraintKind::Formula { formula } => (
+            "Formula",
+            json!({ "formula": formula, "errormsg": errormsg }),
+        ),
+    };
+    json!({ "name": constraint.name, "type": kind, "configuration": configuration })
 }
 
 /// One field, as §7's property list.
@@ -203,10 +226,7 @@ fn field_json(by_name: &HashMap<&str, &Table>, table: &Table, field: &DataField)
         Some(v1_type_name(&target.base.type_))
     });
     out.insert("reftype".to_owned(), json!(reftype));
-    out.insert(
-        "attributes".to_owned(),
-        Json::Object(field.base.attributes.clone()),
-    );
+    out.insert("attributes".to_owned(), Json::Object(v1_attributes(field)));
     out.insert("fieldview".to_owned(), attr(field, ATTR_FIELDVIEW));
     out.insert("sublabel".to_owned(), attr(field, ATTR_SUBLABEL));
     // The table's *name*: v1's `table_id` is a number and this server's tables
@@ -219,6 +239,27 @@ fn field_json(by_name: &HashMap<&str, &Table>, table: &Table, field: &DataField)
     out.insert("sql_name".to_owned(), json!(field.base.name));
     out.insert("sql_type".to_owned(), json!(field.base.type_.sql_type()));
     Json::Object(out)
+}
+
+/// A field's attributes, with the two v1 keeps there and this server keeps
+/// elsewhere put where v1 looks: a key's `summary_field` (the column its options
+/// are labelled by, which this server holds on the key itself), and `day_only`
+/// on a `date` column (v1's one `Date` type is a timestamp unless it says so).
+fn v1_attributes(field: &DataField) -> Map<String, Json> {
+    let mut attributes = field.base.attributes.clone();
+    if let DataFieldKind::Key {
+        summary_field: Some(summary),
+        ..
+    } = &field.kind
+    {
+        attributes
+            .entry("summary_field")
+            .or_insert_with(|| json!(summary.0));
+    }
+    if field.base.type_.as_basic() == Some(&BasicType::Date) {
+        attributes.entry("day_only").or_insert(json!(true));
+    }
+    attributes
 }
 
 /// v1's `type` and `typename` for one field.
@@ -259,10 +300,14 @@ fn field_type(field: &DataField) -> (Json, String) {
 /// `Date` *is* a timestamp, has no date-only counterpart, and a plugin that
 /// formats one formats the other correctly. `sql_name` still tells them apart.
 ///
-/// A **rich** type keeps its own name, which is already a Saltcorn type name.
+/// A **rich** type keeps its own name, which is already a Saltcorn type name —
+/// except the two that *are* v1's types under this server's spelling: `string`
+/// is v1's `String` and `integer` its `Integer` (a restored v1 backup's columns
+/// are exactly these), and a v1 view pattern looks a field's type up in v1's
+/// registry by v1's name.
 fn v1_type_name(type_: &TypeRef) -> String {
     let Some(basic) = type_.as_basic() else {
-        return type_.name().to_owned();
+        return v1_rich_type_name(type_.name()).to_owned();
     };
     match basic {
         BasicType::Text => "String",
@@ -274,6 +319,15 @@ fn v1_type_name(type_: &TypeRef) -> String {
         other => other.name(),
     }
     .to_owned()
+}
+
+/// v1's name for a rich type, which is its own unless it is one of v1's.
+fn v1_rich_type_name(name: &str) -> &str {
+    match name {
+        n if n == sc_types::StringType::NAME => "String",
+        n if n == sc_types::IntegerType::NAME => "Integer",
+        other => other,
+    }
 }
 
 /// One of a field's attributes, or null.
@@ -421,6 +475,37 @@ mod tests {
         assert_eq!(author["reftable_name"], json!("authors"));
         assert_eq!(author["refname"], json!("id"));
         assert_eq!(author["reftype"], json!("Integer"));
+    }
+
+    #[test]
+    fn a_constraint_is_shaped_as_v1s() {
+        use sc_catalog::{ConstraintKind, TableConstraint};
+        let unique = TableConstraint::new(
+            "books_title_author_key",
+            ConstraintKind::Unique {
+                fields: vec!["title".to_owned(), "author".to_owned()],
+            },
+        )
+        .message("A book by that author already has that title");
+        assert_eq!(
+            constraint_json(&unique),
+            json!({
+                "name": "books_title_author_key",
+                "type": "Unique",
+                "configuration": {
+                    "fields": ["title", "author"],
+                    "errormsg": "A book by that author already has that title",
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn the_rich_types_that_are_v1s_carry_v1s_names() {
+        assert_eq!(v1_rich_type_name("string"), "String");
+        assert_eq!(v1_rich_type_name("integer"), "Integer");
+        // Any other rich type is not v1's, and keeps the name it has.
+        assert_eq!(v1_rich_type_name("colour"), "colour");
     }
 
     #[tokio::test]

@@ -300,6 +300,49 @@ mod tests {
         assert_eq!(out.flashes[0].message, "Saved");
     }
 
+    /// §7: the `getConfig` keys the runtime declares are one list, and every
+    /// one of them is either a setting the framework offers an admin or a key
+    /// the application already knows. A key added to `CONFIG_KEYS` without a
+    /// setting fails here, rather than silently answering its default forever.
+    #[test]
+    fn every_get_config_key_the_runtime_declares_is_a_setting_or_derived() {
+        let script = crate::host::HOST_SCRIPT;
+        let start = script
+            .find("const CONFIG_KEYS = {")
+            .expect("the runtime declares its getConfig keys");
+        let end = start
+            + script[start..]
+                .find("\n};")
+                .expect("the declaration closes");
+        let keys: Vec<&str> = script[start..end]
+            .lines()
+            .filter_map(|line| line.strip_prefix("  "))
+            .filter_map(|line| line.split_once(':').map(|(key, _)| key))
+            .filter(|key| {
+                !key.is_empty() && key.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+            })
+            .collect();
+        assert!(keys.contains(&"site_name") && keys.len() > 5, "{keys:?}");
+
+        let settings: Vec<String> = sc_viewpattern::saltcorn_ui_config_spec()
+            .iter()
+            .map(|f| f.name().to_owned())
+            .collect();
+        for key in &keys {
+            assert!(
+                settings.iter().any(|s| s == key)
+                    || sc_viewpattern::DERIVED_CONFIG_KEYS.contains(key),
+                "`{key}` is a getConfig key with no setting: add it to saltcorn_ui_config_spec"
+            );
+        }
+        for setting in &settings {
+            assert!(
+                keys.contains(&setting.as_str()) || setting == sc_viewpattern::CFG_ROOT_PAGES,
+                "`{setting}` is a setting the runtime never reads"
+            );
+        }
+    }
+
     #[test]
     fn an_answer_that_is_not_the_protocol_says_so() {
         let msg = output(json!("<p>hi</p>")).unwrap_err().to_string();

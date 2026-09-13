@@ -33,8 +33,12 @@
 //! - [`ViewRuntime`] — the seam a view is rendered, posted to and configured
 //!   through, declared here and implemented by `sc-module` over its worker
 //!   (§3), and the one installed at boot ([`view_runtime`]).
+//! - [`SaltcornUiFramework`] — the framework that serves an application's views
+//!   and pages on its subdomain, constructed by [`SaltcornUiFactory`] from
+//!   `sc-app`'s factory registry ([`install_saltcorn_ui`]).
 
 mod bundle;
+mod framework;
 mod patterns;
 mod runtime;
 mod snapshot;
@@ -47,13 +51,18 @@ mod view_set;
 pub use bundle::{
     BUNDLE_DIR_IN_CHECKOUT, SALTCORN_UI_FRAMEWORK, VIEW_RUNTIME_FILE, require_view_runtime,
 };
+pub use framework::{
+    ASSET_VERSION_TAG, CFG_ROOT_PAGES, CFG_SITE_NAME, DERIVED_CONFIG_KEYS, SaltcornUiFactory,
+    SaltcornUiFramework, check_saltcorn_ui_config, install_saltcorn_ui, saltcorn_ui_config_spec,
+    saltcorn_ui_csp, view_sets,
+};
 pub use patterns::{
     BUILTIN_PATTERNS, PatternInfo, builtin_patterns, find_pattern, install_patterns,
     registered_patterns,
 };
 pub use runtime::{
     ConfigStep, Flash, PatternManifest, ViewContext, ViewOutput, ViewRequest, ViewRuntime,
-    ViewUser, install_view_runtime, view_runtime,
+    ViewUser, Wrap, install_view_runtime, view_runtime,
 };
 pub use snapshot::{MENU_CONFIG_KEY, ViewSnapshot};
 pub use store::{

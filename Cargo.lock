@@ -8533,6 +8533,7 @@ dependencies = [
  "futures",
  "matchit",
  "rcgen",
+ "regex-lite",
  "reqwest",
  "rust_decimal",
  "rustls",
@@ -8605,6 +8606,9 @@ name = "sc-viewpattern"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
+ "sc-action",
+ "sc-api",
  "sc-app",
  "sc-auth",
  "sc-catalog",

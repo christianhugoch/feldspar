@@ -27,6 +27,9 @@
 //! slow and a duplicate of the work that prompted the signal. An application
 //! that has never been built has nothing to load and says so.
 //!
+//! A **Saltcorn UI** application has no bundle: its views and pages are rows,
+//! and a reload re-reads them under a new generation (TODO "Saltcorn UI" 5.7).
+//!
 //! What it does *not* reload, and still wants a restart: the trigger set, the
 //! agents, the LLM providers, the file-store *connections* (a store's contents
 //! are read live, but a store definition added since boot is not connected
@@ -171,7 +174,7 @@ pub async fn reload_all(apps: &AppMounts) -> ReloadReport {
 
     let phase = Instant::now();
     match list_applications(&catalog).await {
-        Ok(stored) => reload_applications(apps, &catalog, stored, &mut report),
+        Ok(stored) => reload_applications(apps, &catalog, stored, &mut report).await,
         // The catalog is reloaded either way — half a reload is better than none,
         // and the operator is told which half.
         Err(e) => report.applications_error = Some(e.to_string()),
@@ -188,7 +191,7 @@ pub async fn reload_all(apps: &AppMounts) -> ReloadReport {
 /// A **failure is per-app**, the same rule [`mount_all`](crate::mount_all)
 /// follows: one application whose output directory is missing must not take the
 /// others down, and it keeps serving what it was serving.
-fn reload_applications(
+async fn reload_applications(
     apps: &AppMounts,
     catalog: &Catalog,
     stored: Vec<Application>,
@@ -200,7 +203,7 @@ fn reload_applications(
     for app in stored {
         let subdomain = app.subdomain.clone();
         present.push(subdomain.clone());
-        match remount_from_disk(apps, catalog, app) {
+        match remount(apps, catalog, app).await {
             Ok(assets) => {
                 report.assets += assets;
                 report.reloaded.push(subdomain);
@@ -226,7 +229,14 @@ fn reload_applications(
 /// same [`CodeFramework`], same providers from the same
 /// [`MountedApp::new_with`] — because the only difference between the two paths
 /// is who ran the bundler.
-fn remount_from_disk(apps: &AppMounts, catalog: &Catalog, app: Application) -> Result<usize> {
+async fn remount(apps: &AppMounts, catalog: &Catalog, app: Application) -> Result<usize> {
+    // A framework with nothing on disk to re-read (Saltcorn UI) is mounted again
+    // by its factory, which re-reads the application's views and pages under a
+    // new generation — the reload of a rendered application.
+    if sc_app::framework_factory(&app.framework.name).is_some() {
+        crate::apps::build_and_mount(apps, app).await?;
+        return Ok(0);
+    }
     let source = app_source_from_config(&app.framework)?;
     let bundle = load_app_bundle(catalog, &source)?;
     let assets = bundle.len();

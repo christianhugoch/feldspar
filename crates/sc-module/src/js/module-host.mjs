@@ -411,8 +411,53 @@ v1Classes.Field = v1Facade("Field");
  * thing to say. */
 let pure = null;
 function pureApi() {
-  if (!pure) pure = globalThis.__scMakeV1Api(null, null, null);
+  if (!pure) pure = globalThis.__scMakeV1Api(null, null, null, v1FieldType, v1TableField);
   return pure;
+}
+
+/** A table's field as v1's patterns get one from `Table.findOne`, once the view
+ * runtime is loaded: an instance of v1's own `Field` (§4.5's `FormField`), which
+ * a pattern may write to and fill the options of — not the read-only record a
+ * code body gets. Only for the life of one call: the call's `Table` is its own.
+ */
+function v1TableField(record, spec) {
+  if (!viewRuntime) return undefined;
+  const field = new FormField({
+    name: spec.name,
+    label: spec.label,
+    type: spec.is_fkey ? `Key to ${spec.reftable_name}` : spec.typename === "File" ? "File" : spec.typename,
+    required: spec.required,
+    is_unique: spec.is_unique,
+    primary_key: spec.primary_key,
+    calculated: spec.calculated,
+    stored: spec.stored,
+    expression: spec.expression,
+    reftable_name: spec.reftable_name,
+    reftype: spec.reftype,
+    refname: spec.refname,
+    attributes: structuredClone(spec.attributes || {}),
+    fieldview: spec.fieldview,
+    sublabel: spec.sublabel,
+    description: spec.description,
+    table_id: spec.table_id,
+  });
+  field.id = record.id;
+  field.sql_name = record.sql_name;
+  field.sql_type = record.sql_type;
+  if (!field.typename) field.typename = spec.typename;
+  return field;
+}
+
+/** A field's `type` as an instantiated v1 `Field` holds it, once the view
+ * runtime is loaded: `"Key"` for a key, `"File"` for a file, and otherwise the
+ * bundle's own type object — which is where a pattern finds `type.fieldviews`,
+ * `showAs` and `listAs`. Without the runtime there is no registry, and a field
+ * keeps the snapshot's `type`. */
+function v1FieldType(spec) {
+  if (!viewRuntime) return undefined;
+  if (spec.is_fkey) return "Key";
+  if (spec.typename === "File") return "File";
+  return (viewRuntime.types && viewRuntime.types[spec.typename]) || undefined;
 }
 
 /** This call's v1 API — `{ Table, Field }` from the shared `v1_api.js` — built
@@ -429,6 +474,8 @@ function callApi(what) {
       (plan) => ask("db", plan),
       store.schema,
       (request) => ask("trigger", request),
+      v1FieldType,
+      v1TableField,
     );
   }
   return store.api;
@@ -476,7 +523,10 @@ function saltcornModule(specifier) {
     case "@saltcorn/data/models/page_group":
       return V1PageGroup;
     case "@saltcorn/data/db/state":
-      return hostModule(specifier, { getState });
+      // v1's `getReq__` and `getApp__` hand back the request's and the
+      // application's translation function; i18n is the identity here
+      // (TODO, Explicitly OUT), so both hand back `translate`.
+      return hostModule(specifier, { getState, getReq__: () => translate, getApp__: () => translate });
     default: {
       const answered = libraryModule(bare);
       return answered !== undefined ? answered : namedNamespace(specifier);
@@ -2376,6 +2426,58 @@ class FormField {
     return false;
   }
 
+  /** v1's `listKey`: how a list shows the field when no fieldview is named. */
+  get listKey() {
+    const type = this.type;
+    if (type && typeof type.listAs === "function") return (r) => type.listAs(r[this.name]);
+    if (type && typeof type.showAs === "function") return (r) => type.showAs(r[this.name]);
+    return this.name;
+  }
+
+  /** v1's `distinct_values(req, where)`: a key's referenced rows as options,
+   * labelled by its summary field and in that order; any other field's distinct
+   * values. Read under the call's authority, like every other read. */
+  async distinct_values(_req, where) {
+    const api = callApi(`field.distinct_values of ${this.name}`);
+    const blank = this.required ? [] : [{ label: "", value: "" }];
+    if (this.is_fkey) {
+      const target = api.Table.findOne({ name: this.reftable_name });
+      if (!target) {
+        throw new Error(`the key field ${this.name} refers to ${this.reftable_name}, which is not a table here`);
+      }
+      const summary = (this.attributes && this.attributes.summary_field) || target.pk_name;
+      const rows = await target.getRows(where || {}, { orderBy: summary });
+      const refname = this.refname || target.pk_name;
+      return [
+        ...blank,
+        ...rows.map((r) => ({
+          label: r[summary] === null || r[summary] === undefined ? "" : String(r[summary]),
+          value: r[refname],
+        })),
+      ];
+    }
+    const table = this.table_id && api.Table.findOne({ name: this.table_id });
+    if (!table) return blank;
+    const values = await table.distinctValues(this.name, where);
+    return [...blank, ...values.map((v) => ({ label: v === null ? "" : String(v), value: v }))];
+  }
+
+  /** v1's `fill_fkey_options`: a key field's `options`, from the rows its
+   * `attributes.where` (a formula over `extraCtx`) or the caller's `where`
+   * selects. Nothing to do for any other field. */
+  async fill_fkey_options(force_allow_none = false, where0, extraCtx = {}) {
+    if (!this.is_fkey) return;
+    let where = where0;
+    if (!where && this.attributes && this.attributes.where) {
+      const expression = loadedRuntime("field.fill_fkey_options").library["@saltcorn/data/models/expression"];
+      const jsexprToWhere = expression.jsexprToWhere || (expression.default && expression.default.jsexprToWhere);
+      where = jsexprToWhere(this.attributes.where, extraCtx);
+    }
+    const options = await this.distinct_values(undefined, where);
+    if (force_allow_none && !options.some((o) => o.value === "")) options.unshift({ label: "", value: "" });
+    this.options = options;
+  }
+
   get form_name() {
     return this.parent_field ? `${this.parent_field}_${this.name}` : this.name;
   }
@@ -2654,6 +2756,66 @@ function viewAnswer(value, response) {
   return { value: value === undefined ? null : value, response };
 }
 
+/** v1's `get_menu` over the application's `menu_items` (§9): the entries the
+ * viewer's role may see, as `navbar`'s sections. An entry with nothing here to
+ * link to — v1's `Admin Page`, `User Page`, `Search` — is left out, and so is a
+ * `Header` left with nothing under it. */
+function menuSections(set, req) {
+  const role = req.user ? req.user.role_id : 100;
+  const visible = (item) =>
+    item &&
+    role <= +(item.min_role === undefined || item.min_role === null ? 100 : item.min_role) &&
+    (!item.max_role || role >= +item.max_role);
+  const transform = (items) =>
+    (Array.isArray(items) ? items : []).filter(visible).flatMap((item) => {
+      const link =
+        item.type === "View" && item.viewname
+          ? `/view/${encodeURIComponent(item.viewname)}`
+          : item.type === "Page" && item.pagename
+            ? `/page/${encodeURIComponent(item.pagename)}`
+            : item.type === "Link"
+              ? item.url
+              : undefined;
+      const subitems = item.type === "Header" ? transform(item.subitems) : undefined;
+      if (item.type === "Header" ? !subitems.length : !link) return [];
+      return [
+        {
+          label: item.label,
+          icon: item.icon,
+          link,
+          tooltip: item.tooltip,
+          style: item.style || "",
+          location: item.location,
+          target_blank: !!item.target_blank,
+          isUser: false,
+          ...(subitems ? { subitems } : {}),
+        },
+      ];
+    });
+  const items = transform(configValue(set, "menu_items", []));
+  return items.length ? [{ section: "Menu", items }] : [];
+}
+
+/** What a view or page rendered, in the layout (§9) when the request asked for
+ * it: `emergency_layout`'s `wrap`, with the application's brand and menu and the
+ * call's flashes as alerts. An answer that is not HTML — a redirect, `res.json`,
+ * `res.send` — is not wrapped. */
+function wrapped(value, request, req, response, set) {
+  const wrap = request && request.wrap;
+  if (!wrap || typeof value !== "string") return value;
+  if (response.redirect !== null || "json" in response || "sent" in response) return value;
+  return builtInLayout().wrap({
+    title: wrap.title,
+    brand: { name: configValue(set, "site_name") },
+    menu: menuSections(set, req),
+    alerts: response.flashes.map((f) => ({ type: f.kind, msg: f.message })),
+    currentUrl: wrap.current_url || req.path,
+    body: value,
+    headers: [],
+    req,
+  });
+}
+
 /** The pattern manifest (§3.3): the bundle's registry, with each pattern's
  * configuration step **names** — which need a `req` to be built, and nothing
  * else — and never a step's fields, which need a table. */
@@ -2688,7 +2850,7 @@ async function viewRender({ view: name, state, request }) {
   const { req, res, response } = viewRequest(request, set);
   const view = viewNamed(set, name);
   const value = await view.run(view.combine_state_and_default_state(state || {}), { req, res });
-  return viewAnswer(value, response);
+  return viewAnswer(wrapped(value, request, req, response, set), response);
 }
 
 /** v1's `View.runPost`: the state is the query, as v1's route builds it. */
@@ -2730,7 +2892,7 @@ async function viewRenderPage({ page: name, request }) {
           req,
           is_owner: false,
         });
-  return viewAnswer(value, response);
+  return viewAnswer(wrapped(value, request, req, response, set), response);
 }
 
 /** One step of a pattern's configuration workflow (§6): a call per step, over

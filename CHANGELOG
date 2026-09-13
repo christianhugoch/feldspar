@@ -2,6 +2,131 @@
 
 Changes in reverse chronological order.
 
+## Saltcorn UI, Phase 5: the framework, and rendering a view
+
+A Saltcorn UI application now serves its views and pages over HTTP, on its own
+subdomain. `/view/List%20Books` on a restored BooksDB is v1's own `list.ts`
+output, in v1's layout, under Saltcorn UI's CSP. Posting (Phase 6), signing in
+(Phase 7) and the import (Phase 8) are still to come.
+
+- **The request and the response grew (5.1).**
+  - `AppRequest` carries the query, the body (`RequestBody::Form`, `Json`,
+    `Empty`), the headers a pattern reads (`referer`, `x-requested-with`,
+    `accept`), the signed-in user and the application's origin.
+  - `AppResponse` carries other headers (`Location`, a pattern's `Page-Title`)
+    and a session change.
+  - `router.rs` fills the request from the live one. It applies the response's
+    session through `apply_session`, the half of `apply_response` an API
+    provider's response already went through, so there is one session story.
+  - **Deviation:** `session` is a `SessionAction` (with `Keep`), not an
+    `Option<SessionAction>`, because that is the type `HandlerResponse` and
+    `ApiResponse` already use.
+  - A `CodeFramework` still reads only the method and the path, and a test
+    asserts it serves the same bytes whatever else is on the request.
+- **Framework factories (5.2).** `sc_app::FrameworkFactory` is a framework
+  written in Rust outside `sc-app` and constructed rather than built.
+  - It answers its picker entry, its settings, its default CSP and a check of
+    its own, and mounts an application given a `MountContext` (the catalog,
+    the evaluator, the dispatcher and this binary's bundle for it).
+  - `install_framework_factory` / `framework_factory` is the registry. It is
+    consulted after `react` and `code` and before any module's declaration, so
+    a module cannot declare a framework over a compiled one.
+  - `build_and_mount` mounts a factory's application through it and reports an
+    empty build. `reload_all` (SIGHUP) remounts one the same way.
+- **`SaltcornUiFramework` (5.3)**, in `sc-viewpattern`, installed by
+  `AppMounts::new`. Label "Saltcorn UI"; serves a UI; no build; no builder
+  agent. Its default CSP is the strict one with
+  `script-src 'self' 'unsafe-inline'` and nothing else relaxed (§10).
+  - Saving or creating an application whose framework is constructed now
+    mounts it, since there is no Build button to wait for. The response says
+    `mounted`, or `mount_error`.
+  - A mount re-reads the application's views and pages under a new
+    generation. `sc_viewpattern::view_sets()` is the one cache the mount, the
+    renders and every writer share.
+  - The missing-bundle sentence of Phase 2 is now the factory's, still on the
+    mount, and a server with the bundle but no view runtime says that instead.
+- **Its settings (5.4).** `site_name`, `menu_items` (JSON), `root_pages`
+  (`{ "<role id>": "<page name>" }`) and every `getConfig` key the runtime
+  declares that the application does not already know (`default_locale`,
+  `login_form`, `exttables_min_role_read`, and the rest). A menu must be a list
+  of entries with a `type`; `root_pages` must map role ids to names.
+  - A unit test in `sc-module` reads `CONFIG_KEYS` out of the host script and
+    holds it to the settings in both directions. `base_url` and
+    `enable_dynamic_updates` are the two derived keys.
+- **The GET routes (5.5).**
+  - `/`: the role's page from `root_pages`, else a page whose
+    `root_page_for_roles` names the role, else a document naming the pages and
+    views there are ("Nothing here yet" when there are none).
+    **Deviation:** the TODO's "else the first page" is not done; the definition
+    of done's step 5 asks for the document naming the pages, and it does that.
+  - `/view/:name` and `/view/:name/*slug` (the slug's parts fill the fields
+    `slug.steps` name). An ajax request (`X-Requested-With`) gets the view's
+    HTML alone, which is what a Filter's reload asks for.
+  - `/page/:name`.
+  - `/static_assets/:tag/*` out of the bundle's `public/`, confined to it, with
+    a year-long cache (the tag is the server's version).
+  - `/files/serve/<store>/<path>`, or `/files/serve/<path>` in the
+    application's first store, under the store's and the path's access rules.
+    A file the viewer may not read is not found.
+  - A view or page below the viewer's role is refused before it runs: 401 for
+    nobody, 403 for somebody. Phase 7 turns the first into a login.
+  - A pattern that throws is a 500 document naming the view and the reason; a
+    worker that cannot be reached is a server error.
+  - Every other method is 405 until Phase 6.
+- **The document (5.6).** Saltcorn UI's own head (v1's `wrapper.js`, ported):
+  Bootstrap, Font Awesome, `saltcorn.css`, jQuery, `saltcorn-common.js`,
+  `saltcorn.js`, and the globals they read. `<title>` is the view's
+  `page_title` attribute, else its name; a page's title, else its name.
+  - The layout is drawn **in the same worker call** as the view: a
+    `ViewRequest` may carry `wrap: { title, current_url }`, and the runtime
+    runs `emergency_layout`'s `wrap` with the brand, the flashes as alerts, and
+    the menu.
+  - The menu is v1's `get_menu`: the entries the role may see, with `Admin
+    Page`, `User Page` and empty headers left out.
+  - `_sc_globalCsrf` is empty until 6.4.
+- **Found by the golden tests, fixed in the compat layer.** Each of these made a
+  pattern throw or render a plausible wrong thing:
+  - `Field.type` is v1's type **object** (with its fieldviews) whenever the
+    view runtime is loaded, and `"Key"` / `"File"` as an instantiated v1
+    `Field` has it (`__scMakeV1Api`'s new optional `typeOf`).
+  - A table's fields are instances of v1's own `Field` in the view runtime
+    (`fieldOf`), because Filter writes to them. Code bodies keep their
+    read-only fields.
+  - `Field` gains v1's `listKey`, `distinct_values` and `fill_fkey_options`
+    (a key's options, labelled by its summary field, under the call's
+    authority).
+  - `db/state` answers `getReq__` and `getApp__` (the identity translation).
+  - `Table.delete_url` is implemented and off the refusal list; it is a URL.
+  - `getJoinedRows` accepts v1's `starFields`, which adds nothing here.
+  - The schema snapshot carries `table.constraints` in v1's shape, a key's
+    `summary_field` and a `date` column's `day_only` in `attributes`, and
+    calls the rich types `string` and `integer` v1's `String` and `Integer`.
+- **Tests (5.8).**
+  - `sc-server`'s `saltcorn_ui_render` restores the real BooksDB backup, runs
+    the modules with the bundle, mounts a Saltcorn UI application with the
+    backup's own views (plus a Feed and a ListShowList) and its page. It checks:
+    - *List Books* as a document: the CSP, the assets, the navbar and menu, a
+      row per book with the author joined, the ajax fragment, the page with
+      the Filter, `/`, a static asset, a refused path escape, a missing view,
+      and an anonymous viewer refused;
+    - each of the six patterns against committed HTML in
+      `tests/fixtures/saltcorn-ui-golden/`, after replacing what legitimately
+      differs (a UUID, v1's random form id, a `<time>`'s locale text).
+      `SC_UPDATE_GOLDEN=1` rewrites them.
+  - Updated: `admin_applications_api` expects the picker to list
+    `saltcorn-ui` after `react` and `code`.
+  - Unit tests: the request fields a code framework ignores, the factory's
+    place in the registry, the CSP, the settings and their checks, the slug,
+    path decoding and confinement, the `CONFIG_KEYS` agreement, constraint
+    shape and the rich type names.
+- **Notes for review.**
+  - The BooksDB fixture has **two** books, not the five the definition of done
+    describes; the live test counts the admin API's rows rather than a number.
+  - Only `script-src` is relaxed, per §10, so the `style="…"` attributes v1's
+    markup carries are blocked by `default-src 'self'` and do not apply.
+  - An Edit rendered with no `Referer` header carries `_referer="undefined"`,
+    as v1's own does.
+
 ## Saltcorn UI, Phase 4: the compat layer in JavaScript
 
 v1's view patterns now find the v1 models they reach for. `View`, `Page`,

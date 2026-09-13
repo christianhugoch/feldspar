@@ -51,6 +51,8 @@ mod builder_agent;
 // written down as data instead of compiled.
 mod declared;
 mod diagnostics;
+// Frameworks written in Rust above this crate (Saltcorn UI): named constructors.
+mod factory;
 mod framework;
 // The application third of the administrative tool surface (§13.6), and the one
 // constructor of the whole nine-tool set.
@@ -88,13 +90,17 @@ pub use declared::{
     PathTemplate, clean_path, declared_framework, install_frameworks, installed_frameworks,
 };
 pub use diagnostics::build_diagnostics;
+pub use factory::{
+    FrameworkFactory, MountContext, framework_factories, framework_factory,
+    install_framework_factory,
+};
 pub use framework::{
     AppRequest, AppResponse, Asset, AssetBundle, BuildSpec, CFG_CLIENT, CFG_COMMAND, CFG_OUTPUT,
     CFG_SOURCE, CFG_STORE, CODE_FRAMEWORK, CodeFramework, Framework, FrameworkInfo, InstallSpec,
-    Method, code_config_spec, config_spec_in, default_csp_in, framework_config_spec,
-    framework_default_csp, framework_info_in, framework_serves_ui, registered_framework_info,
-    registered_frameworks, serves_ui_in, validate_config_in, validate_config_structure_in,
-    validate_framework_config, validate_framework_config_structure,
+    Method, RequestBody, asset_content_type, code_config_spec, config_spec_in, default_csp_in,
+    framework_config_spec, framework_default_csp, framework_info_in, framework_serves_ui,
+    registered_framework_info, registered_frameworks, serves_ui_in, validate_config_in,
+    validate_config_structure_in, validate_framework_config, validate_framework_config_structure,
 };
 pub use react::{
     CFG_PROJECT, REACT_BUILD_ARGS, REACT_BUILD_COMMAND, REACT_CLIENT_FILE, REACT_FRAMEWORK,
