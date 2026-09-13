@@ -46,6 +46,8 @@ DATA_FILES=(
   models/expression.ts
   models/layout.ts
   utils.ts
+  # getState().evaluator: what a formula in a view is evaluated with.
+  evaluator.ts
   diagram/node_extract_utils.ts
   diagram/nodes/node.ts
   diagram/nodes/page_node.ts

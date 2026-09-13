@@ -49,3 +49,5 @@ mod two_pools;
 mod v1_table;
 #[path = "view_runtime.rs"]
 mod view_runtime;
+#[path = "view_compat.rs"]
+mod view_compat;

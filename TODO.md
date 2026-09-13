@@ -567,34 +567,34 @@ Five levels, because the failure modes are at five levels:
 
 ## Phase 4 — The compat layer in JavaScript
 
-- [ ] 4.1 `View` from the snapshot, synchronous: `findOne`, `find`, `find_table_views_where`,
+- [x] 4.1 `View` from the snapshot, synchronous: `findOne`, `find`, `find_table_views_where`,
       `find_all_views_where`, `find_possible_links_to_table`, and the instance properties
       (`name`, `table_id`, `configuration`, `min_role`, `slug`, `attributes`,
       `viewtemplateObj`). `run`, `runMany`, `runPost`, `runRoute`, `get_state_fields` and
       `combine_state_and_default_state` dispatch into the registry **in-worker** (§3).
-- [ ] 4.2 `Page` from the snapshot, and `renderPage` over `@saltcorn/markup`'s `renderLayout`
+- [x] 4.2 `Page` from the snapshot, and `renderPage` over `@saltcorn/markup`'s `renderLayout`
       with the embedded-view dispatch of 4.1.
-- [ ] 4.3 `getState()` (§7): `types`, `keyFieldviews`, `fileviews`, `viewtemplates` from the
+- [x] 4.3 `getState()` (§7): `types`, `keyFieldviews`, `fileviews`, `viewtemplates` from the
       bundle; `getConfig` over the declared key set with v1's defaulting; `roles`; `actions`
       (§12's three kinds); `functions` over the existing `modfn` surface; `getLayout`
       answering the one built-in layout; `log`; `i18n`/`__` as identity; `emitRoom` refused
       by name.
-- [ ] 4.4 The `req`/`res` shims: `user`, `query`, `body`, `params`, `method`, `path`,
+- [x] 4.4 The `req`/`res` shims: `user`, `query`, `body`, `params`, `method`, `path`,
       `headers`, `xhr`, `csrfToken()`, `flash()`, `getLocale()`, `__`, `get_base_url()`;
       `res.redirect`, `res.json`, `res.status`, `res.sendWrap`, `res.trigger_return`. Built
       from the `AppRequest` of §8 and read back out of it after the call.
-- [ ] 4.5 `Form` and `FieldRepeat` come from the vendored `models/form.ts` and
+- [x] 4.5 `Form` and `FieldRepeat` come from the vendored `models/form.ts` and
       `models/fieldrepeat.ts` and **replace** the stub in `module-host.mjs`, so a module's
       `configuration_workflow`, a plugin pattern's repeated config section and an Edit view
       build the same classes. `Workflow` keeps its stub; the note says which is which.
-- [ ] 4.6 `Trigger` over the existing trigger surface (`Trigger.findOne`, `trigger.run`,
+- [x] 4.6 `Trigger` over the existing trigger surface (`Trigger.findOne`, `trigger.run`,
       bounded by the app's subset), `File` and `User` minimally over the file and auth
       surfaces, `Crash` to the error log, `Library`/`PageGroup` inert and empty.
-- [ ] 4.7 The refusal list extended (§5): every v1 model member the view runtime reaches that
+- [x] 4.7 The refusal list extended (§5): every v1 model member the view runtime reaches that
       this server does not implement, on the one list in `v1_api.js`, each naming itself. The
       build-time check that a name cannot be both implemented and refused already exists and
       now covers these.
-- [ ] 4.8 JavaScript unit tests through the worker: each shim's shape against v1's, the
+- [x] 4.8 JavaScript unit tests through the worker: each shim's shape against v1's, the
       refusals, the absent tier answering `undefined` for each name on it (with the plugin
       idiom that justifies it in the test's name), `getConfig` defaulting, and the depth cap.
 

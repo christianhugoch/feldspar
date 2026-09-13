@@ -993,9 +993,29 @@ impl DenoModuleHost {
         // `Table` reached from a call with no caller refuses at the property,
         // synchronously, naming why — rather than sending an ask that would come
         // back refused from somewhere the plugin author cannot see.
-        let can_ask = call.hosts.host.is_some() || call.hosts.triggers.is_some();
+        let can_ask = call.hosts.host.is_some()
+            || call.hosts.triggers.is_some()
+            || call.hosts.module_fns.is_some();
         if let Json::Object(map) = &mut request {
             map.insert("asks".to_owned(), Json::Bool(can_ask));
+            // The functions this call's modules supply, by name, for v1's
+            // `getState().functions` — synchronous in v1, so the names cross
+            // with the call and only the call itself is an ask.
+            if let Some(module_fns) = call.hosts.module_fns {
+                let functions: Vec<Json> = module_fns
+                    .functions()
+                    .into_iter()
+                    .map(|f| {
+                        json!({
+                            "module": f.module,
+                            "name": f.name,
+                            "description": f.description,
+                            "isAsync": f.is_async,
+                        })
+                    })
+                    .collect();
+                map.insert("moduleFunctions".to_owned(), Json::Array(functions));
+            }
         }
         let (reply, answer) = oneshot::channel();
         let (asks, mut asked) = tokio::sync::mpsc::unbounded_channel::<HostAsk>();
@@ -1012,6 +1032,7 @@ impl DenoModuleHost {
 
         let host = call.hosts.host;
         let triggers = call.hosts.triggers;
+        let module_fns = call.hosts.module_fns;
         // The run's budget, and the same one a code body's run gets: a module's
         // N+1 costs what a body's N+1 costs, because it is the same bound on the
         // same server doing the same work.
@@ -1058,7 +1079,7 @@ impl DenoModuleHost {
                     outstanding.insert(ask.id);
                     let control = control.clone();
                     serving.push(async move {
-                        let (ok, text) = match serve(host, triggers, ask.request).await {
+                        let (ok, text) = match serve(host, triggers, module_fns, ask.request).await {
                             Ok(value) => (
                                 true,
                                 serde_json::to_string(&value)
@@ -1108,14 +1129,16 @@ fn over_budget() -> String {
 
 /// One ask, on the surface it names.
 ///
-/// Two surfaces, because two are what the v1 `Table` speaks: a plan (`db`) and a
-/// run of another trigger (`trigger`). Anything else is a sentence naming what it
-/// asked for and what there is — a module cannot be allowed to reach a seam by
-/// guessing at its name, and a silently ignored ask would be a module computing
-/// the wrong answer.
+/// Three surfaces: the two the v1 `Table` speaks — a plan (`db`) and a run of
+/// another trigger (`trigger`) — and a module function (`function`), which is
+/// what v1's `getState().functions` calls in a Saltcorn UI view. Anything else is
+/// a sentence naming what it asked for and what there is — a module cannot be
+/// allowed to reach a seam by guessing at its name, and a silently ignored ask
+/// would be a module computing the wrong answer.
 async fn serve(
     host: Option<&dyn CodeHost>,
     triggers: Option<&dyn TriggerHost>,
+    module_fns: Option<&dyn sc_expr::ModuleFnHost>,
     request: Json,
 ) -> Result<Json> {
     let surface = request
@@ -1132,8 +1155,16 @@ async fn serve(
             Some(triggers) => triggers.run(plan).await,
             None => Err(Error::config("this module call cannot run other triggers")),
         },
+        "function" => match module_fns {
+            Some(module_fns) => module_fns.call(plan).await,
+            None => Err(Error::config(
+                "this module call cannot call other modules' functions",
+            )),
+        },
         other => Err(Error::config(format!(
-            "`{other}` is not something a module can ask this server for; what a module may              reach is the database (`db`) and this server's triggers (`trigger`)"
+            "`{other}` is not something a module can ask this server for; what a module may \
+             reach is the database (`db`), this server's triggers (`trigger`) and its modules' \
+             functions (`function`)"
         ))),
     }
 }
@@ -1315,24 +1346,40 @@ mod tests {
     async fn an_ask_naming_a_surface_a_module_has_not_got_is_refused_by_name() {
         // A plan on a call with no database host: the honest sentence, and the
         // same one a code body's op answers.
-        let err = serve(None, None, json!({ "surface": "db", "plan": {} }))
+        let err = serve(None, None, None, json!({ "surface": "db", "plan": {} }))
             .await
             .expect_err("there is no host");
         assert!(err.to_string().contains("no database access"), "{err}");
 
-        let err = serve(None, None, json!({ "surface": "trigger", "plan": {} }))
-            .await
-            .expect_err("there is no dispatcher");
+        let err = serve(
+            None,
+            None,
+            None,
+            json!({ "surface": "trigger", "plan": {} }),
+        )
+        .await
+        .expect_err("there is no dispatcher");
         assert!(err.to_string().contains("run other triggers"), "{err}");
+
+        let err = serve(
+            None,
+            None,
+            None,
+            json!({ "surface": "function", "plan": {} }),
+        )
+        .await
+        .expect_err("there are no module functions");
+        assert!(err.to_string().contains("modules' functions"), "{err}");
 
         // A surface nobody has: named, with what there is.
         for request in [json!({ "surface": "fs", "plan": {} }), json!({})] {
-            let err = serve(None, None, request.clone())
+            let err = serve(None, None, None, request.clone())
                 .await
                 .expect_err("not a surface");
             let message = err.to_string();
             assert!(message.contains("`db`"), "{request}: {message}");
             assert!(message.contains("`trigger`"), "{request}: {message}");
+            assert!(message.contains("`function`"), "{request}: {message}");
         }
     }
 

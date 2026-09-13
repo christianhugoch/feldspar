@@ -18,6 +18,7 @@ module.exports = {
         features_present: "features" in state,
         collab: helper.runCollabEvents ? "detected" : "absent",
         get_state: typeof state.getState,
+        add_tenant: typeof state.add_tenant,
       }),
     },
   },

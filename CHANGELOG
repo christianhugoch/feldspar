@@ -2,6 +2,121 @@
 
 Changes in reverse chronological order.
 
+## Saltcorn UI, Phase 4: the compat layer in JavaScript
+
+v1's view patterns now find the v1 models they reach for. `View`, `Page`,
+`getState()`, `req`/`res`, `Form`, `Trigger`, `File`, `User`, `Crash`,
+`Library` and `PageGroup` are answered by the module worker's host script
+over the application a call renders for. Nothing is served over HTTP yet
+(Phase 5); every piece is tested through a real worker.
+
+- **`View` (4.1)**, over the view snapshot and synchronous where v1's is.
+  - `findOne` (by id, name or any `where`, a copy each time), `find` (v1's
+    case-insensitive order), `find_table_views_where`, `find_all_views_where`,
+    `find_possible_links_to_table`.
+  - The instance: `name`, `table_id` (the table's name, which is what `Table`
+    keys on here), `configuration`, `min_role`, `slug`, `attributes`,
+    `viewtemplateObj`, `menu_label`, `select_option`.
+  - `run`, `runMany`, `runPost`, `runRoute`, `get_state_fields` and
+    `combine_state_and_default_state` dispatch into the registry **in the
+    worker**, with v1's role gate and empty-string stripping. `runRoute`
+    answers through `res` as v1's does (`{ json }`, `{ html }`, else
+    `{ success: "ok" }`), fixing v1's `typeof result.stack` status check.
+  - A view embedded in another names itself in a failure (once, the innermost);
+    the outermost is named by the seam or the page it is on. The depth cap of
+    Phase 3 now applies to every `View.run`, and has its test.
+  - The seam's `view_render` combines the default state as v1's GET does;
+    `view_post` and `view_route` go through the same class.
+- **`Page` (4.2)**: `findOne`, `find`, `menu_label`, and `run` ported from v1.
+  - Embedded views in `shared`, `local` and fixed state, wrapped in v1's
+    `data-sc-view-source` `div` (what a filter's ajax reload re-fetches).
+  - Embedded pages, under the same depth cap: a page that embeds itself stops
+    naming `the page Loop → the page Loop`.
+  - Action segments (links, and `on_page_load` through plugin-helper's
+    `run_action_column`), `transfer_state` links, `showIfFormula` containers,
+    `{{ }}` interpolation in HTML segments. `view_render_page` is `Page.run`
+    then `renderLayout`.
+  - A page that is an HTML file is refused by name; its layout is kept.
+- **`getState()` (4.3)**, per application and built once per snapshot.
+  - `types`, `keyFieldviews`, `fileviews`, `viewtemplates` are the bundle's.
+  - `getConfig` answers a declared key set (`CONFIG_KEYS` in `module-host.mjs`,
+    the keys the six patterns read) with v1's defaulting: the setting, else a
+    truthy default, else the declared default. An undeclared key answers the
+    caller's default, never the setting. `site_name`, `base_url` and
+    `menu_items` come from the application. `enable_dynamic_updates` is always
+    off, since nothing here listens for them.
+  - `roles`, `views`, `pages`, `triggers`; `actions` is empty (§12: the view
+    actions are the patterns' own, triggers are found through `Trigger`);
+    `getLayout` is `emergency_layout`; `log` goes to the server log; `i18n`
+    and `__` are the identity.
+  - `functions` and `eval_context` are the call's module functions, called
+    through a new **`function` ask surface** on the worker (`serve` in
+    `deno/mod.rs`). A call carrying `module_fns` sends their names as
+    `moduleFunctions`. `evaluator` is v1's own `Evaluator`, now vendored
+    (`vendor/saltcorn-data/evaluator.ts`, added to `refresh.sh`).
+  - Outside a view call `getState()` still answers the registries, and
+    everything that needs an application says so by name.
+- **`req`/`res` (4.4)**: `method`, `path`, `originalUrl`/`url`, `query`,
+  `body`, `params`, `headers`, `get`/`header` (case-insensitive, `Referrer`
+  as `referer`), `user` (with `attributes`), `isAuthenticated`, `xhr`,
+  `cookies`, `csrfToken`, `flash` (set and read), `getLocale`, `__`,
+  `get_base_url`; `res.status`, `redirect`, `json`, `send`, `sendWrap`,
+  `set`/`header` and `headersSent`.
+  - `ViewOutput` gains `headers`.
+  - **Deviation:** there is no `res.trigger_return`. v1's `trigger_return` is
+    a field of an insert/update result that `edit.ts` reads, not a member of
+    `res`.
+- **`Form` and `FieldRepeat` (4.5)** are v1's own whenever the view runtime is
+  loaded, for modules too. `new Field(cfg)` now builds a form field (v1's
+  constructor, `form_name`, `fieldviews`, `pretty_type`, `toJson`,
+  `showIfEnabled`, `validate`), and `instanceof Field` answers about those;
+  `new Table` is still refused.
+  - A module's settings still cross as declarations: the manifest turns a
+    field's type object back into its name.
+  - Without the bundle, the host's `Form` stub is used as before. `Workflow`
+    stays the host's.
+- **`Trigger`, `File`, `User`, `Crash`, `Library`, `PageGroup` (4.6)**.
+  - `Trigger.find`/`findOne` see only the triggers the application declares.
+    `ViewSnapshot` now carries them as `triggers`. `trigger.run` and
+    `runWithoutRow` go through the trigger ask. `trigger_actions` and
+    `action_options` build a picker from them.
+  - `File` is its pure half: `pathToServeUrl`, `fieldValueFromRelative`,
+    `normalizeFieldValueInput`, `isAbsoluteURL`, `nameToMimeType`.
+    **Deviation:** its lookups are refused, not implemented over the file
+    surface; an app's files are served by the app (5.5).
+  - `User.get_roles`, and a `User.table` that is no table (so Edit's
+    "is this the users table" is false).
+  - `Crash.create` logs an error. `Library` and `PageGroup` are inert and empty.
+- **The refusal list (4.7).**
+  - `v1_api.js`'s `NOT_IMPLEMENTED` gains the members of `View`, `Page`,
+    `Trigger`, `File`, `User`, `Crash` and `state` that the runtime reaches,
+    each with its reason. `__scV1InstallRefusals` exposes the installer, so
+    the "both implemented and refused" check covers them.
+  - sc-expr's two tests over the list (every refusal names itself, and the
+    tutorial's compatibility table) walk only `Table`/`Field`, the owners a
+    code body has.
+- **Tests (4.8).**
+  - `sc-module`'s new `view_compat` suite runs the `compat-module` fixture's
+    probes with a BooksDB snapshot on the call. It covers:
+    - the models' shapes and orders;
+    - `getConfig` defaulting;
+    - module functions through a fake `ModuleFnHost`, from a pattern and from
+      a formula;
+    - the no-application sentences;
+    - the `req`/`res` shape (through `__scViewRequest`, a test accessor like
+      `__scV1Refused`);
+    - every refused member naming itself;
+    - the absent tier, named after kanban's idioms;
+    - the depth cap, innermost-view naming and `runRoute`;
+    - `Form`/`FieldRepeat`/`Field`, and a module's settings manifest;
+    - a page rendered through the seam (interpolation, `transfer_state`, an
+      embedded page) and a page that embeds itself.
+  - Updated: the Phase 3 snapshot test's view has a `min_role`, as every
+    stored view does. `library-module` probes a stub other than `getState`.
+    `deno_host`'s missing-API assertion names `File.findOne`. The ask-surface
+    test covers `function`. The snapshot and output unit tests cover
+    `triggers` and `headers`.
+
 ## Saltcorn UI, Phase 3: where it runs — the built-in module and the render seam
 
 v1's view patterns now run. They run on the module worker every other piece of

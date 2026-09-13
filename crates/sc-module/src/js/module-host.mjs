@@ -65,9 +65,11 @@
 //
 // Four tiers. `Table` and `Field` are the **real** v1 classes — the shared
 // `v1_api.js` this file is concatenated after, over the ask channel above and
-// the schema snapshot the call carried. `Workflow`, `Form` and `interpolate`
-// are real too, because the first two are what a `configuration_workflow` is
-// written in and the third is called on every `proxmox_snapshot` run.
+// the schema snapshot the call carried. `Workflow` and `interpolate` are real
+// too, because the first is what a `configuration_workflow` is written in and
+// the second is called on every `proxmox_snapshot` run. So are the models a
+// Saltcorn UI view reaches — `View`, `Page`, `getState()`, `Trigger`, `File`,
+// `User`, `Crash` — over the application the call renders for.
 //
 // The **library** is real as well: `@saltcorn/markup` and its siblings, v1's
 // plugin-helper, fieldviews and view patterns, answered by Saltcorn UI's view
@@ -300,7 +302,12 @@ function namedStub(pathName) {
   });
 }
 
-/** v1's `Form`: the fields are the whole of what this host reads back. */
+/** v1's `Form`, as this host answers it when there is **no view runtime**: the
+ * fields are the whole of what the manifest reads back. With the runtime, a
+ * `Form` is v1's own, from the library (TODO "Saltcorn UI" 4.5) — one `Form`
+ * for a module's `configuration_workflow`, a plugin pattern's repeated section
+ * and an Edit view alike. `Workflow` below stays this host's in both cases:
+ * v1's is the wizard's state machine, and a configuration step is a call. */
 class Form {
   constructor(opts = {}) {
     Object.assign(this, opts);
@@ -369,6 +376,10 @@ function v1Facade(which) {
       if (which === "Field" && (prop === "labelToName" || prop === "nameToLabel")) {
         return pureApi().Field[prop];
       }
+      // `new Field(…)` builds a form field (below), so `f instanceof Field` —
+      // which v1's `Form` asks of every field — answers about those, without
+      // reaching for a call's api to do it.
+      if (which === "Field" && prop === "prototype") return FormField.prototype;
       return callApi(`${which}.${String(prop)}`)[which][prop];
     },
     // v1's models are classes, so `Table(…)` is a mistake and `new Table(…)` is
@@ -377,7 +388,11 @@ function v1Facade(which) {
     apply() {
       throw new Error(notAvailable(which));
     },
-    construct() {
+    // Except `new Field(cfg)`, which in v1 is an in-memory field and not a
+    // column: it is what a `Form` is made of, and `Field.create` is the schema
+    // edit. So it builds one.
+    construct(_target, args) {
+      if (which === "Field") return new FormField(args[0] || {});
       throw new Error(notAvailable(`new ${which}`));
     },
   });
@@ -432,17 +447,36 @@ function saltcornModule(specifier) {
       return v1Classes.Table;
     case "@saltcorn/data/models/field":
       return v1Classes.Field;
-    // The library has v1's own `Form`, and it constructs a `Field` for every
-    // field it is given — which `new Field` refuses here, because to this host
-    // that is schema editing. So a module's `configuration_workflow` keeps this
-    // host's `Form`, whose fields are all the manifest reads, until a `Field` a
-    // form builds is constructible.
-    case "@saltcorn/data/models/form":
-      return Form;
+    // v1's own `Form` when the library is here (it builds a `FormField` per
+    // field), this host's when it is not.
+    case "@saltcorn/data/models/form": {
+      const library = libraryModule(bare);
+      return library !== undefined ? library : Form;
+    }
     case "@saltcorn/data/models/workflow":
       return Workflow;
     case "@saltcorn/data/utils":
       return { ...namedNamespace(specifier), interpolate };
+    // The v1 models a view reaches, over the application it renders for
+    // (TODO "Saltcorn UI" Phase 4). A class, as v1's CommonJS shim answers one.
+    case "@saltcorn/data/models/view":
+      return View;
+    case "@saltcorn/data/models/page":
+      return Page;
+    case "@saltcorn/data/models/trigger":
+      return V1Trigger;
+    case "@saltcorn/data/models/file":
+      return V1File;
+    case "@saltcorn/data/models/user":
+      return V1User;
+    case "@saltcorn/data/models/crash":
+      return V1Crash;
+    case "@saltcorn/data/models/library":
+      return V1Library;
+    case "@saltcorn/data/models/page_group":
+      return V1PageGroup;
+    case "@saltcorn/data/db/state":
+      return hostModule(specifier, { getState });
     default: {
       const answered = libraryModule(bare);
       return answered !== undefined ? answered : namedNamespace(specifier);
@@ -474,6 +508,22 @@ function libraryModule(bare) {
   const library = viewRuntime && viewRuntime.library;
   if (!library || !Object.prototype.hasOwnProperty.call(library, bare)) return undefined;
   return library[bare];
+}
+
+/** A host module that implements some of a v1 module's exports: those are its
+ * **own** properties — which is what a bundle's `import { getState }` copies —
+ * and every other name is the stub namespace's (named, or absent). */
+function hostModule(specifier, implemented) {
+  const rest = namedNamespace(specifier);
+  return new Proxy(implemented, {
+    get(target, prop) {
+      if (Object.prototype.hasOwnProperty.call(target, prop)) return target[prop];
+      return rest[prop];
+    },
+    has() {
+      return true;
+    },
+  });
 }
 
 /** A stub *namespace*: a plain object whose every property is a named stub, so
@@ -564,6 +614,21 @@ function purgeCache(dir) {
   }
 }
 
+/** One field of a configuration form as the manifest carries it: a declaration.
+ *
+ * v1's `Form` turns every field it is given into a `Field`, whose `type` is the
+ * type **object** — functions, fieldviews and all — rather than its name. What
+ * crosses to the settings screen is the name, as the plugin wrote it. */
+function fieldDeclaration(field) {
+  if (!field || typeof field !== "object") return field;
+  const declared = { ...field };
+  if (declared.type && typeof declared.type === "object") declared.type = declared.type.name;
+  if (declared.type === undefined && declared.typename) declared.type = declared.typename;
+  delete declared.reftable;
+  delete declared.table;
+  return declared;
+}
+
 /** v1's `configFields`: an array, or a function of a context, possibly async. */
 async function evalConfigFields(fields, context) {
   const value = typeof fields === "function" ? await fields(context) : fields;
@@ -593,7 +658,7 @@ async function workflowFields(makeWorkflow, subject) {
   for (const step of (workflow && workflow.steps) || []) {
     try {
       const form = typeof step.form === "function" ? await step.form({}) : step.form;
-      for (const field of (form && form.fields) || []) fields.push(field);
+      for (const field of (form && form.fields) || []) fields.push(fieldDeclaration(field));
     } catch (e) {
       issues.push(
         `${subject} configuration step "${step.name || "?"}" could not be built: ${e.message}`,
@@ -1413,25 +1478,52 @@ function translate(text, ...args) {
   return String(text).replace(/%s/g, () => (next < args.length ? String(args[next++]) : "%s"));
 }
 
-/** v1's `req` and `res` for one call, built from the request the host sent, and
- * the record of what the pattern did to `res` — which is what crosses back. */
+/** v1's `req` and `res` for one call (TODO "Saltcorn UI" 4.4), built from the
+ * request the host sent, and the record of what the pattern did to `res` —
+ * which is what crosses back.
+ *
+ * Express's and connect-flash's members that v1's patterns read, and nothing
+ * else: a member that is not here is `undefined`, as it is on an Express
+ * request that lacks it (`req.files` with no upload, `req.smr` off mobile). */
 function viewRequest(incoming, set) {
   const r = incoming || {};
   const headers = r.headers || {};
-  const response = { status: null, redirect: null, flashes: [] };
+  const query = r.query || {};
+  const response = { status: null, redirect: null, flashes: [], headers: [] };
+  const search = new URLSearchParams(query).toString();
+  const url = (r.path || "/") + (search ? `?${search}` : "");
+  // Express's `req.get`: case-insensitive, and `Referrer` is `Referer`.
+  const header = (name) => {
+    const key = String(name).toLowerCase();
+    return headers[key === "referrer" ? "referer" : key];
+  };
+  // v1's patterns read `req.user.attributes.…` unguarded.
+  const user = r.user ? { ...r.user, attributes: r.user.attributes || {} } : undefined;
   const req = {
     method: r.method || "GET",
     path: r.path || "/",
-    originalUrl: r.path || "/",
-    query: r.query || {},
-    body: r.body || {},
-    params: {},
+    originalUrl: url,
+    url,
+    baseUrl: "",
+    query,
+    body: r.body === null || r.body === undefined ? {} : r.body,
+    params: r.params || {},
     headers,
-    user: r.user || undefined,
-    xhr: String(headers["x-requested-with"] || "").toLowerCase() === "xmlhttprequest",
+    get: header,
+    header,
+    user,
+    isAuthenticated: () => !!user,
+    xhr: String(header("x-requested-with") || "").toLowerCase() === "xmlhttprequest",
+    cookies: {},
+    ip: "",
     csrfToken: () => r.csrf_token || "",
+    // connect-flash: two arguments set one, one argument reads that kind's.
     flash: (kind, message) => {
+      if (message === undefined) {
+        return response.flashes.filter((f) => f.kind === String(kind)).map((f) => f.message);
+      }
       response.flashes.push({ kind: String(kind), message: String(message) });
+      return response.flashes.length;
     },
     getLocale: () => "en",
     __: translate,
@@ -1439,9 +1531,25 @@ function viewRequest(incoming, set) {
       r.base_url || (set && set.application && set.application.base_url) || "/",
   };
   const res = {
+    /** Whether an answer has been given, as a v1 route checks before giving its
+     * own. */
+    get headersSent() {
+      return response.redirect !== null || "json" in response || "sent" in response;
+    },
     status(code) {
       response.status = code;
       return res;
+    },
+    set(name, value) {
+      if (name && typeof name === "object") {
+        for (const [key, each] of Object.entries(name)) response.headers.push([String(key), String(each)]);
+      } else {
+        response.headers.push([String(name), String(value)]);
+      }
+      return res;
+    },
+    header(name, value) {
+      return res.set(name, value);
     },
     redirect(first, second) {
       if (typeof first === "number") {
@@ -1468,17 +1576,18 @@ function viewRequest(incoming, set) {
   return { req, res, response };
 }
 
-/** One view of the snapshot, as the object a pattern is handed — a copy, because
- * patterns write into their configuration and the snapshot is the next call's. */
-function viewRecord(set, name) {
-  const view = (set.views || []).find((v) => v.name === name);
-  if (!view) {
-    throw new Error(
-      `the application ${(set.application && set.application.name) || "?"} has no view named ${name}`,
-    );
-  }
-  return structuredClone(view);
-}
+/** The `req`/`res` pair a view call is handed, for one request — reachable so a
+ * test can hold the shims to v1's shape (`__scV1Refused`'s reason). Inert: it
+ * builds two objects and records what is done to them. */
+Object.defineProperty(globalThis, "__scViewRequest", {
+  value: (request) => viewRequest(request, applicationOf()),
+  writable: false,
+  configurable: false,
+  enumerable: false,
+});
+
+/** The application's name, for a sentence. */
+const applicationName = (set) => (set && set.application && set.application.name) || "?";
 
 /** The views being rendered, outermost first, for the call in flight. Its own
  * storage rather than a field of the call's, because two views embedded side by
@@ -1506,6 +1615,1040 @@ function withinView(name, render) {
   return viewTrail.run([...trail, name], render);
 }
 
+// ---------------------------------------------------------------------------
+// Saltcorn UI: v1's models, over the application a view renders for
+// ---------------------------------------------------------------------------
+//
+// TODO "Saltcorn UI" Phase 4. v1's `View.findOne`, `Page.findOne`,
+// `Trigger.findOne` and `getState().getConfig` are **synchronous**, so they are
+// answered from the view snapshot the call carried (§4) — the rule `Table`
+// already follows for the schema. What they run is dispatched **in this
+// worker**: a Filter's `view.run()` of the List it embeds is a call on the
+// registry here, never a second call across the seam (§3).
+//
+// Each reads the call in flight rather than a module-level variable, for the
+// reason the `Table` façade does: a plugin captures `View` at load and uses it
+// from every call it is ever given, and two applications render on one worker.
+// A member v1 has and this server does not implement is on `v1_api.js`'s one
+// refusal list, installed onto each class below.
+
+const installV1Refusals = globalThis.__scV1InstallRefusals;
+
+/** The view runtime's registries, library and helpers, synchronously. Every
+ * path that reaches a model has already awaited the runtime — a view call does,
+ * and so does every module load — so a runtime that is not here now is one that
+ * will not be. */
+function loadedRuntime(what) {
+  if (viewRuntime) return viewRuntime;
+  throw new Error(
+    `\`${what}\` is not available here: ` +
+      (viewRuntimeError
+        ? `the Saltcorn UI view runtime could not be loaded: ${viewRuntimeError}`
+        : "this server was started without the Saltcorn UI bundle, which is what answers it"),
+  );
+}
+
+/** The application the call in flight renders for, or `null`. */
+function applicationOf() {
+  const store = running.getStore();
+  return (store && store.views) || null;
+}
+
+/** What a model says when it is reached from a call that renders no
+ * application — said at the member, rather than answered with nothing. */
+const noApplication = (what) =>
+  `\`${what}\` is not available here: it answers from the Saltcorn UI application a view is ` +
+  `being rendered for, and this call renders none — a module's action, its load and its ` +
+  `functions are each called outside any application`;
+
+function requireApplication(what) {
+  const set = applicationOf();
+  if (!set) throw new Error(noApplication(what));
+  return set;
+}
+
+/** v1's `stringToJSON`: a column that may hold JSON as text. */
+const jsonOf = (value) => (typeof value === "string" ? JSON.parse(value) : value);
+
+/** v1's `satisfies(where)`, which a `find` filters the snapshot with. */
+const satisfiesOf = (where) => loadedRuntime("satisfies").internals.satisfies(where || {});
+
+/** v1's `find` order: one property, case-insensitively. */
+function sortedBy(list, selectopts) {
+  const by = (selectopts && selectopts.orderBy) || "name";
+  const key = (item) => {
+    const value = item && item[by];
+    return (value && value.toLowerCase && value.toLowerCase()) || value;
+  };
+  return list.sort((a, b) => (key(a) > key(b) ? 1 : -1));
+}
+
+/** The viewer's role, as v1 reads it off the extra arguments. */
+const roleOf = (extra) => (extra && extra.req && extra.req.user && extra.req.user.role_id) || 100;
+
+/** Put `sentence` in front of a failure — once, by the innermost thing that
+ * knows its own name, so a List failing inside a Filter says it was the List. */
+function nameFailure(error, sentence) {
+  if (error && typeof error === "object" && !error.viewDepth && !error.viewNamed) {
+    error.message = `${sentence}: ${error.message}`;
+    error.viewNamed = true;
+  }
+  return error;
+}
+
+/** Run `body` as `view`, inside the depth cap (§3), naming the view in a
+ * failure when it is embedded in another. The outermost view is named by
+ * whoever asked for it: the seam, or the page it is on. */
+function asView(view, body) {
+  const embedded = (viewTrail.getStore() || []).length > 0;
+  return withinView(view.name, async () => {
+    try {
+      return await body();
+    } catch (e) {
+      throw embedded ? nameFailure(e, `in the view ${view.name} (${view.viewtemplate})`) : e;
+    }
+  });
+}
+
+/** v1's `View`, over the snapshot (4.1). */
+class View {
+  constructor(o) {
+    this.name = o.name;
+    this.id = o.id;
+    this.viewtemplate = o.viewtemplate;
+    this.exttable_name = o.exttable_name;
+    this.description = o.description;
+    if (o.table_id !== undefined && o.table_id !== null) this.table_id = o.table_id;
+    if (o.table && !o.table_id) this.table_id = o.table.id;
+    if (o.table_name) this.table_name = o.table_name;
+    this.configuration = jsonOf(o.configuration);
+    if (!o.min_role && !o.is_public) {
+      throw new Error(`Unable to build view ${this.name}, neither 'min_role' or 'is_public' is given.`);
+    }
+    this.min_role = !o.min_role && "is_public" in o ? (o.is_public ? 100 : 80) : +o.min_role;
+    this.viewtemplateObj = loadedRuntime("View").viewtemplates[this.viewtemplate];
+    this.singleton = this.viewtemplateObj && this.viewtemplateObj.singleton;
+    this.default_render_page = o.default_render_page;
+    this.table = o.table;
+    this.slug = jsonOf(o.slug);
+    this.attributes = jsonOf(o.attributes);
+  }
+
+  /** Synchronous, as v1's is. A copy each time, because patterns write into a
+   * view's configuration and the snapshot is the next call's. */
+  static findOne(where) {
+    const set = requireApplication("View.findOne");
+    const w = where || {};
+    const record = (set.views || []).find(
+      w.id ? (v) => String(v.id) === String(w.id) : w.name ? (v) => v.name === w.name : satisfiesOf(w),
+    );
+    return record ? new View(structuredClone(record)) : undefined;
+  }
+
+  static async find(where, selectopts = { orderBy: "name", nocase: true }) {
+    const set = requireApplication("View.find");
+    const views = (set.views || []).map((v) => new View(structuredClone(v))).filter(satisfiesOf(where));
+    return sortedBy(views, selectopts);
+  }
+
+  /** v1 keys a table by id, by an external table's name, or by a table object.
+   * This server's tables are named, and the snapshot's `table_id` is the name,
+   * so all three are one lookup. */
+  static async find_table_views_where(table, pred) {
+    const key = table !== null && typeof table === "object" ? (table.id !== undefined ? table.id : table.name) : table;
+    return View.matching(await View.find({ table_id: key }), pred);
+  }
+
+  static async find_all_views_where(pred) {
+    return View.matching(await View.find({}), pred);
+  }
+
+  static async find_possible_links_to_table(table) {
+    return View.find_table_views_where(table, ({ state_fields }) =>
+      state_fields.some((sf) => sf.name === "id" || sf.primary_key),
+    );
+  }
+
+  /** v1's predicate walk, shared by the two `find_*_where`. */
+  static async matching(views, pred) {
+    const out = [];
+    for (const viewrow of views) {
+      const state_fields = await viewrow.get_state_fields();
+      if (viewrow.viewtemplateObj && pred({ viewrow, viewtemplate: viewrow.viewtemplateObj, state_fields })) {
+        out.push(viewrow);
+      }
+    }
+    return out;
+  }
+
+  get menu_label() {
+    const item = (getState().getConfig("menu_items", []) || []).find((mi) => mi.viewname === this.name);
+    return item ? item.label : undefined;
+  }
+
+  get select_option() {
+    const on = this.table ? this.table.name : this.table_name || this.exttable_name;
+    return { name: this.name, label: `${this.name} [${this.viewtemplate}${on ? ` on ${on}` : ""}]` };
+  }
+
+  check_viewtemplate() {
+    if (!this.viewtemplateObj) {
+      throw new Error(`Cannot find viewtemplate ${this.viewtemplate} in view ${this.name}`);
+    }
+  }
+
+  /** v1's remote-table test: nothing here is rendered from another server. */
+  isRemoteTable() {
+    return false;
+  }
+
+  renderLocally() {
+    return true;
+  }
+
+  async get_state_fields() {
+    const vt = this.viewtemplateObj;
+    if (vt && vt.get_state_fields && (this.exttable_name || this.table_id)) {
+      return await vt.get_state_fields(this.exttable_name || this.table_id, this.name, this.configuration);
+    }
+    return [];
+  }
+
+  queries(_remote, req, res) {
+    const vt = this.viewtemplateObj;
+    return vt && vt.queries ? vt.queries({ ...this, req, res }) : {};
+  }
+
+  async run(query, extraArgs, remote) {
+    this.check_viewtemplate();
+    if (roleOf(extraArgs) > this.min_role) return "";
+    const { removeEmptyStringsKeepNull } = loadedRuntime("view.run").internals;
+    return asView(this, () =>
+      this.viewtemplateObj.run(
+        this.exttable_name || this.table_id,
+        this.name,
+        this.configuration,
+        removeEmptyStringsKeepNull(query || {}),
+        extraArgs,
+        this.queries(remote, extraArgs && extraArgs.req, extraArgs && extraArgs.res),
+      ),
+    );
+  }
+
+  async runMany(query, extraArgs, remote) {
+    this.check_viewtemplate();
+    if (roleOf(extraArgs) > this.min_role) return [];
+    const vt = this.viewtemplateObj;
+    const runtime = loadedRuntime("view.runMany");
+    return asView(this, async () => {
+      if (vt.runMany) {
+        if (!this.table_id) {
+          throw new Error(`Unable to call runMany, ${this.viewtemplate} is missing 'table_id'.`);
+        }
+        return await vt.runMany(
+          this.table_id,
+          this.name,
+          this.configuration,
+          query,
+          extraArgs,
+          this.queries(remote, extraArgs && extraArgs.req, extraArgs && extraArgs.res),
+        );
+      }
+      if (vt.renderRows) {
+        const table = v1Classes.Table.findOne({ id: this.table_id });
+        if (!table) throw new Error(`Unable to find table with id ${this.table_id}`);
+        const { stateFieldsToWhere } = runtime.library["@saltcorn/data/plugin-helper"];
+        const rows = await table.getRows(stateFieldsToWhere({ fields: table.getFields(), state: query, table }));
+        const rendered = await vt.renderRows(table, this.name, this.configuration, extraArgs, rows, query);
+        return rendered.map((html, ix) => ({ html, row: rows[ix] }));
+      }
+      throw new Error(
+        `runMany on view ${this.name}: viewtemplate ${this.viewtemplate} does not have renderRows or runMany methods`,
+      );
+    });
+  }
+
+  async runPost(query, body, extraArgs) {
+    if (roleOf(extraArgs) > this.min_role) return "";
+    this.check_viewtemplate();
+    const vt = this.viewtemplateObj;
+    const { removeEmptyStrings } = loadedRuntime("view.runPost").internals;
+    return asView(this, async () => {
+      if (!vt.runPost) throw new Error(`Unable to call runPost, ${this.viewtemplate} is missing 'runPost'.`);
+      return await vt.runPost(
+        this.table_id,
+        this.name,
+        this.configuration,
+        removeEmptyStrings(query || {}),
+        removeEmptyStrings(body || {}),
+        extraArgs,
+        this.queries(false, extraArgs && extraArgs.req, extraArgs && extraArgs.res),
+        false,
+      );
+    });
+  }
+
+  /** v1's `runRoute`, which answers **through `res`**: a route's `{ json }` as
+   * JSON, its `{ html }` as the body, and anything else as `{ success: "ok" }`
+   * unless the route already answered. */
+  async runRoute(route, body, res, extraArgs) {
+    this.check_viewtemplate();
+    const vt = this.viewtemplateObj;
+    return asView(this, async () => {
+      if (!vt.routes) {
+        throw new Error(`Unable to call runRoute of view '${this.name}', ${this.viewtemplate} is missing 'routes'.`);
+      }
+      const handler = vt.routes[route];
+      if (typeof handler !== "function") {
+        throw new Error(`the ${this.viewtemplate} view pattern has no route ${route}`);
+      }
+      const result = await handler(
+        this.table_id,
+        this.name,
+        this.configuration,
+        body,
+        extraArgs,
+        this.queries(false, extraArgs && extraArgs.req, res),
+      );
+      // v1 tests `typeof result.stack === "number"` here, which is never true;
+      // the status it meant to pass on is passed on.
+      if (result && typeof result.status === "number") res.status(result.status);
+      if (result && result.json) res.json(result.json);
+      else if (result && result.html) {
+        if (result.title) res.set("Page-Title", encodeURIComponent(result.title));
+        res.send(result.html);
+      } else if (!res.headersSent) res.json({ success: "ok" });
+    });
+  }
+
+  combine_state_and_default_state(req_query) {
+    const state = { ...req_query };
+    this.check_viewtemplate();
+    const vt = this.viewtemplateObj;
+    const defstate = vt.default_state_form ? vt.default_state_form(this.configuration) : {};
+    for (const [k, v] of Object.entries(defstate || {})) {
+      if (typeof state[k] === "undefined" && v !== "" && !(typeof v === "object" && v && !Object.keys(v).length)) {
+        state[k] = v;
+      }
+    }
+    return state;
+  }
+}
+installV1Refusals(View, "View.");
+installV1Refusals(View.prototype, "view.");
+
+/** v1's `Page`, over the snapshot (4.2). */
+class Page {
+  constructor(o) {
+    this.name = o.name;
+    this.title = o.title;
+    this.description = o.description;
+    this.min_role = +o.min_role;
+    this.id = o.id;
+    this.attributes = jsonOf(o.attributes);
+    this.layout = jsonOf(o.layout);
+    this.fixed_states = jsonOf(o.fixed_states) || {};
+  }
+
+  static findOne(where) {
+    const set = requireApplication("Page.findOne");
+    const w = where || {};
+    const record = (set.pages || []).find(
+      w.id ? (p) => String(p.id) === String(w.id) : w.name ? (p) => p.name === w.name : satisfiesOf(w),
+    );
+    return record ? new Page(structuredClone(record)) : undefined;
+  }
+
+  static async find(where, selectopts = { orderBy: "name", nocase: true }) {
+    const set = requireApplication("Page.find");
+    const pages = (set.pages || []).map((p) => new Page(structuredClone(p))).filter(satisfiesOf(where));
+    return sortedBy(pages, selectopts);
+  }
+
+  get menu_label() {
+    const item = (getState().getConfig("menu_items", []) || []).find((mi) => mi.pagename === this.name);
+    return item ? item.label : undefined;
+  }
+
+  /** v1's `Page.run`: the layout with every view it embeds rendered into its
+   * segment — the `div` v1 wraps it in carries the view's source URL, which is
+   * what the browser re-fetches when a filter changes — every page it embeds
+   * rendered likewise, and the action, link, container and HTML segments
+   * resolved. `null` when an `on_page_load` action redirected. */
+  async run(querystate, extraArgs) {
+    const runtime = loadedRuntime("page.run");
+    const { eachView, traverse, dollarizeObject, getSessionId, interpolate, objectToQueryString } =
+      runtime.internals;
+    const { div, script, domReady } = runtime.library["@saltcorn/markup/tags"];
+    const { stateToQueryString, run_action_column } = runtime.library["@saltcorn/data/plugin-helper"];
+    const { eval_expression } = runtime.library["@saltcorn/data/models/expression"];
+    const { fill_presets, action_link } = runtime.library["@saltcorn/data/viewable_fields"];
+    const req = extraArgs.req;
+    const query = querystate || {};
+    if (this.layout && this.layout.html_file) {
+      throw new Error(
+        `the page ${this.name} is an HTML file (${this.layout.html_file}), which this version does ` +
+          `not render; its layout is kept as it was`,
+      );
+    }
+
+    await eachView(
+      this.layout,
+      async (segment, inLazy) => {
+        const view = View.findOne({ name: segment.view });
+        const extra_state = segment.extra_state_fml
+          ? eval_expression(
+              segment.extra_state_fml,
+              { ...dollarizeObject(query), session_id: getSessionId(req) },
+              req.user,
+              `Extra state formula when embedding view ${view && view.name}`,
+            )
+          : {};
+        if (!view) {
+          throw new Error(
+            `Page ${this.name} configuration error in embedded view: ` +
+              (segment.view ? `view "${segment.view}" not found` : "no view specified"),
+          );
+        }
+        const fixed = segment.state !== "shared" && segment.state !== "local";
+        let state;
+        if (!fixed) {
+          state = view.combine_state_and_default_state({ ...query, ...extra_state });
+        } else {
+          const table = v1Classes.Table.findOne({ id: view.table_id });
+          const preset = segment.configuration || this.fixed_states[segment.name];
+          state = view.combine_state_and_default_state((await fill_presets(table, req, preset)) || {});
+        }
+        const source = `/view/${view.name}${stateToQueryString(state, true)}`;
+        if (fixed) Object.assign(state, extra_state);
+        // v1's attribute order, because the HTML is v1's.
+        const attributes =
+          segment.state === "local"
+            ? { class: "d-inline", "data-sc-embed-viewname": view.name, "data-sc-local-state": source, "data-sc-view-source": source }
+            : { class: "d-inline", "data-sc-embed-viewname": view.name, "data-sc-view-source": source };
+        let contents = "";
+        if (!inLazy) {
+          try {
+            contents = await view.run(state, extraArgs);
+          } catch (e) {
+            throw nameFailure(e, `in the view ${view.name} (${view.viewtemplate}), embedded in the page ${this.name}`);
+          }
+        }
+        segment.contents = div(attributes, contents);
+      },
+      query,
+    );
+    await Page.renderEachEmbeddedPageInLayout(this.layout, query, extraArgs);
+
+    const pagename = this.name;
+    let redirected = false;
+    await traverse(this.layout, {
+      async action(segment) {
+        if (segment.action_style === "on_page_load") {
+          segment.type = "blank";
+          segment.style = {};
+          if (segment.minRole && segment.minRole != 100 && +segment.minRole < roleOf(extraArgs)) return;
+          const result = await run_action_column({
+            col: { ...segment },
+            referrer: req.get("Referrer"),
+            req,
+            res: extraArgs.res,
+          });
+          if (result && result.goto && extraArgs.res) {
+            extraArgs.res.redirect(result.goto);
+            redirected = true;
+            return;
+          }
+          if (result) segment.contents = script(domReady(`common_done(${JSON.stringify(result)})`));
+          return;
+        }
+        const url =
+          segment.action_name === "GoBack"
+            ? "javascript:history.back()"
+            : `javascript:page_post_action('/page/${pagename}/action/${segment.rndid}')`;
+        const html = action_link(url, req, segment);
+        segment.type = "blank";
+        segment.contents = html;
+      },
+      library: (segment) => V1Library.resolveSegment(segment, req),
+      link: (segment) => {
+        if (segment.transfer_state) segment.url += `?` + objectToQueryString(query);
+        if (segment.view_state_fml) {
+          const extra = eval_expression(
+            segment.view_state_fml,
+            { ...dollarizeObject(query), session_id: getSessionId(req) },
+            req.user,
+            "Link extra state formula",
+          );
+          segment.url += (segment.transfer_state ? "&" : "?") + objectToQueryString(extra || {});
+        }
+      },
+      container: (segment) => {
+        if (segment.showIfFormula) {
+          try {
+            if (!eval_expression(segment.showIfFormula, dollarizeObject(query), req.user)) segment.hide = true;
+          } catch (_) {
+            // v1 shows a container whose formula will not evaluate.
+          }
+        }
+      },
+      blank: (segment) => {
+        if (segment.isHTML && typeof segment.contents === "string" && segment.contents.includes("{{")) {
+          segment.contents = interpolate(
+            segment.contents,
+            { ...query, ...dollarizeObject(query) },
+            req.user,
+            "Page HTML element interpolation",
+          );
+        }
+      },
+    });
+    return redirected ? null : this.layout;
+  }
+
+  /** Every `{ type: "page" }` segment rendered with the one layout's body. A
+   * page that embeds itself is stopped by the same cap, and named the same way,
+   * as a view that does. */
+  static async renderEachEmbeddedPageInLayout(layout, querystate, extraArgs) {
+    const runtime = loadedRuntime("Page.renderEachEmbeddedPageInLayout");
+    await runtime.internals.eachPage(layout, async (segment) => {
+      const page = Page.findOne({ name: segment.page });
+      if (!page) {
+        throw new Error(
+          `a page embeds ${segment.page ? `the page "${segment.page}", which does not exist` : "a page without naming one"}`,
+        );
+      }
+      const contents = await withinView(`the page ${page.name}`, () => page.run(querystate, extraArgs));
+      segment.contents = builtInLayout().renderBody({
+        title: "",
+        body: contents,
+        req: extraArgs.req,
+        role: roleOf(extraArgs),
+        alerts: [],
+      });
+    });
+  }
+}
+installV1Refusals(Page, "Page.");
+installV1Refusals(Page.prototype, "page.");
+
+/** The application's triggers, as v1 objects. The snapshot names them and says
+ * nothing else about them: what one does is this server's business, reached by
+ * running it. */
+const triggersOf = (set) => (set.triggers || []).map((t) => new V1Trigger(typeof t === "string" ? { name: t } : t));
+
+/** v1's `Trigger`, bounded by the triggers the application declares (4.6,
+ * §12.2). A trigger it does not declare is not found, exactly as a trigger that
+ * does not exist is not. */
+const V1Trigger = class Trigger {
+  constructor(o) {
+    this.name = o.name;
+    this.id = o.id === undefined ? o.name : o.id;
+    this.description = o.description || "";
+    this.action = o.action;
+    this.when_trigger = o.when_trigger;
+    this.table_id = o.table_id === undefined ? null : o.table_id;
+    this.configuration = o.configuration || {};
+    this.min_role = o.min_role;
+  }
+
+  static find(where) {
+    return triggersOf(requireApplication("Trigger.find")).filter(satisfiesOf(where));
+  }
+
+  static findOne(where) {
+    const w = where || {};
+    return triggersOf(requireApplication("Trigger.findOne")).find(
+      w.id ? (t) => String(t.id) === String(w.id) : satisfiesOf(w),
+    );
+  }
+
+  /** The state actions a picker offers. This server has none (§12). */
+  static get abbreviated_actions() {
+    return [];
+  }
+
+  static actionsNotRequiringRow() {
+    return [];
+  }
+
+  /** v1's trigger names for an action picker. An application's triggers are
+   * not table triggers — table events fire on this server's own write path —
+   * so `tableTriggers` finds none, and the other two find all of them. */
+  static trigger_actions({ apiNeverTriggers, allTriggers } = {}) {
+    if (!apiNeverTriggers && !allTriggers) return [];
+    return V1Trigger.find({}).map((t) => t.name);
+  }
+
+  /** v1's grouped action picker: the built-ins it is handed, the application's
+   * triggers, and `Other`, which holds only v1's own multi-step action. */
+  static action_options({ builtIns, builtInLabel, noMultiStep, apiNeverTriggers, allTriggers, workflow } = {}) {
+    const triggers = V1Trigger.trigger_actions({ apiNeverTriggers, allTriggers });
+    const groups = [];
+    if (builtInLabel) groups.push({ optgroup: true, label: builtInLabel, options: builtIns || [] });
+    if (triggers.length) groups.push({ optgroup: true, label: "Triggers", options: triggers });
+    groups.push({ optgroup: true, label: "Other", options: noMultiStep ? [] : ["Multi-step action"] });
+    if (workflow) {
+      groups.unshift({ name: "", value: "", disabled: true, label: "Single action:" });
+      groups.unshift("Workflow");
+    }
+    return groups;
+  }
+
+  /** Run it on `row`, through **the** dispatcher and under the viewer's
+   * authority — the one a `trigger("name").run()` in a code body goes through. */
+  async run(row) {
+    return ask("trigger", { trigger: this.name, payload: row === undefined || row === null ? {} : row });
+  }
+
+  async runWithoutRow(runargs = {}) {
+    return ask("trigger", { trigger: this.name, payload: (runargs && runargs.row) || {} });
+  }
+};
+installV1Refusals(V1Trigger, "Trigger.");
+installV1Refusals(V1Trigger.prototype, "trigger.");
+
+/** v1's `File`: the pure half — how a stored value becomes a URL (4.6). Every
+ * lookup is on the refusal list: an application's files are served by the
+ * application (`/files/serve/…`), not read by the code that renders its views. */
+const V1File = class File {
+  static isAbsoluteURL(value) {
+    return typeof value === "string" && /^([a-z][a-z0-9+.-]*:)?\/\//i.test(value.trim());
+  }
+
+  static fieldValueFromRelative(relPath) {
+    if (!relPath) return relPath || "";
+    return relPath.replace(/^[\/]+/, "").replace(/\\/g, "/");
+  }
+
+  static normalizeFieldValueInput(value) {
+    if (typeof value !== "string") return value || "";
+    const trimmed = value.trim();
+    return V1File.isAbsoluteURL(trimmed) ? trimmed : V1File.fieldValueFromRelative(trimmed);
+  }
+
+  static pathToServeUrl(value, opts = {}) {
+    if (!value) return "";
+    const trimmed = value.trim();
+    if (V1File.isAbsoluteURL(trimmed)) return trimmed;
+    const safePath = V1File.fieldValueFromRelative(trimmed).replace(/^[\/]+/, "");
+    return `${opts.targetPrefix || ""}/files/${opts.download ? "download" : "serve"}/${safePath}`;
+  }
+
+  /** v1's `mime-types` lookup, for the extensions a fileview branches on. */
+  static nameToMimeType(filepath) {
+    const name = String(filepath || "").split("/").pop();
+    const dot = name.lastIndexOf(".");
+    if (dot < 0) return false;
+    return MIME_TYPES[name.slice(dot + 1).toLowerCase()] || false;
+  }
+};
+installV1Refusals(V1File, "File.");
+
+const MIME_TYPES = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+  svg: "image/svg+xml", ico: "image/vnd.microsoft.icon", avif: "image/avif", bmp: "image/bmp",
+  pdf: "application/pdf", json: "application/json", zip: "application/zip",
+  txt: "text/plain", csv: "text/csv", html: "text/html", htm: "text/html", css: "text/css",
+  js: "application/javascript", md: "text/markdown", xml: "application/xml", py: "text/x-python",
+  mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", mp4: "video/mp4", webm: "video/webm",
+  doc: "application/msword", xls: "application/vnd.ms-excel",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+};
+
+/** v1's `User`: the roles, and nothing about any user (4.6). */
+const V1User = class User {
+  static async get_roles() {
+    return structuredClone(requireApplication("User.get_roles").roles || []);
+  }
+
+  /** v1's users table. Edit's POST asks `table_id === User.table.id` to decide
+   * whether it is editing one; there is no v1 users table here, so it is not. */
+  static get table() {
+    return NO_USERS_TABLE;
+  }
+};
+const NO_USERS_TABLE = Object.freeze({});
+installV1Refusals(V1User, "User.");
+
+/** v1's `Crash`: a failure, to this server's log (4.6). */
+const V1Crash = class Crash {
+  static async create(err, req = {}) {
+    const where = req && (req.originalUrl || req.path) ? ` at ${req.originalUrl || req.path}` : "";
+    console.error(`a Saltcorn UI view failed${where}: ${(err && err.message) || err}`);
+  }
+};
+installV1Refusals(V1Crash, "Crash.");
+
+/** v1's library of saved layout fragments: inert and empty until the builder
+ * (TODO, Explicitly OUT). A `library` segment renders as nothing. */
+const V1Library = class Library {
+  static async find() {
+    return [];
+  }
+
+  static async findOne() {
+    return undefined;
+  }
+
+  static resolveSegment() {}
+};
+
+/** v1's page groups: inert and empty (TODO, Explicitly OUT). */
+const V1PageGroup = class PageGroup {
+  static find() {
+    return [];
+  }
+
+  static findOne() {
+    return undefined;
+  }
+};
+
+/** v1's `new Field(cfg)`: a field of a **form**, in memory — ported from v1's
+ * constructor, less the database (4.5). What v1's `Form` and `FieldRepeat` build
+ * every field into, and so what a module's `configuration_workflow`, a plugin
+ * pattern's repeated section and an Edit view are all made of. */
+class FormField {
+  constructor(o = {}) {
+    if (!o.name && !o.label) throw new Error("Field initialised with no name and no label");
+    this.label = o.label || pureApi().Field.nameToLabel(o.name);
+    this.name = o.name || pureApi().Field.labelToName(this.label);
+    if (!o.type && !o.input_type) throw new Error(`Field ${o.name} initialised with no type`);
+    this.fieldview = o.fieldview;
+    this.validator = o.validator || (() => true);
+    this.showIf = o.showIf;
+    this.parent_field = o.parent_field;
+    this.postText = o.postText;
+    this.class = o.class || "";
+    this.id = o.id;
+    this.default = o.default;
+    this.sublabel = o.sublabel;
+    this.description = o.description;
+    this.copilot_description = o.copilot_description;
+    const types = (viewRuntime && viewRuntime.types) || {};
+    this.type = typeof o.type === "string" ? types[o.type] : o.type;
+    if (!this.type) this.typename = typeof o.type === "string" ? o.type : o.type && o.type.name;
+    this.options = o.options;
+    this.help = o.help;
+    this.required = !!o.required;
+    this.is_unique = !!o.is_unique;
+    this.hidden = o.hidden || false;
+    this.disabled = !!o.disabled;
+    this.calculated = !!o.calculated;
+    this.primary_key = !!o.primary_key;
+    this.stored = !!o.stored;
+    this.expression = o.expression;
+    this.sourceURL = o.sourceURL;
+    this.tab = o.tab;
+    this.is_fkey = o.type === "Key" || (typeof o.type === "string" && o.type.startsWith("Key to"));
+    if (o.type === "File") {
+      this.type = "File";
+      this.input_type = this.fieldview ? "fromtype" : "file";
+    } else if (!this.is_fkey) {
+      this.input_type = o.input_type || "fromtype";
+    } else {
+      this.reftable_name = o.reftable_name || (o.reftable && o.reftable.name);
+      if (typeof o.type === "string" && o.type.startsWith("Key to ")) {
+        this.reftable_name = o.type.replace("Key to ", "");
+      }
+      this.reftable = o.reftable;
+      this.type = "Key";
+      this.input_type = !this.fieldview || this.fieldview === "select" ? "select" : "fromtype";
+      let default_reftype;
+      const reffield = this.reftable && this.reftable.fields && this.reftable.fields.find((f) => f.primary_key);
+      if (reffield) default_reftype = typeof reffield.type === "string" ? reffield.type : reffield.type && reffield.type.name;
+      this.reftype = o.reftype || default_reftype || "Integer";
+      this.refname = o.refname || "id";
+    }
+    this.attributes = typeof o.attributes === "string" ? JSON.parse(o.attributes) : o.attributes || {};
+    if (o.table_id) this.table_id = o.table_id;
+    if (o.table) {
+      this.table = o.table;
+      if (o.table.id && !o.table_id) this.table_id = o.table.id;
+    }
+    this.in_auto_save = o.in_auto_save;
+    this.exclude_from_mobile = o.exclude_from_mobile;
+  }
+
+  get isRepeat() {
+    return false;
+  }
+
+  get form_name() {
+    return this.parent_field ? `${this.parent_field}_${this.name}` : this.name;
+  }
+
+  get fieldviews() {
+    const types = loadedRuntime("field.fieldviews");
+    if (this.type === "File") return types.fileviews;
+    if (this.is_fkey) return types.keyFieldviews;
+    if (!this.type || typeof this.type === "string") return {};
+    return this.type.fieldviews || {};
+  }
+
+  get pretty_type() {
+    if (this.reftable_name === "_sc_files" || this.type === "File") return "File";
+    if (this.is_fkey) return `Key to ${this.reftable_name}`;
+    return this.type && typeof this.type === "object" ? this.type.name : "?";
+  }
+
+  get toJson() {
+    return {
+      id: this.id,
+      table_id: this.table_id,
+      name: this.name,
+      label: this.label,
+      is_unique: this.is_unique,
+      calculated: this.calculated,
+      stored: this.stored,
+      expression: this.expression,
+      sublabel: this.sublabel,
+      fieldview: this.fieldview,
+      type: typeof this.type === "string" ? this.type : this.type && this.type.name,
+      reftable_name: this.reftable_name,
+      attributes: this.attributes,
+      required: this.required,
+      primary_key: this.primary_key,
+      reftype: this.reftype,
+      refname: this.refname,
+      description: this.description,
+    };
+  }
+
+  /** v1's `showIf`: every named field holds one of the values it lists. */
+  showIfEnabled(whole_rec) {
+    if (!this.showIf) return true;
+    return Object.entries(this.showIf).every(([k, v]) =>
+      Array.isArray(v) ? v.includes(whole_rec[k]) : whole_rec[k] === v,
+    );
+  }
+
+  /** v1's `validate`: read the posted value with the fieldview's or the type's
+   * reader, then the type's and the field's own validators. */
+  validate(whole_rec, originalBody) {
+    const types = loadedRuntime("field.validate").types;
+    const type = this.is_fkey ? { name: "Key" } : this.type;
+    const typeObj = this.type && typeof this.type === "object" ? this.type : null;
+    const fvObj = this.fieldview && typeObj && typeObj.fieldviews ? typeObj.fieldviews[this.fieldview] : undefined;
+    const posted = whole_rec[this.form_name];
+    if (
+      !(fvObj && fvObj.readFromFormRecord) &&
+      !(typeObj && typeObj.readFromFormRecord) &&
+      ((fvObj && fvObj.read) || (typeObj && typeObj.read)) &&
+      !this.required &&
+      typeof posted === "undefined" &&
+      (originalBody || {})[this.form_name] !== ""
+    ) {
+      return {};
+    }
+    let readval;
+    if (this.is_fkey) {
+      if (posted === "" || posted === "null" || posted === "undefined") readval = null;
+      else if (typeof posted === "string" && posted.startsWith("Preset:")) readval = posted;
+      else {
+        const reftype = types[typeof this.reftype === "string" ? this.reftype : this.reftype.name];
+        const parsed = reftype.read(posted);
+        readval = parsed || (posted ? { error: "Unable to read key" } : null);
+      }
+    } else if (fvObj && fvObj.readFromFormRecord) {
+      readval = fvObj.readFromFormRecord(whole_rec, this.form_name);
+    } else if (fvObj && fvObj.read) {
+      readval = fvObj.read(posted, this.attributes);
+    } else if (!typeObj || (!typeObj.read && !typeObj.readFromFormRecord)) {
+      readval = posted;
+    } else {
+      readval = typeObj.readFromFormRecord
+        ? typeObj.readFromFormRecord(whole_rec, this.form_name)
+        : typeObj.read(posted, this.attributes);
+    }
+    if (typeof readval === "undefined" || readval === null) {
+      if (this.required && this.type !== "File" && this.showIfEnabled(whole_rec)) {
+        return { error: "Unable to read " + (type && type.name) };
+      }
+      return { success: null };
+    }
+    const checked = typeObj && typeObj.validate ? typeObj.validate(this.attributes || {})(readval) : readval;
+    if (checked && checked.error) return checked;
+    const accepted = this.validator(readval, whole_rec, this);
+    if (typeof accepted === "string") return { error: accepted };
+    if (typeof accepted === "undefined" || accepted) return { success: readval };
+    return { error: "Not accepted" };
+  }
+}
+
+// --- getState() (4.3) --------------------------------------------------------
+
+/** The `getConfig` keys this server answers (§7): the ones v1's six patterns
+ * read, each with v1's default and, where the application already knows the
+ * answer, where it comes from. A key not here answers the default the caller
+ * supplied — v1's contract, and the one place this server chooses it over
+ * refusing (TODO, *Carried past*). A key added here is a key the framework's
+ * settings offer an admin (5.4). */
+const CONFIG_KEYS = {
+  site_name: {
+    default: "Saltcorn",
+    from: (set) => (set.config && set.config.site_name) || (set.application && set.application.name),
+  },
+  base_url: { default: "", from: (set) => set.application && set.application.base_url },
+  menu_items: { default: [], from: (set) => set.menu },
+  default_locale: { default: "en" },
+  // v1 defaults this on. Nothing listens here — there is no socket transport
+  // for applications — and plugin-helper runs an async action synchronously
+  // when it is off, so it is off, whatever the settings say.
+  enable_dynamic_updates: { default: false, from: () => false },
+  exttables_min_role_read: { default: {} },
+  localizer_languages: { default: {} },
+  login_form: { default: "" },
+  push_policy_by_role: { default: {} },
+  search_disable_fts: { default: false },
+  search_use_websearch: { default: false },
+  layout_by_role: { default: {} },
+};
+
+/** v1's `getConfig(key, def)`: the setting, else a truthy `def`, else the
+ * declared default. A copy every time: the snapshot is the next call's. */
+function configValue(set, key, def) {
+  if (!Object.prototype.hasOwnProperty.call(CONFIG_KEYS, key)) return def || undefined;
+  const declared = CONFIG_KEYS[key];
+  const held = declared.from ? declared.from(set) : set.config ? set.config[key] : undefined;
+  if (held !== undefined && held !== null) return structuredClone(held);
+  if (def) return def;
+  return structuredClone(declared.default);
+}
+
+const NO_FUNCTIONS = Object.freeze({ functions: Object.freeze({}), context: Object.freeze({}) });
+
+/** v1's `getState().functions` and its `eval_context`, over the call's own
+ * module functions (the `function` ask). Every one is awaitable here, whatever
+ * v1 called it, because each is a call to another module. The first module to
+ * supply a name has it, as `modfn`'s resolution does. */
+function moduleFunctions() {
+  const store = running.getStore();
+  if (!store || !store.moduleFunctions || !store.moduleFunctions.length) return NO_FUNCTIONS;
+  if (!store.fns) {
+    const functions = {};
+    const context = {};
+    for (const f of store.moduleFunctions) {
+      if (Object.prototype.hasOwnProperty.call(functions, f.name)) continue;
+      const run = (...args) => ask("function", { module: f.module, function: f.name, args });
+      functions[f.name] = { run, isAsync: true, description: f.description || "" };
+      context[f.name] = run;
+    }
+    store.fns = { functions: Object.freeze(functions), context: Object.freeze(context) };
+  }
+  return store.fns;
+}
+
+/** v1's own `Evaluator`, one per set of functions, so a List's formula column is
+ * compiled once rather than once a cell. */
+const evaluators = new WeakMap();
+function evaluatorFor(context) {
+  let evaluator = evaluators.get(context);
+  if (!evaluator) {
+    evaluator = new (loadedRuntime("getState().evaluator").internals.Evaluator)(context);
+    evaluators.set(context, evaluator);
+  }
+  return evaluator;
+}
+
+/** The one layout (§9): v1's `emergency_layout`. */
+function builtInLayout() {
+  const { wrap, renderBody } = loadedRuntime("getState().getLayout").library["@saltcorn/markup/emergency_layout"];
+  return { pluginName: "emergency", config: {}, hints: {}, wrap, renderBody };
+}
+
+/** v1's `log(level, …)`: 1 an error, 2 a warning, 3 and 4 information, and
+ * anything finer verbose — in this server's log, like every `console` line. */
+function stateLog(level, ...messages) {
+  const n = +level;
+  if (n <= 1) console.error(...messages);
+  else if (n === 2) console.warn(...messages);
+  else if (n <= 4) console.info(...messages);
+  else console.debug(...messages);
+}
+
+/** One application's `getState()` — or, for `null`, the state of no
+ * application: the registries, and a sentence for everything else. */
+function makeState(set) {
+  const application = (what) => {
+    if (!set) throw new Error(noApplication(what));
+    return set;
+  };
+  const registry = (name) => loadedRuntime(`getState().${name}`)[name];
+  const state = {
+    get types() {
+      return registry("types");
+    },
+    get keyFieldviews() {
+      return registry("keyFieldviews");
+    },
+    get fileviews() {
+      return registry("fileviews");
+    },
+    get viewtemplates() {
+      return registry("viewtemplates");
+    },
+    getConfig(key, def) {
+      return configValue(application(`getState().getConfig("${key}")`), key, def);
+    },
+    getConfigCopy(key, def) {
+      return structuredClone(state.getConfig(key, def));
+    },
+    get roles() {
+      return structuredClone(application("getState().roles").roles || []);
+    },
+    get views() {
+      return (application("getState().views").views || []).map((v) => new View(structuredClone(v)));
+    },
+    get pages() {
+      return (application("getState().pages").pages || []).map((p) => new Page(structuredClone(p)));
+    },
+    get triggers() {
+      return triggersOf(application("getState().triggers"));
+    },
+    // §12: a view's actions are of three kinds, and none of them is a v1 state
+    // action. The view actions (Delete, Save …) are the patterns' own; a trigger
+    // of this server is what plugin-helper finds next, with `Trigger.findOne`;
+    // and a name that is neither is found by nothing, which plugin-helper
+    // refuses naming it.
+    actions: Object.freeze({}),
+    get functions() {
+      return moduleFunctions().functions;
+    },
+    get eval_context() {
+      return moduleFunctions().context;
+    },
+    get evaluator() {
+      return evaluatorFor(moduleFunctions().context);
+    },
+    auth_methods: Object.freeze({}),
+    getLayout: () => builtInLayout(),
+    log: stateLog,
+    // i18n is the identity (TODO, Explicitly OUT).
+    i18n: Object.freeze({ __: (phrase) => (phrase && typeof phrase === "object" ? phrase.phrase : phrase) }),
+    __: translate,
+  };
+  return installV1Refusals(state, "state.");
+}
+
+const applicationStates = new WeakMap();
+let noApplicationState = null;
+
+/** v1's `getState()` (§7): the application the call renders for — built once
+ * per snapshot, which is once per generation — not a tenant. */
+function getState() {
+  const set = applicationOf();
+  if (!set) return noApplicationState || (noApplicationState = makeState(null));
+  let state = applicationStates.get(set);
+  if (!state) {
+    state = makeState(set);
+    applicationStates.set(set, state);
+  }
+  return state;
+}
+
 /** What a view call answers. */
 function viewAnswer(value, response) {
   return { value: value === undefined ? null : value, response };
@@ -1529,88 +2672,65 @@ async function viewPatternsOp() {
   });
 }
 
-/** v1's `View.run`. */
+/** The view `name` of the call's application, or the sentence saying there is
+ * none. */
+function viewNamed(set, name) {
+  const view = View.findOne({ name });
+  if (!view) throw new Error(`the application ${applicationName(set)} has no view named ${name}`);
+  return view;
+}
+
+/** v1's GET of a view (`run_possibly_on_page`): the view's default state under
+ * the state asked for, then `View.run`. */
 async function viewRender({ view: name, state, request }) {
-  const runtime = await requireViewRuntime();
+  await requireViewRuntime();
   const set = currentViews();
   const { req, res, response } = viewRequest(request, set);
-  const value = await withinView(name, () =>
-    runtime.runView(viewRecord(set, name), state || {}, { req, res }),
-  );
+  const view = viewNamed(set, name);
+  const value = await view.run(view.combine_state_and_default_state(state || {}), { req, res });
   return viewAnswer(value, response);
 }
 
 /** v1's `View.runPost`: the state is the query, as v1's route builds it. */
 async function viewPost({ view: name, body, request }) {
-  const runtime = await requireViewRuntime();
+  await requireViewRuntime();
   const set = currentViews();
   const { req, res, response } = viewRequest(request, set);
-  const value = await withinView(name, () =>
-    runtime.runPost(viewRecord(set, name), req.query, body || {}, { req, res }),
-  );
+  const value = await viewNamed(set, name).runPost(req.query, body || {}, { req, res });
   return viewAnswer(value, response);
 }
 
-/** v1's `View.runRoute`. */
+/** v1's `View.runRoute`, which answers through `res` — `res.json` of what the
+ * route returned — and returns nothing. */
 async function viewRoute({ view: name, route, body, request }) {
-  const runtime = await requireViewRuntime();
+  await requireViewRuntime();
   const set = currentViews();
   const { req, res, response } = viewRequest(request, set);
-  const value = await withinView(name, () =>
-    runtime.runRoute(viewRecord(set, name), route, body || {}, { req, res }),
-  );
-  return viewAnswer(value, response);
+  await viewNamed(set, name).runRoute(route, body || {}, res, { req, res });
+  return viewAnswer(null, response);
 }
 
-/** v1's `Page.run` then `renderLayout`: every view the layout embeds rendered
- * into its segment's `contents`, then the layout rendered by `@saltcorn/markup`.
- * A view in `shared` state sees the page's query; any other its own fixed
- * state. */
+/** v1's page GET: `Page.run` over the query, then `renderLayout` of the layout
+ * it filled in. A page that redirected (an `on_page_load` action) renders
+ * nothing. */
 async function viewRenderPage({ page: name, request }) {
   const runtime = await requireViewRuntime();
   const set = currentViews();
-  const page = (set.pages || []).find((p) => p.name === name);
-  if (!page) {
-    throw new Error(
-      `the application ${(set.application && set.application.name) || "?"} has no page named ${name}`,
-    );
-  }
   const { req, res, response } = viewRequest(request, set);
-  const layout = structuredClone(page.layout || {});
-  await embedViews(runtime, set, layout, req, res);
-  const renderLayout = runtime.library["@saltcorn/markup/layout"];
-  const value = renderLayout({
-    blockDispatch: {},
-    layout,
-    role: req.user ? req.user.role_id : 100,
-    req,
-    is_owner: false,
-  });
+  const page = Page.findOne({ name });
+  if (!page) throw new Error(`the application ${applicationName(set)} has no page named ${name}`);
+  const layout = await page.run(req.query, { req, res });
+  const value =
+    layout === null
+      ? null
+      : runtime.library["@saltcorn/markup/layout"]({
+          blockDispatch: {},
+          layout,
+          role: req.user ? req.user.role_id : 100,
+          req,
+          is_owner: false,
+        });
   return viewAnswer(value, response);
-}
-
-/** Render every `{ type: "view" }` segment under `segment`, in place. */
-async function embedViews(runtime, set, segment, req, res) {
-  if (!segment || typeof segment !== "object") return;
-  if (Array.isArray(segment)) {
-    for (const inner of segment) await embedViews(runtime, set, inner, req, res);
-    return;
-  }
-  if (segment.type === "view" && typeof segment.view === "string") {
-    const state = segment.state === "shared" ? { ...req.query } : { ...(segment.configuration || {}) };
-    try {
-      segment.contents = await withinView(segment.view, () =>
-        runtime.runView(viewRecord(set, segment.view), state, { req, res }),
-      );
-    } catch (e) {
-      if (e && e.viewDepth) throw e;
-      throw new Error(`the view ${segment.view} embedded here failed: ${(e && e.message) || e}`);
-    }
-    return;
-  }
-  for (const inner of Object.values(segment)) {
-    if (inner && typeof inner === "object") await embedViews(runtime, set, inner, req, res);
-  }
 }
 
 /** One step of a pattern's configuration workflow (§6): a call per step, over
@@ -1758,6 +2878,10 @@ globalThis.__scModuleHost = (id, request) => {
     schema: null,
     api: null,
     views: null,
+    // The functions the call's modules supply (`getState().functions`), and
+    // what is built over them the first time a view asks.
+    moduleFunctions: request && Array.isArray(request.moduleFunctions) ? request.moduleFunctions : null,
+    fns: null,
   };
   running.run(context, () => {
     let pending;

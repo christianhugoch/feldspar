@@ -35,6 +35,9 @@ import * as viewtemplatesViewableFields from "../vendor/saltcorn-data/base-plugi
 import * as types_ from "../vendor/saltcorn-data/base-plugin/types.js";
 import * as fieldviews_ from "../vendor/saltcorn-data/base-plugin/fieldviews.js";
 import * as fileviews_ from "../vendor/saltcorn-data/base-plugin/fileviews.js";
+import * as utils from "../vendor/saltcorn-data/utils.js";
+import * as layoutModel from "../vendor/saltcorn-data/models/layout.js";
+import { Evaluator } from "../vendor/saltcorn-data/evaluator.js";
 
 import * as list from "../vendor/saltcorn-data/base-plugin/viewtemplates/list.js";
 import * as show from "../vendor/saltcorn-data/base-plugin/viewtemplates/show.js";
@@ -134,6 +137,25 @@ export const library: Record<string, unknown> = {
     );
   }
 }
+
+/** The vendored helpers the **host's** v1 models are written with (TODO Phase 4):
+ * `View.run` strips empty strings as v1's does, `Page.run` walks a layout with
+ * v1's own `eachView` and `traverse`, and `getState().evaluator` is v1's own
+ * `Evaluator`. Not the library — no v1 specifier answers these — and not for
+ * plugins: they are how `module-host.mjs` avoids writing a second copy of them. */
+export const internals = {
+  removeEmptyStrings: utils.removeEmptyStrings,
+  removeEmptyStringsKeepNull: utils.removeEmptyStringsKeepNull,
+  satisfies: utils.satisfies,
+  dollarizeObject: utils.dollarizeObject,
+  objectToQueryString: utils.objectToQueryString,
+  getSessionId: utils.getSessionId,
+  interpolate: utils.interpolate,
+  eachView: layoutModel.eachView,
+  eachPage: layoutModel.eachPage,
+  traverse: layoutModel.traverse,
+  Evaluator,
+};
 
 /** The plugin-helper partition (TODO §2), for the test that holds it. */
 export const pluginHelperPartition = {

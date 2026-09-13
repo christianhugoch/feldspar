@@ -263,6 +263,15 @@ fn output(answer: Json) -> Result<ViewOutput> {
             .map(str::to_owned),
         json: response.get("json").cloned(),
         sent: response.get("sent").cloned(),
+        headers: match response.get("headers") {
+            Some(headers) => serde_json::from_value::<Vec<(String, String)>>(headers.clone())
+                .map_err(|e| {
+                    Error::msg(format!(
+                        "the view runtime answered unreadable response headers: {e}"
+                    ))
+                })?,
+            None => Vec::new(),
+        },
         flashes,
     })
 }
@@ -279,9 +288,11 @@ mod tests {
                 "status": 302,
                 "redirect": "/view/List%20Books",
                 "flashes": [{ "kind": "success", "message": "Saved" }],
+                "headers": [["Page-Title", "Books"]],
             },
         }))
         .unwrap();
+        assert_eq!(out.headers, [("Page-Title".to_owned(), "Books".to_owned())]);
         assert_eq!(out.body, json!("<p>hi</p>"));
         assert_eq!(out.status, Some(302));
         assert_eq!(out.redirect.as_deref(), Some("/view/List%20Books"));

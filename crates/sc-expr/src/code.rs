@@ -9815,6 +9815,9 @@ mod tests {
                      const dot = path.indexOf(".");
                      const owner = owners[path.slice(0, dot)];
                      const name = path.slice(dot + 1);
+                     // `View.`, `state.` …: the view runtime's models, which a
+                     // code body has none of (sc-module's tests walk those).
+                     if (!owner) continue;
                      if (typeof owner[name] !== "function") {{
                        out[path] = "not reachable as a property";
                        continue;
@@ -9900,7 +9903,12 @@ mod tests {
                      Table: Table, table: books,
                      Field: Field, field: books.getField("title"),
                    }};
-                   const refused = __scV1Refused();
+                   // Table and Field only: the list's `View.`, `state.` …
+                   // lines are the view runtime's, which no code body has and
+                   // this tutorial does not describe.
+                   const refused = __scV1Refused().filter(
+                     (path) => owners[path.slice(0, path.indexOf("."))] !== undefined
+                   );
                    const implemented = [];
                    for (const prefix of Object.keys(owners)) {{
                      const owner = owners[prefix];

@@ -1,0 +1,8 @@
+{
+  "name": "@saltcorn-test/compat",
+  "version": "0.1.0",
+  "description": "Probes the v1 models a Saltcorn UI view reaches — View, Page, getState(), Trigger, File, User, Form — through require, the way a view pattern reaches them.",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT"
+}

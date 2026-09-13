@@ -70,13 +70,15 @@ async fn a_module_loads_and_runs_in_this_process() {
     assert_eq!(value["module_config"]["endpoint"], json!("e"));
 
     // `require` reached the modules root's own `node_modules` through byonm,
-    // and the `@saltcorn/*` stubs are the same three tiers: a call into one of
-    // them throws, naming itself, rather than quietly answering `undefined`.
+    // and a v1 API this server does not implement throws, naming itself, rather
+    // than quietly answering `undefined` — `File.findOne` from the refusal list
+    // since the Saltcorn UI models (Phase 4), a namespace stub before.
     let err = host
         .run(name, "echo_missing_api", json!({}), CallHosts::default())
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("models/file.findOne"), "{err}");
+    assert!(err.to_string().contains("File.findOne"), "{err}");
+    assert!(err.to_string().contains("not available"), "{err}");
 
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(installer.root());

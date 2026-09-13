@@ -17,7 +17,7 @@ needs to differ goes in `../src/` (see *The line* below).
 |---|---|---|
 | `saltcorn-data/base-plugin/viewtemplates/` | `packages/saltcorn-data/base-plugin/viewtemplates/` | `list.ts`, `show.ts`, `edit.ts`, `feed.ts`, `filter.ts`, `listshowlist.ts`, and the back-compat `viewable_fields.ts` re-export. **Not** `room.ts` or `workflow-room.ts` (socket views, out of scope). |
 | `saltcorn-data/base-plugin/` | same | `types.ts`, `fieldviews.ts`, `fileviews.ts` |
-| `saltcorn-data/` | `packages/saltcorn-data/` | `plugin-helper.ts`, `viewable_fields.ts`, `utils.ts` |
+| `saltcorn-data/` | `packages/saltcorn-data/` | `plugin-helper.ts`, `viewable_fields.ts`, `utils.ts`, `evaluator.ts` (the host builds `getState().evaluator` from it) |
 | `saltcorn-data/models/` | same | `form.ts`, `fieldrepeat.ts`, `expression.ts`, `layout.ts` |
 | `saltcorn-data/diagram/` | same | `node_extract_utils.ts` and `nodes/*` — what a pattern's `connectedObjects` is built from |
 | `saltcorn-data/tests/mocks.ts` | same | `fieldviews.ts` renders with its `mockReqRes` |

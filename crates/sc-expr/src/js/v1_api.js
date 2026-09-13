@@ -60,6 +60,35 @@
   const BUILDER =
     "these are Saltcorn 1's view builder talking to itself, and this server " +
     "builds its views another way";
+  const VIEWS =
+    "an application's views, pages and settings are saved through this " +
+    "server's admin UI and API, not by the code that renders them";
+  const SNAPSHOT =
+    "a view reads its application from a snapshot this server rebuilds itself " +
+    "whenever a view, page or application is saved";
+  const AUTHORITY =
+    "this server decides who may see a view or page from its min_role before " +
+    "it runs, and every row it reads under the viewer's own authority";
+  const TRIGGERS =
+    "triggers are this server's own, edited in its admin UI; a view finds the " +
+    "ones its application declares, by name";
+  const TABLE_EVENTS =
+    "table events fire this server's triggers from its own write path, not " +
+    "from the code that renders a view";
+  const FILES =
+    "files are not reachable from a view in this version: an application's " +
+    "file stores are served by the application itself";
+  const USERS =
+    "users are this server's own accounts, and a view neither reads nor " +
+    "writes them";
+  const CRASHES =
+    "a view's failures go to this server's log, which is read there";
+  const PLUGINS =
+    "a module is installed through this server's Modules screen, not " +
+    "registered by the code that renders a view";
+  const REALTIME =
+    "this server has no socket transport for applications, so there are no " +
+    "rooms and no dynamic updates to emit";
   // Every v1 `Table` and `Field` member this version does not implement, and
   // why. `Table.`/`Field.` is a static, `table.`/`field.` an instance method —
   // the two spellings v1 itself uses.
@@ -128,6 +157,70 @@
     "field.fill_fkey_options": BUILDER,
     "field.generate": BUILDER,
     "field.validate": BUILDER,
+
+    // Saltcorn UI (TODO "Saltcorn UI" §5, 4.7): the members of v1's other
+    // models that the view runtime reaches and this server does not implement.
+    // Installed by `sc-module`'s host script onto its `View`, `Page`,
+    // `Trigger`, `File`, `User`, `Crash` and `getState()`; a code body has none
+    // of those, so to one these lines are only names.
+    "View.create": VIEWS,
+    "View.update": VIEWS,
+    "View.delete": VIEWS,
+    "view.delete": VIEWS,
+    "view.clone": VIEWS,
+    "View.state_refresh": SNAPSHOT,
+    "view.get_config_flow": BUILDER,
+    "view.connected_objects": BUILDER,
+    "view.inbound_connected_objects": BUILDER,
+    "view.getTags": BUILDER,
+    "view.authorize": AUTHORITY,
+    "view.authorise_get": AUTHORITY,
+    "view.authorise_post": AUTHORITY,
+    "view.openDataStream": FILES,
+    "view.runServerSide": SYNC,
+    "Page.create": VIEWS,
+    "Page.update": VIEWS,
+    "page.delete": VIEWS,
+    "page.clone": VIEWS,
+    "Page.state_refresh": SNAPSHOT,
+    "page.is_root_page_for_roles": BUILDER,
+    "page.connected_objects": BUILDER,
+    "page.getTags": BUILDER,
+    "page.authorize": AUTHORITY,
+    "Trigger.create": TRIGGERS,
+    "Trigger.update": TRIGGERS,
+    "trigger.delete": TRIGGERS,
+    "Trigger.findDB": TRIGGERS,
+    "Trigger.findAllWithTableName": TRIGGERS,
+    "Trigger.getAllTableTriggers": TABLE_EVENTS,
+    "Trigger.runTableTriggers": TABLE_EVENTS,
+    "Trigger.emitEvent": TABLE_EVENTS,
+    "File.find": FILES,
+    "File.findOne": FILES,
+    "File.create": FILES,
+    "File.from_contents": FILES,
+    "File.from_req_files": FILES,
+    "File.upload": FILES,
+    "File.allDirectories": FILES,
+    "File.findImagesForBuilder": FILES,
+    "File.ensure_file_store": FILES,
+    "User.find": USERS,
+    "User.findOne": USERS,
+    "User.create": USERS,
+    "User.authenticate": USERS,
+    "User.hashPassword": USERS,
+    "Crash.find": CRASHES,
+    "Crash.findOne": CRASHES,
+    "state.setConfig": VIEWS,
+    "state.deleteConfig": VIEWS,
+    "state.refresh": SNAPSHOT,
+    "state.refresh_views": SNAPSHOT,
+    "state.refresh_pages": SNAPSHOT,
+    "state.refresh_triggers": SNAPSHOT,
+    "state.registerPlugin": PLUGINS,
+    "state.authorizeView": AUTHORITY,
+    "state.emitRoom": REALTIME,
+    "state.emitDynamicUpdate": REALTIME,
   };
 
   // What a refused member says. The same sentence in a code body and in a
@@ -174,6 +267,11 @@
   // and so an admin screen can list what a v1 plugin will not find here. Inert:
   // it is a list of strings.
   fixed("__scV1Refused", () => Object.keys(NOT_IMPLEMENTED).slice());
+
+  // The installer itself, for the v1 models `sc-module`'s host script builds
+  // (`View`, `Page`, `getState()` …): the same list, and the same build-time
+  // refusal to shadow a member that is implemented.
+  fixed("__scV1InstallRefusals", installRefusals);
 
   // -------------------------------------------------------------------------
   // v1's `Where`, translated (§5)

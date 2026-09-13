@@ -23,7 +23,7 @@ use sc_viewpattern::{
 use serde_json::json;
 
 /// The built view runtime, if this checkout has one.
-fn bundle() -> Option<PathBuf> {
+pub(crate) fn bundle() -> Option<PathBuf> {
     let file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(sc_viewpattern::BUNDLE_DIR_IN_CHECKOUT)
@@ -31,7 +31,7 @@ fn bundle() -> Option<PathBuf> {
     file.is_file().then_some(file)
 }
 
-const NO_BUNDLE: &str =
+pub(crate) const NO_BUNDLE: &str =
     "the Saltcorn UI bundle is not built (run `npm ci && npm run build` in ui/saltcorn-ui)";
 
 /// A snapshot of `json` for `application` at `generation`.
@@ -134,7 +134,7 @@ async fn a_view_snapshot_crosses_once_per_generation_and_a_throw_names_the_view(
     let with_view = json!({
         "application": { "name": "BooksDB" },
         "views": [{
-            "name": "List Books", "viewtemplate": "List",
+            "name": "List Books", "viewtemplate": "List", "min_role": 100,
             "table_id": "books", "table_name": "books", "configuration": {},
         }],
         "pages": [],
@@ -259,8 +259,10 @@ async fn a_plugin_requires_the_real_library_and_feature_detects_what_is_absent()
     assert_eq!(value["features_present"], json!(true));
     // `runCollabEvents ? … : []`: absent, so the fallback.
     assert_eq!(value["collab"], json!("absent"));
-    // And a name that is neither implemented nor absent is still a stub.
+    // `getState` is the host's own now (Phase 4), and a name that is neither
+    // implemented nor absent is still a stub.
     assert_eq!(value["get_state"], json!("function"));
+    assert_eq!(value["add_tenant"], json!("function"));
     host.shutdown().await;
 
     // The same plugin on a host with no view runtime: stubs, which throw naming

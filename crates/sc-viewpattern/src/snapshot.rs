@@ -65,6 +65,9 @@ impl ViewSnapshot {
             "menu": config.get(MENU_CONFIG_KEY).filter(|m| m.is_array()).cloned().unwrap_or_else(|| json!([])),
             // v1's `getState().roles` shape: the number is the id.
             "roles": roles.iter().map(|r| json!({ "id": r.role, "role": r.name })).collect::<Vec<_>>(),
+            // The triggers the application declares (§12.2): what v1's
+            // synchronous `Trigger.findOne` finds, and nothing else.
+            "triggers": application.triggers.iter().map(|t| json!({ "name": t.0 })).collect::<Vec<_>>(),
             "views": set.views.iter().map(view_json).collect::<Vec<_>>(),
             "pages": set.pages.iter().map(page_json).collect::<Vec<_>>(),
         });
@@ -168,7 +171,8 @@ mod tests {
 
     #[test]
     fn the_snapshot_carries_what_a_synchronous_v1_lookup_needs() {
-        let app = app();
+        let mut app = app();
+        app.triggers.push(sc_app::TriggerRef::new("notify_author"));
         let set = ViewSet {
             application: app.id,
             generation: 7,
@@ -197,6 +201,7 @@ mod tests {
             value["roles"],
             json!([{ "id": 1, "role": "admin" }, { "id": 100, "role": "public" }])
         );
+        assert_eq!(value["triggers"], json!([{ "name": "notify_author" }]));
         let view = &value["views"][0];
         assert_eq!(view["name"], json!("List Books"));
         // v1's own field names, because v1's own code reads them.

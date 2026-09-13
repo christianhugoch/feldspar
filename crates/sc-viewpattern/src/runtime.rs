@@ -146,6 +146,8 @@ pub struct ViewOutput {
     pub json: Option<Json>,
     /// `res.send(value)` / `res.sendWrap(title, body)`, if either was called.
     pub sent: Option<Json>,
+    /// Every `res.set(name, value)`, in order — v1's route sets `Page-Title`.
+    pub headers: Vec<(String, String)>,
     /// Every `req.flash`, in order.
     pub flashes: Vec<Flash>,
 }

@@ -67,8 +67,9 @@ module.exports = {
     },
     echo_missing_api: {
       description: "Call an API this version does not have",
-      // `File`, and not `Table`: the v1 `Table` is real now, and what a test of
-      // the stub tier needs is something that is still a stub.
+      // `File.findOne`, and not `Table`: the v1 `Table` is real now, and what a
+      // test of an unimplemented API needs is something that still refuses —
+      // by name, from `v1_api.js`'s refusal list.
       run: async () => await File.findOne({ filename: "notes.txt" }),
     },
     echo_table_no_caller: {
