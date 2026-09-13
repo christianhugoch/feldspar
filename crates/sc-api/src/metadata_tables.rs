@@ -75,9 +75,7 @@ pub async fn remove(catalog: &Catalog, name: &str) -> Result<bool> {
         return Ok(false);
     };
     if !meta.is_metadata_table() {
-        return Err(Error::invalid(format!(
-            "`{name}` is not a metadata table"
-        )));
+        return Err(Error::invalid(format!("`{name}` is not a metadata table")));
     }
     let deleted = delete_table_meta(catalog, meta.id).await?;
     // An application exposing it must stop exposing it now.

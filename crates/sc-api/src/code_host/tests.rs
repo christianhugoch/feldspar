@@ -782,6 +782,78 @@ async fn a_named_user_is_loaded_where_users_live_and_a_bad_name_is_refused() {
     );
 }
 
+/// A view's host (TODO "Saltcorn UI" 7.2): the viewer's authority is the ceiling.
+/// A plan that says nothing — which in a code body is the admin's — runs as the
+/// viewer, and `forUser` may name the viewer and nobody else.
+#[tokio::test]
+async fn a_viewers_host_runs_every_plan_as_the_viewer() {
+    let cat = library().await;
+    let plan = |authority: Option<Json>| -> Plan {
+        let mut plan = json!({ "op": "select", "table": "books" });
+        if let Some(authority) = authority {
+            plan["authority"] = authority;
+        }
+        serde_json::from_value(plan).expect("a plan")
+    };
+
+    // The same unmarked read: the admin's in a code body, which passes every
+    // floor and gets as far as the statement (this catalog has no database to
+    // run it on)…
+    let admin = super::TableHost::new(&cat)
+        .caused_by(40, Some(caller()))
+        .run(&plan(None))
+        .await
+        .expect_err("no database here")
+        .to_string();
+    assert!(
+        admin.contains("no database") && !admin.contains("may not read"),
+        "a code body reads as admin: {admin}"
+    );
+    // …and the viewer's in a view, where role 40 may not read `books`.
+    let viewer = super::TableHost::new(&cat)
+        .caused_by(40, Some(caller()))
+        .viewer_only();
+    for authority in [None, Some(json!("admin")), Some(json!("user"))] {
+        let refused = viewer
+            .run(&plan(authority.clone()))
+            .await
+            .expect_err("the viewer may not read books")
+            .to_string();
+        assert!(refused.contains("may not read"), "{authority:?}: {refused}");
+    }
+    // `forUser: req.user` is the viewer, answered without looking them up
+    // (there is no users table here to find them in).
+    let own = viewer
+        .run(&plan(Some(
+            json!({ "user": uuid::Uuid::nil().to_string() }),
+        )))
+        .await
+        .expect_err("still the viewer")
+        .to_string();
+    assert!(own.contains("may not read"), "{own}");
+    // Anybody else is refused by name, before any lookup.
+    let other = "0d4e1e1e-0000-4000-8000-000000000001";
+    let borrowed = viewer
+        .run(&plan(Some(json!({ "user": other }))))
+        .await
+        .expect_err("not the viewer")
+        .to_string();
+    assert!(
+        borrowed.contains(other) && borrowed.contains("only the viewer"),
+        "{borrowed}"
+    );
+    // An anonymous viewer has nobody to name at all.
+    let anonymous = super::TableHost::new(&cat).viewer_only();
+    let refused = anonymous
+        .run(&plan(Some(
+            json!({ "user": uuid::Uuid::nil().to_string() }),
+        )))
+        .await
+        .expect_err("nobody to be")
+        .to_string();
+    assert!(refused.contains("only the viewer"), "{refused}");
+}
+
 #[tokio::test]
 async fn the_call_budget_is_spent_once_per_plan_and_then_refused() {
     let cat = library().await;

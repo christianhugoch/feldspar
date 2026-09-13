@@ -207,6 +207,9 @@ pub struct TableHost<'a> {
     executor: rows::Executor,
     /// How many calls this run has made.
     calls: AtomicU32,
+    /// Whether the caller's authority is the **ceiling** rather than something a
+    /// plan may step down to ([`viewer_only`](TableHost::viewer_only)).
+    viewer_only: bool,
 }
 
 impl<'a> TableHost<'a> {
@@ -221,6 +224,7 @@ impl<'a> TableHost<'a> {
             evaluator: None,
             executor: rows::Executor::Pooled,
             calls: AtomicU32::new(0),
+            viewer_only: false,
         }
     }
 
@@ -245,6 +249,22 @@ impl<'a> TableHost<'a> {
     pub fn caused_by(mut self, role: u8, user: Option<Json>) -> TableHost<'a> {
         self.role = role;
         self.user = user;
+        self
+    }
+
+    /// Make the caller's authority the only one a plan runs under — what a
+    /// **view** is rendered with (TODO "Saltcorn UI" §11, 7.2).
+    ///
+    /// A code body runs as admin and may only narrow, which is why a plan that
+    /// says nothing is the admin's. A view is the other way round: it is somebody
+    /// looking, and a v1 pattern (or a plugin's) that leaves `forUser` off a read
+    /// must not be handed the rows the viewer may not see. So here a plan that
+    /// says nothing — or says `admin` — runs as the caller, and `forUser` naming
+    /// anybody but the caller is refused by name: in a view, naming another user
+    /// is not narrowing, it is borrowing their rows.
+    #[must_use]
+    pub fn viewer_only(mut self) -> TableHost<'a> {
+        self.viewer_only = true;
         self
     }
 
@@ -384,6 +404,9 @@ impl<'a> TableHost<'a> {
     /// which is the one mistake here that would matter, because the caller asked
     /// to be treated as somebody *smaller*.
     async fn actor(&self, authority: &Authority) -> Result<Actor> {
+        if self.viewer_only {
+            return self.viewer_actor(authority);
+        }
         match authority {
             Authority::Admin => Ok(Actor::Admin(self.caller())),
             Authority::User => Ok(Actor::Caller {
@@ -402,6 +425,46 @@ impl<'a> TableHost<'a> {
                     role: user.role,
                     user: Some(user),
                 })
+            }
+        }
+    }
+
+    /// [`actor`](TableHost::actor) under [`viewer_only`](TableHost::viewer_only):
+    /// every authority is the caller's, or the public's, or refused.
+    ///
+    /// `forUser` naming the caller is the caller — v1's patterns pass
+    /// `forUser: req.user` on every read, and that must keep working — and is
+    /// answered without a lookup, since the caller is already here.
+    fn viewer_actor(&self, authority: &Authority) -> Result<Actor> {
+        let caller = || -> Result<Actor> {
+            Ok(Actor::Caller {
+                role: self.role,
+                user: User::from_json(self.role, self.user.as_ref())?,
+            })
+        };
+        match authority {
+            Authority::Admin | Authority::User => caller(),
+            Authority::Public => Ok(Actor::Caller {
+                role: ROLE_PUBLIC,
+                user: None,
+            }),
+            Authority::Named(id) => {
+                let named = match id {
+                    Json::String(text) => Some(text.as_str()),
+                    _ => None,
+                };
+                let own = self
+                    .user
+                    .as_ref()
+                    .and_then(|u| u.get("id"))
+                    .and_then(Json::as_str);
+                match (named, own) {
+                    (Some(named), Some(own)) if named == own => caller(),
+                    _ => Err(Error::invalid(format!(
+                        "a view reads and writes as the person looking at it, and `{id}` is not \
+                         them: `forUser` (or a write's user argument) may name only the viewer"
+                    ))),
+                }
             }
         }
     }

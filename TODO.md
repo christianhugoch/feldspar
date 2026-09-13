@@ -641,17 +641,17 @@ Five levels, because the failure modes are at five levels:
 
 ## Phase 7 — Who is looking: roles, authority and signing in
 
-- [ ] 7.1 The viewer's role reaches the framework, and a view or page whose `min_role` excludes
+- [x] 7.1 The viewer's role reaches the framework, and a view or page whose `min_role` excludes
       it is **not run**: an anonymous viewer is redirected to the login page with a `dest`, a
       signed-in one gets a 403 document naming the view.
-- [ ] 7.2 Every read and write the runtime makes carries the viewer as `Authority::User(id)`
+- [x] 7.2 Every read and write the runtime makes carries the viewer as `Authority::User(id)`
       (`forPublic` when anonymous), through the `*_as` functions §7.3 defines. A test with an
       ownership formula asserts two users see two different lists **through a view**.
-- [ ] 7.3 `/auth/login`, `/auth/logout` and `/auth/signup` rendered by the framework, answered
+- [x] 7.3 `/auth/login`, `/auth/logout` and `/auth/signup` rendered by the framework, answered
       with `AppResponse::session`, honouring the same lockout and password rules the admin
       login does. Sign-up is offered only when the app's settings allow it.
-- [ ] 7.4 The table-subset check on render (§11), with the table named.
-- [ ] 7.5 Live tests: the redirect, the round trip through login to the originally requested
+- [x] 7.4 The table-subset check on render (§11), with the table named.
+- [x] 7.5 Live tests: the redirect, the round trip through login to the originally requested
       view, logout, and a view naming a table outside the subset failing with that sentence.
 
 ## Phase 8 — A v1 backup becomes a Saltcorn UI application

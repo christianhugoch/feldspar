@@ -212,9 +212,9 @@ pub(crate) async fn csrf_middleware(
                     return (StatusCode::PAYLOAD_TOO_LARGE, "form body too large").into_response();
                 }
             };
-            valid = existing
-                .as_deref()
-                .is_some_and(|cookie| form_field(&bytes, CSRF_FORM_FIELD).as_deref() == Some(cookie));
+            valid = existing.as_deref().is_some_and(|cookie| {
+                form_field(&bytes, CSRF_FORM_FIELD).as_deref() == Some(cookie)
+            });
             request = Request::from_parts(parts, axum::body::Body::from(bytes));
         }
         if !valid {

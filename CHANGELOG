@@ -2,6 +2,108 @@
 
 Changes in reverse chronological order.
 
+## Saltcorn UI, Phase 7: who is looking — roles, authority and signing in
+
+A Saltcorn UI application now knows who is looking. A visitor who opens a view
+their role may not see is sent to the application's own sign-in form and comes
+back to the view afterwards. Every row a view reads or writes is read or written
+as that viewer. Sign-up works where the settings offer it. A view whose table
+the application no longer has fails with a sentence naming the table. The import
+is Phase 8.
+
+- **A view or page below the viewer's role is not run (7.1).**
+  - An anonymous **navigation** is redirected to
+    `/auth/login?dest=<the path and query asked for>`.
+  - An anonymous ajax request or POST still gets the 401 document, because a
+    redirect to a form answers neither.
+  - A signed-in viewer gets the 403 document naming the view or page, as before.
+- **Every read and write a view makes is the viewer's (7.2).**
+  - `TableHost::viewer_only()` (sc-api) makes the caller's authority the
+    **ceiling**. The Saltcorn UI framework builds every view's table surface
+    with it.
+  - This fixes a real hole. In a code body a plan that names no authority runs
+    as admin (it may only narrow), and the view surface inherited that. So a
+    pattern or plugin read that left out `forUser` got every row, whatever the
+    table's ownership formula said. v1's built-in patterns pass
+    `forUser: req.user`, which is why nothing showed it.
+  - Under `viewer_only`, a plan that says nothing, `admin` or `user` runs as the
+    viewer, and `public` as the public role. `forUser` (or a write's user
+    argument) naming the viewer is the viewer, with no lookup. Naming anybody
+    else is refused by name: in a view, naming another user is borrowing their
+    rows, not narrowing.
+- **`/auth/login`, `/auth/logout` and `/auth/signup` (7.3)**, answered by the
+  framework.
+  - The forms are Saltcorn UI's own, in the document's Bootstrap. v1's are
+    built by its auth routes, which are v1's server rather than the vendored
+    patterns. Each form carries the browser's `_csrf` and a hidden `dest`.
+  - **Login** checks through `sc_auth::authenticate`, the check the admin login
+    and an application's REST login use, for any role.
+    - A wrong password, an unknown email and a disabled account are one answer:
+      401, "Incorrect email or password.", with the email kept.
+    - Success is a `SessionAction::Start` on the response and a redirect to
+      `dest`, if that is a path on the application, else `/`. The router applies
+      the session through the same `apply_session` an API provider's login goes
+      through: the same cookie, the old session replaced, the login event fired.
+    - A sign-in with no CSRF token is refused by the middleware, so another site
+      cannot sign a browser in as somebody else.
+  - **Logout** ends the session and redirects to `/`. It takes a GET as well as a
+    POST, because v1's navbar links to it.
+  - **Sign-up** is a 404 document ("does not offer sign-up") unless the new
+    `allow_signup` setting is on.
+    - It refuses a blank email, a blank password, two passwords that differ, and
+      an email that already has an account, each with its own sentence (400).
+    - It makes the account with the `new_user_role` setting's role (v1's key and
+      v1's default, 80), signs it in and redirects to `dest`.
+    - The settings check refuses a `new_user_role` outside 2–100: an account
+      anybody can make is never an administrator. A role that does not exist is
+      shown on the form as `create_user`'s sentence.
+  - `allow_signup` and `new_user_role` are declared `getConfig` keys, so the
+    sc-module test holding the settings and `CONFIG_KEYS` together covers them.
+  - **The menu** gains a User section: *Login* (and *Sign up* where offered),
+    each with the way back, for nobody; *Logout* for somebody.
+  - **Deviation:** there is no lockout to honour. The admin login has none
+    (`authenticate_admin` is `authenticate` plus the role gate), and the only
+    password rule anywhere is "not blank", which sign-up applies. A lockout
+    would belong in `sc_auth::authenticate`, where all three logins would get it.
+  - **Deviation:** the `login_form` setting (v1's "use this view as the login
+    form") is still read by nothing. The form is always the built-in one.
+- **The table-subset check on render (7.4)** is in the worker, in `asView`, so it
+  covers the outermost view and every view it embeds alike.
+  - A view naming a table outside the application's subset fails with "the view
+    List Books names the table Books, which the application BooksDB does not
+    have". That is a 500 document, not an empty list.
+  - The view snapshot's `application` now carries `tables` for it. A snapshot
+    without them (one a test wrote by hand) is not checked.
+- **Tests (7.5).**
+  - `saltcorn_ui_render`'s new
+    `signing_in_lands_on_the_view_asked_for_and_signing_out_leaves`, as a fresh
+    browser. It checks:
+    - the redirect from a view and from a page, with `dest`, and the ajax 401;
+    - the form's `dest` and token, and no sign-up link;
+    - a wrong password refused, and a sign-in without a token refused;
+    - the right one landing on `/view/List%20Books?author=1` with a session;
+    - logout, then the view redirecting again;
+    - sign-up refused while not offered. Once offered: the three refusals, an
+      account of role 80 signed in, and that account told its role may not
+      see List Books;
+    - the application losing Books, with the view and the page embedding one
+      each failing with the sentence.
+  - `two_viewers_see_their_own_rows_through_one_view`:
+    - Books gets an `owner` field and the formula `owner === user.email`,
+      through the admin API;
+    - two role-80 members sign in through the form and open one List view (List
+      Books' configuration cut to Books' own columns);
+    - each sees only their own book, and the admin sees both.
+  - Unit tests:
+    - `a_viewers_host_runs_every_plan_as_the_viewer` (sc-api): an unmarked read
+      is the admin's in a code body and the viewer's in a view; `forUser` may
+      name the viewer and nobody else;
+    - the login location and its `dest` round trip;
+    - a field read from a form or the query;
+    - `new_user_role`'s check;
+    - the snapshot's `tables`.
+  - Updated: the Phase 5 test's anonymous viewer now expects the redirect.
+
 ## Saltcorn UI, Phase 6: posting — forms, routes and actions
 
 A Saltcorn UI application's views now take posts. *Edit Books* saves a new book

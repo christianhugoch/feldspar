@@ -1793,12 +1793,29 @@ function nameFailure(error, sentence) {
   return error;
 }
 
+/** §11, 7.4: a view may name only a table its application has. Checked when
+ * the view is saved, and here again on every run — the outermost view and every
+ * view it embeds alike — because an application's subset can shrink under a
+ * view already saved. A snapshot that says nothing about the tables (one a test
+ * wrote by hand) is not a subset to check against. */
+function requireApplicationTable(view) {
+  const table = view.table_name || view.table_id;
+  if (!table || view.exttable_name) return;
+  const set = requireApplication("View.run");
+  const tables = set.application && set.application.tables;
+  if (!Array.isArray(tables) || tables.includes(table)) return;
+  throw new Error(
+    `the view ${view.name} names the table ${table}, which the application ${applicationName(set)} does not have`,
+  );
+}
+
 /** Run `body` as `view`, inside the depth cap (§3), naming the view in a
  * failure when it is embedded in another. The outermost view is named by
  * whoever asked for it: the seam, or the page it is on. */
 function asView(view, body) {
   const embedded = (viewTrail.getStore() || []).length > 0;
   return withinView(view.name, async () => {
+    requireApplicationTable(view);
     try {
       return await body();
     } catch (e) {
@@ -2654,6 +2671,11 @@ const CONFIG_KEYS = {
   search_disable_fts: { default: false },
   search_use_websearch: { default: false },
   layout_by_role: { default: {} },
+  // Whether `/auth/signup` is offered, and the role an account made there gets
+  // (7.3). v1 defaults sign-up on; here it is off until an admin turns it on,
+  // because an application nobody meant to open is the wrong default.
+  allow_signup: { default: false },
+  new_user_role: { default: 80 },
 };
 
 /** v1's `getConfig(key, def)`: the setting, else a truthy `def`, else the
@@ -2880,7 +2902,17 @@ function menuSections(set, req) {
       ];
     });
   const items = transform(configValue(set, "menu_items", []));
-  return items.length ? [{ section: "Menu", items }] : [];
+  // Signing in and out (7.3): the application's own `/auth/` routes, with the
+  // way back to where the viewer is.
+  const entry = (label, link) => ({ label, link, style: "", target_blank: false, isUser: false });
+  const back = `?dest=${encodeURIComponent(req.originalUrl || req.path || "/")}`;
+  const user = req.user
+    ? [entry("Logout", "/auth/logout")]
+    : [
+        entry("Login", `/auth/login${back}`),
+        ...(configValue(set, "allow_signup") ? [entry("Sign up", `/auth/signup${back}`)] : []),
+      ];
+  return [...(items.length ? [{ section: "Menu", items }] : []), { section: "User", items: user }];
 }
 
 /** What a view or page rendered, in the layout (§9) when the request asked for

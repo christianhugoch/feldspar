@@ -258,10 +258,12 @@ mod tests {
 
         // A trigger the application does not declare, deep in a layout.
         view.configuration.remove("columns");
-        view.configuration["layout"] =
-            serde_json::json!({ "besides": [{ "contents": { "type": "action", "action_name": "Notify" } }] });
+        view.configuration["layout"] = serde_json::json!({ "besides": [{ "contents": { "type": "action", "action_name": "Notify" } }] });
         let msg = check_view_actions(&view, &app).unwrap_err().to_string();
-        assert!(msg.contains("`Notify`") && msg.contains("application `Books`"), "{msg}");
+        assert!(
+            msg.contains("`Notify`") && msg.contains("application `Books`"),
+            "{msg}"
+        );
     }
 
     #[test]

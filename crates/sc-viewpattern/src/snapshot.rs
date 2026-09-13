@@ -77,6 +77,10 @@ impl ViewSnapshot {
                 "description": application.description,
                 "subdomain": application.subdomain,
                 "base_url": base_url,
+                // The tables a view may name (§11): checked on save, and again
+                // on every run in the worker, because the subset can shrink
+                // under a view already saved (7.4).
+                "tables": application.tables.iter().map(|t| t.0.as_str()).collect::<Vec<_>>(),
             },
             "generation": set.generation,
             "config": config,
@@ -175,6 +179,7 @@ mod tests {
             .config
             .insert("site_name".into(), json!("BooksDB"));
         Application::new("BooksDB", "books", framework)
+            .with_table(sc_catalog::TableId("books".into()))
     }
 
     fn role(role: u8, name: &str) -> Role {
@@ -213,6 +218,7 @@ mod tests {
             value["application"]["base_url"],
             json!("https://books.example")
         );
+        assert_eq!(value["application"]["tables"], json!(["books"]));
         assert_eq!(value["config"]["site_name"], json!("BooksDB"));
         assert_eq!(value["menu"][0]["label"], json!("Books"));
         assert_eq!(

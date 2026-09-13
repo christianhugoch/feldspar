@@ -21,6 +21,15 @@
 //! - `POST /delete/:table/:id` — v1's Delete action, under the viewer's
 //!   authority.
 //!
+//! And who is looking (Phase 7):
+//!
+//! - `/auth/login` and `/auth/signup` — the application's own forms, answered
+//!   with a session change the router applies exactly as it applies an API
+//!   provider's login; sign-up only where the settings offer it;
+//! - `/auth/logout`;
+//! - a view or page below the viewer's role is not run: an anonymous navigation
+//!   is sent to `/auth/login` with the way back, anybody else is told no.
+//!
 //! **No build**: [`SaltcornUiFactory`] constructs the framework when the
 //! application is mounted, and a mount re-reads the application's view set
 //! under a new generation (§4). What a request renders is always the view set
@@ -36,6 +45,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use async_trait::async_trait;
 use bytes::Bytes;
 use sc_action::TriggerDispatcher;
+use sc_api::SessionAction;
 use sc_api::code_host::{FileStoreHost, TableHost, TriggerRunHost, schema_snapshot};
 use sc_app::{
     AppRequest, AppResponse, Application, BuildSpec, CspPolicy, Framework, FrameworkFactory,
@@ -65,6 +75,17 @@ pub const CFG_SITE_NAME: &str = "site_name";
 /// restored v1 backup keeps the answer.
 pub const CFG_ROOT_PAGES: &str = "root_pages";
 
+/// The `allow_signup` setting: whether `/auth/signup` is offered (7.3). v1's own
+/// key; off unless an admin turns it on.
+pub const CFG_ALLOW_SIGNUP: &str = "allow_signup";
+
+/// The `new_user_role` setting: the role an account made at `/auth/signup` gets.
+/// v1's own key and v1's default, 80; never the admin role.
+pub const CFG_NEW_USER_ROLE: &str = "new_user_role";
+
+/// The role [`CFG_NEW_USER_ROLE`] defaults to — v1's `user` role.
+const DEFAULT_NEW_USER_ROLE: u8 = 80;
+
 /// The `getConfig` keys the view runtime answers that are **not** settings: the
 /// application knows them (`base_url`), or the server decides them
 /// (`enable_dynamic_updates`, always off). Every other declared key is offered
@@ -78,6 +99,9 @@ pub const ASSET_VERSION_TAG: &str = env!("CARGO_PKG_VERSION");
 
 /// The public role, which an anonymous viewer has.
 const ROLE_PUBLIC: u8 = 100;
+
+/// The admin role, which sign-up may never give.
+const ROLE_ADMIN: u8 = 1;
 
 /// The view sets every Saltcorn UI application renders from, one per
 /// application, shared by the mount, the renders and every writer.
@@ -134,6 +158,12 @@ pub fn saltcorn_ui_config_spec() -> Vec<FormField> {
         FormField::new("search_use_websearch", BasicType::Bool)
             .label("Search: web-style queries")
             .default_value(false),
+        FormField::new(CFG_ALLOW_SIGNUP, BasicType::Bool)
+            .label("Offer sign-up")
+            .default_value(false),
+        FormField::new(CFG_NEW_USER_ROLE, BasicType::Int)
+            .label("Role of a new account")
+            .default_value(i64::from(DEFAULT_NEW_USER_ROLE)),
     ]
 }
 
@@ -174,6 +204,18 @@ pub fn check_saltcorn_ui_config(config: &Attrs) -> Result<()> {
                  page name, like {{\"1\": \"Dashboard\", \"100\": \"Welcome\"}}"
             )));
         }
+    }
+    // Sign-up is anybody at all making an account, so it may not make an
+    // administrator.
+    if let Some(role) = config.get(CFG_NEW_USER_ROLE).filter(|r| !r.is_null())
+        && !role
+            .as_u64()
+            .is_some_and(|r| (u64::from(ROLE_ADMIN) + 1..=u64::from(ROLE_PUBLIC)).contains(&r))
+    {
+        return Err(Error::invalid(format!(
+            "framework `{SALTCORN_UI_FRAMEWORK}`: `{CFG_NEW_USER_ROLE}` must be a role from 2 to \
+             100; an account anybody can make at /auth/signup cannot be an administrator"
+        )));
     }
     Ok(())
 }
@@ -267,6 +309,9 @@ impl Framework for SaltcornUiFramework {
     async fn handle(&self, req: AppRequest, cat: &Catalog) -> Result<AppResponse> {
         let path = req.path.clone();
         let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        if let ["auth", action] = segments.as_slice() {
+            return self.auth(&req, cat, action).await;
+        }
         match req.method {
             Method::Get => {}
             // What v1's `routes/view.ts` and `routes/delete.ts` answer. The CSRF
@@ -274,8 +319,7 @@ impl Framework for SaltcornUiFramework {
             Method::Post => {
                 return match segments.as_slice() {
                     ["view", name, rest @ ..] if !name.is_empty() => {
-                        self.post_view(&req, cat, &percent_decode(name), rest)
-                            .await
+                        self.post_view(&req, cat, &percent_decode(name), rest).await
                     }
                     ["delete", table, id] if !table.is_empty() && !id.is_empty() => {
                         self.delete(&req, cat, &percent_decode(table), &percent_decode(id))
@@ -608,6 +652,194 @@ impl SaltcornUiFramework {
         }
     }
 
+    /// `/auth/login`, `/auth/logout` and `/auth/signup` (7.3): v1's three auth
+    /// routes, answered by the application itself.
+    ///
+    /// A successful sign-in is a [`SessionAction::Start`] on the response, which
+    /// the router applies with the code an API provider's login goes through —
+    /// the same cookie, the same replacement of whatever session was there, the
+    /// same login event. The POSTs have passed the CSRF check already, so a
+    /// form on another site cannot sign a browser in as somebody else.
+    async fn auth(&self, req: &AppRequest, cat: &Catalog, action: &str) -> Result<AppResponse> {
+        let dest = field_of(req, "dest");
+        match (action, &req.method) {
+            ("login", Method::Get) => Ok(self.auth_form(req, AuthForm::Login, 200, "", None)),
+            ("login", Method::Post) => self.login(req, cat, &dest).await,
+            // v1's navbar links to it, so a GET signs out as a POST does.
+            ("logout", Method::Get | Method::Post) => {
+                let mut out = AppResponse::redirect("/");
+                out.session = SessionAction::End;
+                Ok(out)
+            }
+            ("signup", _) if !self.signup_allowed() => Ok(self.message(
+                req,
+                404,
+                "Not found",
+                "This application does not offer sign-up.",
+            )),
+            ("signup", Method::Get) => Ok(self.auth_form(req, AuthForm::Signup, 200, "", None)),
+            ("signup", Method::Post) => self.signup(req, cat, &dest).await,
+            ("login" | "logout" | "signup", _) => Ok(AppResponse::method_not_allowed()),
+            _ => Ok(self.message(req, 404, "Not found", "There is nothing at this address.")),
+        }
+    }
+
+    /// `POST /auth/login`: the credentials through `sc_auth::authenticate` — the
+    /// check the admin login and an application's REST login make, for any role
+    /// — and back to where the viewer was going.
+    ///
+    /// A wrong password, an unknown email and a disabled account are one answer,
+    /// as they are everywhere else: telling them apart would tell a stranger
+    /// which addresses have accounts.
+    async fn login(&self, req: &AppRequest, cat: &Catalog, dest: &str) -> Result<AppResponse> {
+        let email = field_of(req, "email");
+        let password = field_of(req, "password");
+        match sc_auth::authenticate(cat, &email, &password).await? {
+            Some(user) => Ok(signed_in(user, dest)),
+            None => Ok(self.auth_form(
+                req,
+                AuthForm::Login,
+                401,
+                email.trim(),
+                Some("Incorrect email or password."),
+            )),
+        }
+    }
+
+    /// `POST /auth/signup`: an account under the password rule every other way of
+    /// making one has (not blank), with the role the settings give a new
+    /// account, and signed in.
+    async fn signup(&self, req: &AppRequest, cat: &Catalog, dest: &str) -> Result<AppResponse> {
+        let email = field_of(req, "email").trim().to_owned();
+        let password = field_of(req, "password");
+        let again =
+            |problem: &str| Ok(self.auth_form(req, AuthForm::Signup, 400, &email, Some(problem)));
+        if email.is_empty() {
+            return again("An email address is required.");
+        }
+        if password.is_empty() {
+            return again("A password is required.");
+        }
+        if has_field(req, "passwordRepeat") && field_of(req, "passwordRepeat") != password {
+            return again("The two passwords are not the same.");
+        }
+        if sc_auth::load_user_by_email(cat, &email).await?.is_some() {
+            return again("There is already an account with this email address.");
+        }
+        match sc_auth::create_user(cat, &email, &password, self.new_user_role()).await {
+            Ok(user) => Ok(signed_in(user, dest)),
+            // "role 80 does not exist" is the admin's to fix, and the one
+            // sentence that says how.
+            Err(e) if e.kind() == ErrorKind::Application => again(&reason_of(&e)),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn signup_allowed(&self) -> bool {
+        self.app
+            .framework
+            .config
+            .get(CFG_ALLOW_SIGNUP)
+            .and_then(Json::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// The role a new account gets. The settings are checked on save to be a
+    /// role from 2 to 100 ([`check_saltcorn_ui_config`]).
+    fn new_user_role(&self) -> u8 {
+        self.app
+            .framework
+            .config
+            .get(CFG_NEW_USER_ROLE)
+            .and_then(Json::as_u64)
+            .and_then(|r| u8::try_from(r).ok())
+            .filter(|r| (ROLE_ADMIN + 1..=ROLE_PUBLIC).contains(r))
+            .unwrap_or(DEFAULT_NEW_USER_ROLE)
+    }
+
+    /// The sign-in or sign-up form, with what was wrong with the last attempt.
+    ///
+    /// Saltcorn UI's own, in the document's Bootstrap — v1's is a `Form` its
+    /// auth routes build, and those routes are v1's server rather than the
+    /// view patterns this bundle vendors. `dest` rides along as a hidden field,
+    /// so the POST knows where the viewer was going.
+    fn auth_form(
+        &self,
+        req: &AppRequest,
+        kind: AuthForm,
+        status: u16,
+        email: &str,
+        problem: Option<&str>,
+    ) -> AppResponse {
+        let dest = field_of(req, "dest");
+        let back = if dest.is_empty() {
+            String::new()
+        } else {
+            format!("?dest={}", percent_encode(&dest))
+        };
+        let (heading, action, button, password_autocomplete) = match kind {
+            AuthForm::Login => ("Sign in", "/auth/login", "Sign in", "current-password"),
+            AuthForm::Signup => (
+                "Create an account",
+                "/auth/signup",
+                "Sign up",
+                "new-password",
+            ),
+        };
+        let alert = problem
+            .map(|p| {
+                format!(
+                    "<div class=\"alert alert-danger\" role=\"alert\">{}</div>",
+                    escape(p)
+                )
+            })
+            .unwrap_or_default();
+        let repeat = match kind {
+            AuthForm::Login => String::new(),
+            AuthForm::Signup => "<div class=\"mb-3\"><label class=\"form-label\" \
+                                 for=\"passwordRepeat\">Password again</label><input \
+                                 class=\"form-control\" type=\"password\" id=\"passwordRepeat\" \
+                                 name=\"passwordRepeat\" autocomplete=\"new-password\" \
+                                 required></div>"
+                .to_owned(),
+        };
+        let other = match kind {
+            AuthForm::Login if self.signup_allowed() => format!(
+                "<p class=\"mt-3\">No account yet? <a href=\"/auth/signup{}\">Sign up</a></p>",
+                escape(&back)
+            ),
+            AuthForm::Login => String::new(),
+            AuthForm::Signup => format!(
+                "<p class=\"mt-3\">Already have an account? <a href=\"/auth/login{}\">Sign \
+                 in</a></p>",
+                escape(&back)
+            ),
+        };
+        let body = format!(
+            "<main class=\"container py-5\"><div class=\"row justify-content-center\">\
+             <div class=\"col-sm-10 col-md-6 col-lg-4\">\
+             <h1 class=\"h3 mb-3\">{heading}</h1>\
+             <p class=\"text-muted\">{site}</p>{alert}\
+             <form action=\"{action}\" method=\"post\">\
+             <input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\">\
+             <input type=\"hidden\" name=\"dest\" value=\"{dest}\">\
+             <div class=\"mb-3\"><label class=\"form-label\" for=\"email\">Email</label>\
+             <input class=\"form-control\" type=\"email\" id=\"email\" name=\"email\" \
+             value=\"{email}\" autocomplete=\"username\" required autofocus></div>\
+             <div class=\"mb-3\"><label class=\"form-label\" for=\"password\">Password</label>\
+             <input class=\"form-control\" type=\"password\" id=\"password\" name=\"password\" \
+             autocomplete=\"{password_autocomplete}\" required></div>\
+             {repeat}\
+             <button class=\"btn btn-primary w-100\" type=\"submit\">{button}</button>\
+             </form>{other}</div></div></main>",
+            site = escape(&self.site_name()),
+            csrf = escape(&req.csrf_token),
+            dest = escape(&dest),
+            email = escape(email),
+        );
+        AppResponse::html(status, self.document(req, heading, &body))
+    }
+
     /// `/page/:name`.
     async fn page(&self, req: &AppRequest, cat: &Catalog, name: &str) -> Result<AppResponse> {
         let set = view_sets().get(cat, self.app.id).await?;
@@ -863,12 +1095,19 @@ impl SaltcornUiFramework {
     }
 
     /// `Some(refusal)` when the viewer's role is below `min_role` (§11's first
-    /// check). Phase 7 turns the anonymous case into a login.
+    /// check, 7.1) — and then the view is not run at all.
+    ///
+    /// Nobody, navigating, is sent to sign in with the way back; nobody asking
+    /// by ajax or posting gets the 401 (a redirect to a form is no answer to
+    /// either). Somebody signed in is told their role may not, naming what.
     fn refused(&self, req: &AppRequest, what: &str, min_role: u8) -> Option<AppResponse> {
         if role_of(req) <= min_role {
             return None;
         }
         Some(match req.user {
+            None if matches!(req.method, Method::Get) && !is_xhr(req) => {
+                AppResponse::redirect(login_location(req))
+            }
             None => self.message(
                 req,
                 401,
@@ -978,9 +1217,13 @@ impl<'a> ViewerHosts<'a> {
     ) -> ViewerHosts<'a> {
         let caller = sc_api::caller_context(user);
         ViewerHosts {
+            // The viewer's authority is the ceiling (7.2): a read a pattern
+            // leaves unmarked is the viewer's, not the admin's it would be in a
+            // code body.
             table: TableHost::new(cat)
                 .caused_by(caller.role, caller.user.clone())
-                .with_evaluator(evaluator),
+                .with_evaluator(evaluator)
+                .viewer_only(),
             files: FileStoreHost::new(cat).caused_by(caller.role),
             triggers: triggers.map(|d| AppTriggers {
                 inner: TriggerRunHost::new(d, cat).caused_by(caller.role, caller.user.clone()),
@@ -1130,6 +1373,53 @@ fn view_user(user: &User) -> ViewUser {
         },
         role_id: user.role,
     }
+}
+
+/// Which of the two auth forms.
+#[derive(Clone, Copy)]
+enum AuthForm {
+    Login,
+    Signup,
+}
+
+/// Signed in as `user`, and on to `dest` if it is a path on this application,
+/// else to `/`.
+fn signed_in(user: User, dest: &str) -> AppResponse {
+    let mut out = AppResponse::redirect(safe_redirect(Some(dest).filter(|d| !d.is_empty())));
+    out.session = SessionAction::Start(user);
+    out
+}
+
+/// A field of the request: the form's (or the JSON body's) on a POST, the
+/// query's on a GET. Empty when there is none.
+fn field_of(req: &AppRequest, name: &str) -> String {
+    match body_json(&req.body).get(name) {
+        Some(Json::String(value)) => value.clone(),
+        _ => req.query.get(name).cloned().unwrap_or_default(),
+    }
+}
+
+/// Whether the request's body has the field at all.
+fn has_field(req: &AppRequest, name: &str) -> bool {
+    body_json(&req.body).get(name).is_some()
+}
+
+/// Where an anonymous viewer is sent to sign in (7.1): `/auth/login`, with the
+/// path and query they asked for as `dest`, so the sign-in lands them back on
+/// it.
+fn login_location(req: &AppRequest) -> String {
+    let mut dest = req.path.clone();
+    if !req.query.is_empty() {
+        dest.push('?');
+        dest.push_str(
+            &req.query
+                .iter()
+                .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
+                .collect::<Vec<_>>()
+                .join("&"),
+        );
+    }
+    format!("/auth/login?dest={}", percent_encode(&dest))
 }
 
 fn role_of(req: &AppRequest) -> u8 {
@@ -1286,11 +1576,67 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(msg.contains("menu_items[0].subitems[0]"), "{msg}");
-        let bad_roots = fw.with(CFG_ROOT_PAGES, json!({ "admin": "Dashboard" }));
+        let bad_roots = fw
+            .clone()
+            .with(CFG_ROOT_PAGES, json!({ "admin": "Dashboard" }));
         let msg = check_saltcorn_ui_config(&bad_roots.config)
             .unwrap_err()
             .to_string();
         assert!(msg.contains(CFG_ROOT_PAGES), "{msg}");
+
+        // Sign-up (7.3) makes any role but the administrator's.
+        let signup = fw
+            .clone()
+            .with(CFG_ALLOW_SIGNUP, true)
+            .with(CFG_NEW_USER_ROLE, 40);
+        sc_types::validate_attrs(&spec, &signup.config).unwrap();
+        check_saltcorn_ui_config(&signup.config).unwrap();
+        for bad in [json!(1), json!(0), json!(101), json!("80")] {
+            let config = fw.clone().with(CFG_NEW_USER_ROLE, bad.clone()).config;
+            let msg = check_saltcorn_ui_config(&config).unwrap_err().to_string();
+            assert!(msg.contains("cannot be an administrator"), "{bad}: {msg}");
+        }
+    }
+
+    /// 7.1: an anonymous viewer is sent to sign in with the way back — the path
+    /// as it arrived and the query re-encoded — as one `dest` parameter.
+    #[test]
+    fn an_anonymous_viewer_is_sent_to_sign_in_with_the_way_back() {
+        let mut req = AppRequest::get("/view/List%20Books");
+        assert_eq!(
+            login_location(&req),
+            "/auth/login?dest=%2Fview%2FList%2520Books"
+        );
+        req.query.insert("author".into(), "1".into());
+        req.query.insert("q".into(), "a&b".into());
+        let location = login_location(&req);
+        assert_eq!(
+            location,
+            "/auth/login?dest=%2Fview%2FList%2520Books%3Fauthor%3D1%26q%3Da%2526b"
+        );
+        // What the form posts back is the decoded `dest`, which the sign-in
+        // redirects to as it stands: still a path on this application.
+        let dest = percent_decode(location.split_once("dest=").unwrap().1);
+        assert_eq!(dest, "/view/List%20Books?author=1&q=a%26b");
+        assert_eq!(safe_redirect(Some(&dest)), dest);
+    }
+
+    #[test]
+    fn a_field_is_the_forms_on_a_post_and_the_querys_on_a_get() {
+        let mut get = AppRequest::get("/auth/login");
+        get.query.insert("dest".into(), "/page/Home".into());
+        assert_eq!(field_of(&get, "dest"), "/page/Home");
+        assert_eq!(field_of(&get, "email"), "");
+        assert!(!has_field(&get, "dest"));
+
+        let mut post = AppRequest::new(Method::Post, "/auth/signup");
+        post.body = RequestBody::Form(vec![
+            ("email".into(), "ada@example.com".into()),
+            ("passwordRepeat".into(), String::new()),
+        ]);
+        assert_eq!(field_of(&post, "email"), "ada@example.com");
+        assert!(has_field(&post, "passwordRepeat"));
+        assert!(!has_field(&post, "password"));
     }
 
     #[test]

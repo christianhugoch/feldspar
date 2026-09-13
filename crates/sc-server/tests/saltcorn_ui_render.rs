@@ -14,6 +14,10 @@
 //!   the action column's trigger through the `run_action` route, the Filter's
 //!   dropdown and range narrowing the list, the Delete action, and a post with
 //!   no CSRF token refused.
+//! - **Who is looking** (Phase 7): an anonymous viewer sent to sign in and back
+//!   to the view they asked for, signing out, sign-up where it is offered, two
+//!   members seeing their own rows through one view, and a view whose table
+//!   the application no longer has failing with that sentence.
 //! - **Golden**: each of the six patterns (List, Show, Edit, Feed, Filter,
 //!   ListShowList) renders, as an ajax request gets it, exactly the committed
 //!   HTML. This is what catches a shim returning something plausible and wrong,
@@ -32,14 +36,14 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use sc_api::admin_endpoints;
 use sc_app::{Application, FrameworkRef, TriggerRef, save_application};
-use sc_auth::SessionStore;
+use sc_auth::{SessionStore, create_user};
 use sc_catalog::{Catalog, FileStoreId, TableId};
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_files::FileStoreDef;
 use sc_server::{
-    AppMounts, CSRF_COOKIE, CSRF_HEADER, ModuleServices, ServerConfig, admin_handlers,
-    build_and_mount, build_router_with_apps, default_js_evaluator, install_agents,
+    AppMounts, CSRF_COOKIE, CSRF_HEADER, ModuleServices, SESSION_COOKIE, ServerConfig,
+    admin_handlers, build_and_mount, build_router_with_apps, default_js_evaluator, install_agents,
     install_triggers,
 };
 use sc_test_harness::TestDb;
@@ -568,7 +572,11 @@ async fn list_books_renders_over_http_on_the_applications_subdomain() -> sc_erro
         cookies: HashMap::new(),
     };
     let refused = anonymous.app_get("/view/List%20Books", &[]).await;
-    assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(refused.status, StatusCode::FOUND);
+    assert_eq!(
+        refused.headers[header::LOCATION],
+        "/auth/login?dest=%2Fview%2FList%2520Books"
+    );
     assert!(!refused.body.contains("<tr"), "{}", refused.body);
     Ok(())
 }
@@ -745,12 +753,7 @@ async fn the_views_save_forms_run_actions_filter_and_delete() -> sc_error::Resul
     assert_eq!(everything.body.matches("<tr").count(), 1 + before + 1);
     let melville = client.app_get("/page/BooksOverview?author=1", &[]).await;
     assert_eq!(melville.status, StatusCode::OK, "{}", melville.body);
-    assert_eq!(
-        melville.body.matches("<tr").count(),
-        2,
-        "{}",
-        melville.body
-    );
+    assert_eq!(melville.body.matches("<tr").count(), 2, "{}", melville.body);
     assert!(melville.body.contains(">Moby Dick<"), "{}", melville.body);
     assert!(!melville.body.contains(">War and Peace<"));
     assert!(
@@ -912,6 +915,390 @@ async fn an_action_that_is_not_the_applications_is_refused_by_name() -> sc_error
         "{answer}"
     );
     assert_eq!(book(client, &json!(1)).await.unwrap()["pages"], pages);
+    Ok(())
+}
+
+/// The BooksDB application, as it is saved.
+async fn booksdb(catalog: &Catalog) -> Application {
+    sc_app::list_applications(catalog)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.subdomain == "booksdb")
+        .expect("the application")
+}
+
+/// A browser with nothing in it yet, on the same server as `client`.
+fn visitor(client: &Client) -> Client {
+    Client {
+        router: client.router.clone(),
+        cookies: HashMap::new(),
+    }
+}
+
+/// `Location`, as a string.
+fn location(answer: &Answer) -> String {
+    answer.headers[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Sign `email` in through the application's own form, as a browser does: the
+/// form first (which is what gives a new browser its CSRF cookie), then the post.
+async fn sign_in(client: &Client, email: &str, password: &str) -> Client {
+    let mut browser = visitor(client);
+    let form_page = browser.app_get("/auth/login", &[]).await;
+    assert_eq!(form_page.status, StatusCode::OK, "{}", form_page.body);
+    let csrf = browser.cookies.get(CSRF_COOKIE).cloned().expect("a token");
+    let signed = browser
+        .app_post(
+            "/auth/login",
+            FORM,
+            form(&[("_csrf", &csrf), ("email", email), ("password", password)]),
+            &[],
+        )
+        .await;
+    assert_eq!(signed.status, StatusCode::FOUND, "{email}: {}", signed.body);
+    assert!(browser.cookies.contains_key(SESSION_COOKIE));
+    browser
+}
+
+/// 7.1, 7.3, 7.4 and 7.5: somebody who is not signed in is sent to sign in and
+/// comes back to what they asked for; signing out leaves; sign-up is offered
+/// only when the settings say so; and a view whose table the application no
+/// longer has fails naming it.
+#[tokio::test]
+async fn signing_in_lands_on_the_view_asked_for_and_signing_out_leaves() -> sc_error::Result<()> {
+    let Some(bundle) = bundle_dir() else {
+        eprintln!(
+            "skipping: the Saltcorn UI bundle is not built (npm ci && npm run build in ui/saltcorn-ui)"
+        );
+        return Ok(());
+    };
+    let mut server = setup("auth", bundle).await?;
+    let catalog = server._catalog.clone();
+    let mut browser = visitor(&server.client);
+
+    // 7.1: every imported view is `min_role` 1, so a navigation is sent to sign
+    // in with the way back, and the view is not run.
+    let asked = browser.app_get("/view/List%20Books?author=1", &[]).await;
+    assert_eq!(asked.status, StatusCode::FOUND, "{}", asked.body);
+    let to_login = location(&asked);
+    assert_eq!(
+        to_login,
+        "/auth/login?dest=%2Fview%2FList%2520Books%3Fauthor%3D1"
+    );
+    assert!(!asked.body.contains("<tr"), "{}", asked.body);
+    let page = browser.app_get("/page/BooksOverview", &[]).await;
+    assert_eq!(page.status, StatusCode::FOUND);
+    assert_eq!(location(&page), "/auth/login?dest=%2Fpage%2FBooksOverview");
+    // An ajax reload cannot follow a form: it is told 401.
+    let ajax = browser
+        .app_get(
+            "/view/List%20Books",
+            &[("X-Requested-With", "XMLHttpRequest")],
+        )
+        .await;
+    assert_eq!(ajax.status, StatusCode::UNAUTHORIZED, "{}", ajax.body);
+
+    // 7.3: the form, carrying the way back and the browser's token.
+    let login = browser.app_get(&to_login, &[]).await;
+    assert_eq!(login.status, StatusCode::OK, "{}", login.body);
+    let csrf = browser.cookies.get(CSRF_COOKIE).cloned().expect("a token");
+    let dest = "/view/List%20Books?author=1";
+    for part in [
+        "action=\"/auth/login\"".to_owned(),
+        format!("name=\"dest\" value=\"{dest}\""),
+        format!("name=\"_csrf\" value=\"{csrf}\""),
+    ] {
+        assert!(login.body.contains(&part), "{part}: {}", login.body);
+    }
+    assert!(
+        !login.body.contains("/auth/signup"),
+        "sign-up is not offered: {}",
+        login.body
+    );
+
+    // A wrong password is refused, the email kept, nobody signed in.
+    let wrong = browser
+        .app_post(
+            "/auth/login",
+            FORM,
+            form(&[
+                ("_csrf", &csrf),
+                ("dest", dest),
+                ("email", ADMIN),
+                ("password", "not-the-password"),
+            ]),
+            &[],
+        )
+        .await;
+    assert_eq!(wrong.status, StatusCode::UNAUTHORIZED, "{}", wrong.body);
+    assert!(
+        wrong.body.contains("Incorrect email or password"),
+        "{}",
+        wrong.body
+    );
+    assert!(
+        wrong.body.contains(&format!("value=\"{ADMIN}\"")),
+        "{}",
+        wrong.body
+    );
+    assert!(!browser.cookies.contains_key(SESSION_COOKIE));
+    // So is a sign-in with no token: a form on another site cannot sign this
+    // browser in.
+    let forged = browser
+        .app_post(
+            "/auth/login",
+            FORM,
+            form(&[("email", ADMIN), ("password", PASSWORD)]),
+            &[],
+        )
+        .await;
+    assert_eq!(forged.status, StatusCode::FORBIDDEN, "{}", forged.body);
+    assert!(!browser.cookies.contains_key(SESSION_COOKIE));
+
+    // The right one: signed in, and back where they were going.
+    let signed = browser
+        .app_post(
+            "/auth/login",
+            FORM,
+            form(&[
+                ("_csrf", &csrf),
+                ("dest", dest),
+                ("email", ADMIN),
+                ("password", PASSWORD),
+            ]),
+            &[],
+        )
+        .await;
+    assert_eq!(signed.status, StatusCode::FOUND, "{}", signed.body);
+    assert_eq!(location(&signed), dest);
+    assert!(browser.cookies.contains_key(SESSION_COOKIE));
+    let landed = browser.app_get(dest, &[]).await;
+    assert_eq!(landed.status, StatusCode::OK, "{}", landed.body);
+    assert!(landed.body.contains("<tr"), "{}", landed.body);
+    assert!(
+        landed.body.contains("href=\"/auth/logout\""),
+        "{}",
+        landed.body
+    );
+
+    // Signing out: the session ends, and the view asks again.
+    let out = browser.app_get("/auth/logout", &[]).await;
+    assert_eq!(out.status, StatusCode::FOUND);
+    assert_eq!(location(&out), "/");
+    assert!(!browser.cookies.contains_key(SESSION_COOKIE));
+    let again = browser.app_get("/view/List%20Books", &[]).await;
+    assert_eq!(again.status, StatusCode::FOUND, "{}", again.body);
+
+    // Sign-up is not offered until the settings say so…
+    let closed = browser.app_get("/auth/signup", &[]).await;
+    assert_eq!(closed.status, StatusCode::NOT_FOUND);
+    assert!(
+        closed.body.contains("does not offer sign-up"),
+        "{}",
+        closed.body
+    );
+    // …and then it is, making an account of the role the settings give (80,
+    // v1's `user`, which the restore brought with it).
+    let mut open = booksdb(&catalog).await;
+    open.framework = open.framework.clone().with("allow_signup", true);
+    let open = save_application(&catalog, &open).await?;
+    build_and_mount(&server.apps, open.clone()).await?;
+    let offered = browser.app_get("/auth/login", &[]).await;
+    assert!(offered.body.contains("/auth/signup"), "{}", offered.body);
+    let signup = browser
+        .app_get("/auth/signup?dest=%2Fview%2FList%2520Books", &[])
+        .await;
+    assert_eq!(signup.status, StatusCode::OK, "{}", signup.body);
+    let csrf = browser.cookies.get(CSRF_COOKIE).cloned().expect("a token");
+    let reader = "reader@example.com";
+    let attempt = |email: &str, password: &str, repeat: &str| {
+        form(&[
+            ("_csrf", &csrf),
+            ("dest", "/view/List%20Books"),
+            ("email", email),
+            ("password", password),
+            ("passwordRepeat", repeat),
+        ])
+    };
+    for (body, problem) in [
+        (attempt(reader, "one-password", "another"), "not the same"),
+        (
+            attempt(ADMIN, "one-password", "one-password"),
+            "already an account",
+        ),
+        (attempt(reader, "", ""), "password is required"),
+    ] {
+        let refused = browser.app_post("/auth/signup", FORM, body, &[]).await;
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{}", refused.body);
+        assert!(
+            refused.body.contains(problem),
+            "{problem}: {}",
+            refused.body
+        );
+    }
+    let made = browser
+        .app_post(
+            "/auth/signup",
+            FORM,
+            attempt(reader, "reader-pass", "reader-pass"),
+            &[],
+        )
+        .await;
+    assert_eq!(made.status, StatusCode::FOUND, "{}", made.body);
+    assert_eq!(location(&made), "/view/List%20Books");
+    assert!(browser.cookies.contains_key(SESSION_COOKIE));
+    let account = sc_auth::load_user_by_email(&catalog, reader)
+        .await?
+        .expect("the account");
+    assert_eq!(account.role, 80);
+    // Signed in, and still not allowed: a role-80 user is told so, by name.
+    let forbidden = browser.app_get("/view/List%20Books", &[]).await;
+    assert_eq!(
+        forbidden.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        forbidden.body
+    );
+    assert!(
+        forbidden.body.contains("may not see the view List Books"),
+        "{}",
+        forbidden.body
+    );
+
+    // 7.4: the application stops having Books, under views that name it. The
+    // view and the page embedding one fail with that sentence, not an empty list.
+    let mut narrowed = open;
+    narrowed.tables.retain(|t| t.0 != "Books");
+    let narrowed = save_application(&catalog, &narrowed).await?;
+    build_and_mount(&server.apps, narrowed).await?;
+    let sentence = "names the table Books, which the application BooksDB does not have";
+    for path in ["/view/List%20Books", "/page/BooksOverview"] {
+        let failed = server.client.app_get(path, &[]).await;
+        assert_eq!(
+            failed.status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{path}: {}",
+            failed.body
+        );
+        assert!(failed.body.contains(sentence), "{path}: {}", failed.body);
+        assert!(!failed.body.contains("<tr"), "{path}: {}", failed.body);
+    }
+    Ok(())
+}
+
+/// 7.2: whose rows a view shows is the viewer's. Books gets an owner and the
+/// ownership formula `owner === user.email`; two members open **one** List view
+/// and each sees their own book, and the admin sees both.
+#[tokio::test]
+async fn two_viewers_see_their_own_rows_through_one_view() -> sc_error::Result<()> {
+    let Some(bundle) = bundle_dir() else {
+        eprintln!(
+            "skipping: the Saltcorn UI bundle is not built (npm ci && npm run build in ui/saltcorn-ui)"
+        );
+        return Ok(());
+    };
+    let mut server = setup("owners", bundle).await?;
+    let catalog = server._catalog.clone();
+    let client = &mut server.client;
+
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/Books/fields",
+            Some(json!({ "name": "owner", "type": "text" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = client
+        .send(
+            "PUT",
+            "/api/tables/Books",
+            Some(json!({
+                "label": "",
+                "description": "",
+                "min_role_read": 1,
+                "min_role_write": 1,
+                "ownership_formula": "owner === user.email",
+                "rls_enabled": false,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Role 80 is v1's `user`, restored with the backup.
+    let (alice, bob) = ("alice@example.com", "bob@example.com");
+    create_user(&catalog, alice, "alice-pass", 80).await?;
+    create_user(&catalog, bob, "bob-pass", 80).await?;
+    let books = rows_of(client, "Books").await;
+    assert!(books.len() >= 2, "{books:?}");
+    let mut titles = Vec::new();
+    for (book, owner) in books.iter().zip([alice, bob]) {
+        let (status, body) = client
+            .send(
+                "PUT",
+                &format!("/api/tables/Books/rows/{}", book["id"]),
+                Some(json!({ "owner": owner })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        titles.push(book["title"].as_str().unwrap().to_owned());
+    }
+
+    // One view for members: List Books' own configuration, cut down to the
+    // columns of Books itself (a member may not read Authors to join it).
+    let pack: Value = serde_json::from_str(&zip_entry(V1_BACKUP, "pack.json")).unwrap();
+    let mut configuration = pack["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "List Books")
+        .unwrap()["configuration"]
+        .clone();
+    let own_column =
+        |c: &Value| ["title", "pages"].contains(&c["field_name"].as_str().unwrap_or(""));
+    configuration["columns"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|c| c["type"] == "Field" && own_column(c));
+    configuration["layout"]["besides"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|b| b["contents"]["type"] == "field" && own_column(&b["contents"]));
+    let app = booksdb(&catalog).await;
+    let view = View::new(app.id, "My Books", "List", "Books")
+        .min_role(80)
+        .configuration(object(configuration));
+    sc_viewpattern::save_view(&catalog, &view).await?;
+    build_and_mount(&server.apps, app).await?;
+
+    let ajax = [("X-Requested-With", "XMLHttpRequest")];
+    for (who, password, own) in [(alice, "alice-pass", 0), (bob, "bob-pass", 1)] {
+        let mut member = sign_in(&server.client, who, password).await;
+        let list = member.app_get("/view/My%20Books", &ajax).await;
+        assert_eq!(list.status, StatusCode::OK, "{who}: {}", list.body);
+        assert_eq!(
+            list.body.matches("<tr").count(),
+            2,
+            "{who}: a header and their one book: {}",
+            list.body
+        );
+        assert!(list.body.contains(&titles[own]), "{who}: {}", list.body);
+        assert!(
+            !list.body.contains(&titles[1 - own]),
+            "{who}: {}",
+            list.body
+        );
+    }
+    // The admin meets the table's floor, so the formula does not narrow them.
+    let everyone = server.client.app_get("/view/My%20Books", &ajax).await;
+    assert_eq!(everyone.status, StatusCode::OK, "{}", everyone.body);
+    for title in &titles {
+        assert!(everyone.body.contains(title), "{title}: {}", everyone.body);
+    }
     Ok(())
 }
 

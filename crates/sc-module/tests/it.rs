@@ -47,7 +47,7 @@ mod rss_provider;
 mod two_pools;
 #[path = "v1_table.rs"]
 mod v1_table;
-#[path = "view_runtime.rs"]
-mod view_runtime;
 #[path = "view_compat.rs"]
 mod view_compat;
+#[path = "view_runtime.rs"]
+mod view_runtime;

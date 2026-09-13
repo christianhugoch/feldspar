@@ -110,7 +110,12 @@ fn names(list: &Value) -> Vec<String> {
     list.as_array()
         .unwrap()
         .iter()
-        .map(|t| t.as_str().or_else(|| t["name"].as_str()).unwrap().to_owned())
+        .map(|t| {
+            t.as_str()
+                .or_else(|| t["name"].as_str())
+                .unwrap()
+                .to_owned()
+        })
         .collect()
 }
 
@@ -126,12 +131,19 @@ async fn a_metadata_table_is_listed_configured_and_edited_but_never_reshaped()
     assert!(!names(&tables).contains(&STORES.to_owned()));
     let (status, available) = client.send("GET", "/api/metadata-tables", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(names(&available).contains(&STORES.to_owned()), "{available}");
+    assert!(
+        names(&available).contains(&STORES.to_owned()),
+        "{available}"
+    );
     assert!(!names(&available).contains(&"users".to_owned()));
 
     // Added with no settings: admin-only, flagged, and never RLS-capable.
     let (status, added) = client
-        .send("POST", "/api/tables/metadata", Some(json!({ "name": STORES })))
+        .send(
+            "POST",
+            "/api/tables/metadata",
+            Some(json!({ "name": STORES })),
+        )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{added}");
     assert_eq!(added["metadata"], json!(true));
@@ -145,11 +157,19 @@ async fn a_metadata_table_is_listed_configured_and_edited_but_never_reshaped()
 
     // Neither twice, nor a table that is not Saltcorn's.
     let (status, _) = client
-        .send("POST", "/api/tables/metadata", Some(json!({ "name": STORES })))
+        .send(
+            "POST",
+            "/api/tables/metadata",
+            Some(json!({ "name": STORES })),
+        )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, _) = client
-        .send("POST", "/api/tables/metadata", Some(json!({ "name": "users" })))
+        .send(
+            "POST",
+            "/api/tables/metadata",
+            Some(json!({ "name": "users" })),
+        )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
@@ -161,7 +181,11 @@ async fn a_metadata_table_is_listed_configured_and_edited_but_never_reshaped()
         })
     };
     let (status, updated) = client
-        .send("PUT", &format!("/api/tables/{STORES}"), Some(settings(false)))
+        .send(
+            "PUT",
+            &format!("/api/tables/{STORES}"),
+            Some(settings(false)),
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "{updated}");
     assert_eq!(updated["label"], json!("File stores"));
@@ -169,10 +193,17 @@ async fn a_metadata_table_is_listed_configured_and_edited_but_never_reshaped()
     assert_eq!(catalog.require(STORES)?.access.min_role_read, 40);
     // …except row-level security, which would be forced on the server too.
     let (status, refused) = client
-        .send("PUT", &format!("/api/tables/{STORES}"), Some(settings(true)))
+        .send(
+            "PUT",
+            &format!("/api/tables/{STORES}"),
+            Some(settings(true)),
+        )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(refused.to_string().contains("row-level security"), "{refused}");
+    assert!(
+        refused.to_string().contains("row-level security"),
+        "{refused}"
+    );
 
     // Its rows are editable, countable and exportable like any table's. The
     // catalog is not built from this table, so writing it reloads nothing.
@@ -188,7 +219,11 @@ async fn a_metadata_table_is_listed_configured_and_edited_but_never_reshaped()
         )
         .await;
     assert!(status.is_success(), "{status} {row}");
-    assert_eq!(catalog.generation(), before, "no catalog reload for _fd_file_stores");
+    assert_eq!(
+        catalog.generation(),
+        before,
+        "no catalog reload for _fd_file_stores"
+    );
     let (_, count) = client
         .send("GET", &format!("/api/tables/{STORES}/rows/count"), None)
         .await;
@@ -238,7 +273,11 @@ async fn editing_a_row_the_catalog_is_built_from_takes_effect_at_once() -> sc_er
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let (status, _) = client
-        .send("POST", "/api/tables/metadata", Some(json!({ "name": "_fd_tables" })))
+        .send(
+            "POST",
+            "/api/tables/metadata",
+            Some(json!({ "name": "_fd_tables" })),
+        )
         .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(catalog.require("books")?.access.min_role_read, 1);
