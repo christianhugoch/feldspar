@@ -81,6 +81,7 @@ async fn the_built_in_view_runtime_loads_with_no_modules_root_at_all() {
         .config_step(
             "List",
             Some("books"),
+            None,
             0,
             &json!({}),
             ViewContext::bare(&views, &request),
@@ -91,6 +92,103 @@ async fn the_built_in_view_runtime_loads_with_no_modules_root_at_all() {
     assert!(step.builder);
     assert!(step.count >= 1, "{step:?}");
     assert!(step.form.is_null(), "{step:?}");
+
+    // A form step (Phase 10): ListShowList's *Views*, as this server's form
+    // fields, opening with what the context says.
+    let with_views = snapshot(
+        app,
+        3,
+        &json!({
+            "application": { "name": "Books" },
+            "views": [
+                { "name": "Books LSL", "viewtemplate": "ListShowList", "min_role": 100,
+                  "table_id": "books", "configuration": { "list_view": "List Books" } },
+                { "name": "List Books", "viewtemplate": "List", "min_role": 100,
+                  "table_id": "books", "configuration": { "columns": [] } },
+            ],
+            "pages": [
+                { "name": "Home", "layout": { "type": "view", "view": "List Books", "state": "shared" } },
+            ],
+        }),
+    );
+    // Over an application with no other views: listing the views over a table
+    // asks each for its state fields, which reads the table, and a bare
+    // context has no schema to read it from.
+    let no_views = snapshot(
+        app,
+        4,
+        &json!({ "application": { "name": "Books" }, "views": [], "pages": [] }),
+    );
+    let step = runtime
+        .config_step(
+            "ListShowList",
+            Some("books"),
+            Some("Books LSL"),
+            0,
+            &json!({ "list_width": 4 }),
+            ViewContext::bare(&no_views, &request),
+        )
+        .await
+        .unwrap();
+    assert_eq!((step.name.as_str(), step.count), ("Views", 2), "{step:?}");
+    assert!(
+        !step.builder && !step.skip && step.context_field.is_none(),
+        "{step:?}"
+    );
+    let names: Vec<&str> = step.fields.iter().map(|f| f.name()).collect();
+    assert_eq!(names, ["list_view", "show_view", "list_width"], "{step:?}");
+    let width = &step.fields[2];
+    assert_eq!(
+        width.base.type_,
+        sc_types::TypeRef::Basic(sc_types::BasicType::Int)
+    );
+    assert_eq!(width.default, Some(json!(6)));
+    // The form opens with what the context says.
+    assert_eq!(step.values.get("list_width"), Some(&json!(4)), "{step:?}");
+    assert!(step.issues.is_empty(), "{:?}", step.issues);
+
+    // The second step keeps its values under `subtables`.
+    let step = runtime
+        .config_step(
+            "ListShowList",
+            Some("books"),
+            Some("Books LSL"),
+            1,
+            &json!({}),
+            ViewContext::bare(&no_views, &request),
+        )
+        .await;
+    // It lists the table's relations, which needs the schema a bare context
+    // does not carry: the failure names the pattern and the step.
+    let message = step.unwrap_err().to_string();
+    assert!(
+        message.contains("ListShowList pattern") && message.contains("Subtables step"),
+        "{message}"
+    );
+
+    // An initial configuration (10.2): Filter starts with an empty layout.
+    let initial = runtime
+        .initial_config(
+            "Filter",
+            Some("books"),
+            Some("Books filter"),
+            ViewContext::bare(&with_views, &request),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::Value::Object(initial),
+        json!({ "layout": {}, "columns": [] })
+    );
+
+    // What refers to a view (10.4), by the patterns' own `connectedObjects`.
+    let references = runtime
+        .references("List Books", ViewContext::bare(&with_views, &request))
+        .await
+        .unwrap();
+    assert_eq!(references.embedded_in, ["Books LSL"], "{references:?}");
+    assert!(references.linked_from.is_empty(), "{references:?}");
+    assert_eq!(references.pages, ["Home"], "{references:?}");
 
     // And a page, through `@saltcorn/markup`'s own `renderLayout`.
     let views = snapshot(

@@ -4,11 +4,14 @@
 //
 // There is no Build button anywhere near this: a Saltcorn UI application's
 // source is these rows, and a delete is live on the app's next request.
-// Creating and configuring a view is Phase 10.
+// Creating a view, opening its configuration and renaming it are Phase 10's;
+// a rename says first what still refers to the view by its old name.
 
 import { useEffect, useState } from "react";
 import Alert from "react-bootstrap/Alert";
 import Button from "react-bootstrap/Button";
+import Form from "react-bootstrap/Form";
+import Modal from "react-bootstrap/Modal";
 import Spinner from "react-bootstrap/Spinner";
 import Table from "react-bootstrap/Table";
 
@@ -16,21 +19,39 @@ import { api, errorMessage } from "../api";
 import { navigate } from "../App";
 import { IconArrowLeft } from "../icons";
 import { AlertBody, PageBody, PageHeader, StatusBadge } from "../layout";
+import { RoleSelect } from "../roleSelect";
 import { useRoles } from "../roles";
 import {
   NO_PAGES,
   NO_VIEWS,
   appTabs,
+  createViewBody,
   deleteConfirmation,
   nameParam,
+  newViewError,
   pageRows,
+  referencesReport,
+  saveViewBody,
+  viewEditorHref,
   viewRows,
   type AppItem,
   type AppTab,
+  type Configuration,
+  type NewViewForm,
   type PageItem,
   type PatternItem,
+  type References,
   type ViewItem,
 } from "../views";
+
+/** The rename dialog: the view, the name being typed, and what refers to the
+ * view — `null` while that is being found out. */
+type Renaming = {
+  view: ViewItem;
+  name: string;
+  references: References | null;
+  error: string | null;
+};
 
 /** The tabs across the top of an application's screens: Settings, and Views
  * and Pages for an application that has them. Links rather than state, because
@@ -64,6 +85,10 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
   const [patterns, setPatterns] = useState<PatternItem[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState<NewViewForm | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<Renaming | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const load = async () => {
     try {
@@ -107,15 +132,87 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
     }
   };
 
+  const create = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!creating) return;
+    const problem = newViewError(creating, patterns);
+    if (problem) {
+      setCreateError(problem);
+      return;
+    }
+    setBusy(true);
+    setCreateError(null);
+    try {
+      const created = await api.createView(appId, createViewBody(creating));
+      setCreating(null);
+      navigate(`/applications/${encodeURIComponent(appId)}/views/${encodeURIComponent(created.name)}`);
+    } catch (err) {
+      setCreateError(errorMessage(err, "Could not create the view."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Open the rename dialog, and find out what refers to the view before any
+   * name is changed (10.4). */
+  const startRename = async (view: ViewItem) => {
+    setRenaming({ view, name: view.name, references: null, error: null });
+    try {
+      const references = await api.viewReferences(appId, nameParam(view.name));
+      setRenaming((r) => (r && r.view.name === view.name ? { ...r, references } : r));
+    } catch (err) {
+      const message = errorMessage(err, "Could not find what refers to the view.");
+      setRenaming((r) => (r && r.view.name === view.name ? { ...r, error: message } : r));
+    }
+  };
+
+  const rename = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!renaming) return;
+    const { view, name } = renaming;
+    setBusy(true);
+    try {
+      await api.saveView(
+        appId,
+        nameParam(view.name),
+        saveViewBody(view, (view.configuration ?? {}) as Configuration, name.trim()),
+      );
+      setRenaming(null);
+      await load();
+    } catch (err) {
+      setRenaming({ ...renaming, error: errorMessage(err, "Could not rename the view.") });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const header = (
     <PageHeader
       pretitle="Application"
       title={app?.name ?? "Application"}
       actions={
-        <Button variant="outline-secondary" onClick={() => navigate("/applications")}>
-          <IconArrowLeft className="icon-2" />
-          Applications
-        </Button>
+        <>
+          {tab === "views" && app && (
+            <Button
+              onClick={() => {
+                setCreateError(null);
+                setCreating({
+                  name: "",
+                  description: "",
+                  viewpattern: patterns?.[0]?.name ?? "List",
+                  table_name: app.tables[0] ?? "",
+                  min_role: 100,
+                });
+              }}
+            >
+              New view
+            </Button>
+          )}
+          <Button variant="outline-secondary" onClick={() => navigate("/applications")}>
+            <IconArrowLeft className="icon-2" />
+            Applications
+          </Button>
+        </>
       }
     />
   );
@@ -192,7 +289,21 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
                     </td>
                     <td>{row.table}</td>
                     <td>{row.role}</td>
-                    <td className="text-end">
+                    <td className="text-end text-nowrap">
+                      <a className="btn btn-sm btn-outline-primary me-1" href={viewEditorHref(appId, row.name)}>
+                        Configure
+                      </a>
+                      <Button
+                        size="sm"
+                        variant="outline-secondary"
+                        className="me-1"
+                        onClick={() => {
+                          const view = views.find((v) => v.name === row.name);
+                          if (view) void startRename(view);
+                        }}
+                      >
+                        Rename
+                      </Button>
                       <Button
                         size="sm"
                         variant="outline-danger"
@@ -251,6 +362,135 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
             </Table>
           </div>
         )}
+        <Modal show={creating !== null} onHide={() => setCreating(null)}>
+          <Form onSubmit={create}>
+            <Modal.Header closeButton>
+              <Modal.Title className="h4">New view</Modal.Title>
+            </Modal.Header>
+            <Modal.Body>
+              {createError && <Alert variant="danger">{createError}</Alert>}
+              {creating && (
+                <>
+                  <Form.Group className="mb-3" controlId="newViewName">
+                    <Form.Label>Name</Form.Label>
+                    <Form.Control
+                      value={creating.name}
+                      autoFocus
+                      required
+                      onChange={(e) => setCreating({ ...creating, name: e.target.value })}
+                    />
+                    <Form.Text muted>Also its address: /view/&lt;name&gt; on the app's subdomain.</Form.Text>
+                  </Form.Group>
+                  <Form.Group className="mb-3" controlId="newViewPattern">
+                    <Form.Label>Pattern</Form.Label>
+                    <Form.Select
+                      value={creating.viewpattern}
+                      onChange={(e) => setCreating({ ...creating, viewpattern: e.target.value })}
+                    >
+                      {(patterns ?? []).map((p) => (
+                        <option key={p.name} value={p.name}>
+                          {p.label || p.name}
+                        </option>
+                      ))}
+                    </Form.Select>
+                    {patterns?.find((p) => p.name === creating.viewpattern)?.description && (
+                      <Form.Text muted>
+                        {patterns.find((p) => p.name === creating.viewpattern)?.description}
+                      </Form.Text>
+                    )}
+                  </Form.Group>
+                  <Form.Group className="mb-3" controlId="newViewTable">
+                    <Form.Label>Table</Form.Label>
+                    <Form.Select
+                      value={creating.table_name}
+                      onChange={(e) => setCreating({ ...creating, table_name: e.target.value })}
+                    >
+                      <option value="">—</option>
+                      {app.tables.map((t) => (
+                        <option key={t} value={t}>
+                          {t}
+                        </option>
+                      ))}
+                    </Form.Select>
+                    <Form.Text muted>One of the application's tables.</Form.Text>
+                  </Form.Group>
+                  <RoleSelect
+                    id="newViewRole"
+                    label="Minimum role"
+                    roles={roles}
+                    value={creating.min_role}
+                    onChange={(min_role) => setCreating({ ...creating, min_role })}
+                  />
+                  <Form.Group className="mb-3" controlId="newViewDescription">
+                    <Form.Label>Description</Form.Label>
+                    <Form.Control
+                      value={creating.description}
+                      onChange={(e) => setCreating({ ...creating, description: e.target.value })}
+                    />
+                  </Form.Group>
+                </>
+              )}
+            </Modal.Body>
+            <Modal.Footer>
+              <Button variant="secondary" type="button" onClick={() => setCreating(null)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={busy}>
+                Create and configure
+              </Button>
+            </Modal.Footer>
+          </Form>
+        </Modal>
+
+        <Modal show={renaming !== null} onHide={() => setRenaming(null)}>
+          <Form onSubmit={rename}>
+            <Modal.Header closeButton>
+              <Modal.Title className="h4">Rename {renaming?.view.name}</Modal.Title>
+            </Modal.Header>
+            <Modal.Body>
+              {renaming?.error && <Alert variant="danger">{renaming.error}</Alert>}
+              {renaming && (
+                <>
+                  <Form.Group className="mb-3" controlId="renameView">
+                    <Form.Label>New name</Form.Label>
+                    <Form.Control
+                      value={renaming.name}
+                      autoFocus
+                      required
+                      onChange={(e) => setRenaming({ ...renaming, name: e.target.value })}
+                    />
+                  </Form.Group>
+                  {renaming.references === null ? (
+                    !renaming.error && <Spinner animation="border" size="sm" role="status" />
+                  ) : (
+                    referencesReport(renaming.view.name, renaming.references).map((line) => (
+                      <p key={line} className="mb-2">
+                        {line}
+                      </p>
+                    ))
+                  )}
+                </>
+              )}
+            </Modal.Body>
+            <Modal.Footer>
+              <Button variant="secondary" type="button" onClick={() => setRenaming(null)}>
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={
+                  busy ||
+                  !renaming ||
+                  renaming.references === null ||
+                  !renaming.name.trim() ||
+                  renaming.name.trim() === renaming.view.name
+                }
+              >
+                Rename
+              </Button>
+            </Modal.Footer>
+          </Form>
+        </Modal>
       </PageBody>
     </>
   );

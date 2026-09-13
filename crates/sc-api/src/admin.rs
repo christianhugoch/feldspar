@@ -1650,8 +1650,9 @@ pub fn admin_endpoints() -> EndpointSet {
     // `saveView`/`savePage` save the record the path names, creating it when
     // there is none; a body naming something else renames it. What a view may
     // name — the pattern, the table, the role, the actions — is refused on save
-    // with a sentence naming it. Replaying the pattern's configuration steps
-    // over the configuration is Phase 10's.
+    // with a sentence naming it, and the configuration is replayed through the
+    // pattern's own configuration steps, so a value a step's form would not
+    // accept is refused naming the step and the field (Phase 10).
     set.register(
         Endpoint::new(
             "listViews",
@@ -1708,6 +1709,63 @@ pub fn admin_endpoints() -> EndpointSet {
             "deleted",
             TypeSchema::bool(),
         )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // A new view (TODO "Saltcorn UI" 10.2): its name, pattern, table and role,
+    // configured as the pattern's `initial_config` starts one — a List over its
+    // table's columns. Refused as a save is, and refused if the name is taken,
+    // where a save would overwrite.
+    set.register(
+        Endpoint::new(
+            "createView",
+            Method::Post,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("views"),
+        )
+        .input(create_view_input_schema())
+        .output(view_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // One step of a view's configuration wizard (10.1): the pattern's
+    // `configuration_workflow` step `step`, over the table and the context the
+    // earlier steps gathered, as the form fields the admin UI renders. A call
+    // per step rather than a form per pattern, because a step's form does not
+    // exist without its context: List's *Default state* lists the table's
+    // fields, and a ListShowList's views are the views over its table.
+    set.register(
+        Endpoint::new(
+            "viewConfigStep",
+            Method::Post,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("view-config-step"),
+        )
+        .input(view_config_step_input_schema())
+        .output(view_config_step_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // What refers to a view by name (10.4) — the views that embed it or link
+    // to it, by their patterns' own `connectedObjects`, and the pages that show
+    // it — so a rename can say before it happens what it will leave pointing at
+    // a name that no longer exists. Nothing is rewritten.
+    set.register(
+        Endpoint::new(
+            "viewReferences",
+            Method::Get,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("views")
+                .param("name", ValueType::Text)
+                .lit("references"),
+        )
+        .output(view_references_schema())
         .auth(AuthRequirement::admin()),
     );
 
@@ -3862,6 +3920,61 @@ fn view_schema() -> TypeSchema {
 /// when the path names one and fresh otherwise.
 fn view_input_schema() -> TypeSchema {
     TypeSchema::Struct(view_fields())
+}
+
+/// The body `createView` takes: what the admin chooses. The configuration is
+/// the pattern's to supply.
+fn create_view_input_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("viewpattern", TypeSchema::text()),
+        StructField::new("table_name", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("min_role", TypeSchema::int()),
+    ])
+}
+
+/// The body `viewConfigStep` takes: the pattern and table being configured, the
+/// view's name (absent for one not yet saved), the step, counting from 0, and
+/// the configuration gathered so far.
+fn view_config_step_input_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("viewpattern", TypeSchema::text()),
+        StructField::new("table_name", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("name", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("step", TypeSchema::int()),
+        StructField::new("context", TypeSchema::json()),
+    ])
+}
+
+/// One step of a view's configuration. `builder` is a layout step, shown
+/// read-only until `ui/builder`; `skip` is a step v1 leaves out for this
+/// configuration; `context_field` is the configuration key its values are kept
+/// under (none: the top level); `values` are what its form opens with; `issues`
+/// are what the form could not express faithfully.
+fn view_config_step_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("index", TypeSchema::int()),
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("count", TypeSchema::int()),
+        StructField::new("builder", TypeSchema::bool()),
+        StructField::new("skip", TypeSchema::bool()),
+        StructField::new("context_field", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("blurb", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("fields", TypeSchema::array(form_field_schema())),
+        StructField::new("values", TypeSchema::json()),
+        StructField::new("issues", TypeSchema::array(TypeSchema::text())),
+    ])
+}
+
+/// What refers to a view by name: the views embedding it, the views linking to
+/// it, and the pages showing it.
+fn view_references_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("embedded_in", TypeSchema::array(TypeSchema::text())),
+        StructField::new("linked_from", TypeSchema::array(TypeSchema::text())),
+        StructField::new("pages", TypeSchema::array(TypeSchema::text())),
+    ])
 }
 
 /// A Saltcorn UI page's fields on the wire, less its id. `attributes` carries

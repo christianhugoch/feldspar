@@ -41,21 +41,35 @@ pub fn config_fields_to_form_fields(fields: &[Json], owner: &str) -> (Vec<FormFi
     let mut issues = Vec::new();
     for field in fields {
         match config_field(field, owner) {
-            Ok((form_field, issue)) => {
+            Ok(Some((form_field, issue))) => {
                 if let Some(issue) = issue {
                     issues.push(issue);
                 }
                 out.push(form_field);
             }
+            Ok(None) => {}
             Err(issue) => issues.push(issue),
         }
     }
     (out, issues)
 }
 
+/// v1's `input_type`s that are part of a form's presentation and hold no value:
+/// a heading between groups of fields, and a hidden field the workflow itself
+/// fills in. Neither is a setting, so neither is translated — or reported.
+const NOT_SETTINGS: [&str; 2] = ["section_header", "hidden"];
+
 /// One v1 field. `Err` is a field that could not be translated at all (it has no
-/// name); `Ok`'s second half is one that was translated with a caveat.
-fn config_field(field: &Json, owner: &str) -> Result<(FormField, Option<String>), String> {
+/// name); `Ok(None)` is one that is not a setting ([`NOT_SETTINGS`]); `Ok`'s
+/// second half is one that was translated with a caveat.
+fn config_field(field: &Json, owner: &str) -> Result<Option<(FormField, Option<String>)>, String> {
+    if field
+        .get("input_type")
+        .and_then(Json::as_str)
+        .is_some_and(|t| NOT_SETTINGS.contains(&t))
+    {
+        return Ok(None);
+    }
     let Some(name) = field.get("name").and_then(Json::as_str) else {
         return Err(format!(
             "{owner} declares a setting with no name, which cannot be shown or stored"
@@ -66,14 +80,37 @@ fn config_field(field: &Json, owner: &str) -> Result<(FormField, Option<String>)
         return Err(format!("{owner} declares a setting with an empty name"));
     }
 
-    let declared = field
-        .get("type")
-        .and_then(Json::as_str)
-        .unwrap_or("String")
-        .trim()
-        .to_owned();
+    // A form built by a v1 `Form` carries the type *object* of a registered
+    // type, where a plugin's `configFields` spells the name.
+    let declared = match field.get("type") {
+        Some(Json::String(t)) => t.trim().to_owned(),
+        Some(Json::Object(t)) => t
+            .get("name")
+            .and_then(Json::as_str)
+            .unwrap_or("String")
+            .to_owned(),
+        _ => "String".to_owned(),
+    };
+    let repeat = declared == "FieldRepeat" || truthy(field.get("isRepeat"));
     let (basic, issue) = match basic_type(&declared) {
         Some(basic) => (basic, None),
+        // A repeated section — `FieldRepeat`, a list of groups of fields — has no
+        // control of its own here, and its value is a list: edited as JSON.
+        None if repeat => (
+            BasicType::Json,
+            Some(format!(
+                "{owner}'s setting `{name}` is a repeated section, which this version edits as JSON"
+            )),
+        ),
+        // A key's value is its target's primary key, whose type the field names
+        // (`reftype`); the choices are the target's rows, in `options`.
+        None if declared == "Key" => (
+            match field.get("reftype").and_then(Json::as_str) {
+                Some("Integer") | None => BasicType::Int,
+                Some(other) => basic_type(other).unwrap_or(BasicType::Text),
+            },
+            None,
+        ),
         None => (
             BasicType::Text,
             Some(format!(
@@ -122,7 +159,7 @@ fn config_field(field: &Json, owner: &str) -> Result<(FormField, Option<String>)
     // `FormField` carries no help text (a `ConfigDef` does, and that is a
     // settings-screen type). Dropped deliberately rather than folded into the
     // label, where it would read as part of the name.
-    Ok((form_field, issue))
+    Ok(Some((form_field, issue)))
 }
 
 /// v1's type names, and what they are here.
@@ -145,22 +182,30 @@ fn basic_type(declared: &str) -> Option<BasicType> {
     })
 }
 
-/// The `attributes.options` list, as strings.
+/// The `attributes.options` list — or, for a v1 `Form`'s select, the field's own
+/// `options` — as the stored values.
 ///
-/// v1 writes options two ways — `["a", "b"]` and `[{name: "a", label: "A"}]` —
-/// and both mean the same set of stored values. The label of the second form is
-/// dropped for the same reason `sublabel` is: there is nowhere for it to go
-/// today, and inventing a place for it here would be a second vocabulary.
+/// v1 writes options three ways — `["a", "b"]`, `[{name: "a", label: "A"}]` and a
+/// select's `[{label: "A", value: 1}]` — and all mean the same set of stored
+/// values. The label is dropped for the same reason `sublabel` is: there is
+/// nowhere for it to go today, and inventing a place for it here would be a
+/// second vocabulary. An empty value is the select's "none", which the form
+/// offers of its own accord, so it is not an option.
 fn options(field: &Json) -> Option<Vec<Json>> {
-    let options = field.get("attributes")?.get("options")?;
+    let options = field
+        .get("attributes")
+        .and_then(|a| a.get("options"))
+        .filter(|o| !o.is_null())
+        .or_else(|| field.get("options").filter(|o| o.is_array()))?;
     let list = match options {
         Json::Array(values) => values
             .iter()
             .filter_map(|value| match value {
                 Json::String(s) => Some(Json::String(s.clone())),
-                Json::Object(o) => o.get("name").cloned(),
+                Json::Object(o) => o.get("value").or_else(|| o.get("name")).cloned(),
                 other => Some(other.clone()),
             })
+            .filter(|value| !value.is_null() && value.as_str() != Some(""))
             .collect::<Vec<_>>(),
         // v1 also accepts a comma-separated string.
         Json::String(s) => s
@@ -300,5 +345,43 @@ mod tests {
         assert!(fields.is_empty());
         assert_eq!(issues.len(), 1);
         assert!(issues[0].contains("no name"), "{}", issues[0]);
+    }
+
+    /// What a view pattern's configuration form is made of (TODO "Saltcorn UI"
+    /// 10.1): v1's `Form` fields, which spell a few things a plugin's
+    /// `configFields` do not.
+    #[test]
+    fn a_v1_forms_fields_translate_the_way_a_plugins_settings_do() {
+        let (fields, issues) = translate(json!([
+            { "input_type": "section_header", "label": "These fields were missing" },
+            { "name": "stepName", "input_type": "hidden" },
+            { "name": "list_width", "type": { "name": "Integer" }, "default": 6 },
+            { "name": "author", "type": "Key", "reftype": "Integer", "input_type": "select",
+              "options": [{ "label": "", "value": "" }, { "label": "Tolkien", "value": 1 }] },
+            { "name": "view_to_create", "type": "String",
+              "attributes": { "options": [{ "name": "Edit Books", "label": "Edit Books [Edit]" }] } },
+            { "name": "formula_destinations", "type": "FieldRepeat", "isRepeat": true,
+              "fields": [{ "name": "expression", "type": "String" }] }
+        ]));
+        let names: Vec<&str> = fields.iter().map(FormField::name).collect();
+        assert_eq!(
+            names,
+            [
+                "list_width",
+                "author",
+                "view_to_create",
+                "formula_destinations"
+            ]
+        );
+        assert_eq!(fields[0].base.type_, TypeRef::Basic(BasicType::Int));
+        assert_eq!(fields[1].base.type_, TypeRef::Basic(BasicType::Int));
+        // The select's blank is the form's own "none", not a choice.
+        assert_eq!(fields[1].static_options(), &[json!(1)]);
+        assert_eq!(fields[2].static_options(), &[json!("Edit Books")]);
+        assert_eq!(fields[3].base.type_, TypeRef::Basic(BasicType::Json));
+        // The headings are not settings and not issues; the repeat is edited as
+        // JSON and says so.
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].contains("`formula_destinations`") && issues[0].contains("JSON"));
     }
 }

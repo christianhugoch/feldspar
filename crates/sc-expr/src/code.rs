@@ -9024,6 +9024,53 @@ mod tests {
         );
     }
 
+    /// v1's relation lists, which a Saltcorn UI pattern's configuration steps
+    /// read (TODO "Saltcorn UI" Phase 10): answered from the snapshot, as the
+    /// rest of a table's metadata is, rather than refused.
+    #[tokio::test]
+    async fn the_v1_table_answers_its_relations_from_the_snapshot() {
+        let rt = CodeRuntime::with_workers(1);
+        let out = with_schema(
+            &rt,
+            &library_snapshot(),
+            &format!(
+                r#"{MAKE}
+                   const books = Table.findOne("books");
+                   const authors = Table.findOne("authors");
+                   const parents = await books.get_parent_relations();
+                   const children = await authors.get_child_relations();
+                   const joined = await books.get_child_relations(true);
+                   return {{
+                     parent_fields: parents.parent_field_list,
+                     parent_keys: parents.parent_relations.map((r) => r.key_field.name + ">" + r.table.name),
+                     child_fields: children.child_field_list,
+                     child_tables: children.child_relations.map((r) => r.table.name),
+                     own_children: (await books.get_child_relations()).child_field_list,
+                     joined_fields: joined.child_field_list,
+                     joined_through: joined.child_relations.map((r) => r.through.name),
+                     authors_parents: (await authors.get_parent_relations(true, true)).parent_field_list,
+                   }};"#
+            ),
+        )
+        .await;
+        let parent_fields = out["parent_fields"].as_array().unwrap();
+        assert!(parent_fields.contains(&json!("author.name")), "{out}");
+        assert!(
+            parent_fields
+                .iter()
+                .all(|f| f.as_str().unwrap().starts_with("author.")),
+            "{out}"
+        );
+        assert_eq!(out["parent_keys"], json!(["author>authors"]));
+        assert_eq!(out["child_fields"], json!(["books.author"]));
+        assert_eq!(out["child_tables"], json!(["books"]));
+        assert_eq!(out["own_children"], json!([]));
+        // Through its key to `authors`, the books of the same author.
+        assert_eq!(out["joined_fields"], json!(["author->books.author"]));
+        assert_eq!(out["joined_through"], json!(["author"]));
+        assert_eq!(out["authors_parents"], json!([]));
+    }
+
     #[tokio::test]
     async fn the_v1_table_answers_its_metadata_synchronously() {
         // The definition of done's first four lines: none of this awaits

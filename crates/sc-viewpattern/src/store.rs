@@ -25,6 +25,22 @@ use crate::tables::{
 use crate::validate::{check_name, check_view_actions, check_view_shape};
 use crate::view::{Page, PageId, View, ViewId};
 
+/// The checks [`save_view`] makes before it writes, without the write, answering
+/// the view's application.
+///
+/// What the admin API runs before it asks a pattern for a first configuration
+/// or replays one through the pattern's steps (TODO "Saltcorn UI" 10.1, 10.2),
+/// so a view the store would refuse is refused with the store's sentence rather
+/// than with whatever the pattern made of a table it was never meant to see.
+pub async fn validate_view(catalog: &Catalog, view: &View) -> Result<Application> {
+    check_name("view", &view.name)?;
+    let app = require_application(catalog, view.application, "view", &view.name).await?;
+    check_view_shape(view, &app, &registered_patterns())?;
+    check_view_actions(view, &app)?;
+    check_role(catalog, "view", &view.name, view.min_role).await?;
+    Ok(app)
+}
+
 /// Save a view: insert its row, or update it in place if a row with its
 /// [`ViewId`] already exists.
 ///
@@ -34,11 +50,7 @@ use crate::view::{Page, PageId, View, ViewId};
 /// `min_role` no role defines; a name another view of the application already
 /// has; and an id that belongs to a view of a different application.
 pub async fn save_view(catalog: &Catalog, view: &View) -> Result<View> {
-    check_name("view", &view.name)?;
-    let app = require_application(catalog, view.application, "view", &view.name).await?;
-    check_view_shape(view, &app, &registered_patterns())?;
-    check_view_actions(view, &app)?;
-    check_role(catalog, "view", &view.name, view.min_role).await?;
+    let app = validate_view(catalog, view).await?;
 
     let existing = load_one(
         catalog,

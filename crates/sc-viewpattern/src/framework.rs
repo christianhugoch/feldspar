@@ -1020,30 +1020,9 @@ impl SaltcornUiFramework {
         {
             return Ok(held.clone());
         }
-        let roles = sc_auth::list_roles(cat).await?;
-        // What each declared trigger runs, which v1's `run_action_column` reads
-        // to decide how to run it (§12.2). Read at the generation, like the rest:
-        // a change to an application's triggers is a save of the application,
-        // and a save is a new generation.
-        let actions: std::collections::HashMap<String, String> = self
-            .triggers
-            .as_ref()
-            .and_then(|d| d.triggers().ok())
-            .map(|triggers| {
-                triggers
-                    .all()
-                    .iter()
-                    .map(|t| (t.name.clone(), t.action().unwrap_or("Workflow").to_owned()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let built = Arc::new(ViewSnapshot::build_with_trigger_actions(
-            &self.app,
-            set,
-            &roles,
-            base_url,
-            &|name| actions.get(name).cloned(),
-        )?);
+        let built = Arc::new(
+            application_snapshot(cat, &self.app, set, base_url, self.triggers.as_deref()).await?,
+        );
         *self.snapshot.write().map_err(|_| poisoned())? = Some(built.clone());
         Ok(built)
     }
@@ -1364,7 +1343,40 @@ fn reason_of(e: &Error) -> String {
 }
 
 /// v1's `req.user`.
-fn view_user(user: &User) -> ViewUser {
+/// The view snapshot of `app`'s `set`, as every call through the view runtime is
+/// given it (§4): its views, pages and settings, the server's roles, and what
+/// each trigger the application declares runs — which v1's `run_action_column`
+/// reads to decide how to run it (§12.2). Read at the generation, like the rest:
+/// a change to an application's triggers is a save of the application, and a
+/// save is a new generation.
+///
+/// One function for the framework and the configuration screen alike, because
+/// the worker holds one snapshot per generation and it must be the same one
+/// whichever of the two sent it first.
+pub(crate) async fn application_snapshot(
+    cat: &Catalog,
+    app: &Application,
+    set: &ViewSet,
+    base_url: &str,
+    triggers: Option<&TriggerDispatcher>,
+) -> Result<ViewSnapshot> {
+    let roles = sc_auth::list_roles(cat).await?;
+    let actions: std::collections::HashMap<String, String> = triggers
+        .and_then(|d| d.triggers().ok())
+        .map(|triggers| {
+            triggers
+                .all()
+                .iter()
+                .map(|t| (t.name.clone(), t.action().unwrap_or("Workflow").to_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    ViewSnapshot::build_with_trigger_actions(app, set, &roles, base_url, &|name| {
+        actions.get(name).cloned()
+    })
+}
+
+pub(crate) fn view_user(user: &User) -> ViewUser {
     ViewUser {
         id: user.id.to_string(),
         email: match user.extra.get("email") {

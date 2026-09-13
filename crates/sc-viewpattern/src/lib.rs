@@ -38,6 +38,7 @@
 //!   `sc-app`'s factory registry ([`install_saltcorn_ui`]).
 
 mod bundle;
+mod configure;
 mod framework;
 mod patterns;
 mod runtime;
@@ -51,6 +52,7 @@ mod view_set;
 pub use bundle::{
     BUNDLE_DIR_IN_CHECKOUT, SALTCORN_UI_FRAMEWORK, VIEW_RUNTIME_FILE, require_view_runtime,
 };
+pub use configure::{Configurer, check_step_values};
 pub use framework::{
     ASSET_VERSION_TAG, CFG_ROOT_PAGES, CFG_SITE_NAME, DERIVED_CONFIG_KEYS, SaltcornUiFactory,
     SaltcornUiFramework, check_saltcorn_ui_config, install_saltcorn_ui, saltcorn_ui_config_spec,
@@ -61,13 +63,13 @@ pub use patterns::{
     registered_patterns,
 };
 pub use runtime::{
-    ConfigStep, Flash, PatternManifest, ViewContext, ViewOutput, ViewRequest, ViewRuntime,
-    ViewUser, Wrap, install_view_runtime, view_runtime,
+    ConfigStep, Flash, PatternManifest, ViewContext, ViewOutput, ViewReferences, ViewRequest,
+    ViewRuntime, ViewUser, Wrap, install_view_runtime, view_runtime,
 };
 pub use snapshot::{MENU_CONFIG_KEY, ViewSnapshot};
 pub use store::{
     delete_application_views_and_pages, delete_page, delete_view, list_pages, list_views,
-    load_page, load_view, save_page, save_view,
+    load_page, load_view, save_page, save_view, validate_view,
 };
 pub use tables::{
     COL_APPLICATION, COL_ATTRIBUTES, COL_CONFIGURATION, COL_DESCRIPTION, COL_ID, COL_LAYOUT,

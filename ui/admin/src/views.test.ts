@@ -23,8 +23,17 @@ import {
   pageRows,
   viewRows,
   viewUrl,
+  applyStep,
+  createViewBody,
+  layoutJson,
+  newViewError,
+  referencesReport,
+  saveViewBody,
+  stepFormValues,
+  stepTitle,
   type PageItem,
   type PatternItem,
+  type StepItem,
   type ViewItem,
 } from "./views";
 
@@ -157,5 +166,153 @@ describe("deleteConfirmation", () => {
     expect(text).toContain('"List Books"');
     expect(text).toContain("BooksDB");
     expect(text).toMatch(/link to it/);
+  });
+});
+
+// --- Configuring a view (TODO "Saltcorn UI" Phase 10) ---------------------
+
+type StepField = StepItem["fields"][number];
+
+const field = (name: string, type: string, extra: Partial<StepField> = {}): StepField => ({
+  name,
+  label: name,
+  type,
+  required: false,
+  default: null,
+  options: [],
+  multiline: false,
+  secret: false,
+  create_only: false,
+  code_language: null,
+  ...extra,
+});
+
+const stepOf = (over: Partial<StepItem>): StepItem => ({
+  index: 0,
+  name: "Views",
+  count: 2,
+  builder: false,
+  skip: false,
+  context_field: null,
+  blurb: null,
+  fields: [],
+  values: {},
+  issues: [],
+  ...over,
+});
+
+describe("a configuration step", () => {
+  it("puts its answers at the top level, typed, and removes a setting that was emptied", () => {
+    const step = stepOf({
+      fields: [field("list_view", "text"), field("list_width", "int"), field("in_card", "bool")],
+    });
+    const before = { list_view: "List Books", list_width: 6, subtables: { a: true } };
+    const after = applyStep(before, step, { list_view: "", list_width: "4", in_card: "true" });
+    // `subtables` is another step's, and untouched.
+    expect(after).toEqual({ list_width: 4, in_card: true, subtables: { a: true } });
+    expect(before.list_view).toBe("List Books");
+  });
+
+  it("puts a step with a context field's answers under that key, beside what is there", () => {
+    const step = stepOf({
+      name: "Default state",
+      context_field: "default_state",
+      fields: [field("author", "int")],
+    });
+    const after = applyStep(
+      { columns: [1], default_state: { _descending: true } },
+      step,
+      { author: "2" },
+    );
+    expect(after).toEqual({ columns: [1], default_state: { _descending: true, author: 2 } });
+  });
+
+  it("leaves the configuration alone on a layout step and on a skipped one", () => {
+    const configuration = { layout: { above: [] } };
+    expect(applyStep(configuration, stepOf({ builder: true }), {})).toBe(configuration);
+    expect(applyStep(configuration, stepOf({ skip: true }), {})).toBe(configuration);
+  });
+
+  it("opens with what the configuration holds, else each field's default", () => {
+    const step = stepOf({
+      fields: [field("list_width", "int", { default: 6 }), field("in_card", "bool")],
+      values: { in_card: true },
+    });
+    expect(stepFormValues(step)).toEqual({ list_width: "6", in_card: "true" });
+  });
+
+  it("shows a layout step's layout and columns, and nothing else", () => {
+    const shown = JSON.parse(layoutJson({ layout: { type: "blank" }, columns: [], list_view: "x" }));
+    expect(shown).toEqual({ layout: { type: "blank" }, columns: [] });
+    expect(stepTitle({ index: 1, count: 5, name: "Default state" })).toBe("Step 2 of 5: Default state");
+  });
+});
+
+describe("creating and renaming a view", () => {
+  const patterns = [
+    {
+      name: "List",
+      label: "List",
+      description: "",
+      table_required: true,
+      view_quantity: "Many",
+      routes: [],
+      steps: ["Columns"],
+      module: null,
+    },
+  ] as PatternItem[];
+  const empty = { name: "", description: "", viewpattern: "", table_name: "", min_role: 100 };
+
+  it("asks for a name, a pattern and, for a pattern over a table, a table", () => {
+    expect(newViewError(empty, patterns)).toMatch(/name/);
+    expect(newViewError({ ...empty, name: "Books" }, patterns)).toMatch(/pattern/);
+    expect(newViewError({ ...empty, name: "Books", viewpattern: "List" }, patterns)).toMatch(/table/);
+    const complete = { ...empty, name: " Books ", viewpattern: "List", table_name: "books" };
+    expect(newViewError(complete, patterns)).toBeNull();
+    expect(createViewBody(complete)).toEqual({
+      name: "Books",
+      description: null,
+      viewpattern: "List",
+      table_name: "books",
+      min_role: 100,
+    });
+  });
+
+  it("says before a rename what will keep the old name, and that nothing is rewritten", () => {
+    const lines = referencesReport("List Books", {
+      embedded_in: ["Filter books"],
+      linked_from: [],
+      pages: ["BooksOverview"],
+    });
+    expect(lines[0]).toContain('the view "Filter books"');
+    expect(lines[1]).toContain('the page "BooksOverview"');
+    expect(lines[lines.length - 1]).toContain("will not be updated");
+    const none = referencesReport("List Books", { embedded_in: [], linked_from: [], pages: [] });
+    expect(none).toHaveLength(1);
+    expect(none[0]).toContain("Nothing");
+  });
+
+  it("renames by saving the same view under another name", () => {
+    const view = {
+      id: "v1",
+      name: "List Books",
+      description: "",
+      viewpattern: "List",
+      table_name: "books",
+      configuration: { columns: [] },
+      min_role: 100,
+      slug: null,
+      attributes: {},
+    } as ViewItem;
+    expect(saveViewBody(view, { columns: [] }, "Books")).toEqual({
+      name: "Books",
+      description: "",
+      viewpattern: "List",
+      table_name: "books",
+      configuration: { columns: [] },
+      min_role: 100,
+      slug: null,
+      attributes: {},
+    });
   });
 });

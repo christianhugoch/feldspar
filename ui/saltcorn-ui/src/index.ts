@@ -38,6 +38,7 @@ import * as fileviews_ from "../vendor/saltcorn-data/base-plugin/fileviews.js";
 import * as utils from "../vendor/saltcorn-data/utils.js";
 import * as layoutModel from "../vendor/saltcorn-data/models/layout.js";
 import { Evaluator } from "../vendor/saltcorn-data/evaluator.js";
+import { extractFromLayout } from "../vendor/saltcorn-data/diagram/node_extract_utils.js";
 
 import * as list from "../vendor/saltcorn-data/base-plugin/viewtemplates/list.js";
 import * as show from "../vendor/saltcorn-data/base-plugin/viewtemplates/show.js";
@@ -264,9 +265,74 @@ export async function runRoute(view: ViewRecord, route: string, body: Obj, extra
   return handler(view.table_id, view.name, view.configuration, body, extra, queriesFor(vt, view, extra));
 }
 
+/** A form field's type as a name: a registered type is an object, a key field
+ * holds `"Key"`, and a type the registry does not have is kept as `typename`. */
+function typeNameOf(field: Obj): string | null {
+  if (typeof field.type === "string") return field.type;
+  if (field.type && typeof field.type.name === "string") return field.type.name;
+  return field.typename ?? null;
+}
+
+/** A v1 form field as data — v1's own `configFields` shape, which is what the
+ * host translates into its form vocabulary (TODO 10.1). A field's `type` object
+ * carries its fieldviews' functions and cannot cross; its name can. */
+function describeField(field: Obj): Obj {
+  if (field.isRepeat) {
+    return {
+      name: field.name,
+      label: field.label,
+      type: "FieldRepeat",
+      isRepeat: true,
+      fields: (field.fields ?? []).map(describeField),
+      showIf: field.showIf ?? null,
+    };
+  }
+  return {
+    name: field.name,
+    label: field.label,
+    type: typeNameOf(field),
+    input_type: field.input_type ?? null,
+    fieldview: field.fieldview ?? null,
+    required: !!field.required,
+    default: field.default ?? null,
+    attributes: field.attributes ?? {},
+    options: field.options ?? null,
+    sublabel: field.sublabel ?? null,
+    showIf: field.showIf ?? null,
+    parent_field: field.parent_field ?? null,
+    reftype: field.reftype ?? null,
+  };
+}
+
+/** The values a step's form opens with — v1's `Workflow.runStep`: the form's
+ * own values, else the context's, read out of the step's `contextField` when it
+ * has one. */
+function stepValues(form: Obj, step: Obj, context: Obj): Obj {
+  const own: Obj = form.values ?? {};
+  const scope: Obj = step.contextField ? (context[step.contextField] ?? {}) : context;
+  const values: Obj = {};
+  for (const field of form.fields ?? []) {
+    if (!field.name) continue;
+    const key = field.parent_field ? `${field.parent_field}_${field.name}` : field.name;
+    const fromContext =
+      step.contextField && field.parent_field
+        ? (scope[field.parent_field] ?? {})[field.name]
+        : scope[field.name];
+    const value = own[key] !== undefined ? own[key] : fromContext;
+    if (value !== undefined) values[key] = value;
+  }
+  return values;
+}
+
 /** One step of a pattern's `configuration_workflow`, over the context gathered
  * so far — a call per step, because a step's form does not exist without its
- * context (TODO §6). */
+ * context (TODO §6).
+ *
+ * The answer is what a wizard needs and nothing it cannot use: whether v1 would
+ * skip the step here (`onlyWhen`), where its values land in the configuration
+ * (`contextField`), its form as data, and the values that form opens with. A
+ * step that cannot be built fails naming itself, so the refusal a host reports
+ * says which step of the pattern it was. */
 export async function configStep(pattern: string, step: number, context: Obj, req: Obj): Promise<Obj> {
   const vt = findPattern(pattern);
   if (!vt.configuration_workflow) throw new Error(`the ${vt.name} view pattern has no configuration`);
@@ -274,10 +340,60 @@ export async function configStep(pattern: string, step: number, context: Obj, re
   const steps: Obj[] = workflow.steps ?? [];
   const current = steps[step];
   if (!current) throw new Error(`the ${vt.name} view pattern has no configuration step ${step}`);
-  return {
+  const answer: Obj = {
     name: current.name,
     count: steps.length,
-    builder: !!current.builder,
-    form: current.form ? await current.form(context) : null,
+    builder: !!current.builder && !current.form,
+    context_field: current.contextField ?? null,
+    skip: false,
+    form: null,
+    values: {},
   };
+  try {
+    if (current.onlyWhen && !(await current.onlyWhen(context))) {
+      answer.skip = true;
+      return answer;
+    }
+    if (current.form) {
+      const built = await current.form(context);
+      answer.form = { blurb: built?.blurb ?? null, fields: (built?.fields ?? []).map(describeField) };
+      answer.values = stepValues(built ?? {}, current, context);
+    }
+  } catch (e) {
+    throw new Error(`its ${current.name} step: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  return answer;
+}
+
+/** v1's `initial_config` — what a new view of the pattern starts as (a List
+ * over its table's columns) — or an empty configuration for a pattern with none,
+ * as v1's `viewedit` gives one. */
+export async function initialConfig(pattern: string, context: Obj): Promise<Obj> {
+  const vt = findPattern(pattern);
+  const configuration = vt.initial_config ? await vt.initial_config(context) : {};
+  return configuration && typeof configuration === "object" ? configuration : {};
+}
+
+/** Which views and pages refer to the view `name` — v1's
+ * `View.inbound_connected_objects`, over each pattern's own `connectedObjects`,
+ * and the same walk over a page's layout. A pattern without `connectedObjects`
+ * is not asked, as in v1. */
+export async function inboundReferences(name: string, views: Obj[], pages: Obj[]): Promise<Obj> {
+  const named = (found: unknown[] | undefined) => (found ?? []).some((v: any) => v?.name === name);
+  const embedded_in: string[] = [];
+  const linked_from: string[] = [];
+  const shown_on: string[] = [];
+  for (const view of views) {
+    if (view.name === name) continue;
+    const vt = viewtemplates[view.viewtemplate];
+    if (typeof vt?.connectedObjects !== "function") continue;
+    const found = (await vt.connectedObjects(view.configuration ?? {})) ?? {};
+    if (named(found.embeddedViews)) embedded_in.push(view.name);
+    if (named(found.linkedViews)) linked_from.push(view.name);
+  }
+  for (const page of pages) {
+    const found = extractFromLayout(page.layout ?? {});
+    if (named(found.embeddedViews) || named(found.linkedViews)) shown_on.push(page.name);
+  }
+  return { embedded_in, linked_from, pages: shown_on };
 }

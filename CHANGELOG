@@ -2,6 +2,150 @@
 
 Changes in reverse chronological order.
 
+## Saltcorn UI, Phase 10: editing a view, without the builder
+
+A Saltcorn UI application's views can now be created, configured and renamed
+from its Views tab. The configuration editor is the view pattern's own
+`configuration_workflow`, one step at a time. Each step's form is built by v1's
+code over the table and the configuration gathered so far, and rendered by the
+settings form the LLM provider and file store screens use. A layout step is
+shown read-only: the builder is the next milestone.
+
+- **The wizard (10.1).**
+  - `ViewRuntime::config_step` now carries the view's name — v1's `viewname`,
+    which a step uses to leave the view out of its own lists — and answers:
+    - `skip`: the step's `onlyWhen` is false for this configuration (Edit's
+      *Fixed and blocked fields* when every field is on the form);
+    - `context_field`: the key the step's values are kept under (List's
+      *Default state* under `default_state`), or the top level;
+    - `fields`: the form translated by `config_fields_to_form_fields`, and
+      `issues` for what did not translate faithfully;
+    - `values`: what the form opens with, read as v1's `Workflow.runStep` reads
+      them;
+    - `blurb`, and the v1 form itself as data (`form`).
+  - A step whose form cannot be built fails naming the pattern and the step:
+    "the configuration of the ListShowList pattern could not be built: its
+    Subtables step: …".
+  - `config_fields_to_form_fields` reads what a v1 `Form` spells and a plugin's
+    `configFields` does not:
+    - `section_header` and `hidden` fields are skipped, silently: they are not
+      settings;
+    - a type given as an object, by its `name`;
+    - a select's own `options` (`{ label, value }`), with the blank "none"
+      dropped;
+    - a `Key`, typed by its `reftype`;
+    - a `FieldRepeat`, edited as JSON, with an issue saying so.
+  - `sc_viewpattern::Configurer` makes the configuration calls for one
+    application, as the signed-in admin. Its snapshot is built by
+    `application_snapshot`, factored out of the framework, because the worker
+    holds one snapshot per generation whichever of the two sends it first.
+  - **A save replays the steps.** `saveView` runs the store's checks first
+    (`validate_view`, split out of `save_view`), then replays the configuration
+    through every step (`Configurer::check`). The first value a step's form
+    would not accept is refused: "view `Books LSL` cannot be saved: its Views
+    step says setting `list_width` should be int, got text".
+    - `check_step_values` checks what v1's wizard form would have posted, read
+      as v1 reads it, so a configuration v1's own wizard produces is not
+      refused:
+      - an empty string is no value;
+      - an unticked checkbox is no value, and not missing even when required;
+      - a choice may be stored as the other scalar spelling of its option
+        (`"3"` for `3`);
+      - a field its `showIf` hides — as the browser hides it, in form order,
+        with v1's loose `==`, an unset condition hiding it too — posts nothing
+        and is not checked. List's *Row click action* is only asked for an
+        `Action` row click. The conditions are read off the step's v1 form,
+        because this server's form fields carry none;
+      - a shown required select left unset posts its first option, as a browser
+        does. List's *Row click event* is `Nothing` until somebody picks
+        another;
+      - a setting declared more than once under different conditions is
+        accepted by any of its shown declarations. List's
+        `create_view_location` is one list of places for a link and another for
+        an embedded view.
+    - A builder step and a skipped step are not checked.
+    - **Deviation:** a server with no view runtime saves what the store accepts
+      without replaying. It cannot render the view either.
+    - **Deviation:** the replay is in the admin API's save, not in `save_view`,
+      so a restore still imports a v1 view whose configuration a step would
+      refuse today (8.4: a view does not fail a restore).
+  - **`table.get_parent_relations` and `table.get_child_relations` are
+    answered**, from the schema snapshot, and leave the v1 refusal list's
+    builder entries. List's *Options*, Show's and Filter's layout steps, Feed's
+    *Order and layout* and ListShowList's *Subtables* list a table's join
+    fields and child lists with them, so a refusal made every List
+    unconfigurable — and every List save unsaveable once the replay ran. They
+    are metadata, as v1's are (it answers them from its field cache), and are
+    ported from v1's `models/table.ts` with its one-to-one relations and its
+    `allow_double`/`allow_triple` depth.
+  - `viewConfigStep` (`POST /api/applications/:id/view-config-step`): one step,
+    for the pattern, table, view name and context in the body. A table outside
+    the application's subset is refused, naming it.
+- **Creating a view (10.2).** `createView` (`POST /api/applications/:id/views`)
+  takes a name, pattern, table, minimum role and description.
+  - The configuration comes from `ViewRuntime::initial_config` — v1's
+    `initial_config`, so a new List has its table's columns — or is empty for a
+    pattern with none.
+  - A taken name is refused, where a save would overwrite. So is anything the
+    store refuses, in the store's words, before the pattern is asked about the
+    table.
+- **The layout step (10.3)** is shown as the JSON of the configuration's
+  `layout` and `columns`, with the sentence saying the builder will edit it and
+  a save keeps it unchanged. ListShowList has no layout step, so it is fully
+  editable; the other five are editable except their layout.
+- **Renaming (10.4).**
+  - `viewReferences` (`GET /api/applications/:id/views/:name/references`)
+    answers `{ embedded_in, linked_from, pages }` through
+    `ViewRuntime::references`: v1's `inbound_connected_objects` over each
+    pattern's own `connectedObjects`, and `extractFromLayout` over each page.
+  - The rename dialog shows it before the rename, and says the views and pages
+    it names keep the old name. Nothing is rewritten.
+- **The screens.**
+  - `ViewEditor` (`#/applications/:id/views/:name`): the pattern's steps across
+    the top, Back and Next carrying the answers along, and Save from any step.
+    A step v1 skips is passed over in the direction of travel. A save refused
+    by a step shows the server's sentence.
+  - The Views tab gains **New view** (name, pattern, table from the
+    application's subset, role, description; it opens the editor), and
+    **Configure** and **Rename** on each row.
+  - `views.ts` holds the logic: `applyStep` puts a step's answers where v1
+    would (under `context_field` or at the top), removes a setting that was
+    emptied, and touches nothing else; `stepFormValues`, `layoutJson`,
+    `newViewError`, `createViewBody`, `saveViewBody`, `referencesReport`.
+  - Both generated `client.ts` files are regenerated.
+- **Tests (10.5).**
+  - `saltcorn_ui_configure::a_view_is_created_configured_refused_and_renamed_without_the_builder`,
+    over HTTP with the view runtime running:
+    - a List created from nothing has its table's columns and renders its rows
+      on the subdomain;
+    - a taken name and a table outside the subset are refused by name;
+    - List's steps walked: the layout step a builder, *Default state* a form
+      over the table's fields under `default_state`;
+    - every step of a new Show, Edit, Feed and Filter built over the same
+      table, so a step reaching for something this server refuses is found by
+      the suite rather than by an admin;
+    - a ListShowList refused on save for `list_width: "wide"` and for a
+      `list_view` its step does not offer, with nothing saved, then saved;
+    - the references reported before a rename; after it the ListShowList still
+      names the old name, the old URL is a 404 and the new one renders.
+  - `sc-module`'s `view_runtime` test: ListShowList's *Views* step as form
+    fields with the view left out, its values and default; the *Subtables*
+    step failing by name without a schema; Filter's initial configuration; and
+    the references of a view embedded by a view and shown on a page.
+  - `sc-expr`'s `the_v1_table_answers_its_relations_from_the_snapshot`: a
+    table's parent fields and keys, a table's children, and the join-aggregation
+    children through a key.
+  - `sc_viewpattern::configure` unit tests for `check_step_values`: a refusal
+    naming the view, the step and the field; v1's readings of a posted form; a
+    step's `context_field`; the required select and the field its `showIf`
+    hides (List's row click); and a setting declared twice (List's
+    `create_view_location`). `spec.rs`'s tests cover the v1 `Form` field shapes.
+  - Phase 9's `saltcorn_ui_admin_api` test is unchanged and passes with the
+    replay: its `List Books` configuration has no row click and no view to
+    create, which is what the `showIf` and select readings are for.
+  - `views.test.ts` for the wizard's arithmetic, the new-view form and the
+    rename report.
+
 ## Saltcorn UI, Phase 9: the admin UI — an application's views and pages
 
 A Saltcorn UI application's screen now has **Views** and **Pages** tabs beside

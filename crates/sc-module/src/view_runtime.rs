@@ -28,14 +28,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use sc_error::{Error, ErrorKind, Repr, Result};
+use sc_types::Attrs;
 use sc_viewpattern::{
-    ConfigStep, Flash, Page, PatternManifest, View, ViewContext, ViewOutput, ViewRequest,
-    ViewRuntime,
+    ConfigStep, Flash, Page, PatternManifest, View, ViewContext, ViewOutput, ViewReferences,
+    ViewRequest, ViewRuntime,
 };
 use serde_json::{Value as Json, json};
 use tokio::sync::OnceCell;
 
 use crate::host::{CallHosts, ModuleHost};
+use crate::spec::config_fields_to_form_fields;
 
 /// The name the built-in view runtime is known by — in the log, and on the card
 /// of any installed package that claims it.
@@ -165,6 +167,7 @@ impl ViewRuntime for ModuleViewRuntime {
         &self,
         pattern: &str,
         table: Option<&str>,
+        view: Option<&str>,
         step: usize,
         context: &Json,
         ctx: ViewContext<'_>,
@@ -177,6 +180,7 @@ impl ViewRuntime for ModuleViewRuntime {
                 json!({
                     "pattern": pattern,
                     "table": table,
+                    "view": view,
                     "step": step,
                     "context": context,
                     "request": request,
@@ -186,28 +190,119 @@ impl ViewRuntime for ModuleViewRuntime {
             .await
             .map_err(|e| {
                 failed(
-                    &format!("step {step} of the {pattern} pattern's configuration"),
+                    &format!("the configuration of the {pattern} pattern"),
                     "built",
                     e,
                 )
             })?;
-        Ok(ConfigStep {
-            name: answer
-                .get("name")
-                .and_then(Json::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            count: answer
-                .get("count")
-                .and_then(Json::as_u64)
-                .and_then(|c| usize::try_from(c).ok())
-                .unwrap_or(0),
-            builder: answer
-                .get("builder")
-                .and_then(Json::as_bool)
-                .unwrap_or(false),
-            form: answer.get("form").cloned().unwrap_or(Json::Null),
+        Ok(config_step_of(pattern, answer))
+    }
+
+    async fn initial_config(
+        &self,
+        pattern: &str,
+        table: Option<&str>,
+        view: Option<&str>,
+        ctx: ViewContext<'_>,
+    ) -> Result<Attrs> {
+        let (call, request) = call_of(ctx);
+        let answer = self
+            .host
+            .view_call(
+                "view_initial_config",
+                json!({ "pattern": pattern, "table": table, "view": view, "request": request }),
+                call,
+            )
+            .await
+            .map_err(|e| {
+                failed(
+                    &format!("the initial configuration of a {pattern} view"),
+                    "built",
+                    e,
+                )
+            })?;
+        match answer {
+            Json::Object(configuration) => Ok(configuration),
+            Json::Null => Ok(Attrs::new()),
+            other => Err(Error::msg(format!(
+                "the {pattern} pattern's initial configuration is {other}, which is not an object"
+            ))),
+        }
+    }
+
+    async fn references(&self, view: &str, ctx: ViewContext<'_>) -> Result<ViewReferences> {
+        let (call, request) = call_of(ctx);
+        let answer = self
+            .host
+            .view_call(
+                "view_references",
+                json!({ "view": view, "request": request }),
+                call,
+            )
+            .await
+            .map_err(|e| failed(&format!("what refers to the view `{view}`"), "found", e))?;
+        serde_json::from_value(answer).map_err(|e| {
+            Error::msg(format!(
+                "the view runtime answered what refers to `{view}` unreadably: {e}"
+            ))
         })
+    }
+}
+
+/// A `view_config_step` answer as a [`ConfigStep`], its v1 form translated into
+/// this server's form fields by the translation a module's settings go through
+/// ([`config_fields_to_form_fields`]).
+fn config_step_of(pattern: &str, answer: Json) -> ConfigStep {
+    let name = answer
+        .get("name")
+        .and_then(Json::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let form = answer.get("form").cloned().unwrap_or(Json::Null);
+    let v1_fields = form
+        .get("fields")
+        .and_then(Json::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let (fields, issues) = config_fields_to_form_fields(
+        &v1_fields,
+        &format!("the {name} step of the {pattern} pattern"),
+    );
+    // v1's blurb is a sentence, or several; either way it is read as one.
+    let blurb = match form.get("blurb") {
+        Some(Json::String(text)) if !text.trim().is_empty() => Some(text.clone()),
+        Some(Json::Array(parts)) => {
+            let text: Vec<&str> = parts.iter().filter_map(Json::as_str).collect();
+            (!text.is_empty()).then(|| text.join(" "))
+        }
+        _ => None,
+    };
+    ConfigStep {
+        name,
+        count: answer
+            .get("count")
+            .and_then(Json::as_u64)
+            .and_then(|c| usize::try_from(c).ok())
+            .unwrap_or(0),
+        builder: answer
+            .get("builder")
+            .and_then(Json::as_bool)
+            .unwrap_or(false),
+        skip: answer.get("skip").and_then(Json::as_bool).unwrap_or(false),
+        context_field: answer
+            .get("context_field")
+            .and_then(Json::as_str)
+            .filter(|f| !f.is_empty())
+            .map(str::to_owned),
+        blurb,
+        fields,
+        values: answer
+            .get("values")
+            .and_then(Json::as_object)
+            .cloned()
+            .unwrap_or_default(),
+        issues,
+        form,
     }
 }
 

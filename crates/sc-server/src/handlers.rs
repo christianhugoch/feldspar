@@ -3679,8 +3679,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("saveView", {
         let catalog = catalog.clone();
+        let apps = apps.clone();
         move |ctx| {
             let catalog = catalog.clone();
+            let apps = apps.clone();
             async move {
                 let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
                 let name = &crate::router::path_decode(ctx.path_param("name")?);
@@ -3690,10 +3692,138 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     .await?
                     .map_or_else(sc_viewpattern::ViewId::new, |v| v.id);
                 let view = view_from_body(id, app.id, &ctx.body)?;
+                // What the store refuses is refused first, in the store's
+                // words; then the configuration is replayed through the
+                // pattern's steps (10.1), so a value a step's form would not
+                // accept is refused naming the step and the field. A server
+                // with no view runtime can replay no step — and render no view —
+                // and saves what the store accepts.
+                sc_viewpattern::validate_view(&catalog, &view).await?;
+                if sc_viewpattern::view_runtime().is_ok() {
+                    view_configurer(&catalog, &app, ctx.user.as_ref(), &apps)
+                        .await?
+                        .check(&view)
+                        .await?;
+                }
                 let saved = sc_viewpattern::view_sets()
                     .save_view(&catalog, &view)
                     .await?;
                 Ok(HandlerResponse::ok(view_json(&saved)))
+            }
+        }
+    });
+
+    reg.register("createView", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let mut view = view_from_body(sc_viewpattern::ViewId::new(), app.id, &ctx.body)?;
+                if sc_viewpattern::load_view(&catalog, app.id, &view.name)
+                    .await?
+                    .is_some()
+                {
+                    return Err(Error::invalid(format!(
+                        "application `{}` already has a view named `{}`; choose another name, \
+                         or configure that view",
+                        app.name, view.name
+                    )));
+                }
+                // Refused by the store's sentence before the pattern is asked
+                // anything about a table it may not have.
+                sc_viewpattern::validate_view(&catalog, &view).await?;
+                view.configuration = view_configurer(&catalog, &app, ctx.user.as_ref(), &apps)
+                    .await?
+                    .initial_config(
+                        &view.viewpattern,
+                        view.table_name.as_deref(),
+                        Some(&view.name),
+                    )
+                    .await?;
+                let saved = sc_viewpattern::view_sets()
+                    .save_view(&catalog, &view)
+                    .await?;
+                Ok(HandlerResponse::ok(view_json(&saved)))
+            }
+        }
+    });
+
+    reg.register("viewConfigStep", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let obj = require_object(&ctx.body)?;
+                let pattern = non_empty_str_field(obj, "viewpattern")?;
+                let table = obj
+                    .get("table_name")
+                    .and_then(Json::as_str)
+                    .filter(|t| !t.is_empty());
+                let name = obj
+                    .get("name")
+                    .and_then(Json::as_str)
+                    .filter(|n| !n.is_empty());
+                let index = obj
+                    .get("step")
+                    .and_then(Json::as_u64)
+                    .and_then(|s| usize::try_from(s).ok())
+                    .ok_or_else(|| {
+                        Error::invalid("`step` must be a step number, counting from 0")
+                    })?;
+                let context = match obj.get("context") {
+                    None | Some(Json::Null) => json!({}),
+                    Some(context @ Json::Object(_)) => context.clone(),
+                    Some(_) => return Err(Error::invalid("`context` must be an object")),
+                };
+                // The subset bounds what a step may be asked about, as it bounds
+                // what a view may be saved over (§11).
+                if let Some(table) = table
+                    && !app.tables.iter().any(|t| t.0 == table)
+                {
+                    return Err(Error::invalid(format!(
+                        "the table `{table}` is not in application `{}`'s table subset",
+                        app.name
+                    )));
+                }
+                let step = view_configurer(&catalog, &app, ctx.user.as_ref(), &apps)
+                    .await?
+                    .step(pattern, table, name, index, &context)
+                    .await?;
+                Ok(HandlerResponse::ok(config_step_json(index, &step)))
+            }
+        }
+    });
+
+    reg.register("viewReferences", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                if sc_viewpattern::load_view(&catalog, app.id, name)
+                    .await?
+                    .is_none()
+                {
+                    return Err(no_such("view", &app, name));
+                }
+                let references = view_configurer(&catalog, &app, ctx.user.as_ref(), &apps)
+                    .await?
+                    .references(name)
+                    .await?;
+                Ok(HandlerResponse::ok(json!({
+                    "embedded_in": references.embedded_in,
+                    "linked_from": references.linked_from,
+                    "pages": references.pages,
+                })))
             }
         }
     });
@@ -6368,6 +6498,41 @@ async fn require_app(catalog: &Catalog, raw_id: &str) -> Result<Application> {
     load_application(catalog, id)
         .await?
         .ok_or_else(|| Error::not_found(format!("no application with id {id}")))
+}
+
+/// The view runtime's configuration calls for `app`, made as the signed-in
+/// admin `user` (TODO "Saltcorn UI" Phase 10). The sentence saying there is no
+/// view runtime when this server has none.
+async fn view_configurer<'a>(
+    catalog: &'a Catalog,
+    app: &Application,
+    user: Option<&sc_auth::User>,
+    apps: &AppMounts,
+) -> Result<sc_viewpattern::Configurer<'a>> {
+    sc_viewpattern::Configurer::new(
+        sc_viewpattern::view_runtime()?,
+        catalog,
+        app,
+        user,
+        apps.triggers().map(|d| d.as_ref()),
+    )
+    .await
+}
+
+/// One configuration step on the wire (`view_config_step_schema`).
+fn config_step_json(index: usize, step: &sc_viewpattern::ConfigStep) -> Json {
+    json!({
+        "index": index,
+        "name": step.name,
+        "count": step.count,
+        "builder": step.builder,
+        "skip": step.skip,
+        "context_field": step.context_field,
+        "blurb": step.blurb,
+        "fields": step.fields.iter().map(form_field_json).collect::<Vec<_>>(),
+        "values": Json::Object(step.values.clone()),
+        "issues": step.issues,
+    })
 }
 
 /// [`require_app`], refusing an application whose framework has no views: a

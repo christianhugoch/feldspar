@@ -147,8 +147,6 @@
     "table.get_join_field_options": BUILDER,
     "table.get_relation_options": BUILDER,
     "table.get_relation_data": BUILDER,
-    "table.get_parent_relations": BUILDER,
-    "table.get_child_relations": BUILDER,
     "table.field_options": BUILDER,
     "table.slug_options": BUILDER,
     "table.getTags": BUILDER,
@@ -1037,6 +1035,78 @@
   // `Table`: metadata synchronously (§2), rows through the sender (§3)
   // -------------------------------------------------------------------------
 
+  // v1's `table.get_parent_relations` and `get_child_relations`: which tables a
+  // table's keys point at, and which tables' keys point at it (TODO "Saltcorn
+  // UI" Phase 10). Metadata, and all of it in the snapshot — v1 answers them
+  // from its field cache — so they are answered rather than refused: a view
+  // pattern's configuration steps list a column's join fields and a table's
+  // child lists with them. Ported from v1's `models/table.ts`, including the
+  // sentence a key to a table that is not there fails with.
+  const isKey = (f) => f.is_fkey && f.type !== "File";
+  const isStored = (f) => !f.calculated || f.stored;
+  const tableNamed = (api, name) => {
+    const table = api.Table.findOne(name);
+    if (!table) throw new Error("Unable to find table '" + name);
+    return table;
+  };
+  const parentRelations = (api, name, allowDouble, allowTriple) => {
+    const parent_relations = [];
+    const parent_field_list = [];
+    for (const f of tableNamed(api, name).fields) {
+      if (!isKey(f)) continue;
+      const table = tableNamed(api, f.reftable_name);
+      for (const pf of table.fields.filter(isStored)) {
+        parent_field_list.push(f.name + "." + pf.name);
+        if (isKey(pf) && allowDouble) {
+          const table1 = tableNamed(api, pf.reftable_name);
+          for (const gpf of table1.fields.filter(isStored)) {
+            parent_field_list.push(f.name + "." + pf.name + "." + gpf.name);
+            if (allowTriple && isKey(gpf)) {
+              const gpfTable = api.Table.findOne(gpf.reftable_name);
+              for (const ggpf of gpfTable ? gpfTable.fields.filter(isStored) : []) {
+                parent_field_list.push(f.name + "." + pf.name + "." + gpf.name + "." + ggpf.name);
+              }
+            }
+          }
+          parent_relations.push({ key_field: pf, through: f, table: table1 });
+        }
+      }
+      parent_relations.push({ key_field: f, table: table });
+    }
+    // A unique key to this table is a one-to-one relation, read from its end.
+    for (const relation of api.Field.find({ reftable_name: name, is_unique: true })) {
+      const related = api.Table.findOne(relation.table_id);
+      if (!related) continue;
+      for (const relfield of related.fields) {
+        parent_field_list.push(related.name + "." + relation.name + "->" + relfield.name);
+        parent_relations.push({ key_field: relation, ontable: related });
+      }
+    }
+    return { parent_relations: parent_relations, parent_field_list: parent_field_list };
+  };
+  const childRelations = (api, name, allowJoinAggregations) => {
+    const child_relations = [];
+    const child_field_list = [];
+    for (const f of api.Field.find({ reftable_name: name })) {
+      if (!f.is_fkey) continue;
+      const table = api.Table.findOne(f.table_id);
+      if (!table) throw new Error("Unable to find table with id: " + f.table_id);
+      child_field_list.push(table.name + "." + f.name);
+      child_relations.push({ key_field: f, table: table });
+    }
+    if (allowJoinAggregations) {
+      for (const f of tableNamed(api, name).fields) {
+        if (!isKey(f)) continue;
+        const refTable = tableNamed(api, f.reftable_name);
+        for (const rel of childRelations(api, refTable.name, false).child_relations) {
+          child_field_list.push(f.name + "->" + rel.table.name + "." + rel.key_field.name);
+          child_relations.push({ key_field: rel.key_field, table: rel.table, through: f });
+        }
+      }
+    }
+    return { child_relations: child_relations, child_field_list: child_field_list };
+  };
+
   const makeTable = (api, spec, send, runTrigger) => {
     const fields = spec.fields.map((f) => makeField(api, spec.name, f, send));
     const byName = new Map(fields.map((f) => [f.name, f]));
@@ -1150,6 +1220,11 @@
       // array — so the v1 spelling and this one are the same line.
       getFields: () => Object.freeze(fields),
       getForeignKeys: () => fields.filter((f) => f.is_fkey),
+      // Awaited in v1; answered from the snapshot (see `parentRelations`).
+      get_parent_relations: (allowDouble, allowTriple) =>
+        Promise.resolve(parentRelations(api, spec.name, allowDouble, allowTriple)),
+      get_child_relations: (allowJoinAggregations) =>
+        Promise.resolve(childRelations(api, spec.name, allowJoinAggregations)),
       owner_fieldname: () => spec.ownership_field_id || undefined,
       to_json: () => ({
         id: spec.name,

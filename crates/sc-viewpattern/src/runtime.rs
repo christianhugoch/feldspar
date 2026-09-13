@@ -21,6 +21,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use sc_error::{Error, Result};
 use sc_expr::{CodeHosts, SchemaSnapshot};
+use sc_types::{Attrs, FormField};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
@@ -179,8 +180,51 @@ pub struct ConfigStep {
     /// Whether the step is a drag-and-drop **builder** (a layout) rather than a
     /// form — which this version shows read-only.
     pub builder: bool,
-    /// The step's v1 `Form`, as JSON; `null` for a builder step.
+    /// Whether v1 skips the step for this context: its `onlyWhen` answered
+    /// false (Edit's *Fixed and blocked fields* when every field is on the
+    /// form). A skipped step has no form.
+    pub skip: bool,
+    /// Where the step's values land: under this key of the configuration (v1's
+    /// `contextField` — List's *Default state* is `default_state`), or at its
+    /// top level when `None`.
+    pub context_field: Option<String>,
+    /// The sentence the step's form opens with (v1's `blurb`), if it has one.
+    pub blurb: Option<String>,
+    /// The step's form as this server's form vocabulary — what the admin UI
+    /// renders, and what a saved configuration is checked against.
+    pub fields: Vec<FormField>,
+    /// The values the form opens with, keyed by field name: what the context
+    /// already says, else the form's own.
+    pub values: Attrs,
+    /// What the translation into [`fields`](ConfigStep::fields) could not
+    /// express faithfully, each naming the field.
+    pub issues: Vec<String>,
+    /// The step's v1 form as data — v1's own `configFields` shape — or `null`
+    /// for a builder step and a skipped one.
     pub form: Json,
+}
+
+/// What refers to one view by name (TODO "Saltcorn UI" 10.4): v1's
+/// `View.inbound_connected_objects`, and the pages whose layout shows or links
+/// to it. Every name here stops finding the view if it is renamed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewReferences {
+    /// The views that embed it.
+    #[serde(default)]
+    pub embedded_in: Vec<String>,
+    /// The views that link to it.
+    #[serde(default)]
+    pub linked_from: Vec<String>,
+    /// The pages that show it or link to it.
+    #[serde(default)]
+    pub pages: Vec<String>,
+}
+
+impl ViewReferences {
+    /// Whether nothing refers to the view.
+    pub fn is_empty(&self) -> bool {
+        self.embedded_in.is_empty() && self.linked_from.is_empty() && self.pages.is_empty()
+    }
 }
 
 /// The seam a view is rendered through.
@@ -212,17 +256,35 @@ pub trait ViewRuntime: Send + Sync {
         ctx: ViewContext<'_>,
     ) -> Result<ViewOutput>;
 
-    /// One step of `pattern`'s configuration workflow over `table`, with the
-    /// `context` the earlier steps gathered — a call per step, because a step's
-    /// form does not exist without that context (§6).
+    /// One step of `pattern`'s configuration workflow over `table`, for the view
+    /// named `view`, with the `context` the earlier steps gathered — a call per
+    /// step, because a step's form does not exist without that context (§6).
+    /// `view` is v1's `viewname`: a step lists the views it may name, and leaves
+    /// the one being configured out.
     async fn config_step(
         &self,
         pattern: &str,
         table: Option<&str>,
+        view: Option<&str>,
         step: usize,
         context: &Json,
         ctx: ViewContext<'_>,
     ) -> Result<ConfigStep>;
+
+    /// The configuration a new view of `pattern` over `table` starts with — v1's
+    /// `initial_config`, which for a List is its table's columns — or an empty
+    /// one for a pattern that declares none (TODO "Saltcorn UI" 10.2).
+    async fn initial_config(
+        &self,
+        pattern: &str,
+        table: Option<&str>,
+        view: Option<&str>,
+        ctx: ViewContext<'_>,
+    ) -> Result<Attrs>;
+
+    /// What in the snapshot's application refers to the view named `view`, by
+    /// the patterns' own `connectedObjects` (TODO "Saltcorn UI" 10.4).
+    async fn references(&self, view: &str, ctx: ViewContext<'_>) -> Result<ViewReferences>;
 }
 
 /// The installed runtime.

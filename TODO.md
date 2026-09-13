@@ -688,20 +688,20 @@ Five levels, because the failure modes are at five levels:
 
 ## Phase 10 — Editing a view, without the builder
 
-- [ ] 10.1 The pattern's `configuration_workflow` as a **wizard**: one `config_step` call per
+- [x] 10.1 The pattern's `configuration_workflow` as a **wizard**: one `config_step` call per
       step (§3.1) carrying the table, the view name and the context accumulated so far,
       translated to `FormField`s by `config_fields_to_form_fields` and rendered by the same
       form the LLM provider and file store screens use. `saveView` validates the configuration
       by replaying the steps. A step whose form cannot be built names the step and the reason,
       rather than being skipped as a module's settings step is.
-- [ ] 10.2 Creating a view: table, pattern, name, `min_role`; the pattern's `initial_config`
+- [x] 10.2 Creating a view: table, pattern, name, `min_role`; the pattern's `initial_config`
       supplies the first configuration, so a new List has its table's columns in it.
-- [ ] 10.3 The layout step shown as read-only JSON with the sentence naming what will edit it.
+- [x] 10.3 The layout step shown as read-only JSON with the sentence naming what will edit it.
       `ListShowList` has no layout step and is therefore fully editable here; the other five
       are editable except their layout.
-- [ ] 10.4 Renaming a view, and the report of what references it (`connectedObjects`, which
+- [x] 10.4 Renaming a view, and the report of what references it (`connectedObjects`, which
       the patterns already export) shown before the rename rather than after.
-- [ ] 10.5 Tests: a view created from nothing through the API renders; a configuration that
+- [x] 10.5 Tests: a view created from nothing through the API renders; a configuration that
       the steps refuse is refused on save naming the field; a rename updates nothing silently.
 
 ## Phase 11 — View patterns from an installed plugin

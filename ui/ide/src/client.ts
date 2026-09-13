@@ -135,6 +135,11 @@ export type GetViewResponse = { id: string; name: string; description: string; v
 export type SaveViewRequest = { name: string; description: string; viewpattern: string; table_name?: string | null; configuration: unknown; min_role: number; slug?: unknown | null; attributes: unknown };
 export type SaveViewResponse = { id: string; name: string; description: string; viewpattern: string; table_name?: string | null; configuration: unknown; min_role: number; slug?: unknown | null; attributes: unknown };
 export type DeleteViewResponse = { deleted: boolean };
+export type CreateViewRequest = { name: string; description?: string | null; viewpattern: string; table_name?: string | null; min_role: number };
+export type CreateViewResponse = { id: string; name: string; description: string; viewpattern: string; table_name?: string | null; configuration: unknown; min_role: number; slug?: unknown | null; attributes: unknown };
+export type ViewConfigStepRequest = { viewpattern: string; table_name?: string | null; name?: string | null; step: number; context: unknown };
+export type ViewConfigStepResponse = { index: number; name: string; count: number; builder: boolean; skip: boolean; context_field?: string | null; blurb?: string | null; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; values: unknown; issues: Array<string> };
+export type ViewReferencesResponse = { embedded_in: Array<string>; linked_from: Array<string>; pages: Array<string> };
 export type ListPagesResponse = Array<{ id: string; name: string; title: string; description: string; layout: unknown; min_role: number; attributes: unknown }>;
 export type GetPageResponse = { id: string; name: string; title: string; description: string; layout: unknown; min_role: number; attributes: unknown };
 export type SavePageRequest = { name: string; title: string; description: string; layout: unknown; min_role: number; attributes: unknown };
@@ -299,6 +304,9 @@ export interface ApiClient {
   getView(id: string, name: string): Promise<GetViewResponse>;
   saveView(id: string, name: string, body: SaveViewRequest): Promise<SaveViewResponse>;
   deleteView(id: string, name: string): Promise<DeleteViewResponse>;
+  createView(id: string, body: CreateViewRequest): Promise<CreateViewResponse>;
+  viewConfigStep(id: string, body: ViewConfigStepRequest): Promise<ViewConfigStepResponse>;
+  viewReferences(id: string, name: string): Promise<ViewReferencesResponse>;
   listPages(id: string): Promise<ListPagesResponse>;
   getPage(id: string, name: string): Promise<GetPageResponse>;
   savePage(id: string, name: string, body: SavePageRequest): Promise<SavePageResponse>;
@@ -1102,6 +1110,32 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("deleteView", res);
       return (await res.json()) as DeleteViewResponse;
+    },
+    async createView(id, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/views`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("createView", res);
+      return (await res.json()) as CreateViewResponse;
+    },
+    async viewConfigStep(id, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/view-config-step`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("viewConfigStep", res);
+      return (await res.json()) as ViewConfigStepResponse;
+    },
+    async viewReferences(id, name) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/views/${name}/references`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("viewReferences", res);
+      return (await res.json()) as ViewReferencesResponse;
     },
     async listPages(id) {
       const res = await doFetch(`${baseUrl}/api/applications/${id}/pages`, {

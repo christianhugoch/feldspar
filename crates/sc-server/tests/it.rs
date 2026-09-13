@@ -101,6 +101,8 @@ mod router;
 mod saltcorn_ui_mount;
 #[path = "saltcorn_ui_admin_api.rs"]
 mod saltcorn_ui_admin_api;
+#[path = "saltcorn_ui_configure.rs"]
+mod saltcorn_ui_configure;
 #[path = "saltcorn_ui_render.rs"]
 mod saltcorn_ui_render;
 #[path = "schema_edit_api.rs"]

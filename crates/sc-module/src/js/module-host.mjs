@@ -3021,18 +3021,39 @@ async function viewRenderPage({ page: name, request }) {
   return viewAnswer(wrapped(value, request, req, response, set), response);
 }
 
-/** One step of a pattern's configuration workflow (§6): a call per step, over
- * the context gathered so far, with the table named. */
-async function viewConfigStep({ pattern, table, step, context, request }) {
-  const runtime = await requireViewRuntime();
-  const store = running.getStore();
-  const { req } = viewRequest(request, store && store.views);
+/** The context a configuration call is made over: what the caller gathered, the
+ * table as the snapshot keys it, and v1's `viewname` — which is how a step
+ * leaves the view being configured out of its own lists of views. */
+function configContext(context, table, view) {
   const gathered = { ...(context || {}) };
   if (table) {
     gathered.table_id = table;
     gathered.table_name = table;
   }
-  return runtime.configStep(pattern, step || 0, gathered, req);
+  if (view) gathered.viewname = view;
+  return gathered;
+}
+
+/** One step of a pattern's configuration workflow (§6): a call per step, over
+ * the context gathered so far, with the table and the view named. */
+async function viewConfigStep({ pattern, table, view, step, context, request }) {
+  const runtime = await requireViewRuntime();
+  const store = running.getStore();
+  const { req } = viewRequest(request, store && store.views);
+  return runtime.configStep(pattern, step || 0, configContext(context, table, view), req);
+}
+
+/** A pattern's `initial_config` over a table (10.2). */
+async function viewInitialConfig({ pattern, table, view }) {
+  const runtime = await requireViewRuntime();
+  return runtime.initialConfig(pattern, configContext({}, table, view));
+}
+
+/** What refers to the view `view` in the call's application (10.4). */
+async function viewReferences({ view: name }) {
+  const runtime = await requireViewRuntime();
+  const set = currentViews();
+  return runtime.inboundReferences(name, set.views || [], set.pages || []);
 }
 
 // ---------------------------------------------------------------------------
@@ -3124,6 +3145,10 @@ async function handle(request) {
       return await viewRoute(request);
     case "view_config_step":
       return await viewConfigStep(request);
+    case "view_initial_config":
+      return await viewInitialConfig(request);
+    case "view_references":
+      return await viewReferences(request);
     default:
       throw new Error(`unknown module-host operation ${request.op}`);
   }
