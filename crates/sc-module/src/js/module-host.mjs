@@ -522,6 +522,12 @@ function saltcornModule(specifier) {
       return V1Library;
     case "@saltcorn/data/models/page_group":
       return V1PageGroup;
+    // v1's `db`: its pure helpers and `withTransaction`, which the patterns'
+    // POST paths call (TODO "Saltcorn UI" Phase 6). Everything else on it — a
+    // query, a client, a tenant schema — is still refused by name.
+    case "@saltcorn/data/db":
+    case "@saltcorn/data/db/index":
+      return hostModule(specifier, v1Db);
     case "@saltcorn/data/db/state":
       // v1's `getReq__` and `getApp__` hand back the request's and the
       // application's translation function; i18n is the identity here
@@ -533,6 +539,47 @@ function saltcornModule(specifier) {
     }
   }
 }
+
+/** The part of v1's `db` module a view pattern reaches that is not a database:
+ * the name helpers `stateFieldsToWhere` and a slug build with, and
+ * `withTransaction`, which `edit.ts`'s `runPost` and `list.ts`'s `run_action`
+ * put their writes inside.
+ *
+ * **`withTransaction` opens no transaction.** A view's writes go through the
+ * row layer one call at a time, under the viewer's authority, and there is no
+ * surface that holds a database transaction open across host calls. So the
+ * body runs as it is, and its `rollback()` undoes nothing: a pattern calls it
+ * after a write has **failed**, which for Edit's single row leaves nothing
+ * written. What it does not cover is an edit-in-edit child row written before
+ * a later one fails. */
+const v1Db = {
+  is_node: true,
+  // v1's `@saltcorn/db-common/internal`, verbatim.
+  sqlsanitize(nm) {
+    if (typeof nm === "symbol") return nm.description ? v1Db.sqlsanitize(nm.description) : "";
+    const s = String(nm).replace(/[^\p{Letter}_0-9]*/gu, "");
+    return s[0] >= "0" && s[0] <= "9" ? `_${s}` : s;
+  },
+  sqlsanitizeAllowDots(nm) {
+    if (typeof nm === "symbol") return nm.description ? v1Db.sqlsanitizeAllowDots(nm.description) : "";
+    const s = String(nm).replace(/[^A-Za-z_0-9."]*/g, "");
+    return s[0] >= "0" && s[0] <= "9" ? `_${s}` : s;
+  },
+  // v1's `@saltcorn/postgres`, verbatim.
+  slugify: (s) =>
+    String(s)
+      .toLowerCase()
+      .replace(/\s+/g, "-")
+      .replace(/[^\w-]/g, ""),
+  async withTransaction(body, onError) {
+    try {
+      return await body(async () => {});
+    } catch (error) {
+      if (typeof onError === "function") return await onError(error);
+      throw error;
+    }
+  },
+};
 
 /** The v1 exports that answer `undefined` rather than a stub: the **absent**
  * tier (TODO "Saltcorn UI" §5).
@@ -2671,6 +2718,44 @@ function stateLog(level, ...messages) {
   else console.debug(...messages);
 }
 
+/** `getState().actions` for an application (§12.2): one runner per action its
+ * declared triggers are configured with, and nothing else.
+ *
+ * It exists for v1's `run_action_column`, which runs a trigger named in a view
+ * by looking up `getState().actions[trigger.action]` and calling its `run`
+ * with the trigger's id — so the runner runs **that trigger**, by name, through
+ * the trigger surface and under the viewer's authority. A view that names the
+ * action itself (`run_js_code`, v1's state actions) reaches the same runner
+ * with no trigger, and is refused naming it (§12.3). A workflow is not here:
+ * v1 runs it with `trigger.runWithoutRow`. Hidden from v1's action pickers
+ * (`disableInList`), which offer triggers by their own names. */
+const actionRunners = new WeakMap();
+function triggerActionRunners(set) {
+  const held = actionRunners.get(set);
+  if (held) return held;
+  const runners = {};
+  for (const trigger of set.triggers || []) {
+    const kind = trigger && typeof trigger === "object" ? trigger.action : null;
+    if (!kind || kind === "Workflow" || kind === "Multi-step action" || Object.hasOwn(runners, kind)) continue;
+    runners[kind] = Object.freeze({
+      disableInList: true,
+      async run(args = {}) {
+        if (args.trigger_id === undefined || args.trigger_id === null) {
+          throw new Error(
+            `the action ${kind} is not run by its own name from a view here: a view runs the ` +
+              `triggers application ${applicationName(set)} declares, so name the trigger that is ` +
+              `configured with it`,
+          );
+        }
+        return ask("trigger", { trigger: String(args.trigger_id), payload: args.row || {} });
+      },
+    });
+  }
+  const frozen = Object.freeze(runners);
+  actionRunners.set(set, frozen);
+  return frozen;
+}
+
 /** One application's `getState()` — or, for `null`, the state of no
  * application: the registries, and a sentence for everything else. */
 function makeState(set) {
@@ -2715,7 +2800,9 @@ function makeState(set) {
     // of this server is what plugin-helper finds next, with `Trigger.findOne`;
     // and a name that is neither is found by nothing, which plugin-helper
     // refuses naming it.
-    actions: Object.freeze({}),
+    get actions() {
+      return set ? triggerActionRunners(set) : Object.freeze({});
+    },
     get functions() {
       return moduleFunctions().functions;
     },
@@ -2859,6 +2946,13 @@ async function viewPost({ view: name, body, request }) {
   const set = currentViews();
   const { req, res, response } = viewRequest(request, set);
   const value = await viewNamed(set, name).runPost(req.query, body || {}, { req, res });
+  // What a POST re-renders — Edit's form again, with the reason it was not
+  // saved — goes out through `res.sendWrap`, and gets the layout a GET does.
+  if (typeof response.sent === "string" && response.redirect === null && !("json" in response)) {
+    const sent = response.sent;
+    delete response.sent;
+    response.sent = wrapped(sent, request, req, response, set);
+  }
   return viewAnswer(value, response);
 }
 

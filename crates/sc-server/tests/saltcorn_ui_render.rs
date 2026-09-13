@@ -10,6 +10,10 @@
 //!   assets, a row per book with its author joined in — under Saltcorn UI's
 //!   CSP; the page embedding the Filter renders; `/` names what there is; a
 //!   viewer below a view's role is refused; the static assets are served.
+//! - **Posting** (Phase 6): an insert and an update through *Edit Books*'s form,
+//!   the action column's trigger through the `run_action` route, the Filter's
+//!   dropdown and range narrowing the list, the Delete action, and a post with
+//!   no CSRF token refused.
 //! - **Golden**: each of the six patterns (List, Show, Edit, Feed, Filter,
 //!   ListShowList) renders, as an ajax request gets it, exactly the committed
 //!   HTML. This is what catches a shim returning something plausible and wrong,
@@ -27,7 +31,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use sc_api::admin_endpoints;
-use sc_app::{Application, FrameworkRef, save_application};
+use sc_app::{Application, FrameworkRef, TriggerRef, save_application};
 use sc_auth::SessionStore;
 use sc_catalog::{Catalog, FileStoreId, TableId};
 use sc_db::DatabaseDriver;
@@ -48,6 +52,13 @@ const APP_HOST: &str = "booksdb.example.com";
 const ADMIN: &str = "admin@example.com";
 const PASSWORD: &str = "hunter2pass";
 const V1_BACKUP: &[u8] = include_bytes!("fixtures/saltcorn-v1-BooksDB.zip");
+
+/// `TrimPages`, as this server's trigger: v1's `modify_row` of
+/// `{ pages: Math.round(pages*0.9) }`, on the row the action column is on —
+/// which a `none` trigger's body is given as its `payload`.
+const TRIM_PAGES: &str = "const [book] = await db.Books.where({ id: payload.id }).rows();\n\
+     await db.Books.where({ id: payload.id }).update({ pages: Math.round(book.pages * 0.9) });\n\
+     return { notify: `Trimmed ${book.title}` };";
 
 /// The built bundle's directory, if there is one.
 fn bundle_dir() -> Option<PathBuf> {
@@ -95,6 +106,28 @@ impl Client {
             .await
     }
 
+    /// A POST on the application's subdomain **as a browser sends one**: no
+    /// CSRF header unless `headers` has one, so the token is wherever the
+    /// caller put it — a form's `_csrf` field, v1's `CSRF-Token` header, or
+    /// nowhere.
+    async fn app_post(
+        &mut self,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+        headers: &[(&str, &str)],
+    ) -> Answer {
+        self.request_as(
+            "POST",
+            Some(APP_HOST),
+            path,
+            headers,
+            Some((body, content_type)),
+            false,
+        )
+        .await
+    }
+
     async fn request(
         &mut self,
         method: &str,
@@ -102,6 +135,19 @@ impl Client {
         path: &str,
         headers: &[(&str, &str)],
         body: Option<(Vec<u8>, &str)>,
+    ) -> Answer {
+        self.request_as(method, host, path, headers, body, true)
+            .await
+    }
+
+    async fn request_as(
+        &mut self,
+        method: &str,
+        host: Option<&str>,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: Option<(Vec<u8>, &str)>,
+        csrf_header: bool,
     ) -> Answer {
         let mut builder = Request::builder().method(method).uri(path);
         if let Some(host) = host {
@@ -120,6 +166,7 @@ impl Client {
             builder = builder.header(header::COOKIE, cookie);
         }
         if method != "GET"
+            && csrf_header
             && let Some(csrf) = self.cookies.get(CSRF_COOKIE)
         {
             builder = builder.header(CSRF_HEADER, csrf);
@@ -164,6 +211,7 @@ impl Client {
 /// mounted with the backup's views, one Feed, one ListShowList and its page.
 struct Server {
     client: Client,
+    apps: Arc<AppMounts>,
     _catalog: Arc<Catalog>,
     _modules: Arc<ModuleServices>,
     _db: TestDb,
@@ -288,6 +336,29 @@ async fn setup(tag: &str, bundle: PathBuf) -> sc_error::Result<Server> {
         .await;
     assert_eq!(status, StatusCode::OK, "{report}");
 
+    // --- The trigger List Books' action column runs. BooksDB's `TrimPages` is a
+    // v1 `modify_row`, an action this server does not have, so the restore
+    // leaves it out; this is the same trigger written as this server writes one,
+    // so the view names a trigger its application declares (§12.3).
+    let (status, created) = client
+        .send(
+            "POST",
+            "/api/triggers",
+            Some(json!({
+                "name": "TrimPages",
+                "description": "",
+                "when": "none",
+                "channel": Value::Null,
+                "only_if": Value::Null,
+                "action": "run_js_code",
+                "configuration": { "code": TRIM_PAGES },
+                "min_role": Value::Null,
+                "enabled": true,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
     // --- The application, and the backup's own views and page.
     let mut app = Application::new(
         "BooksDB",
@@ -303,7 +374,8 @@ async fn setup(tag: &str, bundle: PathBuf) -> sc_error::Result<Server> {
                 ]),
             ),
     )
-    .with_file_store(FileStoreId("BooksDB".to_owned()));
+    .with_file_store(FileStoreId("BooksDB".to_owned()))
+    .with_trigger(TriggerRef::new("TrimPages"));
     for table in ["Books", "Authors", "Publishers"] {
         app = app.with_table(TableId(table.to_owned()));
     }
@@ -355,6 +427,7 @@ async fn setup(tag: &str, bundle: PathBuf) -> sc_error::Result<Server> {
 
     Ok(Server {
         client,
+        apps: apps.clone(),
         _catalog: catalog,
         _modules: modules,
         _db: db,
@@ -500,6 +573,348 @@ async fn list_books_renders_over_http_on_the_applications_subdomain() -> sc_erro
     Ok(())
 }
 
+const FORM: &str = "application/x-www-form-urlencoded";
+
+/// A URL-encoded form body, as a browser encodes one.
+fn form(pairs: &[(&str, &str)]) -> Vec<u8> {
+    let encode = |s: &str| {
+        s.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    char::from(b).to_string()
+                }
+                b' ' => "+".to_owned(),
+                other => format!("%{other:02X}"),
+            })
+            .collect::<String>()
+    };
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{}={}", encode(k), encode(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+        .into_bytes()
+}
+
+/// The book with `id`, read back through the admin API.
+async fn book(client: &mut Client, id: &Value) -> Option<Value> {
+    rows_of(client, "Books")
+        .await
+        .into_iter()
+        .find(|b| &b["id"] == id)
+}
+
+/// Phase 6: what a browser does with the forms, buttons and links v1's patterns
+/// render — through the assembled router, CSRF middleware and all.
+#[tokio::test]
+async fn the_views_save_forms_run_actions_filter_and_delete() -> sc_error::Result<()> {
+    let Some(bundle) = bundle_dir() else {
+        eprintln!(
+            "skipping: the Saltcorn UI bundle is not built (npm ci && npm run build in ui/saltcorn-ui)"
+        );
+        return Ok(());
+    };
+    let mut server = setup("post", bundle).await?;
+    let client = &mut server.client;
+    let csrf = client
+        .cookies
+        .get(CSRF_COOKIE)
+        .cloned()
+        .expect("the admin's requests were given a CSRF cookie");
+
+    // 6.4: the rendered form carries the viewer's token, and so does the page
+    // script `saltcorn.js` posts with.
+    let edit = client.app_get("/view/Edit%20Books?id=1", &[]).await;
+    assert_eq!(edit.status, StatusCode::OK, "{}", edit.body);
+    assert!(
+        edit.body
+            .contains(&format!("name=\"_csrf\" value=\"{csrf}\"")),
+        "{}",
+        edit.body
+    );
+    assert!(
+        edit.body
+            .contains(&format!("var _sc_globalCsrf = \"{csrf}\"")),
+        "{}",
+        edit.body
+    );
+
+    let before = row_count(client, "Books").await;
+    let new_book = |title: &'static str, extra: &[(&'static str, String)]| {
+        let mut pairs: Vec<(&str, String)> = vec![
+            ("author", "2".to_owned()),
+            ("pages", "321".to_owned()),
+            ("published_on", "2021-03-04".to_owned()),
+            ("publisher", "1".to_owned()),
+            ("title", title.to_owned()),
+        ];
+        pairs.extend(extra.iter().cloned());
+        let borrowed: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        form(&borrowed)
+    };
+
+    // 6.5: a form posted with no token, or with the wrong one, is refused
+    // before any pattern runs, and nothing is written.
+    let refused = client
+        .app_post("/view/Edit%20Books", FORM, new_book("Forged", &[]), &[])
+        .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    let forged = client
+        .app_post(
+            "/view/Edit%20Books",
+            FORM,
+            new_book("Forged", &[("_csrf", "0".repeat(64))]),
+            &[],
+        )
+        .await;
+    assert_eq!(forged.status, StatusCode::FORBIDDEN, "{}", forged.body);
+    assert_eq!(row_count(client, "Books").await, before);
+
+    // 6.1: an insert through Edit Books — the form as the browser submits it,
+    // the token in its `_csrf` field — lands a row and redirects.
+    let inserted = client
+        .app_post(
+            "/view/Edit%20Books",
+            FORM,
+            new_book("Anna Karenina", &[("_csrf", csrf.clone())]),
+            &[],
+        )
+        .await;
+    assert_eq!(inserted.status, StatusCode::FOUND, "{}", inserted.body);
+    assert!(inserted.headers.contains_key(header::LOCATION));
+    let books = rows_of(client, "Books").await;
+    assert_eq!(books.len(), before + 1);
+    let added = books
+        .iter()
+        .find(|b| b["title"] == "Anna Karenina")
+        .cloned()
+        .expect("the inserted book");
+    assert_eq!(added["pages"], json!(321));
+    assert_eq!(added["author"], json!(2));
+    let id = added["id"].clone();
+
+    // An update: the same form, with the row's id.
+    let updated = client
+        .app_post(
+            "/view/Edit%20Books",
+            FORM,
+            new_book(
+                "Anna Karenina (revised)",
+                &[("id", id.to_string()), ("_csrf", csrf.clone())],
+            ),
+            &[],
+        )
+        .await;
+    assert_eq!(updated.status, StatusCode::FOUND, "{}", updated.body);
+    assert_eq!(row_count(client, "Books").await, before + 1);
+    assert_eq!(
+        book(client, &id).await.expect("still there")["title"],
+        json!("Anna Karenina (revised)")
+    );
+
+    // 6.2 and 6.3: the action column runs the trigger the application
+    // declares, through the `run_action` route, as `saltcorn.js`'s `view_post`
+    // sends it — JSON, v1's `CSRF-Token` header — and answers JSON.
+    let ran = client
+        .app_post(
+            "/view/List%20Books/run_action",
+            "application/json",
+            json!({ "rndid": "ce2dfa", "id": id.to_string(), "column_index": 8 })
+                .to_string()
+                .into_bytes(),
+            &[
+                ("CSRF-Token", csrf.as_str()),
+                ("X-Requested-With", "XMLHttpRequest"),
+            ],
+        )
+        .await;
+    assert_eq!(ran.status, StatusCode::OK, "{}", ran.body);
+    assert_eq!(ran.headers[header::CONTENT_TYPE], "application/json");
+    let answer: Value = serde_json::from_str(&ran.body).unwrap();
+    assert_eq!(answer["success"], json!("ok"), "{answer}");
+    assert_eq!(
+        book(client, &id).await.expect("still there")["pages"],
+        json!(289),
+        "TrimPages ran on the row the column is on"
+    );
+
+    // 6.5: the Filter's dropdown and range round-trip through the state and
+    // narrow the list embedded under them. Moby Dick is Melville's and 500
+    // pages; War and Peace and Anna Karenina are Tolstoy's.
+    let everything = client.app_get("/page/BooksOverview", &[]).await;
+    assert_eq!(everything.body.matches("<tr").count(), 1 + before + 1);
+    let melville = client.app_get("/page/BooksOverview?author=1", &[]).await;
+    assert_eq!(melville.status, StatusCode::OK, "{}", melville.body);
+    assert_eq!(
+        melville.body.matches("<tr").count(),
+        2,
+        "{}",
+        melville.body
+    );
+    assert!(melville.body.contains(">Moby Dick<"), "{}", melville.body);
+    assert!(!melville.body.contains(">War and Peace<"));
+    assert!(
+        regex_lite::Regex::new(r#"<option value="1"[^>]*selected"#)
+            .unwrap()
+            .is_match(&melville.body),
+        "the dropdown shows the state it was given: {}",
+        melville.body
+    );
+    let long = client
+        .app_get("/page/BooksOverview?_gte_pages=600", &[])
+        .await;
+    assert_eq!(long.status, StatusCode::OK, "{}", long.body);
+    assert_eq!(long.body.matches("<tr").count(), 2, "{}", long.body);
+    assert!(long.body.contains(">War and Peace<"), "{}", long.body);
+    assert!(long.body.contains("value=\"600\""), "{}", long.body);
+    // What the Filter's reload fetches when the dropdown changes: the list
+    // alone, over the new state.
+    let reloaded = client
+        .app_get(
+            "/view/List%20Books?author=2&_lte_pages=400",
+            &[("X-Requested-With", "XMLHttpRequest")],
+        )
+        .await;
+    assert_eq!(reloaded.body.matches("<tr").count(), 2, "{}", reloaded.body);
+    assert!(
+        reloaded.body.contains(">Anna Karenina (revised)<"),
+        "{}",
+        reloaded.body
+    );
+
+    // The Delete action: `ajax_post_btn` to `/delete/<table>/<id>`, which
+    // answers the ajax call and deletes the row as the viewer.
+    let deleted = client
+        .app_post(
+            &format!("/delete/Books/{id}?redirect=/view/List%20Books"),
+            FORM,
+            Vec::new(),
+            &[
+                ("CSRF-Token", csrf.as_str()),
+                ("X-Requested-With", "XMLHttpRequest"),
+            ],
+        )
+        .await;
+    assert_eq!(deleted.status, StatusCode::OK, "{}", deleted.body);
+    assert_eq!(
+        serde_json::from_str::<Value>(&deleted.body).unwrap(),
+        json!({ "success": true })
+    );
+    assert!(book(client, &id).await.is_none());
+    assert_eq!(row_count(client, "Books").await, before);
+    // A form post is sent back where it came from — a path on the application,
+    // and nowhere else.
+    let again = client
+        .app_post(
+            &format!("/delete/Books/{id}?redirect=/view/List%20Books"),
+            FORM,
+            form(&[("_csrf", &csrf)]),
+            &[],
+        )
+        .await;
+    assert_eq!(again.status, StatusCode::FOUND, "{}", again.body);
+    assert_eq!(again.headers[header::LOCATION], "/view/List%20Books");
+    let offsite = client
+        .app_post(
+            "/delete/Books/1?redirect=https://evil.example/",
+            FORM,
+            form(&[("_csrf", &csrf)]),
+            &[("X-Requested-With", "")],
+        )
+        .await;
+    assert_eq!(offsite.headers[header::LOCATION], "/");
+    // A table outside the application's subset is not one it deletes from.
+    let outside = client
+        .app_post(
+            "/delete/users/1",
+            FORM,
+            Vec::new(),
+            &[
+                ("CSRF-Token", csrf.as_str()),
+                ("X-Requested-With", "XMLHttpRequest"),
+            ],
+        )
+        .await;
+    let outside: Value = serde_json::from_str(&outside.body).unwrap();
+    assert_eq!(outside["success"], json!(false), "{outside}");
+    assert!(
+        outside["error"].as_str().unwrap().contains("`users`"),
+        "{outside}"
+    );
+
+    Ok(())
+}
+
+/// 6.3, §12.3: an action a view may not run. At save time, where the
+/// configuration names it; at run time, when the application stops declaring
+/// the trigger a stored view names.
+#[tokio::test]
+async fn an_action_that_is_not_the_applications_is_refused_by_name() -> sc_error::Result<()> {
+    let Some(bundle) = bundle_dir() else {
+        eprintln!(
+            "skipping: the Saltcorn UI bundle is not built (npm ci && npm run build in ui/saltcorn-ui)"
+        );
+        return Ok(());
+    };
+    let mut server = setup("refuse", bundle).await?;
+    let catalog = server._catalog.clone();
+    let app = sc_app::list_applications(&catalog)
+        .await?
+        .into_iter()
+        .find(|a| a.subdomain == "booksdb")
+        .expect("the application");
+
+    // Save time: v1's state action by its own name, and a trigger the
+    // application does not declare.
+    for action in ["run_js_code", "AddBook"] {
+        let view = View::new(app.id, "Runs something", "List", "Books")
+            .min_role(1)
+            .configuration(object(json!({
+                "columns": [{ "type": "Action", "action_name": action, "rndid": "abc123" }],
+            })));
+        let msg = sc_viewpattern::save_view(&catalog, &view)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains(&format!("`{action}`")), "{msg}");
+        assert!(msg.contains("it declares TrimPages"), "{msg}");
+    }
+
+    // Run time: the application no longer declares TrimPages, and List Books
+    // still names it. `Trigger.findOne` no longer finds it, so the action
+    // column's route answers what v1's `run_action` answers for an action it
+    // cannot find — `{ error }`, naming it, with a 200 — and the row is
+    // untouched.
+    let mut without = app.clone();
+    without.triggers.clear();
+    let without = save_application(&catalog, &without).await?;
+    build_and_mount(&server.apps, without).await?;
+    let client = &mut server.client;
+    let csrf = client.cookies.get(CSRF_COOKIE).cloned().unwrap();
+    let pages = book(client, &json!(1)).await.unwrap()["pages"].clone();
+    let ran = client
+        .app_post(
+            "/view/List%20Books/run_action",
+            "application/json",
+            json!({ "rndid": "ce2dfa", "id": "1", "column_index": 8 })
+                .to_string()
+                .into_bytes(),
+            &[
+                ("CSRF-Token", csrf.as_str()),
+                ("X-Requested-With", "XMLHttpRequest"),
+            ],
+        )
+        .await;
+    assert_eq!(ran.status, StatusCode::OK, "{}", ran.body);
+    let answer: Value = serde_json::from_str(&ran.body).unwrap();
+    assert!(
+        answer["error"].as_str().unwrap().contains("TrimPages"),
+        "{answer}"
+    );
+    assert_eq!(book(client, &json!(1)).await.unwrap()["pages"], pages);
+    Ok(())
+}
+
 /// A table's rows, read back through the admin API.
 async fn rows_of(client: &mut Client, table: &str) -> Vec<Value> {
     let (status, rows) = client
@@ -582,6 +997,7 @@ async fn the_six_patterns_render_their_golden_html() -> sc_error::Result<()> {
 /// - a UUID — the signed-in admin's id, new in every test database;
 /// - v1's random form ids (`form3fa9c1`) — an action column's `rndid` is
 ///   *stored* in the view's configuration and stays;
+/// - a form's `_csrf` value, which is the test client's own CSRF token;
 /// - the text of a `<time>`, which v1 renders in the server's locale and
 ///   timezone and `saltcorn-common.js` re-renders in the browser's — its
 ///   `datetime` attribute is kept, and is the value.
@@ -590,9 +1006,13 @@ fn normalise(html: &str) -> String {
         regex_lite::Regex::new("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
             .unwrap();
     // A form's id, wherever it is used: its `id`, and the script that finds it.
-    let form_id = regex_lite::Regex::new(r#"\bform[0-9a-f]{6}\b"#).unwrap();
+    // v1 draws it as `Math.floor(Math.random() * 16777215).toString(16)`, so it
+    // is one to six hex digits, not always six.
+    let form_id = regex_lite::Regex::new(r#"\bform[0-9a-f]{1,6}\b"#).unwrap();
     let time = regex_lite::Regex::new(r"(<time [^>]*>)[^<]*(</time>)").unwrap();
+    let csrf = regex_lite::Regex::new(r#"(name="_csrf" value=")[^"]*(")"#).unwrap();
     let out = uuid.replace_all(html, "UUID");
+    let out = csrf.replace_all(&out, "${1}CSRF${2}");
     let out = form_id.replace_all(&out, "formRNDID");
     let out = time.replace_all(&out, "${1}TIME${2}");
     let mut out = out.trim_end().to_owned();

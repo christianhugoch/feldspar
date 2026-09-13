@@ -364,6 +364,61 @@ async fn csrf_allows_mutations_with_a_matching_token() {
     );
 }
 
+/// TODO "Saltcorn UI" 6.4: the same double-submit check, with the token where
+/// v1's browser code puts it — `saltcorn.js`'s `CSRF-Token` header, and a
+/// rendered form's `_csrf` field — and still refused when it is wrong.
+#[tokio::test]
+async fn csrf_accepts_the_token_in_v1s_header_and_in_a_forms_field() {
+    let (router, _) = test_router();
+    let (_, cookies, _) = call(
+        &router,
+        Request::get("/api/ping").body(Body::empty()).unwrap(),
+    )
+    .await;
+    let csrf = cookie_value(&cookies, CSRF_COOKIE).expect("csrf cookie");
+
+    // v1's header spelling.
+    let request = Request::post("/api/echo")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::COOKIE, format!("{CSRF_COOKIE}={csrf}"))
+        .header("CSRF-Token", &csrf)
+        .body(Body::from("{\"a\":1}"))
+        .unwrap();
+    let (status, _, _) = call(&router, request).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A browser's form post: no header, the token in the body. It gets past the
+    // check (the echo handler then has a form where it wanted JSON).
+    let form = |token: &str| {
+        Request::post("/api/echo")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::COOKIE, format!("{CSRF_COOKIE}={csrf}"))
+            .body(Body::from(format!("title=Dune&_csrf={token}")))
+            .unwrap()
+    };
+    let (status, _, body) = call(&router, form(&csrf)).await;
+    assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
+
+    // The wrong token, in either place, and a form with none.
+    let (status, _, _) = call(&router, form("forged")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let request = Request::post("/api/echo")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(header::COOKIE, format!("{CSRF_COOKIE}={csrf}"))
+        .body(Body::from("title=Dune"))
+        .unwrap();
+    let (status, _, _) = call(&router, request).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let request = Request::post("/api/echo")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::COOKIE, format!("{CSRF_COOKIE}={csrf}"))
+        .header("CSRF-Token", "forged")
+        .body(Body::from("{\"a\":1}"))
+        .unwrap();
+    let (status, _, _) = call(&router, request).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn login_starts_a_session_that_unlocks_admin_routes() {
     let (router, _) = test_router();

@@ -197,7 +197,7 @@ not write what this server has an answer for* — applied one level down:
 | `models/trigger.js` | the host | this server's triggers, over the existing trigger surface |
 | `models/file.js`, `models/user.js` | the host | the file stores and `sc-auth` |
 | `models/crash.js` | the host | this server's error log |
-| `db/index.js` | the host | refused by name — there is no v1 `db` module here (milestone 23) |
+| `db/index.js` | the host | its pure helpers (`sqlsanitize`, `slugify`) and a `withTransaction` that opens none (Phase 6); every query refused by name — there is no v1 `db` here (milestone 23) |
 | `models/library.js`, `page_group.js`, `workflow.js` | the host | inert stubs; see *Explicitly OUT* |
 
 **Both columns are reachable by `require`, from any module on the worker.** The bundle is
@@ -626,16 +626,16 @@ Five levels, because the failure modes are at five levels:
 
 ## Phase 6 — Posting: forms, routes and actions
 
-- [ ] 6.1 `POST /view/:name` → the pattern's `runPost`: form-encoded body into `req.body`, the
+- [x] 6.1 `POST /view/:name` → the pattern's `runPost`: form-encoded body into `req.body`, the
       redirect or the re-rendered form back out.
-- [ ] 6.2 `POST /view/:name/:route` → the pattern's `routes` (`run_action`,
+- [x] 6.2 `POST /view/:name/:route` → the pattern's `routes` (`run_action`,
       `update_matching_rows`), answering JSON, and the `delete` route.
-- [ ] 6.3 The view actions of §12.1 in the vendored bundle, and §12.2's trigger resolution
+- [x] 6.3 The view actions of §12.1 in the vendored bundle, and §12.2's trigger resolution
       through `TriggerHost` bounded by `Application.triggers`. §12.3's refusal, at save time
       where the configuration names it and at run time otherwise.
-- [ ] 6.4 CSRF: `req.csrfToken()` answers the app session's token, the rendered forms carry
+- [x] 6.4 CSRF: `req.csrfToken()` answers the app session's token, the rendered forms carry
       it, and a POST without it is refused by the existing double-submit check.
-- [ ] 6.5 Live tests: an insert through *Edit Books* that lands a row; an update; the Delete
+- [x] 6.5 Live tests: an insert through *Edit Books* that lands a row; an update; the Delete
       action; the Filter view's dropdown and range round-tripping through the state and
       narrowing the embedded list; and a POST with no CSRF token refused.
 

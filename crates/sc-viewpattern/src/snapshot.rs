@@ -45,6 +45,24 @@ impl ViewSnapshot {
         roles: &[Role],
         base_url: &str,
     ) -> Result<ViewSnapshot> {
+        ViewSnapshot::build_with_trigger_actions(application, set, roles, base_url, &|_| None)
+    }
+
+    /// [`build`](ViewSnapshot::build), with what each of the application's
+    /// triggers runs: `action_of(name)` is the trigger's action (`run_js_code`,
+    /// `Workflow` for a workflow body), or `None` for a trigger this server does
+    /// not have.
+    ///
+    /// v1's `run_action_column` reads a trigger's `action` to decide how to run
+    /// it (§12.2), so a trigger whose action is unknown to the snapshot is found
+    /// by `Trigger.findOne` but cannot be run from a view.
+    pub fn build_with_trigger_actions(
+        application: &Application,
+        set: &ViewSet,
+        roles: &[Role],
+        base_url: &str,
+        action_of: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<ViewSnapshot> {
         if set.application != application.id {
             return Err(Error::msg(format!(
                 "the view set of application {} cannot be the snapshot of `{}` ({})",
@@ -67,7 +85,7 @@ impl ViewSnapshot {
             "roles": roles.iter().map(|r| json!({ "id": r.role, "role": r.name })).collect::<Vec<_>>(),
             // The triggers the application declares (§12.2): what v1's
             // synchronous `Trigger.findOne` finds, and nothing else.
-            "triggers": application.triggers.iter().map(|t| json!({ "name": t.0 })).collect::<Vec<_>>(),
+            "triggers": application.triggers.iter().map(|t| json!({ "name": t.0, "action": action_of(&t.0) })).collect::<Vec<_>>(),
             "views": set.views.iter().map(view_json).collect::<Vec<_>>(),
             "pages": set.pages.iter().map(page_json).collect::<Vec<_>>(),
         });
@@ -201,7 +219,11 @@ mod tests {
             value["roles"],
             json!([{ "id": 1, "role": "admin" }, { "id": 100, "role": "public" }])
         );
-        assert_eq!(value["triggers"], json!([{ "name": "notify_author" }]));
+        // A trigger this server does not have has no action to run.
+        assert_eq!(
+            value["triggers"],
+            json!([{ "name": "notify_author", "action": null }])
+        );
         let view = &value["views"][0];
         assert_eq!(view["name"], json!("List Books"));
         // v1's own field names, because v1's own code reads them.
@@ -209,6 +231,31 @@ mod tests {
         assert_eq!(view["table_id"], json!("books"));
         assert_eq!(view["min_role"], json!(1));
         assert_eq!(value["pages"][0]["title"], json!("Books"));
+    }
+
+    #[test]
+    fn the_snapshot_says_what_each_trigger_runs() {
+        let mut app = app();
+        app.triggers.push(sc_app::TriggerRef::new("TrimPages"));
+        app.triggers.push(sc_app::TriggerRef::new("Gone"));
+        let set = ViewSet {
+            application: app.id,
+            generation: 1,
+            views: Vec::new(),
+            pages: Vec::new(),
+        };
+        let snapshot = ViewSnapshot::build_with_trigger_actions(&app, &set, &[], "", &|name| {
+            (name == "TrimPages").then(|| "run_js_code".to_owned())
+        })
+        .unwrap();
+        let value: Json = serde_json::from_str(snapshot.json()).unwrap();
+        assert_eq!(
+            value["triggers"],
+            json!([
+                { "name": "TrimPages", "action": "run_js_code" },
+                { "name": "Gone", "action": null },
+            ])
+        );
     }
 
     #[test]

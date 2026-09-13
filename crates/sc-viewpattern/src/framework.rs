@@ -12,6 +12,15 @@
 //!   `saltcorn.js`), out of the bundle's `public/`;
 //! - `/files/serve/*` — the application's file stores, under their access rules.
 //!
+//! And three things posted to (Phase 6):
+//!
+//! - `POST /view/:name` and `/view/:name/*slug` — the pattern's `runPost`: a
+//!   form's fields as `req.body`, and the redirect or re-rendered form back out;
+//! - `POST /view/:name/:route` — one of the pattern's `routes` (`run_action`,
+//!   `update_matching_rows`), answering JSON;
+//! - `POST /delete/:table/:id` — v1's Delete action, under the viewer's
+//!   authority.
+//!
 //! **No build**: [`SaltcornUiFactory`] constructs the framework when the
 //! application is mounted, and a mount re-reads the application's view set
 //! under a new generation (§4). What a request renders is always the view set
@@ -30,7 +39,7 @@ use sc_action::TriggerDispatcher;
 use sc_api::code_host::{FileStoreHost, TableHost, TriggerRunHost, schema_snapshot};
 use sc_app::{
     AppRequest, AppResponse, Application, BuildSpec, CspPolicy, Framework, FrameworkFactory,
-    FrameworkInfo, Method, MountContext,
+    FrameworkInfo, Method, MountContext, RequestBody, TriggerRef,
 };
 use sc_auth::User;
 use sc_catalog::Catalog;
@@ -256,12 +265,32 @@ impl Framework for SaltcornUiFramework {
     }
 
     async fn handle(&self, req: AppRequest, cat: &Catalog) -> Result<AppResponse> {
-        // Posting is Phase 6.
-        if !matches!(req.method, Method::Get) {
-            return Ok(AppResponse::method_not_allowed());
-        }
         let path = req.path.clone();
         let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        match req.method {
+            Method::Get => {}
+            // What v1's `routes/view.ts` and `routes/delete.ts` answer. The CSRF
+            // check has already run, in front of every application (6.4).
+            Method::Post => {
+                return match segments.as_slice() {
+                    ["view", name, rest @ ..] if !name.is_empty() => {
+                        self.post_view(&req, cat, &percent_decode(name), rest)
+                            .await
+                    }
+                    ["delete", table, id] if !table.is_empty() && !id.is_empty() => {
+                        self.delete(&req, cat, &percent_decode(table), &percent_decode(id))
+                            .await
+                    }
+                    _ => Ok(self.message(
+                        &req,
+                        404,
+                        "Not found",
+                        "There is nothing to post to at this address.",
+                    )),
+                };
+            }
+            _ => return Ok(AppResponse::method_not_allowed()),
+        }
         match segments.as_slice() {
             [""] => self.index(&req, cat).await,
             ["view", name, slug @ ..] if !name.is_empty() => {
@@ -270,7 +299,7 @@ impl Framework for SaltcornUiFramework {
             ["page", name] if !name.is_empty() => self.page(&req, cat, &percent_decode(name)).await,
             ["static_assets", _tag, rest @ ..] if !rest.is_empty() => self.static_asset(rest),
             ["files", "serve", rest @ ..] if !rest.is_empty() => self.file(&req, cat, rest).await,
-            _ => Ok(self.message(404, "Not found", "There is nothing at this address.")),
+            _ => Ok(self.message(&req, 404, "Not found", "There is nothing at this address.")),
         }
     }
 
@@ -327,6 +356,7 @@ impl SaltcornUiFramework {
         Ok(AppResponse::html(
             200,
             self.document(
+                req,
                 &self.site_name(),
                 &format!("<main class=\"container py-4\">{body}</main>"),
             ),
@@ -393,38 +423,16 @@ impl SaltcornUiFramework {
     ) -> Result<AppResponse> {
         let set = view_sets().get(cat, self.app.id).await?;
         let Some(view) = set.view(name) else {
-            return Ok(self.message(
-                404,
-                "Not found",
-                &format!("This application has no view named {name}."),
-            ));
+            return Ok(self.no_view(req, name));
         };
         if let Some(refused) = self.refused(req, &format!("the view {name}"), view.min_role) {
             return Ok(refused);
         }
         let state = state_of(req, view, slug);
-        let title = view
-            .attributes
-            .get("page_title")
-            .and_then(Json::as_str)
-            .filter(|t| !t.trim().is_empty())
-            .unwrap_or(&view.name)
-            .to_owned();
-        let request = self.view_request(
-            req,
-            (!is_xhr(req)).then(|| Wrap {
-                title,
-                current_url: req.path.clone(),
-            }),
-        );
+        let request = self.view_request(req, self.wrap_for(req, view));
         let snapshot = self.snapshot(cat, &set, &req.base_url).await?;
         let schema = schema_snapshot(cat)?;
-        let hosts = ViewerHosts::new(
-            cat,
-            req.user.as_ref(),
-            self.evaluator.clone(),
-            self.triggers.as_deref(),
-        );
+        let hosts = self.viewer_hosts(cat, req);
         let ctx = ViewContext {
             snapshot: &snapshot,
             request: &request,
@@ -432,7 +440,172 @@ impl SaltcornUiFramework {
             schema: Some(&schema),
         };
         let out = self.runtime.render(view, &state, ctx).await;
-        self.respond(out, &request)
+        self.respond(req, out, &request)
+    }
+
+    /// `POST /view/:name/…`: one of the pattern's routes when the one segment
+    /// after the name is a route the pattern declares, and otherwise the
+    /// pattern's `runPost` with the rest as the slug.
+    ///
+    /// v1 decides by the number of segments alone (`/:viewname/:route` is
+    /// matched first), which makes a one-part slug unpostable; asking the
+    /// pattern's manifest keeps both.
+    async fn post_view(
+        &self,
+        req: &AppRequest,
+        cat: &Catalog,
+        name: &str,
+        rest: &[&str],
+    ) -> Result<AppResponse> {
+        let set = view_sets().get(cat, self.app.id).await?;
+        let Some(view) = set.view(name) else {
+            return Ok(self.no_view(req, name));
+        };
+        if let Some(refused) = self.refused(req, &format!("the view {name}"), view.min_role) {
+            return Ok(refused);
+        }
+        if let [route] = rest {
+            let route = percent_decode(route);
+            let declared = self
+                .runtime
+                .patterns()
+                .await?
+                .into_iter()
+                .find(|p| p.name == view.viewpattern)
+                .is_some_and(|p| p.routes.contains(&route));
+            if declared {
+                return self.route(req, cat, &set, view, &route).await;
+            }
+        }
+
+        // v1's `rewrite_query_from_slug`: the slug's parts join the query, which
+        // is the state a POST is run over.
+        let mut request = self.view_request(req, self.wrap_for(req, view));
+        if let Json::Object(state) = state_of(req, view, rest) {
+            request.query = state
+                .into_iter()
+                .filter_map(|(k, v)| v.as_str().map(|v| (k, v.to_owned())))
+                .collect();
+        }
+        let snapshot = self.snapshot(cat, &set, &req.base_url).await?;
+        let schema = schema_snapshot(cat)?;
+        let hosts = self.viewer_hosts(cat, req);
+        let body = request.body.clone();
+        let ctx = ViewContext {
+            snapshot: &snapshot,
+            request: &request,
+            hosts: hosts.surfaces(),
+            schema: Some(&schema),
+        };
+        let out = self.runtime.post(view, &body, ctx).await;
+        self.respond(req, out, &request)
+    }
+
+    /// `POST /view/:name/:route`: v1's `runRoute`, which answers JSON — so a
+    /// route that fails answers `{ "error": … }` too, which is what
+    /// `saltcorn.js` shows the viewer, rather than a document it cannot.
+    async fn route(
+        &self,
+        req: &AppRequest,
+        cat: &Catalog,
+        set: &ViewSet,
+        view: &View,
+        route: &str,
+    ) -> Result<AppResponse> {
+        let request = self.view_request(req, None);
+        let snapshot = self.snapshot(cat, set, &req.base_url).await?;
+        let schema = schema_snapshot(cat)?;
+        let hosts = self.viewer_hosts(cat, req);
+        let ctx = ViewContext {
+            snapshot: &snapshot,
+            request: &request,
+            hosts: hosts.surfaces(),
+            schema: Some(&schema),
+        };
+        match self.runtime.route(view, route, &request.body, ctx).await {
+            Err(e) if e.kind() == ErrorKind::Application => {
+                eprintln!("feldspar: application `{}`: {e}", self.app.subdomain);
+                json_response(500, &serde_json::json!({ "error": reason_of(&e) }))
+            }
+            out => self.respond(req, out, &request),
+        }
+    }
+
+    /// `POST /delete/:table/:id`: v1's Delete action (§12.1), which a List's
+    /// action column and an Edit's Delete button post to.
+    ///
+    /// The row is deleted **as the viewer** — `delete_row_as`, the function the
+    /// agent tools and the GraphQL provider delete through — so the table's
+    /// write role and its ownership formula decide, not the view (§11). A table
+    /// outside the application's subset is not one it can delete from.
+    ///
+    /// An ajax post (what `ajax_post_btn` sends) answers `{ success, error? }`,
+    /// as v1's does; a form post is redirected to the `redirect` it names, if
+    /// that is a path on this application, else to `/`.
+    async fn delete(
+        &self,
+        req: &AppRequest,
+        cat: &Catalog,
+        table_name: &str,
+        id: &str,
+    ) -> Result<AppResponse> {
+        let outcome = self.delete_row(req, cat, table_name, id).await?;
+        if is_xhr(req) {
+            let mut answer = serde_json::json!({ "success": outcome.is_ok() });
+            if let Err(error) = &outcome {
+                answer["error"] = Json::String(error.clone());
+            }
+            return json_response(200, &answer);
+        }
+        if let Err(error) = &outcome {
+            eprintln!(
+                "feldspar: application `{}`: deleting {id} from `{table_name}`: {error}",
+                self.app.subdomain
+            );
+        }
+        Ok(AppResponse::redirect(safe_redirect(
+            req.query.get("redirect").map(String::as_str),
+        )))
+    }
+
+    /// The deletion itself: `Ok(Err(sentence))` for what the viewer is told —
+    /// no such table here, not permitted, no such row — and `Err` for what is
+    /// the server's.
+    async fn delete_row(
+        &self,
+        req: &AppRequest,
+        cat: &Catalog,
+        table_name: &str,
+        id: &str,
+    ) -> Result<std::result::Result<(), String>> {
+        let no_table = || {
+            Ok(Err(format!(
+                "application `{}` has no table named `{table_name}`",
+                self.app.name
+            )))
+        };
+        if !self.app.tables.iter().any(|t| t.0 == table_name) {
+            return no_table();
+        }
+        let Some(table) = cat.get(table_name)? else {
+            return no_table();
+        };
+        let deleted = sc_api::delete_row_as(
+            cat,
+            &table,
+            id,
+            role_of(req),
+            req.user.as_ref(),
+            self.evaluator.as_ref(),
+            &[],
+            &sc_api::rows::Executor::Pooled,
+        )
+        .await;
+        match deleted {
+            Ok(_) => Ok(Ok(())),
+            Err(e) if e.kind() == ErrorKind::Application => Ok(Err(reason_of(&e))),
+            Err(e) => Err(e),
+        }
     }
 
     /// `/page/:name`.
@@ -440,6 +613,7 @@ impl SaltcornUiFramework {
         let set = view_sets().get(cat, self.app.id).await?;
         let Some(page) = set.page(name) else {
             return Ok(self.message(
+                req,
                 404,
                 "Not found",
                 &format!("This application has no page named {name}."),
@@ -473,12 +647,7 @@ impl SaltcornUiFramework {
         );
         let snapshot = self.snapshot(cat, set, &req.base_url).await?;
         let schema = schema_snapshot(cat)?;
-        let hosts = ViewerHosts::new(
-            cat,
-            req.user.as_ref(),
-            self.evaluator.clone(),
-            self.triggers.as_deref(),
-        );
+        let hosts = self.viewer_hosts(cat, req);
         let ctx = ViewContext {
             snapshot: &snapshot,
             request: &request,
@@ -486,7 +655,7 @@ impl SaltcornUiFramework {
             schema: Some(&schema),
         };
         let out = self.runtime.render_page(page, ctx).await;
-        self.respond(out, &request)
+        self.respond(req, out, &request)
     }
 
     /// `/static_assets/:tag/*`: a file of the bundle's `public/`, and nothing
@@ -558,13 +727,49 @@ impl SaltcornUiFramework {
             method: req.method.as_str().to_owned(),
             path: req.path.clone(),
             query: req.query.clone(),
-            body: Json::Null,
+            body: body_json(&req.body),
             headers: req.headers.clone(),
             user: req.user.as_ref().map(view_user),
             base_url: req.base_url.clone(),
-            csrf_token: String::new(),
+            csrf_token: req.csrf_token.clone(),
             wrap,
         }
+    }
+
+    /// How a view is wrapped for `req`: in the layout under its title, unless
+    /// the request is an ajax one, which gets the HTML alone.
+    fn wrap_for(&self, req: &AppRequest, view: &View) -> Option<Wrap> {
+        let title = view
+            .attributes
+            .get("page_title")
+            .and_then(Json::as_str)
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or(&view.name)
+            .to_owned();
+        (!is_xhr(req)).then(|| Wrap {
+            title,
+            current_url: req.path.clone(),
+        })
+    }
+
+    /// The surfaces a call for `req` reaches, on the viewer's terms.
+    fn viewer_hosts<'a>(&'a self, cat: &'a Catalog, req: &AppRequest) -> ViewerHosts<'a> {
+        ViewerHosts::new(
+            cat,
+            req.user.as_ref(),
+            self.evaluator.clone(),
+            self.triggers.as_deref(),
+            &self.app.triggers,
+        )
+    }
+
+    fn no_view(&self, req: &AppRequest, name: &str) -> AppResponse {
+        self.message(
+            req,
+            404,
+            "Not found",
+            &format!("This application has no view named {name}."),
+        )
     }
 
     /// The snapshot of `set`, built once per generation.
@@ -584,13 +789,40 @@ impl SaltcornUiFramework {
             return Ok(held.clone());
         }
         let roles = sc_auth::list_roles(cat).await?;
-        let built = Arc::new(ViewSnapshot::build(&self.app, set, &roles, base_url)?);
+        // What each declared trigger runs, which v1's `run_action_column` reads
+        // to decide how to run it (§12.2). Read at the generation, like the rest:
+        // a change to an application's triggers is a save of the application,
+        // and a save is a new generation.
+        let actions: std::collections::HashMap<String, String> = self
+            .triggers
+            .as_ref()
+            .and_then(|d| d.triggers().ok())
+            .map(|triggers| {
+                triggers
+                    .all()
+                    .iter()
+                    .map(|t| (t.name.clone(), t.action().unwrap_or("Workflow").to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let built = Arc::new(ViewSnapshot::build_with_trigger_actions(
+            &self.app,
+            set,
+            &roles,
+            base_url,
+            &|name| actions.get(name).cloned(),
+        )?);
         *self.snapshot.write().map_err(|_| poisoned())? = Some(built.clone());
         Ok(built)
     }
 
     /// What a render produced, as a response.
-    fn respond(&self, out: Result<ViewOutput>, request: &ViewRequest) -> Result<AppResponse> {
+    fn respond(
+        &self,
+        req: &AppRequest,
+        out: Result<ViewOutput>,
+        request: &ViewRequest,
+    ) -> Result<AppResponse> {
         let out = match out {
             Ok(out) => out,
             // A pattern that threw is the application's to fix: a document
@@ -598,11 +830,7 @@ impl SaltcornUiFramework {
             // reached is the server's, and goes up.
             Err(e) if e.kind() == ErrorKind::Application => {
                 eprintln!("feldspar: application `{}`: {e}", self.app.subdomain);
-                let reason = match e.repr() {
-                    Repr::Config(m) | Repr::Invalid(m) | Repr::NotFound(m) => m.clone(),
-                    _ => e.to_string(),
-                };
-                return Ok(self.message(500, "This could not be shown", &reason));
+                return Ok(self.message(req, 500, "This could not be shown", &reason_of(&e)));
             }
             Err(e) => return Err(e),
         };
@@ -624,7 +852,7 @@ impl SaltcornUiFramework {
             };
             let status = out.status.unwrap_or(200);
             match &request.wrap {
-                Some(wrap) => AppResponse::html(status, self.document(&wrap.title, &html)),
+                Some(wrap) => AppResponse::html(status, self.document(req, &wrap.title, &html)),
                 None => AppResponse::html(status, html),
             }
         };
@@ -642,11 +870,13 @@ impl SaltcornUiFramework {
         }
         Some(match req.user {
             None => self.message(
+                req,
                 401,
                 "Please sign in",
                 &format!("You need to sign in to see {what}."),
             ),
             Some(_) => self.message(
+                req,
                 403,
                 "Not permitted",
                 &format!("Your role may not see {what}."),
@@ -655,10 +885,11 @@ impl SaltcornUiFramework {
     }
 
     /// A short document: a heading and a sentence.
-    fn message(&self, status: u16, heading: &str, sentence: &str) -> AppResponse {
+    fn message(&self, req: &AppRequest, status: u16, heading: &str, sentence: &str) -> AppResponse {
         AppResponse::html(
             status,
             self.document(
+                req,
                 heading,
                 &format!(
                     "<main class=\"container py-4\"><h1>{}</h1><p>{}</p></main>",
@@ -682,7 +913,10 @@ impl SaltcornUiFramework {
 
     /// The document around a body (§9): Saltcorn UI's own head — v1's
     /// `wrapper.js`, ported — with the assets a v1 view needs to *work*.
-    fn document(&self, title: &str, body: &str) -> String {
+    ///
+    /// `_sc_globalCsrf` is the viewer's CSRF token, which every ajax post
+    /// `saltcorn.js` makes sends back as `CSRF-Token` (6.4).
+    fn document(&self, req: &AppRequest, title: &str, body: &str) -> String {
         let asset = |file: &str| format!("/static_assets/{ASSET_VERSION_TAG}/{file}");
         format!(
             "<!doctype html>\n\
@@ -697,7 +931,7 @@ impl SaltcornUiFramework {
              <script src=\"{bootstrap_js}\"></script>\n\
              <script src=\"{common}\"></script>\n\
              <script src=\"{saltcorn}\"></script>\n\
-             <script>var _sc_globalCsrf = \"\"; var _sc_version_tag = \"{ASSET_VERSION_TAG}\"; \
+             <script>var _sc_globalCsrf = \"{csrf}\"; var _sc_version_tag = \"{ASSET_VERSION_TAG}\"; \
              var _sc_pageloadtag = \"\"; var _sc_loglevel = 1; var _sc_lightmode = \"light\";</script>\n\
              <title>{title}</title>\n\
              </head>\n\
@@ -713,6 +947,12 @@ impl SaltcornUiFramework {
             common = asset("saltcorn-common.js"),
             saltcorn = asset("saltcorn.js"),
             title = escape(title),
+            // A token is hex; anything else in it is not put into a script.
+            csrf = req
+                .csrf_token
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>(),
         )
     }
 }
@@ -724,7 +964,7 @@ impl SaltcornUiFramework {
 struct ViewerHosts<'a> {
     table: TableHost<'a>,
     files: FileStoreHost<'a>,
-    triggers: Option<TriggerRunHost<'a>>,
+    triggers: Option<AppTriggers<'a>>,
     module_fns: Option<Arc<dyn ModuleFnHost>>,
 }
 
@@ -734,6 +974,7 @@ impl<'a> ViewerHosts<'a> {
         user: Option<&User>,
         evaluator: Option<Arc<dyn JsEvaluator>>,
         triggers: Option<&'a TriggerDispatcher>,
+        declared: &'a [TriggerRef],
     ) -> ViewerHosts<'a> {
         let caller = sc_api::caller_context(user);
         ViewerHosts {
@@ -741,8 +982,10 @@ impl<'a> ViewerHosts<'a> {
                 .caused_by(caller.role, caller.user.clone())
                 .with_evaluator(evaluator),
             files: FileStoreHost::new(cat).caused_by(caller.role),
-            triggers: triggers
-                .map(|d| TriggerRunHost::new(d, cat).caused_by(caller.role, caller.user.clone())),
+            triggers: triggers.map(|d| AppTriggers {
+                inner: TriggerRunHost::new(d, cat).caused_by(caller.role, caller.user.clone()),
+                declared,
+            }),
             module_fns: cat.module_functions(),
         }
     }
@@ -755,6 +998,125 @@ impl<'a> ViewerHosts<'a> {
             triggers: self.triggers.as_ref().map(|t| t as &dyn TriggerHost),
             module_fns: self.module_fns.as_deref(),
         }
+    }
+}
+
+/// The trigger surface of a view call, bounded by the triggers the application
+/// declares (§12.2).
+///
+/// `Trigger.findOne` in the worker already finds only those, so this is the
+/// same bound where it cannot be talked around: a pattern — or a plugin's —
+/// that asks for a trigger by name directly gets the sentence, not the run.
+struct AppTriggers<'a> {
+    inner: TriggerRunHost<'a>,
+    declared: &'a [TriggerRef],
+}
+
+#[async_trait]
+impl TriggerHost for AppTriggers<'_> {
+    async fn run(&self, request: Json) -> Result<Json> {
+        let name = request
+            .get("trigger")
+            .and_then(Json::as_str)
+            .unwrap_or_default();
+        if !self.declared.iter().any(|t| t.0 == name) {
+            let declared: Vec<&str> = self.declared.iter().map(|t| t.0.as_str()).collect();
+            return Err(Error::config(format!(
+                "the trigger `{name}` is not one this application declares, so its views cannot \
+                 run it; {}",
+                if declared.is_empty() {
+                    "it declares none".to_owned()
+                } else {
+                    format!("it declares {}", declared.join(", "))
+                }
+            )));
+        }
+        self.inner.run(request).await
+    }
+
+    fn trigger_names(&self) -> Vec<String> {
+        let exist = self.inner.trigger_names();
+        self.declared
+            .iter()
+            .filter(|t| exist.is_empty() || exist.contains(&t.0))
+            .map(|t| t.0.clone())
+            .collect()
+    }
+}
+
+/// v1's `req.body`: a JSON body as it came, and a form's fields as an object —
+/// a repeated field as the list of its values, which is what Express's
+/// URL-encoded parser makes of `a=1&a=2`.
+fn body_json(body: &RequestBody) -> Json {
+    match body {
+        RequestBody::Empty => Json::Null,
+        RequestBody::Json(value) => value.clone(),
+        RequestBody::Form(pairs) => {
+            let mut out = Map::new();
+            for (key, value) in pairs {
+                let value = Json::String(value.clone());
+                match out.get_mut(key) {
+                    None => {
+                        out.insert(key.clone(), value);
+                    }
+                    Some(Json::Array(values)) => values.push(value),
+                    Some(first) => {
+                        let first = first.take();
+                        out.insert(key.clone(), Json::Array(vec![first, value]));
+                    }
+                }
+            }
+            Json::Object(out)
+        }
+    }
+}
+
+/// Where a form post that names `redirect` goes: the path, if it is one on this
+/// application, else `/`. An absolute URL, a protocol-relative `//host` and a
+/// backslash trick are all refused — v1's `safe_redirect` rule, because the
+/// value is whatever was in the query.
+///
+/// What is kept is encoded as Express's `res.redirect` encodes a `Location`
+/// (`encodeurl`): a space or a non-ASCII character becomes its `%XX`, and an
+/// escape already there is left alone — the query decoded `%20` into the space
+/// this puts back.
+fn safe_redirect(redirect: Option<&str>) -> String {
+    match redirect {
+        Some(path)
+            if path.starts_with('/')
+                && !path.starts_with("//")
+                && !path.contains('\\')
+                && !path.chars().any(char::is_control) =>
+        {
+            let mut out = String::with_capacity(path.len());
+            for byte in path.bytes() {
+                if byte <= b' ' || byte >= 0x7f || b"\"<>^`{|}".contains(&byte) {
+                    out.push_str(&format!("%{byte:02X}"));
+                } else {
+                    out.push(char::from(byte));
+                }
+            }
+            out
+        }
+        _ => "/".to_owned(),
+    }
+}
+
+/// A JSON response under `status`.
+fn json_response(status: u16, value: &Json) -> Result<AppResponse> {
+    Ok(AppResponse::with_status(
+        status,
+        "application/json",
+        serde_json::to_vec(value).map_err(|e| Error::serde(e.to_string()))?,
+    ))
+}
+
+/// An application error's own sentence, without the kind printed in front of
+/// it.
+fn reason_of(e: &Error) -> String {
+    match e.repr() {
+        Repr::Config(m) | Repr::Invalid(m) | Repr::NotFound(m) | Repr::Auth(m) => m.clone(),
+        _ => e.to_string(),
     }
 }
 
@@ -974,6 +1336,46 @@ mod tests {
             state_of(&req, &view, &["Dune%20Messiah", "extra"]),
             json!({ "id": "3", "title": "Dune Messiah" })
         );
+    }
+
+    #[test]
+    fn a_forms_fields_are_req_body_with_a_repeated_field_as_a_list() {
+        let body = RequestBody::Form(vec![
+            ("title".to_owned(), "Dune".to_owned()),
+            ("tag".to_owned(), "a".to_owned()),
+            ("tag".to_owned(), "b".to_owned()),
+            ("tag".to_owned(), "c".to_owned()),
+            ("_csrf".to_owned(), "t0k".to_owned()),
+        ]);
+        assert_eq!(
+            body_json(&body),
+            json!({ "title": "Dune", "tag": ["a", "b", "c"], "_csrf": "t0k" })
+        );
+        assert_eq!(body_json(&RequestBody::Empty), Json::Null);
+        assert_eq!(
+            body_json(&RequestBody::Json(json!({ "rndid": "ce2dfa" }))),
+            json!({ "rndid": "ce2dfa" })
+        );
+    }
+
+    #[test]
+    fn a_redirect_after_a_post_stays_on_the_application() {
+        assert_eq!(
+            safe_redirect(Some("/view/List Books?author=1")),
+            "/view/List%20Books?author=1"
+        );
+        assert_eq!(safe_redirect(Some("/view/Caf%C3%A9")), "/view/Caf%C3%A9");
+        assert_eq!(safe_redirect(Some("/view/Café")), "/view/Caf%C3%A9");
+        for bad in [
+            "https://evil.example",
+            "//evil.example",
+            "/\\evil.example",
+            "view/x",
+            "",
+        ] {
+            assert_eq!(safe_redirect(Some(bad)), "/", "{bad:?}");
+        }
+        assert_eq!(safe_redirect(None), "/");
     }
 
     #[test]

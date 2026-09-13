@@ -9082,7 +9082,9 @@ mod tests {
         assert_eq!(out["label"], json!("Books"));
         assert_eq!(out["pk_name"], json!("id"));
         assert_eq!(out["pk_type"], json!("Integer"));
-        assert_eq!(out["composite"], json!(["id"]));
+        // v1's getter: `null` for a one-column key, which v1's patterns test for
+        // truth (`edit.ts` takes its composite-key path on anything truthy).
+        assert_eq!(out["composite"], json!(null));
         assert_eq!(out["sql_name"], json!("\"books\""));
         assert_eq!(out["min_role_read"], json!(40));
         assert_eq!(

@@ -1125,7 +1125,12 @@
       // v1's `pk_name` is the first key; the whole of a composite one is beside
       // it, because this server allows a composite primary key and v1 did not.
       pk_name: pk.length ? pk[0] : undefined,
-      composite_pk_names: Object.freeze(pk.slice()),
+      // v1's getter answers `null` unless the key has two or more columns, and
+      // v1's patterns test it for truth: `edit.ts` builds an object id — and
+      // takes the upsert path — whenever it is truthy, so a one-column key's
+      // `["id"]` turned every insert through an Edit view into an update of
+      // `{}`.
+      composite_pk_names: pk.length > 1 ? Object.freeze(pk.slice()) : null,
       // v1's `constraints`: the unique keys, indexes and row constraints, as
       // v1 shapes them (`{ type, configuration }`).
       constraints: Object.freeze((spec.constraints || []).slice()),

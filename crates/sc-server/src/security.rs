@@ -151,15 +151,43 @@ fn is_bearer_authenticated(request: &Request) -> bool {
     crate::mcp::bearer_token(request.headers()).is_some()
 }
 
+/// The v1 spelling of the CSRF header: what `saltcorn.js` sends on every ajax
+/// POST a Saltcorn UI view makes (`"CSRF-Token": _sc_globalCsrf`).
+pub const V1_CSRF_HEADER: &str = "csrf-token";
+
+/// The form field a server-rendered form carries the token in — v1's
+/// `renderForm(form, req.csrfToken())` writes `<input name="_csrf">`.
+pub const CSRF_FORM_FIELD: &str = "_csrf";
+
+/// The largest form body the CSRF check reads to find [`CSRF_FORM_FIELD`]. A
+/// form is fields, not files; an upload is not form-encoded and is never read
+/// here.
+const MAX_CSRF_FORM_BODY: usize = 2 * 1024 * 1024;
+
+/// This browser's CSRF token, as the request's handler sees it: the cookie's
+/// value, or the one minted for it on first contact — which the response then
+/// sets, so a page rendered on first contact carries the token its cookie will
+/// hold (TODO "Saltcorn UI" 6.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CsrfToken(pub String);
+
 /// CSRF middleware implementing the double-submit-cookie check.
 ///
-/// On a mutating request the `x-csrf-token` header must equal the existing
-/// `sc_csrf` cookie, else the request is rejected `403`. Every response ensures
-/// the cookie is set (minting one on first contact) so the SPA can read it and
-/// echo it on later mutations. `State<bool>` carries the `Secure` cookie flag.
+/// On a mutating request the token must equal the existing `sc_csrf` cookie,
+/// else the request is rejected `403`. The token may come in any of three
+/// places, all the same check against the same cookie:
 ///
-/// A **bearer-authenticated** request skips the check
-/// ([`is_bearer_authenticated`] says why it may).
+/// - the `x-csrf-token` header — the admin SPA and the generated client;
+/// - the `csrf-token` header — v1's `saltcorn.js`, in a Saltcorn UI view;
+/// - an `application/x-www-form-urlencoded` body's `_csrf` field — a Saltcorn UI
+///   form submitted by the browser, which cannot set a header.
+///
+/// A cross-site page can make the browser send the cookie but cannot read it,
+/// so it can put the token in none of them. Every response ensures the cookie is
+/// set (minting one on first contact) and the handler is told the token in a
+/// [`CsrfToken`] extension. `State<bool>` carries the `Secure` cookie flag.
+///
+/// **Bearer requests are exempt** (see [`is_bearer_authenticated`]).
 pub(crate) async fn csrf_middleware(
     State(secure): State<bool>,
     jar: CookieJar,
@@ -167,13 +195,28 @@ pub(crate) async fn csrf_middleware(
     next: Next,
 ) -> Response {
     let existing = jar.get(CSRF_COOKIE).map(|c| c.value().to_owned());
+    let mut request = request;
 
     if is_mutating(request.method()) && !is_bearer_authenticated(&request) {
-        let header = request
-            .headers()
-            .get(CSRF_HEADER)
-            .and_then(|v| v.to_str().ok());
-        let valid = matches!((&existing, header), (Some(cookie), Some(hdr)) if cookie == hdr);
+        let header = [CSRF_HEADER, V1_CSRF_HEADER]
+            .iter()
+            .find_map(|name| request.headers().get(*name))
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let mut valid = matches!((&existing, &header), (Some(cookie), Some(hdr)) if cookie == hdr);
+        if !valid && header.is_none() && is_form(&request) {
+            let (parts, body) = request.into_parts();
+            let bytes = match axum::body::to_bytes(body, MAX_CSRF_FORM_BODY).await {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    return (StatusCode::PAYLOAD_TOO_LARGE, "form body too large").into_response();
+                }
+            };
+            valid = existing
+                .as_deref()
+                .is_some_and(|cookie| form_field(&bytes, CSRF_FORM_FIELD).as_deref() == Some(cookie));
+            request = Request::from_parts(parts, axum::body::Body::from(bytes));
+        }
         if !valid {
             // Reject, but still hand out a token so a first-contact client can
             // read it and retry successfully.
@@ -182,9 +225,31 @@ pub(crate) async fn csrf_middleware(
         }
     }
 
+    let token = existing.clone().unwrap_or_else(new_csrf_token);
+    request.extensions_mut().insert(CsrfToken(token.clone()));
     let response = next.run(request).await;
-    let jar = ensure_csrf_cookie(jar, existing, secure);
+    let jar = match existing {
+        Some(_) => jar,
+        None => jar.add(build_cookie(CSRF_COOKIE, token, false, secure)),
+    };
     (jar, response).into_response()
+}
+
+/// Whether the request's body is a URL-encoded form.
+fn is_form(request: &Request) -> bool {
+    request
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("application/x-www-form-urlencoded"))
+}
+
+/// The first value of `name` in a URL-encoded form body.
+fn form_field(body: &[u8], name: &str) -> Option<String> {
+    crate::router::parse_form(&String::from_utf8_lossy(body))
+        .into_iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v)
 }
 
 /// Ensure the jar carries a CSRF cookie, minting one when absent.

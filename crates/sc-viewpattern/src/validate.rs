@@ -6,6 +6,7 @@
 
 use sc_app::Application;
 use sc_error::{Error, Result};
+use serde_json::Value as Json;
 
 use crate::patterns::{PatternInfo, find_pattern};
 use crate::view::View;
@@ -83,6 +84,120 @@ pub(crate) fn check_view_shape(
     }
 }
 
+/// v1's own view actions (§12.1): run by the pattern that renders them — a
+/// form's submit, a link to `/delete/…` — and never by name through a trigger.
+/// The set is fixed; a trigger of the same name cannot take one out of it.
+pub const VIEW_ACTIONS: [&str; 11] = [
+    "Delete",
+    "Save",
+    "SaveAndContinue",
+    "UpdateMatchingRows",
+    "SubmitWithAjax",
+    "Reset",
+    "GoBack",
+    "Cancel",
+    "Login",
+    "Sign up",
+    "Logout",
+];
+
+/// v1's name for an action column that runs its steps in order; each step is
+/// checked in its place.
+const MULTI_STEP: &str = "Multi-step action";
+
+/// Every action a view's configuration names, in the order it names them: the
+/// action columns (and a multi-step column's steps), the `action` segments and
+/// container `click_action`s anywhere in its layout, and a row-click action.
+pub fn configured_actions(configuration: &sc_types::Attrs) -> Vec<String> {
+    fn push(out: &mut Vec<String>, name: Option<&Json>) {
+        if let Some(name) = name.and_then(Json::as_str).filter(|n| !n.is_empty())
+            && !out.iter().any(|seen| seen == name)
+        {
+            out.push(name.to_owned());
+        }
+    }
+    fn action(out: &mut Vec<String>, item: &serde_json::Map<String, Json>) {
+        let name = item.get("action_name");
+        if name.and_then(Json::as_str) == Some(MULTI_STEP) {
+            for step in item
+                .get("step_action_names")
+                .and_then(Json::as_array)
+                .into_iter()
+                .flatten()
+            {
+                push(out, Some(step));
+            }
+        } else {
+            push(out, name);
+        }
+    }
+    fn walk(out: &mut Vec<String>, value: &Json) {
+        match value {
+            Json::Object(item) => {
+                if item.get("type").and_then(Json::as_str) == Some("action") {
+                    action(out, item);
+                }
+                push(out, item.get("click_action"));
+                for child in item.values() {
+                    walk(out, child);
+                }
+            }
+            Json::Array(items) => items.iter().for_each(|i| walk(out, i)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for column in configuration
+        .get("columns")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Json::as_object)
+    {
+        if column.get("type").and_then(Json::as_str) == Some("Action") {
+            action(&mut out, column);
+        }
+    }
+    if let Some(layout) = configuration.get("layout") {
+        walk(&mut out, layout);
+    }
+    push(
+        &mut out,
+        configuration
+            .get("default_state")
+            .and_then(|d| d.get("_row_click_action")),
+    );
+    out
+}
+
+/// Refuse a view that names an action this server will not run (§12.3): every
+/// action it names is one of v1's [`VIEW_ACTIONS`] or a trigger in the
+/// application's declared subset. A v1 state action, a plugin's action, a
+/// `Toggle` column, a trigger the application does not declare — each is
+/// refused here, naming it, rather than failing when somebody clicks it.
+pub fn check_view_actions(view: &View, app: &Application) -> Result<()> {
+    for name in configured_actions(&view.configuration) {
+        if VIEW_ACTIONS.contains(&name.as_str()) || app.triggers.iter().any(|t| t.0 == name) {
+            continue;
+        }
+        let declared: Vec<&str> = app.triggers.iter().map(|t| t.0.as_str()).collect();
+        return Err(Error::invalid(format!(
+            "view `{}` runs the action `{name}`, which is neither one of v1's view actions ({}) \
+             nor a trigger of application `{}` ({}); add a trigger of that name to the \
+             application, or remove the action from the view",
+            view.name,
+            VIEW_ACTIONS.join(", "),
+            app.name,
+            if declared.is_empty() {
+                "it declares none".to_owned()
+            } else {
+                format!("it declares {}", declared.join(", "))
+            }
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +220,48 @@ mod tests {
         assert!(msg("books/authors").contains("`/`"));
         assert!(msg("50%").contains("`%`"));
         assert!(msg("a\nb").contains("control character"));
+    }
+
+    #[test]
+    fn a_view_may_run_the_view_actions_and_the_applications_triggers_and_nothing_else() {
+        let app = Application::new("Books", "books", FrameworkRef::new("saltcorn-ui"))
+            .with_table(TableId("books".to_owned()))
+            .with_trigger(sc_app::TriggerRef::new("TrimPages"));
+        let configuration = serde_json::json!({
+            "columns": [
+                { "type": "Action", "action_name": "Delete" },
+                { "type": "Action", "action_name": "TrimPages" },
+                { "type": "Field", "field_name": "title" },
+            ],
+            "layout": { "above": [
+                { "type": "action", "action_name": "Save" },
+                { "type": "container", "click_action": "TrimPages", "contents": [] },
+            ]},
+        });
+        let mut view = View::new(app.id, "List Books", "List", "books")
+            .configuration(configuration.as_object().cloned().unwrap());
+        assert_eq!(
+            configured_actions(&view.configuration),
+            ["Delete", "TrimPages", "Save"]
+        );
+        check_view_actions(&view, &app).unwrap();
+
+        // A v1 state action, in a multi-step column's second step.
+        view.configuration["columns"] = serde_json::json!([{
+            "type": "Action",
+            "action_name": "Multi-step action",
+            "step_action_names": ["TrimPages", "run_js_code"],
+        }]);
+        let msg = check_view_actions(&view, &app).unwrap_err().to_string();
+        assert!(msg.contains("`run_js_code`"), "{msg}");
+        assert!(msg.contains("it declares TrimPages"), "{msg}");
+
+        // A trigger the application does not declare, deep in a layout.
+        view.configuration.remove("columns");
+        view.configuration["layout"] =
+            serde_json::json!({ "besides": [{ "contents": { "type": "action", "action_name": "Notify" } }] });
+        let msg = check_view_actions(&view, &app).unwrap_err().to_string();
+        assert!(msg.contains("`Notify`") && msg.contains("application `Books`"), "{msg}");
     }
 
     #[test]

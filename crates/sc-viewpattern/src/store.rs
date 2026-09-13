@@ -22,7 +22,7 @@ use crate::tables::{
     COL_MIN_ROLE, COL_NAME, COL_SLUG, COL_TABLE_NAME, COL_TITLE, COL_VIEWPATTERN, PAGES_TABLE,
     VIEWS_TABLE,
 };
-use crate::validate::{check_name, check_view_shape};
+use crate::validate::{check_name, check_view_actions, check_view_shape};
 use crate::view::{Page, PageId, View, ViewId};
 
 /// Save a view: insert its row, or update it in place if a row with its
@@ -37,6 +37,7 @@ pub async fn save_view(catalog: &Catalog, view: &View) -> Result<View> {
     check_name("view", &view.name)?;
     let app = require_application(catalog, view.application, "view", &view.name).await?;
     check_view_shape(view, &app, &registered_patterns())?;
+    check_view_actions(view, &app)?;
     check_role(catalog, "view", &view.name, view.min_role).await?;
 
     let existing = load_one(

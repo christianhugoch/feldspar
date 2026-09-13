@@ -694,9 +694,11 @@ knowing:
   field is v1's non-stored kind exactly;
 - **`sql_name` is the bare quoted name.** No tenant schema qualifies it — and nothing here will
   run SQL you build out of it anyway;
-- **`composite_pk_names` is not v1's**, and is there because a table on this server may have a
-  composite primary key. `pk_name` is the first of them, and the methods that address a row by
-  its id say so by name when there is more than one.
+- **`composite_pk_names` is v1's**, and answers what v1's does: the key's columns when there
+  are two or more, and `null` for a one-column key — v1's patterns test it for truth. It matters
+  more here, because a table on this server may have a composite primary key; `pk_name` is the
+  first of its columns, and the methods that address a row by its id say so by name when there
+  is more than one.
 
 What is **not** here at all: v1's `db` module (`db.query`, `db.select`, `db.insert` …),
 `File`, `User`, `getState()`, `eval_expression` and v1's `View`. Each is reachable and throws

@@ -44,7 +44,7 @@ use crate::handler::{HandlerCtx, HandlerRegistry, HandlerResponse};
 use crate::lsp::{LSP_ROUTE, ServerSlots, language_server_upgrade, server_slots};
 use crate::mcp::MCP_ROUTE;
 use crate::security::{
-    CONTENT_SECURITY_POLICY, CSRF_HEADER, IDE_CONTENT_SECURITY_POLICY, SESSION_COOKIE,
+    CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, IDE_CONTENT_SECURITY_POLICY, SESSION_COOKIE,
     build_cookie, csrf_middleware,
 };
 
@@ -601,12 +601,14 @@ async fn dispatch(
     uri: Uri,
     headers: axum::http::HeaderMap,
     jar: CookieJar,
+    csrf: Option<axum::Extension<crate::security::CsrfToken>>,
     body: Bytes,
 ) -> Response {
     // An application claims the whole of its subdomain, so this comes first: on
     // `blog.example.com` every path is the blog's, not the admin's.
     if let Some(app) = resolve_app(&state, &headers) {
-        return dispatch_app(&state, &app, method, &uri, &headers, jar, &body).await;
+        let csrf = csrf.map(|axum::Extension(token)| token.0);
+        return dispatch_app(&state, &app, method, &uri, &headers, jar, csrf, &body).await;
     }
 
     match state.routes.at(uri.path()) {
@@ -664,6 +666,7 @@ fn resolve_app(state: &AppState, headers: &axum::http::HeaderMap) -> Option<Arc<
 /// Providers win over the framework for the paths they claim, so an app's
 /// `/api/*` is its data and everything else is its UI. Both answers carry the
 /// app's own CSP.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_app(
     state: &AppState,
     app: &MountedApp,
@@ -671,6 +674,7 @@ async fn dispatch_app(
     uri: &Uri,
     headers: &axum::http::HeaderMap,
     jar: CookieJar,
+    csrf: Option<String>,
     body: &Bytes,
 ) -> Response {
     let csp = app.app.csp.header_value();
@@ -826,10 +830,15 @@ async fn dispatch_app(
         },
         None => None,
     };
-    let req = match app_request(state, api_method, uri, headers, body, user.clone()) {
+    let mut req = match app_request(state, api_method, uri, headers, body, user.clone()) {
         Ok(req) => req,
         Err(rejection) => return with_csp(*rejection, &csp),
     };
+    // The token the CSRF middleware checked this request against, or minted for
+    // it: what a rendered form carries, and what `req.csrfToken()` answers.
+    req.csrf_token = csrf
+        .or_else(|| jar.get(CSRF_COOKIE).map(|c| c.value().to_owned()))
+        .unwrap_or_default();
     match app.framework.handle(req, catalog).await {
         Ok(resp) => {
             let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
@@ -1360,7 +1369,7 @@ fn parse_query(uri: &Uri) -> Vec<(String, String)> {
 /// parser that knows only that a `%` was not followed by two hex digits.
 /// The pairs of a form-encoded body, decoded as a query string's are: order and
 /// repeats kept.
-fn parse_form(body: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_form(body: &str) -> Vec<(String, String)> {
     body.split('&')
         .filter(|p| !p.is_empty())
         .map(|pair| {

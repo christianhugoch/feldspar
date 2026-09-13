@@ -57,6 +57,10 @@ pub struct AppRequest {
     /// The application's own origin, `https://books.example.com` — v1's
     /// `req.get_base_url()`.
     pub base_url: String,
+    /// The CSRF token of this browser (the double-submit cookie's value, minted
+    /// on first contact) — what a server-rendered form carries as `_csrf` and
+    /// v1's `req.csrfToken()` answers. Empty when there is none.
+    pub csrf_token: String,
 }
 
 impl AppRequest {
@@ -75,6 +79,7 @@ impl AppRequest {
             headers: BTreeMap::new(),
             user: None,
             base_url: String::new(),
+            csrf_token: String::new(),
         }
     }
 

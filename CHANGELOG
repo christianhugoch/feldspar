@@ -2,6 +2,132 @@
 
 Changes in reverse chronological order.
 
+## Saltcorn UI, Phase 6: posting — forms, routes and actions
+
+A Saltcorn UI application's views now take posts. *Edit Books* saves a new book
+and an edited one, the List's action column runs the application's trigger,
+the Filter narrows the list under it, *Delete* deletes, and a post without the
+viewer's CSRF token is refused before any pattern runs. Roles and signing in
+are still Phase 7; the import is Phase 8.
+
+- **`POST /view/:name` and `/view/:name/*slug` (6.1)** run the pattern's
+  `runPost`. A form's fields are `req.body` (a repeated field is the list of
+  its values, as Express makes it); the slug joins the query, which is the
+  state, as v1's `rewrite_query_from_slug` does.
+  - A redirect goes out as a redirect. A form the pattern shows again
+    (`res.sendWrap`) gets the layout a GET does, drawn in the same worker call.
+  - A view below the viewer's role is refused as a GET is (401/403).
+- **`POST /view/:name/:route` (6.2)** runs one of the pattern's `routes`
+  (`run_action`, `update_matching_rows`) and answers JSON. A route that fails
+  answers `{ "error": … }` with a 500, which is what `saltcorn.js` shows.
+  - **Deviation from v1:** the one segment after the name is a route only if
+    the pattern's manifest declares it; otherwise it is a one-part slug. v1
+    decides by the number of segments, which makes a one-part slug unpostable.
+- **`POST /delete/:table/:id` (6.2)**, v1's Delete action (what a List's
+  action column and an Edit's Delete button post to).
+  - The row is deleted **as the viewer**, through `sc_api::delete_row_as`, so
+    the table's write role and ownership formula decide. A table outside the
+    application's subset is refused naming it.
+  - An ajax post answers `{ success, error? }`. A form post is redirected to
+    its `redirect` if that is a path on the application, else to `/`. The
+    `Location` is percent-encoded as Express's `res.redirect` encodes one, so
+    `/view/List Books` goes out as `/view/List%20Books`.
+  - Only a single-column primary key; v1's `/delete/:table?pk=…` for a
+    composite key is not routed.
+- **Actions (6.3, §12).**
+  - **Save time:** `save_view` refuses a view naming an action that is neither
+    one of v1's view actions (`VIEW_ACTIONS`: Delete, Save, SaveAndContinue,
+    UpdateMatchingRows, SubmitWithAjax, Reset, GoBack, Cancel, Login, Sign up,
+    Logout) nor a trigger the application declares. It looks in action
+    columns (and a multi-step column's steps), `action` segments and
+    `click_action`s anywhere in the layout, and the row-click action
+    (`configured_actions`). A `Toggle <field>` column is refused too: there is
+    no `/edit/toggle` route.
+  - **Run time:** v1's `run_action_column` is kept. It finds a trigger with
+    `Trigger.findOne` (the application's triggers only) and runs it through
+    `getState().actions[trigger.action]`. So `getState().actions` now holds one
+    runner per action kind the application's triggers use, hidden from pickers.
+    A runner runs **the trigger it was called for**, by name, through the
+    trigger surface. Called with no trigger (a view naming `run_js_code`
+    itself) it refuses naming the action. A workflow runs through
+    `trigger.runWithoutRow`, as in v1.
+  - The view snapshot's triggers carry their `action`
+    (`ViewSnapshot::build_with_trigger_actions`), read from the dispatcher at
+    the generation.
+  - **The bound, twice:** the trigger surface a view call carries
+    (`AppTriggers`) refuses a trigger the application does not declare, so a
+    pattern or plugin asking by name directly gets the sentence rather than the
+    run.
+- **v1's `db`, in part.** The patterns' POST paths call `db.withTransaction`
+  (Edit's save, List's `run_action`), and `stateFieldsToWhere` calls
+  `db.sqlsanitize` for a range filter's `_gte_`/`_lte_` keys. So the host now
+  answers `@saltcorn/data/db` with `sqlsanitize`, `sqlsanitizeAllowDots`,
+  `slugify` (v1's own, verbatim), `is_node` and `withTransaction`. Every other
+  member is still refused by name (`db.query` included).
+  - **Deviation:** `withTransaction` opens no transaction; its `rollback()`
+    undoes nothing. A pattern calls it after a write has failed, which for one
+    row leaves nothing written. It does not cover edit-in-edit child rows
+    written before a later one fails.
+- **Found by the first Edit save, fixed in the compat layer.** `Table.composite_pk_names`
+  answered the key's columns for every table (`["id"]`). v1's getter answers
+  `null` unless there are two or more, and `edit.ts` tests it for truth: with
+  a one-column key it built the id `{}` and took the upsert path, so every
+  insert through an Edit view was refused as "`id`: value {} is not a valid
+  int". It now answers v1's `null`. sc-expr's metadata test and the triggers
+  tutorial say so.
+- **CSRF (6.4).**
+  - The middleware accepts the token in v1's `CSRF-Token` header and in a
+    URL-encoded form's `_csrf` field, as well as `x-csrf-token`. It is the same
+    comparison against the same cookie. A form body is read only when it is
+    form-encoded, up to 2 MiB.
+  - The middleware now mints the token **before** the handler runs and hands it
+    over as a `CsrfToken` extension, so a page rendered on first contact
+    carries the token its cookie is about to hold.
+  - `AppRequest` gains `csrf_token`. `req.csrfToken()` answers it, so v1's
+    forms carry it as `_csrf`, and the document's `_sc_globalCsrf` is it.
+- **Tests (6.5).**
+  - `saltcorn_ui_render`'s new `the_views_save_forms_run_actions_filter_and_delete`,
+    over the restored BooksDB application. It checks:
+    - the token in the rendered form and the page script;
+    - a form post with no token, and with a forged one, refused, nothing written;
+    - an insert through *Edit Books* (the token in `_csrf`), then an update;
+    - *List Books*' `TrimPages` column through `run_action`, as `view_post`
+      sends it, trimming the row's pages;
+    - the Filter page narrowed by `author=1` (the dropdown shows it selected)
+      and by `_gte_pages=600` (the range input shows it), and the list's ajax
+      reload over `author` and `_lte_pages`;
+    - Delete over ajax, a form post's redirect kept on the application, and a
+      table outside the subset refused.
+  - `an_action_that_is_not_the_applications_is_refused_by_name`:
+    - at save time, a state action by name and an undeclared trigger;
+    - at run time, List Books' column once the application stops declaring
+      `TrimPages`, answering JSON naming it with the row untouched.
+  - The setup creates `TrimPages` as this server's trigger (`run_js_code`)
+    and the application declares it. BooksDB's own is a v1 `modify_row`,
+    which the restore leaves out.
+  - `router`'s `csrf_accepts_the_token_in_v1s_header_and_in_a_forms_field`.
+  - Unit tests:
+    - `configured_actions` and `check_view_actions`;
+    - the snapshot's trigger actions;
+    - a form body as `req.body`;
+    - the redirect rule.
+  - Updated: the golden normaliser replaces a form's `_csrf` value, and
+    `edit.html` says `CSRF`. The snapshot test expects a trigger's `action`.
+  - Fixed, from Phase 5: the golden normaliser matched a v1 form id of exactly
+    six hex digits. v1 draws it with `Math.random() * 16777215` in base 16, so
+    it can have fewer, and the Edit comparison failed about one run in sixteen.
+    It now matches one to six.
+- **Notes for review.**
+  - A flash set on a redirect (v1's "Not authorized" on a refused delete) is not
+    carried to the next page: there is no flash store across requests yet. A
+    refused form-posted delete is logged.
+  - A trigger's action kind is read into the snapshot at its generation. Editing
+    which action a trigger runs without saving the application leaves the old
+    kind until the next save or SIGHUP.
+  - The trigger runs under the trigger surface's existing rule: a trigger with
+    no `min_role` is admin-only. Whose authority a view's writes carry
+    throughout is 7.2.
+
 ## Saltcorn UI, Phase 5: the framework, and rendering a view
 
 A Saltcorn UI application now serves its views and pages over HTTP, on its own
