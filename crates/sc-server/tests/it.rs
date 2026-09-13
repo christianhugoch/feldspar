@@ -97,8 +97,26 @@ mod python_trigger;
 mod rls_enforcement;
 #[path = "router.rs"]
 mod router;
+/// The process-wide registries `ModuleServices` installs into on boot and on
+/// every module change — the view runtime, the view pattern registry, a
+/// plugin's headers and public files, the frameworks — held against the tests
+/// in this binary that boot one.
+///
+/// A server is one process, so in production these are globals for good
+/// reason; here many servers share one process. A test that boots the modules
+/// takes the lock **for reading**, and they run side by side as before. A test
+/// that needs the registries to stay what *its* server installed — an installed
+/// plugin's view patterns (TODO "Saltcorn UI" Phase 11) — takes it **for
+/// writing**, so no other server's boot replaces them mid-test.
+pub(crate) fn module_registries() -> &'static tokio::sync::RwLock<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::RwLock<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::RwLock::new(()))
+}
+
 #[path = "saltcorn_ui_mount.rs"]
 mod saltcorn_ui_mount;
+#[path = "saltcorn_ui_plugins.rs"]
+mod saltcorn_ui_plugins;
 #[path = "saltcorn_ui_admin_api.rs"]
 mod saltcorn_ui_admin_api;
 #[path = "saltcorn_ui_configure.rs"]

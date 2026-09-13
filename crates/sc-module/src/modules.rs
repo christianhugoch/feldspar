@@ -16,6 +16,7 @@ use sc_catalog::Catalog;
 use sc_core_actions::CodeSurfaces;
 use sc_error::Result;
 use sc_types::{Attrs, FormField};
+use sc_viewpattern::{BUILTIN_PATTERNS, PatternInfo, PluginAssets};
 use serde_json::{Value as Json, json};
 
 use crate::action::ModuleAction;
@@ -76,6 +77,16 @@ impl LoadedModule {
             .unwrap_or_default()
     }
 
+    /// The view patterns this module supplies that are available (TODO
+    /// "Saltcorn UI" 11.1) — what the Modules tab lists, and what a view may be
+    /// saved with. A pattern whose name was taken is not here; it is an issue.
+    pub fn view_pattern_names(&self) -> Vec<String> {
+        self.manifest
+            .as_ref()
+            .map(|m| m.view_patterns.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// Whether the module is loaded and contributing.
     pub fn is_loaded(&self) -> bool {
         self.manifest.is_some()
@@ -126,7 +137,73 @@ impl ModuleSet {
             }
             modules.push(load_one(&module, host, installer, surfaces, registry).await);
         }
+        resolve_view_patterns(&mut modules);
         Ok(ModuleSet { modules })
+    }
+
+    /// Every module's available view patterns, as the registry a view's save is
+    /// checked against (TODO "Saltcorn UI" 11.1).
+    pub fn view_patterns(&self) -> Vec<PatternInfo> {
+        self.modules
+            .iter()
+            .flat_map(|loaded| {
+                loaded.manifest.iter().flat_map(|manifest| {
+                    manifest.view_patterns.iter().map(|pattern| PatternInfo {
+                        name: pattern.name.clone(),
+                        tableless: !pattern.table_required,
+                        module: Some(loaded.module.name.clone()),
+                    })
+                })
+            })
+            .collect()
+    }
+
+    /// The same patterns as `(module, pattern)`: what the view runtime's
+    /// registry is installed with ([`ModuleHost::install_view_patterns`]).
+    pub fn installed_view_patterns(&self) -> Vec<(String, String)> {
+        self.view_patterns()
+            .into_iter()
+            .filter_map(|p| p.module.map(|module| (module, p.name)))
+            .collect()
+    }
+
+    /// What each JavaScript module brings to a rendered document: its declared
+    /// headers and its package's `public/` (11.2), under the names v1 builds
+    /// its public URLs from — the plugin's own name, and the package name
+    /// without its scope.
+    pub fn plugin_assets(&self, installer: &Installer) -> Vec<PluginAssets> {
+        self.modules
+            .iter()
+            .filter(|loaded| loaded.module.language == crate::module::ModuleLanguage::JavaScript)
+            .filter_map(|loaded| {
+                let manifest = loaded.manifest.as_ref()?;
+                let public = installer.package_dir(&loaded.module.name).join("public");
+                let public_dir = public.is_dir().then_some(public);
+                if manifest.headers.is_empty() && public_dir.is_none() {
+                    return None;
+                }
+                let mut names: Vec<String> = Vec::new();
+                for name in [
+                    manifest.plugin_name.as_deref(),
+                    loaded.module.name.rsplit('/').next(),
+                ]
+                .into_iter()
+                .flatten()
+                .map(str::trim)
+                {
+                    if !name.is_empty() && !names.iter().any(|n| n == name) {
+                        names.push(name.to_owned());
+                    }
+                }
+                Some(PluginAssets {
+                    module: loaded.module.name.clone(),
+                    names,
+                    version: loaded.module.version.clone().unwrap_or_default(),
+                    public_dir,
+                    headers: manifest.headers.clone(),
+                })
+            })
+            .collect()
     }
 
     /// The same set, with another language's loaded modules in it (§8).
@@ -247,6 +324,49 @@ async fn load_one(
     }
 }
 
+/// One namespace of view pattern names, as a view stores its pattern by name
+/// (TODO "Saltcorn UI" §6): v1's built-in patterns first, then each module's in
+/// the set's order. A name already taken costs **that pattern** — removed from
+/// the module's manifest, with the reason on its card — and the module keeps
+/// everything else it supplies.
+fn resolve_view_patterns(modules: &mut [LoadedModule]) {
+    let mut taken: Vec<(String, Option<String>)> = BUILTIN_PATTERNS
+        .iter()
+        .map(|name| ((*name).to_owned(), None))
+        .collect();
+    for loaded in modules {
+        let LoadedModule {
+            module,
+            manifest,
+            issues,
+            ..
+        } = loaded;
+        let Some(manifest) = manifest else {
+            continue;
+        };
+        let mut kept = Vec::new();
+        for pattern in std::mem::take(&mut manifest.view_patterns) {
+            match taken.iter().find(|(name, _)| *name == pattern.name) {
+                Some((_, None)) => issues.push(format!(
+                    "its view pattern `{}` is not available: that is the name of one of Saltcorn \
+                     1's built-in view patterns, and a view stores its pattern by name",
+                    pattern.name
+                )),
+                Some((_, Some(owner))) => issues.push(format!(
+                    "its view pattern `{}` is not available: the module {owner} already supplies \
+                     a view pattern of that name, and a view stores its pattern by name",
+                    pattern.name
+                )),
+                None => {
+                    taken.push((pattern.name.clone(), Some(module.name.clone())));
+                    kept.push(pattern);
+                }
+            }
+        }
+        manifest.view_patterns = kept;
+    }
+}
+
 /// A module's configuration, redacted for the wire: every `secret` field
 /// replaced by the sentinel (§11.1).
 pub fn redacted_configuration(loaded: &LoadedModule) -> Attrs {
@@ -298,6 +418,8 @@ mod tests {
             table_providers: Vec::new(),
             model_providers: Vec::new(),
             frameworks: Vec::new(),
+            view_patterns: Vec::new(),
+            headers: Vec::new(),
             config_fields: Vec::new(),
             unsupported: vec![UnsupportedEntity {
                 key: "eventTypes".into(),
@@ -335,6 +457,95 @@ mod tests {
         assert_eq!(census.len(), 1);
         assert_eq!(census[0]["key"], json!("eventTypes"));
         assert_eq!(census[0]["count"], json!(1));
+    }
+
+    fn with_patterns(module: &str, patterns: &[&str]) -> LoadedModule {
+        let mut manifest = manifest();
+        manifest.view_patterns = patterns
+            .iter()
+            .map(|name| serde_json::from_value(json!({ "name": name, "table_required": true })).unwrap())
+            .collect();
+        let mut loaded = loaded_with(Some(manifest), Vec::new());
+        loaded.module.name = module.to_owned();
+        loaded
+    }
+
+    /// 11.1: one namespace with the built-ins, first module first; a clash
+    /// costs that pattern, on that module's card, and nothing else.
+    #[test]
+    fn a_view_pattern_whose_name_is_taken_is_lost_with_the_reason_on_the_card() {
+        let mut modules = vec![
+            with_patterns("@saltcorn/kanban", &["Kanban", "KanbanAllocator"]),
+            with_patterns("@acme/boards", &["Kanban", "List", "Gantt"]),
+        ];
+        resolve_view_patterns(&mut modules);
+        let set = ModuleSet { modules };
+
+        assert_eq!(set.modules[0].view_pattern_names(), ["Kanban", "KanbanAllocator"]);
+        assert!(set.modules[0].issues.is_empty(), "{:?}", set.modules[0].issues);
+        let boards = &set.modules[1];
+        assert_eq!(boards.view_pattern_names(), ["Gantt"]);
+        assert_eq!(boards.action_names(), ["mqtt_publish"], "the rest of the module stays");
+        let issues = boards.issues.join("\n");
+        assert!(
+            issues.contains("`Kanban` is not available: the module @saltcorn/kanban already"),
+            "{issues}"
+        );
+        assert!(
+            issues.contains("`List` is not available: that is the name of one of Saltcorn 1's built-in"),
+            "{issues}"
+        );
+
+        let registered: Vec<(String, bool, Option<String>)> = set
+            .view_patterns()
+            .into_iter()
+            .map(|p| (p.name, p.tableless, p.module))
+            .collect();
+        assert_eq!(registered.len(), 3);
+        assert_eq!(
+            registered[2],
+            ("Gantt".to_owned(), false, Some("@acme/boards".to_owned()))
+        );
+        assert_eq!(
+            set.installed_view_patterns(),
+            [
+                ("@saltcorn/kanban".to_owned(), "Kanban".to_owned()),
+                ("@saltcorn/kanban".to_owned(), "KanbanAllocator".to_owned()),
+                ("@acme/boards".to_owned(), "Gantt".to_owned()),
+            ]
+        );
+    }
+
+    /// 11.2: a module's headers and `public/`, under the names v1's URLs use.
+    #[test]
+    fn a_plugins_assets_are_its_headers_and_its_public_directory() {
+        let root = std::env::temp_dir().join(format!("sc-module-assets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let installer = Installer::new(&root);
+        std::fs::create_dir_all(installer.package_dir("@saltcorn/kanban").join("public")).unwrap();
+
+        let mut kanban = with_patterns("@saltcorn/kanban", &["Kanban"]);
+        kanban.module.version = Some("0.5.5".into());
+        if let Some(manifest) = kanban.manifest.as_mut() {
+            manifest.plugin_name = Some("kanban".into());
+            manifest.headers = vec![sc_viewpattern::PluginHeader {
+                script: Some("/plugins/public/kanban@0.5.5/dragula.min.js".into()),
+                only_views: Some(vec!["Kanban".into()]),
+                ..Default::default()
+            }];
+        }
+        // Neither headers nor a public directory: nothing to install.
+        let plain = with_patterns("@saltcorn/mqtt", &[]);
+        let set = ModuleSet {
+            modules: vec![kanban, plain],
+        };
+        let assets = set.plugin_assets(&installer);
+        assert_eq!(assets.len(), 1, "{assets:?}");
+        assert_eq!(assets[0].names, ["kanban"]);
+        assert_eq!(assets[0].version, "0.5.5");
+        assert!(assets[0].public_dir.as_ref().is_some_and(|d| d.ends_with("kanban/public")));
+        assert_eq!(assets[0].headers.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

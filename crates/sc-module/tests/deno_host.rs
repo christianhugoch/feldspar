@@ -51,7 +51,7 @@ async fn a_module_loads_and_runs_in_this_process() {
         .iter()
         .map(|e| e.key.as_str())
         .collect();
-    assert!(census.contains(&"viewtemplates"), "{census:?}");
+    assert!(census.contains(&"types"), "{census:?}");
     assert!(manifest.issues.is_empty(), "{:?}", manifest.issues);
 
     // And the action runs, with v1's argument object and the module's own

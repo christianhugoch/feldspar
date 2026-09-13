@@ -65,7 +65,13 @@ async fn a_module_loads_and_reports_what_it_supplies() {
         .iter()
         .map(|e| (e.key.as_str(), e.count))
         .collect();
-    assert!(census.contains(&("viewtemplates", Some(2))), "{census:?}");
+    assert!(census.contains(&("types", Some(2))), "{census:?}");
+    // `viewtemplates` left it with Saltcorn UI (TODO "Saltcorn UI" 11.1): a
+    // module's view patterns are loaded now.
+    assert!(
+        !census.iter().any(|(key, _)| *key == "viewtemplates" || *key == "headers"),
+        "{census:?}"
+    );
     // `table_providers` left the census when it started being loaded (§8.3), so
     // its absence here is the assertion that it is no longer "what you are not
     // getting".

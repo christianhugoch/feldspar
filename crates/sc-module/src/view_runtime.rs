@@ -34,7 +34,7 @@ use sc_viewpattern::{
     ViewRequest, ViewRuntime,
 };
 use serde_json::{Value as Json, json};
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex;
 
 use crate::host::{CallHosts, ModuleHost};
 use crate::spec::config_fields_to_form_fields;
@@ -46,9 +46,10 @@ pub const BUILTIN_VIEW_RUNTIME: &str = "@feldspar/saltcorn-ui";
 /// The view runtime, over the module pool.
 pub struct ModuleViewRuntime {
     host: Arc<ModuleHost>,
-    /// The pattern manifest, asked once and kept: it is the bundle's registry,
-    /// and the bundle does not change while the server runs.
-    patterns: OnceCell<Vec<PatternManifest>>,
+    /// The pattern manifest, asked once per generation of the installed module
+    /// patterns and kept: the bundle's six do not change while the server runs,
+    /// and the modules' change only when the module set does (11.1).
+    patterns: Mutex<Option<(u64, Vec<PatternManifest>)>>,
 }
 
 impl ModuleViewRuntime {
@@ -57,7 +58,7 @@ impl ModuleViewRuntime {
     pub fn new(host: &Arc<ModuleHost>) -> ModuleViewRuntime {
         ModuleViewRuntime {
             host: Arc::clone(host),
-            patterns: OnceCell::new(),
+            patterns: Mutex::new(None),
         }
     }
 }
@@ -77,22 +78,26 @@ fn call_of(ctx: ViewContext<'_>) -> (CallHosts<'_>, &ViewRequest) {
 #[async_trait]
 impl ViewRuntime for ModuleViewRuntime {
     async fn patterns(&self) -> Result<Vec<PatternManifest>> {
-        self.patterns
-            .get_or_try_init(|| async {
-                let answer = self
-                    .host
-                    .view_call("view_patterns", json!({}), CallHosts::default())
-                    .await
-                    .map_err(|e| failed("the view patterns", "listed", e))?;
-                serde_json::from_value::<Vec<PatternManifest>>(answer).map_err(|e| {
-                    Error::msg(format!(
-                        "the view runtime answered its pattern list with something this server \
-                         cannot read: {e}"
-                    ))
-                })
-            })
+        let generation = self.host.view_patterns_generation();
+        let mut held = self.patterns.lock().await;
+        if let Some((at, patterns)) = held.as_ref()
+            && *at == generation
+        {
+            return Ok(patterns.clone());
+        }
+        let answer = self
+            .host
+            .view_call("view_patterns", json!({}), CallHosts::default())
             .await
-            .cloned()
+            .map_err(|e| failed("the view patterns", "listed", e))?;
+        let patterns = serde_json::from_value::<Vec<PatternManifest>>(answer).map_err(|e| {
+            Error::msg(format!(
+                "the view runtime answered its pattern list with something this server cannot \
+                 read: {e}"
+            ))
+        })?;
+        *held = Some((generation, patterns.clone()));
+        Ok(patterns)
     }
 
     async fn render(&self, view: &View, state: &Json, ctx: ViewContext<'_>) -> Result<ViewOutput> {
@@ -368,6 +373,17 @@ fn output(answer: Json) -> Result<ViewOutput> {
             None => Vec::new(),
         },
         flashes,
+        patterns: response
+            .get("patterns")
+            .and_then(Json::as_array)
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(Json::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -384,9 +400,11 @@ mod tests {
                 "redirect": "/view/List%20Books",
                 "flashes": [{ "kind": "success", "message": "Saved" }],
                 "headers": [["Page-Title", "Books"]],
+                "patterns": ["Filter", "Kanban"],
             },
         }))
         .unwrap();
+        assert_eq!(out.patterns, ["Filter", "Kanban"]);
         assert_eq!(out.headers, [("Page-Title".to_owned(), "Books".to_owned())]);
         assert_eq!(out.body, json!("<p>hi</p>"));
         assert_eq!(out.status, Some(302));
@@ -436,6 +454,15 @@ mod tests {
                 "`{setting}` is a setting the runtime never reads"
             );
         }
+    }
+
+    /// 11.5: a plugin's `db.connectObj.version_tag` is the worker's
+    /// `CARGO_PKG_VERSION`, and a `/static_assets/<tag>/` URL built from it has
+    /// to be one the framework serves.
+    #[test]
+    fn the_version_tag_a_plugin_reads_is_the_asset_tag_the_framework_serves() {
+        assert_eq!(env!("CARGO_PKG_VERSION"), sc_viewpattern::ASSET_VERSION_TAG);
+        assert!(crate::host::HOST_SCRIPT.contains("version_tag: versionTag"));
     }
 
     #[test]

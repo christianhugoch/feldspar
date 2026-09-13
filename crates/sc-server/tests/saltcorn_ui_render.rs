@@ -220,6 +220,7 @@ struct Server {
     _modules: Arc<ModuleServices>,
     _db: TestDb,
     _files: TempDir,
+    _registries: tokio::sync::RwLockReadGuard<'static, ()>,
 }
 
 struct TempDir(PathBuf);
@@ -262,6 +263,7 @@ async fn setup(tag: &str, bundle: PathBuf) -> sc_error::Result<Server> {
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&root);
+    let registries = crate::module_registries().read().await;
     let modules = ModuleServices::install(
         &catalog,
         &dispatcher,
@@ -409,6 +411,7 @@ async fn setup(tag: &str, bundle: PathBuf) -> sc_error::Result<Server> {
         _modules: modules,
         _db: db,
         _files: TempDir(root),
+        _registries: registries,
     })
 }
 

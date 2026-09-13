@@ -646,6 +646,14 @@ fn install_seam(worker: &mut MainWorker, view_runtime: Option<&str>) -> Result<(
     define(scope, global, "__scFail", host_fail)?;
     define(scope, global, "__scLog", host_log)?;
     define(scope, global, "__scAsk", host_ask)?;
+    // v1's `db.connectObj.version_tag`, which a plugin builds a
+    // `/static_assets/<tag>/…` URL out of (TODO "Saltcorn UI" 11.5): the
+    // server's version, which is Saltcorn UI's asset tag.
+    let key = v8::String::new(scope, "__scVersionTag")
+        .ok_or_else(|| Error::msg("the module worker could not name `__scVersionTag`"))?;
+    let value = v8::String::new(scope, env!("CARGO_PKG_VERSION"))
+        .ok_or_else(|| Error::msg("the module worker could not hold the version tag"))?;
+    global.set(scope, key.into(), value.into());
     if let Some(url) = view_runtime {
         let key = v8::String::new(scope, "__scViewRuntime")
             .ok_or_else(|| Error::msg("the module worker could not name `__scViewRuntime`"))?;

@@ -110,6 +110,9 @@ const askHost = globalThis.__scAsk;
  * every worker needs it and only some are ever told about a view. */
 const viewRuntimeUrl =
   typeof globalThis.__scViewRuntime === "string" ? globalThis.__scViewRuntime : null;
+/** The server's version: Saltcorn UI's `/static_assets/<tag>/` tag, and v1's
+ * `db.connectObj.version_tag` (TODO "Saltcorn UI" 11.5). */
+const versionTag = typeof globalThis.__scVersionTag === "string" ? globalThis.__scVersionTag : "";
 
 // ---------------------------------------------------------------------------
 // Which module is speaking
@@ -502,8 +505,10 @@ function saltcornModule(specifier) {
     }
     case "@saltcorn/data/models/workflow":
       return Workflow;
+    // A host module, so a name this host does not answer is a named stub rather
+    // than `undefined` (a spread of the stub namespace copies nothing).
     case "@saltcorn/data/utils":
-      return { ...namedNamespace(specifier), interpolate };
+      return hostModule(specifier, v1Utils);
     // The v1 models a view reaches, over the application it renders for
     // (TODO "Saltcorn UI" Phase 4). A class, as v1's CommonJS shim answers one.
     case "@saltcorn/data/models/view":
@@ -539,6 +544,14 @@ function saltcornModule(specifier) {
     }
   }
 }
+
+/** The members of v1's `@saltcorn/data/utils` this host answers. */
+const v1Utils = {
+  interpolate,
+  // `const { isWeb } = require("@saltcorn/data/utils")` — @saltcorn/kanban.
+  // v1's, verbatim: node, and not a Saltcorn mobile request (its `smr` flag).
+  isWeb: (req) => !(req && req.smr),
+};
 
 /** The part of v1's `db` module a view pattern reaches that is not a database:
  * the name helpers `stateFieldsToWhere` and a slug build with, and
@@ -579,7 +592,36 @@ const v1Db = {
       throw error;
     }
   },
+  // `script({ src: `/static_assets/${db.connectObj.version_tag}/socket.io.min.js` })`
+  // — @saltcorn/kanban. A string, not a connection: the asset tag this server's
+  // `/static_assets/` answers (11.5). A wrong one is a silent 404, not an error.
+  connectObj: Object.freeze({ version_tag: versionTag }),
+  // v1's raw SQL, refused **by what it is** rather than as a missing API
+  // (TODO "Saltcorn UI" §6): `@saltcorn/mind-map` builds a recursive CTE with
+  // `db.getTenantSchemaPrefix()`, `db.sqlsanitize` and `db.query`.
+  query: rawSql("query"),
+  getTenantSchemaPrefix: rawSql("getTenantSchemaPrefix"),
+  getTenantSchema: rawSql("getTenantSchema"),
+  getClient: rawSql("getClient"),
 };
+
+/** A member of v1's `db` that only exists to run SQL a plugin wrote. Refused,
+ * and it is a decision rather than an omission: SQL from a plugin goes around
+ * the row layer's plan, its ownership rule and its row cap, all three of which
+ * exist on purpose. */
+function rawSql(member) {
+  return function () {
+    const what =
+      member === "query"
+        ? "`db.query` is v1's raw SQL"
+        : `\`db.${member}\` is part of v1's raw SQL — what a plugin writes a \`db.query\` with —`;
+    throw new Error(
+      `${what}, which this server does not give a plugin: SQL from a plugin would go around ` +
+        `the row layer's query plan, its ownership rule and its row cap. Rows are read and ` +
+        `written through \`Table\` here.`,
+    );
+  };
+}
 
 /** The v1 exports that answer `undefined` rather than a stub: the **absent**
  * tier (TODO "Saltcorn UI" §5).
@@ -683,6 +725,10 @@ const supportedKeys = new Set([
   "table_providers",
   "modelproviders",
   "frameworks",
+  // Saltcorn UI (TODO "Saltcorn UI" §6): view patterns, and the scripts and
+  // stylesheets a document rendering them wants.
+  "viewtemplates",
+  "headers",
 ]);
 
 /** Keys that are metadata rather than an entity type — including `onLoad`,
@@ -1022,6 +1068,131 @@ async function evalFrameworks(plugin, configuration) {
     });
   }
   return { frameworks, set, issues };
+}
+
+/** A plugin key read v1's `withCfg` way: a value, or a function of the module's
+ * configuration answering one. A function that throws is an issue, named. */
+async function withConfiguration(plugin, key, configuration, what, issues) {
+  const exported = plugin[key];
+  if (typeof exported !== "function") return exported;
+  try {
+    return await exported(configuration || {});
+  } catch (e) {
+    issues.push(`its ${what} could not be built: ${e.message}`);
+    return undefined;
+  }
+}
+
+/** One view pattern as data (§3.3): what the admin UI asks on the path that
+ * renders a form. The step **names** need a `req` and nothing else; a step's
+ * fields need a table, and are a call (§6). */
+function describePattern(vt) {
+  const { req } = viewRequest({}, null);
+  const workflow =
+    typeof vt.configuration_workflow === "function" ? vt.configuration_workflow(req) : null;
+  return {
+    name: vt.name,
+    label: vt.label || vt.name,
+    description: vt.description || "",
+    table_required: !vt.tableless,
+    view_quantity: vt.view_quantity || null,
+    routes: Object.keys(vt.routes || {}),
+    steps: ((workflow && workflow.steps) || []).map((step) => String(step.name)),
+  };
+}
+
+/** v1's `viewtemplates`: a list of patterns (v1 also accepts them keyed by
+ * name), each `{ name, run, configuration_workflow, routes, … }` (TODO
+ * "Saltcorn UI" §6, 11.1).
+ *
+ * What crosses is each pattern's **description**; the pattern itself stays in
+ * `loaded`, and reaches the view runtime's registry only when the server says
+ * which module's pattern holds each name (`syncInstalledPatterns`). So a clash
+ * — with a built-in, or with another module — is decided in one place, for the
+ * whole set, and is not a race between two loads.
+ *
+ * A pattern with no name or no `run` is an issue and is skipped. So is every
+ * pattern on a server without the Saltcorn UI bundle, which has nothing to
+ * render one with. */
+async function evalViewTemplates(plugin, configuration) {
+  const issues = [];
+  const exported = await withConfiguration(plugin, "viewtemplates", configuration, "view patterns", issues);
+  const raw = Array.isArray(exported)
+    ? exported
+    : exported && typeof exported === "object"
+      ? Object.values(exported)
+      : [];
+  const patterns = [];
+  const set = {};
+  if (raw.length > 0 && !viewRuntimeUrl) {
+    const names = raw.map((vt) => (vt && vt.name) || "?").join(", ");
+    issues.push(
+      `its view patterns (${names}) are not available: this server was started without the ` +
+        `Saltcorn UI bundle, which is what renders a view`,
+    );
+    return { patterns, set, issues };
+  }
+  for (const vt of raw) {
+    if (!vt || typeof vt.name !== "string" || !vt.name.trim()) {
+      issues.push("a view pattern it declares has no name, so no view can be saved with it");
+      continue;
+    }
+    if (typeof vt.run !== "function") {
+      issues.push(`the view pattern "${vt.name}" is not available: it has no run function`);
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(set, vt.name)) {
+      issues.push(`the view pattern "${vt.name}" is declared twice; the first is the one kept`);
+      continue;
+    }
+    let description;
+    try {
+      description = describePattern(vt);
+    } catch (e) {
+      issues.push(
+        `the view pattern "${vt.name}" is not available: its configuration steps could not be ` +
+          `listed: ${e.message}`,
+      );
+      continue;
+    }
+    // 11.4: read and reported, never silently dropped. Each view of the
+    // pattern that asks for them is named when it renders.
+    if (typeof vt.virtual_triggers === "function") {
+      issues.push(
+        `the view pattern "${vt.name}" declares virtual triggers — Saltcorn 1's realtime events ` +
+          `— which this server does not run: a ${vt.name} view configured for real-time updates ` +
+          `renders, and does not update live`,
+      );
+    }
+    set[vt.name] = vt;
+    patterns.push(description);
+  }
+  return { patterns, set, issues };
+}
+
+/** v1's `headers`: `{ script }` or `{ css }`, each with an optional
+ * `onlyViews` naming the patterns that want it (11.2). Data, crossing at load;
+ * the document builder decides where they go. A header of another kind is not
+ * injected, and says so. */
+async function evalHeaders(plugin, configuration) {
+  const issues = [];
+  const exported = await withConfiguration(plugin, "headers", configuration, "headers", issues);
+  const headers = [];
+  for (const header of Array.isArray(exported) ? exported : []) {
+    if (!header || typeof header !== "object") continue;
+    const only_views = Array.isArray(header.onlyViews) ? header.onlyViews.map(String) : undefined;
+    if (typeof header.script === "string") {
+      headers.push({ script: header.script, only_views });
+    } else if (typeof header.css === "string") {
+      headers.push({ css: header.css, only_views });
+    } else {
+      issues.push(
+        `a header it declares is not injected: this version injects a plugin's scripts and ` +
+          `stylesheets, and this one is { ${Object.keys(header).join(", ")} }`,
+      );
+    }
+  }
+  return { headers, issues };
 }
 
 /** The files one framework generates for one application.
@@ -1420,6 +1591,15 @@ async function loadModule({ module: name, dir, configuration }) {
   } = await evalFrameworks(plugin, configuration);
   issues.push(...frameworkIssues);
 
+  const {
+    patterns: viewPatterns,
+    set: viewPatternSet,
+    issues: viewPatternIssues,
+  } = await evalViewTemplates(plugin, configuration);
+  issues.push(...viewPatternIssues);
+  const { headers, issues: headerIssues } = await evalHeaders(plugin, configuration);
+  issues.push(...headerIssues);
+
   const unsupported = [];
   for (const [key, value] of Object.entries(plugin)) {
     if (supportedKeys.has(key) || metadataKeys.has(key)) continue;
@@ -1433,8 +1613,12 @@ async function loadModule({ module: name, dir, configuration }) {
     providers: providerSet,
     modelProviders: modelProviderSet,
     frameworks: frameworkSet,
+    viewtemplates: viewPatternSet,
     configuration: configuration || {},
   });
+  // The registry may hold this module's previous patterns: rebuild it on the
+  // next view call, whatever generation that call carries.
+  installedPatternsGeneration = null;
 
   return {
     name,
@@ -1445,6 +1629,8 @@ async function loadModule({ module: name, dir, configuration }) {
     table_providers: providers,
     model_providers: modelProviders,
     frameworks,
+    view_patterns: viewPatterns,
+    headers,
     config_fields: configFields,
     unsupported,
     issues,
@@ -1539,6 +1725,46 @@ async function requireViewRuntime() {
       : "this server was started without the Saltcorn UI bundle, so there is no view runtime " +
           "to render a view with",
   );
+}
+
+/** The module patterns in the view runtime's registry (11.1): which module's
+ * pattern holds each name, and the generation of the server's list they were
+ * installed from — `null` when the registry must be rebuilt on the next call. */
+const installedPatternModules = new Map();
+let installedPatternsGeneration = null;
+/** The bundle's own pattern names: v1's six, which no module takes. */
+let builtinPatternNames = null;
+
+/** Make the view runtime's registry the one the call names (11.1): v1's six,
+ * and each `{ module, name }` the server resolved — **installed whole**, so a
+ * module uninstalled or out-voted loses its pattern here too.
+ *
+ * The server carries the list on every view call rather than once, because a
+ * worker that restarted has lost what it was told; one integer comparison
+ * decides whether anything is done. A pattern whose module is not on this
+ * worker is not installed, and a view of it fails naming the pattern. */
+async function syncInstalledPatterns(request) {
+  const runtime = await ensureViewRuntime();
+  if (!runtime) return;
+  const generation = typeof request.patternsGeneration === "number" ? request.patternsGeneration : 0;
+  if (generation === installedPatternsGeneration) return;
+  const wanted = Array.isArray(request.patterns) ? request.patterns : [];
+  // A module still loading (a restart replaying its loads) is waited for.
+  await Promise.all(wanted.map((p) => loading.get(p && p.module)).filter(Boolean));
+  if (!builtinPatternNames) builtinPatternNames = new Set(runtime.viewPatterns().map((p) => p.name));
+  for (const name of Object.keys(runtime.viewtemplates)) {
+    if (!builtinPatternNames.has(name)) delete runtime.viewtemplates[name];
+  }
+  installedPatternModules.clear();
+  for (const { module, name } of wanted) {
+    if (builtinPatternNames.has(name) || installedPatternModules.has(name)) continue;
+    const entry = loaded.get(module);
+    const vt = entry && entry.viewtemplates && entry.viewtemplates[name];
+    if (!vt) continue;
+    runtime.viewtemplates[name] = vt;
+    installedPatternModules.set(name, module);
+  }
+  installedPatternsGeneration = generation;
 }
 
 /** The view snapshots this worker holds, by application id (§4).
@@ -1816,12 +2042,61 @@ function asView(view, body) {
   const embedded = (viewTrail.getStore() || []).length > 0;
   return withinView(view.name, async () => {
     requireApplicationTable(view);
+    noteRenderedPattern(view.viewtemplate);
+    await reportVirtualTriggers(view);
     try {
       return await body();
     } catch (e) {
       throw embedded ? nameFailure(e, `in the view ${view.name} (${view.viewtemplate})`) : e;
     }
   });
+}
+
+/** Record that the call in flight ran `pattern`, once, in order: the document
+ * builder injects the headers of the patterns a page actually rendered, the
+ * embedded ones included (11.3). */
+function noteRenderedPattern(pattern) {
+  const store = running.getStore();
+  if (!store || !pattern) return;
+  if (!store.patterns) store.patterns = [];
+  if (!store.patterns.includes(pattern)) store.patterns.push(pattern);
+}
+
+/** The views already reported for their virtual triggers, per snapshot — so
+ * once per view per generation, not once per render. */
+const virtualTriggersReported = new WeakMap();
+
+/** 11.4: a view whose pattern declares `virtual_triggers` and whose
+ * configuration asks for some — Kanban with real-time updates on — is named in
+ * the log, because this server does not run them and the view looks as if it
+ * works. Not a failure: the view renders, and does not update live. */
+async function reportVirtualTriggers(view) {
+  const vt = view.viewtemplateObj;
+  const set = applicationOf();
+  if (!vt || typeof vt.virtual_triggers !== "function" || !set) return;
+  let reported = virtualTriggersReported.get(set);
+  if (!reported) {
+    reported = new Set();
+    virtualTriggersReported.set(set, reported);
+  }
+  if (reported.has(view.name)) return;
+  reported.add(view.name);
+  let triggers;
+  try {
+    triggers = await vt.virtual_triggers(view.table_id, view.name, view.configuration || {});
+  } catch (e) {
+    triggers = null;
+  }
+  if (Array.isArray(triggers) && triggers.length > 0) {
+    log(
+      "warning",
+      VIEW_RUNTIME,
+      `the view ${view.name} (${view.viewtemplate}) of application ${applicationName(set)} asks ` +
+        `for ${triggers.length} virtual trigger${triggers.length === 1 ? "" : "s"} — Saltcorn 1's ` +
+        `realtime events — which this server does not run, so it will not update live; turn off ` +
+        `its real-time updates to say so`,
+    );
+  }
 }
 
 /** v1's `View`, over the snapshot (4.1). */
@@ -2862,6 +3137,8 @@ function getState() {
 
 /** What a view call answers. */
 function viewAnswer(value, response) {
+  const store = running.getStore();
+  response.patterns = (store && store.patterns) || [];
   return { value: value === undefined ? null : value, response };
 }
 
@@ -2940,17 +3217,15 @@ function wrapped(value, request, req, response, set) {
  * else — and never a step's fields, which need a table. */
 async function viewPatternsOp() {
   const runtime = await requireViewRuntime();
-  const { req } = viewRequest({}, null);
-  return runtime.viewPatterns().map((pattern) => {
-    const vt = runtime.viewtemplates[pattern.name];
-    const workflow =
-      typeof vt.configuration_workflow === "function" ? vt.configuration_workflow(req) : null;
-    return {
-      ...pattern,
-      label: vt.label || pattern.name,
-      steps: ((workflow && workflow.steps) || []).map((step) => String(step.name)),
-    };
-  });
+  const builtins = runtime.viewPatterns().map((pattern) => ({
+    ...describePattern(runtime.viewtemplates[pattern.name]),
+    ...pattern,
+  }));
+  // And the installed modules' (11.1), as the registry holds them now.
+  const installed = [...installedPatternModules.keys()].map((name) =>
+    describePattern(runtime.viewtemplates[name]),
+  );
+  return [...builtins, ...installed];
 }
 
 /** The view `name` of the call's application, or the sentence saying there is
@@ -3061,6 +3336,9 @@ async function viewReferences({ view: name }) {
 // ---------------------------------------------------------------------------
 
 async function handle(request) {
+  if (typeof request.op === "string" && request.op.startsWith("view_")) {
+    await syncInstalledPatterns(request);
+  }
   switch (request.op) {
     case "ping":
       return { pong: true, node: process.version };
@@ -3075,6 +3353,7 @@ async function handle(request) {
     case "unload":
       loaded.delete(request.module);
       loading.delete(request.module);
+      installedPatternsGeneration = null;
       return { unloaded: true };
     case "run": {
       const pending = loading.get(request.module);

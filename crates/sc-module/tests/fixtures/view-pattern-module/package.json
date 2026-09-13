@@ -1,0 +1,8 @@
+{
+  "name": "@saltcorn-test/view-patterns",
+  "version": "0.1.0",
+  "description": "A v1 plugin whose content is view patterns and headers, the way @saltcorn/kanban's is: one pattern of its own, one whose name a built-in already has, a script for its own pattern, a stylesheet for every page, and a header this version does not inject.",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT"
+}

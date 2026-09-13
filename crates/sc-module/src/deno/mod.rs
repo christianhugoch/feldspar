@@ -270,6 +270,11 @@ pub struct DenoModuleHost {
     pool: Mutex<Pool>,
     /// The view runtime bundle, as the file URL a worker imports it from.
     view_runtime: Option<String>,
+    /// The module view patterns installed into the view runtime's registry —
+    /// `[{ module, name }]` — and the generation they were installed at
+    /// (TODO "Saltcorn UI" 11.1). Carried on every view call, because a worker
+    /// that restarted has lost the registry it was told about.
+    view_patterns: std::sync::RwLock<(u64, Json)>,
 }
 
 impl DenoModuleHost {
@@ -294,6 +299,31 @@ impl DenoModuleHost {
             per_set: workers.max(1),
             pool: Mutex::new(Pool::default()),
             view_runtime: None,
+            view_patterns: std::sync::RwLock::new((0, json!([]))),
+        }
+    }
+
+    /// Install the module view patterns the view runtime's registry holds,
+    /// `(module, pattern)`, replacing the last set — **whole**, and under a new
+    /// generation even when the list is the same: a reload re-required every
+    /// module, and the registry must hold the new objects, not the old ones.
+    pub fn install_view_patterns(&self, patterns: &[(String, String)]) {
+        let list: Vec<Json> = patterns
+            .iter()
+            .map(|(module, name)| json!({ "module": module, "name": name }))
+            .collect();
+        let mut held = match self.view_patterns.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *held = (held.0 + 1, Json::Array(list));
+    }
+
+    /// The generation of the installed view patterns.
+    pub fn view_patterns_generation(&self) -> u64 {
+        match self.view_patterns.read() {
+            Ok(guard) => guard.0,
+            Err(poisoned) => poisoned.into_inner().0,
         }
     }
 
@@ -374,11 +404,81 @@ impl DenoModuleHost {
             )
             .await
             .map_err(|e| denial(name, e))?;
-        serde_json::from_value(value).map_err(|e| {
-            Error::msg(format!(
-                "the module host answered a load of `{name}` with something unreadable: {e}"
-            ))
-        })
+        let manifest = read_manifest(name, value)?;
+        if manifest.view_patterns.is_empty() || self.view_runtime.is_none() {
+            return Ok(manifest);
+        }
+        self.beside_the_view_runtime(name, index, dir, configuration, permissions, manifest)
+            .await
+    }
+
+    /// A module's view patterns run **in the view runtime's registry**, and a
+    /// view embeds views inside one worker (§3), so a module that supplies
+    /// patterns has to live on the worker the runtime does (11.1).
+    ///
+    /// With one worker per permission set — the default — a closed module is
+    /// already there. Otherwise a closed module moves, as a module whose
+    /// permissions changed does. A module granted anything cannot: the runtime's
+    /// worker is granted nothing, and widening it would hand every view the
+    /// module's grants. Its patterns are then unavailable, said on its card, and
+    /// the rest of the module works where it is.
+    async fn beside_the_view_runtime(
+        &self,
+        name: &str,
+        index: usize,
+        dir: &Path,
+        configuration: &Json,
+        permissions: &ModulePermissions,
+        mut manifest: ModuleManifest,
+    ) -> Result<ModuleManifest> {
+        let view = self.view_worker().await;
+        if view == index {
+            return Ok(manifest);
+        }
+        if !permissions.is_closed() {
+            let names: Vec<String> = manifest
+                .view_patterns
+                .iter()
+                .map(|p| format!("`{}`", p.name))
+                .collect();
+            manifest.issues.push(format!(
+                "its view patterns ({}) are not available: a view pattern runs beside Saltcorn \
+                 UI's view runtime, which is granted nothing, and this module has been granted \
+                 permissions; withdraw them to use its view patterns",
+                names.join(", ")
+            ));
+            manifest.view_patterns.clear();
+            return Ok(manifest);
+        }
+        {
+            let mut pool = self.pool.lock().await;
+            pool.pinned.insert(name.to_owned(), view);
+            pool.release(index);
+            if let Some(worker) = pool.workers.get_mut(view).and_then(Option::as_mut) {
+                worker.modules += 1;
+            }
+        }
+        self.evict(index, name).await;
+        let value = self
+            .send(
+                view,
+                json!({
+                    "op": "load",
+                    "module": name,
+                    "dir": dir.display().to_string(),
+                    "configuration": configuration,
+                }),
+                Some((
+                    name.to_owned(),
+                    LoadRequest {
+                        dir: dir.to_path_buf(),
+                        configuration: configuration.clone(),
+                    },
+                )),
+            )
+            .await
+            .map_err(|e| denial(name, e))?;
+        read_manifest(name, value)
     }
 
     /// Forget a module — after an uninstall, so a restarted worker does not
@@ -728,6 +828,15 @@ impl DenoModuleHost {
             map.insert("op".to_owned(), json!(op));
             // The log tag: a `console.log` in a view pattern is the runtime's.
             map.insert("module".to_owned(), json!(BUILTIN_VIEW_RUNTIME));
+            // The module patterns the registry should hold. A list of a few
+            // names, so always carried; the worker rebuilds only when the
+            // generation moves.
+            let (generation, patterns) = match self.view_patterns.read() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            };
+            map.insert("patternsGeneration".to_owned(), json!(generation));
+            map.insert("patterns".to_owned(), patterns);
         }
         self.send_with(index, request, None, call)
             .await
@@ -1218,6 +1327,15 @@ impl Pool {
             None
         }
     }
+}
+
+/// A load's answer, as the manifest it has to be.
+fn read_manifest(name: &str, value: Json) -> Result<ModuleManifest> {
+    serde_json::from_value(value).map_err(|e| {
+        Error::msg(format!(
+            "the module host answered a load of `{name}` with something unreadable: {e}"
+        ))
+    })
 }
 
 /// A module's failure, with a permission denial rewritten into something an

@@ -706,25 +706,25 @@ Five levels, because the failure modes are at five levels:
 
 ## Phase 11 — View patterns from an installed plugin
 
-- [ ] 11.1 `viewtemplates` as a module facility key (§6): parsed from the loaded plugin,
+- [x] 11.1 `viewtemplates` as a module facility key (§6): parsed from the loaded plugin,
       installed into the registry whole on every module change, one namespace with the
       built-ins, a clash losing *that pattern* with the reason on the module's card.
       `ModuleManifest::unsupported` stops counting it.
-- [ ] 11.2 `headers` on the manifest — `{ script | css, onlyViews }`, crossing at load as data
+- [x] 11.2 `headers` on the manifest — `{ script | css, onlyViews }`, crossing at load as data
       — and `/plugins/public/<name>@<version>/*` served by the app out of the installed
       package's `public/` directory, with the same path confinement the file stores use.
-- [ ] 11.3 The document builder (§9) injects the headers of every module whose `onlyViews`
+- [x] 11.3 The document builder (§9) injects the headers of every module whose `onlyViews`
       names the pattern being rendered, or that declares no `onlyViews`, de-duplicated and in
       manifest order.
-- [ ] 11.4 `virtual_triggers` read and reported as unsupported, naming the view — not silently
+- [x] 11.4 `virtual_triggers` read and reported as unsupported, naming the view — not silently
       dropped, because a Kanban with `real_time_updates` on and no triggers is a Kanban that
       looks like it works.
-- [ ] 11.5 `db.connectObj.version_tag` answers the asset version tag, because two plugins
+- [x] 11.5 `db.connectObj.version_tag` answers the asset version tag, because two plugins
       build a `<script src>` out of it and a broken one is a silent 404 rather than an error.
-- [ ] 11.6 The `@saltcorn/kanban` test (§15, ignored by default; npm): installed, both
+- [x] 11.6 The `@saltcorn/kanban` test (§15, ignored by default; npm): installed, both
       patterns registered, a Kanban view configured over a fixture table through the wizard of
       Phase 10, rendered, and `set_card_value` posted to.
-- [ ] 11.7 `@saltcorn/mind-map` installed in the same test: its pattern registers and its
+- [x] 11.7 `@saltcorn/mind-map` installed in the same test: its pattern registers and its
       render fails naming `db.query` (§6). Asserted, so that the boundary is a fact the suite
       states rather than a paragraph in this file.
 

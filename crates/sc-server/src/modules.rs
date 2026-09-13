@@ -249,6 +249,28 @@ impl ModuleServices {
                 sc_error::format_chain(&e)
             );
         }
+        // And the **view patterns** (TODO "Saltcorn UI" 11.1): into
+        // `sc-viewpattern`'s registry, which a view's save is checked against,
+        // and into the view runtime's, which renders them — both whole, so an
+        // uninstalled module's pattern stops being savable and renderable at
+        // once. A name clash was already decided by the set, on the module's
+        // card. With them, the headers and `public/` a plugin brings (11.2).
+        if let Err(e) = sc_viewpattern::install_patterns(set.view_patterns()) {
+            eprintln!(
+                "feldspar: the view patterns the modules supply could not be installed, so the \
+                 pattern list was left as it was: {}",
+                sc_error::format_chain(&e)
+            );
+        }
+        self.host
+            .install_view_patterns(&set.installed_view_patterns());
+        if let Err(e) = sc_viewpattern::install_plugin_assets(set.plugin_assets(&self.installer)) {
+            eprintln!(
+                "feldspar: the headers and public files the modules supply could not be \
+                 installed: {}",
+                sc_error::format_chain(&e)
+            );
+        }
         // And the **model providers**, which is the third source the model
         // registry composes: the built-ins, whatever the JavaScript modules
         // supply, and whatever the Python ones do. Rebuilt from the built-ins

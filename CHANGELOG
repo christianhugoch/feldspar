@@ -2,6 +2,144 @@
 
 Changes in reverse chronological order.
 
+## Saltcorn UI, Phase 11: view patterns from an installed plugin
+
+A v1 plugin whose content is `viewtemplates` — `@saltcorn/kanban`,
+`@saltcorn/mind-map` — now supplies view patterns. Install it from the Modules
+tab and its patterns are offered by a Saltcorn UI application's New view beside
+v1's six. They are configured through Phase 10's wizard and rendered, posted to
+and routed exactly like the built-ins. The scripts and stylesheets the plugin
+declares go into the documents that render its patterns, and its `public/`
+directory is served. Kanban installs and works. Mind-map installs, registers,
+and fails naming the raw SQL it needs.
+
+- **`viewtemplates` as a facility key (11.1).**
+  - The module host reads it the way v1 does: a list, a map, or a function of
+    the module's configuration. It describes each pattern as data on the
+    manifest (`ModuleManifest::view_patterns`, the same `PatternManifest` the
+    built-ins cross as: name, label, description, `table_required`,
+    `view_quantity`, routes, step names). A pattern with no name or no `run` is
+    an issue and is skipped; so is every pattern on a server without the
+    Saltcorn UI bundle. `viewtemplates` and `headers` leave the unsupported
+    census.
+  - **One namespace, decided once.** `ModuleSet::load` resolves every module's
+    patterns against v1's six and against each other, first module first. A
+    taken name costs **that pattern**, removed from the manifest with the reason
+    on the module's card ("its view pattern `List` is not available: that is the
+    name of one of Saltcorn 1's built-in view patterns…"); the module keeps
+    everything else.
+  - **Installed whole on every module change.** `ModuleServices::reload`
+    installs the winners into `sc-viewpattern`'s registry (what a save is
+    checked against) and into the view runtime's, so an uninstalled plugin's
+    pattern stops being savable and renderable at once.
+  - **The view runtime's registry is told, not guessed.** The worker keeps a
+    loaded plugin's pattern objects beside the module and puts them into the
+    bundle's `viewtemplates` only when a view call says which module holds each
+    name: `ModuleHost::install_view_patterns` stamps the list with a generation,
+    every view call carries it, and the worker rebuilds its registry when the
+    generation moves. A worker that restarted has lost the registry and rebuilds
+    it on its next call. `ModuleViewRuntime::patterns` is cached per generation
+    instead of once.
+  - **A module with patterns lives beside the view runtime.** A view embeds
+    views inside one worker (§3), so after a load that declared patterns, a
+    closed module on another worker moves to the runtime's (with the default
+    one worker per permission set it is already there). A module granted any
+    permission cannot move there, because the runtime's worker is granted
+    nothing. Its patterns are then unavailable, said on its card ("withdraw them
+    to use its view patterns"), and the rest of the module works.
+  - The Modules tab lists a module's view patterns and counts them in its status
+    and in the install sentence (`view_patterns` on the module JSON and schema).
+    Both generated `client.ts` files are regenerated.
+- **Headers and public files (11.2).**
+  - `headers` crosses at load as data (`{ script | css, only_views }`). A header
+    of another kind (`headerTag`) is not injected, and says so on the card.
+  - `sc_viewpattern::plugins`: the installed plugins' assets (headers, the
+    package's `public/`, the names its URLs use — `plugin_name` and the package
+    name without its scope — and the version), installed whole beside the
+    pattern registry.
+  - A Saltcorn UI application serves `/plugins/public/<name>@<version>/*` out of
+    that directory. It is confined as a local file store confines a path: no
+    empty, `.` or `..` part, and the resolved file, symlinks followed, still
+    inside `public/`. It is long-cached only when the URL's version is the one
+    installed.
+- **The document builder injects them (11.3).** A view call now answers the
+  patterns it ran, the embedded ones included (`ViewOutput::patterns`). The
+  document puts, after v1's own scripts, every header whose `onlyViews` names one
+  of them or that names none, de-duplicated and in declaration order. An empty
+  `onlyViews` is nowhere, as in v1.
+- **Virtual triggers (11.4)** are read and reported rather than dropped:
+  - on the module's card, per pattern that declares them;
+  - in the log when a view renders whose configuration asks for them, naming
+    the view, once per view per generation: "the view Board (Kanban) of
+    application boards asks for 3 virtual triggers — Saltcorn 1's realtime
+    events — which this server does not run, so it will not update live".
+- **`db.connectObj.version_tag` (11.5)** answers the server's version, which is
+  Saltcorn UI's `/static_assets/` tag. Each worker is handed it at start
+  (`__scVersionTag`), and a unit test holds it equal to `ASSET_VERSION_TAG`.
+- **What kanban needed that the built-ins did not.**
+  - `@saltcorn/data/utils` is now a host module, so a name the host does not
+    answer is a named stub. Before, it was a spread of the stub namespace, which
+    copies nothing, so every name but `interpolate` was `undefined`. It also
+    answers v1's `isWeb`, which kanban's `run` calls.
+- **Raw SQL is refused as what it is (§6, 11.7).** v1's `db.query`,
+  `db.getTenantSchemaPrefix`, `db.getTenantSchema` and `db.getClient` throw
+  naming raw SQL and why this server does not give it to a plugin.
+  - **Deviation:** mind-map calls `db.getTenantSchemaPrefix()` before
+    `db.query`, so that is the member its render reaches first. Its refusal
+    says it is part of v1's raw SQL, "what a plugin writes a `db.query` with",
+    so the failure names `db.query` either way.
+- **Tests (11.6, 11.7).**
+  - A fixture plugin, `sc-module/tests/fixtures/view-pattern-module`, shaped like
+    kanban: it requires the library, feature-detects `features`, reads
+    `db.connectObj.version_tag`, and declares a `Greeting` pattern with a
+    configuration step, a route and virtual triggers. It also declares a `List`
+    pattern that clashes, a script for `Greeting`, a stylesheet for every page,
+    a `headerTag`, and a `public/` directory.
+  - `sc-module`'s
+    `view_runtime::a_plugins_view_patterns_render_once_the_server_installs_them`:
+    - the manifest's patterns, headers and issues;
+    - not in the registry until installed;
+    - once installed, rendered with the version tag and the patterns it ran, and
+      configured by a step call;
+    - gone when a list without it is installed;
+    - a module granted a permission keeps its actions and loses its patterns,
+      saying why.
+  - `sc_module::modules` unit tests: a clash with a built-in and with another
+    module, each on the loser's card; and a plugin's assets from its headers and
+    its `public/`. `sc_viewpattern::plugins` unit tests: the header selection,
+    de-duplication and escaping; and a public file found by name, stale
+    versions uncached, and nothing outside `public/`.
+  - `saltcorn_ui_plugins::a_plugins_view_pattern_is_configured_rendered_with_its_headers_and_posted_to`,
+    over HTTP:
+    - the fixture installed through the API, its card and the pattern list;
+    - a view of it created, walked through the wizard and saved;
+    - rendered on the subdomain with its script and stylesheet, while a List
+      gets only the stylesheet;
+    - its public file served, a stale tag uncached, and a path out of
+      `public/` a 404;
+    - its route posted to, changing the row;
+    - after the module is deleted, the pattern neither listed nor rendered.
+  - `saltcorn_ui_plugins::kanban_installs_and_works_and_mind_map_fails_naming_the_raw_sql_it_needs`
+    (ignored: it installs both from their checkouts — `SC_KANBAN_DIR` /
+    `SC_MIND_MAP_DIR`, else `~/kanban` and `~/mind-map` — and kanban's `moment`
+    comes from npm):
+    - both install and register;
+    - a Kanban view over a `tasks` table is configured through the wizard, with
+      a Show as its card view, and renders the board with dragula in the head;
+    - dragula is served, and `set_card_value` moves a card;
+    - a Mind map view fails with a document naming `db.query` and raw SQL.
+  - **The process-wide registries, in the test binary.** The view runtime, the
+    pattern registry and the plugin assets are globals (one server, one
+    process), and sc-server's `it` binary boots many servers at once. Before
+    this phase that did not matter, because every server's runtime had the same
+    six patterns. Now `it.rs` has a `module_registries()` lock. Every test that
+    boots `ModuleServices` takes it for reading (`modules_api`,
+    `provided_tables_api`, `saltcorn_ui_configure`, `saltcorn_ui_render`), and
+    the plugin tests take it for writing.
+  - `echo-module`'s example of an unsupported key is now `types`, since
+    `viewtemplates` is loaded; `host`, `deno_host` and `modules_api` assert that.
+  - `modules.test.ts`: a module's view patterns counted.
+
 ## Saltcorn UI, Phase 10: editing a view, without the builder
 
 A Saltcorn UI application's views can now be created, configured and renamed

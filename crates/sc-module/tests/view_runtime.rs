@@ -331,6 +331,122 @@ async fn an_installed_module_claiming_the_runtimes_name_keeps_its_actions_and_ta
     let _ = std::fs::remove_dir_all(installer.root());
 }
 
+/// Phase 11: a plugin's `viewtemplates` are view patterns. The worker describes
+/// them at load and keeps them out of the registry until the server says which
+/// module holds each name; then they render, configure and answer routes like
+/// v1's six, and are gone again when the server installs a list without them.
+#[tokio::test]
+async fn a_plugins_view_patterns_render_once_the_server_installs_them() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    skip_without!(bundle().is_some(), NO_BUNDLE);
+    let (installer, _, names) = installed("view-runtime-plugin", &["view-pattern-module"]).await;
+    let name = &names[0];
+    let host = Arc::new(ModuleHost::new(installer.root()).with_view_runtime(bundle()));
+    let runtime = ModuleViewRuntime::new(&host);
+
+    // 11.1: described as data. The worker does not decide clashes — `List` is
+    // here, and the set takes it away (see `modules.rs`).
+    let manifest = host
+        .load(name, &installer.package_dir(name), &json!({}), &closed())
+        .await
+        .unwrap();
+    let described: Vec<&str> = manifest.view_patterns.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(described, ["Greeting", "List"]);
+    let greeting = &manifest.view_patterns[0];
+    assert_eq!(greeting.steps, ["Greeting"]);
+    assert_eq!(greeting.routes, ["rename"]);
+    assert!(greeting.table_required);
+    assert!(manifest.unsupported.is_empty(), "{:?}", manifest.unsupported);
+    // 11.2: the headers, as data; one this version does not inject says so.
+    assert_eq!(manifest.headers.len(), 2, "{:?}", manifest.headers);
+    assert_eq!(
+        manifest.headers[0].only_views.as_deref(),
+        Some(&["Greeting".to_owned()][..])
+    );
+    assert!(manifest.headers[1].css.is_some() && manifest.headers[1].only_views.is_none());
+    let issues = manifest.issues.join("\n");
+    assert!(issues.contains("headerTag"), "{issues}");
+    // 11.4: its virtual triggers are read and reported, not dropped.
+    assert!(
+        issues.contains("\"Greeting\" declares virtual triggers"),
+        "{issues}"
+    );
+
+    // Not in the registry until the server installs it.
+    assert_eq!(runtime.patterns().await.unwrap().len(), BUILTIN_PATTERNS.len());
+    host.install_view_patterns(&[(name.clone(), "Greeting".to_owned())]);
+    let patterns = runtime.patterns().await.unwrap();
+    assert!(
+        patterns.iter().any(|p| p.name == "Greeting" && p.steps == ["Greeting"]),
+        "{patterns:?}"
+    );
+    // A built-in keeps its name even if a list names a module for it.
+    assert_eq!(patterns.iter().filter(|p| p.name == "List").count(), 1);
+
+    // It renders, through the real library, with v1's version tag (11.5), and
+    // the call says which patterns ran (11.3).
+    let app = AppId::new();
+    let views = snapshot(
+        app,
+        1,
+        &json!({
+            "application": { "name": "Greetings" },
+            "views": [{ "name": "Hi", "viewtemplate": "Greeting", "min_role": 100,
+                        "configuration": { "salutation": "Good morning" } }],
+            "pages": [],
+        }),
+    );
+    let request = ViewRequest::default();
+    let view = View::new(app, "Hi", "Greeting", "books");
+    let out = runtime
+        .render(&view, &json!({}), ViewContext::bare(&views, &request))
+        .await
+        .unwrap();
+    let html = out.body.as_str().unwrap_or_default();
+    assert!(html.contains("Good morning, nobody"), "{html}");
+    assert!(
+        html.contains(&format!("data-version=\"{}\"", sc_viewpattern::ASSET_VERSION_TAG)),
+        "{html}"
+    );
+    assert_eq!(out.patterns, ["Greeting"]);
+
+    // Its configuration is a call per step, like a built-in's.
+    let step = runtime
+        .config_step("Greeting", None, Some("Hi"), 0, &json!({}), ViewContext::bare(&views, &request))
+        .await
+        .unwrap();
+    let fields: Vec<&str> = step.fields.iter().map(|f| f.name()).collect();
+    assert_eq!(fields, ["salutation", "field", "live"], "{step:?}");
+
+    // Installed whole: a list without it takes it out of the registry.
+    host.install_view_patterns(&[]);
+    assert_eq!(runtime.patterns().await.unwrap().len(), BUILTIN_PATTERNS.len());
+    let message = runtime
+        .render(&view, &json!({}), ViewContext::bare(&views, &request))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("Greeting"), "{message}");
+
+    // 11.1: a module granted something cannot join the view runtime's worker,
+    // so its patterns are not available — said, and the module still loads.
+    let mut granted = closed();
+    granted.env.push("HOME".to_owned());
+    let manifest = host
+        .load(name, &installer.package_dir(name), &json!({}), &granted)
+        .await
+        .unwrap();
+    assert!(manifest.view_patterns.is_empty(), "{:?}", manifest.view_patterns);
+    assert!(
+        manifest.issues.iter().any(|i| i.contains("withdraw them")),
+        "{:?}",
+        manifest.issues
+    );
+
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(installer.root());
+}
+
 /// §3.3a and §5: one `require` table. A plugin's `@saltcorn/markup/tags` is v1's
 /// own, and the names a plugin feature-detects are absent rather than truthy
 /// stubs.

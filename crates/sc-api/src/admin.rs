@@ -3394,6 +3394,10 @@ fn module_schema() -> TypeSchema {
         // what a provider *asks for* belongs to the model being fitted and is
         // on `listModelProviders`.
         StructField::new("model_providers", TypeSchema::array(TypeSchema::text())),
+        // The view patterns it supplies (TODO "Saltcorn UI" 11.1) — names only:
+        // what one *asks for* is its configuration wizard, a call per step on
+        // `viewConfigStep`.
+        StructField::new("view_patterns", TypeSchema::array(TypeSchema::text())),
         // What it also supplies and this version does not load: `{key, count}`,
         // so the tab can say "also supplies 1 table provider (not yet
         // supported)".

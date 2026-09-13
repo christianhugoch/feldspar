@@ -144,6 +144,7 @@ struct Server {
     _catalog: Arc<Catalog>,
     _modules: Arc<ModuleServices>,
     _root: TempDir,
+    _registries: tokio::sync::RwLockReadGuard<'static, ()>,
 }
 
 /// A server with every platform table bootstrapped, the modules (and so the
@@ -178,6 +179,7 @@ async fn setup(bundle: PathBuf) -> sc_error::Result<Server> {
     let root =
         std::env::temp_dir().join(format!("sc-saltcorn-ui-configure-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
+    let registries = crate::module_registries().read().await;
     let modules = ModuleServices::install(
         &catalog,
         &dispatcher,
@@ -228,6 +230,7 @@ async fn setup(bundle: PathBuf) -> sc_error::Result<Server> {
         _catalog: catalog,
         _modules: modules,
         _root: TempDir(root),
+        _registries: registries,
     })
 }
 

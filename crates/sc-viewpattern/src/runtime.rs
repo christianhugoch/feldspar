@@ -167,6 +167,10 @@ pub struct ViewOutput {
     pub headers: Vec<(String, String)>,
     /// Every `req.flash`, in order.
     pub flashes: Vec<Flash>,
+    /// The patterns the call ran — the view's own and every view it embeds, in
+    /// the order they ran — which is what decides the plugin headers the
+    /// document gets (11.3).
+    pub patterns: Vec<String>,
 }
 
 /// One step of a pattern's `configuration_workflow`, over the context gathered

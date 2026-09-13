@@ -20,7 +20,9 @@
 //!   in the application's subset, `min_role` is a role that exists, and the name
 //!   is unique in the application and usable as a URL path segment.
 //! - The pattern registry ([`registered_patterns`]): v1's six built-in patterns,
-//!   and whatever an installed module declares (Phase 11).
+//!   and whatever an installed module declares (Phase 11) — and the headers and
+//!   `public/` directory such a module brings with its patterns
+//!   ([`installed_plugin_assets`]).
 //! - [`ViewSet`] — every view and page of one application, loaded once — and
 //!   [`ViewSets`], the cache that reloads a set on a write and stamps it with the
 //!   **generation** the worker's view snapshot is keyed on (§4).
@@ -41,6 +43,7 @@ mod bundle;
 mod configure;
 mod framework;
 mod patterns;
+mod plugins;
 mod runtime;
 mod snapshot;
 mod store;
@@ -61,6 +64,10 @@ pub use framework::{
 pub use patterns::{
     BUILTIN_PATTERNS, PatternInfo, builtin_patterns, find_pattern, install_patterns,
     registered_patterns,
+};
+pub use plugins::{
+    PluginAssets, PluginHeader, install_plugin_assets, installed_plugin_assets, plugin_header_tags,
+    plugin_public_file,
 };
 pub use runtime::{
     ConfigStep, Flash, PatternManifest, ViewContext, ViewOutput, ViewReferences, ViewRequest,

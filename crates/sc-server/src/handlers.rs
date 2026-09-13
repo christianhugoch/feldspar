@@ -5930,6 +5930,10 @@ fn module_json(loaded: &sc_module::LoadedModule) -> Json {
         // `feldspar-sklearn` gets an admin five estimators on the model form,
         // and the tab is where they find that out.
         "model_providers": loaded.model_provider_names(),
+        // And the view patterns (TODO "Saltcorn UI" 11.1): what a Saltcorn UI
+        // application's New view offers beside v1's six. One whose name was
+        // taken is not here; its issue says so.
+        "view_patterns": loaded.view_pattern_names(),
         "unsupported": sc_module::unsupported_json(loaded),
         "issues": loaded.issues,
         "loaded": loaded.is_loaded(),

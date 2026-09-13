@@ -136,6 +136,7 @@ struct Server {
     dispatcher: Arc<sc_action::TriggerDispatcher>,
     root: PathBuf,
     _db: TestDb,
+    _registries: tokio::sync::RwLockReadGuard<'static, ()>,
 }
 
 async fn setup(tag: &str) -> sc_error::Result<Server> {
@@ -163,6 +164,7 @@ async fn setup(tag: &str) -> sc_error::Result<Server> {
     let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents, &models).await?;
     let root = std::env::temp_dir().join(format!("sc-modules-api-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
+    let registries = crate::module_registries().read().await;
     let modules = ModuleServices::install(
         &catalog,
         &dispatcher,
@@ -213,6 +215,7 @@ async fn setup(tag: &str) -> sc_error::Result<Server> {
         dispatcher,
         root,
         _db: db,
+        _registries: registries,
     })
 }
 
@@ -299,7 +302,7 @@ async fn a_module_is_installed_listed_configured_and_deleted() -> sc_error::Resu
     // what they are not getting.
     let census = installed["unsupported"].as_array().unwrap();
     assert!(
-        census.iter().any(|e| e["key"] == json!("viewtemplates")),
+        census.iter().any(|e| e["key"] == json!("types")),
         "{census:?}"
     );
 

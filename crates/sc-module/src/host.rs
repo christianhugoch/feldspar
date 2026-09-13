@@ -327,7 +327,7 @@ pub struct FrameworkManifest {
 /// An entity type the module exports and this version does not load.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UnsupportedEntity {
-    /// The plugin key — `viewtemplates`, `table_providers`, `eventTypes`.
+    /// The plugin key — `types`, `fieldviews`, `eventTypes`.
     pub key: String,
     /// How many of them, when that can be told without running the module's
     /// code.
@@ -365,6 +365,16 @@ pub struct ModuleManifest {
     /// form offers beside `react` and `code`.
     #[serde(default)]
     pub frameworks: Vec<FrameworkManifest>,
+    /// The view patterns it supplies (TODO "Saltcorn UI" §6) — v1's
+    /// `viewtemplates`, described as data. The functions stay in the worker, in
+    /// the view runtime's registry. After [`ModuleSet::load`](crate::ModuleSet)
+    /// only the ones whose names were free are left here; a clash is an issue.
+    #[serde(default)]
+    pub view_patterns: Vec<sc_viewpattern::PatternManifest>,
+    /// v1's `headers`: the scripts and stylesheets a document rendering its
+    /// patterns wants (11.2).
+    #[serde(default)]
+    pub headers: Vec<sc_viewpattern::PluginHeader>,
     /// The fields of its `configuration_workflow`'s forms, flattened (§5).
     #[serde(default)]
     pub config_fields: Vec<Json>,
@@ -476,6 +486,34 @@ impl ModuleHost {
     /// The modules root.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Install the module view patterns — `(module, pattern)`, as
+    /// [`ModuleSet::installed_view_patterns`](crate::ModuleSet::installed_view_patterns)
+    /// resolves them — into the view runtime's registry, whole (TODO "Saltcorn
+    /// UI" 11.1).
+    pub fn install_view_patterns(&self, patterns: &[(String, String)]) {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool.install_view_patterns(patterns);
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = patterns;
+        }
+    }
+
+    /// The generation of the installed view patterns: what the view runtime's
+    /// pattern manifest is cached against.
+    pub fn view_patterns_generation(&self) -> u64 {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool.view_patterns_generation()
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            0
+        }
     }
 
     /// Load (or reload) a module from `dir`, with `configuration` as the object

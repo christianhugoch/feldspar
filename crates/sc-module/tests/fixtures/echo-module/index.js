@@ -309,6 +309,7 @@ module.exports = {
       }),
     },
   },
-  // One entity type this version does not load: the census reports it.
-  viewtemplates: [{ name: "echo_list" }, { name: "echo_show" }],
+  // One entity type this version does not load: the census reports it. (It was
+  // `viewtemplates` until Saltcorn UI loaded those.)
+  types: [{ name: "EchoText" }, { name: "EchoNumber" }],
 };

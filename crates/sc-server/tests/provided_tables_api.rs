@@ -136,6 +136,7 @@ struct Server {
     root: PathBuf,
     _modules: Arc<ModuleServices>,
     _db: TestDb,
+    _registries: tokio::sync::RwLockReadGuard<'static, ()>,
 }
 
 async fn setup(tag: &str) -> sc_error::Result<Server> {
@@ -164,6 +165,7 @@ async fn setup(tag: &str) -> sc_error::Result<Server> {
     let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents, &models).await?;
     let root = std::env::temp_dir().join(format!("sc-provided-api-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
+    let registries = crate::module_registries().read().await;
     let modules = ModuleServices::install(
         &catalog,
         &dispatcher,
@@ -211,6 +213,7 @@ async fn setup(tag: &str) -> sc_error::Result<Server> {
         root,
         _modules: modules,
         _db: db,
+        _registries: registries,
     })
 }
 

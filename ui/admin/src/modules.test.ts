@@ -88,6 +88,7 @@ function module_(overrides: Partial<Module> = {}): Module {
     functions: [],
     table_providers: [],
     model_providers: [],
+    view_patterns: [],
     unsupported: [],
     issues: [],
     loaded: true,
@@ -330,6 +331,15 @@ describe("how an installed module reads", () => {
     expect(
       suppliedSummary(module_({ actions: [], model_providers: ["sklearn_ridge"] })),
     ).toBe("1 model provider");
+  });
+
+  it("counts the view patterns it supplies", () => {
+    // `@saltcorn/kanban` is two view patterns and nothing else.
+    const kanban = module_({ actions: [], view_patterns: ["Kanban", "KanbanAllocator"] });
+    expect(moduleStatus(kanban)).toEqual({ label: "2 view patterns", tone: "green" });
+    expect(suppliedSummary(module_({ view_patterns: ["Mind map"] }))).toBe(
+      "1 action and 1 view pattern",
+    );
   });
 
   it("marks a module that did not load, and one that loaded with a complaint", () => {

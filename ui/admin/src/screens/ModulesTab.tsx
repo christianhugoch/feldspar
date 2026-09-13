@@ -591,6 +591,23 @@ function ModuleCard({
           </>
         )}
 
+        {module.view_patterns.length > 0 && (
+          <>
+            <div className="text-secondary mb-1">View patterns</div>
+            <ul className="list-unstyled mb-2">
+              {module.view_patterns.map((pattern) => (
+                <li key={pattern}>
+                  <code>{pattern}</code>
+                </li>
+              ))}
+            </ul>
+            <div className="text-secondary mb-2">
+              A Saltcorn UI application offers these under Views → New view, beside Saltcorn
+              1's own.
+            </div>
+          </>
+        )}
+
         {census && <div className="text-secondary">{census}</div>}
 
         {/* What this module may reach. For JavaScript that is the allow-list and

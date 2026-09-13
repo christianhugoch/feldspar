@@ -10,7 +10,9 @@
 //! - `/page/:name` — one page, with the views it embeds rendered in place;
 //! - `/static_assets/:tag/*` — the browser half of v1 (Bootstrap, jQuery,
 //!   `saltcorn.js`), out of the bundle's `public/`;
-//! - `/files/serve/*` — the application's file stores, under their access rules.
+//! - `/files/serve/*` — the application's file stores, under their access rules;
+//! - `/plugins/public/:name@:version/*` — an installed plugin's own `public/`,
+//!   which its declared headers point into (Phase 11).
 //!
 //! And three things posted to (Phase 6):
 //!
@@ -59,6 +61,7 @@ use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Map, Value as Json};
 
 use crate::bundle::{SALTCORN_UI_FRAMEWORK, require_view_runtime};
+use crate::plugins::{installed_plugin_assets, plugin_header_tags, plugin_public_file};
 use crate::runtime::{
     ViewContext, ViewOutput, ViewRequest, ViewRuntime, ViewUser, Wrap, view_runtime,
 };
@@ -343,6 +346,9 @@ impl Framework for SaltcornUiFramework {
             ["page", name] if !name.is_empty() => self.page(&req, cat, &percent_decode(name)).await,
             ["static_assets", _tag, rest @ ..] if !rest.is_empty() => self.static_asset(rest),
             ["files", "serve", rest @ ..] if !rest.is_empty() => self.file(&req, cat, rest).await,
+            ["plugins", "public", plugin, rest @ ..] if !rest.is_empty() => {
+                Ok(plugin_asset(&percent_decode(plugin), rest))
+            }
             _ => Ok(self.message(&req, 404, "Not found", "There is nothing at this address.")),
         }
     }
@@ -403,6 +409,7 @@ impl SaltcornUiFramework {
                 req,
                 &self.site_name(),
                 &format!("<main class=\"container py-4\">{body}</main>"),
+                &[],
             ),
         ))
     }
@@ -837,7 +844,7 @@ impl SaltcornUiFramework {
             dest = escape(&dest),
             email = escape(email),
         );
-        AppResponse::html(status, self.document(req, heading, &body))
+        AppResponse::html(status, self.document(req, heading, &body, &[]))
     }
 
     /// `/page/:name`.
@@ -1063,7 +1070,10 @@ impl SaltcornUiFramework {
             };
             let status = out.status.unwrap_or(200);
             match &request.wrap {
-                Some(wrap) => AppResponse::html(status, self.document(req, &wrap.title, &html)),
+                Some(wrap) => AppResponse::html(
+                    status,
+                    self.document(req, &wrap.title, &html, &out.patterns),
+                ),
                 None => AppResponse::html(status, html),
             }
         };
@@ -1114,6 +1124,7 @@ impl SaltcornUiFramework {
                     escape(heading),
                     escape(sentence)
                 ),
+                &[],
             ),
         )
     }
@@ -1134,7 +1145,11 @@ impl SaltcornUiFramework {
     ///
     /// `_sc_globalCsrf` is the viewer's CSRF token, which every ajax post
     /// `saltcorn.js` makes sends back as `CSRF-Token` (6.4).
-    fn document(&self, req: &AppRequest, title: &str, body: &str) -> String {
+    ///
+    /// `patterns` are the view patterns the body rendered: the installed
+    /// plugins' headers for them follow v1's own scripts, as v1's `headers` do
+    /// (11.3).
+    fn document(&self, req: &AppRequest, title: &str, body: &str, patterns: &[String]) -> String {
         let asset = |file: &str| format!("/static_assets/{ASSET_VERSION_TAG}/{file}");
         format!(
             "<!doctype html>\n\
@@ -1149,6 +1164,7 @@ impl SaltcornUiFramework {
              <script src=\"{bootstrap_js}\"></script>\n\
              <script src=\"{common}\"></script>\n\
              <script src=\"{saltcorn}\"></script>\n\
+             {plugins}\
              <script>var _sc_globalCsrf = \"{csrf}\"; var _sc_version_tag = \"{ASSET_VERSION_TAG}\"; \
              var _sc_pageloadtag = \"\"; var _sc_loglevel = 1; var _sc_lightmode = \"light\";</script>\n\
              <title>{title}</title>\n\
@@ -1164,6 +1180,7 @@ impl SaltcornUiFramework {
             bootstrap_js = asset("bootstrap.bundle.min.js"),
             common = asset("saltcorn-common.js"),
             saltcorn = asset("saltcorn.js"),
+            plugins = plugin_header_tags(&installed_plugin_assets(), patterns),
             title = escape(title),
             // A token is hex; anything else in it is not put into a script.
             csrf = req
@@ -1464,8 +1481,35 @@ fn state_of(req: &AppRequest, view: &View, slug: &[&str]) -> Json {
     Json::Object(state)
 }
 
+/// `/plugins/public/:plugin/*`: a file of an installed plugin's `public/`
+/// (11.2). Public, as v1's is: the headers that point here are in the head of a
+/// page anybody may be shown. Long-cached only when the URL names the version
+/// installed, so an upgraded plugin is not served stale under its old tag.
+fn plugin_asset(plugin: &str, rest: &[&str]) -> AppResponse {
+    let parts: Vec<String> = rest.iter().map(|p| percent_decode(p)).collect();
+    let Some((file, current)) = plugin_public_file(&installed_plugin_assets(), plugin, &parts)
+    else {
+        return AppResponse::not_found();
+    };
+    match std::fs::read(&file) {
+        Ok(bytes) => AppResponse::ok(
+            sc_app::asset_content_type(&parts.join("/")),
+            Bytes::from(bytes),
+        )
+        .header(
+            "Cache-Control",
+            if current {
+                "public, max-age=31536000, immutable"
+            } else {
+                "no-cache"
+            },
+        ),
+        Err(_) => AppResponse::not_found(),
+    }
+}
+
 /// Whether decoded path parts stay inside the directory they are joined onto.
-fn confined(parts: &[String]) -> bool {
+pub(crate) fn confined(parts: &[String]) -> bool {
     parts
         .iter()
         .all(|p| !p.is_empty() && p != "." && p != ".." && !p.contains(['/', '\\', '\0']))
