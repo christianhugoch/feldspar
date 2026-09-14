@@ -523,8 +523,8 @@ function saltcornModule(specifier) {
       return V1User;
     case "@saltcorn/data/models/crash":
       return V1Crash;
-    case "@saltcorn/data/models/library":
-      return V1Library;
+    // `@saltcorn/data/models/library` is not here: it is v1's own class, in the
+    // library below, reading `getState().library` (TODO "The builder" 2.3).
     case "@saltcorn/data/models/page_group":
       return V1PageGroup;
     // v1's `db`: its pure helpers and `withTransaction`, which the patterns'
@@ -2372,6 +2372,7 @@ class Page {
     const { stateToQueryString, run_action_column } = runtime.library["@saltcorn/data/plugin-helper"];
     const { eval_expression } = runtime.library["@saltcorn/data/models/expression"];
     const { fill_presets, action_link } = runtime.library["@saltcorn/data/viewable_fields"];
+    const Library = runtime.library["@saltcorn/data/models/library"];
     const req = extraArgs.req;
     const query = querystate || {};
     if (this.layout && this.layout.html_file) {
@@ -2459,7 +2460,7 @@ class Page {
         segment.type = "blank";
         segment.contents = html;
       },
-      library: (segment) => V1Library.resolveSegment(segment, req),
+      library: (segment) => Library.resolveSegment(segment, req),
       link: (segment) => {
         if (segment.transfer_state) segment.url += `?` + objectToQueryString(query);
         if (segment.view_state_fml) {
@@ -2669,20 +2670,6 @@ const V1Crash = class Crash {
   }
 };
 installV1Refusals(V1Crash, "Crash.");
-
-/** v1's library of saved layout fragments: inert and empty until the builder
- * (TODO, Explicitly OUT). A `library` segment renders as nothing. */
-const V1Library = class Library {
-  static async find() {
-    return [];
-  }
-
-  static async findOne() {
-    return undefined;
-  }
-
-  static resolveSegment() {}
-};
 
 /** v1's page groups: inert and empty (TODO, Explicitly OUT). */
 const V1PageGroup = class PageGroup {
@@ -3088,6 +3075,13 @@ function makeState(set) {
     },
     get pages() {
       return (application("getState().pages").pages || []).map((p) => new Page(structuredClone(p)));
+    },
+    // Not a member of v1's State: v1's `Library` reads `_sc_library`. The
+    // vendored `Library` reads this instead — the application's library items
+    // as the snapshot carries them, `{ id, name, icon, layout }` — through
+    // ui/saltcorn-ui's `src/shims/library-db.ts` (TODO "The builder" 2.3).
+    get library() {
+      return structuredClone(application("getState().library").library || []);
     },
     get triggers() {
       return triggersOf(application("getState().triggers"));

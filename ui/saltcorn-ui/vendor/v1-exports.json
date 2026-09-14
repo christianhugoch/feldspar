@@ -281,6 +281,10 @@
         "transform_for_async"
       ]
     },
+    "@saltcorn/data/models/library": {
+      "type": "function",
+      "exports": []
+    },
     "@saltcorn/data/plugin-helper": {
       "type": "object",
       "exports": [

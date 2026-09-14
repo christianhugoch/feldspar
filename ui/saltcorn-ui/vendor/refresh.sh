@@ -45,6 +45,8 @@ DATA_FILES=(
   models/fieldrepeat.ts
   models/expression.ts
   models/layout.ts
+  # Library.resolveSegment and suitableFor; its `db` is src/shims/library-db.ts.
+  models/library.ts
   utils.ts
   # getState().evaluator: what a formula in a view is evaluated with.
   evaluator.ts

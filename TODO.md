@@ -609,17 +609,17 @@ entry plus its §3 URLs, not a surprise.
 
 ## Phase 2 — The library, rendered
 
-- [ ] 2.1 Vendor `models/library.ts` (header, `refresh.sh` entry); remove `models/library` from
+- [x] 2.1 Vendor `models/library.ts` (header, `refresh.sh` entry); remove `models/library` from
       `HOST_DATA_MODULES`.
-- [ ] 2.2 `src/shims/library-db.ts`: reads from the snapshot, every write refused by name,
+- [x] 2.2 `src/shims/library-db.ts`: reads from the snapshot, every write refused by name,
       resolved for `models/library.ts`'s import only (an esbuild `onResolve` keyed on the
       importer, with a test that no other vendored file reaches it).
-- [ ] 2.3 `bundle_shape` updated for the move; the snapshot's library reaches `getState()` and
+- [x] 2.3 `bundle_shape` updated for the move; the snapshot's library reaches `getState()` and
       `Library.find`/`findOne` answer from it.
-- [ ] 2.4 `library` segments resolved in a page's render and in `filter.ts`'s layout, as v1
+- [x] 2.4 `library` segments resolved in a page's render and in `filter.ts`'s layout, as v1
       does (verify against v1's `models/page.ts` and `filter.ts`; add the call where the runtime
       lacks it).
-- [ ] 2.5 Golden tests: a Show, an Edit, a Filter and a page placing an item with a field slot
+- [x] 2.5 Golden tests: a Show, an Edit, a Filter and a page placing an item with a field slot
       and a content slot render the same HTML as the inline equivalent; a missing item and a
       self-containing item render blank.
 

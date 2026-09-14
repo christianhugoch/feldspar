@@ -1,6 +1,7 @@
 // Evaluate Saltcorn UI's built view runtime and hold it to its shape (TODO 2.7).
 //
-//   node bundle_shape.mjs <dist/view-runtime.js> <vendor/v1-exports.json>
+//   node bundle_shape.mjs <dist/view-runtime.js> <vendor/v1-exports.json> \
+//     <dist/view-runtime.importers.json>
 //
 // Run by `bundle_shape.rs`. The bundle's one import is `node:module`, for its
 // `require`; this script answers it the way the module worker will — Node's
@@ -14,7 +15,7 @@ import { register } from "node:module";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const [bundlePath, exportsPath] = process.argv.slice(2).map((p) => resolve(p));
+const [bundlePath, exportsPath, importersPath] = process.argv.slice(2).map((p) => resolve(p));
 
 register(
   "data:text/javascript," +
@@ -127,6 +128,38 @@ for (const name of kept) {
 // --- and the library is the real thing, not a stub --------------------------
 const { div } = rt.library["@saltcorn/markup/tags"];
 check(div({ class: "x" }, "hi") === '<div class="x">hi</div>', "@saltcorn/markup/tags' div does not render");
+
+// --- models/library: vendored, not host-supplied (TODO "The builder" 2.1–2.3) --
+// v1's own class. Its pure half works with nothing behind it, and its writes
+// reach the library shim, which refuses them by name without asking the host.
+const Library = rt.library["@saltcorn/data/models/library"];
+check(typeof Library?.resolveSegment === "function", "models/library has no resolveSegment");
+const searchOnly = new Library({ name: "search", icon: "", layout: { type: "search_bar" } });
+check(
+  searchOnly.suitableFor("page") === true && searchOnly.suitableFor("show") === false,
+  "models/library's suitableFor is not v1's (a search bar is for a page, not a show)",
+);
+let writeRefusal = "";
+try {
+  await Library.create({ name: "x", icon: "", layout: {} });
+} catch (e) {
+  writeRefusal = e.message;
+}
+check(
+  writeRefusal.includes("db.insert") && writeRefusal.includes("never writes"),
+  `Library.create was not refused by the library shim (${writeRefusal || "no error"})`,
+);
+
+// --- each keyed shim is reached by its importer and no other file -----------
+const { keyed, importers } = JSON.parse(readFileSync(importersPath, "utf8"));
+check(Object.keys(keyed).includes("src/shims/library-db.ts"), "the library shim is not keyed on its importer");
+for (const [shim, importer] of Object.entries(keyed)) {
+  const reached = importers[shim] ?? [];
+  check(
+    reached.length === 1 && reached[0] === importer,
+    `${shim} may be imported only by ${importer}; it was imported by ${reached.join(", ") || "nothing"}`,
+  );
+}
 
 for (const f of failures) console.log(f);
 if (failures.length) process.exit(1);

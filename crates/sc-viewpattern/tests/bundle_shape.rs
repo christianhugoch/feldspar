@@ -38,10 +38,15 @@ fn bundle_shape() {
     }
     let harness = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/bundle_shape.mjs");
     let exports = saltcorn_ui().join("vendor/v1-exports.json");
+    // Written by the same build: who imported each of `src/shims/`.
+    let importers = saltcorn_ui()
+        .join("dist")
+        .join("view-runtime.importers.json");
     let output = match Command::new("node")
         .arg(&harness)
         .arg(&bundle)
         .arg(&exports)
+        .arg(&importers)
         .output()
     {
         Ok(output) => output,

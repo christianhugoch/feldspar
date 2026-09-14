@@ -14,6 +14,7 @@
   "@saltcorn/data/models/form",
   "@saltcorn/data/models/fieldrepeat",
   "@saltcorn/data/models/expression",
+  "@saltcorn/data/models/library",
   "@saltcorn/data/plugin-helper",
   "@saltcorn/data/viewable_fields",
   "@saltcorn/data/base-plugin/viewtemplates/viewable_fields",

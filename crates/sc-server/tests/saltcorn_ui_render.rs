@@ -47,7 +47,7 @@ use sc_server::{
     install_triggers,
 };
 use sc_test_harness::TestDb;
-use sc_viewpattern::View;
+use sc_viewpattern::{LibraryItem, View};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -1452,6 +1452,206 @@ async fn the_six_patterns_render_their_golden_html() -> sc_error::Result<()> {
         wrong.join("\n\n")
     );
     Ok(())
+}
+
+/// The builder 2.5: a `library` segment renders as its item's layout with the
+/// slots filled, resolved by v1's own `Library.resolveSegment` over the
+/// application's snapshot — **the same HTML as that layout written inline** —
+/// in a Show, an Edit, a Filter and a page. A reference to an item that does not
+/// exist, and an item's reference to itself, render blank where they were.
+///
+/// Each view keeps its restored layout and has one row of it moved into an item,
+/// with a heading above it: the heading becomes a content slot and the row's
+/// field a field slot. The page places an item with a content slot and a slot
+/// its placement leaves unfilled (a field slot means nothing on a page, which has
+/// no row), then a missing item, then an item containing itself, above the view
+/// it already embeds.
+#[tokio::test]
+async fn a_placed_library_item_renders_as_its_inline_equivalent() -> sc_error::Result<()> {
+    let Some(bundle) = bundle_dir() else {
+        eprintln!(
+            "skipping: the Saltcorn UI bundle is not built (npm ci && npm run build in ui/saltcorn-ui)"
+        );
+        return Ok(());
+    };
+    let mut server = setup("library", bundle).await?;
+    let catalog = server._catalog.clone();
+    let app = booksdb(&catalog).await;
+
+    for (name, path) in [
+        ("Show Books", "/view/Show%20Books?id=1"),
+        ("Edit Books", "/view/Edit%20Books?id=1"),
+        ("Filter books", "/view/Filter%20books"),
+    ] {
+        let view = sc_viewpattern::load_view(&catalog, app.id, name)
+            .await?
+            .expect("the restored view");
+        let layout = view.configuration["layout"].clone();
+        let row = layout["above"]
+            .as_array()
+            .and_then(|above| {
+                above
+                    .iter()
+                    .position(|seg| first_of(&mut seg.clone(), "field").is_some())
+            })
+            .unwrap_or_else(|| panic!("{name} has a row with a field: {layout}"));
+        let part = json!({ "above": [
+            { "type": "blank", "contents": "Wrapped row", "textStyle": "h5" },
+            layout["above"][row].clone(),
+        ]});
+        let (item_layout, slots, resolved) = slotted(&part);
+        assert_eq!(slots.as_array().map(Vec::len), Some(2), "{name}: {slots}");
+
+        let mut inline = layout.clone();
+        inline["above"][row] = resolved;
+        let expected = render_with_layout(&mut server, &view, inline, path).await?;
+        assert!(expected.contains("Wrapped row"), "{name}: {expected}");
+
+        let item = sc_viewpattern::save_library_item(
+            &catalog,
+            &LibraryItem::new(app.id, format!("{name} row")).layout(item_layout),
+        )
+        .await?;
+        let mut placed = layout.clone();
+        placed["above"][row] = json!({
+            "type": "library", "library_id": item.id.0.to_string(), "slots": slots,
+        });
+        let rendered = render_with_layout(&mut server, &view, placed, path).await?;
+        assert_eq!(
+            rendered, expected,
+            "{name}: the placed item renders as the inline row"
+        );
+    }
+
+    // --- A page.
+    let page = sc_viewpattern::load_page(&catalog, app.id, "BooksOverview")
+        .await?
+        .expect("the restored page");
+    let heading = sc_viewpattern::save_library_item(
+        &catalog,
+        &LibraryItem::new(app.id, "Overview heading").layout(json!({ "above": [
+            { "type": "blank", "contents": "Overview", "textStyle": "h2" },
+            { "type": "library-slot", "name": "intro" },
+            { "type": "library-slot", "name": "unfilled" },
+        ]})),
+    )
+    .await?;
+    let itself = LibraryItem::new(app.id, "Contains itself");
+    let itself_id = itself.id.0.to_string();
+    let itself = sc_viewpattern::save_library_item(
+        &catalog,
+        &itself.layout(json!({ "above": [
+            { "type": "blank", "contents": "Before itself" },
+            { "type": "library", "library_id": itself_id },
+        ]})),
+    )
+    .await?;
+    let never_saved = LibraryItem::new(app.id, "Never saved").id.0.to_string();
+
+    let inline = json!({ "above": [
+        { "above": [
+            { "type": "blank", "contents": "Overview", "textStyle": "h2" },
+            { "type": "blank", "contents": "Find a book" },
+            { "type": "blank", "contents": "" },
+        ]},
+        { "type": "blank", "contents": "" },
+        { "above": [
+            { "type": "blank", "contents": "Before itself" },
+            { "type": "blank", "contents": "" },
+        ]},
+        page.layout.clone(),
+    ]});
+    let placed = json!({ "above": [
+        { "type": "library", "library_id": heading.id.0.to_string(), "slots": [
+            { "name": "intro", "kind": "content",
+              "contents": { "type": "blank", "contents": "Find a book" } },
+        ]},
+        { "type": "library", "library_id": never_saved },
+        { "type": "library", "library_id": itself.id.0.to_string() },
+        page.layout.clone(),
+    ]});
+    let mut rendered = Vec::new();
+    for layout in [inline, placed] {
+        sc_viewpattern::save_page(&catalog, &page.clone().layout(layout)).await?;
+        build_and_mount(&server.apps, booksdb(&catalog).await).await?;
+        let answer = server
+            .client
+            .app_get(
+                "/page/BooksOverview",
+                &[("X-Requested-With", "XMLHttpRequest")],
+            )
+            .await;
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+        rendered.push(normalise(&answer.body));
+    }
+    for text in ["Overview", "Find a book", "Before itself"] {
+        assert!(rendered[0].contains(text), "{text}: {}", rendered[0]);
+    }
+    assert_eq!(
+        rendered[1], rendered[0],
+        "the page's placed items render as their inline layouts"
+    );
+    Ok(())
+}
+
+/// Save `view` with `layout` as its layout, deploy, and render `path` as the
+/// golden test does.
+async fn render_with_layout(
+    server: &mut Server,
+    view: &View,
+    layout: Value,
+    path: &str,
+) -> sc_error::Result<String> {
+    let mut configuration = view.configuration.clone();
+    configuration.insert("layout".to_owned(), layout);
+    sc_viewpattern::save_view(&server._catalog, &view.clone().configuration(configuration)).await?;
+    build_and_mount(&server.apps, booksdb(&server._catalog).await).await?;
+    let answer = server
+        .client
+        .app_get(path, &[("X-Requested-With", "XMLHttpRequest")])
+        .await;
+    assert_eq!(answer.status, StatusCode::OK, "{path}: {}", answer.body);
+    Ok(normalise(&answer.body))
+}
+
+/// The first segment of type `kind` in `value`, depth first.
+fn first_of<'a>(value: &'a mut Value, kind: &str) -> Option<&'a mut Value> {
+    if value.get("type").and_then(Value::as_str) == Some(kind) {
+        return Some(value);
+    }
+    match value {
+        Value::Array(items) => items.iter_mut().find_map(|v| first_of(v, kind)),
+        Value::Object(map) => map.values_mut().find_map(|v| first_of(v, kind)),
+        _ => None,
+    }
+}
+
+/// `part` made into a library item: its first `field` segment becomes the slot
+/// `value` and its first `blank` the slot `label`. Answers the item's layout,
+/// the slots a placement fills them with, and `part` as it is once resolved —
+/// v1's `resolveSegment` gives a field slot exactly
+/// `{ type, field_name, fieldview, configuration: {} }` and a content slot its
+/// contents unchanged.
+fn slotted(part: &Value) -> (Value, Value, Value) {
+    let mut item = part.clone();
+    let mut resolved = part.clone();
+    let mut slots = Vec::new();
+    if let Some(field) = first_of(&mut item, "field") {
+        let (field_name, fieldview) = (field["field_name"].clone(), field["fieldview"].clone());
+        *field = json!({ "type": "library-slot", "name": "value" });
+        *first_of(&mut resolved, "field").expect("the same field") = json!({
+            "type": "field", "field_name": field_name, "fieldview": fieldview, "configuration": {},
+        });
+        slots.push(json!({
+            "name": "value", "kind": "field", "field": field_name, "fieldview": fieldview,
+        }));
+    }
+    if let Some(blank) = first_of(&mut item, "blank") {
+        let contents = blank.clone();
+        *blank = json!({ "type": "library-slot", "name": "label" });
+        slots.push(json!({ "name": "label", "kind": "content", "contents": contents }));
+    }
+    (item, Value::Array(slots), resolved)
 }
 
 /// What legitimately differs between two renders of one view, replaced by a

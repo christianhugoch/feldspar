@@ -2,6 +2,74 @@
 
 Changes in reverse chronological order.
 
+## The builder, Phase 2: the library, rendered
+
+A `library` segment in a Saltcorn UI view or page now renders as its item's
+layout, with the slots filled. The class that does it is **v1's own
+`models/library.ts`**. It is vendored, not reimplemented, and reads the
+application's snapshot instead of `_sc_library`. Until now the worker answered
+`@saltcorn/data/models/library` with an inert stub, and every placed item
+rendered as nothing.
+
+- **Vendored (2.1).**
+  - `vendor/saltcorn-data/models/library.ts` is taken from saltcorn/saltcorn
+    `0508c45ac2`, the commit of the rest of `vendor/`, with the two-line
+    header. `refresh.sh` lists it.
+  - `models/library` is off `build.mjs`'s `HOST_DATA_MODULES`. The bundle's
+    library answers `@saltcorn/data/models/library` as a v1 `require` does: the
+    class itself, with no enumerable exports.
+  - The class is added to `library-specifiers.json` and `v1-exports.json`. The
+    latter is written by hand, because the local v1 checkout (`147056573f`)
+    fails to `require` the module on its own. Required after `models/table`,
+    it gives `function` and `[]`, which is what the file records.
+- **`src/shims/library-db.ts` (2.2)** is `library.ts`'s `db`.
+  - `select` and `selectMaybeOne` on `_sc_library` answer from
+    `getState().library`, filtered by v1's own `satisfies`, with `orderBy` /
+    `orderDesc` / `limit` / `offset`.
+  - Every other member (`insert`, `update`, `query`,
+    `getTenantSchemaPrefix` …) refuses by name. The worker never writes the
+    library; the admin API does.
+- **Shims keyed on their importer.**
+  - `build.mjs`'s new `KEYED_SHIMS` table resolves `models/library.ts`'s
+    `../db/index.js`, and no other file's, to that shim. Every other `db` import
+    is still the host's.
+  - The `module` and `os` shims for `utils.ts` moved into the same table.
+  - The build now writes `dist/view-runtime.importers.json`, which records which
+    files actually imported each file in `src/shims/`.
+- **`getState().library` (2.3).**
+  - `module-host.mjs`'s state gains `library`: a copy of the snapshot's
+    `{ id, name, icon, layout }` entries. It is not a v1 member, and the comment
+    says so.
+  - The `V1Library` stub is deleted, and its case is removed from
+    `saltcornModule`, so a plugin's `require` gets the vendored class too.
+  - `Page.run` resolves with the bundle's class.
+- **Where library segments are resolved (2.4)** was checked against v1 at
+  `0508c45ac2` and matches, so no call was added.
+  - v1 calls `resolveSegment` in `show.ts`, `edit.ts`, `list.ts`, `filter.ts`
+    (all vendored) and in `Page.run`. The host's port of `Page.run` already had
+    the call in the same place.
+  - One v1 behaviour carries over: `Page.run` renders embedded views
+    (`eachView`) *before* it resolves library segments. A `view` segment inside
+    a library item placed on a page therefore does not render, in v1 or here.
+  - Likewise, Show gathers its on-load actions and join fieldviews from the
+    layout before resolving.
+- **Tests (2.5).**
+  - `bundle_shape` covers the vendored `Library`: `suitableFor` is v1's, and
+    `Library.create` is refused by the shim without reaching the host. It also
+    checks every keyed shim was imported by its one importer and no other file.
+  - `saltcorn_ui_render.rs`'s
+    `a_placed_library_item_renders_as_its_inline_equivalent` runs over the
+    restored BooksDB. In Show Books, Edit Books and Filter books, a row plus a
+    heading is moved into an item: the heading becomes a content slot, the
+    row's field a field slot.
+  - The view with the item placed renders exactly the HTML of the view with that
+    row written inline.
+  - BooksOverview places three things above its embedded filter. The first is an
+    item with a filled content slot and an unfilled slot. The second is a
+    reference to an item that does not exist. The third is an item containing
+    itself. The page renders exactly as the inline layout, with blanks where the
+    missing item, the unfilled slot and the self-reference were.
+
 ## The builder, Phase 1: the library, stored
 
 A Saltcorn UI application can hold **library items**, v1's `_sc_library` rows

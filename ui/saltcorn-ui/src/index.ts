@@ -37,6 +37,7 @@ import * as fieldviews_ from "../vendor/saltcorn-data/base-plugin/fieldviews.js"
 import * as fileviews_ from "../vendor/saltcorn-data/base-plugin/fileviews.js";
 import * as utils from "../vendor/saltcorn-data/utils.js";
 import * as layoutModel from "../vendor/saltcorn-data/models/layout.js";
+import * as libraryModel from "../vendor/saltcorn-data/models/library.js";
 import { Evaluator } from "../vendor/saltcorn-data/evaluator.js";
 import { extractFromLayout } from "../vendor/saltcorn-data/diagram/node_extract_utils.js";
 
@@ -112,6 +113,9 @@ export const library: Record<string, unknown> = {
   "@saltcorn/data/models/form": dataShim(form),
   "@saltcorn/data/models/fieldrepeat": dataShim(fieldrepeat),
   "@saltcorn/data/models/expression": dataShim(expression),
+  // v1's own class, answering from the application's snapshot
+  // (src/shims/library-db.ts); the host's `Page.run` resolves with it too.
+  "@saltcorn/data/models/library": dataShim(libraryModel),
   "@saltcorn/data/plugin-helper": pluginHelperLibrary(),
   "@saltcorn/data/viewable_fields": dataShim(viewableFields),
   "@saltcorn/data/base-plugin/viewtemplates/viewable_fields": dataShim(viewtemplatesViewableFields),

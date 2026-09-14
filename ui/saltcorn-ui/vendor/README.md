@@ -18,7 +18,7 @@ needs to differ goes in `../src/` (see *The line* below).
 | `saltcorn-data/base-plugin/viewtemplates/` | `packages/saltcorn-data/base-plugin/viewtemplates/` | `list.ts`, `show.ts`, `edit.ts`, `feed.ts`, `filter.ts`, `listshowlist.ts`, and the back-compat `viewable_fields.ts` re-export. **Not** `room.ts` or `workflow-room.ts` (socket views, out of scope). |
 | `saltcorn-data/base-plugin/` | same | `types.ts`, `fieldviews.ts`, `fileviews.ts` |
 | `saltcorn-data/` | `packages/saltcorn-data/` | `plugin-helper.ts`, `viewable_fields.ts`, `utils.ts`, `evaluator.ts` (the host builds `getState().evaluator` from it) |
-| `saltcorn-data/models/` | same | `form.ts`, `fieldrepeat.ts`, `expression.ts`, `layout.ts` |
+| `saltcorn-data/models/` | same | `form.ts`, `fieldrepeat.ts`, `expression.ts`, `layout.ts`, `library.ts` (`resolveSegment` and `suitableFor`; its `db` is `../src/shims/library-db.ts`) |
 | `saltcorn-data/diagram/` | same | `node_extract_utils.ts` and `nodes/*` — what a pattern's `connectedObjects` is built from |
 | `saltcorn-data/tests/mocks.ts` | same | `fieldviews.ts` renders with its `mockReqRes` |
 | `saltcorn-data/mobile-mocks/` | same | `saltcorn/plugin-testing.ts`, `npm/dockerode.ts`, `npm/xml2js.ts`, `node/fs-extra.ts` — v1's own mocks for running `@saltcorn/data` without its server |
@@ -46,18 +46,23 @@ through the one `require` the bundle imports (`createRequire` from `node:module`
 module worker is `module-host.mjs`'s patched `Module._load`:
 
 - **Host-supplied `@saltcorn/data` modules** (`build.mjs`'s `HOST_DATA_MODULES`):
-  `models/table`, `field`, `view`, `page`, `trigger`, `file`, `user`, `crash`, `library`,
-  `page_group`, `workflow`, `tag`, `config`, `discovery`, and `db/state`, `db/index`. A vendored
-  file's relative import of any of them becomes `require("@saltcorn/data/<path>")`.
+  `models/table`, `field`, `view`, `page`, `trigger`, `file`, `user`, `crash`, `page_group`,
+  `workflow`, `tag`, `config`, `discovery`, and `db/state`, `db/index`. A vendored file's
+  relative import of any of them becomes `require("@saltcorn/data/<path>")`.
 - **Node's built-ins** (`vm`, `path`, `crypto`, `fs`, …): the worker's own.
 - **`plugin-helper.ts`**, per export: `../src/plugin-helper.ts` is the partition, and every
   import of plugin-helper — the vendored patterns' included — reaches it. Kept, refused (fatal on
   call, naming the export) or absent (`undefined` to a plugin, which feature-detects it). The
   `bundle_shape` test holds every upstream export to exactly one of the three.
 - **Shims in `../src/shims/`**, each saying why: `module` (utils' lazy `require` of `db/*`),
-  `vm2` (formulas run with `vm.runInNewContext`, the branch v1 takes off Node — the isolation
-  boundary is the worker's empty permission set) and `https-proxy-agent` (views make no
-  outbound requests).
+  `os` (utils asks for the home directory at load), `library-db` (`models/library.ts`'s `db`:
+  its two reads answered from `getState().library`, the application's snapshot, and every write
+  refused by name — the admin API writes the library, never the worker), `vm2` (formulas run
+  with `vm.runInNewContext`, the branch v1 takes off Node — the isolation boundary is the
+  worker's empty permission set) and `https-proxy-agent` (views make no outbound requests).
+  `module`, `os` and `library-db` are **keyed on their importer** (`build.mjs`'s `KEYED_SHIMS`):
+  only that file's import reaches them. The build records who actually imported each shim in
+  `dist/view-runtime.importers.json`, and `bundle_shape` holds it to that table.
 - **npm packages** the vendored files import (`moment`, `underscore`, `xss`, …) are bundled,
   pinned in `../package.json` to the versions v1's lock file resolved.
 
