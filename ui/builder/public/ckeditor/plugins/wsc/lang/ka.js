@@ -1,0 +1,4 @@
+// Vendored from Saltcorn 1: packages/server/public/ckeditor/plugins/wsc/lang/ka.js
+// at @saltcorn/builder 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/builder/vendor/README.md.
+CKEDITOR.plugins.setLang("wsc","ka",{btnIgnore:"უგულებელყოფა",btnIgnoreAll:"ყველას უგულებელყოფა",btnReplace:"შეცვლა",btnReplaceAll:"ყველას შეცვლა",btnUndo:"გაუქმება",changeTo:"შეცვლელი",errorLoading:"სერვისის გამოძახების შეცდომა: %s.",ieSpellDownload:"მართლწერის შემოწმება არაა დაინსტალირებული. ჩამოვქაჩოთ ინტერნეტიდან?",manyChanges:"მართლწერის შემოწმება: %1 სიტყვა შეიცვალა",noChanges:"მართლწერის შემოწმება: არაფერი შეცვლილა",noMispell:"მართლწერის შემოწმება: შეცდომა არ მოიძებნა",noSuggestions:"- არაა შემოთავაზება -",
+notAvailable:"უკაცრავად, ეს სერვისი ამჟამად მიუწვდომელია.",notInDic:"არაა ლექსიკონში",oneChange:"მართლწერის შემოწმება: ერთი სიტყვა შეიცვალა",progress:"მიმდინარეობს მართლწერის შემოწმება...",title:"მართლწერა",toolbar:"მართლწერა"});

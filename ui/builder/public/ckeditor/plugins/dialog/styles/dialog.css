@@ -1,0 +1,20 @@
+/* Vendored from Saltcorn 1: packages/server/public/ckeditor/plugins/dialog/styles/dialog.css
+/* at @saltcorn/builder 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/builder/vendor/README.md. */
+.cke_dialog_open {
+	overflow: hidden;
+}
+
+.cke_dialog_container {
+	position: fixed;
+	overflow-y: auto;
+	overflow-x: auto;
+	width: 100%;
+	height: 100%;
+	top: 0;
+	left: 0;
+	z-index: 10010;
+}
+
+.cke_dialog_body {
+	position: relative;
+}

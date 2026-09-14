@@ -46,6 +46,7 @@
 #   /opt/feldspar/ui/admin/dist       the admin SPA it serves
 #   /opt/feldspar/ui/ide/dist         the file-store IDE it serves
 #   /opt/feldspar/ui/saltcorn-ui/dist Saltcorn UI's view runtime and assets
+#   /opt/feldspar/ui/builder/dist     Saltcorn UI's builder, the layout editor
 #   /opt/feldspar/plugins/            the modules it ships with, installable in
 #                                     one click from Settings -> Modules
 #   /opt/feldspar/install.sh          copies the tree into place
@@ -424,7 +425,7 @@ build_native() {
     cp "${REPO_ROOT}/target/${TARGET}/release/feldspar" "${STAGE}/bin/feldspar"
     stage_plugins
     if [[ ${BUILD_UI} -eq 1 ]]; then
-        for bundle in admin ide saltcorn-ui; do
+        for bundle in admin ide saltcorn-ui builder; do
             local dist="${REPO_ROOT}/ui/${bundle}/dist"
             [[ -d "${dist}" ]] || { echo "error: ${dist} was not built" >&2; exit 1; }
             mkdir -p "${STAGE}/ui/${bundle}"
@@ -649,10 +650,12 @@ cat <<INNER
   ui/ide/dist           the file-store IDE, reached from the admin UI
   ui/saltcorn-ui/dist   Saltcorn UI: the view runtime and browser assets that
                         serve Saltcorn 1 views
+  ui/builder/dist       Saltcorn UI's builder: Saltcorn 1's drag-and-drop layout
+                        editor, served on the admin server's builder routes
 INNER
 else
 cat <<INNER
-  (built with --no-ui: no admin SPA and no IDE. \`serve\` will answer the API and
+  (built with --no-ui: no admin SPA, no IDE and no builder. \`serve\` will answer the API and
   serve the bootstrap page; point --static-dir at a bundle to serve one.)
 INNER
 fi)

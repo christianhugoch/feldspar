@@ -1,12 +1,14 @@
 //! Wire the admin UI into the server binary's build: the `ui/admin` SPA, the
 //! `ui/ide` file-store IDE (design §12.1), which are one thing to an operator,
 //! and `ui/saltcorn-ui` — Saltcorn UI's view runtime and browser assets, the
-//! framework that serves Saltcorn 1's views (TODO Phase 2, §9).
+//! framework that serves Saltcorn 1's views (TODO Phase 2, §9), and `ui/builder`,
+//! v1's drag-and-drop layout editor for it (TODO "The builder" §1).
 //!
-//! The build is **on by default**: `cargo build -p sc-cli` runs the three
+//! The build is **on by default**: `cargo build -p sc-cli` runs the four
 //! production builds (`npm ci && npm run build`) and records the output
-//! directories in the `SC_ADMIN_BUNDLE_DIR`, `SC_IDE_BUNDLE_DIR` and
-//! `SC_SALTCORN_UI_BUNDLE_DIR` compile-time envs, so the binary serves all three
+//! directories in the `SC_ADMIN_BUNDLE_DIR`, `SC_IDE_BUNDLE_DIR`,
+//! `SC_SALTCORN_UI_BUNDLE_DIR` and `SC_BUILDER_BUNDLE_DIR` compile-time envs, so
+//! the binary serves all four
 //! with no flags at all (see `main.rs`). A binary that does not serve
 //! its own admin UI is the surprising outcome, not the expected one, which is why
 //! it is the default rather than something to remember.
@@ -23,7 +25,8 @@
 //! **`SC_BUNDLE_PREFIX`** is that case: set it to the directory the artifact will
 //! be installed under (`scripts/build-static.sh` sets it to the install prefix) and
 //! the recorded paths become `$SC_BUNDLE_PREFIX/ui/admin/dist`,
-//! `$SC_BUNDLE_PREFIX/ui/ide/dist` and `$SC_BUNDLE_PREFIX/ui/saltcorn-ui/dist` —
+//! `$SC_BUNDLE_PREFIX/ui/ide/dist`, `$SC_BUNDLE_PREFIX/ui/saltcorn-ui/dist` and
+//! `$SC_BUNDLE_PREFIX/ui/builder/dist` —
 //! the same `ui/<name>/dist` layout, rooted where
 //! the bundles will actually be. The bundles are still built here; only the path
 //! compiled into the binary moves.
@@ -39,6 +42,14 @@
 //! the same statement about it: no directory is recorded, and an application
 //! whose framework is `saltcorn-ui` then fails to mount naming the missing
 //! bundle, rather than failing on every request.
+//!
+//! The builder is the fourth bundle and rides on the same variable, for the same
+//! reason. A `--no-ui` build records no `SC_BUILDER_BUNDLE_DIR`; the builder's
+//! routes then answer a page saying so, and the admin UI keeps showing a layout
+//! as read-only JSON, so that build degrades rather than breaks (TODO "The
+//! builder" §2). It is its own package rather than part of `ui/saltcorn-ui`
+//! because the view runtime runs in the module worker and the builder in an
+//! admin's browser: nothing but the vendored `common-code` it reads is shared.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -155,7 +166,7 @@ struct Bundle {
     marker: &'static str,
 }
 
-const BUNDLES: [Bundle; 3] = [
+const BUNDLES: [Bundle; 4] = [
     Bundle {
         subdir: "ui/admin",
         env_var: "SC_ADMIN_BUNDLE_DIR",
@@ -176,6 +187,22 @@ const BUNDLES: [Bundle; 3] = [
         label: "Saltcorn UI view runtime",
         inputs: &["src", "vendor", "public", "build.mjs"],
         marker: "view-runtime.js",
+    },
+    Bundle {
+        subdir: "ui/builder",
+        env_var: "SC_BUILDER_BUNDLE_DIR",
+        label: "Saltcorn UI builder",
+        // The relation finder is the view runtime's vendored copy (`build.mjs`'s
+        // aliases), so a change there rebuilds this bundle too.
+        inputs: &[
+            "src",
+            "vendor",
+            "public",
+            "build.mjs",
+            "tsconfig.json",
+            "../saltcorn-ui/vendor/common-code",
+        ],
+        marker: "builder.js",
     },
 ];
 

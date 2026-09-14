@@ -1418,6 +1418,8 @@ fn the_metadata_namespace_is_fd_and_only_v1_is_still_called_sc() {
             || rel.ends_with("repo_hygiene.rs")
             || rel.starts_with("ui/saltcorn-ui/vendor/")
             || rel.starts_with("ui/saltcorn-ui/public/")
+            || rel.starts_with("ui/builder/vendor/")
+            || rel.starts_with("ui/builder/public/")
         {
             continue;
         }

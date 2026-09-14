@@ -1,0 +1,443 @@
+// Vendored from Saltcorn 1: packages/saltcorn-builder/src/components/elements/Text.js
+// at @saltcorn/builder 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/builder/vendor/README.md.
+/**
+ * @category saltcorn-builder
+ * @module components/elements/Text
+ * @subcategory components / elements
+ */
+
+import React, { useState, useContext, useEffect, useRef, Fragment } from "react";
+import { useNode } from "@craftjs/core";
+import {
+  blockProps,
+  BlockOrInlineSetting,
+  TextStyleSetting,
+  OrFormula,
+  ErrorBoundary,
+  TextStyleRow,
+  DynamicFontAwesomeIcon,
+  isBlock,
+  reactifyStyles,
+  SettingsRow,
+  setAPropGen,
+} from "./utils";
+import { getDeviceValue } from "../../utils/responsive_utils";
+import ContentEditable from "react-contenteditable";
+import optionsCtx from "../context";
+import PreviewCtx from "../preview_context";
+import { CKEditor } from "ckeditor4-react";
+import FontIconPicker from "@fonticonpicker/react-fonticonpicker";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import fas from "@fortawesome/free-solid-svg-icons";
+import far from "@fortawesome/free-regular-svg-icons";
+import { SingleLineEditor } from "./MonacoEditor";
+import useTranslation from "../../hooks/useTranslation";
+
+const ckConfig = {
+  toolbarGroups: [
+    { name: "document", groups: ["mode", "document", "doctools"] },
+    { name: "clipboard", groups: ["clipboard", "undo"] },
+    { name: "forms", groups: ["forms"] },
+    { name: "basicstyles", groups: ["basicstyles", "cleanup"] },
+    {
+      name: "editing",
+      groups: ["find", "selection", "spellchecker", "editing"],
+    },
+    {
+      name: "paragraph",
+      groups: ["list", "indent", "blocks", "align", "bidi", "paragraph"],
+    },
+    { name: "links", groups: ["links"] },
+    "/",
+    { name: "insert", groups: ["insert"] },
+    { name: "styles", groups: ["styles"] },
+    { name: "colors", groups: ["colors"] },
+    { name: "tools", groups: ["tools"] },
+    { name: "others", groups: ["others"] },
+    { name: "about", groups: ["about"] },
+  ],
+  autoParagraph: false,
+  fillEmptyBlocks: false,
+  removeButtons:
+    "Source,Save,NewPage,ExportPdf,Print,Preview,Templates,Cut,Copy,Paste,PasteText,PasteFromWord,Find,Replace,SelectAll,Form,Checkbox,Radio,TextField,Textarea,Select,Button,ImageButton,HiddenField,CopyFormatting,CreateDiv,BidiLtr,BidiRtl,Language,Anchor,Flash,Iframe,PageBreak,Maximize,ShowBlocks,About,Undo,Redo,Image",
+};
+
+/**
+ * @param {string} str
+ * @returns {string}
+ */
+function escape_tags(str) {
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+export /**
+ * @param {object} props
+ * @param {string} props.text
+ * @param {boolean} props.block
+ * @param {object} props.isFormula
+ * @param {string} props.textStyle
+ * @param {string} [props.icon]
+ * @param {string} [props.font]
+ * @returns {div}
+ * @namespace
+ * @category saltcorn-builder
+ * @subcategory components
+ */
+const Text = ({
+  text: propText,
+  block,
+  inline,
+  isFormula,
+  textStyle,
+  icon,
+  font,
+  style,
+  customClass,
+  mobileFontSize,
+  tabletFontSize,
+}) => {
+  const {
+    connectors: { connect, drag },
+    selected,
+    nodeText,
+    actions: { setProp },
+  } = useNode((state) => ({
+    selected: state.events.selected,
+    dragged: state.events.dragged,
+    nodeText: state.data.props.text,
+  }));
+  // Use nodeText from store (reacts to undo) with fallback to prop
+  const text = nodeText !== undefined ? nodeText : propText;
+  const [editable, setEditable] = useState(false);
+  const { previewDevice } = useContext(PreviewCtx);
+  const ckInitRef = useRef(true);
+  const lastSavedTextRef = useRef(text);
+  const skipDestroyRef = useRef(false);
+
+  const baseStyle = {
+    ...(font ? { fontFamily: font } : {}),
+    ...reactifyStyles(style || {}),
+  };
+  const activeFontSize = getDeviceValue(
+    baseStyle.fontSize,
+    tabletFontSize,
+    mobileFontSize,
+    previewDevice
+  );
+  if (activeFontSize) baseStyle.fontSize = activeFontSize;
+
+  useEffect(() => {
+    if (editable) {
+      ckInitRef.current = true;
+      lastSavedTextRef.current = text;
+    }
+  }, [editable]);
+  // Close CKEditor when text changes externally (e.g. undo/redo)
+  useEffect(() => {
+    if (editable && text !== lastSavedTextRef.current) {
+      skipDestroyRef.current = true;
+      setEditable(false);
+    }
+  }, [text]);
+  useEffect(() => {
+    !selected && setEditable(false);
+  }, [selected]);
+  return (
+    <div
+      className={`${
+        isBlock(block, inline, textStyle) ? "d-block" : "d-inline-block"
+      } ${customClass || ""} ${Array.isArray(textStyle) ? textStyle.join(" ") : textStyle} is-text ${
+        isFormula.text ? "font-monospace" : ""
+      } ${selected ? "selected-node" : ""}`}
+      ref={(dom) => connect(drag(dom))}
+      onDoubleClick={(e) => selected && setEditable(true)}
+      style={baseStyle}
+    >
+      <DynamicFontAwesomeIcon icon={icon} className="me-1" />
+      {isFormula.text ? (
+        <Fragment>
+          =
+          <ContentEditable
+            html={text}
+            style={{ display: "inline" }}
+            disabled={!editable}
+            onChange={(e) =>
+              e?.target && setProp((props) => (props.text = e.target.value))
+            }
+          />
+        </Fragment>
+      ) : editable ? (
+        <ErrorBoundary>
+          <CKEditor
+            initData={text || ""}
+            style={{ display: "inline" }}
+            onChange={(e) => {
+              if (ckInitRef.current) {
+                ckInitRef.current = false;
+                return;
+              }
+              if (e?.editor) {
+                const newText = e.editor.getData();
+                setProp((props) => (props.text = newText), 500);
+                lastSavedTextRef.current = newText;
+              }
+            }}
+            onBeforeDestroy={(e) => {
+              if (skipDestroyRef.current) {
+                skipDestroyRef.current = false;
+                return;
+              }
+              if (e?.editor) {
+                const newText = e.editor.getData();
+                if (newText !== lastSavedTextRef.current) {
+                  setProp((props) => (props.text = newText));
+                }
+              }
+            }}
+            config={ckConfig}
+            type="inline"
+          />
+        </ErrorBoundary>
+      ) : (
+        <div className="d-inline" dangerouslySetInnerHTML={{ __html: text }} />
+      )}
+    </div>
+  );
+};
+//<div dangerouslySetInnerHTML={{ __html: text }} />
+
+export /**
+ * @returns {div}
+ * @namespace
+ * @category saltcorn-builder
+ * @subcategory components
+ */
+const TextSettings = () => {
+  const { t } = useTranslation();
+  const { previewDevice } = useContext(PreviewCtx);
+  const node = useNode((node) => ({
+    id: node.id,
+    text: node.data.props.text,
+    block: node.data.props.block,
+    inline: node.data.props.inline,
+    isFormula: node.data.props.isFormula,
+    textStyle: node.data.props.textStyle,
+    labelFor: node.data.props.labelFor,
+    customClass: node.data.props.customClass,
+    icon: node.data.props.icon,
+    font: node.data.props.font,
+    style: node.data.props.style,
+    mobileFontSize: node.data.props.mobileFontSize,
+    tabletFontSize: node.data.props.tabletFontSize,
+  }));
+  const {
+    actions: { setProp },
+    text,
+    block,
+    inline,
+    textStyle,
+    isFormula,
+    labelFor,
+    icon,
+    font,
+    style,
+    customClass,
+    mobileFontSize,
+    tabletFontSize,
+  } = node;
+  const { mode, fields, icons } = useContext(optionsCtx);
+  const setAProp = setAPropGen(setProp);
+  const allowFormula = mode === "show" || mode === "list";
+
+  return (
+    <div>
+      {allowFormula && (
+        <div className="form-check">
+          <input
+            type="checkbox"
+            className="form-check-input"
+            checked={isFormula.text}
+            onChange={(e) => {
+              if (!e.target) return;
+              const checked = e.target.checked;
+              setProp((prop) => (prop.isFormula.text = checked));
+            }}
+          />
+          <label className="form-check-label">{t("Formula?")}</label>
+        </div>
+      )}
+     <label>{t("Text to display")}</label>
+      {allowFormula && isFormula.text ? (
+        <SingleLineEditor setProp={setProp} value={text} propKey="text" />
+      ) : (
+        <ErrorBoundary>
+          <div className="border">
+            <CKEditor
+              key={node.id}
+              initData={text || ""}
+              onChange={(e) => {
+                if (e.editor) {
+                  const text = e.editor.getData();
+                  setProp((props) => (props.text = text));
+                }
+              }}
+              config={ckConfig}
+              type="inline"
+            />
+          </div>
+        </ErrorBoundary>
+      )}
+      {mode === "edit" && (
+        <Fragment>
+          <label>{t("Label for Field")}</label>
+          <select
+            value={labelFor}
+            onChange={setAProp("labelFor")}
+            className="form-control form-select"
+          >
+            <option value={""}></option>
+            {fields.map((f, ix) => (
+              <option key={ix} value={f.name}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+        </Fragment>
+      )}
+      <table className="w-100 mt-2">
+        <tbody>
+          <TextStyleRow textStyle={textStyle} setProp={setProp} />
+          <tr>
+            <td>
+              <label>{t("Icon")}</label>
+            </td>
+            <td>
+              <FontIconPicker
+                className="w-100"
+                value={icon}
+                icons={icons}
+                onChange={(value) => { if ((value || "") !== (icon || "")) setProp((prop) => (prop.icon = value), 500); }}
+                isMulti={false}
+              />
+            </td>
+          </tr>
+          <SettingsRow
+            field={{
+              name: "font",
+              label: t("Font family"),
+              type: "Font",
+            }}
+            node={node}
+            setProp={setProp}
+          />
+          {previewDevice === "desktop" ? (
+            <SettingsRow
+              field={{
+                name: "font-size",
+                label: t("Font size"),
+                type: "DimUnits",
+              }}
+              node={node}
+              setProp={setProp}
+              isStyle={true}
+            />
+          ) : (
+            <SettingsRow
+              field={{
+                name: "font-size",
+                label: `${t("Font size")} (${previewDevice})`,
+                type: "DimUnits",
+              }}
+              node={{
+                ...node,
+                style: {
+                  "font-size": previewDevice === "mobile" ? mobileFontSize : tabletFontSize,
+                },
+              }}
+              setProp={(fn) => {
+                // Write to mobileFontSize/tabletFontSize instead of style
+                const proxy = { style: {} };
+                fn(proxy);
+                const val = proxy.style["font-size"];
+                const propName = previewDevice === "mobile" ? "mobileFontSize" : "tabletFontSize";
+                setProp((prop) => { prop[propName] = val; });
+              }}
+              isStyle={true}
+            />
+          )}
+          <SettingsRow
+            field={{
+              name: "font-weight",
+              label: t("Weight"),
+              type: "Integer",
+              min: 100,
+              max: 900,
+              step: 100,
+            }}
+            node={node}
+            setProp={setProp}
+            isStyle={true}
+          />
+          <SettingsRow
+            field={{
+              name: "line-height",
+              label: t("Line height"),
+              type: "DimUnits",
+            }}
+            node={node}
+            setProp={setProp}
+            isStyle={true}
+          />
+          <tr>
+            <td>{t("Class")}</td>
+            <td>
+              <input
+                type="text"
+                value={customClass}
+                className="form-control"
+                onChange={setAProp("customClass")}
+                spellCheck={false}
+              />
+            </td>
+          </tr>
+          <SettingsRow
+            field={{
+              name: "color",
+              label: t("Color"),
+              type: "Color",
+            }}
+            node={node}
+            setProp={setProp}
+            isStyle={true}
+          />
+        </tbody>
+      </table>
+      <BlockOrInlineSetting
+        block={block}
+        inline={inline}
+        textStyle={textStyle}
+        setProp={setProp}
+      />
+    </div>
+  );
+};
+
+/**
+ * @type {object}
+ */
+Text.craft = {
+  defaultProps: {
+    text: "Click here",
+    block: false,
+    inline: false,
+    isFormula: {},
+    textStyle: "",
+    labelFor: "",
+    font: "",
+    style: {},
+  },
+  displayName: "Text",
+  related: {
+    settings: TextSettings,
+  },
+};

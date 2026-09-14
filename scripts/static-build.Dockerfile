@@ -104,6 +104,7 @@ RUN set -eu; \
     if [ -d ui/admin/dist ]; then mkdir -p /out/ui/admin && cp -r ui/admin/dist /out/ui/admin/; fi; \
     if [ -d ui/ide/dist ]; then mkdir -p /out/ui/ide && cp -r ui/ide/dist /out/ui/ide/; fi; \
     if [ -d ui/saltcorn-ui/dist ]; then mkdir -p /out/ui/saltcorn-ui && cp -r ui/saltcorn-ui/dist /out/ui/saltcorn-ui/; fi; \
+    if [ -d ui/builder/dist ]; then mkdir -p /out/ui/builder && cp -r ui/builder/dist /out/ui/builder/; fi; \
     if [ ! -d plugins ]; then echo "plugins/ is missing; it belongs in the artifact" >&2; exit 1; fi; \
     mkdir -p /out/plugins; \
     cp -r plugins/. /out/plugins/; \

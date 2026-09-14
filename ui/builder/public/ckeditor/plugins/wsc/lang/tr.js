@@ -1,0 +1,4 @@
+// Vendored from Saltcorn 1: packages/server/public/ckeditor/plugins/wsc/lang/tr.js
+// at @saltcorn/builder 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/builder/vendor/README.md.
+CKEDITOR.plugins.setLang("wsc","tr",{btnIgnore:"Yoksay",btnIgnoreAll:"Tümünü Yoksay",btnReplace:"Değiştir",btnReplaceAll:"Tümünü Değiştir",btnUndo:"Geri Al",changeTo:"Şuna değiştir:",errorLoading:"Uygulamada yüklerken hata oluştu: %s.",ieSpellDownload:"Yazım denetimi yüklenmemiş. Şimdi yüklemek ister misiniz?",manyChanges:"Yazım denetimi tamamlandı: %1 kelime değiştirildi",noChanges:"Yazım denetimi tamamlandı: Hiçbir kelime değiştirilmedi",noMispell:"Yazım denetimi tamamlandı: Yanlış yazıma rastlanmadı",
+noSuggestions:"- Öneri Yok -",notAvailable:"Üzügünüz, bu servis şuanda hizmet dışıdır.",notInDic:"Sözlükte Yok",oneChange:"Yazım denetimi tamamlandı: Bir kelime değiştirildi",progress:"Yazım denetimi işlemde...",title:"Yazımı Denetle",toolbar:"Yazım Denetimi"});

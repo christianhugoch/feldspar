@@ -1,0 +1,4 @@
+// Vendored from Saltcorn 1: packages/server/public/ckeditor/plugins/wsc/lang/he.js
+// at @saltcorn/builder 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/builder/vendor/README.md.
+CKEDITOR.plugins.setLang("wsc","he",{btnIgnore:"התעלמות",btnIgnoreAll:"התעלמות מהכל",btnReplace:"החלפה",btnReplaceAll:"החלפת הכל",btnUndo:"החזרה",changeTo:"שינוי ל",errorLoading:"שגיאה בהעלאת השירות: %s.",ieSpellDownload:"בודק האיות לא מותקן, האם להורידו?",manyChanges:"בדיקות איות הסתיימה: %1 מילים שונו",noChanges:"בדיקות איות הסתיימה: לא שונתה אף מילה",noMispell:"בדיקות איות הסתיימה: לא נמצאו שגיאות כתיב",noSuggestions:"- אין הצעות -",notAvailable:"לא נמצא שירות זמין.",notInDic:"לא נמצא במילון",
+oneChange:"בדיקות איות הסתיימה: שונתה מילה אחת",progress:"בודק האיות בתהליך בדיקה....",title:"בדיקת איות",toolbar:"בדיקת איות"});

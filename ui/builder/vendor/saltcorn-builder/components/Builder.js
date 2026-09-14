@@ -1,0 +1,1154 @@
+// Vendored from Saltcorn 1: packages/saltcorn-builder/src/components/Builder.js
+// at @saltcorn/builder 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/builder/vendor/README.md.
+/**
+ * @category saltcorn-builder
+ * @module components/Builder
+ * @subcategory components
+ */
+
+import React, {
+  useEffect,
+  useContext,
+  useState,
+  Fragment,
+  useRef
+} from "react";
+import { createPortal } from "react-dom";
+import useTranslation from "../hooks/useTranslation";
+import { Editor, Frame, Element, Selector, useEditor, DefaultEventHandlers } from "@craftjs/core";
+import { Layers } from "@craftjs/layers"
+import { Text } from "./elements/Text";
+import { Field } from "./elements/Field";
+import { JoinField } from "./elements/JoinField";
+import { Aggregation } from "./elements/Aggregation";
+import { LineBreak } from "./elements/LineBreak";
+import { ViewLink } from "./elements/ViewLink";
+import { Columns, ntimes } from "./elements/Columns";
+import { SearchBar } from "./elements/SearchBar";
+import { HTMLCode } from "./elements/HTMLCode";
+import { Action } from "./elements/Action";
+import { Image } from "./elements/Image";
+import { Tabs } from "./elements/Tabs";
+import { Table } from "./elements/Table";
+import { Empty } from "./elements/Empty";
+import { DropDownFilter } from "./elements/DropDownFilter";
+import { DropMenu } from "./elements/DropMenu";
+import { ToggleFilter } from "./elements/ToggleFilter";
+import optionsCtx from "./context";
+import PreviewCtx from "./preview_context";
+import RelationsCtx from "./relations_context";
+import StorageCtx from "./storage_context";
+import {
+  ToolboxShow,
+  ToolboxEdit,
+  ToolboxPage,
+  ToolboxFilter,
+  ToolboxList,
+  ToolboxRoom,
+} from "./Toolbox";
+import { craftToSaltcorn, layoutToNodes, resolveLibraryRefs } from "./storage";
+import { Card } from "./elements/Card";
+import { Link } from "./elements/Link";
+import { View } from "./elements/View";
+import { Container } from "./elements/Container";
+import { Column } from "./elements/Column";
+import { LibraryInstance } from "./elements/LibraryInstance";
+import { LibrarySlotInstance } from "./elements/LibrarySlotInstance";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import {
+  faCopy,
+  faUndo,
+  faRedo,
+  faTrashAlt,
+  faSave,
+  faExclamationTriangle,
+  faPlus
+} from "@fortawesome/free-solid-svg-icons";
+import {
+  faCaretSquareLeft,
+  faCaretSquareRight,
+} from "@fortawesome/free-regular-svg-icons";
+import { Accordion, ErrorBoundary } from "./elements/utils";
+import { Display, Tablet, Phone } from "react-bootstrap-icons";
+import { InitNewElement, Library, LibraryElem, LibrarySlotElem, hydratingRef } from "./Library";
+import { RenderNode } from "./RenderNode";
+import { ListColumn } from "./elements/ListColumn";
+import { ListColumns } from "./elements/ListColumns";
+import { Prompt } from "./elements/Prompt";
+import { recursivelyCloneToElems } from "./elements/Clone";
+import { MessageList } from "./elements/MessageList";
+import { MessageForm } from "./elements/MessageForm";
+import { Page } from "./elements/Page";
+import CustomLayer from "./elements/CustomLayer";
+
+const { Provider } = optionsCtx;
+
+const getSelectedNodes = (selected) => {
+  if (!selected) return [];
+  if (typeof selected.all === "function") {
+    return selected.all();
+  }
+  if (Array.isArray(selected.all)) {
+    return selected.all;
+  }
+  if (typeof selected.values === "function") {
+    return Array.from(selected.values());
+  }
+  if (typeof selected.has === "function") {
+    return [...selected];
+  }
+  return [selected];
+};
+
+/**
+ *
+ * @returns {div}
+ * @category saltcorn-builder
+ * @subcategory components
+ * @namespace
+ */
+const SettingsPanel = ({ isEnlarged, setIsEnlarged }) => {
+  const { t } = useTranslation();
+  const options = useContext(optionsCtx);
+
+  const { actions, selected, selectedCount, query } = useEditor((state, query) => {
+    const selectedNodes = getSelectedNodes(state.events.selected);
+    const currentNodeId = selectedNodes.length === 1 ? selectedNodes[0] : null;
+    let selected;
+
+    if (currentNodeId) {
+      selected = {
+        id: currentNodeId,
+        name: state.nodes[currentNodeId].data.name,
+        parent: state.nodes[currentNodeId].data.parent,
+        displayName:
+          state.nodes[currentNodeId].data &&
+          state.nodes[currentNodeId].data.displayName,
+        settings:
+          state.nodes[currentNodeId].related &&
+          state.nodes[currentNodeId].related.settings,
+        isDeletable: query.node(currentNodeId).isDeletable(),
+        children:
+          state.nodes[currentNodeId].data &&
+          state.nodes[currentNodeId].data.nodes,
+      };
+    }
+
+    return {
+      selected,
+      selectedCount: selectedNodes.length,
+    };
+  });
+
+  /** */
+  const deleteThis = () => {
+    actions.delete(selected.id);
+  };
+
+  /**
+   * @param {number} offset
+   * @returns {NodeId}
+   */
+  const otherSibling = (offset) => {
+    const siblings = query.node(selected.parent).childNodes();
+    const sibIx = siblings.findIndex((sib) => sib === selected.id);
+    return siblings[sibIx + offset];
+  };
+
+  /**
+   * @param {object} event
+   */
+  const handleUserKeyPress = (event) => {
+    const { keyCode, target } = event;
+    const tagName = target.tagName.toLowerCase();
+    const hasSelection = selectedCount > 0;
+    if ((tagName === "body" || tagName === "button") && hasSelection) {
+      if (!selected && selectedCount > 1 && (keyCode === 8 || keyCode === 46)) {
+        const currentSelected = query.getEvent("selected");
+        const nodeIds = getSelectedNodes(currentSelected)
+          .map((nodeId) => (typeof nodeId === "string" ? nodeId : nodeId?.id))
+          .filter((nodeId) => nodeId && nodeId !== "ROOT");
+        nodeIds.forEach((nodeId) => {
+          try { actions.delete(nodeId); } catch (e) { /* node may already be deleted */ }
+        });
+      }
+      if (selected) {
+        if ((keyCode === 8 || keyCode === 46) && selected.id === "ROOT") {
+          deleteChildren();
+        }
+        if (keyCode === 8) {
+          //backspace
+          const prevSib = otherSibling(-1);
+          const parent = selected.parent;
+          deleteThis();
+          if (prevSib) actions.selectNode(prevSib);
+          else actions.selectNode(parent);
+        }
+        if (keyCode === 46) {
+          //del
+          const nextSib = otherSibling(1);
+          deleteThis();
+          if (nextSib) actions.selectNode(nextSib);
+        }
+        if (keyCode === 37 && selected.parent)
+          //left
+          actions.selectNode(selected.parent);
+  
+        if (keyCode === 39) {
+          //right
+          if (selected.children && selected.children.length > 0) {
+            actions.selectNode(selected.children[0]);
+          } else if (selected.displayName === "Columns") {
+            const node = query.node(selected.id).get();
+            const child = node?.data?.linkedNodes?.Col0;
+            if (child) actions.selectNode(child);
+          }
+        }
+        if (keyCode === 38 && selected.parent) {
+          //up
+          const prevSib = otherSibling(-1);
+          if (prevSib) actions.selectNode(prevSib);
+          event.preventDefault();
+        }
+        if (keyCode === 40 && selected.parent) {
+          //down
+          const nextSib = otherSibling(1);
+          if (nextSib) actions.selectNode(nextSib);
+          event.preventDefault();
+        }
+      }
+      if ((event.ctrlKey || event.metaKey) && event.keyCode == 67) {
+        const serialized = JSON.parse(query.serialize());
+        const serializedIds = new Set(Object.keys(serialized));
+        const currentSelected = query.getEvent("selected");
+        const rawSelected = getSelectedNodes(currentSelected);
+        if (rawSelected.length === 0 && selected?.id) rawSelected.push(selected.id);
+        const selectedNodes = rawSelected
+          .map((nodeId) => (typeof nodeId === "string" ? nodeId : nodeId?.id))
+          .filter(
+            (nodeId) =>
+              nodeId && nodeId !== "ROOT" && serializedIds.has(nodeId)
+          );
+        if (selectedNodes.length === 0) return;
+
+        if (selectedNodes.length === 1) {
+          const { layout } = craftToSaltcorn(
+            serialized,
+            selectedNodes[0],
+            options
+          );
+          navigator.clipboard.writeText(JSON.stringify(layout, null, 2));
+        } else {
+          const layouts = selectedNodes.map((nodeId) => {
+            const { layout } = craftToSaltcorn(
+              serialized,
+              nodeId,
+              options
+            );
+            return layout;
+          });
+          navigator.clipboard.writeText(
+            JSON.stringify({ above: layouts }, null, 2)
+          );
+        }
+      }
+      if ((event.ctrlKey || event.metaKey) && event.keyCode == 88) {
+        const serialized = JSON.parse(query.serialize());
+        const serializedIds = new Set(Object.keys(serialized));
+        const currentSelected = query.getEvent("selected");
+        const rawSelected = getSelectedNodes(currentSelected);
+        if (rawSelected.length === 0 && selected?.id) rawSelected.push(selected.id);
+        const selectedNodes = rawSelected
+          .map((nodeId) => (typeof nodeId === "string" ? nodeId : nodeId?.id))
+          .filter(
+            (nodeId) =>
+              nodeId && nodeId !== "ROOT" && serializedIds.has(nodeId)
+          );
+        if (selectedNodes.length === 0) return;
+
+        if (selectedNodes.length === 1) {
+          const { layout } = craftToSaltcorn(
+            serialized,
+            selectedNodes[0],
+            options
+          );
+          navigator.clipboard.writeText(JSON.stringify(layout, null, 2));
+          actions.delete(selectedNodes[0]);
+        } else {
+          const layouts = selectedNodes.map((nodeId) => {
+            const { layout } = craftToSaltcorn(
+              serialized,
+              nodeId,
+              options
+            );
+            return layout;
+          });
+          navigator.clipboard.writeText(
+            JSON.stringify({ above: layouts }, null, 2)
+          );
+          selectedNodes.forEach((nodeId) => actions.delete(nodeId));
+        }
+      }
+      if ((event.ctrlKey || event.metaKey) && event.keyCode == 90) {
+        // undo
+        actions.history.undo();
+      }
+      if ((event.ctrlKey || event.metaKey) && event.keyCode == 89) {
+        // redo
+        actions.history.redo();
+      }
+    }
+    if ((event.ctrlKey || event.metaKey) && event.keyCode == 86) {
+      const inputTags = ["input", "textarea", "select"];
+      if (!inputTags.includes(tagName) && !target.isContentEditable) {
+        navigator.clipboard.readText().then((clipText) => {
+          try {
+            const layout = JSON.parse(clipText);
+
+            let pasteTarget = "ROOT";
+            let pasteIndex = false;
+            try {
+              if (selected?.id && selected.id !== "ROOT") {
+                const selNode = query.node(selected.id).get();
+                const linkedNodes = selNode?.data?.linkedNodes;
+                if (linkedNodes && Object.keys(linkedNodes).length > 0) {
+                  const firstLinkedId = Object.values(linkedNodes)[0];
+                  pasteTarget = firstLinkedId;
+                  pasteIndex = query.node(firstLinkedId).childNodes().length;
+                } else if (selNode?.data?.isCanvas) {
+                  pasteTarget = selected.id;
+                  pasteIndex = query.node(selected.id).childNodes().length;
+                } else {
+                  const parentId = selNode?.data?.parent;
+                  if (parentId) {
+                    pasteTarget = parentId;
+                    const siblings = query.node(parentId).childNodes();
+                    const sibIx = siblings.findIndex((sib) => sib === selected.id);
+                    if (sibIx !== -1) pasteIndex = sibIx + 1;
+                  }
+                }
+              }
+            } catch (_) {}
+            layoutToNodes(layout, query, actions, pasteTarget, options, pasteIndex);
+          } catch (e) {
+          }
+        });
+      }
+    }
+    if ((tagName === "body" || tagName === "button") &&
+        (event.ctrlKey || event.metaKey) && event.keyCode == 65) {
+      event.preventDefault();
+      const rootChildren = query.node("ROOT").childNodes();
+      if (rootChildren.length > 0) {
+        actions.selectNode(rootChildren);
+      }
+    }
+  };
+  useEffect(() => {
+    window.addEventListener("keydown", handleUserKeyPress);
+    return () => {
+      window.removeEventListener("keydown", handleUserKeyPress);
+    };
+  }, [handleUserKeyPress]);
+
+  const hasChildren =
+    selected && selected.children && selected.children.length > 0;
+
+  /**
+   * @returns {void}
+   */
+  const deleteChildren = () => {
+    selected.children.forEach((child) => {
+      actions.delete(child);
+    });
+  };
+
+  /**
+   * @returns {void}
+   */
+  const duplicate = () => {
+    const {
+      data: { parent },
+    } = query.node(selected.id).get();
+    const siblings = query.node(selected.parent).childNodes();
+    const sibIx = siblings.findIndex((sib) => sib === selected.id);
+    const elem = recursivelyCloneToElems(query)(selected.id);
+    actions.addNodeTree(
+      query.parseReactElement(elem).toNodeTree(),
+      parent || "ROOT",
+      sibIx + 1
+    );
+  };
+
+  const [generating, setGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState(null);
+
+  // Regenerate modal state
+  const [showRegenerateModal, setShowRegenerateModal] = useState(false);
+  const [regeneratePrompt, setRegeneratePrompt] = useState("");
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenerateError, setRegenerateError] = useState(null);
+
+  const handleRegenerate = async () => {
+    if (!regeneratePrompt.trim() || !selected) return;
+    setRegenerating(true);
+    setRegenerateError(null);
+    try {
+      const selectedNode = query.node(selected.id).get();
+      const existingJson = craftToSaltcorn(
+        JSON.parse(query.serialize()),
+        selected.id
+      );
+      const res = await fetch("/viewedit/copilot-generate-layout", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "CSRF-Token": options.csrfToken,
+          "X-Requested-With": "XMLHttpRequest",
+        },
+        body: JSON.stringify({
+          prompt: regeneratePrompt,
+          mode: options.mode,
+          table: options.tableName,
+          existing: existingJson,
+        }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        setRegenerateError(data.error);
+      } else if (data.layout) {
+        const parentId = selectedNode.data.parent || "ROOT";
+        const siblings = query.node(parentId).childNodes();
+        const sibIx = siblings.findIndex((sib) => sib === selected.id);
+        actions.delete(selected.id);
+        layoutToNodes(data.layout, query, actions, parentId, options, sibIx);
+        setShowRegenerateModal(false);
+        setRegeneratePrompt("");
+      }
+    } catch (err) {
+      setRegenerateError(err.message || "Regeneration failed");
+    } finally {
+      setRegenerating(false);
+    }
+  };
+
+  // Find prompt nodes: check children of selected, or siblings if selected is a Prompt
+  const findPromptContext = () => {
+    if (!selected) return { promptNodes: [], targetParent: null };
+    const isSelectedPrompt = selected.displayName === "Prompt";
+
+    if (isSelectedPrompt && selected.parent) {
+      // Selected node is a Prompt — find all Prompt siblings in same parent
+      try {
+        const siblingIds = query.node(selected.parent).childNodes();
+        const promptIds = siblingIds.filter((id) => {
+          const n = query.node(id).get();
+          return n?.data?.displayName === "Prompt";
+        });
+        return { promptNodes: promptIds, targetParent: selected.parent };
+      } catch {
+        return { promptNodes: [], targetParent: null };
+      }
+    }
+
+    // Selected node is a container — check its direct children
+    if (selected.children && selected.children.length > 0) {
+      const promptIds = selected.children.filter((id) => {
+        try {
+          const n = query.node(id).get();
+          return n?.data?.displayName === "Prompt";
+        } catch {
+          return false;
+        }
+      });
+      if (promptIds.length > 0) {
+        return { promptNodes: promptIds, targetParent: selected.id };
+      }
+    }
+
+    // Check linked nodes (e.g. Card's inner Column)
+    try {
+      const nodeData = query.node(selected.id).get();
+      const linkedNodes = nodeData?.data?.linkedNodes;
+      if (linkedNodes) {
+        for (const linkedId of Object.values(linkedNodes)) {
+          const linkedChildIds = query.node(linkedId).childNodes();
+          const promptIds = linkedChildIds.filter((id) => {
+            try {
+              const n = query.node(id).get();
+              return n?.data?.displayName === "Prompt";
+            } catch {
+              return false;
+            }
+          });
+          if (promptIds.length > 0) {
+            return { promptNodes: promptIds, targetParent: linkedId };
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    return { promptNodes: [], targetParent: null };
+  };
+
+  const { promptNodes, targetParent } = selected
+    ? findPromptContext()
+    : { promptNodes: [], targetParent: null };
+  const hasPromptNodes = promptNodes.length > 0;
+
+  const handleGenerate = async () => {
+    setGenerating(true);
+    setGenerateError(null);
+    try {
+      const prompts = promptNodes.map((childId) => {
+        const n = query.node(childId).get();
+        const { promptType, promptText } = n.data.props;
+        return `[${promptType}]: ${promptText}`;
+      });
+      const combinedPrompt = prompts.join("\n");
+
+      const res = await fetch("/viewedit/copilot-generate-layout", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "CSRF-Token": options.csrfToken,
+          "X-Requested-With": "XMLHttpRequest",
+        },
+        body: JSON.stringify({
+          prompt: combinedPrompt,
+          mode: options.mode,
+          table: options.tableName,
+        }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        setGenerateError(data.error);
+      } else if (data.layout) {
+        promptNodes.forEach((id) => actions.delete(id));
+        layoutToNodes(data.layout, query, actions, targetParent, options);
+      }
+    } catch (err) {
+      setGenerateError(err.message || "Generation failed");
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  return (
+    <div className="settings-panel card mt-1">
+      <div className="card-header px-2 py-1 d-flex justify-content-between align-items-center">
+        <div>
+          {selected && selected.displayName ? (
+            <Fragment>
+              <b>{selected.displayName}</b> settings
+            </Fragment>
+          ) : (
+            t("Settings")
+          )}
+        </div>
+        {setIsEnlarged && (
+          <FontAwesomeIcon
+            icon={isEnlarged ? faCaretSquareRight : faCaretSquareLeft}
+            className="fa-lg builder-expand-toggle-right"
+            onClick={() => setIsEnlarged(!isEnlarged)}
+            title={isEnlarged ? t("Shrink") : t("Enlarge")}
+          />
+        )}
+      </div>
+      <div className="card-body p-2">
+        {selectedCount > 1 ? (
+          <div>
+            <p><strong>{selectedCount} {t("elements selected")}</strong></p>
+            <p className="text-muted small">{t("Multi-selection active. Use Shift+Click to add/remove elements.")}</p>
+          </div>
+        ) : selected ? (
+          <Fragment>
+            {selected.isDeletable && (
+              <button
+                className="btn btn-sm btn-danger delete-element-builder"
+                onClick={deleteThis}
+              >
+                <FontAwesomeIcon icon={faTrashAlt} className="me-1" />
+                {t("Delete")}
+              </button>
+            )}
+            {hasChildren && !selected.isDeletable ? (
+              <button
+                className="btn btn-sm btn-danger delete-children-builder"
+                onClick={deleteChildren}
+              >
+                <FontAwesomeIcon icon={faTrashAlt} className="me-1" />
+                {t("Delete contents")}
+              </button>
+            ) : (
+              <button
+                title={t("Duplicate element with its children")}
+                className="btn btn-sm btn-secondary ms-1 duplicate-element-builder"
+                onClick={duplicate}
+              >
+                <FontAwesomeIcon icon={faCopy} className="me-1" />
+                {t("Clone")}
+              </button>
+            )}
+            {options.has_copilot_generate && selected.isDeletable && (
+              <button
+                className="btn btn-sm btn-secondary ms-1"
+                onClick={() => setShowRegenerateModal(true)}
+              >
+                {t("Edit with AI")}
+              </button>
+            )}
+            <div className="mt-2">
+              {selected.settings && React.createElement(selected.settings)}
+            </div>
+            {showRegenerateModal && (
+              <div className="modal d-block" tabIndex="-1" style={{ backgroundColor: "rgba(0,0,0,0.5)" }}>
+                <div className="modal-dialog">
+                  <div className="modal-content">
+                    <div className="modal-header">
+                      <h5 className="modal-title">{t("Generate Element")}</h5>
+                      <button
+                        type="button"
+                        className="btn-close"
+                        onClick={() => {
+                          setShowRegenerateModal(false);
+                          setRegenerateError(null);
+                        }}
+                      ></button>
+                    </div>
+                    <div className="modal-body">
+                      <p className="text-muted small">
+                        {t("Describe how you want to regenerate the selected element.")}
+                      </p>
+                      <textarea
+                        className="form-control"
+                        rows={3}
+                        value={regeneratePrompt}
+                        onChange={(e) => setRegeneratePrompt(e.target.value)}
+                        placeholder={t("Enter your prompt...")}
+                      />
+                      {regenerateError && (
+                        <div className="alert alert-danger mt-2 mb-0">{regenerateError}</div>
+                      )}
+                    </div>
+                    <div className="modal-footer">
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => {
+                          setShowRegenerateModal(false);
+                          setRegenerateError(null);
+                        }}
+                      >
+                        {t("Cancel")}
+                      </button>
+                      <button
+                        className="btn btn-primary"
+                        onClick={handleRegenerate}
+                        disabled={regenerating || !regeneratePrompt.trim()}
+                      >
+                        {regenerating ? t("Generating...") : t("Generate")}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </Fragment>
+        ) : (
+          t("No element selected")
+        )}
+      </div>
+    </div>
+  );
+};
+
+// https://stackoverflow.com/questions/36862334/get-viewport-window-height-in-reactjs
+function getWindowDimensions() {
+  const { innerWidth: windowWidth, innerHeight: windowHeight } = window;
+  return {
+    windowWidth,
+    windowHeight,
+  };
+}
+
+function useWindowDimensions() {
+  const [windowDimensions, setWindowDimensions] = useState(
+    getWindowDimensions()
+  );
+
+  useEffect(() => {
+    function handleResize() {
+      setWindowDimensions(getWindowDimensions());
+    }
+
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  return windowDimensions;
+}
+
+const AddColumnButton = () => {
+  const { t } = useTranslation();
+  const { query, actions } = useEditor(() => {});
+  const options = useContext(optionsCtx);
+  const addColumn = () => {
+    actions.addNodeTree(
+      query.parseReactElement(<ListColumn />).toNodeTree(),
+      "ROOT"
+    );
+  };
+  return (
+    <button
+      className="btn btn-primary mt-2 add-column-builder"
+      onClick={addColumn}
+    >
+      <FontAwesomeIcon icon={faPlus} className="me-2" />
+      {t("Add column")}
+    </button>
+  );
+};
+
+const DEVICE_WIDTHS = {
+  desktop: null,
+  tablet: 768,
+  mobile: 576,
+};
+
+const DevicePreviewToolbar = ({ previewDevice, setPreviewDevice }) => {
+  const { t } = useTranslation();
+  const devices = [
+    { key: "desktop", icon: Display, label: t("Desktop") },
+    { key: "tablet", icon: Tablet, label: t("Tablet") },
+    { key: "mobile", icon: Phone, label: t("Mobile") },
+  ];
+
+  return (
+    <div className="device-preview-toolbar">
+      {devices.map(({ key, icon: Icon, label }) => (
+        <button
+          key={key}
+          className={`btn btn-sm ${
+            previewDevice === key ? "btn-primary" : "btn-outline-secondary"
+          } device-preview-btn`}
+          onClick={() => setPreviewDevice(key)}
+          title={label}
+        >
+          <Icon size={16} />
+        </button>
+      ))}
+    </div>
+  );
+};
+
+/**
+ * @returns {Fragment}
+ * @category saltcorn-builder
+ * @subcategory components
+ * @namespace
+ */
+const HistoryPanel = () => {
+  const { t } = useTranslation();
+  const { canUndo, canRedo, actions } = useEditor((state, query) => ({
+    canUndo: query.history.canUndo(),
+    canRedo: query.history.canRedo(),
+  }));
+
+  return (
+    <div className="d-flex gap-1">
+      <button
+        className="btn btn-sm btn-secondary undo-builder"
+        title={t("Undo")}
+        onClick={() => actions.history.undo()}
+        disabled={!canUndo}
+        style={!canUndo ? { opacity: 0.4, pointerEvents: "none" } : {}}
+      >
+        <FontAwesomeIcon icon={faUndo} />
+      </button>
+      <button
+        className="btn btn-sm btn-secondary redo-builder"
+        title={t("Redo")}
+        onClick={() => actions.history.redo()}
+        disabled={!canRedo}
+        style={!canRedo ? { opacity: 0.4, pointerEvents: "none" } : {}}
+      >
+        <FontAwesomeIcon icon={faRedo} />
+      </button>
+    </div>
+  );
+};
+
+/**
+ * @param {object} opts
+ * @param {object} opts.layout
+ * @returns {button}
+ * @category saltcorn-builder
+ * @subcategory components
+ * @namespace
+ */
+const NextButton = ({ layout }) => {
+  const { query, actions } = useEditor(() => {});
+  const options = useContext(optionsCtx);
+
+  useEffect(() => {
+    (async () => {
+      hydratingRef.current = true;
+      try {
+        await resolveLibraryRefs(layout, options);
+        layoutToNodes(layout, query, actions.history.ignore(), "ROOT", options);
+      } finally {
+        hydratingRef.current = false;
+      }
+    })();
+  }, []);
+
+  /**
+   * @returns {void}
+   */
+  const onClick = () => {
+    const { columns, layout, libraryUpdates } = craftToSaltcorn(
+      JSON.parse(query.serialize()),
+      "ROOT",
+      options
+    );
+    if (libraryUpdates?.length) {
+      // fire-and-forget with keepalive - the form submits right after
+      fetch(`/library/save-updates`, {
+        method: "POST",
+        keepalive: true,
+        headers: {
+          "Content-Type": "application/json",
+          "CSRF-Token": options.csrfToken,
+        },
+        body: JSON.stringify({ libraryUpdates }),
+      }).catch(() => {
+        window.notifyAlert({
+          type: "danger",
+          text: "Unable to save shared component changes",
+        });
+      });
+    }
+    document
+      .querySelector("form#scbuildform input[name=columns]")
+      .setAttribute("value", encodeURIComponent(JSON.stringify(columns)));
+    document
+      .querySelector("form#scbuildform input[name=layout]")
+      .setAttribute("value", encodeURIComponent(JSON.stringify(layout)));
+    document.getElementById("scbuildform").submit();
+  };
+  return (
+    <button className="btn btn-sm btn-primary builder-save" onClick={onClick}>
+      {options.next_button_label || "Next"} &raquo;
+    </button>
+  );
+};
+
+/**
+ * @param {object} props
+ * @param {object} props.options
+ * @param {object} props.layout
+ * @param {string} props.mode
+ * @returns {ErrorBoundary}
+ * @category saltcorn-builder
+ * @subcategory components
+ * @namespace
+ */
+
+
+const Builder = ({ options, layout, mode }) => {
+  const { t } = useTranslation();
+  const [showLayers, setShowLayers] = useState(true);
+  const [previews, setPreviews] = useState({});
+  const [uploadedFiles, setUploadedFiles] = useState([]);
+  const nodekeys = useRef([]);
+  const [savingState, setSavingState] = useState({ isSaving: false });
+  const [isEnlarged, setIsEnlarged] = useState(false);
+  const [isLeftEnlarged, setIsLeftEnlarged] = useState(false);
+  const [relationsCache, setRelationsCache] = useState({});
+  const [previewDevice, setPreviewDevice] = useState("desktop");
+  const { windowWidth, windowHeight } = useWindowDimensions();
+
+  const [builderHeight, setBuilderHeight] = useState(0);
+  const [builderTop, setBuilderTop] = useState(0);
+
+  const ref = useRef(null);
+
+   useEffect(() => {
+     if (!ref.current) return;
+     setBuilderHeight(ref.current.clientHeight);
+     const rect = ref.current.getBoundingClientRect();
+     setBuilderTop(rect.top);
+   });
+
+  // Correct the CraftJS drop indicator position when body CSS zoom is applied.
+  // getBoundingClientRect() returns visual (zoomed) coords, but position:fixed
+  // top values inside a zoomed body are in layout (pre-zoom) coords, so we
+  // divide top/height by zoom. Left/width are already in viewport coords.
+  useEffect(() => {
+    const getBodyZoom = () => {
+      const bw = document.body.offsetWidth;
+      if (!bw) return 1;
+      return document.body.getBoundingClientRect().width / bw || 1;
+    };
+
+    let isCorrecting = false;
+
+    const correctIndicator = (el) => {
+      if (isCorrecting) return;
+      const zoom = getBodyZoom();
+      if (Math.abs(zoom - 1) < 0.01) return;
+
+      isCorrecting = true;
+      const top = parseFloat(el.style.top);
+      const height = parseFloat(el.style.height);
+
+      if (!isNaN(top)) el.style.top = `${top / zoom}px`;
+      if (!isNaN(height)) el.style.height = `${height / zoom}px`;
+
+      setTimeout(() => { isCorrecting = false; }, 0);
+    };
+
+    const observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === "attributes" && mutation.attributeName === "style") {
+          const el = mutation.target;
+          if (el.classList && el.classList.contains("builder-drop-indicator")) {
+            correctIndicator(el);
+          }
+        } else if (mutation.type === "childList") {
+          mutation.addedNodes.forEach((node) => {
+            if (node.nodeType === 1 && node.classList && node.classList.contains("builder-drop-indicator")) {
+              correctIndicator(node);
+            }
+          });
+        }
+      }
+    });
+
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["style"],
+    });
+
+    return () => observer.disconnect();
+  }, []);
+
+  const canvasHeight =
+    Math.max(windowHeight - builderTop, builderHeight, 600) - 10;
+
+  const smallSidebarWidth = options.isRTL ? '17.5rem' : '16.5rem'
+
+  return (
+    <ErrorBoundary>
+      <Editor
+        onRender={RenderNode}
+        indicator={{
+          success: "#28a745",
+          thickness: 2,
+          className: "builder-drop-indicator",
+        }}
+        handlers={(store) => new DefaultEventHandlers({
+          store,
+          isMultiSelectEnabled: (e) => e?.shiftKey || false
+        })}
+        resolver={{
+          Text,
+          Empty,
+          Columns,
+          JoinField,
+          Field,
+          ViewLink,
+          Action,
+          HTMLCode,
+          LineBreak,
+          Aggregation,
+          Card,
+          Image,
+          Link,
+          View,
+          SearchBar,
+          Container,
+          Column,
+          DropDownFilter,
+          DropMenu,
+          Tabs,
+          Table,
+          ToggleFilter,
+          ListColumn,
+          ListColumns,
+          LibraryElem,
+          LibraryInstance,
+          LibrarySlotElem,
+          LibrarySlotInstance,
+          Prompt,
+          Page,
+          MessageList,
+          MessageForm
+        }}
+      >
+        <Provider value={options}>
+          <PreviewCtx.Provider
+            value={{ previews, setPreviews, uploadedFiles, setUploadedFiles, previewDevice }}
+          >
+            <RelationsCtx.Provider
+              value={{
+                relationsCache,
+                setRelationsCache,
+              }}
+            >
+              <StorageCtx.Provider
+                value={{
+                  craftToSaltcorn,
+                  layoutToNodes,
+                }}
+              >
+                <div className="row" ref={ref} style={{ marginTop: "-5px" }} dir={options.isRTL ? "rtl" : "ltr"}>
+                  <div
+                    className={`col-sm-auto left-builder-col ${
+                      isLeftEnlarged
+                        ? "builder-left-enlarged"
+                        : "builder-left-shrunk"
+                    }`}
+                  >
+                    <div className="componets-and-library-accordion toolbox-card">
+                      <InitNewElement
+                        nodekeys={nodekeys}
+                        setSavingState={setSavingState}
+                        savingState={savingState}
+                      />
+                      <Accordion>
+                        <div className="card mt-1" accordiontitle={t("Components")}>
+                          {{
+                            show: <ToolboxShow expanded={isLeftEnlarged} />,
+                            list: <ToolboxList expanded={isLeftEnlarged} />,
+                            edit: <ToolboxEdit expanded={isLeftEnlarged} />,
+                            page: <ToolboxPage expanded={isLeftEnlarged} />,
+                            filter: <ToolboxFilter expanded={isLeftEnlarged} />,
+                            room: <ToolboxRoom expanded={isLeftEnlarged} />,
+                          }[mode] || <div>{t("Missing mode")}</div>}
+                        </div>
+                        <div accordiontitle={t("Library")}>
+                          <Library expanded={isLeftEnlarged} />
+                        </div>
+                      </Accordion>
+                    </div>
+                    <div
+                      className="card toolbox-card pe-0"
+                      style={isLeftEnlarged ? { width: "13.4rem" } : {}}
+                    >
+                      <div className="card-header p-2 d-flex justify-content-between">
+                        <div>{t("Layers")}</div>
+                        <FontAwesomeIcon
+                          icon={
+                            isLeftEnlarged
+                              ? faCaretSquareLeft
+                              : faCaretSquareRight
+                          }
+                          className={
+                            "float-end fa-lg builder-expand-toggle-left"
+                          }
+                          onClick={() => setIsLeftEnlarged(!isLeftEnlarged)}
+                          title={isLeftEnlarged ? t("Shrink") : t("Enlarge")}
+                        />
+                      </div>
+                      {showLayers && (
+                        <div className="card-body p-0 builder-layers">
+                          <Layers
+                            expandRootOnLoad={true}
+                            renderLayer={CustomLayer}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div
+                    id="builder-main-canvas"
+                    style={{ height: canvasHeight }}
+                    className={`col builder-mode-${options.mode} ${
+                      options.mode !== "list" ? "emptymsg" : ""
+                    }`}
+                  >
+                    <div className="device-preview-scroll-area">
+                      <div
+                        className={`device-preview-canvas-wrapper ${
+                          previewDevice !== "desktop" && options.mode !== "list" ? "device-preview-constrained" : ""
+                        }`}
+                        style={{
+                          maxWidth: options.mode !== "list" && DEVICE_WIDTHS[previewDevice]
+                            ? `${DEVICE_WIDTHS[previewDevice]}px`
+                            : "none",
+                        }}
+                      >
+                        <Frame>
+                          {options.mode === "list" ? (
+                            <Element canvas is={ListColumns}></Element>
+                          ) : (
+                            <Element canvas is={Column}></Element>
+                          )}
+                        </Frame>
+                        {options.mode === "list" ? <AddColumnButton /> : null}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="col-sm-auto builder-sidebar">
+                    <div style={{ width: isEnlarged ? "28rem" : smallSidebarWidth }}>
+                      {document.getElementById("builder-header-actions") &&
+                        createPortal(
+                          <Fragment>
+                            <FontAwesomeIcon
+                              icon={faSave}
+                              className={savingState.isSaving ? "d-inline" : "d-none"}
+                            />
+                            <FontAwesomeIcon
+                              icon={faExclamationTriangle}
+                              color="#ff0033"
+                              className={savingState.error ? "d-inline" : "d-none"}
+                            />
+                            <HistoryPanel />
+                            {options.mode !== "list" && (
+                              <DevicePreviewToolbar
+                                previewDevice={previewDevice}
+                                setPreviewDevice={setPreviewDevice}
+                              />
+                            )}
+                            <NextButton layout={layout} />
+                          </Fragment>,
+                          document.getElementById("builder-header-actions")
+                        )}
+                      <div
+                        className={` ${
+                          savingState.error ? "d-block" : "d-none"
+                        } my-2 fw-bold`}
+                      >
+                        {t("your work is not being saved")}
+                      </div>
+                      <SettingsPanel isEnlarged={isEnlarged} setIsEnlarged={setIsEnlarged} />
+                    </div>
+                  </div>
+                </div>
+              </StorageCtx.Provider>
+            </RelationsCtx.Provider>
+          </PreviewCtx.Provider>
+        </Provider>
+        <div className="d-none preview-scratchpad"></div>
+      </Editor>
+      <style>
+        {options.icons
+          .filter((icon) => icon.startsWith("unicode-"))
+          .map(
+            (icon) =>
+              `i.${icon}:after {content: '${String.fromCharCode(
+                parseInt(icon.substring(8, 12), 16)
+              )}'}`
+          )
+          .join("\n")}
+      </style>
+    </ErrorBoundary>
+  );
+};
+
+export default Builder;

@@ -1,0 +1,4 @@
+// Vendored from Saltcorn 1: packages/server/public/ckeditor/plugins/wsc/lang/is.js
+// at @saltcorn/builder 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/builder/vendor/README.md.
+CKEDITOR.plugins.setLang("wsc","is",{btnIgnore:"Hunsa",btnIgnoreAll:"Hunsa allt",btnReplace:"Skipta",btnReplaceAll:"Skipta öllu",btnUndo:"Til baka",changeTo:"Tillaga",errorLoading:"Error loading application service host: %s.",ieSpellDownload:"Villuleit ekki sett upp.\x3cbr\x3eViltu setja hana upp?",manyChanges:"Villuleit lokið: %1 orðum breytt",noChanges:"Villuleit lokið: Engu orði breytt",noMispell:"Villuleit lokið: Engin villa fannst",noSuggestions:"- engar tillögur -",notAvailable:"Sorry, but service is unavailable now.",
+notInDic:"Ekki í orðabókinni",oneChange:"Villuleit lokið: Einu orði breytt",progress:"Villuleit í gangi...",title:"Spell Checker",toolbar:"Villuleit"});

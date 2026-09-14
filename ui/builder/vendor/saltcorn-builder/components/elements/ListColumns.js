@@ -1,0 +1,67 @@
+// Vendored from Saltcorn 1: packages/saltcorn-builder/src/components/elements/ListColumns.js
+// at @saltcorn/builder 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/builder/vendor/README.md.
+/**
+ * @category saltcorn-builder
+ * @module components/elements/ListColumns
+ * @subcategory components / elements
+ */
+
+import React, { useContext, Fragment } from "react";
+
+import { Element, useNode } from "@craftjs/core";
+import optionsCtx from "../context";
+
+export /**
+ *
+ * @param {object} props
+ * @param {string} props.children
+ * @param {*} props.align
+ * @returns {div}
+ * @category saltcorn-builder
+ * @subcategory components
+ * @namespace
+ */
+const ListColumns = ({ children, align }) => {
+  const {
+    selected,
+    id,
+    connectors: { connect, drag },
+  } = useNode((node) => ({ selected: node.events.selected }));
+  return (
+    <div className={selected ? "selected-node" : ""}>
+      <div className={` ${id === "ROOT" ? "root-canvas" : ""}`}>{children}</div>
+    </div>
+  );
+};
+
+export /**
+ * @returns {div}
+ * @category saltcorn-builder
+ * @subcategory components
+ * @namespace
+ */
+const ListColumnsSettings = () => {
+  useNode((node) => ({}));
+  return <div></div>;
+};
+
+/**
+ * @type {object}
+ */
+ListColumns.craft = {
+  displayName: "ListColumns",
+  props: {},
+  rules: {
+    canDrag: () => false,
+    canDrop: () => false,
+    canMoveIn: (incoming) => {
+      const incomingNodes = Array.isArray(incoming) ? incoming : [incoming];
+      return incomingNodes.every(
+        (node) => node?.data?.displayName === "ListColumn"
+      );
+    },
+  },
+  related: {
+    settings: ListColumnsSettings,
+  },
+};

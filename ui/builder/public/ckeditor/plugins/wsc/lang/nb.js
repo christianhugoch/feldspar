@@ -1,0 +1,4 @@
+// Vendored from Saltcorn 1: packages/server/public/ckeditor/plugins/wsc/lang/nb.js
+// at @saltcorn/builder 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/builder/vendor/README.md.
+CKEDITOR.plugins.setLang("wsc","nb",{btnIgnore:"Ignorer",btnIgnoreAll:"Ignorer alle",btnReplace:"Erstatt",btnReplaceAll:"Erstatt alle",btnUndo:"Angre",changeTo:"Endre til",errorLoading:"Feil under lasting av applikasjonstjenestetjener: %s.",ieSpellDownload:"Stavekontroll er ikke installert. Vil du laste den ned nå?",manyChanges:"Stavekontroll fullført: %1 ord endret",noChanges:"Stavekontroll fullført: ingen ord endret",noMispell:"Stavekontroll fullført: ingen feilstavinger funnet",noSuggestions:"- Ingen forslag -",
+notAvailable:"Beklager, tjenesten er utilgjenglig nå.",notInDic:"Ikke i ordboken",oneChange:"Stavekontroll fullført: Ett ord endret",progress:"Stavekontroll pågår...",title:"Stavekontroll",toolbar:"Stavekontroll"});

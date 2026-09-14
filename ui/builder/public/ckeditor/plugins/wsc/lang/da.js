@@ -1,0 +1,4 @@
+// Vendored from Saltcorn 1: packages/server/public/ckeditor/plugins/wsc/lang/da.js
+// at @saltcorn/builder 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/builder/vendor/README.md.
+CKEDITOR.plugins.setLang("wsc","da",{btnIgnore:"Ignorér",btnIgnoreAll:"Ignorér alle",btnReplace:"Erstat",btnReplaceAll:"Erstat alle",btnUndo:"Tilbage",changeTo:"Forslag",errorLoading:"Fejl ved indlæsning af host: %s.",ieSpellDownload:"Stavekontrol ikke installeret. Vil du installere den nu?",manyChanges:"Stavekontrol færdig: %1 ord ændret",noChanges:"Stavekontrol færdig: Ingen ord ændret",noMispell:"Stavekontrol færdig: Ingen fejl fundet",noSuggestions:"(ingen forslag)",notAvailable:"Stavekontrol er desværre ikke tilgængelig.",
+notInDic:"Ikke i ordbogen",oneChange:"Stavekontrol færdig: Et ord ændret",progress:"Stavekontrollen arbejder...",title:"Stavekontrol",toolbar:"Stavekontrol"});

@@ -693,21 +693,21 @@ entry plus its §3 URLs, not a surprise.
 
 ## Phase 7 — `ui/builder`: vendored and bundled
 
-- [ ] 7.1 `ui/builder/`: `package.json` pinned to v1's builder dependency versions at the
+- [x] 7.1 `ui/builder/`: `package.json` pinned to v1's builder dependency versions at the
       vendored commit, `tsconfig.json` for `src/`, `build.mjs` (esbuild: JSX, the `fetch`
       inject, the aliases, one JS and one CSS output), `vendor/README.md`.
-- [ ] 7.2 `ui/builder/vendor/refresh.sh`: copies `packages/saltcorn-builder/src/` and the CSS and
+- [x] 7.2 `ui/builder/vendor/refresh.sh`: copies `packages/saltcorn-builder/src/` and the CSS and
       CKEditor assets with headers; refuses a checkout at a different commit from
       `ui/saltcorn-ui/vendor/`'s.
-- [ ] 7.3 Shims in `src/shims/`, each with its reason: `@monaco-editor/react` onto bundled ESM
+- [x] 7.3 Shims in `src/shims/`, each with its reason: `@monaco-editor/react` onto bundled ESM
       Monaco with same-origin workers; anything else the first build or the jsdom mount shows
       reaching outside the document's origin.
-- [ ] 7.4 `src/routes.ts` (§3) and `builderFetch`; the delegated href listener; `routes.test.ts`
+- [x] 7.4 `src/routes.ts` (§3) and `builderFetch`; the delegated href listener; `routes.test.ts`
       walking the vendored literals.
-- [ ] 7.5 `src/globals.ts` (§4) and its test.
-- [ ] 7.6 `crates/sc-cli/build.rs`: the fourth bundle; `SC_BUILD_ADMIN=0` records none;
+- [x] 7.5 `src/globals.ts` (§4) and its test.
+- [x] 7.6 `crates/sc-cli/build.rs`: the fourth bundle; `SC_BUILD_ADMIN=0` records none;
       `scripts/build-static.sh` and the static-build Dockerfile carry it.
-- [ ] 7.7 jsdom tests: the mount with each recorded options object; the Craft round trip over
+- [x] 7.7 jsdom tests: the mount with each recorded options object; the Craft round trip over
       every BooksDB view and page layout, with the listed normalisations.
 
 ## Phase 8 — The builder routes
@@ -725,7 +725,9 @@ entry plus its §3 URLs, not a surprise.
       `savePageLayout` → the Pages tab; autosave through the same calls; a refused save shown
       with `notifyAlert` and the canvas kept.
 - [ ] 8.5 The builder's static assets (bundle, CSS, CKEditor) served from the builder `dist`
-      under a versioned prefix, like `/static_assets/:tag/`.
+      under a versioned prefix, like `/static_assets/:tag/`; and `/files/serve/*` on the
+      builder's origin redirected to the application's, because an image `src` or CSS `url()` the
+      builder renders does not pass through the link listener (7.4, `routes.ts`).
 - [ ] 8.6 HTTP tests: the document for each of the four patterns and a page, the 404s, the
       refused mode and page, the CSP header, the no-bundle page.
 

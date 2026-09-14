@@ -1,0 +1,57 @@
+{
+  "name": "@feldspar/builder",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Saltcorn UI's builder: Saltcorn 1's drag-and-drop layout editor (@saltcorn/builder), vendored and bundled by esbuild for its own admin route (TODO \"The builder\" §1).",
+  "scripts": {
+    "build": "tsc --noEmit && node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node build.mjs && vitest run",
+    "gen-client": "cargo run -q -p sc-api --example emit_admin_client -- src/client.ts"
+  },
+  "dependencies": {
+    "@craftjs/core": "0.2.12",
+    "@craftjs/layers": "0.2.7",
+    "@craftjs/utils": "0.2.5",
+    "@fonticonpicker/react-fonticonpicker": "1.2.0",
+    "@fortawesome/fontawesome-svg-core": "1.2.34",
+    "@fortawesome/free-regular-svg-icons": "5.15.2",
+    "@fortawesome/free-solid-svg-icons": "5.15.2",
+    "@fortawesome/react-fontawesome": "0.1.14",
+    "@monaco-editor/react": "4.7.0",
+    "@tippyjs/react": "4.2.6",
+    "ckeditor4-react": "2.0.0",
+    "classnames": "2.3.2",
+    "immer": "9.0.21",
+    "lodash": "4.17.21",
+    "mobile-drag-drop": "2.3.0-rc.2",
+    "monaco-editor": "0.52.2",
+    "prop-types": "15.8.1",
+    "react": "18.2.0",
+    "react-bootstrap-icons": "1.10.3",
+    "react-contenteditable": "3.3.7",
+    "react-dom": "18.2.0",
+    "react-select": "5.8.0",
+    "react-transition-group": "4.4.5",
+    "styled-components": "6.4.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.4",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "acorn": "8.16.0",
+    "acorn-jsx": "5.3.2",
+    "esbuild": "0.28.2",
+    "jsdom": "26.0.0",
+    "typescript": "^5.5.4",
+    "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "react": "$react",
+    "react-dom": "$react-dom",
+    "react-transition-group": "$react-transition-group",
+    "immer": "9.0.21",
+    "@monaco-editor/loader": "1.7.0"
+  }
+}

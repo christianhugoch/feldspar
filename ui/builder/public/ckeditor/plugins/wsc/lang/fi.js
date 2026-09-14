@@ -1,0 +1,4 @@
+// Vendored from Saltcorn 1: packages/server/public/ckeditor/plugins/wsc/lang/fi.js
+// at @saltcorn/builder 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/builder/vendor/README.md.
+CKEDITOR.plugins.setLang("wsc","fi",{btnIgnore:"Jätä huomioimatta",btnIgnoreAll:"Jätä kaikki huomioimatta",btnReplace:"Korvaa",btnReplaceAll:"Korvaa kaikki",btnUndo:"Kumoa",changeTo:"Vaihda",errorLoading:"Virhe ladattaessa oikolukupalvelua isännältä: %s.",ieSpellDownload:"Oikeinkirjoituksen tarkistusta ei ole asennettu. Haluatko ladata sen nyt?",manyChanges:"Tarkistus valmis: %1 sanaa muutettiin",noChanges:"Tarkistus valmis: Yhtään sanaa ei muutettu",noMispell:"Tarkistus valmis: Ei virheitä",noSuggestions:"Ei ehdotuksia",
+notAvailable:"Valitettavasti oikoluku ei ole käytössä tällä hetkellä.",notInDic:"Ei sanakirjassa",oneChange:"Tarkistus valmis: Yksi sana muutettiin",progress:"Tarkistus käynnissä...",title:"Oikoluku",toolbar:"Tarkista oikeinkirjoitus"});

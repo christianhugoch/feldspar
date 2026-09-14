@@ -1,0 +1,11 @@
+/* The builder's one stylesheet, `dist/builder.css` (TODO "The builder" §1).
+ *
+ * v1's builder page links `saltcorn-builder.css` and `fonticonpicker.react.css`
+ * separately, and Monaco's CSS arrives with v1's `/monaco`. Here all three are one
+ * file, built by `build.mjs`, with the fonts they name emitted beside it. The page
+ * stylesheets the canvas renders with (Bootstrap, Font Awesome, `saltcorn.css`)
+ * are the subdomain's own and are not in it: the canvas must look like the
+ * subdomain, so it uses the same files. */
+@import "../public/saltcorn-builder.css";
+@import "../public/fonticonpicker.react.css";
+@import "monaco-editor/min/vs/editor/editor.main.css";

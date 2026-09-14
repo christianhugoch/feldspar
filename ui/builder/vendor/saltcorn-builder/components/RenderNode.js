@@ -1,0 +1,288 @@
+// Vendored from Saltcorn 1: packages/saltcorn-builder/src/components/RenderNode.js
+// at @saltcorn/builder 1.7.0-alpha.1 (saltcorn/saltcorn 0508c45ac2). Do not edit; see ui/builder/vendor/README.md.
+/**
+ * @category saltcorn-builder
+ * @module components/RenderNode
+ * @subcategory components
+ */
+
+import { useNode, useEditor } from "@craftjs/core";
+//import { ROOT_NODE } from "@craftjs/utils";
+import React, { useEffect, useRef, useCallback, Fragment, useContext } from "react";
+import ReactDOM from "react-dom";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import optionsCtx from "./context";
+import {
+  faCopy,
+  faUndo,
+  faRedo,
+  faTrashAlt,
+  faArrowUp,
+  faArrowsAlt,
+} from "@fortawesome/free-solid-svg-icons";
+import { recursivelyCloneToElems } from "./elements/Clone";
+/* 
+Contains code copied from craft.js landing page example
+Copyright (c) 2020 Previnash Wong Sze Chuan
+*/
+
+export /**
+ * @param {object} props
+ * @param {string} props.render
+ * @category saltcorn-builder
+ * @subcategory components
+ * @namespace
+ */
+const RenderNode = ({ render }) => {
+  const { id } = useNode();
+  const options = useContext(optionsCtx);
+  const { actions, query, isActive } = useEditor((state) => ({
+    isActive: state.nodes[id]?.events?.selected,
+  }));
+
+  const {
+    isHover,
+    dom,
+    name,
+    moveable,
+    deletable,
+    connectors: { drag },
+    parent,
+  } = useNode((node) => ({
+    isHover: node.events.hovered,
+    dom: node.dom,
+    name: node.data.custom.displayName || node.data.props?.custom?.displayName || node.data.displayName,
+    moveable: query.node(node.id).isDraggable(),
+    deletable: query.node(node.id).isDeletable(),
+    parent: node.data.parent,
+    props: node.data.props,
+  }));
+
+  const currentRef = useRef();
+  const borderRef = useRef();
+
+  const getZoomFactor = useCallback(() => {
+    const bw = document.body.offsetWidth;
+    if (!bw) return 1;
+    const factor = document.body.getBoundingClientRect().width / bw;
+    return factor || 1;
+  }, []);
+
+  // a display:contents element (e.g. the LibraryInstance boundary) has no
+  // box of its own, so getBoundingClientRect() on it is all zeros - fall
+  // back to the union of its children's boxes so selection still has
+  // something real to draw a border around
+  const getRect = (dom) => {
+    if (!dom) return { top: 0, left: 0, bottom: 0, right: 0, height: 0, width: 0 };
+    const rect = dom.getBoundingClientRect();
+    if (rect.width || rect.height) return rect;
+    const childRects = Array.from(dom.children || []).map(getRect);
+    if (!childRects.length) return rect;
+    const top = Math.min(...childRects.map((r) => r.top));
+    const left = Math.min(...childRects.map((r) => r.left));
+    const bottom = Math.max(...childRects.map((r) => r.bottom));
+    const right = Math.max(...childRects.map((r) => r.right));
+    return { top, left, bottom, right, width: right - left, height: bottom - top };
+  };
+
+  const getPos = useCallback((dom) => {
+    const zoom = getZoomFactor();
+    const ownRect = dom?.getBoundingClientRect();
+    const hasOwnBox = !!(ownRect && (ownRect.width || ownRect.height));
+    const { top, left, bottom, height, width, right } = hasOwnBox
+      ? ownRect
+      : getRect(dom);
+    const topAdj = (top > 0 ? top : bottom) / zoom;
+    const leftAdj = left / zoom;
+    const rightPos = window.innerWidth / zoom - right / zoom;
+    return {
+      top: `${topAdj}px`,
+      left: `${leftAdj}px`,
+      right: `${rightPos}px`,
+      topn: topAdj,
+      leftn: leftAdj,
+      rightn: rightPos,
+      height: height / zoom,
+      width: width / zoom,
+      bottom: bottom / zoom,
+      hasOwnBox,
+    };
+  }, [getZoomFactor]);
+
+  const scroll = useCallback(() => {
+    const pos = getPos(dom);
+    [currentRef.current, borderRef.current].forEach((el) => {
+      if (!el) return;
+      el.style.top = pos.top;
+      if (options.isRTL) {
+        el.style.right = pos.right;
+        el.style.left = "auto";
+      } else {
+        el.style.left = pos.left;
+        el.style.right = "auto";
+      }
+    });
+  }, [dom, getPos, options.isRTL]);
+
+  const hiddenColumnParents = new Set(["Card", "Container", "Table", "DropMenu"]);
+  useEffect(() => {
+    if (!isActive) return;
+    if (name === "Column" && parent && parent !== "ROOT") {
+      const parentNode = query.node(parent).get();
+      const parentName = parentNode?.data?.displayName;
+      const parentLinked = parentNode?.data?.linkedNodes;
+      if (
+        hiddenColumnParents.has(parentName) &&
+        parentLinked &&
+        Object.values(parentLinked).includes(id)
+      ) {
+        const currentlySelected = query.getEvent("selected").all();
+        const otherSelected = currentlySelected.filter((nid) => nid !== id);
+        if (otherSelected.length > 0) {
+          actions.selectNode([...otherSelected, parent]);
+        } else {
+          actions.selectNode(parent);
+        }
+      }
+    }
+  }, [isActive]);
+
+  useEffect(() => {
+    document
+      .getElementById("builder-main-canvas")
+      .addEventListener("scroll", scroll);
+    document.addEventListener("scroll", scroll);
+
+    return () => {
+      document
+        .getElementById("builder-main-canvas")
+        .removeEventListener("scroll", scroll);
+      document.removeEventListener("scroll", scroll);
+    };
+  }, [scroll]);
+
+  /**
+   * @returns {void}
+   */
+  const duplicate = () => {
+    const {
+      data: { parent },
+    } = query.node(id).get();
+    const siblings = query.node(parent).childNodes();
+    const sibIx = siblings.findIndex((sib) => sib === id);
+    const elem = recursivelyCloneToElems(query)(id);
+    actions.addNodeTree(
+      query.parseReactElement(elem).toNodeTree(),
+      parent || "ROOT",
+      sibIx + 1
+    );
+  };
+   return (
+     <>
+       {(isActive || isHover) &&
+       id !== "ROOT" &&
+       !(name === "Column" && !isActive)
+         ? ReactDOM.createPortal(
+            <div
+              ref={currentRef}
+              className={`selected-indicator ${
+                isActive ? "activeind" : "hoverind"
+              } px-1 text-white`}
+              style={{
+                ...(options.isRTL ? { right: getPos(dom).right, left: 'auto' } : { left: getPos(dom).left, right: 'auto' }),
+                top: getPos(dom).top,
+                zIndex: 1029,
+              }}
+            >
+              <div className="dispname me-3">{name}</div>{" "}
+              {moveable && isActive && (
+                <button
+                  className="btn btn-link btn-builder-move p-0"
+                  ref={drag}
+                >
+                  <FontAwesomeIcon icon={faArrowsAlt} className="me-2" />
+                </button>
+              )}
+              {isActive && parent && parent !== "ROOT" ? (
+                <FontAwesomeIcon
+                  icon={faArrowUp}
+                  className="me-2"
+                  onClick={() => {
+                    actions.selectNode(parent);
+                  }}
+                />
+              ) : null}
+              {deletable && isActive
+                ? [
+                    <FontAwesomeIcon
+                      key={1}
+                      icon={faCopy}
+                      onClick={duplicate}
+                      className="me-2"
+                    />,
+                    <FontAwesomeIcon
+                      key={2}
+                      icon={faTrashAlt}
+                      className="me-2"
+                      onMouseDown={(e) => {
+                        e.stopPropagation();
+                        actions.delete(id);
+                        setTimeout(() => actions.selectNode(parent), 0);
+                      }}
+                    />,
+                  ]
+                : null}
+            </div>,
+            document.querySelector("#builder-main-canvas")
+          )
+        : null}
+      {isActive && id !== "ROOT" && !getPos(dom).hasOwnBox
+        ? ReactDOM.createPortal(
+            <div
+              ref={borderRef}
+              className="selected-indicator-border"
+              style={{
+                ...(options.isRTL
+                  ? { right: getPos(dom).right, left: "auto" }
+                  : { left: getPos(dom).left, right: "auto" }),
+                top: getPos(dom).top,
+                width: getPos(dom).width,
+                height: getPos(dom).height,
+                zIndex: 1028,
+              }}
+            />,
+            document.querySelector("#builder-main-canvas")
+          )
+        : null}
+      {render}
+    </>
+  );
+};
+/*
+   {moveable ? (
+                <Btn className="me-2 cursor-move" ref={drag}>
+                  <Move />
+                </Btn>
+              ) : null}
+              {id !== ROOT_NODE && (
+                <Btn
+                  className="me-2 cursor-pointer"
+                  onClick={() => {
+                    actions.selectNode(parent);
+                  }}
+                >
+                  <ArrowUp />
+                </Btn>
+              )}
+              {deletable ? (
+                <Btn
+                  className="cursor-pointer"
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    actions.delete(id);
+                  }}
+                >
+                  <Delete />
+                </Btn>
+              ) : null}
+*/

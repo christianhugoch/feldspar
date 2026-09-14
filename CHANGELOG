@@ -2,6 +2,123 @@
 
 Changes in reverse chronological order.
 
+## The builder, Phase 7: `ui/builder`, vendored and bundled
+
+v1's builder is now in the repository, unedited. It builds into a bundle the admin server can
+serve, and it reaches this server only through the typed client. It mounts in jsdom over every
+options object v1 recorded. Every BooksDB layout goes through its canvas and comes back as it
+went in. The builder routes, their document and the admin screens are Phases 8 and 9.
+
+- **The package (7.1).** `ui/builder/`:
+  - `package.json` pins every dependency to the version v1's lock file resolved at
+    `0508c45ac2`.
+    - Its `overrides` are v1's root ones (`react`, `react-dom`,
+      `react-transition-group`, `immer`) plus the `@monaco-editor/loader` pin.
+    - `ckeditor4-react` and `@fonticonpicker/react-fonticonpicker` declare React 16 and 17
+      peers, and npm refuses to install them on React 18 without the overrides. v1 has run them
+      that way for years.
+  - `build.mjs` is esbuild. It writes `dist/builder.js` and `dist/builder.css` (the builder's
+    two stylesheets and Monaco's), Monaco's `editor.worker.js` and `ts.worker.js`, and
+    `dist/ckeditor/`.
+  - **Not one JS file, as §1 said.** Monaco (2.3 MB) is a chunk of its own, imported the first
+    time a code editor mounts, so a canvas with no code field never loads it. `builder.js` is
+    therefore an ES module, and Phase 8's document loads it with `type="module"`.
+  - **`fetch` is rewritten per importer, not by esbuild's `inject`.** `inject` rewrites the
+    free `fetch` of every file in the bundle, Monaco's and CKEditor's integration included.
+    The build instead puts `import { builderFetch as fetch }` in front of each vendored file,
+    and of no other.
+  - `@saltcorn/common-code` resolves to the view runtime's vendored copy.
+  - **6.5's decision:** the builder has its own generated `src/client.ts` and `helper.ts`, as the
+    IDE does. `admin_client_sync` now checks all three copies.
+- **Vendoring (7.2).** `vendor/refresh.sh` copies, each with the two-line header:
+  - `packages/saltcorn-builder/src/` (51 files) into `vendor/saltcorn-builder/`;
+  - `saltcorn-builder.css`, `fonticonpicker.react.css`, the icon picker's fonts and
+    CKEditor 4.16.2 into `public/`. A byte-order mark is stripped, so it does not end up after
+    the header.
+
+  It reads the renderers' commit from a `ui/saltcorn-ui/vendor/` header. It refuses a checkout
+  at any other commit, and one with uncommitted changes in the files it copies. This vendoring
+  was taken from a shared clone of the local checkout at `0508c45ac2`. `vendor/README.md` says
+  what is where and why.
+- **Shims (7.3)**, reached from `vendor/` only. The build records who imported each in
+  `dist/builder.importers.json`.
+  - **`@monaco-editor/react`** loads Monaco from a CDN, or v1's `/monaco`, with an AMD loader.
+    Here it gets the bundled ESM Monaco, whose workers are same-origin files.
+    - The loader's `config` replaces the instance it holds with whatever the call carries, so
+      `MonacoEditor.js`'s module-level `loader.config({ paths })` would clear an instance
+      given before it.
+    - The shim therefore drops `paths`, and gives the instance when an editor first mounts.
+  - **`ckeditor4-react`** loads CKEditor from cdn.ckeditor.com unless given a URL. The shim
+    forces `editorUrl` to `dist/ckeditor/`.
+- **The URL partition (7.4).** `src/routes.ts` has 26 routes: 18 mapped, 7 refused and
+  1 unreachable.
+  - Two URLs §3's table did not have: `/viewedit/getlayout/:id` and `/pageedit/getlayout/:id`.
+    `Library.js` reloads the layout from them when a tab comes back into view, and they are
+    mapped to `getView` and `getPage`.
+  - `/monaco` is *unreachable*, with the shim that makes it so written beside it.
+  - Page groups are refused as `/page_groupedit/*` and `/page_group/*`. A `*` route claims
+    only a shape that spells its prefix out, so `/${urlroot}/savebuilder/${id}` is not a page
+    group URL.
+  - `OTHER_ORIGINS` lists the two external URLs the builder names: v1's formula wiki link, and
+    the URL a new Link element starts with.
+  - **`builderFetch`** (`builder-fetch.ts`) answers:
+    - a mapped request through the client, in the shape v1's route answered;
+    - a refused one with `{ error }` and its sentence;
+    - anything else with a refusal naming the URL. Nothing reaches the network.
+  - **`links.ts`** is one capturing click listener over the same table. A refused link renders
+    `aria-disabled` with its sentence as the tooltip, including links rendered later.
+  - An image `src` or CSS `url()` of `/files/serve/…` passes through no listener. TODO 8.5 now
+    says the builder route's server answers that path.
+  - **`routes.test.ts`** parses every vendored file with acorn-jsx.
+    - Every URL-shaped literal, and whatever `fetch`, `url:` and `href` are given, must be in
+      exactly one column.
+    - A prefix literal (`url.startsWith("/page/")`) names what it prefixes.
+    - No route may be stale.
+- **Globals (7.5).** `src/globals.ts` has two lists:
+  - `DOCUMENT_GLOBALS`: jQuery, Bootstrap, and v1's own `notifyAlert`,
+    `validate_expression_elem`, `validate_bool_expression_elem` and `apply_showif` from
+    `saltcorn-common.js`, loaded whole rather than copied out;
+  - `HOST_GLOBALS`, which `installGlobals` defines:
+    - `ajax_modal`, refused;
+    - `set_state_field`, `set_state_fields` and `pjax_to`, as v1's `builder.ts` stubs them;
+    - v1's `_sc_lightmode` and `_sc_globalCsrf`;
+    - plus v1's `#toasts-area`.
+  - **The host document loads `saltcorn.js` as well**, where §4 named three scripts, because
+    `saltcorn-common.js`'s page initialiser calls its `$.debounce`. The order is Saltcorn UI's
+    own page's. `installGlobals` then replaces `saltcorn.js`'s `ajax_modal` and the three
+    stubs, as v1's `builder.ts` does.
+  - **`globals.test.ts`** holds every v1 global the vendored source reaches to exactly one list.
+    "Reaches" means an ESLint `/* global */` comment, a `window.x` a browser lacks, or a free
+    identifier naming a v1 page-script declaration or a `_sc_` value, less each file's own
+    declarations. It also checks:
+    - the four scripts define every document global;
+    - v1's `notifyAlert` toasts into the area;
+    - `ajax_modal` refuses.
+- **The fourth bundle (7.6).**
+  - `crates/sc-cli/build.rs` builds `ui/builder` and records `SC_BUILDER_BUNDLE_DIR`, with the
+    view runtime's `common-code` among its inputs. `SC_BUILD_ADMIN=0` records none, as for the
+    other three. Nothing reads the variable until Phase 8 serves the bundle.
+  - `build_script.rs` asserts its prefix path.
+  - `scripts/build-static.sh` stages and describes `ui/builder/dist`, and the static-build
+    Dockerfile copies it.
+  - `repo_hygiene`'s `_sc_` sweep skips `ui/builder/vendor/` and `public/`, which are v1's.
+- **jsdom (7.7).** `src/builder.test.ts` imports the built `dist/builder.js` into jsdom after
+  the host document's four scripts.
+  - **The mount.** `startBuilder` runs for each BooksDB view with a layout (six) and the page
+    *BooksOverview*, with the options v1 recorded for that mode. The canvas logs no error, loads
+    no script from another origin, and calls nothing but the `builder*` previews and lookups
+    while it renders. The Authors layouts use the same mode's Books options, the only ones
+    recorded.
+  - **The Craft round trip.** Each layout is saved with v1's own *Next* button, unchanged, and
+    comes back as it went in, after the normalisations the test lists:
+    - `above` has its nulls dropped and a one-segment wrapper unwrapped (`removeEmpty`). The
+      BooksDB layouts were written by an older builder.
+    - Props `layoutToNodes` defaults and `craftToSaltcorn` writes back are forgiven **only as
+      additions at their default value** (`ADDED_AT_DEFAULT`). So are empty-string
+      `breakpoints`, and a newly minted `rndid` on an action that had none. A prop the layout
+      had must come back with the value it had.
+- `cd ui/builder && npm test` builds the bundle and runs 30 tests in 4 files.
+
 ## The builder, Phase 6: the admin API
 
 Everything the builder will call now exists on the admin API, and nothing it
