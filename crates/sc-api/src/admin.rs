@@ -2110,6 +2110,19 @@ pub fn admin_endpoints() -> EndpointSet {
             .auth(AuthRequirement::admin()),
     );
 
+    // Whether this server has the builder bundle (TODO "The builder" §2, §9), so
+    // the admin UI offers **Open in builder** only where it opens something. A
+    // binary built without `ui/builder` answers `false`, and the admin screens
+    // keep a layout as read-only JSON with a sentence saying why.
+    set.register(
+        Endpoint::new("builderStatus", Method::Get, api().lit("builder"))
+            .output(TypeSchema::struct_of([StructField::new(
+                "available",
+                TypeSchema::bool(),
+            )]))
+            .auth(AuthRequirement::admin()),
+    );
+
     // --- frameworks ---------------------------------------------------------
     // The registered frameworks with their settings spec, so the create/edit
     // form can render controls for a framework it knows nothing about (§13.3).

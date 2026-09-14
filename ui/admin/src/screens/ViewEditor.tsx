@@ -7,9 +7,12 @@
 // any step, sends the whole configuration, which the server replays through
 // every step and refuses naming the step and the field.
 //
-// A layout step is shown as the JSON it is saved as, read-only, with the sentence
-// saying what will edit it: the drag-and-drop builder is the next milestone, and
-// until it lands a layout is preserved rather than edited.
+// A layout step opens in the builder (TODO "The builder" §9), a document of its
+// own on this server. The builder starts from the *saved* configuration, so what
+// the wizard has gathered is saved first; the builder's Next comes back here at
+// `?step=n`, and the wizard opens there over the configuration the builder saved.
+// On a server built without the builder the layout is shown as the JSON it is
+// saved as, with the sentence saying why.
 
 import { useEffect, useState } from "react";
 import Alert from "react-bootstrap/Alert";
@@ -18,11 +21,18 @@ import Spinner from "react-bootstrap/Spinner";
 
 import { api, errorMessage } from "../api";
 import { navigate } from "../App";
+import {
+  NO_BUILDER,
+  OPEN_IN_BUILDER,
+  builderViewUrl,
+  configurationChanged,
+  openStep,
+} from "../builder";
+import { useBuilderAvailable } from "../builderStatus";
 import { IconArrowLeft } from "../icons";
 import { AlertBody, PageBody, PageHeader } from "../layout";
 import { SettingsFields } from "../settings";
 import {
-  LAYOUT_READ_ONLY,
   STEP_SKIPPED,
   applyStep,
   layoutJson,
@@ -37,7 +47,17 @@ import {
   type ViewItem,
 } from "../views";
 
-export function ViewEditor({ appId, name }: { appId: string; name: string }) {
+export function ViewEditor({
+  appId,
+  name,
+  initialStep = null,
+}: {
+  appId: string;
+  name: string;
+  /** The step to open at, counting from 0: the builder's way back. */
+  initialStep?: number | null;
+}) {
+  const builderAvailable = useBuilderAvailable();
   const [app, setApp] = useState<AppItem | null>(null);
   const [view, setView] = useState<ViewItem | null>(null);
   const [pattern, setPattern] = useState<PatternItem | null>(null);
@@ -56,24 +76,20 @@ export function ViewEditor({ appId, name }: { appId: string; name: string }) {
     setBusy(true);
     setError(null);
     try {
-      let at = index;
-      for (;;) {
-        const next = await api.viewConfigStep(appId, {
-          viewpattern: target.viewpattern,
-          table_name: target.table_name ?? null,
-          name: target.name,
-          step: at,
-          context: config,
-        });
-        const beyond = at + direction;
-        if (next.skip && beyond >= 0 && beyond < next.count) {
-          at = beyond;
-          continue;
-        }
-        setStep(next);
-        setValues(stepFormValues(next));
-        break;
-      }
+      const next = await openStep(
+        (at) =>
+          api.viewConfigStep(appId, {
+            viewpattern: target.viewpattern,
+            table_name: target.table_name ?? null,
+            name: target.name,
+            step: at,
+            context: config,
+          }),
+        index,
+        direction,
+      );
+      setStep(next);
+      setValues(stepFormValues(next));
     } catch (err) {
       setError(errorMessage(err, "Could not build this step of the view's configuration."));
     } finally {
@@ -100,13 +116,13 @@ export function ViewEditor({ appId, name }: { appId: string; name: string }) {
         setPattern(patterns.find((p) => p.name === found.viewpattern) ?? null);
         const config = (found.configuration ?? {}) as Configuration;
         setConfiguration(config);
-        await open(found, 0, config, 1);
+        await open(found, initialStep ?? 0, config, 1);
       } catch (err) {
         setLoadError(errorMessage(err, "Could not load the view."));
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appId, name]);
+  }, [appId, name, initialStep]);
 
   /** The configuration with what is on screen in it. */
   const gathered = () => (step ? applyStep(configuration, step, values) : configuration);
@@ -132,6 +148,24 @@ export function ViewEditor({ appId, name }: { appId: string; name: string }) {
     } catch (err) {
       setError(errorMessage(err, "Could not save the view."));
     } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Save what the wizard gathered, if it differs from what is saved, and open
+   * this step in the builder, which builds over the saved configuration. */
+  const openInBuilder = async () => {
+    if (!view || !step) return;
+    const config = gathered();
+    setBusy(true);
+    setError(null);
+    try {
+      if (configurationChanged(view.configuration, config)) {
+        await api.saveView(appId, nameParam(view.name), saveViewBody(view, config));
+      }
+      window.location.assign(builderViewUrl(appId, view.name, step.index));
+    } catch (err) {
+      setError(errorMessage(err, "Could not save the view before opening the builder."));
       setBusy(false);
     }
   };
@@ -213,13 +247,29 @@ export function ViewEditor({ appId, name }: { appId: string; name: string }) {
           <div className="card-body">
             {!step ? (
               busy && <Spinner animation="border" role="status" />
-            ) : step.builder ? (
-              <>
-                <Alert variant="info">{LAYOUT_READ_ONLY}</Alert>
-                <pre className="small mb-0">{layoutJson(configuration)}</pre>
-              </>
             ) : step.skip ? (
               <p className="text-muted mb-0">{STEP_SKIPPED}</p>
+            ) : step.builder ? (
+              builderAvailable === false ? (
+                <>
+                  <Alert variant="info">{NO_BUILDER}</Alert>
+                  <pre className="small mb-0">{layoutJson(configuration)}</pre>
+                </>
+              ) : (
+                <>
+                  <p className="text-muted">{OPEN_IN_BUILDER}</p>
+                  <Button
+                    disabled={busy || builderAvailable === null}
+                    onClick={() => void openInBuilder()}
+                  >
+                    Open in builder
+                  </Button>
+                  <details className="mt-3">
+                    <summary className="text-muted">The layout as saved (JSON)</summary>
+                    <pre className="small mb-0 mt-2">{layoutJson(configuration)}</pre>
+                  </details>
+                </>
+              )
             ) : (
               <>
                 {step.blurb && <p className="text-muted">{step.blurb}</p>}

@@ -733,19 +733,19 @@ entry plus its §3 URLs, not a surprise.
 
 ## Phase 9 — The admin UI
 
-- [ ] 9.1 `ViewEditor.tsx`: **Open in builder** on a builder step, the collapsed JSON, the
+- [x] 9.1 `ViewEditor.tsx`: **Open in builder** on a builder step, the collapsed JSON, the
       no-bundle variant; `step` in the hash route honoured on return. The builder route (8.2)
       links to and saves back to `#/applications/:id/views/:name?step=n`, which `App.tsx`'s
       route match does not accept yet (it matches the whole hash, query included).
-- [ ] 9.2 Creating a view whose first unskipped step is a builder step lands in the builder.
-- [ ] 9.3 The Pages tab: **New page** (the properties form → the builder), **Edit**,
+- [x] 9.2 Creating a view whose first unskipped step is a builder step lands in the builder.
+- [x] 9.3 The Pages tab: **New page** (the properties form → the builder), **Edit**,
       **Properties**, rename with `pageReferences`; `pageForm.ts` for the form's validation
       (name required and unique in the application, the role list) with vitest. The page
       builder's **Page properties** link is `#/applications/:id/pages/:name/properties`.
-- [ ] 9.4 The **Library** tab: list with icon and `used_by`, rename, delete with references,
+- [x] 9.4 The **Library** tab: list with icon and `used_by`, rename, delete with references,
       read-only layout; hidden for non-Saltcorn-UI applications.
-- [ ] 9.5 View and page rename and delete warnings include the library items a layout places.
-- [ ] 9.6 vitest for the step-index, landing and references logic.
+- [x] 9.5 View and page rename and delete warnings include the library items a layout places.
+- [x] 9.6 vitest for the step-index, landing and references logic.
 
 ## Phase 10 — Documentation and the definition of done
 

@@ -14,6 +14,7 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import Spinner from "react-bootstrap/Spinner";
 
 import { api } from "./api";
+import { splitRoute, stepParam } from "./builder";
 import { PoppedChats } from "./PoppedChats";
 import { useChatWindows } from "./chatWindows";
 import type { AuthStatusResponse } from "./client";
@@ -39,7 +40,9 @@ import { AgentForm } from "./screens/AgentForm";
 import { Agents } from "./screens/Agents";
 import { Applications } from "./screens/Applications";
 import { ApplicationForm } from "./screens/ApplicationForm";
+import { ApplicationLibrary } from "./screens/ApplicationLibrary";
 import { ApplicationViews } from "./screens/ApplicationViews";
+import { PageProperties } from "./screens/PageProperties";
 import { ViewEditor } from "./screens/ViewEditor";
 import { DbConnections } from "./screens/DbConnections";
 import { FileManager } from "./screens/FileManager";
@@ -452,18 +455,21 @@ function ThemeToggle({
  * than about a record — today the GraphQL explorer, which runs its queries under
  * that admin's own authority and has to say whose. */
 function Screen({ route, user }: { route: string; user: CurrentUser }) {
-  const tableDataMatch = route.match(/^\/tables\/([^/]+)\/data$/);
+  // Routes are matched on their path; a query is what a screen is opened with
+  // (the builder's way back to `views/:name?step=n`).
+  const { path, query } = splitRoute(route);
+  const tableDataMatch = path.match(/^\/tables\/([^/]+)\/data$/);
   if (tableDataMatch) {
     return <TableData table={decodeURIComponent(tableDataMatch[1])} />;
   }
-  const tableMatch = route.match(/^\/tables\/([^/]+)$/);
+  const tableMatch = path.match(/^\/tables\/([^/]+)$/);
   if (tableMatch) {
     return <TableDetail table={decodeURIComponent(tableMatch[1])} />;
   }
-  if (route === "/applications/new") {
+  if (path === "/applications/new") {
     return <ApplicationForm />;
   }
-  const graphqlMatch = route.match(/^\/applications\/([^/]+)\/graphql$/);
+  const graphqlMatch = path.match(/^\/applications\/([^/]+)\/graphql$/);
   if (graphqlMatch) {
     return (
       <GraphqlExplorer
@@ -472,18 +478,44 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
       />
     );
   }
-  const viewEditMatch = route.match(
+  const viewEditMatch = path.match(
     /^\/applications\/([^/]+)\/views\/([^/]+)$/,
   );
   if (viewEditMatch) {
     return (
       <ViewEditor
+        key={route}
         appId={decodeURIComponent(viewEditMatch[1])}
         name={decodeURIComponent(viewEditMatch[2])}
+        initialStep={stepParam(query)}
       />
     );
   }
-  const viewsMatch = route.match(/^\/applications\/([^/]+)\/(views|pages)$/);
+  // `pages/new` before `pages/:name/properties`; a page named "new" has its
+  // properties at `pages/new/properties`, so the two never meet.
+  const newPageMatch = path.match(/^\/applications\/([^/]+)\/pages\/new$/);
+  if (newPageMatch) {
+    return (
+      <PageProperties key={path} appId={decodeURIComponent(newPageMatch[1])} name={null} />
+    );
+  }
+  const pagePropertiesMatch = path.match(
+    /^\/applications\/([^/]+)\/pages\/([^/]+)\/properties$/,
+  );
+  if (pagePropertiesMatch) {
+    return (
+      <PageProperties
+        key={path}
+        appId={decodeURIComponent(pagePropertiesMatch[1])}
+        name={decodeURIComponent(pagePropertiesMatch[2])}
+      />
+    );
+  }
+  const libraryMatch = path.match(/^\/applications\/([^/]+)\/library$/);
+  if (libraryMatch) {
+    return <ApplicationLibrary appId={decodeURIComponent(libraryMatch[1])} />;
+  }
+  const viewsMatch = path.match(/^\/applications\/([^/]+)\/(views|pages)$/);
   if (viewsMatch) {
     return (
       <ApplicationViews
@@ -492,7 +524,7 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
       />
     );
   }
-  const editMatch = route.match(
+  const editMatch = path.match(
     /^\/applications\/([^/]+)\/(edit|app-settings)$/,
   );
   if (editMatch) {
@@ -503,19 +535,19 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
       />
     );
   }
-  if (route.startsWith("/applications")) {
+  if (path.startsWith("/applications")) {
     return <Applications />;
   }
-  if (route === "/triggers/new") {
+  if (path === "/triggers/new") {
     return <TriggerForm />;
   }
   // "Create trigger" on a table's own page: the same form, with that table
   // already chosen as the one the trigger fires on.
-  const triggerForTableMatch = route.match(/^\/triggers\/new\/([^/]+)$/);
+  const triggerForTableMatch = path.match(/^\/triggers\/new\/([^/]+)$/);
   if (triggerForTableMatch) {
     return <TriggerForm table={decodeURIComponent(triggerForTableMatch[1])} />;
   }
-  const triggerEditMatch = route.match(/^\/triggers\/([^/]+)\/edit$/);
+  const triggerEditMatch = path.match(/^\/triggers\/([^/]+)\/edit$/);
   if (triggerEditMatch) {
     return <TriggerForm triggerId={decodeURIComponent(triggerEditMatch[1])} />;
   }
@@ -523,32 +555,32 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
   // runs hang off the trigger's id rather than standing beside it as an entity
   // of their own — there is no `/workflows/…` because there is no workflow to
   // address without a trigger.
-  const workflowMatch = route.match(/^\/triggers\/([^/]+)\/workflow$/);
+  const workflowMatch = path.match(/^\/triggers\/([^/]+)\/workflow$/);
   if (workflowMatch) {
     return <WorkflowEditor triggerId={decodeURIComponent(workflowMatch[1])} />;
   }
-  const workflowRunsMatch = route.match(/^\/triggers\/([^/]+)\/runs$/);
+  const workflowRunsMatch = path.match(/^\/triggers\/([^/]+)\/runs$/);
   if (workflowRunsMatch) {
     return (
       <WorkflowRuns triggerId={decodeURIComponent(workflowRunsMatch[1])} />
     );
   }
-  if (route.startsWith("/triggers")) {
+  if (path.startsWith("/triggers")) {
     return <Triggers />;
   }
-  if (route === "/file-stores/new") {
+  if (path === "/file-stores/new") {
     return <FileStoreForm />;
   }
-  const storeEditMatch = route.match(/^\/file-stores\/([^/]+)\/edit$/);
+  const storeEditMatch = path.match(/^\/file-stores\/([^/]+)\/edit$/);
   if (storeEditMatch) {
     return <FileStoreForm storeId={decodeURIComponent(storeEditMatch[1])} />;
   }
-  if (route.startsWith("/file-stores")) {
+  if (path.startsWith("/file-stores")) {
     return <FileStores />;
   }
   // `/files/<store>` opens at the root; `/files/<store>/<dir>` opens in a
   // directory, which is what an application row links to (§2.4).
-  const filesMatch = route.match(/^\/files\/([^/]+)(?:\/(.*))?$/);
+  const filesMatch = path.match(/^\/files\/([^/]+)(?:\/(.*))?$/);
   if (filesMatch) {
     const dir = (filesMatch[2] ?? "")
       .split("/")
@@ -559,44 +591,44 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
       <FileManager store={decodeURIComponent(filesMatch[1])} initialDir={dir} />
     );
   }
-  if (route === "/agents/new") {
+  if (path === "/agents/new") {
     return <AgentForm />;
   }
   // A chat is addressed by the agent's **name**, not its id: it is what the run
   // history is keyed by (§11.4) and what the socket's `start` carries, so a
   // bookmarked chat URL says which agent it is.
-  const agentChatMatch = route.match(/^\/agents\/([^/]+)\/chat$/);
+  const agentChatMatch = path.match(/^\/agents\/([^/]+)\/chat$/);
   if (agentChatMatch) {
     return <AgentChat agent={decodeURIComponent(agentChatMatch[1])} />;
   }
-  const agentEditMatch = route.match(/^\/agents\/([^/]+)\/edit$/);
+  const agentEditMatch = path.match(/^\/agents\/([^/]+)\/edit$/);
   if (agentEditMatch) {
     return <AgentForm agentId={decodeURIComponent(agentEditMatch[1])} />;
   }
-  if (route.startsWith("/agents")) {
+  if (path.startsWith("/agents")) {
     return <Agents />;
   }
-  if (route === "/llm-providers/new") {
+  if (path === "/llm-providers/new") {
     return <LlmProviderForm />;
   }
-  const providerEditMatch = route.match(/^\/llm-providers\/([^/]+)\/edit$/);
+  const providerEditMatch = path.match(/^\/llm-providers\/([^/]+)\/edit$/);
   if (providerEditMatch) {
     return (
       <LlmProviderForm providerId={decodeURIComponent(providerEditMatch[1])} />
     );
   }
-  if (route.startsWith("/llm-providers")) {
+  if (path.startsWith("/llm-providers")) {
     return <LlmProviders />;
   }
-  if (route.startsWith("/db-connections")) {
+  if (path.startsWith("/db-connections")) {
     return <DbConnections />;
   }
-  if (route === "/models/new") {
+  if (path === "/models/new") {
     return <ModelForm />;
   }
   // A fit is addressed by its own id, as `getModelInstance` is: which model it
   // is of is the server's answer, not the URL's.
-  const instanceMatch = route.match(/^\/model-instances\/([^/]+)$/);
+  const instanceMatch = path.match(/^\/model-instances\/([^/]+)$/);
   if (instanceMatch) {
     const instanceId = decodeURIComponent(instanceMatch[1]);
     // Keyed, so moving from one fit to another **remounts** rather than
@@ -608,26 +640,26 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
   }
   // The model *is* its form: a model is edited and refitted continuously, so
   // there is no read-only screen it would be opened into first.
-  const modelMatch = route.match(/^\/models\/([^/]+)$/);
+  const modelMatch = path.match(/^\/models\/([^/]+)$/);
   if (modelMatch) {
     return <ModelForm modelId={decodeURIComponent(modelMatch[1])} />;
   }
-  if (route.startsWith("/models")) {
+  if (path.startsWith("/models")) {
     return <Models />;
   }
   // A run is addressed by its own id, as `getRun` is: which workflow it is of is
   // the server's answer, not the URL's.
-  const runMatch = route.match(/^\/runs\/([^/]+)$/);
+  const runMatch = path.match(/^\/runs\/([^/]+)$/);
   if (runMatch) {
     return <RunDetail runId={decodeURIComponent(runMatch[1])} />;
   }
-  if (route.startsWith("/users")) {
+  if (path.startsWith("/users")) {
     return <Users />;
   }
-  if (route.startsWith("/roles")) {
+  if (path.startsWith("/roles")) {
     return <Roles />;
   }
-  if (route.startsWith("/settings")) {
+  if (path.startsWith("/settings")) {
     return <Settings />;
   }
   return <Tables />;

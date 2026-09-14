@@ -170,6 +170,7 @@ export type BuilderPagePreviewRequest = { page: string };
 export type BuilderPagePreviewResponse = { html: string };
 export type BuilderDistinctValuesResponse = { success: unknown };
 export type ListViewPatternsResponse = Array<{ name: string; label: string; description: string; table_required: boolean; view_quantity?: string | null; routes: Array<string>; steps: Array<string>; module?: string | null }>;
+export type BuilderStatusResponse = { available: boolean };
 export type ListFrameworksResponse = Array<{ name: string; label: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; has_views: boolean }>;
 export type ListApiProvidersResponse = Array<{ name: string; label: string; description: string; default_mount: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; supports_custom_queries: boolean }>;
 export type DescribeCustomQueryRequest = { name: string; description?: string | null; method: string; path: string; sql: string; params: Array<{ name: string; type: string; required?: boolean | null }>; min_role?: number | null; tables?: Array<string> | null };
@@ -350,6 +351,7 @@ export interface ApiClient {
   builderPagePreview(id: string, body: BuilderPagePreviewRequest): Promise<BuilderPagePreviewResponse>;
   builderDistinctValues(id: string, table: string, field: string): Promise<BuilderDistinctValuesResponse>;
   listViewPatterns(): Promise<ListViewPatternsResponse>;
+  builderStatus(): Promise<BuilderStatusResponse>;
   listFrameworks(): Promise<ListFrameworksResponse>;
   listApiProviders(): Promise<ListApiProvidersResponse>;
   describeCustomQuery(body: DescribeCustomQueryRequest): Promise<DescribeCustomQueryResponse>;
@@ -1339,6 +1341,14 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("listViewPatterns", res);
       return (await res.json()) as ListViewPatternsResponse;
+    },
+    async builderStatus() {
+      const res = await doFetch(`${baseUrl}/api/builder`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("builderStatus", res);
+      return (await res.json()) as BuilderStatusResponse;
     },
     async listFrameworks() {
       const res = await doFetch(`${baseUrl}/api/frameworks`, {

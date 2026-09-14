@@ -191,6 +191,8 @@ pub fn build_router_with_apps(
     }
 
     let routes = Arc::new(build_matchit(endpoints)?);
+    let mut handlers = handlers;
+    crate::builder::register_status_handler(&mut handlers, config.builder_dir.clone());
     let handlers = Arc::new(handlers);
     let mcp_endpoint_tools = Arc::new(crate::mcp::endpoint_tools(endpoints, &handlers));
     let state = AppState {

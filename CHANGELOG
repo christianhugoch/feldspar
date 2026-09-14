@@ -2,6 +2,75 @@
 
 Changes in reverse chronological order.
 
+## The builder, Phase 9: the admin UI
+
+The admin screens now open the builder. A view's layout step has **Open in builder**, and a
+new Show or Filter lands straight in the builder. Pages have **New page**, **Edit**,
+**Properties** and rename. An application has a **Library** tab.
+
+- **`builderStatus`** (`GET /api/builder`, `{ available }`), the one server change.
+  - The admin UI needs to know whether the binary has the builder bundle, and the admin
+    handlers never see `ServerConfig`. So the handler is registered by `build_router_with_apps`
+    (`builder::register_status_handler`).
+  - It checks for the bundle the same way the builder routes do (`built_bundle`), per
+    request, so the two cannot disagree.
+  - The three `client.ts` copies are regenerated.
+  - Tested in `builder_route.rs`: `builder_status_says_whether_the_bundle_is_built` (no
+    directory, an empty one, a built one; admin only).
+- **The wizard (9.1)**, `ViewEditor.tsx`.
+  - A layout step shows **Open in builder**, with the JSON collapsed underneath in a
+    `<details>`.
+  - The builder builds over the *saved* configuration. So when the wizard has gathered
+    something different, it saves first, then goes to
+    `/builder/applications/:app/views/:view?step=n`.
+  - Without the bundle, the step shows `NO_BUILDER` and the JSON. `LAYOUT_READ_ONLY` is gone.
+  - A skipped layout step now shows as skipped, not as a layout.
+  - `App.tsx` matches routes on their path and passes the query on. So the builder's way
+    back, `#/applications/:id/views/:name?step=n`, opens the wizard at `n`. The editor is
+    keyed by the whole route, so a new step remounts it and reloads the configuration.
+- **Creating a view (9.2)** walks the new view's steps the way the wizard does
+  (`openStep`, now shared by both). It lands in the builder when the first step it stops at
+  is a layout and the bundle is there (`viewLanding`), and in the wizard at that step
+  otherwise.
+- **Pages (9.3).**
+  - The Pages tab has **New page**. Each row has **Edit** (the builder; disabled with the
+    reason when there is no bundle), **Properties**, **Rename** and **Delete**.
+  - `PageProperties.tsx` serves `#/applications/:id/pages/new` and `…/pages/:name/properties`,
+    which is where the builder's *Page properties* link lands. Its fields are name, title,
+    description, minimum role, *no menu* and *fluid layout*.
+  - **Create** saves through `savePage` and opens the builder. Saving an existing page
+    returns to the tab. Changing the name there shows `pageReferences` first.
+  - `pageForm.ts` holds the validation:
+    - a name is required, and must not be another page's, because `savePage` would take the
+      new page as that page and empty its layout;
+    - the minimum role must be one of the roles.
+
+    The body keeps the page's layout and the attributes the form does not show
+    (`root_page_for_roles`). A cleared flag is removed rather than stored as `false`.
+- **The Library tab (9.4)**, `ApplicationLibrary.tsx` at `#/applications/:id/library`. It is a
+  tab only for applications with views and pages.
+  - Each row has the icon (the Font Awesome class as text, since the admin UI does not load
+    Font Awesome), the name and description, and "used by".
+  - "Used by" expands to links: a view to its wizard, a page to the builder (or to its
+    properties without the bundle), and an item placed in another item to nothing.
+  - Rename refuses a name another item has. Delete confirms naming every place that will
+    render blank, and passes `confirm` only for an item in use.
+  - **Layout** shows the JSON read-only.
+  - `library.ts` holds this logic.
+- **Warnings (9.5).**
+  - `views.ts` builds the reference sentences for both kinds: `viewReferenceLines` (now with
+    the library items showing the view), `pageReferenceLines` (menu, home page per role,
+    views, pages, library items) and `placesLine`, for the items a layout places, which stay.
+  - Renaming a view or a page, and deleting either, fetches the references first and says
+    all of it. The rename dialog is shared by views and pages.
+- **Tests (9.6).**
+  - `builder.test.ts`: route splitting and the step parameter, the builder URLs, skipping
+    in both directions, the landing, and save-before-open.
+  - `pageForm.test.ts` and `library.test.ts`.
+  - `views.test.ts` gains the Library tab, the reference sentences with library items and
+    places, the page rename report, and the editor links.
+  - `ui/admin` vitest is 465 tests in 34 files.
+
 ## The builder, Phase 8: the builder routes
 
 The admin server now serves v1's builder. It is a document of its own under `/builder/`, like

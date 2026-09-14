@@ -20,6 +20,7 @@ import type {
   ListPagesResponse,
   ListViewPatternsResponse,
   ListViewsResponse,
+  PageReferencesResponse,
   SaveViewRequest,
   ViewConfigStepResponse,
   ViewReferencesResponse,
@@ -34,7 +35,9 @@ export type PatternItem = ListViewPatternsResponse[number];
 export type StepItem = ViewConfigStepResponse;
 export type References = ViewReferencesResponse;
 
-export type AppTab = "settings" | "views" | "pages" | "app-settings";
+export type PageReferences = PageReferencesResponse;
+
+export type AppTab = "settings" | "views" | "pages" | "library" | "app-settings";
 
 /** Where the page is, as much of `window.location` as a link needs. */
 export type Here = { protocol: string; host: string };
@@ -61,6 +64,9 @@ export function appTabs(
   if (app.has_views) {
     tabs.push({ id: "views", label: "Views", href: `${base}/views` });
     tabs.push({ id: "pages", label: "Pages", href: `${base}/pages` });
+    // Library items belong to the framework whose views and pages place them
+    // (TODO "The builder" §8), so the tab comes with those two.
+    tabs.push({ id: "library", label: "Library", href: `${base}/library` });
     tabs.push({
       id: "app-settings",
       label: "App settings",
@@ -175,17 +181,21 @@ export function pageRows(
   });
 }
 
-/** The confirmation a delete asks for. */
+/** The confirmation a delete asks for. `references` are the sentences saying
+ * what names it and what its layout places (`viewReferenceLines`,
+ * `pageReferenceLines`), empty while they could not be had. */
 export function deleteConfirmation(
   kind: "view" | "page",
   name: string,
   appName: string,
+  references: string[] = [],
 ): string {
   const consequence =
     kind === "view"
       ? "Pages and views that show or link to it will no longer find it."
       : "A role whose home page it is will land on the list of views instead.";
-  return `Delete the ${kind} "${name}" from ${appName}? ${consequence} This cannot be undone.`;
+  const found = references.length ? ` ${references.join(" ")}` : "";
+  return `Delete the ${kind} "${name}" from ${appName}? ${consequence}${found} This cannot be undone.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -200,13 +210,6 @@ export function deleteConfirmation(
 
 /** A view's configuration, the object a wizard gathers into. */
 export type Configuration = Record<string, unknown>;
-
-/** What a layout step says, because the answer to "where is my layout?" is not
- * obvious: it exists, it is rendered, and nothing here edits it yet. */
-export const LAYOUT_READ_ONLY =
-  "This step is the view's layout, which is edited in the drag-and-drop builder. " +
-  "The builder is not in this version: the layout is shown here as it is saved, and " +
-  "saving the view keeps it unchanged.";
 
 /** What a step v1 leaves out says, when it is the one on screen. */
 export const STEP_SKIPPED =
@@ -318,9 +321,83 @@ export function createViewBody(form: NewViewForm): CreateViewRequest {
   };
 }
 
-/** Where a view's configuration editor is. */
-export function viewEditorHref(appId: string, name: string): string {
-  return `#/applications/${encodeURIComponent(appId)}/views/${encodeURIComponent(name)}`;
+/** Where a view's configuration editor is, opened at `step` when one is given
+ * (the builder's way back, TODO "The builder" §9). */
+export function viewEditorHref(appId: string, name: string, step?: number): string {
+  const query = step === undefined ? "" : `?step=${step}`;
+  return `#/applications/${encodeURIComponent(appId)}/views/${encodeURIComponent(name)}${query}`;
+}
+
+/** Where a page's properties form is. The builder's **Page properties** link
+ * is this route (`sc-server/src/builder.rs`). */
+export function pagePropertiesHref(appId: string, name: string): string {
+  return `#/applications/${encodeURIComponent(appId)}/pages/${encodeURIComponent(name)}/properties`;
+}
+
+/** Where a new page's properties form is. */
+export function newPageHref(appId: string): string {
+  return `#/applications/${encodeURIComponent(appId)}/pages/new`;
+}
+
+/** The sentences saying what names a view: the views embedding or linking to
+ * it, and the pages and library items showing it. Empty when nothing does. */
+export function viewReferenceLines(references: References): string[] {
+  const lines: string[] = [];
+  if (references.embedded_in.length) {
+    lines.push(`Embedded in ${named(references.embedded_in, "view")}.`);
+  }
+  if (references.linked_from.length) {
+    lines.push(`Linked to from ${named(references.linked_from, "view")}.`);
+  }
+  if (references.pages.length) {
+    lines.push(`Shown on ${named(references.pages, "page")}.`);
+  }
+  if (references.library.length) {
+    lines.push(`Shown or linked to by ${named(references.library, "library item")}.`);
+  }
+  return lines;
+}
+
+/** The sentences saying what names a page: the menu entries opening it, the
+ * roles whose home page it is, and the views, pages and library items showing
+ * or linking to it. Empty when nothing does. */
+export function pageReferenceLines(references: PageReferences): string[] {
+  const lines: string[] = [];
+  if (references.menu.length) {
+    lines.push(
+      `Opened by the menu ${references.menu.length === 1 ? "entry" : "entries"} ${quotedList(references.menu)}.`,
+    );
+  }
+  if (references.home_page_for.length) {
+    lines.push(`The home page of ${named(references.home_page_for, "role")}.`);
+  }
+  if (references.views.length) {
+    lines.push(`Shown or linked to by ${named(references.views, "view")}.`);
+  }
+  if (references.pages.length) {
+    lines.push(`Shown or linked to by ${named(references.pages, "page")}.`);
+  }
+  if (references.library.length) {
+    lines.push(`Shown or linked to by ${named(references.library, "library item")}.`);
+  }
+  return lines;
+}
+
+/** The sentence saying which library items a layout places, which a rename or a
+ * delete leaves as they are, or `null` when it places none. */
+export function placesLine(places: string[]): string | null {
+  if (!places.length) return null;
+  const them = places.length === 1 ? "it stays" : "they stay";
+  return `Its layout places ${named(places, "library item")}; ${them} in the library.`;
+}
+
+/** Everything a delete warning says about a view's or page's references. */
+export function deleteReferenceLines(
+  lines: string[],
+  places: string[],
+): string[] {
+  const place = placesLine(places);
+  return place ? [...lines, place] : lines;
 }
 
 /** What a rename will leave behind, one sentence per kind, said **before** the
@@ -330,35 +407,40 @@ export function referencesReport(
   name: string,
   references: References,
 ): string[] {
-  const list = (names: string[]) => names.map((n) => `"${n}"`).join(", ");
-  const lines: string[] = [];
-  if (references.embedded_in.length) {
-    lines.push(
-      `Embedded in ${plural(references.embedded_in.length, "view")} ${list(references.embedded_in)}.`,
-    );
-  }
-  if (references.linked_from.length) {
-    lines.push(
-      `Linked to from ${plural(references.linked_from.length, "view")} ${list(references.linked_from)}.`,
-    );
-  }
-  if (references.pages.length) {
-    lines.push(
-      `Shown on ${plural(references.pages.length, "page")} ${list(references.pages)}.`,
-    );
-  }
-  if (!lines.length) {
-    return [
-      `Nothing in this application refers to "${name}" by name, so nothing is left behind.`,
-    ];
-  }
-  lines.push(
-    `These refer to the view as "${name}" and will not be updated: after the rename they will ` +
-      "no longer find it until they are changed to the new name.",
-  );
-  return lines;
+  return renameReport("view", name, viewReferenceLines(references), references.places);
 }
 
-function plural(n: number, noun: string): string {
-  return n === 1 ? `the ${noun}` : `the ${noun}s`;
+/** The same for a page. */
+export function pageReferencesReport(
+  name: string,
+  references: PageReferences,
+): string[] {
+  return renameReport("page", name, pageReferenceLines(references), references.places);
+}
+
+function renameReport(
+  kind: "view" | "page",
+  name: string,
+  lines: string[],
+  places: string[],
+): string[] {
+  const report = lines.length
+    ? [
+        ...lines,
+        `These refer to the ${kind} as "${name}" and will not be updated: after the rename ` +
+          "they will no longer find it until they are changed to the new name.",
+      ]
+    : [`Nothing in this application refers to "${name}" by name, so nothing is left behind.`];
+  const place = placesLine(places);
+  return place ? [...report, place] : report;
+}
+
+/** `"a", "b"`. */
+export function quotedList(names: string[]): string {
+  return names.map((n) => `"${n}"`).join(", ");
+}
+
+/** `the view "a"`, `the views "a", "b"`. */
+function named(names: string[], noun: string): string {
+  return `the ${noun}${names.length === 1 ? "" : "s"} ${quotedList(names)}`;
 }

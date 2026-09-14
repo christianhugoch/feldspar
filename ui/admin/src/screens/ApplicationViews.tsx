@@ -4,8 +4,13 @@
 //
 // There is no Build button anywhere near this: a Saltcorn UI application's
 // source is these rows, and a delete is live on the app's next request.
-// Creating a view, opening its configuration and renaming it are Phase 10's;
-// a rename says first what still refers to the view by its old name.
+// A rename and a delete say first what still refers to the view or page by its
+// name, and which library items its layout places.
+//
+// A new view lands where v1's *Configure* does: in the builder when the first
+// step its wizard stops at is a layout, else in the wizard. A page is built in
+// the builder (**Edit**), and its properties are a form of their own
+// (TODO "The builder" §9).
 
 import { useEffect, useState } from "react";
 import Alert from "react-bootstrap/Alert";
@@ -17,8 +22,11 @@ import Table from "react-bootstrap/Table";
 
 import { api, errorMessage } from "../api";
 import { navigate } from "../App";
+import { NO_BUILDER, builderPageUrl, openStep, viewLanding, type Landing } from "../builder";
+import { useBuilderAvailable } from "../builderStatus";
 import { IconArrowLeft } from "../icons";
 import { AlertBody, PageBody, PageHeader, StatusBadge } from "../layout";
+import { pageFormErrors, pageFormOf, savePageBody } from "../pageForm";
 import { RoleSelect } from "../roleSelect";
 import { useRoles } from "../roles";
 import {
@@ -27,12 +35,18 @@ import {
   appTabs,
   createViewBody,
   deleteConfirmation,
+  deleteReferenceLines,
   nameParam,
+  newPageHref,
   newViewError,
+  pageReferenceLines,
+  pageReferencesReport,
+  pagePropertiesHref,
   pageRows,
   referencesReport,
   saveViewBody,
   viewEditorHref,
+  viewReferenceLines,
   viewRows,
   type AppItem,
   type AppTab,
@@ -40,23 +54,23 @@ import {
   type NewViewForm,
   type PageItem,
   type PatternItem,
-  type References,
   type ViewItem,
 } from "../views";
 
-/** The rename dialog: the view, the name being typed, and what refers to the
- * view — `null` while that is being found out. */
+/** The rename dialog: a view or a page, the name being typed, and what refers to
+ * it — `null` while that is being found out. */
 type Renaming = {
-  view: ViewItem;
+  kind: "view" | "page";
+  original: string;
   name: string;
-  references: References | null;
+  report: string[] | null;
   error: string | null;
 };
 
-/** The tabs across the top of an application's screens: Settings, and Views
- * and Pages for an application that has them. Links rather than state, because
- * each tab is its own route. Tabler's `.nav-pills`, as the Settings screen
- * uses, with nothing but classes doing the work under the admin's CSP. */
+/** The tabs across the top of an application's screens: Settings, and Views,
+ * Pages and Library for an application that has them. Links rather than state,
+ * because each tab is its own route. Tabler's `.nav-pills`, as the Settings
+ * screen uses, with nothing but classes doing the work under the admin's CSP. */
 export function ApplicationTabs({ app, active }: { app: AppItem; active: AppTab }) {
   const tabs = appTabs(app);
   if (tabs.length < 2) return null;
@@ -79,6 +93,7 @@ export function ApplicationTabs({ app, active }: { app: AppItem; active: AppTab 
 
 export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" | "pages" }) {
   const roles = useRoles();
+  const builderAvailable = useBuilderAvailable();
   const [app, setApp] = useState<AppItem | null>(null);
   const [views, setViews] = useState<ViewItem[] | null>(null);
   const [pages, setPages] = useState<PageItem[] | null>(null);
@@ -117,8 +132,25 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appId]);
 
+  /** What the delete warning says about references. A warning without them is
+   * still a warning, so failing to find them does not stop the delete. */
+  const deleteReferences = async (kind: "view" | "page", name: string): Promise<string[]> => {
+    try {
+      if (kind === "view") {
+        const references = await api.viewReferences(appId, nameParam(name));
+        return deleteReferenceLines(viewReferenceLines(references), references.places);
+      }
+      const references = await api.pageReferences(appId, nameParam(name));
+      return deleteReferenceLines(pageReferenceLines(references), references.places);
+    } catch {
+      return [];
+    }
+  };
+
   const remove = async (kind: "view" | "page", name: string) => {
-    if (!app || !window.confirm(deleteConfirmation(kind, name, app.name))) return;
+    if (!app) return;
+    const references = await deleteReferences(kind, name);
+    if (!window.confirm(deleteConfirmation(kind, name, app.name, references))) return;
     setError(null);
     try {
       if (kind === "view") {
@@ -144,8 +176,32 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
     setCreateError(null);
     try {
       const created = await api.createView(appId, createViewBody(creating));
+      const context = (created.configuration ?? {}) as Configuration;
+      let landing: Landing;
+      try {
+        const first = await openStep(
+          (at) =>
+            api.viewConfigStep(appId, {
+              viewpattern: created.viewpattern,
+              table_name: created.table_name ?? null,
+              name: created.name,
+              step: at,
+              context,
+            }),
+          0,
+          1,
+        );
+        landing = viewLanding(appId, created.name, first, builderAvailable === true);
+      } catch {
+        // The view exists; the wizard is where a step that cannot be built says why.
+        landing = { kind: "wizard", route: viewEditorHref(appId, created.name).slice(1) };
+      }
       setCreating(null);
-      navigate(`/applications/${encodeURIComponent(appId)}/views/${encodeURIComponent(created.name)}`);
+      if (landing.kind === "builder") {
+        window.location.assign(landing.url);
+      } else {
+        navigate(landing.route);
+      }
     } catch (err) {
       setCreateError(errorMessage(err, "Could not create the view."));
     } finally {
@@ -153,34 +209,50 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
     }
   };
 
-  /** Open the rename dialog, and find out what refers to the view before any
-   * name is changed (10.4). */
-  const startRename = async (view: ViewItem) => {
-    setRenaming({ view, name: view.name, references: null, error: null });
+  /** Open the rename dialog, and find out what refers to the view or page
+   * before any name is changed. */
+  const startRename = async (kind: "view" | "page", original: string) => {
+    setRenaming({ kind, original, name: original, report: null, error: null });
+    const same = (r: Renaming | null) => r !== null && r.kind === kind && r.original === original;
     try {
-      const references = await api.viewReferences(appId, nameParam(view.name));
-      setRenaming((r) => (r && r.view.name === view.name ? { ...r, references } : r));
+      const report =
+        kind === "view"
+          ? referencesReport(original, await api.viewReferences(appId, nameParam(original)))
+          : pageReferencesReport(original, await api.pageReferences(appId, nameParam(original)));
+      setRenaming((r) => (r && same(r) ? { ...r, report } : r));
     } catch (err) {
-      const message = errorMessage(err, "Could not find what refers to the view.");
-      setRenaming((r) => (r && r.view.name === view.name ? { ...r, error: message } : r));
+      const message = errorMessage(err, `Could not find what refers to the ${kind}.`);
+      setRenaming((r) => (r && same(r) ? { ...r, error: message } : r));
     }
   };
 
   const rename = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!renaming) return;
-    const { view, name } = renaming;
+    if (!renaming || !views || !pages) return;
+    const { kind, original, name } = renaming;
     setBusy(true);
     try {
-      await api.saveView(
-        appId,
-        nameParam(view.name),
-        saveViewBody(view, (view.configuration ?? {}) as Configuration, name.trim()),
-      );
+      if (kind === "view") {
+        const view = views.find((v) => v.name === original);
+        if (!view) throw new Error(`rename failed: 404: There is no view named "${original}".`);
+        await api.saveView(
+          appId,
+          nameParam(original),
+          saveViewBody(view, (view.configuration ?? {}) as Configuration, name.trim()),
+        );
+      } else {
+        const page = pages.find((p) => p.name === original);
+        if (!page) throw new Error(`rename failed: 404: There is no page named "${original}".`);
+        const form = { ...pageFormOf(page), name };
+        // A name another page has would be taken by `savePage` as that page.
+        const taken = pageFormErrors(form, pages, original, null).name;
+        if (taken) throw new Error(`rename failed: 409: ${taken}`);
+        await api.savePage(appId, nameParam(original), savePageBody(form, page));
+      }
       setRenaming(null);
       await load();
     } catch (err) {
-      setRenaming({ ...renaming, error: errorMessage(err, "Could not rename the view.") });
+      setRenaming({ ...renaming, error: errorMessage(err, `Could not rename the ${kind}.`) });
     } finally {
       setBusy(false);
     }
@@ -207,6 +279,11 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
             >
               New view
             </Button>
+          )}
+          {tab === "pages" && app && (
+            <a className="btn btn-primary" href={newPageHref(appId)}>
+              New page
+            </a>
           )}
           <Button variant="outline-secondary" onClick={() => navigate("/applications")}>
             <IconArrowLeft className="icon-2" />
@@ -297,10 +374,7 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
                         size="sm"
                         variant="outline-secondary"
                         className="me-1"
-                        onClick={() => {
-                          const view = views.find((v) => v.name === row.name);
-                          if (view) void startRename(view);
-                        }}
+                        onClick={() => void startRename("view", row.name)}
                       >
                         Rename
                       </Button>
@@ -347,7 +421,37 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
                     <td>{row.title}</td>
                     <td>{row.role}</td>
                     <td>{row.homeFor.length ? row.homeFor.join(", ") : "—"}</td>
-                    <td className="text-end">
+                    <td className="text-end text-nowrap">
+                      {builderAvailable ? (
+                        <a
+                          className="btn btn-sm btn-outline-primary me-1"
+                          href={builderPageUrl(appId, row.name)}
+                        >
+                          Edit
+                        </a>
+                      ) : (
+                        // A disabled button swallows hover, so the reason sits on
+                        // a wrapper.
+                        <span className="d-inline-block me-1" title={builderAvailable === false ? NO_BUILDER : undefined}>
+                          <Button size="sm" variant="outline-primary" disabled>
+                            Edit
+                          </Button>
+                        </span>
+                      )}
+                      <a
+                        className="btn btn-sm btn-outline-secondary me-1"
+                        href={pagePropertiesHref(appId, row.name)}
+                      >
+                        Properties
+                      </a>
+                      <Button
+                        size="sm"
+                        variant="outline-secondary"
+                        className="me-1"
+                        onClick={() => void startRename("page", row.name)}
+                      >
+                        Rename
+                      </Button>
                       <Button
                         size="sm"
                         variant="outline-danger"
@@ -435,7 +539,7 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
               <Button variant="secondary" type="button" onClick={() => setCreating(null)}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={busy}>
+              <Button type="submit" disabled={busy || builderAvailable === null}>
                 Create and configure
               </Button>
             </Modal.Footer>
@@ -445,13 +549,13 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
         <Modal show={renaming !== null} onHide={() => setRenaming(null)}>
           <Form onSubmit={rename}>
             <Modal.Header closeButton>
-              <Modal.Title className="h4">Rename {renaming?.view.name}</Modal.Title>
+              <Modal.Title className="h4">Rename {renaming?.original}</Modal.Title>
             </Modal.Header>
             <Modal.Body>
               {renaming?.error && <Alert variant="danger">{renaming.error}</Alert>}
               {renaming && (
                 <>
-                  <Form.Group className="mb-3" controlId="renameView">
+                  <Form.Group className="mb-3" controlId="renameViewOrPage">
                     <Form.Label>New name</Form.Label>
                     <Form.Control
                       value={renaming.name}
@@ -460,10 +564,10 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
                       onChange={(e) => setRenaming({ ...renaming, name: e.target.value })}
                     />
                   </Form.Group>
-                  {renaming.references === null ? (
+                  {renaming.report === null ? (
                     !renaming.error && <Spinner animation="border" size="sm" role="status" />
                   ) : (
-                    referencesReport(renaming.view.name, renaming.references).map((line) => (
+                    renaming.report.map((line) => (
                       <p key={line} className="mb-2">
                         {line}
                       </p>
@@ -481,9 +585,9 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
                 disabled={
                   busy ||
                   !renaming ||
-                  renaming.references === null ||
+                  renaming.report === null ||
                   !renaming.name.trim() ||
-                  renaming.name.trim() === renaming.view.name
+                  renaming.name.trim() === renaming.original
                 }
               >
                 Rename

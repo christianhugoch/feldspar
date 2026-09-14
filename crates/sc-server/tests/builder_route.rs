@@ -444,6 +444,59 @@ async fn without_the_builder_bundle_the_routes_say_so() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+/// `builderStatus` says whether the builder routes have a bundle to serve, so
+/// the admin UI offers **Open in builder** only when it opens a builder: `false`
+/// with no bundle directory, or one without a built entry module, and `true`
+/// with one.
+#[tokio::test]
+async fn builder_status_says_whether_the_bundle_is_built() {
+    let root = std::env::temp_dir().join(format!("sc-builder-status-{}", Uuid::new_v4()));
+    let empty = root.join("empty");
+    let built = root.join("built");
+    std::fs::create_dir_all(&empty).unwrap();
+    std::fs::create_dir_all(&built).unwrap();
+    std::fs::write(built.join("builder.js"), "export {};").unwrap();
+    for (dir, expected) in [
+        (None, false),
+        (Some(empty.clone()), false),
+        (Some(built.clone()), true),
+    ] {
+        let sessions = Arc::new(SessionStore::default());
+        let config = ServerConfig {
+            builder_dir: dir.clone(),
+            ..ServerConfig::default()
+        };
+        let router = build_router(
+            &sc_api::admin_endpoints(),
+            HandlerRegistry::new(),
+            sessions.clone(),
+            &config,
+        )
+        .expect("build router");
+        let admin = sessions
+            .login(User::new(Uuid::new_v4(), 1).unwrap())
+            .await
+            .unwrap();
+        let request = Request::get("/api/builder")
+            .header(header::COOKIE, format!("{SESSION_COOKIE}={admin}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{dir:?}");
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body, json!({ "available": expected }), "{dir:?}");
+
+        // Admin only, like the routes it describes.
+        let request = Request::get("/api/builder").body(Body::empty()).unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{dir:?}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Every file under `dir`.
 fn files_under(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();

@@ -19,7 +19,14 @@ import {
   NO_VIEWS,
   appTabs,
   deleteConfirmation,
+  deleteReferenceLines,
   nameParam,
+  newPageHref,
+  pagePropertiesHref,
+  pageReferenceLines,
+  pageReferencesReport,
+  viewEditorHref,
+  viewReferenceLines,
   pageRows,
   viewRows,
   viewUrl,
@@ -78,17 +85,19 @@ function pattern(name: string, label = name): PatternItem {
 }
 
 describe("appTabs", () => {
-  it("gives a views-and-pages application Views, Pages and App settings after Settings", () => {
+  it("gives a views-and-pages application Views, Pages, Library and App settings after Settings", () => {
     const tabs = appTabs({ id: "a1", has_views: true });
     expect(tabs.map((t) => t.id)).toEqual([
       "settings",
       "views",
       "pages",
+      "library",
       "app-settings",
     ]);
     expect(tabs[1].href).toBe("#/applications/a1/views");
     expect(tabs[0].href).toBe("#/applications/a1/edit");
-    expect(tabs[3].href).toBe("#/applications/a1/app-settings");
+    expect(tabs[3].href).toBe("#/applications/a1/library");
+    expect(tabs[4].href).toBe("#/applications/a1/app-settings");
   });
 
   it("gives any other application only Settings", () => {
@@ -201,6 +210,58 @@ describe("deleteConfirmation", () => {
     expect(text).toContain('"List Books"');
     expect(text).toContain("BooksDB");
     expect(text).toMatch(/link to it/);
+  });
+
+  it("names what refers to it and the library items its layout places (9.5)", () => {
+    const view = {
+      embedded_in: [],
+      linked_from: ["Show Books"],
+      pages: [],
+      library: ["Book header"],
+      places: ["Book card", "Footer"],
+    };
+    const text = deleteConfirmation(
+      "view",
+      "List Books",
+      "BooksDB",
+      deleteReferenceLines(viewReferenceLines(view), view.places),
+    );
+    expect(text).toContain('Linked to from the view "Show Books".');
+    expect(text).toContain('Shown or linked to by the library item "Book header".');
+    expect(text).toContain(
+      'Its layout places the library items "Book card", "Footer"; they stay in the library.',
+    );
+    expect(text.endsWith("This cannot be undone.")).toBe(true);
+
+    const page = {
+      menu: ["Home"],
+      home_page_for: ["public"],
+      views: [],
+      pages: ["Landing"],
+      library: [],
+      places: ["Book header"],
+    };
+    const lines = deleteReferenceLines(pageReferenceLines(page), page.places);
+    expect(lines).toEqual([
+      'Opened by the menu entry "Home".',
+      'The home page of the role "public".',
+      'Shown or linked to by the page "Landing".',
+      'Its layout places the library item "Book header"; it stays in the library.',
+    ]);
+  });
+});
+
+describe("links to the editors", () => {
+  it("open the wizard at a step, and a page's properties", () => {
+    expect(viewEditorHref("a1", "Show Books")).toBe("#/applications/a1/views/Show%20Books");
+    expect(viewEditorHref("a1", "Show Books", 2)).toBe(
+      "#/applications/a1/views/Show%20Books?step=2",
+    );
+    // The builder's **Page properties** link (`sc-server/src/builder.rs`).
+    expect(pagePropertiesHref("a1", "Books Overview")).toBe(
+      "#/applications/a1/pages/Books%20Overview/properties",
+    );
+    expect(newPageHref("a1")).toBe("#/applications/a1/pages/new");
   });
 });
 
@@ -382,6 +443,47 @@ describe("creating and renaming a view", () => {
     });
     expect(none).toHaveLength(1);
     expect(none[0]).toContain("Nothing");
+  });
+
+  it("says before a rename which library items show the view, and which it places", () => {
+    const lines = referencesReport("List Books", {
+      embedded_in: [],
+      linked_from: [],
+      pages: [],
+      library: ["Book header"],
+      places: ["Footer"],
+    });
+    expect(lines).toEqual([
+      'Shown or linked to by the library item "Book header".',
+      expect.stringContaining('refer to the view as "List Books"'),
+      'Its layout places the library item "Footer"; it stays in the library.',
+    ]);
+  });
+
+  it("says before a page rename what names the page", () => {
+    const lines = pageReferencesReport("Home", {
+      menu: ["Home", "Start"],
+      home_page_for: ["public", "user"],
+      views: ["Show Books"],
+      pages: [],
+      library: [],
+      places: [],
+    });
+    expect(lines).toEqual([
+      'Opened by the menu entries "Home", "Start".',
+      'The home page of the roles "public", "user".',
+      'Shown or linked to by the view "Show Books".',
+      expect.stringContaining('refer to the page as "Home"'),
+    ]);
+    const none = pageReferencesReport("Home", {
+      menu: [],
+      home_page_for: [],
+      views: [],
+      pages: [],
+      library: [],
+      places: [],
+    });
+    expect(none).toEqual([expect.stringContaining("Nothing")]);
   });
 
   it("renames by saving the same view under another name", () => {

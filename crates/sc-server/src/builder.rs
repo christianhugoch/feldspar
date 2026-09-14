@@ -49,6 +49,7 @@ use sc_viewpattern::{
 use serde_json::{Value as Json, json};
 
 use crate::apps::AppMounts;
+use crate::handler::{HandlerRegistry, HandlerResponse};
 use crate::security::{BUILDER_CONTENT_SECURITY_POLICY, builder_content_security_policy};
 
 /// The path prefix the builder is served under.
@@ -66,6 +67,31 @@ pub const BUILDER_BOOT_ID: &str = "builder-boot";
 
 /// The bundle's entry module, which is also how a built bundle is recognised.
 const BUILDER_ENTRY: &str = "builder.js";
+
+/// The bundle directory, if it holds a built bundle.
+fn built_bundle(dir: Option<&Path>) -> Option<&Path> {
+    dir.filter(|dir| dir.join(BUILDER_ENTRY).is_file())
+}
+
+/// Register `builderStatus`: whether the builder routes have a bundle to serve.
+///
+/// Registered by the router rather than in `admin_handlers`, because the bundle
+/// directory is the server's configuration, which the admin handlers never see.
+/// It is checked per request, the way the routes check it, so the answer and
+/// what **Open in builder** then opens cannot disagree.
+pub(crate) fn register_status_handler(
+    handlers: &mut HandlerRegistry,
+    bundle: Option<std::path::PathBuf>,
+) {
+    let bundle = std::sync::Arc::new(bundle);
+    handlers.register("builderStatus", move |_ctx| {
+        let bundle = bundle.clone();
+        async move {
+            let available = built_bundle(bundle.as_deref()).is_some();
+            Ok(HandlerResponse::ok(json!({ "available": available })))
+        }
+    });
+}
 
 /// Where the builder's canvas finds an application's files: v1's serve URL.
 const FILES_SERVE_PREFIX: &str = "/files/serve/";
@@ -253,7 +279,7 @@ async fn document(
     target: Target,
 ) -> std::result::Result<Response, Response> {
     let not_found = |sentence: String| refusal(StatusCode::NOT_FOUND, &sentence, None);
-    let Some(bundle) = env.bundle.filter(|dir| dir.join(BUILDER_ENTRY).is_file()) else {
+    let Some(bundle) = built_bundle(env.bundle) else {
         return Err(not_found(
             "This server was built without the builder (ui/builder), so layouts can be edited \
              only as JSON in the admin UI. Build it with `npm ci && npm run build` in \
