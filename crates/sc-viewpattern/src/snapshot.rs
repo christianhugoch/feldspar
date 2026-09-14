@@ -83,6 +83,10 @@ impl ViewSnapshot {
                 // on every run in the worker, because the subset can shrink
                 // under a view already saved (7.4).
                 "tables": application.tables.iter().map(|t| t.0.as_str()).collect::<Vec<_>>(),
+                // The stores the builder's image picker lists (TODO "The
+                // builder" 5.4). Names only: what is in them is listed when the
+                // builder asks, through the call's file surface.
+                "file_stores": application.file_stores.iter().map(|s| s.0.as_str()).collect::<Vec<_>>(),
             },
             "generation": set.generation,
             "config": config,

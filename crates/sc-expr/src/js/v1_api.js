@@ -143,10 +143,9 @@
     "table.import_json_file": PORTS,
     "table.dump_to_json": PORTS,
 
-    // The view builder's own helpers.
-    "table.get_join_field_options": BUILDER,
-    "table.get_relation_options": BUILDER,
-    "table.get_relation_data": BUILDER,
+    // The view builder's own helpers. `get_join_field_options`,
+    // `get_relation_options` and `get_relation_data` are answered (TODO "The
+    // builder" 5.2), because the builder's options are computed from them.
     "table.field_options": BUILDER,
     "table.slug_options": BUILDER,
     "table.getTags": BUILDER,
@@ -199,7 +198,6 @@
     "File.from_req_files": FILES,
     "File.upload": FILES,
     "File.allDirectories": FILES,
-    "File.findImagesForBuilder": FILES,
     "File.ensure_file_store": FILES,
     "User.find": USERS,
     "User.findOne": USERS,
@@ -955,13 +953,16 @@
     });
   };
 
-  const capitalise = (s) => (s.length === 0 ? s : s[0].toUpperCase() + s.slice(1));
 
   // v1's `Field.labelToName` and `Field.nameToLabel`, which plugins use to
   // build a column from a form label and a label from a column.
   const labelToName = (label) =>
     String(label).toLowerCase().replace(/ /g, "_").replace(/[^a-z0-9_]/g, "");
-  const nameToLabel = (name) => capitalise(String(name).replace(/_/g, " "));
+  // v1's own, which does not capitalise: `label.split("_").join(" ")`. A label
+  // that differed from v1's would be a form, a builder field list and a page's
+  // fixed-state picker each naming a field differently from v1 (TODO "The
+  // builder" 5.7 found it: a view's `id` state field is "id" in v1).
+  const nameToLabel = (name) => String(name).split("_").join(" ");
 
   // One field of one table, with v1's property names on it. `send` is the run's
   // sender, for the one member of `Field` with I/O behind it.
@@ -1042,26 +1043,91 @@
   // pattern's configuration steps list a column's join fields and a table's
   // child lists with them. Ported from v1's `models/table.ts`, including the
   // sentence a key to a table that is not there fails with.
+  //
+  // **Restricted to the tables the host lets the run see** (TODO "The builder"
+  // 5.2): a Saltcorn UI view sees its application's table subset, so a key to a
+  // table outside it is not a relation the builder may offer. A key to an
+  // invisible table is skipped rather than refused — the table exists, and the
+  // application is simply not allowed to join to it. A code isolate passes no
+  // predicate and sees every table.
   const isKey = (f) => f.is_fkey && f.type !== "File";
   const isStored = (f) => !f.calculated || f.stored;
+  const visible = (api, name) => !api.tableVisible || api.tableVisible(String(name));
+  const visibleKey = (api, f) => isKey(f) && visible(api, f.reftable_name);
   const tableNamed = (api, name) => {
     const table = api.Table.findOne(name);
     if (!table) throw new Error("Unable to find table '" + name);
     return table;
   };
+  // v1's `get_join_field_options(allow_double, allow_triple)`: the join paths a
+  // field picker offers, each key followed one, two or three tables deep.
+  const joinFieldOptions = (api, name, allowDouble, allowTriple) => {
+    const result = [];
+    for (const f of tableNamed(api, name).fields) {
+      if (!visibleKey(api, f)) continue;
+      const table = tableNamed(api, f.reftable_name);
+      const subOne = { name: f.name, table: table.name, subFields: [], fieldPath: f.name };
+      for (const pf of table.fields.filter(isStored)) {
+        const subTwo = { name: pf.name, subFields: [], fieldPath: f.name + "." + pf.name };
+        if (visibleKey(api, pf) && allowDouble) {
+          const table1 = tableNamed(api, pf.reftable_name);
+          subTwo.table = table1.name;
+          for (const gpf of table1.fields.filter(isStored)) {
+            const subThree = {
+              name: gpf.name,
+              subFields: [],
+              fieldPath: f.name + "." + pf.name + "." + gpf.name,
+            };
+            if (allowTriple && visibleKey(api, gpf)) {
+              const gpfTable = api.Table.findOne(gpf.reftable_name);
+              if (gpfTable) {
+                subThree.table = gpfTable.name;
+                for (const ggpf of gpfTable.fields.filter(isStored)) {
+                  subThree.subFields.push({
+                    name: ggpf.name,
+                    fieldPath: f.name + "." + pf.name + "." + gpf.name + "." + ggpf.name,
+                  });
+                }
+              }
+            }
+            subTwo.subFields.push(subThree);
+          }
+        }
+        subOne.subFields.push(subTwo);
+      }
+      result.push(subOne);
+    }
+    return result;
+  };
+  // v1's `get_relation_data(unique)`: the keys of other tables that point at
+  // this one, unique ones by default (a one-to-one relation), with their tables.
+  const relationData = (api, name, unique) => {
+    const result = [];
+    for (const field of api.Field.find({ reftable_name: name, is_unique: unique })) {
+      const relationTable = visible(api, field.table_id) ? api.Table.findOne(field.table_id) : undefined;
+      if (relationTable) result.push({ relationTable: relationTable, relationField: field });
+    }
+    return result;
+  };
+  // v1's `get_relation_options()`: those relations as a picker shows them.
+  const relationOptions = (api, name) =>
+    relationData(api, name, true).map(({ relationTable, relationField }) => ({
+      relationPath: relationTable.name + "." + relationField.name,
+      relationFields: relationTable.fields.filter((f) => f.type !== "Key").map((f) => f.name),
+    }));
   const parentRelations = (api, name, allowDouble, allowTriple) => {
     const parent_relations = [];
     const parent_field_list = [];
     for (const f of tableNamed(api, name).fields) {
-      if (!isKey(f)) continue;
+      if (!visibleKey(api, f)) continue;
       const table = tableNamed(api, f.reftable_name);
       for (const pf of table.fields.filter(isStored)) {
         parent_field_list.push(f.name + "." + pf.name);
-        if (isKey(pf) && allowDouble) {
+        if (visibleKey(api, pf) && allowDouble) {
           const table1 = tableNamed(api, pf.reftable_name);
           for (const gpf of table1.fields.filter(isStored)) {
             parent_field_list.push(f.name + "." + pf.name + "." + gpf.name);
-            if (allowTriple && isKey(gpf)) {
+            if (allowTriple && visibleKey(api, gpf)) {
               const gpfTable = api.Table.findOne(gpf.reftable_name);
               for (const ggpf of gpfTable ? gpfTable.fields.filter(isStored) : []) {
                 parent_field_list.push(f.name + "." + pf.name + "." + gpf.name + "." + ggpf.name);
@@ -1075,7 +1141,7 @@
     }
     // A unique key to this table is a one-to-one relation, read from its end.
     for (const relation of api.Field.find({ reftable_name: name, is_unique: true })) {
-      const related = api.Table.findOne(relation.table_id);
+      const related = visible(api, relation.table_id) ? api.Table.findOne(relation.table_id) : undefined;
       if (!related) continue;
       for (const relfield of related.fields) {
         parent_field_list.push(related.name + "." + relation.name + "->" + relfield.name);
@@ -1088,7 +1154,7 @@
     const child_relations = [];
     const child_field_list = [];
     for (const f of api.Field.find({ reftable_name: name })) {
-      if (!f.is_fkey) continue;
+      if (!f.is_fkey || !visible(api, f.table_id)) continue;
       const table = api.Table.findOne(f.table_id);
       if (!table) throw new Error("Unable to find table with id: " + f.table_id);
       child_field_list.push(table.name + "." + f.name);
@@ -1096,7 +1162,7 @@
     }
     if (allowJoinAggregations) {
       for (const f of tableNamed(api, name).fields) {
-        if (!isKey(f)) continue;
+        if (!visibleKey(api, f)) continue;
         const refTable = tableNamed(api, f.reftable_name);
         for (const rel of childRelations(api, refTable.name, false).child_relations) {
           child_field_list.push(f.name + "->" + rel.table.name + "." + rel.key_field.name);
@@ -1225,6 +1291,12 @@
         Promise.resolve(parentRelations(api, spec.name, allowDouble, allowTriple)),
       get_child_relations: (allowJoinAggregations) =>
         Promise.resolve(childRelations(api, spec.name, allowJoinAggregations)),
+      // The builder's join and relation pickers (see `joinFieldOptions`).
+      get_join_field_options: (allowDouble, allowTriple) =>
+        Promise.resolve(joinFieldOptions(api, spec.name, allowDouble, allowTriple)),
+      get_relation_options: () => Promise.resolve(relationOptions(api, spec.name)),
+      get_relation_data: (unique) =>
+        Promise.resolve(relationData(api, spec.name, unique === undefined ? true : unique)),
       owner_fieldname: () => spec.ownership_field_id || undefined,
       to_json: () => ({
         id: spec.name,
@@ -1590,8 +1662,18 @@
   // so by name rather than classes that know no tables: a `Table.findOne`
   // answering undefined for everything would have a plugin compute the wrong
   // answer instead of failing.
-  fixed("__scMakeV1Api", (send, snapshot, runTrigger, typeOf, fieldOf) => {
+  fixed("__scMakeV1Api", (send, snapshot, runTrigger, typeOf, fieldOf, tableVisible) => {
     const api = {};
+    // Which tables the run may see by listing or relating, when the host
+    // restricts it: a Saltcorn UI view sees its application's table subset
+    // (TODO "The builder" 5.2). `Table.find`, `Field.find` and the relation
+    // helpers answer inside it; `Table.findOne` by name does not, because the
+    // save checks already refuse a view naming a table outside the subset, and
+    // the run refuses it again. A code isolate passes nothing and sees all.
+    Object.defineProperty(api, "tableVisible", {
+      value: typeof tableVisible === "function" ? tableVisible : null,
+      enumerable: false,
+    });
     // What a table's field *is*, when the host has v1's own `Field` class: v1's
     // patterns write to a table's fields (Filter sets a field's `fieldview`
     // before it fills the field's options), which a read-only snapshot object
@@ -1634,6 +1716,7 @@
     // that listed them would put them in front of a plugin that only ever
     // wanted the application's tables.
     const specs = snapshot.tables.filter((t) => !t.is_system);
+    const visibleSpec = (spec) => !api.tableVisible || api.tableVisible(spec.name);
     // Built on demand and **kept**, so that `Table.findOne("books")` twice is
     // the same object twice: v1's is a state cache and plugins compare what
     // comes out of it.
@@ -1671,16 +1754,18 @@
         return spec ? tableOf(spec) : undefined;
       },
       find: (where, selopts) => {
-        let out = specs.filter((s) => matches(s, where));
+        let out = specs.filter((s) => matches(s, where) && visibleSpec(s));
         if (selopts !== undefined && selopts !== null) {
           if (!isObject(selopts)) {
             throw new Error("Table.find's second argument is an options object");
           }
           for (const key of Object.keys(selopts)) {
-            if (key !== "orderBy" && key !== "limit") {
+            // `cached` is v1's "from the state cache"; the snapshot is that
+            // cache, so it changes nothing (`build_schema_data` passes it).
+            if (key !== "orderBy" && key !== "limit" && key !== "cached") {
               throw new Error(
                 "`" + key + "` is not an option of Table.find; the options are: " +
-                "orderBy, limit"
+                "orderBy, limit, cached"
               );
             }
           }
@@ -1703,6 +1788,7 @@
     const allFields = () => {
       const out = [];
       for (const spec of specs) {
+        if (!visibleSpec(spec)) continue;
         const table = tableOf(spec);
         for (const field of table.fields) out.push(field);
       }

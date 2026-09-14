@@ -1104,7 +1104,8 @@ impl DenoModuleHost {
         // back refused from somewhere the plugin author cannot see.
         let can_ask = call.hosts.host.is_some()
             || call.hosts.triggers.is_some()
-            || call.hosts.module_fns.is_some();
+            || call.hosts.module_fns.is_some()
+            || call.hosts.files.is_some();
         if let Json::Object(map) = &mut request {
             map.insert("asks".to_owned(), Json::Bool(can_ask));
             // The functions this call's modules supply, by name, for v1's
@@ -1142,6 +1143,7 @@ impl DenoModuleHost {
         let host = call.hosts.host;
         let triggers = call.hosts.triggers;
         let module_fns = call.hosts.module_fns;
+        let files = call.hosts.files;
         // The run's budget, and the same one a code body's run gets: a module's
         // N+1 costs what a body's N+1 costs, because it is the same bound on the
         // same server doing the same work.
@@ -1188,7 +1190,8 @@ impl DenoModuleHost {
                     outstanding.insert(ask.id);
                     let control = control.clone();
                     serving.push(async move {
-                        let (ok, text) = match serve(host, triggers, module_fns, ask.request).await {
+                        let surfaces = Surfaces { host, triggers, module_fns, files };
+                        let (ok, text) = match serve(surfaces, ask.request).await {
                             Ok(value) => (
                                 true,
                                 serde_json::to_string(&value)
@@ -1236,44 +1239,54 @@ fn over_budget() -> String {
     )
 }
 
+/// The surfaces one call's asks are served from.
+#[derive(Clone, Copy, Default)]
+struct Surfaces<'a> {
+    host: Option<&'a dyn CodeHost>,
+    triggers: Option<&'a dyn TriggerHost>,
+    module_fns: Option<&'a dyn sc_expr::ModuleFnHost>,
+    files: Option<&'a dyn sc_expr::FileHost>,
+}
+
 /// One ask, on the surface it names.
 ///
-/// Three surfaces: the two the v1 `Table` speaks — a plan (`db`) and a run of
-/// another trigger (`trigger`) — and a module function (`function`), which is
-/// what v1's `getState().functions` calls in a Saltcorn UI view. Anything else is
-/// a sentence naming what it asked for and what there is — a module cannot be
-/// allowed to reach a seam by guessing at its name, and a silently ignored ask
-/// would be a module computing the wrong answer.
-async fn serve(
-    host: Option<&dyn CodeHost>,
-    triggers: Option<&dyn TriggerHost>,
-    module_fns: Option<&dyn sc_expr::ModuleFnHost>,
-    request: Json,
-) -> Result<Json> {
+/// Four surfaces: the two the v1 `Table` speaks — a plan (`db`) and a run of
+/// another trigger (`trigger`) — a module function (`function`), which is what
+/// v1's `getState().functions` calls in a Saltcorn UI view, and a file operation
+/// (`files`), which is how the builder's image list is read from an
+/// application's stores (TODO "The builder" 5.4). Anything else is a sentence
+/// naming what it asked for and what there is — a module cannot be allowed to
+/// reach a seam by guessing at its name, and a silently ignored ask would be a
+/// module computing the wrong answer.
+async fn serve(surfaces: Surfaces<'_>, request: Json) -> Result<Json> {
     let surface = request
         .get("surface")
         .and_then(Json::as_str)
         .unwrap_or_default();
     let plan = request.get("plan").cloned().unwrap_or(Json::Null);
     match surface {
-        "db" => match host {
+        "db" => match surfaces.host {
             Some(host) => host.call(plan).await,
             None => Err(Error::config("this module call has no database access")),
         },
-        "trigger" => match triggers {
+        "trigger" => match surfaces.triggers {
             Some(triggers) => triggers.run(plan).await,
             None => Err(Error::config("this module call cannot run other triggers")),
         },
-        "function" => match module_fns {
+        "function" => match surfaces.module_fns {
             Some(module_fns) => module_fns.call(plan).await,
             None => Err(Error::config(
                 "this module call cannot call other modules' functions",
             )),
         },
+        "files" => match surfaces.files {
+            Some(files) => files.files(plan).await,
+            None => Err(Error::config("this module call has no file store access")),
+        },
         other => Err(Error::config(format!(
             "`{other}` is not something a module can ask this server for; what a module may \
-             reach is the database (`db`), this server's triggers (`trigger`) and its modules' \
-             functions (`function`)"
+             reach is the database (`db`), this server's triggers (`trigger`), its modules' \
+             functions (`function`) and the file stores it was given (`files`)"
         ))),
     }
 }
@@ -1464,40 +1477,37 @@ mod tests {
     async fn an_ask_naming_a_surface_a_module_has_not_got_is_refused_by_name() {
         // A plan on a call with no database host: the honest sentence, and the
         // same one a code body's op answers.
-        let err = serve(None, None, None, json!({ "surface": "db", "plan": {} }))
+        let none = Surfaces::default();
+        let err = serve(none, json!({ "surface": "db", "plan": {} }))
             .await
             .expect_err("there is no host");
         assert!(err.to_string().contains("no database access"), "{err}");
 
-        let err = serve(
-            None,
-            None,
-            None,
-            json!({ "surface": "trigger", "plan": {} }),
-        )
-        .await
-        .expect_err("there is no dispatcher");
+        let err = serve(none, json!({ "surface": "trigger", "plan": {} }))
+            .await
+            .expect_err("there is no dispatcher");
         assert!(err.to_string().contains("run other triggers"), "{err}");
 
-        let err = serve(
-            None,
-            None,
-            None,
-            json!({ "surface": "function", "plan": {} }),
-        )
-        .await
-        .expect_err("there are no module functions");
+        let err = serve(none, json!({ "surface": "function", "plan": {} }))
+            .await
+            .expect_err("there are no module functions");
         assert!(err.to_string().contains("modules' functions"), "{err}");
+
+        let err = serve(none, json!({ "surface": "files", "plan": {} }))
+            .await
+            .expect_err("there are no file stores");
+        assert!(err.to_string().contains("no file store access"), "{err}");
 
         // A surface nobody has: named, with what there is.
         for request in [json!({ "surface": "fs", "plan": {} }), json!({})] {
-            let err = serve(None, None, None, request.clone())
+            let err = serve(none, request.clone())
                 .await
                 .expect_err("not a surface");
             let message = err.to_string();
             assert!(message.contains("`db`"), "{request}: {message}");
             assert!(message.contains("`trigger`"), "{request}: {message}");
             assert!(message.contains("`function`"), "{request}: {message}");
+            assert!(message.contains("`files`"), "{request}: {message}");
         }
     }
 

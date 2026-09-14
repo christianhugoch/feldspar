@@ -44,3 +44,40 @@ What the fixture holds, and what the tests expect of it:
 - **Featured book** places *Book note* with "Featured this week", then embeds
   *Show Books* with the legacy fixed state `{ id: 2 }`, so the page shows
   *War and Peace* only if the fold happened.
+
+## `builder-options/`
+
+What a real Saltcorn 1 passes to `builder.renderBuilder` when an admin opens the
+builder (TODO "The builder" 5.6): `show-books.json`, `edit-books.json`,
+`list-books.json` and `filter-books.json` from `/viewedit/config/<view>`, and
+`page-booksoverview.json` from `/pageedit/edit/BooksOverview`. Each is the
+options object decoded out of v1's own document, with only the session's
+`csrfToken` removed. `saltcorn_ui_render.rs` compares what this server's worker
+computes against them, key for key, with every intended difference listed in the
+test beside its reason.
+
+**They were recorded by a running Saltcorn 1**, unlike the library fixture above,
+by [`record-builder-options.sh`](./record-builder-options.sh):
+
+```sh
+V1_CHECKOUT=~/saltcorn RECORD_TEMPLATE=saltcorn_v2_template \
+  crates/sc-server/tests/fixtures/record-builder-options.sh
+```
+
+It restores `saltcorn-v1-BooksDB.zip` into a Postgres database of its own
+(`saltcorn_v1_builder_record` unless `RECORD_DATABASE` says otherwise), creates
+an admin, starts v1's server in-process, signs in and fetches the five pages.
+Recorded on 2026-09-14 from saltcorn/saltcorn `147056573f` (1.7.0-alpha.1), which
+differs from the vendored `0508c45ac2` nowhere under `saltcorn-data`,
+`saltcorn-markup`, `saltcorn-builder` or the `viewedit`/`pageedit` routes; the
+script checks that before it records anything.
+
+**The script resets the database it is given**, so it asks v1 which database it
+actually connected to first and refuses unless that is the one named. The first
+attempt at this recording is why: with `PGPASSWORD` set to the empty string, v1's
+`connect.ts` treats the Postgres settings as incomplete (it wants user, password
+and database all truthy) and silently falls back to a SQLite file under
+`~/.local/share/saltcorn`. That run restored into a new SQLite file rather than
+the database named; nothing existing was touched, but the fallback is not
+something to rediscover by accident, so the script sets a non-empty password
+(peer authentication ignores it) and checks.

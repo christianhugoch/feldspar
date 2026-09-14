@@ -124,6 +124,24 @@ for (const name of absent) {
 for (const name of kept) {
   check(typeof helper[name] === "function", `kept ${name} is not v1's function`);
 }
+// The builder's `tables` and `views` (TODO "The builder" 5.3) moved from refused
+// to kept: it lists through `Table.find` and `View.find`, which answer inside the
+// application's subset.
+check(kept.includes("build_schema_data"), "build_schema_data is not on the kept side of the partition");
+
+// --- the builder's state defaults (TODO "The builder" 5.4) -------------------
+// v1's `getState().fonts`, `icons` and `keyframes`, which `module-host.mjs`
+// answers from the bundle: v1's thirty standard fonts, its Font Awesome 5 list
+// with the three unicode stars appended, and its ten animations.
+const defaults = rt.stateDefaults;
+check(Object.keys(defaults?.fonts ?? {}).length === 30, "stateDefaults.fonts is not v1's thirty standard fonts");
+check(defaults?.icons?.[0] === "empty", "stateDefaults.icons does not start with v1's fa5-icons list");
+check(
+  defaults?.icons?.at(-1) === "unicode-2608-thunderstorm" && defaults.icons.length === 1345,
+  `stateDefaults.icons is not v1's list plus its three unicode stars (${defaults?.icons?.length})`,
+);
+check(defaults?.keyframes?.length === 10 && defaults.keyframes[0] === "fadeIn", "stateDefaults.keyframes is not v1's");
+check(typeof rt.pageBuilderOptions === "function", "the bundle does not export pageBuilderOptions");
 
 // --- and the library is the real thing, not a stub --------------------------
 const { div } = rt.library["@saltcorn/markup/tags"];

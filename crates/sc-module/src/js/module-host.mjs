@@ -439,7 +439,9 @@ function v1TableField(record, spec) {
     reftype: spec.reftype,
     refname: spec.refname,
     attributes: structuredClone(spec.attributes || {}),
-    fieldview: spec.fieldview,
+    // The snapshot's `null` is v1's absent fieldview, which v1's `toBuilder`
+    // leaves out rather than sending as `null`.
+    fieldview: spec.fieldview === null ? undefined : spec.fieldview,
     sublabel: spec.sublabel,
     description: spec.description,
     table_id: spec.table_id,
@@ -479,9 +481,20 @@ function callApi(what) {
       (request) => ask("trigger", request),
       v1FieldType,
       v1TableField,
+      applicationTableVisible,
     );
   }
   return store.api;
+}
+
+/** Whether a Saltcorn UI view call may list or relate to the table `name`: one
+ * of its application's tables (TODO "The builder" 5.2). A call that renders no
+ * application, or a snapshot that says nothing about the tables (one a test
+ * wrote by hand), restricts nothing — the rule `requireApplicationTable` keeps. */
+function applicationTableVisible(name) {
+  const set = applicationOf();
+  const tables = set && set.application && set.application.tables;
+  return !Array.isArray(tables) || tables.includes(name);
 }
 
 /** The `@saltcorn/*` specifiers this host answers, and with what.
@@ -2566,10 +2579,14 @@ const V1Trigger = class Trigger {
 
   /** v1's trigger names for an action picker. An application's triggers are
    * not table triggers — table events fire on this server's own write path —
-   * so `tableTriggers` finds none, and the other two find all of them. */
-  static trigger_actions({ apiNeverTriggers, allTriggers } = {}) {
+   * so `tableTriggers` finds none, and the other two find all of them.
+   * `onlyWorkflows` narrows to the workflows, which the builder gives an
+   * *initial context* form (TODO "The builder" 5.4). */
+  static trigger_actions({ apiNeverTriggers, allTriggers, onlyWorkflows } = {}) {
     if (!apiNeverTriggers && !allTriggers) return [];
-    return V1Trigger.find({}).map((t) => t.name);
+    return V1Trigger.find({})
+      .filter((t) => !onlyWorkflows || t.action === "Workflow")
+      .map((t) => t.name);
   }
 
   /** v1's grouped action picker: the built-ins it is handed, the application's
@@ -2600,10 +2617,37 @@ const V1Trigger = class Trigger {
 installV1Refusals(V1Trigger, "Trigger.");
 installV1Refusals(V1Trigger.prototype, "trigger.");
 
-/** v1's `File`: the pure half — how a stored value becomes a URL (4.6). Every
- * lookup is on the refusal list: an application's files are served by the
- * application (`/files/serve/…`), not read by the code that renders its views. */
+/** v1's `File`: the pure half — how a stored value becomes a URL (4.6) — and the
+ * builder's image list. Every other lookup is on the refusal list: an
+ * application's files are served by the application (`/files/serve/…`), not
+ * read by the code that renders its views. */
 const V1File = class File {
+  /** v1's `findImagesForBuilder` (TODO "The builder" 5.4): the image files in
+   * the application's file stores, in v1's `{ id, filename, location }` shape,
+   * listed through the call's file surface. `id` and `location` are what the
+   * builder puts after `/files/serve/`, and the application's serve route reads
+   * `<store>/<path>` as that store's file, so an image in any of its stores
+   * resolves. An image is what v1's `mime_super` would call one, judged here by
+   * the extension, since a listing carries no MIME type. */
+  static async findImagesForBuilder() {
+    const set = requireApplication("File.findImagesForBuilder");
+    const stores = (set.application && set.application.file_stores) || [];
+    const images = [];
+    const walk = async (store, dir) => {
+      const entries = await ask("files", { op: "list", store, path: dir, authority: "admin" });
+      for (const entry of entries || []) {
+        if (entry.isDirectory) {
+          await walk(store, entry.path);
+        } else if (String(V1File.nameToMimeType(entry.path)).startsWith("image/")) {
+          const location = `${store}/${entry.path}`;
+          images.push({ id: location, filename: entry.path, location });
+        }
+      }
+    };
+    for (const store of stores) await walk(store, "");
+    return images;
+  }
+
   static isAbsoluteURL(value) {
     return typeof value === "string" && /^([a-z][a-z0-9+.-]*:)?\/\//i.test(value.trim());
   }
@@ -2808,6 +2852,47 @@ class FormField {
 
   get form_name() {
     return this.parent_field ? `${this.parent_field}_${this.name}` : this.name;
+  }
+
+  /** v1's `type_name`: the type's name however the field holds it. */
+  get type_name() {
+    if (typeof this.type === "string") return this.type;
+    if (this.type && this.type.name) return this.type.name;
+    if (this.typename) return this.typename;
+    if (this.input_type) return this.input_type;
+    throw new Error("Field without type name");
+  }
+
+  /** v1's `presets`: the preset values a fixed state may name — the type's own
+   * (a date's `Now`), and `LoggedIn` for a key to v1's users table, which no
+   * table here is. What a Filter's field and a page's fixed state offer
+   * (TODO "The builder" 5.4). */
+  get presets() {
+    if (this.type && typeof this.type === "object" && this.type.presets) return this.type.presets;
+    if (this.type === "Key" && this.reftable_name === "users") return { LoggedIn: ({ user }) => user && user.id };
+    return null;
+  }
+
+  /** v1's `toBuilder`: the field as the builder's options carry it, in v1's key
+   * order (TODO "The builder" 5.4). */
+  get toBuilder() {
+    return {
+      id: this.id,
+      table_id: this.table_id,
+      name: this.name,
+      label: this.label,
+      is_unique: this.is_unique,
+      calculated: this.calculated,
+      stored: this.stored,
+      fieldview: this.fieldview,
+      type: typeof this.type === "string" ? this.type : this.type && this.type.name,
+      input_type: this.input_type,
+      reftable_name: this.reftable_name,
+      attributes: this.attributes,
+      required: this.required,
+      primary_key: this.primary_key,
+      preset_options: this.preset_options,
+    };
   }
 
   get fieldviews() {
@@ -3062,6 +3147,19 @@ function makeState(set) {
     },
     get viewtemplates() {
       return registry("viewtemplates");
+    },
+    // v1's built-in defaults for the builder's pickers (TODO "The builder"
+    // 5.4): no plugin adds a font, an icon or a keyframe here, so v1's own
+    // `standard_fonts`, Font Awesome 5 list and animations are the whole of
+    // each. A copy, as v1's `icons` getter hands out a new array.
+    get fonts() {
+      return { ...loadedRuntime("getState().fonts").stateDefaults.fonts };
+    },
+    get icons() {
+      return [...loadedRuntime("getState().icons").stateDefaults.icons];
+    },
+    get keyframes() {
+      return [...loadedRuntime("getState().keyframes").stateDefaults.keyframes];
     },
     getConfig(key, def) {
       return configValue(application(`getState().getConfig("${key}")`), key, def);
@@ -3382,6 +3480,15 @@ async function viewConfigStep({ pattern, table, view, step, context, request }) 
   return runtime.configStep(pattern, step || 0, configContext(context, table, view), req);
 }
 
+/** The options a page's builder is opened with (TODO "The builder" 5.5): v1's
+ * `pageBuilderData`, ported in the bundle, as the admin over the application's
+ * snapshot. */
+async function viewPageBuilderOptions({ page, request }) {
+  const runtime = await requireViewRuntime();
+  const { req } = viewRequest(request, currentViews());
+  return runtime.pageBuilderOptions(page, req);
+}
+
 /** A pattern's `initial_config` over a table (10.2). */
 async function viewInitialConfig({ pattern, table, view }) {
   const runtime = await requireViewRuntime();
@@ -3490,6 +3597,8 @@ async function handle(request) {
       return await viewRoute(request);
     case "view_config_step":
       return await viewConfigStep(request);
+    case "view_page_builder_options":
+      return await viewPageBuilderOptions(request);
     case "view_initial_config":
       return await viewInitialConfig(request);
     case "view_references":

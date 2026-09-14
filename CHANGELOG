@@ -2,6 +2,123 @@
 
 Changes in reverse chronological order.
 
+## The builder, Phase 5: the builder's options, from the worker
+
+The worker now computes the options object v1's builder is opened with, using
+v1's own code, for a view's layout step and for a page. Rust hands it on whole
+and never looks inside. It is checked against what a real Saltcorn 1 passes to
+`renderBuilder` over the same BooksDB backup, recorded from v1 itself.
+
+- **A builder step's options (5.1).**
+  - `ConfigStep` gains `builder_options: Option<Json>`, on the wire as
+    `builder_options` (schema in `admin.rs`, `ui/admin/src/client.ts`
+    regenerated). A form step and a skipped step answer `null`.
+  - `configStep` in `ui/saltcorn-ui/src/index.ts` fills it in three stages, in
+    v1's order:
+    - the step's own `builder(context)`;
+    - what `Workflow.runStep`'s builder branch adds (`fonts`,
+      `join_field_picker_data`, `tables`, `views`,
+      `max_relations_layer_depth`, `icons`, `keyframes`);
+    - what `viewedit.ts`'s `respondWorkflow` adds (`isRTL`, `translations`,
+      `view_id`).
+  - v1's `File.buildDirCache` around the step is not ported: it caches v1's
+    file table, which this server does not have.
+- **Relations, inside the application's subset (5.2, 5.3).**
+  - `table.get_join_field_options`, `get_relation_options` and
+    `get_relation_data` are ported from `models/table.ts` into `v1_api.js` and
+    leave the `BUILDER` refusal list.
+  - `__scMakeV1Api` takes an optional table-visibility predicate. The module
+    host passes the application's tables; a code isolate passes nothing and
+    sees every table.
+  - Under it, `Table.find`, `Field.find`, the three new methods and the
+    existing `get_parent_relations`/`get_child_relations` answer inside the
+    subset. A key to a table outside it is skipped, not refused.
+    `Table.findOne` by name is unchanged: the save checks already refuse a
+    view naming such a table, and the run refuses it again.
+  - `Table.find` accepts v1's `cached` option, which changes nothing here.
+  - `build_schema_data` moves from refused to kept in the `plugin-helper.ts`
+    partition, and `bundle_shape` checks it is there.
+- **What the builder steps reach (5.4).**
+  - `File.findImagesForBuilder` lists image files in the application's stores.
+    - The snapshot's application gains `file_stores`.
+    - The worker asks a new `files` surface, the `list` operation of the
+      existing `FileStoreHost`. The module pool's `serve` now has four
+      surfaces. The `Configurer` gives its calls one, as the admin.
+    - `id` and `location` are `<store>/<path>`, which the application's
+      `/files/serve/` reads as that store's file.
+  - `getState().fonts`, `icons` and `keyframes` answer v1's defaults, from
+    `ui/saltcorn-ui/src/state-defaults.ts`.
+    - Fonts and keyframes are ported from `db/state.ts`.
+    - The icon list is v1's `db/fa5-icons.ts`, now vendored (`refresh.sh`,
+      `vendor/README.md`), with v1's three unicode stars appended.
+  - `PageGroup.find` already answered `[]`. `copilot_generate_layout` is
+    absent unless a module supplies it, so `has_copilot_generate` is `false`.
+  - The host's `FormField` gains v1's `toBuilder`, `presets` and `type_name`.
+  - `Trigger.trigger_actions` honours `onlyWorkflows`. Before, every trigger
+    was offered a workflow's *initial context* form.
+- **A page's options (5.5).**
+  - `pageBuilderOptions` in the new `ui/saltcorn-ui/src/builder-routes.ts` is
+    ported from `pageBuilderData` in `server/routes/pageedit.ts`.
+  - It is reached through `ViewRuntime::page_builder_options` (worker op
+    `view_page_builder_options`) and `Configurer::page_builder_options`.
+  - An HTML-file page is refused, naming the file.
+  - Where it differs from v1:
+    - v1 lists the "API call" and "Never" triggers; the snapshot carries no
+      event, so it lists the application's triggers, which
+      `trigger_actions({ apiNeverTriggers })` already did.
+    - v1's `table.name === "users"` is guarded, so a tableless view with
+      state fields does not throw.
+- **Two shim bugs the goldens found, fixed at the source.**
+  - `Field.nameToLabel` in `v1_api.js` capitalised (`"First name"`). v1's is
+    `name.split("_").join(" ")` (`"first name"`), so every unlabelled form
+    field, and a page view's `id` state field, was named differently from v1.
+    Six test expectations moved to v1's answer: three in `sc-expr`, one in
+    `sc-core-actions` and two in `sc-module`'s `v1_table`.
+  - A table field's `fieldview` went out as `null` where v1 leaves it out.
+- **The recording (5.6).**
+  - `crates/sc-server/tests/fixtures/record-builder-options.sh` restores
+    `saltcorn-v1-BooksDB.zip` into a Postgres database of its own, starts v1's
+    server in-process as an admin, and decodes the options out of
+    `/viewedit/config/<view>` for Show, Edit, List and Filter books, and
+    `/pageedit/edit/BooksOverview`.
+  - Recorded on 2026-09-14 from saltcorn/saltcorn `147056573f`. The script
+    first checks that the checkout matches the vendored `0508c45ac2` wherever
+    the options come from.
+  - **A trap found on the way, and guarded.** v1's `connect.ts` uses Postgres
+    only when user, password and database are all truthy. The first attempt
+    set `PGPASSWORD` to the empty string, and v1 silently restored into a new
+    SQLite file under `~/.local/share/saltcorn` instead. Nothing existing was
+    touched, and the new file was moved out of that directory. The script now sets a non-empty
+    password and refuses to reset any database but the one it names, after
+    asking v1 which one it reached. `fixtures/README.md` tells the story.
+- **Tests (5.7).**
+  - `saltcorn_ui_render::the_builder_options_are_what_saltcorn_1_passes`, over
+    the BooksDB import:
+    - compares the four views' options, through `viewConfigStep`, and the
+      page's, key for key with the recordings;
+    - every intended difference is written in `normalise_builder_options` with
+      its reason: ids, field order, v1's defaulted field attributes, a primary
+      key's `is_unique`, v1's state actions, the triggers the import rewrote or
+      left out, v1's `users` table, role names, image locations, and a page
+      row's `fixed_states`/`updated_at`;
+    - checks what those take out directly: `view_id`, `page_id`,
+      `triggerActions` and the image entry;
+    - checks that a form step answers `builder_options: null`;
+    - checks that with `Publishers` dropped from the application, the options
+      offer no join, parent or table for it.
+    - `SC_DUMP_BUILDER_OPTIONS=<dir>` writes this server's options for
+      comparing by hand.
+  - `bundle_shape`: `build_schema_data` kept; `stateDefaults` is v1's (30
+    fonts, 1 345 icons, 10 keyframes); `pageBuilderOptions` exported.
+  - `sc-expr`: the three methods are off the refusal list.
+  - `sc-module` `deno` unit test: the `files` surface, and its refusal when a
+    call has none.
+  - `view_runtime`'s bare-context List step now expects the step to fail
+    naming itself, since its options need the schema.
+- **Not done:**
+  - the Phase 6 `builder*` endpoints;
+  - the builder routes that render these options into a document (Phase 8).
+
 ## The builder, Phase 4: the library and pages, imported and backed up
 
 A Saltcorn 1 backup's library now comes across. Until now the import noted it as

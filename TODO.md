@@ -653,25 +653,25 @@ entry plus its §3 URLs, not a surprise.
 
 ## Phase 5 — The builder's options, from the worker
 
-- [ ] 5.1 `ConfigStep` gains `builder_options: Option<Json>`, filled for a builder step by
+- [x] 5.1 `ConfigStep` gains `builder_options: Option<Json>`, filled for a builder step by
       `module-host.mjs`'s `view_config_step` running the step's `builder(context)` plus
       `Workflow.runStep`'s additions, as the admin; `ui/saltcorn-ui/src/index.ts` answers it.
-- [ ] 5.2 Port `table.get_join_field_options`, `get_relation_options` and `get_relation_data`
+- [x] 5.2 Port `table.get_join_field_options`, `get_relation_options` and `get_relation_data`
       over the `SchemaSnapshot`, restricted to the application's subset; off the `BUILDER`
       refusal list, each citing `models/table.ts`.
-- [ ] 5.3 `build_schema_data` from the snapshot, subset-restricted; moved to *kept* in the
+- [x] 5.3 `build_schema_data` from the snapshot, subset-restricted; moved to *kept* in the
       `plugin-helper.ts` partition.
-- [ ] 5.4 `File.findImagesForBuilder` over the application's file stores; `PageGroup.find` → `[]`;
+- [x] 5.4 `File.findImagesForBuilder` over the application's file stores; `PageGroup.find` → `[]`;
       `getState().fonts`/`icons`/`keyframes` defaults; `copilot_generate_layout` absent; any
       `Field`/`Table` member the four builder steps reach that the shims lack (found by running
       them, Filter's `get_child_relations`/`get_parent_relations(true)` included, each added
       with its upstream cited).
-- [ ] 5.5 `page_builder_options` in `builder-routes.ts`, ported from `pageBuilderData`, and its
+- [x] 5.5 `page_builder_options` in `builder-routes.ts`, ported from `pageBuilderData`, and its
       `ViewRuntime` method.
-- [ ] 5.6 The v1 recording script (`crates/sc-server/tests/fixtures/record-builder-options.*`)
+- [x] 5.6 The v1 recording script (`crates/sc-server/tests/fixtures/record-builder-options.*`)
       and its five fixtures (four views, one page), recorded against a Saltcorn 1.7.0-alpha.1
       over the BooksDB backup.
-- [ ] 5.7 Tests: the five goldens with their listed differences; subset restriction; a
+- [x] 5.7 Tests: the five goldens with their listed differences; subset restriction; a
       non-builder step still answers `builder_options: null`.
 
 ## Phase 6 — The admin API

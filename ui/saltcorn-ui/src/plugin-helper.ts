@@ -17,6 +17,10 @@ import * as upstream from "../vendor/saltcorn-data/plugin-helper.js";
  * shims over this server's own row layer. */
 export const KEPT = [
   "add_free_variables_to_joinfields",
+  // The builder's `tables` and `views` (TODO "The builder" 5.3): over `View.find`
+  // and `Table.find`, which in a Saltcorn UI call list the application's views
+  // and the tables of its subset, so it sees what the application sees.
+  "build_schema_data",
   "calcfldViewConfig",
   "calcfldViewOptions",
   "calcrelViewOptions",
@@ -52,8 +56,6 @@ export const REFUSED: Record<string, string> = {
     "it assembles a query for v1's own data layer; a view reads rows through Table.getJoinedRows",
   json_list_to_external_table:
     "it builds a v1 external table in memory; this server's tables come from its table providers",
-  build_schema_data:
-    "it is the data v1's drag-and-drop builder loads, and the builder is not part of this version",
 };
 
 /** Absent: `undefined` to a plugin, because a plugin feature-detects it. Inside
@@ -80,6 +82,7 @@ function refusal(name: string, reason: string) {
 export const UPSTREAM_EXPORTS: string[] = Object.keys(upstream).sort();
 
 export const add_free_variables_to_joinfields = upstream.add_free_variables_to_joinfields;
+export const build_schema_data = upstream.build_schema_data;
 export const calcfldViewConfig = upstream.calcfldViewConfig;
 export const calcfldViewOptions = upstream.calcfldViewOptions;
 export const calcrelViewOptions = upstream.calcrelViewOptions;
@@ -111,6 +114,5 @@ export const json_list_to_external_table = refusal(
   "json_list_to_external_table",
   REFUSED.json_list_to_external_table,
 );
-export const build_schema_data = refusal("build_schema_data", REFUSED.build_schema_data);
 
 export const runCollabEvents = refusal("runCollabEvents", ABSENT.runCollabEvents);

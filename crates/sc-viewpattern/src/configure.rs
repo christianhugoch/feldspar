@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use sc_action::TriggerDispatcher;
-use sc_api::code_host::{TableHost, schema_snapshot};
+use sc_api::code_host::{FileStoreHost, TableHost, schema_snapshot};
 use sc_app::Application;
 use sc_auth::User;
 use sc_catalog::Catalog;
@@ -33,7 +33,7 @@ use serde_json::Value as Json;
 use crate::framework::{application_snapshot, view_sets, view_user};
 use crate::runtime::{ConfigStep, ViewContext, ViewReferences, ViewRequest, ViewRuntime};
 use crate::snapshot::ViewSnapshot;
-use crate::view::View;
+use crate::view::{Page, View};
 
 /// The most steps a configuration is replayed through. v1's longest built-in
 /// workflow (List) has five; a pattern answering more than this is refused
@@ -47,6 +47,10 @@ pub struct Configurer<'a> {
     snapshot: ViewSnapshot,
     request: ViewRequest,
     table: TableHost<'a>,
+    /// The file stores, as the admin: what a builder step's image list is read
+    /// from (TODO "The builder" 5.4). The worker lists only the application's
+    /// own stores, which the snapshot names.
+    files: FileStoreHost<'a>,
 }
 
 impl<'a> Configurer<'a> {
@@ -77,13 +81,16 @@ impl<'a> Configurer<'a> {
                 ..ViewRequest::default()
             },
             table: TableHost::new(catalog).caused_by(caller.role, caller.user.clone()),
+            files: FileStoreHost::new(catalog).caused_by(caller.role),
         })
     }
 
-    /// The surfaces a configuration call reaches: the tables, as the admin.
+    /// The surfaces a configuration call reaches: the tables and the file
+    /// stores, as the admin.
     fn hosts(&self) -> CodeHosts<'_> {
         CodeHosts {
             host: Some(&self.table),
+            files: Some(&self.files),
             ..CodeHosts::default()
         }
     }
@@ -138,6 +145,20 @@ impl<'a> Configurer<'a> {
             schema: Some(&schema),
         };
         self.runtime.references(view, ctx).await
+    }
+
+    /// The options v1's builder is opened with for `page` (TODO "The builder"
+    /// 5.5), computed in the worker as the admin, over the same snapshot and
+    /// surfaces a builder step's options are.
+    pub async fn page_builder_options(&self, page: &Page) -> Result<Json> {
+        let schema = schema_snapshot(self.catalog)?;
+        let ctx = ViewContext {
+            snapshot: &self.snapshot,
+            request: &self.request,
+            hosts: self.hosts(),
+            schema: Some(&schema),
+        };
+        self.runtime.page_builder_options(page, ctx).await
     }
 
     /// Replay `view`'s configuration through its pattern's steps, refusing the
@@ -432,6 +453,7 @@ mod tests {
             name: "Views".to_owned(),
             count: 2,
             builder: false,
+            builder_options: None,
             skip: false,
             context_field: context_field.map(str::to_owned),
             blurb: None,

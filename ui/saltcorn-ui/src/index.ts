@@ -12,6 +12,14 @@
 //   arguments v1's `View` passes it.
 import SPECIFIERS from "./library-specifiers.json";
 import * as pluginHelper from "./plugin-helper.js";
+// Host-supplied, as they are to the vendored patterns: the builder step's
+// additions below read the application through the same `Table`, `View` and
+// `getState()` a pattern does.
+import Table from "@saltcorn/data/models/table";
+import View from "@saltcorn/data/models/view";
+import { getState } from "@saltcorn/data/db/state";
+export { stateDefaults } from "./state-defaults.js";
+export { pageBuilderOptions } from "./builder-routes.js";
 
 import * as markupIndex from "../vendor/saltcorn-markup/index.js";
 import * as markupTags from "../vendor/saltcorn-markup/tags.js";
@@ -334,9 +342,10 @@ function stepValues(form: Obj, step: Obj, context: Obj): Obj {
  *
  * The answer is what a wizard needs and nothing it cannot use: whether v1 would
  * skip the step here (`onlyWhen`), where its values land in the configuration
- * (`contextField`), its form as data, and the values that form opens with. A
- * step that cannot be built fails naming itself, so the refusal a host reports
- * says which step of the pattern it was. */
+ * (`contextField`), its form as data, the values that form opens with, and for
+ * a builder step the options object the builder is opened with. A step that
+ * cannot be built fails naming itself, so the refusal a host reports says which
+ * step of the pattern it was. */
 export async function configStep(pattern: string, step: number, context: Obj, req: Obj): Promise<Obj> {
   const vt = findPattern(pattern);
   if (!vt.configuration_workflow) throw new Error(`the ${vt.name} view pattern has no configuration`);
@@ -352,6 +361,7 @@ export async function configStep(pattern: string, step: number, context: Obj, re
     skip: false,
     form: null,
     values: {},
+    builder_options: null,
   };
   try {
     if (current.onlyWhen && !(await current.onlyWhen(context))) {
@@ -362,11 +372,52 @@ export async function configStep(pattern: string, step: number, context: Obj, re
       const built = await current.form(context);
       answer.form = { blurb: built?.blurb ?? null, fields: (built?.fields ?? []).map(describeField) };
       answer.values = stepValues(built ?? {}, current, context);
+    } else if (answer.builder) {
+      answer.builder_options = await builderOptions(current, context, req);
     }
   } catch (e) {
     throw new Error(`its ${current.name} step: ${e instanceof Error ? e.message : String(e)}`);
   }
   return answer;
+}
+
+/** What v1 passes to `builder.renderBuilder` for a builder step (TODO "The
+ * builder" §5): the step's own `builder(context)`, then what
+ * `Workflow.runStep`'s builder branch adds (packages/saltcorn-data/models/
+ * workflow.ts), then what `respondWorkflow` adds on the way to the page
+ * (packages/server/routes/viewedit.ts). Ported in that order, so a key a later
+ * stage sets replaces the earlier one exactly as in v1 — Filter's own `views` is
+ * replaced by `build_schema_data`'s.
+ *
+ * Not ported: `File.buildDirCache` / `destroyDirCache`, a cache around the
+ * step for v1's file table, which this server does not have. */
+async function builderOptions(current: Obj, context: Obj, req: Obj): Promise<Obj> {
+  const state: Obj = getState();
+  // Workflow.runStep
+  const options: Obj = {
+    ...(await current.builder(context)),
+    fonts: state.fonts,
+  };
+  const table = Table.findOne(context.table_id ? { id: context.table_id } : { name: context.exttable_name });
+  if (table) {
+    options.join_field_picker_data = {
+      join_field_options: await table.get_join_field_options(true, true),
+      relation_options: await table.get_relation_options(),
+    };
+  }
+  const { tables, views } = await pluginHelper.build_schema_data();
+  options.tables = tables;
+  options.views = views;
+  options.max_relations_layer_depth = state.getConfig("max_relations_layer_depth", 6);
+  options.icons = state.icons;
+  options.keyframes = state.keyframes;
+  // respondWorkflow: right-to-left is off and i18n is the identity here
+  // (Explicitly OUT), which is what v1 sends for an English admin.
+  options.isRTL = !!req.isRTL;
+  options.translations = {};
+  const view = context.viewname ? View.findOne({ name: context.viewname }) : undefined;
+  if (view) options.view_id = view.id;
+  return options;
 }
 
 /** v1's `initial_config` — what a new view of the pattern starts as (a List

@@ -277,6 +277,24 @@ impl ViewRuntime for ModuleViewRuntime {
             ))
         })
     }
+
+    async fn page_builder_options(&self, page: &Page, ctx: ViewContext<'_>) -> Result<Json> {
+        let (call, request) = call_of(ctx);
+        self.host
+            .view_call(
+                "view_page_builder_options",
+                json!({ "page": page.name, "request": request }),
+                call,
+            )
+            .await
+            .map_err(|e| {
+                failed(
+                    &format!("the builder options of the page `{}`", page.name),
+                    "built",
+                    e,
+                )
+            })
+    }
 }
 
 /// A `view_config_step` answer as a [`ConfigStep`], its v1 form translated into
@@ -318,6 +336,10 @@ fn config_step_of(pattern: &str, answer: Json) -> ConfigStep {
             .get("builder")
             .and_then(Json::as_bool)
             .unwrap_or(false),
+        builder_options: answer
+            .get("builder_options")
+            .filter(|options| options.is_object())
+            .cloned(),
         skip: answer.get("skip").and_then(Json::as_bool).unwrap_or(false),
         context_field: answer
             .get("context_field")

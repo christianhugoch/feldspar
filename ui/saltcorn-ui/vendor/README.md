@@ -19,6 +19,7 @@ needs to differ goes in `../src/` (see *The line* below).
 | `saltcorn-data/base-plugin/` | same | `types.ts`, `fieldviews.ts`, `fileviews.ts` |
 | `saltcorn-data/` | `packages/saltcorn-data/` | `plugin-helper.ts`, `viewable_fields.ts`, `utils.ts`, `evaluator.ts` (the host builds `getState().evaluator` from it) |
 | `saltcorn-data/models/` | same | `form.ts`, `fieldrepeat.ts`, `expression.ts`, `layout.ts`, `library.ts` (`resolveSegment` and `suitableFor`; its `db` is `../src/shims/library-db.ts`) |
+| `saltcorn-data/db/` | same | `fa5-icons.ts` — the Font Awesome 5 names v1's `getState().icons` starts from, which the builder's icon picker lists (`../src/state-defaults.ts`) |
 | `saltcorn-data/diagram/` | same | `node_extract_utils.ts` and `nodes/*` — what a pattern's `connectedObjects` is built from |
 | `saltcorn-data/tests/mocks.ts` | same | `fieldviews.ts` renders with its `mockReqRes` |
 | `saltcorn-data/mobile-mocks/` | same | `saltcorn/plugin-testing.ts`, `npm/dockerode.ts`, `npm/xml2js.ts`, `node/fs-extra.ts` — v1's own mocks for running `@saltcorn/data` without its server |

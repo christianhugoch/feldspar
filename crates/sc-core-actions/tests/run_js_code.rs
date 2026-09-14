@@ -348,7 +348,8 @@ async fn the_v1_table_is_in_scope_in_a_trigger_and_reads_and_writes() -> Result<
         json!({
             "pk": "id",
             "fields": ["id", "title", "pages"],
-            "label": "Published at",
+            // v1's `nameToLabel`, which does not capitalise.
+            "label": "published at",
             "titles": ["A Book"],
         })
     );

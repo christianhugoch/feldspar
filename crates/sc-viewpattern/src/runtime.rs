@@ -190,8 +190,14 @@ pub struct ConfigStep {
     /// How many steps the workflow has, so a wizard knows where it is.
     pub count: usize,
     /// Whether the step is a drag-and-drop **builder** (a layout) rather than a
-    /// form — which this version shows read-only.
+    /// form.
     pub builder: bool,
+    /// For a builder step, the options object v1 passes to
+    /// `builder.renderBuilder`: the step's `builder(context)` and what
+    /// `Workflow.runStep` adds, computed in the worker by v1's code (TODO "The
+    /// builder" §5). `None` for a form step and a skipped one. This server never
+    /// looks inside it; it is handed to the builder whole.
+    pub builder_options: Option<Json>,
     /// Whether v1 skips the step for this context: its `onlyWhen` answered
     /// false (Edit's *Fixed and blocked fields* when every field is on the
     /// form). A skipped step has no form.
@@ -308,6 +314,12 @@ pub trait ViewRuntime: Send + Sync {
     /// What in the snapshot's application refers to the view named `view`, by
     /// the patterns' own `connectedObjects` (TODO "Saltcorn UI" 10.4).
     async fn references(&self, view: &str, ctx: ViewContext<'_>) -> Result<ViewReferences>;
+
+    /// The options v1's builder is opened with for `page`: v1's
+    /// `pageBuilderData`, ported into the worker and computed over the snapshot
+    /// (TODO "The builder" 5.5). Like a builder step's options, handed on whole
+    /// and never looked inside.
+    async fn page_builder_options(&self, page: &Page, ctx: ViewContext<'_>) -> Result<Json>;
 }
 
 /// The installed runtime.

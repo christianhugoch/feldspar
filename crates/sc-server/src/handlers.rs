@@ -6567,6 +6567,7 @@ fn config_step_json(index: usize, step: &sc_viewpattern::ConfigStep) -> Json {
         "name": step.name,
         "count": step.count,
         "builder": step.builder,
+        "builder_options": step.builder_options,
         "skip": step.skip,
         "context_field": step.context_field,
         "blurb": step.blurb,

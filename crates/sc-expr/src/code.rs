@@ -9170,7 +9170,8 @@ mod tests {
         assert_eq!(out["keys"], json!(["author"]));
         assert_eq!(out["cached_fields"], json!(2), "both tables have an id");
         assert_eq!(out["label_to_name"], json!("first_name"));
-        assert_eq!(out["name_to_label"], json!("First name"));
+        // v1's `nameToLabel` is `name.split("_").join(" ")`: no capital.
+        assert_eq!(out["name_to_label"], json!("first name"));
     }
 
     /// The api over a sender that **records** what it is handed and answers
@@ -9909,12 +9910,24 @@ mod tests {
             "{out}"
         );
         assert!(
-            out["table.get_relation_options"]
+            out["table.field_options"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("view builder"),
             "{out}"
         );
+        // The builder's join and relation pickers are answered (TODO "The
+        // builder" 5.2), so they left the list in the edit that implemented them.
+        for method in [
+            "table.get_join_field_options",
+            "table.get_relation_options",
+            "table.get_relation_data",
+        ] {
+            assert!(
+                refusals.get(method).is_none(),
+                "{method} is implemented and still on the refusal list"
+            );
+        }
         // And the writes are gone from it, because the edit that implemented
         // them deleted their lines — which is the only way `installRefusals`
         // would have let the api build at all.
@@ -10110,7 +10123,7 @@ mod tests {
                 .contains("Table.create"),
             "{out}"
         );
-        assert_eq!(out["pure"], json!("First name"));
+        assert_eq!(out["pure"], json!("first name"));
     }
 
     // -----------------------------------------------------------------------
@@ -10141,7 +10154,8 @@ mod tests {
         let out = CodeRuntime::with_workers(1).run(c).await.expect("it ran");
         assert_eq!(out["pk"], json!("id"), "no host call answered this");
         assert_eq!(out["fkey"], json!(true));
-        assert_eq!(out["label"], json!("First name"));
+        // v1's `nameToLabel` does not capitalise.
+        assert_eq!(out["label"], json!("first name"));
         assert_eq!(out["titles"], json!(["Dune"]));
         // One plan, and it is the read — the metadata went nowhere near the
         // host.

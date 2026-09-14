@@ -1466,6 +1466,421 @@ async fn the_six_patterns_render_their_golden_html() -> sc_error::Result<()> {
     Ok(())
 }
 
+/// The builder 5.7: the options the builder is opened with, computed in the
+/// worker by v1's own code over the BooksDB import, are what a real Saltcorn 1
+/// passes to `renderBuilder` over the same backup (`fixtures/builder-options/`,
+/// recorded by `record-builder-options.sh`), key for key, apart from the
+/// differences [`builder_option_differences`] lists with their reasons.
+///
+/// Then: a form step answers no options, and the options see only the
+/// application's tables — a table dropped from its subset is not joined to,
+/// listed or offered as a parent.
+///
+/// `SC_DUMP_BUILDER_OPTIONS=<dir>` writes what this server computed, before
+/// anything is normalised, for comparing by hand.
+#[tokio::test]
+async fn the_builder_options_are_what_saltcorn_1_passes() -> sc_error::Result<()> {
+    let Some(bundle) = bundle_dir() else {
+        eprintln!(
+            "skipping: the Saltcorn UI bundle is not built (npm ci && npm run build in ui/saltcorn-ui)"
+        );
+        return Ok(());
+    };
+    let mut server = setup("builder-options", bundle).await?;
+    let catalog = server._catalog.clone();
+    let mut app = booksdb(&catalog).await;
+    // The import's views only, as v1 had them: the setup's Feed and
+    // ListShowList are this suite's own. Deleted as the admin deletes a view,
+    // which is what moves the generation the worker's snapshot is keyed on.
+    for extra in ["Feed%20Books", "Books%20and%20details"] {
+        let (status, body) = server
+            .client
+            .send(
+                "DELETE",
+                &format!("/api/applications/{}/views/{extra}", app.id.0),
+                None,
+            )
+            .await;
+        assert!(status.is_success(), "{extra}: {status} {body}");
+    }
+    let recorded =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/builder-options");
+    let dump = std::env::var_os("SC_DUMP_BUILDER_OPTIONS").map(PathBuf::from);
+    let step_path = format!("/api/applications/{}/view-config-step", app.id.0);
+
+    let mut ours: Vec<(&str, Value)> = Vec::new();
+    for (file, name) in [
+        ("show-books", "Show Books"),
+        ("edit-books", "Edit Books"),
+        ("list-books", "List Books"),
+        ("filter-books", "Filter books"),
+    ] {
+        let view = sc_viewpattern::load_view(&catalog, app.id, name)
+            .await?
+            .unwrap_or_else(|| panic!("the import has {name}"));
+        let (status, step) = server
+            .client
+            .send(
+                "POST",
+                &step_path,
+                Some(json!({
+                    "viewpattern": view.viewpattern,
+                    "table_name": view.table_name,
+                    "name": view.name,
+                    "step": 0,
+                    "context": Value::Object(view.configuration.clone()),
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{name}: {step}");
+        assert_eq!(step["builder"], true, "{name}'s first step is its layout: {step}");
+        let options = &step["builder_options"];
+        assert!(options.is_object(), "{name}: {step}");
+        // What the differences below take out, checked for what it is here.
+        assert_eq!(options["view_id"], json!(view.id.0.to_string()), "{name}");
+        assert_eq!(options["triggerActions"], json!(["TrimPages"]), "{name}");
+        ours.push((file, options.clone()));
+    }
+    let page = sc_viewpattern::load_page(&catalog, app.id, "BooksOverview")
+        .await?
+        .expect("the import has BooksOverview");
+    let configurer =
+        sc_viewpattern::Configurer::new(sc_viewpattern::view_runtime()?, &catalog, &app, None, None)
+            .await?;
+    let page_options = configurer.page_builder_options(&page).await?;
+    drop(configurer);
+    assert_eq!(page_options["page_id"], json!(page.id.0.to_string()));
+    assert_eq!(page_options["triggerActions"], json!(["TrimPages"]));
+    // The image in the application's store, where its serve route finds it.
+    assert_eq!(
+        page_options["images"],
+        json!([{
+            "id": "BooksDB/Each+session+is+30+mins.png",
+            "filename": "Each+session+is+30+mins.png",
+            "location": "BooksDB/Each+session+is+30+mins.png",
+        }])
+    );
+    ours.push(("page-booksoverview", page_options));
+
+    if let Some(dir) = &dump {
+        std::fs::create_dir_all(dir)?;
+        for (file, options) in &ours {
+            std::fs::write(
+                dir.join(format!("{file}.json")),
+                serde_json::to_string_pretty(options).unwrap(),
+            )?;
+        }
+    }
+
+    let mut wrong = Vec::new();
+    for (file, options) in &ours {
+        let path = recorded.join(format!("{file}.json"));
+        let v1: Value = serde_json::from_str(&std::fs::read_to_string(&path)?).unwrap();
+        wrong.extend(builder_option_differences(file, v1, options.clone()));
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
+
+    // --- A form step has no builder options: List's *Options* step.
+    let list = sc_viewpattern::load_view(&catalog, app.id, "List Books")
+        .await?
+        .expect("List Books");
+    let mut index = 1;
+    let form_step = loop {
+        let (status, step) = server
+            .client
+            .send(
+                "POST",
+                &step_path,
+                Some(json!({
+                    "viewpattern": "List", "table_name": list.table_name, "name": list.name,
+                    "step": index, "context": Value::Object(list.configuration.clone()),
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "step {index}: {step}");
+        if step["skip"] == false {
+            break step;
+        }
+        index += 1;
+    };
+    assert_eq!(form_step["builder"], false, "{form_step}");
+    assert!(form_step["builder_options"].is_null(), "{form_step}");
+
+    // --- The subset (5.2, 5.3): without Publishers, Books' key to it is no
+    // join, no parent and no table the builder offers.
+    app.tables.retain(|t| t.0 != "Publishers");
+    let app = save_application(&catalog, &app).await?;
+    // Saving the row is not deploying it; the mount is what the snapshot the
+    // worker holds is rebuilt from (as 7.4's narrowing does).
+    build_and_mount(&server.apps, app.clone()).await?;
+    let show = sc_viewpattern::load_view(&catalog, app.id, "Show Books")
+        .await?
+        .expect("Show Books");
+    let (status, step) = server
+        .client
+        .send(
+            "POST",
+            &step_path,
+            Some(json!({
+                "viewpattern": "Show", "table_name": show.table_name, "name": show.name,
+                "step": 0, "context": Value::Object(show.configuration.clone()),
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{step}");
+    let options = &step["builder_options"];
+    let joins: Vec<&str> = options["join_field_picker_data"]["join_field_options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|j| j["name"].as_str())
+        .collect();
+    assert_eq!(joins, ["author"], "{options}");
+    let parents = options["parent_field_list"].as_array().unwrap();
+    assert!(
+        parents.iter().all(|p| !p.as_str().unwrap().starts_with("publisher.")),
+        "{parents:?}"
+    );
+    let tables: Vec<&str> = options["tables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(!tables.contains(&"Publishers") && tables.contains(&"Books"), "{tables:?}");
+    Ok(())
+}
+
+/// How this server's builder options for `file` differ from what Saltcorn 1
+/// recorded, after the intended differences are taken out of both
+/// ([`normalise_builder_options`]): one line per top-level key that still
+/// differs.
+fn builder_option_differences(file: &str, mut v1: Value, mut ours: Value) -> Vec<String> {
+    normalise_builder_options(Side::V1, &mut v1);
+    normalise_builder_options(Side::Ours, &mut ours);
+    let (Value::Object(v1), Value::Object(ours)) = (v1, ours) else {
+        return vec![format!("{file}: the options are not both objects")];
+    };
+    let mut keys: Vec<&String> = v1.keys().chain(ours.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    keys.into_iter()
+        .filter(|key| v1.get(*key) != ours.get(*key))
+        .map(|key| {
+            let show = |v: Option<&Value>| {
+                let text = v.map_or("(absent)".to_owned(), Value::to_string);
+                text.chars().take(600).collect::<String>()
+            };
+            format!(
+                "{file}: `{key}` differs\n  v1:   {}\n  ours: {}",
+                show(v1.get(key)),
+                show(ours.get(key))
+            )
+        })
+        .collect()
+}
+
+/// Which recording a value came from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    V1,
+    Ours,
+}
+
+/// Saltcorn 1's serial ids for BooksDB's tables, as the recording's restore
+/// numbered them.
+const V1_TABLE_IDS: [(u64, &str); 4] = [
+    (1, "users"),
+    (2, "Books"),
+    (3, "Authors"),
+    (4, "Publishers"),
+];
+
+/// Take the **intended** differences out of one side's builder options. Each is
+/// a fact about this server, written with its reason, not a tolerance; anything
+/// else that differs fails the test.
+///
+/// - **Ids.** v1 numbers tables, fields, views and pages; this server names a
+///   table and a field, and gives a view and a page a UUID. v1's `table_id`s and
+///   field `id`s become the names they stand for, and `view_id`/`page_id` go
+///   (the test checks ours are the view's and page's own ids).
+/// - **Field order.** v1's field cache is ordered by name; a table here keeps its
+///   column order. `fields`, each `agg_field_opts` list, each page view's
+///   `fixed_state_fields`, the join picker's sub-fields and `parent_field_list`
+///   are compared in name order.
+/// - **v1's defaulted field attributes.** v1's field form writes every attribute
+///   it has, empty (`regexp: ""`, `min: null`, `include_fts: false`,
+///   `on_delete: "Fail"`); the import keeps the attributes that say something.
+/// - **A primary key's `is_unique`.** v1 marks its serial id unique; here a
+///   primary key's uniqueness is its being the key.
+/// - **v1's state actions** (`run_js_code`, `send_email`, … and every plugin's):
+///   this server's view actions are the patterns' own and the application's
+///   triggers (§12), so v1's groups of them, and their config forms,
+///   descriptions and constraints, are not here.
+/// - **Triggers.** The application's triggers are this server's: BooksDB's
+///   `TrimPages` rewritten as `run_js_code`, and its `AddBook` workflow not
+///   imported. v1 also leaves a table's trigger off a page, and nothing here is
+///   a table trigger. The trigger group and `triggerActions` go from both sides;
+///   the test checks ours name the application's trigger.
+/// - **`users`** in `tables`: v1's account table; accounts here are this
+///   server's, not a table an application has.
+/// - **Role names.** This server's built-in roles are `Admin` and `Public`.
+/// - **Image locations.** An image is `<store>/<path>`, which the application's
+///   `/files/serve/` reads as that store's file; v1 has one file area. The test
+///   checks ours exactly.
+/// - **A page's own record** in `pages`: v1's row carries `fixed_states` (folded
+///   into the layout by the import) and `updated_at`; ours carries
+///   `root_page_for_roles` in its attributes.
+fn normalise_builder_options(side: Side, options: &mut Value) {
+    normalise_ids(side, options);
+    let Value::Object(map) = options else {
+        return;
+    };
+    let by_name = |list: &mut Value| {
+        if let Value::Array(items) = list {
+            items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        }
+    };
+    if let Some(fields) = map.get_mut("fields") {
+        by_name(fields);
+    }
+    for key in ["agg_field_opts", "fixed_state_fields"] {
+        if let Some(Value::Object(lists)) = map.get_mut(key) {
+            lists.values_mut().for_each(by_name);
+        }
+    }
+    if let Some(Value::Array(parents)) = map.get_mut("parent_field_list") {
+        parents.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    }
+    if let Some(Value::Array(joins)) = map.get_mut("join_field_picker_data").and_then(|j| j.get_mut("join_field_options")) {
+        for join in joins {
+            if let Some(sub) = join.get_mut("subFields") {
+                by_name(sub);
+            }
+        }
+    }
+    if let Some(Value::Array(tables)) = map.get_mut("tables") {
+        tables.retain(|t| t["name"] != "users");
+        if side == Side::V1 {
+            for table in tables.iter_mut() {
+                table["id"] = table["name"].clone();
+            }
+        }
+    }
+    if let Some(Value::Array(roles)) = map.get_mut("roles") {
+        for role in roles {
+            if let Some(name) = role["role"].as_str() {
+                role["role"] = json!(name.to_lowercase());
+            }
+        }
+    }
+    if side == Side::Ours
+        && let Some(Value::Array(images)) = map.get_mut("images")
+    {
+        for image in images {
+            for key in ["id", "location"] {
+                if let Some(path) = image[key].as_str().and_then(|p| p.strip_prefix("BooksDB/")) {
+                    image[key] = json!(path);
+                }
+            }
+        }
+    }
+    if let Some(Value::Array(pages)) = map.get_mut("pages") {
+        for page in pages.iter_mut().filter_map(Value::as_object_mut) {
+            page.remove("id");
+            page.remove("fixed_states");
+            page.remove("updated_at");
+            if let Some(Value::Object(attributes)) = page.get_mut("attributes") {
+                attributes.remove("root_page_for_roles");
+            }
+        }
+    }
+    normalise_actions(side, map);
+}
+
+/// The ids, defaulted attributes and primary keys' `is_unique` of
+/// [`normalise_builder_options`], wherever they are.
+fn normalise_ids(side: Side, value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.remove("view_id");
+            map.remove("page_id");
+            if side == Side::V1 {
+                let table = map
+                    .get("table_id")
+                    .and_then(Value::as_u64)
+                    .and_then(|id| V1_TABLE_IDS.iter().find(|(n, _)| *n == id));
+                if let Some((_, name)) = table {
+                    map.insert("table_id".to_owned(), json!(name));
+                    if map.get("id").is_some_and(Value::is_number) {
+                        let field = map.get("name").cloned().unwrap_or(Value::Null);
+                        map.insert("id".to_owned(), field);
+                    }
+                }
+            }
+            if map.get("primary_key") == Some(&json!(true)) {
+                map.remove("is_unique");
+            }
+            if let Some(Value::Object(attributes)) = map.get_mut("attributes") {
+                attributes.retain(|key, v| {
+                    !(v.is_null()
+                        || *v == json!("")
+                        || *v == json!(false)
+                        || (key == "on_delete" && *v == json!("Fail")))
+                });
+            }
+            map.values_mut().for_each(|v| normalise_ids(side, v));
+        }
+        Value::Array(items) => items.iter_mut().for_each(|v| normalise_ids(side, v)),
+        _ => {}
+    }
+}
+
+/// The state actions and triggers of [`normalise_builder_options`]: the action
+/// picker keeps its built-in group and `Other`'s multi-step action.
+fn normalise_actions(side: Side, map: &mut serde_json::Map<String, Value>) {
+    let mut gone: Vec<String> = map
+        .remove("triggerActions")
+        .and_then(|t| t.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|t| t.as_str().map(str::to_owned))
+        .collect();
+    let Some(Value::Array(groups)) = map.get_mut("actions") else {
+        return;
+    };
+    let builtin = groups.first().and_then(|g| g["label"].as_str()).map(str::to_owned);
+    let mut kept = Vec::new();
+    for mut group in std::mem::take(groups) {
+        let label = group["label"].as_str().unwrap_or_default().to_owned();
+        let names: Vec<String> = group["options"]
+            .as_array()
+            .map(|o| o.iter().filter_map(|n| n.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default();
+        if Some(&label) == builtin.as_ref() {
+            kept.push(group);
+        } else if label == "Triggers" {
+            gone.extend(names);
+        } else if label == "Other" {
+            if side == Side::V1 {
+                gone.extend(names.iter().filter(|n| *n != "Multi-step action").cloned());
+            }
+            group["options"] = json!(names.iter().filter(|n| *n == "Multi-step action").collect::<Vec<_>>());
+            kept.push(group);
+        } else if side == Side::V1 {
+            gone.extend(names);
+        } else {
+            kept.push(group);
+        }
+    }
+    *groups = kept;
+    for key in ["actionConfigForms", "actionDescriptions", "actionConstraints"] {
+        if let Some(Value::Object(by_action)) = map.get_mut(key) {
+            by_action.retain(|name, _| !gone.contains(name));
+        }
+    }
+}
+
 /// The builder 2.5: a `library` segment renders as its item's layout with the
 /// slots filled, resolved by v1's own `Library.resolveSegment` over the
 /// application's snapshot — **the same HTML as that layout written inline** —

@@ -3951,17 +3951,19 @@ fn view_config_step_input_schema() -> TypeSchema {
     ])
 }
 
-/// One step of a view's configuration. `builder` is a layout step, shown
-/// read-only until `ui/builder`; `skip` is a step v1 leaves out for this
-/// configuration; `context_field` is the configuration key its values are kept
-/// under (none: the top level); `values` are what its form opens with; `issues`
-/// are what the form could not express faithfully.
+/// One step of a view's configuration. `builder` is a layout step, and
+/// `builder_options` the options v1's builder is opened with for it (none for a
+/// form step); `skip` is a step v1 leaves out for this configuration;
+/// `context_field` is the configuration key its values are kept under (none: the
+/// top level); `values` are what its form opens with; `issues` are what the form
+/// could not express faithfully.
 fn view_config_step_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("index", TypeSchema::int()),
         StructField::new("name", TypeSchema::text()),
         StructField::new("count", TypeSchema::int()),
         StructField::new("builder", TypeSchema::bool()),
+        StructField::new("builder_options", TypeSchema::optional(TypeSchema::json())),
         StructField::new("skip", TypeSchema::bool()),
         StructField::new("context_field", TypeSchema::optional(TypeSchema::text())),
         StructField::new("blurb", TypeSchema::optional(TypeSchema::text())),

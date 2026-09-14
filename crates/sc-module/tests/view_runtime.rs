@@ -68,8 +68,12 @@ async fn the_built_in_view_runtime_loads_with_no_modules_root_at_all() {
     // Nothing was installed to get here.
     assert!(!root.join("node_modules").exists());
 
-    // One configuration step, as a call: List's first is a builder, whose layout
-    // this version shows read-only, so it has no form.
+    // One configuration step, as a call: List's first is a builder, which answers
+    // the options v1's builder is opened with (TODO "The builder" 5.1). Those are
+    // computed from the table, and a bare context has no schema and no caller to
+    // read it with, so the call fails naming the pattern and the step. The
+    // options themselves are compared against Saltcorn 1's in `sc-server`'s
+    // `the_builder_options_are_what_saltcorn_1_passes`.
     let app = AppId::new();
     let views = snapshot(
         app,
@@ -77,7 +81,7 @@ async fn the_built_in_view_runtime_loads_with_no_modules_root_at_all() {
         &json!({ "application": { "name": "Books" }, "views": [], "pages": [] }),
     );
     let request = ViewRequest::default();
-    let step = runtime
+    let message = runtime
         .config_step(
             "List",
             Some("books"),
@@ -87,11 +91,12 @@ async fn the_built_in_view_runtime_loads_with_no_modules_root_at_all() {
             ViewContext::bare(&views, &request),
         )
         .await
-        .unwrap();
-    assert_eq!(step.name, "Columns");
-    assert!(step.builder);
-    assert!(step.count >= 1, "{step:?}");
-    assert!(step.form.is_null(), "{step:?}");
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.contains("List pattern") && message.contains("Columns step"),
+        "{message}"
+    );
 
     // A form step (Phase 10): ListShowList's *Views*, as this server's form
     // fields, opening with what the context says.

@@ -50,6 +50,8 @@ DATA_FILES=(
   utils.ts
   # getState().evaluator: what a formula in a view is evaluated with.
   evaluator.ts
+  # getState().icons: the builder's icon picker (src/state-defaults.ts).
+  db/fa5-icons.ts
   diagram/node_extract_utils.ts
   diagram/nodes/node.ts
   diagram/nodes/page_node.ts

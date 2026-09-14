@@ -210,7 +210,7 @@ async fn a_modules_on_load_cannot_reach_the_database_and_says_so() {
     // authority in a string function.
     assert_eq!(
         answer["load_failure"],
-        json!("onLoad reached the database (Page count)")
+        json!("onLoad reached the database (page count)")
     );
 
     // And so does the one that reads rows, from the same module whose load threw.
@@ -222,7 +222,7 @@ async fn a_modules_on_load_cannot_reach_the_database_and_says_so() {
         json!(true),
         "a table nobody has is undefined"
     );
-    assert_eq!(read["label"], json!("Page count"));
+    assert_eq!(read["label"], json!("page count"));
     assert!(
         read["tables"]
             .as_array()
