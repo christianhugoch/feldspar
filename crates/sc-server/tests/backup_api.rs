@@ -1214,6 +1214,202 @@ async fn a_saltcorn_1_backup_is_imported() -> sc_error::Result<()> {
     Ok(())
 }
 
+/// The BooksDB backup with a v1 library and a page with legacy fixed states
+/// added; `fixtures/README.md` says how it was made and from what.
+const V1_LIBRARY_BACKUP: &[u8] = include_bytes!("fixtures/saltcorn-v1-BooksDB-library.zip");
+
+/// Upload `archive` and restore everything it offers, returning the report.
+async fn restore_everything(server: &mut Server, archive: &[u8]) -> Value {
+    let (status, bytes, _) = server
+        .client
+        .raw(
+            "POST",
+            "/backup/upload",
+            Some((archive.to_vec(), "application/zip")),
+        )
+        .await;
+    let uploaded: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::OK, "{uploaded}");
+    let (status, report) = server
+        .client
+        .send(
+            "POST",
+            "/api/backup/restore",
+            Some(json!({ "id": uploaded["id"], "include": uploaded["include"] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    report
+}
+
+/// A server with the `BooksDB` store defined at its own temp path, which is
+/// where a BooksDB import's files go.
+async fn setup_for_booksdb() -> sc_error::Result<Server> {
+    let server = setup().await?;
+    sc_catalog::save_file_store(
+        &server.catalog,
+        &FileStoreDef::local("BooksDB", server.files.to_string_lossy()),
+    )
+    .await?;
+    sc_catalog::connect_file_store_def(
+        &server.catalog,
+        &sc_catalog::load_file_store_by_name(&server.catalog, "BooksDB")
+            .await?
+            .expect("the store just saved"),
+    )?;
+    Ok(server)
+}
+
+fn report_has(report: &Value, key: &str, text: &str) -> bool {
+    report[key]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line.as_str().unwrap_or_default().contains(text))
+}
+
+/// The builder 4.1, 4.2 and 4.4: a v1 library and a legacy page, imported, then
+/// carried by this server's own backup into a second installation.
+///
+/// The import gives each item a UUID and rewrites every placement to it — in a
+/// view, in a page, and in the item that places the other — folds the page's
+/// `fixed_states` into its `view` segment, and says how many items came. A
+/// second import replaces the library rather than doubling it. This server's
+/// backup then writes `library.json` beside `views.json`, and the restore puts
+/// the items back with their ids, before the views and pages that place them,
+/// reporting a placement of an item that is not there.
+#[tokio::test]
+async fn a_v1_library_is_imported_and_travels_in_a_backup() -> sc_error::Result<()> {
+    let mut server = setup_for_booksdb().await?;
+    let report = restore_everything(&mut server, V1_LIBRARY_BACKUP).await;
+    let did = |text: &str| report_has(&report, "restored", text);
+    let warned = |text: &str| report_has(&report, "warnings", text);
+    assert!(
+        did("2 library items into application `booksdb`"),
+        "{report}"
+    );
+    assert!(did("7 views into application `booksdb`"), "{report}");
+    assert!(did("2 pages into application `booksdb`"), "{report}");
+    // The library is imported now, and every placement found its item.
+    assert!(!warned("library"), "{report}");
+
+    let app = sc_app::load_application_by_subdomain(&server.catalog, "booksdb")
+        .await?
+        .unwrap_or_else(|| panic!("the imported application: {report}"));
+    let library = sc_viewpattern::list_library(&server.catalog, app.id).await?;
+    assert_eq!(
+        library.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
+        vec!["Book header", "Book note"]
+    );
+    let (header, note) = (&library[0], &library[1]);
+    assert_eq!(header.icon, "fas fa-book");
+    let id_of = |item: &sc_viewpattern::LibraryItem| json!(item.id.0.to_string());
+    // Serial 2, inside serial 1's own layout.
+    assert_eq!(header.layout["above"][2]["library_id"], id_of(note));
+
+    let show = sc_viewpattern::load_view(&server.catalog, app.id, "Show Books")
+        .await?
+        .expect("Show Books");
+    let placed = &show.configuration["layout"]["above"][0];
+    assert_eq!(placed["library_id"], id_of(header));
+    assert_eq!(placed["slots"][0]["field"], json!("title"));
+
+    let featured = sc_viewpattern::load_page(&server.catalog, app.id, "Featured book")
+        .await?
+        .expect("Featured book");
+    assert_eq!(featured.layout["above"][0]["library_id"], id_of(note));
+    // The fold: the legacy state is on the segment, and `fixed_states` is gone.
+    assert_eq!(
+        featured.layout["above"][1]["configuration"],
+        json!({ "id": 2 })
+    );
+    assert!(featured.attributes.get("fixed_states").is_none());
+    // The references walk finds the placements, through the nested item too.
+    let set = sc_viewpattern::ViewSet::load(&server.catalog, app.id, 0).await?;
+    let refs = set.library_references(note.id);
+    assert_eq!(refs.views, vec!["Show Books"]);
+    assert_eq!(refs.pages, vec!["Featured book"]);
+    assert_eq!(refs.library, vec!["Book header"]);
+
+    // --- again: replaced, not doubled, and still consistent ------------------
+    let again = restore_everything(&mut server, V1_LIBRARY_BACKUP).await;
+    assert!(
+        report_has(
+            &again,
+            "restored",
+            "2 library items into application `booksdb`"
+        ),
+        "{again}"
+    );
+    assert!(!report_has(&again, "warnings", "library"), "{again}");
+    let library = sc_viewpattern::list_library(&server.catalog, app.id).await?;
+    assert_eq!(library.len(), 2, "two items, not four");
+    let show = sc_viewpattern::load_view(&server.catalog, app.id, "Show Books")
+        .await?
+        .expect("Show Books");
+    assert_eq!(
+        show.configuration["layout"]["above"][0]["library_id"],
+        json!(library[0].id.0.to_string())
+    );
+
+    // --- this server's backup, into a second installation --------------------
+    // A page placing an item that does not exist, which the restore reports.
+    let dangling = sc_viewpattern::LibraryItemId::new().0.to_string();
+    sc_viewpattern::save_page(
+        &server.catalog,
+        &sc_viewpattern::Page::new(app.id, "Dangling")
+            .layout(json!({ "type": "library", "library_id": dangling })),
+    )
+    .await?;
+    let archive = backup_everything(&mut server).await;
+    let written: Value =
+        serde_json::from_str(&entry(&archive, "applications/booksdb/library.json"))
+            .expect("library.json is JSON");
+    assert_eq!(written.as_array().map(Vec::len), Some(2), "{written}");
+    assert_eq!(written[0]["id"], json!(library[0].id.0.to_string()));
+
+    let mut second = setup_for_booksdb().await?;
+    let restored = restore_everything(&mut second, &archive).await;
+    assert!(
+        report_has(
+            &restored,
+            "restored",
+            "2 library items into application `booksdb`"
+        ),
+        "{restored}"
+    );
+    assert!(
+        report_has(
+            &restored,
+            "warnings",
+            &format!(
+                "page `Dangling` places the library item `{dangling}`, which was not imported"
+            )
+        ),
+        "{restored}"
+    );
+    // Nothing else is reported about the library.
+    let library_warnings = restored["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w.as_str().unwrap_or_default().contains("library"))
+        .count();
+    assert_eq!(library_warnings, 1, "{restored}");
+
+    let copy = sc_app::load_application_by_subdomain(&second.catalog, "booksdb")
+        .await?
+        .unwrap_or_else(|| panic!("the restored application: {restored}"));
+    assert_eq!(copy.id, app.id);
+    let copied = sc_viewpattern::list_library(&second.catalog, copy.id).await?;
+    assert_eq!(copied, library, "the same items, ids and layouts");
+    let copied_show = sc_viewpattern::load_view(&second.catalog, copy.id, "Show Books")
+        .await?
+        .expect("Show Books");
+    assert_eq!(copied_show.configuration, show.configuration);
+    Ok(())
+}
+
 #[tokio::test]
 async fn what_a_backup_includes_is_remembered_as_what_was_left_out() -> sc_error::Result<()> {
     let mut server = setup().await?;

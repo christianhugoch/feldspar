@@ -2336,7 +2336,9 @@ class Page {
     this.id = o.id;
     this.attributes = jsonOf(o.attributes);
     this.layout = jsonOf(o.layout);
-    this.fixed_states = jsonOf(o.fixed_states) || {};
+    // No `fixed_states`: v1's legacy spelling of an embedded view's fixed state
+    // is folded into the `view` segments' `configuration` by the v1 import
+    // (TODO "The builder" §7), so the snapshot never carries it.
   }
 
   static findOne(where) {
@@ -2406,7 +2408,7 @@ class Page {
           state = view.combine_state_and_default_state({ ...query, ...extra_state });
         } else {
           const table = v1Classes.Table.findOne({ id: view.table_id });
-          const preset = segment.configuration || this.fixed_states[segment.name];
+          const preset = segment.configuration;
           state = view.combine_state_and_default_state((await fill_presets(table, req, preset)) || {});
         }
         const source = `/view/${view.name}${stateToQueryString(state, true)}`;

@@ -30,7 +30,8 @@ use zip::write::SimpleFileOptions;
 use super::{Available, Item, MANIFEST_FILE, SSL_SECTION, Selection};
 use crate::handlers::{
     agent_json, application_json, backup_file_meta_json, backup_store_def_json, constraint_json,
-    field_json, page_json, role_json, table_json, trigger_json, trigger_table, view_json,
+    field_json, library_item_json, page_json, role_json, table_json, trigger_json, trigger_table,
+    view_json,
 };
 
 /// What can be included in a backup of this server, right now.
@@ -174,6 +175,20 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
         // A Saltcorn UI application's content is rows rather than a source tree,
         // so without these a restored one would serve nothing.
         if selection.views {
+            // The library travels with the views, the choice that places its
+            // items, and only a Saltcorn UI application has one (TODO "The
+            // builder" §8).
+            if app.framework.name == sc_viewpattern::SALTCORN_UI_FRAMEWORK {
+                let library: Vec<Json> = library_of(catalog, &app)
+                    .await?
+                    .iter()
+                    .map(library_item_json)
+                    .collect();
+                zip.json(
+                    &format!("applications/{}/library.json", app.subdomain),
+                    &Json::Array(library),
+                )?;
+            }
             let views: Vec<Json> = views_of(catalog, &app)
                 .await?
                 .iter()
@@ -360,6 +375,17 @@ async fn pages_of(
         return Ok(Vec::new());
     }
     sc_viewpattern::list_pages(catalog, app.id).await
+}
+
+/// An application's library items, with [`views_of`]'s rule.
+async fn library_of(
+    catalog: &Catalog,
+    app: &sc_app::Application,
+) -> Result<Vec<sc_viewpattern::LibraryItem>> {
+    if catalog.get(sc_viewpattern::LIBRARY_TABLE)?.is_none() {
+        return Ok(Vec::new());
+    }
+    sc_viewpattern::list_library(catalog, app.id).await
 }
 
 /// Every row of a table as JSON, ordered by its primary key where it has a

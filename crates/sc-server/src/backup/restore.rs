@@ -39,8 +39,8 @@ use super::{Available, MANIFEST_FILE, SSL_SECTION, Selection};
 use crate::apps::AppMounts;
 use crate::handlers::{
     agent_from_body, agents_of, application_from_body, backup_file_meta_from_json,
-    field_spec_from_body, file_store_from_body, page_from_body, table_settings_from_body,
-    trigger_from_body, trigger_table, triggers_of, view_from_body,
+    field_spec_from_body, file_store_from_body, library_item_from_body, page_from_body,
+    table_settings_from_body, trigger_from_body, trigger_table, triggers_of, view_from_body,
 };
 
 /// What a restore did, and what it declined to do.
@@ -991,19 +991,23 @@ async fn free_subdomain(catalog: &Catalog, wanted: &str) -> Result<String> {
     )))
 }
 
-/// An application's views and pages (TODO "Saltcorn UI" 8.4–8.6).
+/// An application's library, views and pages (TODO "Saltcorn UI" 8.4–8.6, "The
+/// builder" 4.4).
 ///
 /// **They replace the application's own.** This is the one place a restore
 /// deletes anything, and what it deletes is the content of the application whose
 /// row was just written from the same file, not something else on the server:
 /// re-importing a backup must leave seven views, not fourteen. A kind is replaced
-/// only when it was chosen and the file carries it for this application.
+/// only when it was chosen and the file carries it for this application. The
+/// library travels under the views' choice, and is restored **first**, so the
+/// views and pages that place its items find them.
 ///
-/// Each view and page is saved on its own and a refusal is a line naming it — a
-/// pattern this server has not got, a table that did not come, anything
+/// Each item, view and page is saved on its own and a refusal is a line naming
+/// it — a pattern this server has not got, a table that did not come, anything
 /// `save_view` refuses. Then each link from what was saved to a view the
-/// application does not have is a line too: the view is imported, and the admin
-/// is told its link leads nowhere before somebody clicks it.
+/// application does not have is a line too, and so is each placement of a library
+/// item it does not have: the view is imported, and the admin is told its link
+/// leads nowhere before somebody clicks it.
 async fn restore_views_and_pages(
     catalog: &Catalog,
     entries: &Entries,
@@ -1016,6 +1020,58 @@ async fn restore_views_and_pages(
         let path = format!("applications/{key}/{kind}.json");
         (chosen && entries.contains_key(&path)).then_some(path)
     };
+    let mut library = Vec::new();
+    if let Some(path) = wanted("library", selection.views) {
+        let replaced = async {
+            let document = json_entry(entries, &path)?;
+            for item in sc_viewpattern::list_library(catalog, app.id).await? {
+                sc_viewpattern::delete_library_item(catalog, app.id, item.id).await?;
+            }
+            Ok::<_, Error>(document)
+        }
+        .await;
+        match replaced {
+            Ok(document) => {
+                for value in array_list(&document) {
+                    let name = value
+                        .get("name")
+                        .and_then(Json::as_str)
+                        .unwrap_or("a library item")
+                        .to_owned();
+                    let result = async {
+                        let item = library_item_from_body(
+                            record_id(&value).map_or_else(
+                                sc_viewpattern::LibraryItemId::new,
+                                sc_viewpattern::LibraryItemId,
+                            ),
+                            app.id,
+                            &value,
+                        )?;
+                        sc_viewpattern::save_library_item(catalog, &item).await
+                    }
+                    .await;
+                    match result {
+                        Ok(item) => library.push(item),
+                        Err(e) => report.skipped(format!(
+                            "library item `{name}` was not imported: {}",
+                            e.causes()
+                        )),
+                    }
+                }
+                report.did(format!(
+                    "{} into application `{}`",
+                    counted(library.len(), "library item", "library items"),
+                    app.subdomain
+                ));
+            }
+            Err(e) => report.skipped(format!(
+                "the library of application `{}`: {}",
+                app.subdomain,
+                e.causes()
+            )),
+        }
+    }
+
     let mut views = Vec::new();
     if let Some(path) = wanted("views", selection.views) {
         let replaced = async {
@@ -1107,7 +1163,7 @@ async fn restore_views_and_pages(
         }
     }
 
-    if views.is_empty() && pages.is_empty() {
+    if views.is_empty() && pages.is_empty() && library.is_empty() {
         return;
     }
     // Against every view the application has now, not only the ones just
@@ -1139,6 +1195,45 @@ async fn restore_views_and_pages(
                 report.skipped(format!(
                     "page `{}` shows the view `{target}`, which was not imported",
                     page.name
+                ));
+            }
+        }
+    }
+
+    // Placements, against every item the application has now. An unknown id
+    // renders blank (v1's `resolveSegment`), which is why it is a line and not a
+    // refusal — and why the line is worth having.
+    let items: BTreeSet<String> = match sc_viewpattern::list_library(catalog, app.id).await {
+        Ok(all) => all.into_iter().map(|i| i.id.0.to_string()).collect(),
+        Err(e) => {
+            report.skipped(format!(
+                "the library placements of application `{}` were not checked: {}",
+                app.subdomain,
+                e.causes()
+            ));
+            return;
+        }
+    };
+    let placements = library
+        .iter()
+        .map(|i| (format!("library item `{}`", i.name), i.layout.clone()))
+        .chain(views.iter().map(|v| {
+            (
+                format!("view `{}`", v.name),
+                Json::Object(v.configuration.clone()),
+            )
+        }))
+        .chain(
+            pages
+                .iter()
+                .map(|p| (format!("page `{}`", p.name), p.layout.clone())),
+        );
+    for (what, layout) in placements {
+        for id in sc_viewpattern::placed_library_ids(&layout) {
+            if !items.contains(&id) {
+                report.skipped(format!(
+                    "{what} places the library item `{id}`, which was not imported, so it \
+                     renders blank"
                 ));
             }
         }

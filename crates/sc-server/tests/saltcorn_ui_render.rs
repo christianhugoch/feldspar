@@ -56,6 +56,8 @@ const APP_HOST: &str = "booksdb.example.com";
 const ADMIN: &str = "admin@example.com";
 const PASSWORD: &str = "hunter2pass";
 const V1_BACKUP: &[u8] = include_bytes!("fixtures/saltcorn-v1-BooksDB.zip");
+/// BooksDB with a v1 library and a legacy page; see `fixtures/README.md`.
+const V1_LIBRARY_BACKUP: &[u8] = include_bytes!("fixtures/saltcorn-v1-BooksDB-library.zip");
 
 /// `TrimPages`, as this server's trigger: v1's `modify_row` of
 /// `{ pages: Math.round(pages*0.9) }`, on the row the action column is on —
@@ -245,6 +247,16 @@ async fn setup_with(
     bundle: PathBuf,
     write_trim_pages: bool,
 ) -> sc_error::Result<Server> {
+    setup_from(tag, bundle, V1_BACKUP, write_trim_pages).await
+}
+
+/// [`setup_with`], restoring `archive` rather than the plain BooksDB backup.
+async fn setup_from(
+    tag: &str,
+    bundle: PathBuf,
+    archive: &[u8],
+    write_trim_pages: bool,
+) -> sc_error::Result<Server> {
     let db = TestDb::new().await?;
     db.client()
         .await?
@@ -341,7 +353,7 @@ async fn setup_with(
             None,
             "/backup/upload",
             &[],
-            Some((V1_BACKUP.to_vec(), "application/zip")),
+            Some((archive.to_vec(), "application/zip")),
         )
         .await;
     assert_eq!(uploaded.status, StatusCode::OK, "{}", uploaded.body);
@@ -1765,6 +1777,61 @@ async fn a_pages_action_buttons_run_and_its_properties_shape_the_document() -> s
         "{}",
         wide.body
     );
+    Ok(())
+}
+
+/// The builder 4.5: a v1 library and a legacy page, imported, render on the
+/// subdomain.
+///
+/// *Show Books* places *Book header* (serial 1 in the v1 pack), which places
+/// *Book note* (serial 2): both only render if the import's UUIDs reached the
+/// placements, the nested one included. *Featured book* embeds *Show Books*
+/// with v1's legacy `fixed_states` entry `{ id: 2 }`; the page shows *War and
+/// Peace* only because the import folded that into the segment, since nothing
+/// here reads `fixed_states`.
+#[tokio::test]
+async fn an_imported_library_and_legacy_page_render_on_the_subdomain() -> sc_error::Result<()> {
+    let Some(bundle) = bundle_dir() else {
+        eprintln!(
+            "skipping: the Saltcorn UI bundle is not built (npm ci && npm run build in ui/saltcorn-ui)"
+        );
+        return Ok(());
+    };
+    let mut server = setup_from("v1-library", bundle, V1_LIBRARY_BACKUP, true).await?;
+    let report = server.restore_report.to_string();
+    assert!(
+        report.contains("2 library items into application `booksdb`"),
+        "{report}"
+    );
+    let client = &mut server.client;
+
+    let show = client
+        .app_get(
+            "/view/Show%20Books?id=1",
+            &[("X-Requested-With", "XMLHttpRequest")],
+        )
+        .await;
+    assert_eq!(show.status, StatusCode::OK, "{}", show.body);
+    let html = &show.body;
+    let at = |text: &str| {
+        html.find(text)
+            .unwrap_or_else(|| panic!("`{text}` is rendered: {html}"))
+    };
+    // The header, its title slot filled with the row's title, and the nested
+    // note with its content slot — all above the view's own first row.
+    assert!(html.contains("<h3>Book</h3>"), "{html}");
+    assert!(at("<h3>Book</h3>") < at("Moby Dick"), "{html}");
+    assert!(at("Moby Dick") < at("Note:"), "{html}");
+    assert!(at("Note:") < at("From the BooksDB library"), "{html}");
+    assert!(at("From the BooksDB library") < at("Melville"), "{html}");
+
+    let page = client.app_get("/page/Featured%20book", &[]).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    let html = &page.body;
+    assert!(html.contains("Featured this week"), "{html}");
+    assert!(html.contains("War and Peace"), "{html}");
+    assert!(html.contains("Tolstoy"), "{html}");
+    assert!(!html.contains("Moby Dick"), "{html}");
     Ok(())
 }
 

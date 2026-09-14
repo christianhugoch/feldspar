@@ -637,18 +637,18 @@ entry plus its §3 URLs, not a surprise.
 
 ## Phase 4 — The library and pages, imported and backed up
 
-- [ ] 4.1 `backup::v1`: import `library` into the application; mint UUIDs and rewrite
+- [x] 4.1 `backup::v1`: import `library` into the application; mint UUIDs and rewrite
       `library_id` in item, view and page layouts (nested items included) before saving; remove
       the "not imported" note for it; the report line; replace on re-import.
-- [ ] 4.2 `backup::v1`: §7's fixed-state fold into pages' `view` segments; stop copying
+- [x] 4.2 `backup::v1`: §7's fixed-state fold into pages' `view` segments; stop copying
       `fixed_states` into `attributes`.
-- [ ] 4.3 A fixture: extend the BooksDB pack (or add a second small v1 pack) with a library item
+- [x] 4.3 A fixture: extend the BooksDB pack (or add a second small v1 pack) with a library item
       that has slots and is placed in a Show view and a page, and a page with legacy
       `fixed_states`, so the rewrite and the fold have something real to work on. Record how it
       was made beside the fixture.
-- [ ] 4.4 This server's backup: `applications/<subdomain>/library.json`, restored before views and
+- [x] 4.4 This server's backup: `applications/<subdomain>/library.json`, restored before views and
       pages, replace-not-append.
-- [ ] 4.5 Tests: the v1 import with the rewrite and the fold, rendered on the subdomain; the
+- [x] 4.5 Tests: the v1 import with the rewrite and the fold, rendered on the subdomain; the
       backup round trip.
 
 ## Phase 5 — The builder's options, from the worker

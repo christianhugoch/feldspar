@@ -21,6 +21,7 @@
 //! applications/<subdomain>.json       one application
 //! applications/<subdomain>/views.json its Saltcorn UI views, when chosen
 //! applications/<subdomain>/pages.json its Saltcorn UI pages, when chosen
+//! applications/<subdomain>/library.json its Saltcorn UI library, with the views
 //! file-stores/<store>/store.json      { definition, files: [ { path, meta } ] }
 //! file-stores/<store>/files/<path>    the bytes, as they are
 //! users.json                          { roles, users, fields } — hashes included
@@ -344,9 +345,11 @@ pub struct Selection {
     /// Whether triggers are included. A trigger on a table whose metadata is
     /// *not* included is left out even so — see [`Selection::includes_trigger`].
     pub triggers: bool,
-    /// Whether the included applications' views are. On restore they **replace**
-    /// the views the application has, which is what makes a second import of
-    /// one backup leave the views it had rather than twice as many.
+    /// Whether the included applications' views are — and, with them, a Saltcorn
+    /// UI application's library, whose items the views place. On restore they
+    /// **replace** the views (and library) the application has, which is what
+    /// makes a second import of one backup leave the views it had rather than
+    /// twice as many.
     pub views: bool,
     /// Whether the included applications' pages are, with the same rule.
     pub pages: bool,

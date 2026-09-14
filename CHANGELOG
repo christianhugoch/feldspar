@@ -2,6 +2,105 @@
 
 Changes in reverse chronological order.
 
+## The builder, Phase 4: the library and pages, imported and backed up
+
+A Saltcorn 1 backup's library now comes across. Until now the import noted it as
+"not imported", and every placed item in an imported view or page rendered
+blank. A v1 page's legacy fixed states are folded into its layout, so an
+embedded view with one shows the row it was fixed to. And this server's own
+backup carries each Saltcorn UI application's library, restored before the
+views and pages that place its items.
+
+- **The v1 library (4.1)**, in `backup::v1`.
+  - Each `library` entry becomes an item of the imported application with a
+    fresh UUID. It is written to `applications/<subdomain>/library.json`, the
+    entry a Feldspar backup has, so the ordinary restore saves it.
+  - Every `library_id` naming a v1 serial is rewritten to that UUID. That covers
+    views' configurations, pages' layouts and the items' own layouts, so nested
+    items are included. A digit string is read as the same serial.
+  - **Serials are mapped by position**, because a v1 pack has no library ids:
+    `Library.toJson` drops `id`. v1's `install_pack` recreates the entries in
+    pack order onto an empty `_sc_library`, so the first entry becomes serial 1.
+    That is the only reading under which the backup's layouts resolve in v1
+    itself.
+  - A `library_id` that matches no entry is left as written. It renders blank,
+    as in v1, and the restore reports it (4.4).
+  - A layout stored as JSON text is parsed, as v1's `Library` constructor does.
+    An entry with no name is a note.
+  - The "library entries were not imported" note is gone. Page groups, tags,
+    models and plugins are still noted.
+  - A re-import replaces the application's library, the same rule as its views.
+- **The fixed-state fold (4.2).**
+  - `fold_fixed_states` is v1's `getEditNormalPage` fold from
+    `server/routes/pageedit.ts`: a `view` segment with `state: "fixed"` and no
+    `configuration` takes the page's `fixed_states` entry under its name.
+  - JavaScript truthiness is kept. A segment whose `configuration` is `{}`
+    already has one and is left alone. An entry that is `{}` is still folded in.
+  - `fixed_states` stored as JSON text is parsed.
+  - `fixed_states` is **no longer copied into the page's attributes**.
+  - The host's `Page` in `module-host.mjs` no longer reads `fixed_states`. Its
+    render reads `segment.configuration` only, so there is one spelling and no
+    fallback reader.
+- **A fixture (4.3):** `tests/fixtures/saltcorn-v1-BooksDB-library.zip`.
+  - It is the real BooksDB backup with two library items (one placing the
+    other, both with slots), *Show Books* placing the first, and a page
+    *Featured book* that places the second and embeds *Show Books* with a
+    legacy fixed state `{ id: 2 }`.
+  - `make-v1-library-fixture.py` writes it from `saltcorn-v1-BooksDB.zip`, and
+    the output is identical on every run.
+  - **It was not recorded by a running Saltcorn 1.** The v1 checkout here has no
+    `sqlite3` module, and running it against the shared Postgres was not worth
+    the risk.
+  - `tests/fixtures/README.md` says so, and names the v1 source each added shape
+    was taken from: `Library.toJson`, `install_pack`, `resolveSegment`,
+    `getEditNormalPage` and `Page.run`.
+  - The original fixture is unchanged, so no existing test or golden moved.
+- **This server's backup (4.4).**
+  - **Writing:** a Saltcorn UI application gets
+    `applications/<subdomain>/library.json` under the views choice, since the
+    views are what place the items. Other frameworks have no library and get no
+    entry.
+  - **Restoring:** the library is restored **before** the views and pages.
+    Replace-not-append is the views' rule: the application's items are deleted,
+    then each item in the file is saved with the id it carries, so placements
+    stay valid. A refused item is a line naming it.
+  - The report gets `n library items into application x`.
+  - **Where this goes past the spec:** after the views and pages, every
+    placement is checked against the application's library. That covers items,
+    views and pages. A placement naming an item that is not there is a warning
+    ("page `Dangling` places the library item `…`, which was not imported, so it
+    renders blank"), in the same way a link to a missing view already is.
+  - `handlers.rs` gains `library_item_json` / `library_item_from_body`, beside
+    the view and page pairs. The backup uses them now, and Phase 6's library
+    endpoints will too.
+  - **Not done:** `Available` has no library count, so the restore dialog does
+    not list the items separately. They are counted in the report instead.
+- **Tests (4.5).**
+  - `backup::v1` unit tests:
+    - `library_items_get_uuids_and_every_placement_is_rewritten` checks the
+      rewrite in a view, a page and a nested item, a text layout, and an
+      unknown serial left alone.
+    - `a_pages_legacy_fixed_states_are_folded_into_its_view_segments` checks the
+      fold with JS truthiness, inside a container, for text `fixed_states`, and
+      that no `fixed_states` attribute is kept.
+  - `backup_api::a_v1_library_is_imported_and_travels_in_a_backup`, over real
+    Postgres:
+    - the fixture imported, with the report line and no library warnings;
+    - the UUIDs in *Show Books*, in *Featured book* and in the nested item;
+    - the folded configuration;
+    - `library_references` from the view, the page and the item;
+    - a re-import replacing the two items rather than adding two more;
+    - this server's backup writing `library.json`;
+    - the restore into a second server giving back identical items and
+      configurations, and warning exactly once, about a page placing an item
+      that does not exist.
+  - `saltcorn_ui_render::an_imported_library_and_legacy_page_render_on_the_subdomain`
+    (needs the bundle):
+    - `/view/Show%20Books?id=1` renders the header, the title slot, the nested
+      note and its slot, in order, above the view's own rows;
+    - `/page/Featured%20book` shows *War and Peace* and not *Moby Dick*, which it
+      can only do through the fold.
+
 ## The builder, Phase 3: pages, running what a built page contains
 
 A page's action buttons now work. Until now they posted to

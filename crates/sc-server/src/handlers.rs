@@ -4829,6 +4829,37 @@ pub(crate) fn page_from_body(
     Ok(page)
 }
 
+/// A library item as `{ id, name, description, icon, layout, attributes }` —
+/// the page pair's counterpart for `_fd_library` (TODO "The builder" §8).
+pub(crate) fn library_item_json(item: &sc_viewpattern::LibraryItem) -> Json {
+    json!({
+        "id": item.id.0.to_string(),
+        "name": item.name,
+        "description": item.description,
+        "icon": item.icon,
+        "layout": item.layout,
+        "attributes": Json::Object(item.attributes.clone()),
+    })
+}
+
+/// Parse a library item in [`library_item_json`]'s shape into `application`.
+/// Whether the application may have a library is `save_library_item`'s to check.
+pub(crate) fn library_item_from_body(
+    id: sc_viewpattern::LibraryItemId,
+    application: sc_app::AppId,
+    body: &Json,
+) -> Result<sc_viewpattern::LibraryItem> {
+    let obj = require_object(body)?;
+    let name = non_empty_str_field(obj, "name")?;
+    let mut item = sc_viewpattern::LibraryItem::new(application, name)
+        .icon(obj.get("icon").and_then(Json::as_str).unwrap_or(""))
+        .description(obj.get("description").and_then(Json::as_str).unwrap_or(""))
+        .layout(obj.get("layout").cloned().unwrap_or_else(|| json!({})));
+    item.id = id;
+    item.attributes = object_member(obj, "attributes")?;
+    Ok(item)
+}
+
 /// An object member, absent or `null` meaning the empty object.
 fn object_member(obj: &Map<String, Json>, key: &str) -> Result<Attrs> {
     match obj.get(key) {

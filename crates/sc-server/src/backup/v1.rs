@@ -19,17 +19,18 @@
 //!
 //! The kinds this system has: **tables**, their **fields**, their **rows**,
 //! **triggers** (v1 calls them actions), **files** and **users** — and the
-//! **views**, **pages** and **menu**, which become one **Saltcorn UI
-//! application** named after the site (TODO "Saltcorn UI" §13). A view's
-//! configuration and a page's layout cross unchanged: they are what v1's own
-//! `list.ts` reads, and the Saltcorn UI framework runs v1's own `list.ts`.
-//! v1's page groups, libraries, tags, models, plugins and event logs have no
-//! counterpart, and a half-translation of them would be worse than their absence.
+//! **views**, **pages**, **library** and **menu**, which become one **Saltcorn
+//! UI application** named after the site (TODO "Saltcorn UI" §13, "The builder"
+//! §8). A view's configuration, a page's layout and a library item's layout cross
+//! unchanged apart from the two rewrites below: they are what v1's own `list.ts`
+//! reads, and the Saltcorn UI framework runs v1's own `list.ts`.
+//! v1's page groups, tags, models, plugins and event logs have no counterpart,
+//! and a half-translation of them would be worse than their absence.
 //! Everything left out — every field whose type has no counterpart, every menu
 //! entry that opens v1's admin UI — becomes a line in the restore report rather
 //! than a silence.
 //!
-//! ## Two translations that are not mechanical
+//! ## Translations that are not mechanical
 //!
 //! - **Users are keyed differently.** v1 numbers users; this system gives them
 //!   UUIDs (§7.1). Each imported account therefore gets a fresh UUID *here*, in
@@ -41,6 +42,20 @@
 //!   has named stores (§6). The uploads are put into a local store named after
 //!   the application (`site_name`), created if it is not already there — and left
 //!   exactly as it is if it is, like every other restored store.
+//! - **Library items are keyed differently too** (TODO "The builder" §8). A v1
+//!   layout places an item as `{ type: "library", library_id: 3 }`, a serial of
+//!   `_sc_library`; here an item's id is a UUID. Each item gets one here, and
+//!   every `library_id` in every view's configuration, page's layout and item's
+//!   own layout is rewritten to it in the same pass ([`LibraryKeys`]).
+//! - **A page's legacy fixed states are folded into its layout** (§7). v1 has
+//!   two spellings of an embedded view's fixed state: `configuration` on the
+//!   `view` segment, which the builder writes, and the page's `fixed_states`,
+//!   which older builders wrote and v1's page editor folds into the segments
+//!   before opening the builder. The import does that fold once, and
+//!   `fixed_states` is not kept, so this system has one spelling.
+//!
+//! Those two rewrites are the only places where "a layout crosses unchanged"
+//! gives way, and each is v1's own reading of the data rather than a new one.
 //!
 //! Password hashes are deliberately **not** carried: v1 hashes with bcrypt and
 //! this system with argon2id, and a bcrypt string in `password_hash` would not be
@@ -202,6 +217,10 @@ pub(super) fn convert(entries: &Entries) -> Result<Entries> {
     out.insert(
         format!("applications/{subdomain}/pages.json"),
         pretty(&Json::Array(application.pages.clone()))?,
+    );
+    out.insert(
+        format!("applications/{subdomain}/library.json"),
+        pretty(&Json::Array(application.library.clone()))?,
     );
     contents
         .applications
@@ -948,6 +967,8 @@ struct ConvertedApplication {
     document: Json,
     views: Vec<Json>,
     pages: Vec<Json>,
+    /// Library items, each with the UUID minted for it.
+    library: Vec<Json>,
 }
 
 /// **One application per backup** (§13): named after the site, framework
@@ -999,12 +1020,104 @@ fn convert_application(
             .filter_map(|v| v.as_object().cloned())
             .collect()
     };
+    // The library first: its ids are what every layout's `library_id` is
+    // rewritten to, its own items' layouts included.
+    let (library, keys) = convert_library(pack, notes);
     ConvertedApplication {
-        views: objects("views").iter().map(convert_view).collect(),
-        pages: objects("pages").iter().map(convert_page).collect(),
+        views: objects("views")
+            .iter()
+            .map(|view| convert_view(view, &keys))
+            .collect(),
+        pages: objects("pages")
+            .iter()
+            .map(|page| convert_page(page, &keys))
+            .collect(),
+        library,
         subdomain,
         document,
     }
+}
+
+/// The UUID each v1 library item was given, keyed by the serial v1 knows it by.
+///
+/// **By position, because the pack has no ids.** v1 writes a library entry as
+/// `Library.toJson`, which drops `id`, and its `install_pack` restores the
+/// entries in pack order with `Library.create` onto an empty `_sc_library` — so
+/// the first entry becomes serial 1, the second serial 2. That is the only
+/// reading under which a v1 backup's own layouts resolve in v1 after a restore,
+/// and so the one taken here. A `library_id` that names no position is left as
+/// written: it renders blank, as it would in v1, and the restore reports it.
+#[derive(Default)]
+struct LibraryKeys {
+    by_v1_id: BTreeMap<i64, Uuid>,
+}
+
+impl LibraryKeys {
+    /// Rewrite every `library` segment's `library_id` in `value` that names an
+    /// imported item, slots and nested containers included. v1 writes a number;
+    /// a string of digits is read as the same number.
+    fn rewrite(&self, value: &mut Json) {
+        match value {
+            Json::Object(segment) => {
+                if segment.get("type").and_then(Json::as_str) == Some("library") {
+                    let serial = match segment.get("library_id") {
+                        Some(Json::Number(n)) => n.as_i64(),
+                        Some(Json::String(text)) => text.trim().parse::<i64>().ok(),
+                        _ => None,
+                    };
+                    if let Some(id) = serial.and_then(|serial| self.by_v1_id.get(&serial)) {
+                        segment.insert("library_id".to_owned(), json!(id.to_string()));
+                    }
+                }
+                segment.values_mut().for_each(|child| self.rewrite(child));
+            }
+            Json::Array(items) => items.iter_mut().for_each(|item| self.rewrite(item)),
+            _ => {}
+        }
+    }
+}
+
+/// v1's `library` entries as this system's library items, in the shape a
+/// Feldspar backup carries them in, each with a fresh UUID, and the key map
+/// the views' and pages' layouts are rewritten through.
+fn convert_library(pack: &Map<String, Json>, notes: &mut Vec<String>) -> (Vec<Json>, LibraryKeys) {
+    let entries = array(pack, "library");
+    let mut keys = LibraryKeys::default();
+    let mut kept = Vec::new();
+    for (position, value) in (1_i64..).zip(&entries) {
+        let Some(entry) = value.as_object() else {
+            continue;
+        };
+        let name = name_of(entry);
+        if name.trim().is_empty() {
+            notes.push("a library entry without a name was not imported".to_owned());
+            continue;
+        }
+        let id = Uuid::new_v4();
+        keys.by_v1_id.insert(position, id);
+        // v1's `Library` constructor reads a layout stored as JSON text too.
+        let layout = match entry.get("layout") {
+            Some(Json::String(text)) => serde_json::from_str(text).unwrap_or_else(|_| json!({})),
+            Some(layout) if !layout.is_null() => layout.clone(),
+            _ => json!({}),
+        };
+        kept.push((id, name, text(entry, "icon"), layout));
+    }
+    let library = kept
+        .into_iter()
+        .map(|(id, name, icon, mut layout)| {
+            keys.rewrite(&mut layout);
+            json!({
+                "id": id.to_string(),
+                "name": name,
+                "description": "",
+                "icon": icon,
+                "layout": layout,
+                "attributes": {},
+            })
+        })
+        .collect();
+    (library, keys)
 }
 
 /// A subdomain from an application's name: lower case, each run of anything but
@@ -1030,14 +1143,14 @@ pub(super) fn subdomain_for(name: &str) -> String {
 }
 
 /// One v1 view, in the shape a Feldspar backup carries a view in. The
-/// configuration crosses **unchanged** (§1): it is v1-shaped on purpose, and
-/// translating it would be inventing a second format to keep in step with a file
-/// this system does not own.
+/// configuration crosses **unchanged** (§1) but for its `library_id`s: it is
+/// v1-shaped on purpose, and translating it would be inventing a second format to
+/// keep in step with a file this system does not own.
 ///
 /// Nothing is checked here. Whether the pattern is registered and the table came
 /// are questions about the server the backup is restored onto and what was
 /// chosen, so the restore asks them and reports each refusal by the view's name.
-fn convert_view(view: &Map<String, Json>) -> Json {
+fn convert_view(view: &Map<String, Json>, library: &LibraryKeys) -> Json {
     let mut attributes = view
         .get("attributes")
         .and_then(Json::as_object)
@@ -1059,26 +1172,29 @@ fn convert_view(view: &Map<String, Json>) -> Json {
         .and_then(Json::as_str)
         .or_else(|| view.get("exttable_name").and_then(Json::as_str))
         .filter(|t| !t.is_empty());
+    let mut configuration = view
+        .get("configuration")
+        .filter(|c| c.is_object())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    library.rewrite(&mut configuration);
     json!({
         "name": name_of(view),
         "description": text(view, "description"),
         "viewpattern": text(view, "viewtemplate"),
         "table_name": table,
-        "configuration": view
-            .get("configuration")
-            .filter(|c| c.is_object())
-            .cloned()
-            .unwrap_or_else(|| json!({})),
+        "configuration": configuration,
         "min_role": role(view, "min_role"),
         "slug": view.get("slug").cloned().unwrap_or(Json::Null),
         "attributes": attributes,
     })
 }
 
-/// One v1 page. The layout crosses unchanged; `root_page_for_roles` — what makes
-/// `/` resolve — and a non-empty `fixed_states` move into the attributes, which
-/// is where a page's sparse settings live here.
-fn convert_page(page: &Map<String, Json>) -> Json {
+/// One v1 page. The layout crosses unchanged but for its `library_id`s and v1's
+/// fixed-state fold ([`fold_fixed_states`]); `root_page_for_roles` — what makes
+/// `/` resolve — moves into the attributes, which is where a page's sparse
+/// settings live here.
+fn convert_page(page: &Map<String, Json>, library: &LibraryKeys) -> Json {
     let mut attributes = page
         .get("attributes")
         .and_then(Json::as_object)
@@ -1091,20 +1207,76 @@ fn convert_page(page: &Map<String, Json>) -> Json {
             .cloned()
             .unwrap_or_else(|| json!([])),
     );
-    if let Some(fixed) = page
-        .get("fixed_states")
-        .filter(|f| f.as_object().is_some_and(|o| !o.is_empty()))
-    {
-        attributes.insert("fixed_states".to_owned(), fixed.clone());
+    let mut layout = page.get("layout").cloned().unwrap_or_else(|| json!({}));
+    // v1's `Page` constructor reads `fixed_states` stored as JSON text too.
+    let fixed_states = match page.get("fixed_states") {
+        Some(Json::String(text)) => serde_json::from_str(text).unwrap_or(Json::Null),
+        other => other.cloned().unwrap_or(Json::Null),
+    };
+    if let Some(fixed_states) = fixed_states.as_object() {
+        fold_fixed_states(&mut layout, fixed_states);
     }
+    library.rewrite(&mut layout);
     json!({
         "name": name_of(page),
         "title": text(page, "title"),
         "description": text(page, "description"),
-        "layout": page.get("layout").cloned().unwrap_or_else(|| json!({})),
+        "layout": layout,
         "min_role": role(page, "min_role"),
         "attributes": attributes,
     })
+}
+
+/// v1's fold of a page's legacy `fixed_states` into its `view` segments, from
+/// `getEditNormalPage` in v1's `server/routes/pageedit.ts`:
+///
+/// ```js
+/// traverseSync(page.layout, { view(s) {
+///   if (s.state === "fixed" && !s.configuration) {
+///     const fs = page.fixed_states[s.name];
+///     if (fs) s.configuration = fs;
+///   } } });
+/// ```
+///
+/// JavaScript's truthiness is kept: a segment whose `configuration` is `{}`
+/// already has one and is left alone, and an entry that is `{}` is still
+/// folded in. The walk visits every object, which reaches every segment
+/// `traverseSync` does.
+fn fold_fixed_states(layout: &mut Json, fixed_states: &Map<String, Json>) {
+    match layout {
+        Json::Object(segment) => {
+            if segment.get("type").and_then(Json::as_str) == Some("view")
+                && segment.get("state").and_then(Json::as_str) == Some("fixed")
+                && segment.get("configuration").is_none_or(js_falsy)
+                && let Some(fixed) = segment
+                    .get("name")
+                    .and_then(Json::as_str)
+                    .and_then(|name| fixed_states.get(name))
+                    .filter(|fixed| !js_falsy(fixed))
+            {
+                segment.insert("configuration".to_owned(), fixed.clone());
+            }
+            segment
+                .values_mut()
+                .for_each(|child| fold_fixed_states(child, fixed_states));
+        }
+        Json::Array(items) => items
+            .iter_mut()
+            .for_each(|item| fold_fixed_states(item, fixed_states)),
+        _ => {}
+    }
+}
+
+/// Whether JavaScript reads `value` as false: `null`, `false`, `0` and `""`.
+/// Every object and array is true.
+fn js_falsy(value: &Json) -> bool {
+    match value {
+        Json::Null => true,
+        Json::Bool(b) => !b,
+        Json::Number(n) => n.as_f64() == Some(0.0),
+        Json::String(s) => s.is_empty(),
+        Json::Array(_) | Json::Object(_) => false,
+    }
 }
 
 /// What was taken out of v1's menu, for the notes.
@@ -1219,7 +1391,6 @@ fn strip_menu(items: &[Json], dropped: &mut MenuDropped) -> Vec<Json> {
 fn note_what_was_left_out(pack: &Map<String, Json>, notes: &mut Vec<String>) {
     for (key, one, many) in [
         ("page_groups", "page group was", "page groups were"),
-        ("library", "library entry was", "library entries were"),
         ("tags", "tag was", "tags were"),
         ("models", "model was", "models were"),
         (
@@ -1879,6 +2050,140 @@ mod tests {
 
     /// An archive with no `site_name` still has to name its store something, and
     /// a v1 event this system shares is spelled the way this system spells it.
+    /// [`v1_archive`] with its pack changed by `edit`.
+    fn with_pack(edit: impl FnOnce(&mut Json)) -> Entries {
+        let mut entries = v1_archive();
+        let mut pack: Json = serde_json::from_slice(&entries[PACK]).unwrap();
+        edit(&mut pack);
+        entries.insert(PACK.to_owned(), serde_json::to_vec(&pack).unwrap());
+        entries
+    }
+
+    /// The builder 4.1: v1's library entries have no ids, so each gets a UUID by
+    /// its position — the serial v1's own restore gives it — and every
+    /// `library_id` naming that serial is rewritten, in views, pages and the
+    /// items' own layouts. One naming no entry is left as written.
+    #[test]
+    fn library_items_get_uuids_and_every_placement_is_rewritten() {
+        let out = convert(&with_pack(|pack| {
+            pack["library"] = json!([
+                { "name": "Book header", "icon": "fas fa-book", "layout": { "above": [
+                    { "type": "blank", "contents": "Book", "textStyle": "h3" },
+                    { "type": "library-slot", "name": "title" },
+                    { "type": "library", "library_id": 2, "slots": [] },
+                ]}},
+                // v1's constructor reads a layout stored as text.
+                { "name": "Byline", "icon": "", "layout": "{\"type\":\"blank\",\"contents\":\"by\"}" },
+            ]);
+            pack["views"][0]["configuration"]["layout"] = json!({ "above": [
+                { "type": "library", "library_id": 1, "slots": [
+                    { "name": "title", "kind": "field", "field": "title", "fieldview": "as_text" },
+                ]},
+                { "type": "library", "library_id": 9 },
+            ]});
+            pack["pages"][0]["layout"] = json!({ "besides": [
+                { "type": "library", "library_id": "2" },
+                { "type": "view", "view": "BookList", "state": "shared" },
+            ]});
+        }))
+        .expect("a conversion");
+
+        let library = document(&out, "applications/booksdb/library.json");
+        let app = sc_app::AppId::new();
+        let items: Vec<sc_viewpattern::LibraryItem> = library
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|item| {
+                let id = Uuid::parse_str(item["id"].as_str().expect("an id")).expect("a UUID");
+                crate::handlers::library_item_from_body(
+                    sc_viewpattern::LibraryItemId(id),
+                    app,
+                    item,
+                )
+                .expect("the parser reads it")
+            })
+            .collect();
+        assert_eq!(items.len(), 2);
+        let (header, byline) = (&items[0], &items[1]);
+        assert_eq!(header.name, "Book header");
+        assert_eq!(header.icon, "fas fa-book");
+        assert_eq!(byline.layout, json!({ "type": "blank", "contents": "by" }));
+        let uuid_of = |item: &sc_viewpattern::LibraryItem| json!(item.id.0.to_string());
+        // Nested: the header's own placement of serial 2.
+        assert_eq!(header.layout["above"][2]["library_id"], uuid_of(byline));
+        // The slot is untouched.
+        assert_eq!(
+            header.layout["above"][1],
+            json!({ "type": "library-slot", "name": "title" })
+        );
+
+        let views = document(&out, "applications/booksdb/views.json");
+        let placed = &views[0]["configuration"]["layout"]["above"];
+        assert_eq!(placed[0]["library_id"], uuid_of(header));
+        assert_eq!(placed[0]["slots"][0]["field"], json!("title"));
+        // A serial no entry had: left as written, for the restore to report.
+        assert_eq!(placed[1]["library_id"], json!(9));
+
+        let pages = document(&out, "applications/booksdb/pages.json");
+        assert_eq!(
+            pages[0]["layout"]["besides"][0]["library_id"],
+            uuid_of(byline)
+        );
+
+        let notes = notes(&out);
+        assert!(!notes.iter().any(|n| n.contains("library")), "{notes:?}");
+    }
+
+    /// The builder 4.2: v1's `getEditNormalPage` fold, with JavaScript's
+    /// truthiness — and `fixed_states` is not kept.
+    #[test]
+    fn a_pages_legacy_fixed_states_are_folded_into_its_view_segments() {
+        let out = convert(&with_pack(|pack| {
+            pack["pages"][0]["layout"] = json!({ "above": [
+                { "type": "view", "name": "legacy", "view": "BookList", "state": "fixed" },
+                { "type": "view", "name": "nulled", "view": "BookList", "state": "fixed",
+                  "configuration": null },
+                // `{}` is truthy: it already has a configuration.
+                { "type": "view", "name": "modern", "view": "BookList", "state": "fixed",
+                  "configuration": {} },
+                // Only a fixed-state segment is folded.
+                { "type": "view", "name": "shared", "view": "BookList", "state": "shared" },
+                { "type": "container", "contents":
+                    { "type": "view", "name": "inside", "view": "BookList", "state": "fixed" } },
+                { "type": "view", "name": "unlisted", "view": "BookList", "state": "fixed" },
+            ]});
+            pack["pages"][0]["fixed_states"] = json!({
+                "legacy": { "id": 1 }, "nulled": { "id": 2 }, "modern": { "id": 3 },
+                "shared": { "id": 4 }, "inside": { "title": "Moby Dick" },
+            });
+        }))
+        .expect("a conversion");
+        let pages = document(&out, "applications/booksdb/pages.json");
+        let page = &pages[0];
+        let above = &page["layout"]["above"];
+        assert_eq!(above[0]["configuration"], json!({ "id": 1 }));
+        assert_eq!(above[1]["configuration"], json!({ "id": 2 }));
+        assert_eq!(above[2]["configuration"], json!({}));
+        assert!(above[3].get("configuration").is_none(), "{page}");
+        assert_eq!(
+            above[4]["contents"]["configuration"],
+            json!({ "title": "Moby Dick" })
+        );
+        assert!(above[5].get("configuration").is_none(), "{page}");
+        assert!(page["attributes"].get("fixed_states").is_none(), "{page}");
+
+        // v1 also stores it as text.
+        let out = convert(&with_pack(|pack| {
+            pack["pages"][0]["layout"] =
+                json!({ "type": "view", "name": "a", "view": "BookList", "state": "fixed" });
+            pack["pages"][0]["fixed_states"] = json!("{\"a\":{\"id\":7}}");
+        }))
+        .expect("a conversion");
+        let pages = document(&out, "applications/booksdb/pages.json");
+        assert_eq!(pages[0]["layout"]["configuration"], json!({ "id": 7 }));
+    }
+
     #[test]
     fn an_unnamed_application_still_names_its_store() {
         let mut entries = v1_archive();
