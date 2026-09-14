@@ -19,7 +19,7 @@ use sc_viewpattern::{
     LibraryItem, LibraryItemId, LibraryReferences, LibraryUpdate, Page, View, ViewSets,
     apply_library_updates, apply_library_updates_in, bootstrap,
     delete_application_views_pages_and_library, delete_library_item, install_saltcorn_ui,
-    list_library, load_library_item, save_library_item, save_view,
+    list_library, load_library_item, load_page, load_view, save_library_item, save_view,
 };
 use serde_json::{Value as Json, json};
 
@@ -390,5 +390,165 @@ async fn references_run_both_ways_through_nested_items_and_writes_move_the_gener
     let deleted = sets.get(&catalog, app).await?;
     assert!(deleted.generation > updated.generation);
     assert!(deleted.library_item(unused.id).is_none());
+    Ok(())
+}
+
+/// The builder 6.1: a layout save writes the library edits it carries in the
+/// same transaction as the view or page, so a save refused after the edits were
+/// written leaves none of them; it moves the generation once; and a layout
+/// naming an item, an action or a view the application does not have is
+/// refused naming it.
+#[tokio::test]
+async fn a_layout_save_and_its_library_edits_commit_together_or_not_at_all() -> Result<()> {
+    let db = TestDb::new().await?;
+    let catalog = catalog(&db).await?;
+    let app = application(&catalog, "Books", "books").await?;
+    let item = save_library_item(&catalog, &header(app)).await?;
+    let sets = ViewSets::new();
+    let view = sets
+        .save_view(&catalog, &show_books(app, json!({ "above": [] })))
+        .await?;
+    let generation = sets.generation(app)?.expect("the save cached the set");
+
+    // A layout placing the item, and an edit made inside it: both written, the
+    // generation moved once.
+    let edited = json!({ "type": "blank", "contents": "Edited header" });
+    let edit = |layout: Json| LibraryUpdate {
+        library_id: item.id,
+        layout,
+    };
+    let mut laid_out = view.clone();
+    laid_out.configuration["layout"] = json!({ "above": [placing(&item)] });
+    sets.save_view_layout(&catalog, &laid_out, &[edit(edited.clone())])
+        .await?;
+    assert_eq!(sets.generation(app)?, Some(generation + 1));
+    assert_eq!(
+        load_library_item(&catalog, app, item.id)
+            .await?
+            .unwrap()
+            .layout,
+        edited
+    );
+    assert_eq!(
+        load_view(&catalog, app, "Show Books")
+            .await?
+            .unwrap()
+            .configuration["layout"],
+        laid_out.configuration["layout"]
+    );
+
+    // Refused inside the transaction, after the edit was written: another view
+    // of the same name. The edit is not there afterwards.
+    let lost = json!({ "type": "blank", "contents": "Lost" });
+    let clash = show_books(app, json!({ "above": [placing(&item)] }));
+    let err = sets
+        .save_view_layout(&catalog, &clash, &[edit(lost.clone())])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("already has a view named `Show Books`"),
+        "{err}"
+    );
+    assert_eq!(
+        load_library_item(&catalog, app, item.id)
+            .await?
+            .unwrap()
+            .layout,
+        edited
+    );
+
+    // An item the application does not have, placed or edited.
+    let stray = LibraryItemId::new();
+    let mut placing_stray = laid_out.clone();
+    placing_stray.configuration["layout"] =
+        json!({ "type": "library", "library_id": stray.0.to_string() });
+    let err = sets
+        .save_view_layout(&catalog, &placing_stray, &[])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("view `Show Books`") && err.contains(&stray.0.to_string()),
+        "{err}"
+    );
+    let err = sets
+        .save_view_layout(
+            &catalog,
+            &laid_out,
+            &[LibraryUpdate {
+                library_id: stray,
+                layout: json!({}),
+            }],
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(&stray.0.to_string()), "{err}");
+    let err = sets
+        .save_view_layout(
+            &catalog,
+            &laid_out,
+            &[edit(
+                json!({ "type": "library", "library_id": stray.0.to_string() }),
+            )],
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("library item `Book header`"), "{err}");
+
+    // A page: its layout replaces the page's, with the view it shows, the item
+    // it places and v1's page action.
+    let home = sets.save_page(&catalog, &Page::new(app, "Home")).await?;
+    let mut built = home.clone();
+    built.layout = json!({ "above": [
+        placing(&item),
+        { "type": "view", "view": "Show Books", "state": "shared" },
+        { "type": "action", "action_name": "GoBack", "rndid": "b1" },
+    ]});
+    sets.save_page_layout(&catalog, &built, &[edit(edited.clone())])
+        .await?;
+    assert_eq!(
+        load_page(&catalog, app, "Home").await?.unwrap().layout,
+        built.layout
+    );
+    for (layout, named) in [
+        (
+            json!({ "type": "action", "action_name": "Notify", "rndid": "b2" }),
+            "`Notify`".to_owned(),
+        ),
+        (
+            json!({ "type": "view", "view": "Missing", "state": "shared" }),
+            "`Missing`".to_owned(),
+        ),
+        (
+            json!({ "type": "library", "library_id": stray.0.to_string() }),
+            format!("`{}`", stray.0),
+        ),
+    ] {
+        let mut refused = built.clone();
+        refused.layout = layout;
+        let err = sets
+            .save_page_layout(&catalog, &refused, &[edit(lost.clone())])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("page `Home`") && err.contains(&named), "{err}");
+    }
+    // …and one refused inside its transaction.
+    let err = sets
+        .save_page_layout(&catalog, &Page::new(app, "Home"), &[edit(lost)])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("already has a page named `Home`"), "{err}");
+    assert_eq!(
+        load_library_item(&catalog, app, item.id)
+            .await?
+            .unwrap()
+            .layout,
+        edited
+    );
     Ok(())
 }

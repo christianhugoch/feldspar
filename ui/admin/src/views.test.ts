@@ -367,6 +367,8 @@ describe("creating and renaming a view", () => {
       embedded_in: ["Filter books"],
       linked_from: [],
       pages: ["BooksOverview"],
+      library: [],
+      places: [],
     });
     expect(lines[0]).toContain('the view "Filter books"');
     expect(lines[1]).toContain('the page "BooksOverview"');
@@ -375,6 +377,8 @@ describe("creating and renaming a view", () => {
       embedded_in: [],
       linked_from: [],
       pages: [],
+      library: [],
+      places: [],
     });
     expect(none).toHaveLength(1);
     expect(none[0]).toContain("Nothing");

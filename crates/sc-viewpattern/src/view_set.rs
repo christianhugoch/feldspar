@@ -24,6 +24,9 @@ use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use serde_json::Value as Json;
 
+use sc_app::Application;
+
+use crate::layout::{self, PageReferences, application_menu, menu_entries_for, referenced_pages};
 use crate::library::{
     self, LibraryItem, LibraryItemId, LibraryReferences, LibraryUpdate, collect_library_ids,
 };
@@ -112,6 +115,79 @@ impl ViewSet {
                 .library
                 .iter()
                 .filter(|i| i.id != id && places(self.library_placed_by_item(i)))
+                .map(|i| i.name.clone())
+                .collect(),
+        }
+    }
+
+    /// What names the page `name` (TODO "The builder" §10): `app`'s menu
+    /// entries, the roles whose home page it is, and the views, other pages and
+    /// library items whose layouts embed or link to it. `roles` is every role as
+    /// `(id, name)`, which is how a role named in `root_page_for_roles` by id is
+    /// given its name.
+    pub fn page_references(
+        &self,
+        app: &Application,
+        name: &str,
+        roles: &[(u8, String)],
+    ) -> PageReferences {
+        let mut home: Vec<(u8, String)> = Vec::new();
+        let mut claim = |role: Option<&(u8, String)>, written: String| {
+            let entry = role.cloned().unwrap_or((u8::MAX, written));
+            if !home.contains(&entry) {
+                home.push(entry);
+            }
+        };
+        if let Some(Json::Object(root_pages)) = app.framework.config.get(crate::CFG_ROOT_PAGES) {
+            for (role, page) in root_pages {
+                if page.as_str() == Some(name) {
+                    let found = role
+                        .parse::<u8>()
+                        .ok()
+                        .and_then(|id| roles.iter().find(|r| r.0 == id));
+                    claim(found, role.clone());
+                }
+            }
+        }
+        if let Some(page) = self.page(name) {
+            for role in page
+                .attributes
+                .get("root_page_for_roles")
+                .and_then(Json::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let written = role
+                    .as_str()
+                    .map_or_else(|| role.to_string(), str::to_owned);
+                let found = roles.iter().find(|(id, role_name)| {
+                    role.as_u64() == Some(u64::from(*id))
+                        || written == id.to_string()
+                        || written == *role_name
+                });
+                claim(found, written);
+            }
+        }
+        home.sort();
+        PageReferences {
+            menu: menu_entries_for(application_menu(app), name),
+            home_page_for: home.into_iter().map(|(_, role)| role).collect(),
+            views: self
+                .views
+                .iter()
+                .filter(|v| v.configuration.values().any(|c| names_page(c, name)))
+                .map(|v| v.name.clone())
+                .collect(),
+            pages: self
+                .pages
+                .iter()
+                .filter(|p| p.name != name && names_page(&p.layout, name))
+                .map(|p| p.name.clone())
+                .collect(),
+            library: self
+                .library
+                .iter()
+                .filter(|i| names_page(&i.layout, name))
                 .map(|i| i.name.clone())
                 .collect(),
         }
@@ -260,6 +336,32 @@ impl ViewSets {
         Ok(deleted)
     }
 
+    /// [`layout::save_view_with_library_updates`], then reload the view's
+    /// application once.
+    pub async fn save_view_layout(
+        &self,
+        catalog: &Catalog,
+        view: &View,
+        updates: &[LibraryUpdate],
+    ) -> Result<View> {
+        let saved = layout::save_view_with_library_updates(catalog, view, updates).await?;
+        self.reload(catalog, saved.application).await?;
+        Ok(saved)
+    }
+
+    /// [`layout::save_page_with_library_updates`], then reload the page's
+    /// application once.
+    pub async fn save_page_layout(
+        &self,
+        catalog: &Catalog,
+        page: &Page,
+        updates: &[LibraryUpdate],
+    ) -> Result<Page> {
+        let saved = layout::save_page_with_library_updates(catalog, page, updates).await?;
+        self.reload(catalog, saved.application).await?;
+        Ok(saved)
+    }
+
     /// [`library::apply_library_updates`], then reload the application.
     pub async fn apply_library_updates(
         &self,
@@ -295,6 +397,11 @@ impl ViewSets {
             }
         }
     }
+}
+
+/// Whether a configuration value or a layout embeds or links to the page `name`.
+fn names_page(value: &Json, name: &str) -> bool {
+    referenced_pages(value).iter().any(|p| p == name)
 }
 
 fn poisoned() -> Error {

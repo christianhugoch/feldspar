@@ -320,6 +320,54 @@ pub trait ViewRuntime: Send + Sync {
     /// (TODO "The builder" 5.5). Like a builder step's options, handed on whole
     /// and never looked inside.
     async fn page_builder_options(&self, page: &Page, ctx: ViewContext<'_>) -> Result<Json>;
+
+    /// v1's `POST /field/preview/:table/:field/:fieldview`
+    /// (`server/routes/fields.ts`; TODO "The builder" §10): the fieldview
+    /// `fieldview` of `field` — a field of `table`, or `key.field` through one
+    /// of its keys — rendered over the first row the caller can read, for the
+    /// builder's canvas. `body` is v1's `{ configuration, row_id }`. The HTML
+    /// v1's route sends, empty where it sends nothing.
+    async fn builder_field_preview(
+        &self,
+        table: &str,
+        field: &str,
+        fieldview: &str,
+        body: &Json,
+        ctx: ViewContext<'_>,
+    ) -> Result<String>;
+
+    /// v1's `POST /field/fieldviewcfgform/:table?accept=json`: a fieldview's
+    /// `configFields` as v1's form JSON. `body` is v1's (`field_name`,
+    /// `fieldview`, `type`, `join_field`, `agg_outcome_type`, …).
+    async fn builder_fieldview_config(
+        &self,
+        table: &str,
+        body: &Json,
+        ctx: ViewContext<'_>,
+    ) -> Result<Json>;
+
+    /// v1's `POST /view/:name/preview`: the view `view` rendered with `state`
+    /// for the canvas, each required state field it lacks taken from the first
+    /// row the caller can read.
+    async fn builder_view_preview(
+        &self,
+        view: &str,
+        state: &Json,
+        ctx: ViewContext<'_>,
+    ) -> Result<String>;
+
+    /// v1's `POST /page/:name/preview`: the page `page` rendered for the canvas,
+    /// with no layout around it.
+    async fn builder_page_preview(&self, page: &str, ctx: ViewContext<'_>) -> Result<String>;
+
+    /// v1's `GET /api/:table/distinct/:field`, as the builder's *Tabs* element
+    /// asks it: `{ success: [...] }`, over the application's tables only.
+    async fn builder_distinct_values(
+        &self,
+        table: &str,
+        field: &str,
+        ctx: ViewContext<'_>,
+    ) -> Result<Json>;
 }
 
 /// The installed runtime.

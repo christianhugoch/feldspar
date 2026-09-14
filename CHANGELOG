@@ -2,6 +2,151 @@
 
 Changes in reverse chronological order.
 
+## The builder, Phase 6: the admin API
+
+Everything the builder will call now exists on the admin API, and nothing it
+does not. A layout from a view's builder step or from a page is a save, checked
+as one, and it writes the library edits it carries in the same transaction.
+The library can be listed, read, created, renamed, edited in place and deleted.
+A page reports what names it. The canvas's previews and lookups are v1's own
+server routes, ported into the worker. The builder itself, its routes and the
+admin screens are Phases 7 to 9.
+
+- **Layout saves (6.1)**, in the new `sc-viewpattern/src/layout.rs`.
+  - `saveViewLayout` (`PUT /api/applications/:id/views/:name/layout`) takes
+    `{ step, columns, layout, libraryUpdates? }`.
+    - The step's own answer says where the layout lands: `merge_view_layout` is
+      the `step.builder` branch of v1's `Workflow.run`, under the step's
+      `contextField` or at the top level.
+    - A form step is refused, naming the view and the step.
+    - Then every check `saveView` makes: `validate_view`, and the replay of the
+      pattern's other steps.
+  - `savePageLayout` (`PUT …/pages/:name/layout`) takes
+    `{ layout, libraryUpdates? }` and replaces the page's layout.
+    - `validate_page` checks the page. Its actions must be v1's page actions
+      (`PAGE_ACTIONS`, which is `GoBack`) or the application's triggers.
+      Every view it embeds or links to must be one of the application's.
+  - **Both** refuse a `library` segment naming an item the application does not
+    have, in the layout or in an edited item.
+    - They write the view or page and its `libraryUpdates` in one `SharedTx`
+      (`save_view_with_library_updates` / `save_page_with_library_updates`),
+      so a save refused after the edits were written leaves none of them.
+    - `ViewSets::save_view_layout` / `save_page_layout` reload the set once.
+  - `store::write_row` takes an optional transaction, so the row writes can
+    join it.
+  - **`savePage` now runs `validate_page` too.**
+    - The spec called "every embedded view exists" an existing check of
+      `savePage`. It was not one; it is now.
+    - The store's `save_page` still makes only the name, application and role
+      checks, because the restore saves a page before it knows whether its
+      views came and reports the ones that did not.
+  - **`Clear` joins `VIEW_ACTIONS`.** It is Filter's built-in action, a link or
+    button calling `clear_state` in the browser. Without it, saving a Filter
+    with a *Clear* button (the definition of done's step 3) was refused.
+- **What names a page (6.2).**
+  - `pageReferences` (`GET …/pages/:name/references`) answers, from
+    `ViewSet::page_references`:
+    - `menu`: menu entries' labels, nested under headers too;
+    - `home_page_for`: role names, from the `root_pages` setting and the page's
+      `root_page_for_roles`;
+    - `views`, `pages`, `library`: what embeds a `page` segment or links to the
+      page (`referenced_pages`, as v1's `extractFromLayout` reads a `link`);
+    - `places`: the library items its own layout places.
+  - A rename through `savePage` refuses nothing and rewrites nothing. The test
+    shows the references before and after one.
+  - `viewReferences` gains `library` (items whose layouts show the view) and
+    `places` (items the view places), which 9.5's warnings need.
+- **The library endpoints (6.3).**
+  - `listLibrary` answers each item with `used_by`.
+  - `getLibraryItem` reads the row fresh, as v1's `/library/content/:id` does.
+  - `createLibraryItem` (201) refuses a duplicate name or a placement of an
+    unknown item.
+  - `saveLibraryItem` changes name, icon and description; the layout is the
+    builder's.
+  - `saveLibraryUpdates` (`POST …/library/updates`, v1's body) is transactional.
+  - `deleteLibraryItem` answers **409** with the `references` beside the
+    `error` when something places the item, unless `?confirm=true`.
+    - The generated client's `clientError` reads only `error`, so a screen
+      should look at `used_by` before it deletes.
+  - Every one refuses an application that is not Saltcorn UI.
+- **The canvas's calls (6.4).**
+  - `ViewRuntime` gains `builder_field_preview`, `builder_fieldview_config`,
+    `builder_view_preview`, `builder_page_preview` and
+    `builder_distinct_values`.
+  - `Configurer` makes them as the admin; `ModuleViewRuntime` sends them as the
+    worker ops `view_builder_*`.
+  - They are ported into `ui/saltcorn-ui/src/builder-routes.ts`, each headed
+    with its v1 route:
+    - `builderFieldPreview`, from `fields.ts` `/preview`;
+    - `builderFieldviewConfig`, from `/fieldviewcfgform`, JSON answer only,
+      since the builder never asks for the HTML form;
+    - `builderViewPreview`, from `view.ts`;
+    - `builderPagePreview`, from `page.ts`, the layout rendered with nothing
+      around it, as `sendWrap` does for an XHR. v1's maintenance-mode check is
+      left out, because there is no maintenance mode here.
+    - `builderDistinctValues`, from `api.ts`.
+  - The endpoints are `builderFieldPreview`, `builderFieldviewConfigForm`,
+    `builderViewPreview` and `builderPagePreview` (`POST …/builder/…`, previews
+    answering `{ html }`), and `builderDistinctValues`
+    (`GET …/builder/distinct/:table/:field`, v1's `{ success }`).
+    - The handler refuses a table outside the subset, or a view or page the
+      application lacks, by name, before the worker is asked.
+  - **Inside the subset.** The shim's `Table.findOne` by name is not
+    subset-restricted, so the ports find tables through `Table.find`. A join
+    or a key to a table outside the application previews nothing and offers
+    no values.
+  - The snapshot's fields are read-only, and v1's routes write to the field
+    they found. So the ports wrap it in the host's `Field`, which has v1's
+    `fill_fkey_options` and `distinct_values(req, where)`. The shim's own
+    `distinct_values` takes `where` alone.
+  - The host's `Field` gains v1's `fill_table`, which `calcfldViewConfig` calls
+    on every field. The config form failed without it.
+- **Clients (6.5).** `ui/admin/src/client.ts` and `ui/ide/src/client.ts` are
+  regenerated. Whether `ui/builder` gets a copy or a shared import is 7.1's
+  decision, as the TODO says. `ui/admin`'s `views.test.ts` fixtures gain the
+  two new reference fields.
+- **Tests (6.6).**
+  - `sc-viewpattern` unit tests in `layout.rs`:
+    - the merge rule, under a `contextField` and refused over a non-object;
+    - library placements, and an edited item's;
+    - page actions and views;
+    - `referenced_pages`;
+    - menu entries under a header.
+  - `library_store::a_layout_save_and_its_library_edits_commit_together_or_not_at_all`,
+    over Postgres:
+    - a view layout and its edit written together, moving the generation once;
+    - a save refused **inside** the transaction (a name taken) leaving the edit
+      unapplied, for a view and for a page;
+    - an unknown item placed, edited or placed by an edit, each refused;
+    - a page's action, view and item refusals.
+  - `saltcorn_ui_configure::the_builder_saves_layouts_keeps_the_library_and_previews`,
+    over HTTP with the runtime:
+    - a Show's layout saved and served on the subdomain;
+    - the four refusals;
+    - the library's six endpoints, including the transaction over HTTP, the
+      409 and `confirm=true`, after which the place renders blank;
+    - a page's layout and its refusals, and `savePage` refusing a missing view;
+    - `pageReferences` with menu, home page, a linking page and `places`, then
+      a rename that leaves the old references pointing at the old name;
+    - the previews and distinct values, and the subset refusals;
+    - an application of the `code` framework refused on all fourteen calls.
+    - A table made through the tables API has no default key, so the test
+      gives `books` an integer one for the Show to select by.
+  - `saltcorn_ui_render::the_builder_canvas_calls_answer_their_goldens`, over
+    the BooksDB import:
+    - nine goldens in `fixtures/saltcorn-ui-golden/builder-*`: a field as text,
+      through a join, as a key's select and at a given row; *Show Books*; the
+      page *BooksOverview*; Date's `format` configuration form; and the
+      distinct values of a key and of a number;
+    - then, with `Publishers` dropped from the application, the join previews
+      nothing, the key offers nothing and `Publishers` is refused by name.
+  - `bundle_shape`: the five new exports.
+- **Not done:**
+  - the admin screens (Phase 9);
+  - the builder bundle and its routes (Phases 7, 8).
+  - The goldens were recorded by this server. v1's own answers to these five
+    routes were not recorded, unlike the builder options in Phase 5.
+
 ## The builder, Phase 5: the builder's options, from the worker
 
 The worker now computes the options object v1's builder is opened with, using

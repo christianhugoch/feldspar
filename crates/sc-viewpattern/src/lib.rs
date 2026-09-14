@@ -47,6 +47,7 @@
 mod bundle;
 mod configure;
 mod framework;
+mod layout;
 mod library;
 mod patterns;
 mod plugins;
@@ -66,6 +67,11 @@ pub use framework::{
     ASSET_VERSION_TAG, CFG_ROOT_PAGES, CFG_SITE_NAME, DERIVED_CONFIG_KEYS, SaltcornUiFactory,
     SaltcornUiFramework, check_saltcorn_ui_config, install_saltcorn_ui, saltcorn_ui_config_spec,
     saltcorn_ui_csp, view_sets,
+};
+pub use layout::{
+    PAGE_ACTIONS, PageReferences, check_library_placements, check_page_actions, check_page_views,
+    check_update_placements, merge_view_layout, referenced_pages, save_page_with_library_updates,
+    save_view_with_library_updates, validate_page,
 };
 pub use library::{
     LibraryItem, LibraryItemId, LibraryReferences, LibraryUpdate, apply_library_updates,

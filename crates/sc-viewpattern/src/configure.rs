@@ -14,9 +14,10 @@
 //! framework builds it with, because the worker holds one snapshot per
 //! generation and it must be the same one whichever of the two sent it first.
 //!
-//! What is not replayed is a **builder** step: its layout is edited by
-//! `ui/builder`, which is the next milestone, and until then it is carried
-//! through a save unchanged.
+//! What is not replayed is a **builder** step: its layout is the builder's, and
+//! is checked by the save it arrives through (TODO "The builder" §6). The
+//! builder's own calls — its options, and the previews and lookups its canvas
+//! makes (§10) — are made here too, as the admin, over the same snapshot.
 
 use std::sync::Arc;
 
@@ -159,6 +160,78 @@ impl<'a> Configurer<'a> {
             schema: Some(&schema),
         };
         self.runtime.page_builder_options(page, ctx).await
+    }
+
+    /// A fieldview rendered for the builder's canvas (TODO "The builder" §10).
+    pub async fn field_preview(
+        &self,
+        table: &str,
+        field: &str,
+        fieldview: &str,
+        body: &Json,
+    ) -> Result<String> {
+        let schema = schema_snapshot(self.catalog)?;
+        let ctx = ViewContext {
+            snapshot: &self.snapshot,
+            request: &self.request,
+            hosts: self.hosts(),
+            schema: Some(&schema),
+        };
+        self.runtime
+            .builder_field_preview(table, field, fieldview, body, ctx)
+            .await
+    }
+
+    /// A fieldview's configuration form, as v1's form JSON, for the builder.
+    pub async fn fieldview_config(&self, table: &str, body: &Json) -> Result<Json> {
+        let schema = schema_snapshot(self.catalog)?;
+        let ctx = ViewContext {
+            snapshot: &self.snapshot,
+            request: &self.request,
+            hosts: self.hosts(),
+            schema: Some(&schema),
+        };
+        self.runtime
+            .builder_fieldview_config(table, body, ctx)
+            .await
+    }
+
+    /// An embedded view rendered for the builder's canvas with `state`.
+    pub async fn view_preview(&self, view: &str, state: &Json) -> Result<String> {
+        let schema = schema_snapshot(self.catalog)?;
+        let ctx = ViewContext {
+            snapshot: &self.snapshot,
+            request: &self.request,
+            hosts: self.hosts(),
+            schema: Some(&schema),
+        };
+        self.runtime.builder_view_preview(view, state, ctx).await
+    }
+
+    /// An embedded page rendered for the builder's canvas.
+    pub async fn page_preview(&self, page: &str) -> Result<String> {
+        let schema = schema_snapshot(self.catalog)?;
+        let ctx = ViewContext {
+            snapshot: &self.snapshot,
+            request: &self.request,
+            hosts: self.hosts(),
+            schema: Some(&schema),
+        };
+        self.runtime.builder_page_preview(page, ctx).await
+    }
+
+    /// A field's distinct values, as v1's `{ success }`, for the builder's *Tabs*.
+    pub async fn distinct_values(&self, table: &str, field: &str) -> Result<Json> {
+        let schema = schema_snapshot(self.catalog)?;
+        let ctx = ViewContext {
+            snapshot: &self.snapshot,
+            request: &self.request,
+            hosts: self.hosts(),
+            schema: Some(&schema),
+        };
+        self.runtime
+            .builder_distinct_values(table, field, ctx)
+            .await
     }
 
     /// Replay `view`'s configuration through its pattern's steps, refusing the

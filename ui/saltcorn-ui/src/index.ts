@@ -19,7 +19,14 @@ import Table from "@saltcorn/data/models/table";
 import View from "@saltcorn/data/models/view";
 import { getState } from "@saltcorn/data/db/state";
 export { stateDefaults } from "./state-defaults.js";
-export { pageBuilderOptions } from "./builder-routes.js";
+export {
+  pageBuilderOptions,
+  builderFieldPreview,
+  builderFieldviewConfig,
+  builderViewPreview,
+  builderPagePreview,
+  builderDistinctValues,
+} from "./builder-routes.js";
 
 import * as markupIndex from "../vendor/saltcorn-markup/index.js";
 import * as markupTags from "../vendor/saltcorn-markup/tags.js";

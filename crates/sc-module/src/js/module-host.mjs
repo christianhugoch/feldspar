@@ -2850,6 +2850,16 @@ class FormField {
     this.options = options;
   }
 
+  /** v1's `fill_table` (models/field.ts): the field's own table, when it was
+   * not given one. `calcfldViewConfig` calls it on every field it builds a
+   * configuration form for. The host's `Table.findOne` takes the name a
+   * field's `table_id` holds. */
+  fill_table() {
+    if (!this.table && this.table_id) {
+      this.table = callApi(`field.fill_table of ${this.name}`).Table.findOne({ name: this.table_id });
+    }
+  }
+
   get form_name() {
     return this.parent_field ? `${this.parent_field}_${this.name}` : this.name;
   }
@@ -3489,6 +3499,39 @@ async function viewPageBuilderOptions({ page, request }) {
   return runtime.pageBuilderOptions(page, req);
 }
 
+/** The builder canvas's calls (TODO "The builder" §10): v1's server routes,
+ * ported in the bundle's `builder-routes.ts`, run as the admin over the
+ * application's snapshot. Each answers what v1's route sends. */
+async function viewBuilderFieldPreview({ table, field, fieldview, body, request }) {
+  const runtime = await requireViewRuntime();
+  const { req } = viewRequest(request, currentViews());
+  return runtime.builderFieldPreview(table, field, fieldview, body || {}, req);
+}
+
+async function viewBuilderFieldviewConfig({ table, body, request }) {
+  const runtime = await requireViewRuntime();
+  const { req } = viewRequest(request, currentViews());
+  return runtime.builderFieldviewConfig(table, body || {}, req);
+}
+
+async function viewBuilderViewPreview({ view, state, request }) {
+  const runtime = await requireViewRuntime();
+  const { req, res } = viewRequest(request, currentViews());
+  return runtime.builderViewPreview(view, state || {}, req, res);
+}
+
+async function viewBuilderPagePreview({ page, request }) {
+  const runtime = await requireViewRuntime();
+  const { req, res } = viewRequest(request, currentViews());
+  return runtime.builderPagePreview(page, req, res);
+}
+
+async function viewBuilderDistinctValues({ table, field, request }) {
+  const runtime = await requireViewRuntime();
+  const { req } = viewRequest(request, currentViews());
+  return runtime.builderDistinctValues(table, field, req);
+}
+
 /** A pattern's `initial_config` over a table (10.2). */
 async function viewInitialConfig({ pattern, table, view }) {
   const runtime = await requireViewRuntime();
@@ -3599,6 +3642,16 @@ async function handle(request) {
       return await viewConfigStep(request);
     case "view_page_builder_options":
       return await viewPageBuilderOptions(request);
+    case "view_builder_field_preview":
+      return await viewBuilderFieldPreview(request);
+    case "view_builder_fieldview_config":
+      return await viewBuilderFieldviewConfig(request);
+    case "view_builder_view_preview":
+      return await viewBuilderViewPreview(request);
+    case "view_builder_page_preview":
+      return await viewBuilderPagePreview(request);
+    case "view_builder_distinct_values":
+      return await viewBuilderDistinctValues(request);
     case "view_initial_config":
       return await viewInitialConfig(request);
     case "view_references":

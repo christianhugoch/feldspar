@@ -9,7 +9,7 @@
 //! is an error naming the table and the column, never a silently defaulted field.
 
 use sc_app::{AppId, Application, load_application};
-use sc_catalog::Catalog;
+use sc_catalog::{Catalog, SharedTx};
 use sc_db::Row;
 use sc_error::{Error, Result};
 use sc_query::{Assignment, Delete, Expr, Insert, Select, Source, Statement, Value};
@@ -50,6 +50,17 @@ pub async fn validate_view(catalog: &Catalog, view: &View) -> Result<Application
 /// `min_role` no role defines; a name another view of the application already
 /// has; and an id that belongs to a view of a different application.
 pub async fn save_view(catalog: &Catalog, view: &View) -> Result<View> {
+    save_view_on(catalog, None, view).await
+}
+
+/// [`save_view`], writing inside `tx` when one is given, so a layout save and
+/// the library edits it carries commit together (TODO "The builder" §6). The
+/// checks read outside it.
+pub(crate) async fn save_view_on(
+    catalog: &Catalog,
+    tx: Option<&SharedTx>,
+    view: &View,
+) -> Result<View> {
     let app = validate_view(catalog, view).await?;
 
     let existing = load_one(
@@ -106,7 +117,15 @@ pub async fn save_view(catalog: &Catalog, view: &View) -> Result<View> {
             .map_or(Value::Null, |s| Value::Json(s.clone())),
         Value::Json(Json::Object(view.attributes.clone())),
     ];
-    write_row(catalog, VIEWS_TABLE, &columns, values, existing.is_some()).await?;
+    write_row(
+        catalog,
+        tx,
+        VIEWS_TABLE,
+        &columns,
+        values,
+        existing.is_some(),
+    )
+    .await?;
     Ok(view.clone())
 }
 
@@ -139,6 +158,15 @@ pub async fn delete_view(catalog: &Catalog, application: AppId, name: &str) -> R
 /// [`PageId`] already exists. Refused for the same reasons a view is, less the
 /// two that are about a pattern and a table.
 pub async fn save_page(catalog: &Catalog, page: &Page) -> Result<Page> {
+    save_page_on(catalog, None, page).await
+}
+
+/// [`save_page`], writing inside `tx` when one is given (see [`save_view_on`]).
+pub(crate) async fn save_page_on(
+    catalog: &Catalog,
+    tx: Option<&SharedTx>,
+    page: &Page,
+) -> Result<Page> {
     check_name("page", &page.name)?;
     let app = require_application(catalog, page.application, "page", &page.name).await?;
     check_role(catalog, "page", &page.name, page.min_role).await?;
@@ -188,7 +216,15 @@ pub async fn save_page(catalog: &Catalog, page: &Page) -> Result<Page> {
         Value::Int(i64::from(page.min_role)),
         Value::Json(Json::Object(page.attributes.clone())),
     ];
-    write_row(catalog, PAGES_TABLE, &columns, values, existing.is_some()).await?;
+    write_row(
+        catalog,
+        tx,
+        PAGES_TABLE,
+        &columns,
+        values,
+        existing.is_some(),
+    )
+    .await?;
     Ok(page.clone())
 }
 
@@ -239,7 +275,7 @@ pub async fn delete_application_views_pages_and_library(
 }
 
 /// The application a view or page is being saved into, or the refusal naming it.
-async fn require_application(
+pub(crate) async fn require_application(
     catalog: &Catalog,
     id: AppId,
     kind: &str,
@@ -254,7 +290,7 @@ async fn require_application(
 }
 
 /// Refuse a `min_role` that is out of range or that no role defines.
-async fn check_role(catalog: &Catalog, kind: &str, name: &str, role: u8) -> Result<()> {
+pub(crate) async fn check_role(catalog: &Catalog, kind: &str, name: &str, role: u8) -> Result<()> {
     if sc_auth::role_in_range(role) && sc_auth::load_role(catalog, role).await?.is_some() {
         return Ok(());
     }
@@ -289,9 +325,11 @@ pub(crate) async fn delete_where(catalog: &Catalog, table: &str, filter: Expr) -
     Ok(existed)
 }
 
-/// Insert a row, or update the one with the same id.
+/// Insert a row, or update the one with the same id — inside `tx` when one is
+/// given.
 pub(crate) async fn write_row(
     catalog: &Catalog,
+    tx: Option<&SharedTx>,
     table: &str,
     columns: &[&str],
     values: Vec<Value>,
@@ -310,14 +348,22 @@ pub(crate) async fn write_row(
         let id = id.ok_or_else(|| Error::msg(format!("a `{table}` write has no id")))?;
         let update =
             sc_query::Update::new(table, assignments).filter(Expr::col(COL_ID).eq(Expr::Lit(id)));
-        run(catalog, Statement::from(update)).await
+        run_on(catalog, tx, Statement::from(update)).await
     } else {
         let insert = Insert::row(
             table,
             columns.iter().map(|c| (*c).to_owned()).collect(),
             values.into_iter().map(Expr::Lit).collect(),
         );
-        run(catalog, Statement::from(insert)).await
+        run_on(catalog, tx, Statement::from(insert)).await
+    }
+}
+
+/// [`run`], or the same statement inside `tx`.
+async fn run_on(catalog: &Catalog, tx: Option<&SharedTx>, statement: Statement) -> Result<()> {
+    match tx {
+        Some(tx) => tx.run(None, &statement).await.map(|_| ()),
+        None => run(catalog, statement).await,
     }
 }
 

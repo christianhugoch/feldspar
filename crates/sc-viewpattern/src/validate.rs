@@ -87,7 +87,11 @@ pub(crate) fn check_view_shape(
 /// v1's own view actions (§12.1): run by the pattern that renders them — a
 /// form's submit, a link to `/delete/…` — and never by name through a trigger.
 /// The set is fixed; a trigger of the same name cannot take one out of it.
-pub const VIEW_ACTIONS: [&str; 11] = [
+///
+/// `Clear` is Filter's: its builder offers it as a built-in action
+/// (`filter.ts`'s `builtInActions`), and the pattern renders it as a link or a
+/// button calling `clear_state`, in the browser.
+pub const VIEW_ACTIONS: [&str; 12] = [
     "Delete",
     "Save",
     "SaveAndContinue",
@@ -99,6 +103,7 @@ pub const VIEW_ACTIONS: [&str; 11] = [
     "Login",
     "Sign up",
     "Logout",
+    "Clear",
 ];
 
 /// v1's name for an action column that runs its steps in order; each step is

@@ -1828,6 +1828,279 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- The builder (TODO "The builder" §6, §10) --------------------------------
+    // What `ui/builder` calls, and nothing it does not: the two layout saves,
+    // what names a page, the application's library, and the calls the canvas
+    // makes for its previews and lookups — v1's server routes, ported into the
+    // worker and made as the admin. Every one refuses an application that is not
+    // a Saltcorn UI application. The builder's options are not an endpoint: the
+    // builder route renders them into its document.
+
+    // A view's layout from one of its pattern's builder steps (§6): merged into
+    // the configuration where the step keeps it, checked as `saveView` checks —
+    // the store, the replay of the other steps, the actions — and saved with the
+    // library edits it carries in one transaction, moving the generation once.
+    set.register(
+        Endpoint::new(
+            "saveViewLayout",
+            Method::Put,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("views")
+                .param("name", ValueType::Text)
+                .lit("layout"),
+        )
+        .input(view_layout_input_schema())
+        .output(view_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // A page's layout (§6): it replaces the page's, is checked as a page is —
+    // its actions are v1's page actions or the application's triggers, and the
+    // views it shows are the application's — and is saved with its library
+    // edits in one transaction.
+    set.register(
+        Endpoint::new(
+            "savePageLayout",
+            Method::Put,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("pages")
+                .param("name", ValueType::Text)
+                .lit("layout"),
+        )
+        .input(page_layout_input_schema())
+        .output(page_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // What names a page (§10): the menu entries opening it, the roles whose home
+    // page it is, and the views, pages and library items whose layouts show or
+    // link to it — so a rename or a delete can say beforehand what it leaves
+    // pointing at a name that no longer exists. `places` is the other direction:
+    // the library items its own layout places. Nothing is rewritten.
+    set.register(
+        Endpoint::new(
+            "pageReferences",
+            Method::Get,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("pages")
+                .param("name", ValueType::Text)
+                .lit("references"),
+        )
+        .output(page_references_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // The application's library (§8): its items, each with the views, pages
+    // and other items that place it.
+    set.register(
+        Endpoint::new(
+            "listLibrary",
+            Method::Get,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("library"),
+        )
+        .output(TypeSchema::array(listed_library_item_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // One item, read fresh rather than from the set the builder was opened
+    // with: v1's `/library/content/:id`, which a placed instance starts from so
+    // it shows the latest layout.
+    set.register(
+        Endpoint::new(
+            "getLibraryItem",
+            Method::Get,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("library")
+                .param("item", ValueType::Uuid),
+        )
+        .output(library_item_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // v1's `/library/savefrombuilder`: a new item from what the builder
+    // selected. A name the application's library already has is refused naming
+    // it, as is a layout placing an item the application does not have.
+    set.register(
+        Endpoint::new(
+            "createLibraryItem",
+            Method::Post,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("library"),
+        )
+        .input(create_library_item_input_schema())
+        .output(library_item_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Rename an item, or change its icon or description. Its layout is the
+    // builder's, and changes through a layout save or `saveLibraryUpdates`.
+    set.register(
+        Endpoint::new(
+            "saveLibraryItem",
+            Method::Put,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("library")
+                .param("item", ValueType::Uuid),
+        )
+        .input(save_library_item_input_schema())
+        .output(library_item_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // v1's `/library/save-updates`: edits made inside placed items, apart from
+    // any view or page, all or none.
+    set.register(
+        Endpoint::new(
+            "saveLibraryUpdates",
+            Method::Post,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("library")
+                .lit("updates"),
+        )
+        .input(library_updates_input_schema())
+        .output(TypeSchema::struct_of([StructField::new(
+            "updated",
+            TypeSchema::int(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Delete an item. One that something places is refused with `409` and the
+    // `references` beside the error, unless `confirm` is true; what placed it
+    // then renders blank, which is v1's `resolveSegment` behaviour. The answer
+    // names what did.
+    set.register(
+        Endpoint::new(
+            "deleteLibraryItem",
+            Method::Delete,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("library")
+                .param("item", ValueType::Uuid),
+        )
+        .query([QueryParam::new("confirm", ValueType::Bool)])
+        .output(TypeSchema::struct_of([
+            StructField::new("deleted", TypeSchema::bool()),
+            StructField::new("references", library_references_schema()),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // v1's `/field/preview/:table/:field/:fieldview`: a fieldview rendered over
+    // the first row the admin can read, as HTML for the canvas.
+    set.register(
+        Endpoint::new(
+            "builderFieldPreview",
+            Method::Post,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("builder")
+                .lit("field-preview"),
+        )
+        .input(builder_field_preview_input_schema())
+        .output(builder_html_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // v1's `/field/fieldviewcfgform/:table?accept=json`: a fieldview's
+    // configuration fields, as v1's form JSON — which is the builder's to render,
+    // so it is `json` here.
+    set.register(
+        Endpoint::new(
+            "builderFieldviewConfigForm",
+            Method::Post,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("builder")
+                .lit("fieldview-config"),
+        )
+        .input(builder_fieldview_config_input_schema())
+        .output(TypeSchema::json())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // v1's `/view/:name/preview`: an embedded view rendered for the canvas with
+    // the state given.
+    set.register(
+        Endpoint::new(
+            "builderViewPreview",
+            Method::Post,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("builder")
+                .lit("view-preview"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("view", TypeSchema::text()),
+            StructField::new("state", TypeSchema::optional(TypeSchema::json())),
+        ]))
+        .output(builder_html_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // v1's `/page/:name/preview`: an embedded page rendered for the canvas.
+    set.register(
+        Endpoint::new(
+            "builderPagePreview",
+            Method::Post,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("builder")
+                .lit("page-preview"),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "page",
+            TypeSchema::text(),
+        )]))
+        .output(builder_html_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // v1's `/api/:table/distinct/:field`, which the builder's *Tabs* element
+    // asks for a field's values: v1's `{ success: [...] }`, as the admin, for a
+    // table in the application's subset only (§3). v1's public row API behind it
+    // is not a route on the subdomain, and this does not add one.
+    set.register(
+        Endpoint::new(
+            "builderDistinctValues",
+            Method::Get,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("builder")
+                .lit("distinct")
+                .param("table", ValueType::Text)
+                .param("field", ValueType::Text),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "success",
+            TypeSchema::json(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // The view patterns a view may be saved with: the registry save checks
     // against, described by the view runtime where one is running. Server-wide
     // rather than per application, because a pattern is the server's.
@@ -3974,12 +4247,17 @@ fn view_config_step_schema() -> TypeSchema {
 }
 
 /// What refers to a view by name: the views embedding it, the views linking to
-/// it, and the pages showing it.
+/// it, the pages and library items showing it — and the library items it places.
 fn view_references_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("embedded_in", TypeSchema::array(TypeSchema::text())),
         StructField::new("linked_from", TypeSchema::array(TypeSchema::text())),
         StructField::new("pages", TypeSchema::array(TypeSchema::text())),
+        // The library items whose layouts show or link to it (TODO "The
+        // builder" §8).
+        StructField::new("library", TypeSchema::array(TypeSchema::text())),
+        // The other direction: the library items its own layout places.
+        StructField::new("places", TypeSchema::array(TypeSchema::text())),
     ])
 }
 
@@ -4006,6 +4284,155 @@ fn page_schema() -> TypeSchema {
 /// The body `savePage` takes.
 fn page_input_schema() -> TypeSchema {
     TypeSchema::Struct(page_fields())
+}
+
+/// One of v1's in-place edits to a placed library item: the item, and its whole
+/// new layout.
+fn library_update_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("library_id", TypeSchema::uuid()),
+        StructField::new("layout", TypeSchema::json()),
+    ])
+}
+
+/// The body `saveViewLayout` takes: the builder step, counting from 0, what the
+/// builder wrote for it (v1's `columns` and `layout`), and its edits to the
+/// library items the layout places.
+fn view_layout_input_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("step", TypeSchema::int()),
+        StructField::new("columns", TypeSchema::json()),
+        StructField::new("layout", TypeSchema::json()),
+        StructField::new(
+            "libraryUpdates",
+            TypeSchema::optional(TypeSchema::array(library_update_schema())),
+        ),
+    ])
+}
+
+/// The body `savePageLayout` takes: the page's new layout and the library edits
+/// it carries.
+fn page_layout_input_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("layout", TypeSchema::json()),
+        StructField::new(
+            "libraryUpdates",
+            TypeSchema::optional(TypeSchema::array(library_update_schema())),
+        ),
+    ])
+}
+
+/// What names a page: the menu entries' labels, the roles (by name) whose home
+/// page it is, and the views, pages and library items showing or linking to it —
+/// and the library items its own layout places.
+fn page_references_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("menu", TypeSchema::array(TypeSchema::text())),
+        StructField::new("home_page_for", TypeSchema::array(TypeSchema::text())),
+        StructField::new("views", TypeSchema::array(TypeSchema::text())),
+        StructField::new("pages", TypeSchema::array(TypeSchema::text())),
+        StructField::new("library", TypeSchema::array(TypeSchema::text())),
+        StructField::new("places", TypeSchema::array(TypeSchema::text())),
+    ])
+}
+
+/// What places a library item, by name: views, pages and other items, each
+/// directly or through an item they place.
+fn library_references_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("views", TypeSchema::array(TypeSchema::text())),
+        StructField::new("pages", TypeSchema::array(TypeSchema::text())),
+        StructField::new("library", TypeSchema::array(TypeSchema::text())),
+    ])
+}
+
+/// A library item as returned: v1's `{ name, icon, layout }`, with this server's
+/// UUID id, description and attributes. The layout is v1's, untouched.
+fn library_item_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("id", TypeSchema::uuid()),
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("icon", TypeSchema::text()),
+        StructField::new("layout", TypeSchema::json()),
+        StructField::new("attributes", TypeSchema::json()),
+    ])
+}
+
+/// A library item as `listLibrary` returns it: [`library_item_schema`] and what
+/// places it.
+fn listed_library_item_schema() -> TypeSchema {
+    let TypeSchema::Struct(mut fields) = library_item_schema() else {
+        unreachable!("library_item_schema is a struct")
+    };
+    fields.push(StructField::new("used_by", library_references_schema()));
+    TypeSchema::Struct(fields)
+}
+
+/// The body `createLibraryItem` takes: v1's `savefrombuilder` body, and a
+/// description.
+fn create_library_item_input_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("icon", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("description", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("layout", TypeSchema::json()),
+    ])
+}
+
+/// The body `saveLibraryItem` takes: the name, and the icon and description when
+/// they change.
+fn save_library_item_input_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("icon", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("description", TypeSchema::optional(TypeSchema::text())),
+    ])
+}
+
+/// The body `saveLibraryUpdates` takes: v1's `save-updates` body.
+fn library_updates_input_schema() -> TypeSchema {
+    TypeSchema::struct_of([StructField::new(
+        "libraryUpdates",
+        TypeSchema::array(library_update_schema()),
+    )])
+}
+
+/// A preview, as the HTML v1's route sends for the canvas.
+fn builder_html_schema() -> TypeSchema {
+    TypeSchema::struct_of([StructField::new("html", TypeSchema::text())])
+}
+
+/// The body `builderFieldPreview` takes: v1's path (table, field, fieldview)
+/// and v1's body (the fieldview's configuration, and the row a Show previews).
+fn builder_field_preview_input_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("table", TypeSchema::text()),
+        StructField::new("field", TypeSchema::text()),
+        StructField::new("fieldview", TypeSchema::text()),
+        StructField::new("configuration", TypeSchema::optional(TypeSchema::json())),
+        StructField::new("row_id", TypeSchema::optional(TypeSchema::json())),
+    ])
+}
+
+/// The body `builderFieldviewConfigForm` takes: v1's path (the table) and v1's
+/// body, whose members say which kind of column asks — a field, a join field or
+/// an aggregation.
+fn builder_fieldview_config_input_schema() -> TypeSchema {
+    let optional = |name: &str| StructField::new(name, TypeSchema::optional(TypeSchema::text()));
+    TypeSchema::struct_of([
+        StructField::new("table", TypeSchema::text()),
+        optional("field_name"),
+        optional("fieldview"),
+        optional("type"),
+        optional("join_field"),
+        optional("join_fieldview"),
+        optional("agg_outcome_type"),
+        optional("agg_fieldview"),
+        optional("agg_field"),
+        optional("mode"),
+        optional("_columndef"),
+    ])
 }
 
 /// A registered view pattern: the name a view's `viewpattern` holds, how the

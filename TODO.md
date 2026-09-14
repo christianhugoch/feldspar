@@ -676,19 +676,19 @@ entry plus its §3 URLs, not a surprise.
 
 ## Phase 6 — The admin API
 
-- [ ] 6.1 `saveViewLayout` and `savePageLayout` (§6): the merge and replace rules, the existing
+- [x] 6.1 `saveViewLayout` and `savePageLayout` (§6): the merge and replace rules, the existing
       save checks, the page's action and view checks, the library-id check, `libraryUpdates` in
       the same transaction, one generation bump.
-- [ ] 6.2 `pageReferences`, and page rename through `savePage` refusing nothing but reporting
+- [x] 6.2 `pageReferences`, and page rename through `savePage` refusing nothing but reporting
       what refers to the old name, as view rename does.
-- [ ] 6.3 The library endpoints (§10): `listLibrary`, `getLibraryItem`, `createLibraryItem`,
+- [x] 6.3 The library endpoints (§10): `listLibrary`, `getLibraryItem`, `createLibraryItem`,
       `saveLibraryItem`, `saveLibraryUpdates`, `deleteLibraryItem` with references.
-- [ ] 6.4 The `builder*` endpoints: `ViewRuntime` gains field preview, fieldview config form,
+- [x] 6.4 The `builder*` endpoints: `ViewRuntime` gains field preview, fieldview config form,
       view preview, page preview and distinct values; `builder-routes.ts` ports v1's routes;
       `ModuleViewRuntime` implements them.
-- [ ] 6.5 Regenerate `ui/admin/src/client.ts` (and the builder's copy of it, or a shared import;
+- [x] 6.5 Regenerate `ui/admin/src/client.ts` (and the builder's copy of it, or a shared import;
       decide in 7.1 and say which).
-- [ ] 6.6 Tests: every refusal naming its subject; the transaction; the previews' and distinct
+- [x] 6.6 Tests: every refusal naming its subject; the transaction; the previews' and distinct
       values' goldens; a non-Saltcorn-UI application refused on every endpoint.
 
 ## Phase 7 — `ui/builder`: vendored and bundled

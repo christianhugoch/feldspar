@@ -1,0 +1,11 @@
+[
+  {
+    "name": "format",
+    "label": "Format",
+    "type": "String",
+    "help": {
+      "topic": "Date format"
+    },
+    "class": "item-menu"
+  }
+]

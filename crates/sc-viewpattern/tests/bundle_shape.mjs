@@ -142,6 +142,16 @@ check(
 );
 check(defaults?.keyframes?.length === 10 && defaults.keyframes[0] === "fadeIn", "stateDefaults.keyframes is not v1's");
 check(typeof rt.pageBuilderOptions === "function", "the bundle does not export pageBuilderOptions");
+// The builder canvas's calls, ported from v1's server routes (TODO "The builder" 6.4).
+for (const name of [
+  "builderFieldPreview",
+  "builderFieldviewConfig",
+  "builderViewPreview",
+  "builderPagePreview",
+  "builderDistinctValues",
+]) {
+  check(typeof rt[name] === "function", `the bundle does not export ${name}`);
+}
 
 // --- and the library is the real thing, not a stub --------------------------
 const { div } = rt.library["@saltcorn/markup/tags"];

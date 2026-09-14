@@ -18,6 +18,12 @@
 //!   before the rename; after it the referring view still names the old name,
 //!   and nothing refers to the new one.
 //!
+//! - **The builder's calls** (TODO "The builder" Phase 6): a layout saved from a
+//!   view's builder step and from a page, each checked like a save and written
+//!   with its library edits in one transaction; the library managed; what names
+//!   a page, before and after a rename; the canvas's previews and lookups; and
+//!   every one of those refused for an application that is not Saltcorn UI.
+//!
 //! Needs the built Saltcorn UI bundle, and skips without it.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -542,5 +548,605 @@ async fn a_view_is_created_configured_refused_and_renamed_without_the_builder()
     assert_eq!(status, StatusCode::OK, "{html}");
     assert!(html.contains("Dune"), "{html}");
 
+    Ok(())
+}
+
+/// Asserts a refusal: a client error whose body names every one of `named`.
+fn refused(status: StatusCode, body: &Value, named: &[&str]) {
+    assert!(status.is_client_error(), "{status} {body}");
+    let text = body.to_string();
+    for name in named {
+        assert!(
+            text.contains(name),
+            "{name} is not named in {status} {text}"
+        );
+    }
+}
+
+/// The builder, Phase 6 (6.1–6.4, 6.6), over HTTP with the view runtime running.
+#[tokio::test]
+async fn the_builder_saves_layouts_keeps_the_library_and_previews() -> sc_error::Result<()> {
+    let Some(bundle) = bundle_dir() else {
+        eprintln!(
+            "skipping: the Saltcorn UI bundle is not built (npm ci && npm run build in ui/saltcorn-ui)"
+        );
+        return Ok(());
+    };
+    let mut server = setup(bundle).await?;
+    let catalog = server._catalog.clone();
+    let client = &mut server.client;
+    table(client, "books").await;
+    table(client, "authors").await;
+    // A Show selects its row by the table's key, and a table is created with
+    // exactly the key its fields declare: an integer one numbers itself.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/books/fields",
+            Some(json!({ "name": "id", "type": "int", "primary_key": true })),
+        )
+        .await;
+    assert!(status.is_success(), "{body}");
+    server
+        .db
+        .client()
+        .await?
+        .batch_execute("INSERT INTO books (title) VALUES ('Dune'), ('Emma')")
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?;
+    // The row a Show is asked for, by whatever key the tables API gave it.
+    let dune: String = server
+        .db
+        .client()
+        .await?
+        .query_one("SELECT id::text FROM books WHERE title = 'Dune'", &[])
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?
+        .get(0);
+    let show_dune = format!("/view/Show%20Book?id={dune}");
+    let app = application(client).await;
+    let api = format!("/api/applications/{app}");
+    let (status, body) = client
+        .send(
+            "POST",
+            &format!("{api}/views"),
+            Some(json!({ "name": "Show Book", "viewpattern": "Show", "table_name": "books", "min_role": 100 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let show_layout = format!("{api}/views/Show%20Book/layout");
+    let title = json!({ "type": "field", "field_name": "title", "fieldview": "as_text" });
+
+    // --- 6.1: a view's layout, from its builder step, lands where the step
+    // keeps it, and the subdomain serves it on the next request.
+    let (status, saved) = client
+        .send(
+            "PUT",
+            &show_layout,
+            Some(json!({
+                "step": 0,
+                "columns": [],
+                "layout": { "above": [{ "type": "blank", "contents": "Book:" }, title] },
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved["configuration"]["layout"]["above"][0]["contents"],
+        "Book:"
+    );
+    assert_eq!(saved["configuration"]["columns"], json!([]));
+    let (status, html) = client.app_get(&show_dune).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(html.contains("Book:") && html.contains("Dune"), "{html}");
+
+    // Each refusal names what it refuses: a form step, an action the
+    // application does not declare, a library item it does not have, and a body
+    // with no layout.
+    let (status, body) = client
+        .send(
+            "POST",
+            &format!("{api}/views"),
+            Some(json!({ "name": "Books", "viewpattern": "List", "table_name": "books", "min_role": 100 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = client
+        .send(
+            "PUT",
+            &format!("{api}/views/Books/layout"),
+            Some(json!({ "step": 1, "columns": [], "layout": {} })),
+        )
+        .await;
+    refused(
+        status,
+        &body,
+        &["view `Books`", "a form rather than a layout"],
+    );
+    let with_layout = |layout: Value| json!({ "step": 0, "columns": [], "layout": layout });
+    let (status, body) = client
+        .send(
+            "PUT",
+            &show_layout,
+            Some(with_layout(
+                json!({ "type": "action", "action_name": "Notify", "rndid": "a1" }),
+            )),
+        )
+        .await;
+    refused(status, &body, &["`Notify`"]);
+    let stray = uuid::Uuid::new_v4().to_string();
+    let (status, body) = client
+        .send(
+            "PUT",
+            &show_layout,
+            Some(with_layout(
+                json!({ "type": "library", "library_id": stray }),
+            )),
+        )
+        .await;
+    refused(status, &body, &[&stray, "view `Show Book`"]);
+    let (status, body) = client
+        .send(
+            "PUT",
+            &show_layout,
+            Some(json!({ "step": 0, "columns": [] })),
+        )
+        .await;
+    refused(status, &body, &["`layout` is required"]);
+
+    // --- 6.3: the library.
+    let library = format!("{api}/library");
+    let (status, item) = client
+        .send(
+            "POST",
+            &library,
+            Some(json!({
+                "name": "Book header",
+                "icon": "fas fa-heading",
+                "layout": { "type": "blank", "contents": "Header" },
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{item}");
+    let id = item["id"].as_str().unwrap().to_owned();
+    let (status, body) = client
+        .send(
+            "POST",
+            &library,
+            Some(json!({ "name": "Book header", "layout": {} })),
+        )
+        .await;
+    refused(
+        status,
+        &body,
+        &["already has a library item named `Book header`"],
+    );
+    let placing = json!({ "type": "library", "library_id": id, "slots": [] });
+
+    // A layout placing it, with an edit made inside it: both saved.
+    let (status, body) = client
+        .send(
+            "PUT",
+            &show_layout,
+            Some(json!({
+                "step": 0,
+                "columns": [],
+                "layout": { "above": [placing, title] },
+                "libraryUpdates": [{ "library_id": id, "layout": { "type": "blank", "contents": "Edited header" } }],
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, fresh) = client.send("GET", &format!("{library}/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{fresh}");
+    assert_eq!(fresh["layout"]["contents"], "Edited header");
+    let (_, html) = client.app_get(&show_dune).await;
+    assert!(
+        html.contains("Edited header") && html.contains("Dune"),
+        "{html}"
+    );
+
+    // The transaction: a save refused for its layout leaves its edit unapplied.
+    let (status, body) = client
+        .send(
+            "PUT",
+            &show_layout,
+            Some(json!({
+                "step": 0,
+                "columns": [],
+                "layout": { "above": [placing, { "type": "action", "action_name": "Notify", "rndid": "a2" }] },
+                "libraryUpdates": [{ "library_id": id, "layout": { "type": "blank", "contents": "Lost" } }],
+            })),
+        )
+        .await;
+    refused(status, &body, &["`Notify`"]);
+    let (_, fresh) = client.send("GET", &format!("{library}/{id}"), None).await;
+    assert_eq!(fresh["layout"]["contents"], "Edited header", "{fresh}");
+
+    // Listed with what places it; renamed; edited on its own.
+    let (status, listed) = client.send("GET", &library, None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed[0]["name"], "Book header", "{listed}");
+    assert_eq!(
+        listed[0]["used_by"],
+        json!({ "views": ["Show Book"], "pages": [], "library": [] })
+    );
+    let (status, renamed) = client
+        .send(
+            "PUT",
+            &format!("{library}/{id}"),
+            Some(json!({ "name": "Title card" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    assert_eq!(
+        (
+            &renamed["name"],
+            &renamed["icon"],
+            &renamed["layout"]["contents"]
+        ),
+        (
+            &json!("Title card"),
+            &json!("fas fa-heading"),
+            &json!("Edited header")
+        )
+    );
+    let (status, body) = client
+        .send(
+            "POST",
+            &format!("{library}/updates"),
+            Some(json!({ "libraryUpdates": [{ "library_id": id, "layout": { "type": "blank", "contents": "Header, again" } }] })),
+        )
+        .await;
+    assert_eq!((status, &body), (StatusCode::OK, &json!({ "updated": 1 })));
+    let (status, body) = client
+        .send(
+            "POST",
+            &format!("{library}/updates"),
+            Some(json!({ "libraryUpdates": [{ "library_id": stray, "layout": {} }] })),
+        )
+        .await;
+    refused(status, &body, &[&stray]);
+    let (status, body) = client
+        .send("GET", &format!("{library}/{stray}"), None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    // --- 6.1: a page's layout, checked as a page is.
+    let page_body = |name: &str, layout: Value, attributes: Value| {
+        json!({
+            "name": name, "title": "Library", "description": "",
+            "layout": layout, "min_role": 100, "attributes": attributes,
+        })
+    };
+    let (status, body) = client
+        .send(
+            "PUT",
+            &format!("{api}/pages/Home"),
+            Some(page_body(
+                "Home",
+                json!({}),
+                json!({ "root_page_for_roles": ["public"] }),
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let home_layout = format!("{api}/pages/Home/layout");
+    let (status, body) = client
+        .send(
+            "PUT",
+            &home_layout,
+            Some(json!({ "layout": { "above": [
+                { "type": "blank", "contents": "Welcome" },
+                placing,
+                { "type": "view", "view": "Show Book", "state": "shared" },
+                { "type": "action", "action_name": "GoBack", "rndid": "p1" },
+            ]}})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, html) = client.app_get("/page/Home").await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(
+        html.contains("Welcome") && html.contains("Header, again"),
+        "{html}"
+    );
+    for (layout, named) in [
+        (
+            json!({ "type": "action", "action_name": "Delete", "rndid": "p2" }),
+            "`Delete`",
+        ),
+        (
+            json!({ "type": "view", "view": "Missing", "state": "shared" }),
+            "`Missing`",
+        ),
+        (
+            json!({ "type": "library", "library_id": stray }),
+            stray.as_str(),
+        ),
+    ] {
+        let (status, body) = client
+            .send("PUT", &home_layout, Some(json!({ "layout": layout })))
+            .await;
+        refused(status, &body, &["page `Home`", named]);
+    }
+    // savePage makes the same checks.
+    let (status, body) = client
+        .send(
+            "PUT",
+            &format!("{api}/pages/Elsewhere"),
+            Some(page_body(
+                "Elsewhere",
+                json!({ "type": "view", "view": "Missing", "state": "shared" }),
+                json!({}),
+            )),
+        )
+        .await;
+    refused(status, &body, &["page `Elsewhere`", "`Missing`"]);
+
+    // --- 6.2: what names a page, and a rename that rewrites none of it.
+    let (status, body) = client
+        .send(
+            "PUT",
+            &format!("{api}/pages/About"),
+            Some(page_body(
+                "About",
+                json!({ "type": "link", "link_src": "Page", "url": "/page/Home", "text": "Home" }),
+                json!({}),
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, applications) = client.send("GET", "/api/applications", None).await;
+    assert_eq!(status, StatusCode::OK, "{applications}");
+    let mut application_body = applications
+        .as_array()
+        .and_then(|all| all.iter().find(|a| a["id"] == app.as_str()))
+        .cloned()
+        .unwrap_or_else(|| panic!("{app} is listed: {applications}"));
+    application_body["framework"]["config"]["menu_items"] = json!([
+        { "type": "Header", "label": "Go", "subitems": [
+            { "type": "Page", "label": "Start", "pagename": "Home", "min_role": 100 },
+        ]},
+    ]);
+    let (status, body) = client.send("PUT", &api, Some(application_body)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, references) = client
+        .send("GET", &format!("{api}/pages/Home/references"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{references}");
+    assert_eq!(
+        references,
+        json!({
+            "menu": ["Start"],
+            "home_page_for": ["public"],
+            "views": [],
+            "pages": ["About"],
+            "library": [],
+            "places": ["Title card"],
+        })
+    );
+    let (status, body) = client
+        .send(
+            "PUT",
+            &format!("{api}/pages/Home"),
+            Some(page_body(
+                "Start page",
+                json!({ "above": [{ "type": "blank", "contents": "Welcome" }, placing] }),
+                json!({ "root_page_for_roles": ["public"] }),
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = client
+        .send("GET", &format!("{api}/pages/Home/references"), None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, references) = client
+        .send("GET", &format!("{api}/pages/Start%20page/references"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{references}");
+    assert_eq!(
+        (
+            &references["menu"],
+            &references["pages"],
+            &references["home_page_for"]
+        ),
+        (&json!([]), &json!([]), &json!(["public"])),
+        "{references}"
+    );
+    let (status, references) = client
+        .send("GET", &format!("{api}/views/Show%20Book/references"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{references}");
+    assert_eq!(references["places"], json!(["Title card"]), "{references}");
+
+    // --- 6.4: the canvas's previews and lookups.
+    let (status, preview) = client
+        .send(
+            "POST",
+            &format!("{api}/builder/field-preview"),
+            Some(json!({ "table": "books", "field": "title", "fieldview": "as_text" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert!(
+        preview["html"].as_str().unwrap().contains("Dune"),
+        "{preview}"
+    );
+    let (status, preview) = client
+        .send(
+            "POST",
+            &format!("{api}/builder/view-preview"),
+            Some(json!({ "view": "Show Book", "state": {} })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    let html = preview["html"].as_str().unwrap();
+    assert!(
+        html.contains("Dune") && html.contains("Header, again"),
+        "{preview}"
+    );
+    let (status, preview) = client
+        .send(
+            "POST",
+            &format!("{api}/builder/page-preview"),
+            Some(json!({ "page": "Start page" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert!(
+        preview["html"].as_str().unwrap().contains("Welcome"),
+        "{preview}"
+    );
+    let (status, form) = client
+        .send(
+            "POST",
+            &format!("{api}/builder/fieldview-config"),
+            Some(json!({ "table": "books", "field_name": "title", "fieldview": "as_text", "type": "Field", "mode": "show" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{form}");
+    assert!(form.is_array(), "{form}");
+    let (status, values) = client
+        .send("GET", &format!("{api}/builder/distinct/books/title"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{values}");
+    assert_eq!(values, json!({ "success": ["Dune", "Emma"] }));
+    // Outside the subset, and what the application does not have.
+    let (status, body) = client
+        .send(
+            "GET",
+            &format!("{api}/builder/distinct/authors/title"),
+            None,
+        )
+        .await;
+    refused(status, &body, &["`authors`"]);
+    let (status, body) = client
+        .send(
+            "POST",
+            &format!("{api}/builder/field-preview"),
+            Some(json!({ "table": "authors", "field": "title", "fieldview": "as_text" })),
+        )
+        .await;
+    refused(status, &body, &["`authors`"]);
+    let (status, body) = client
+        .send(
+            "POST",
+            &format!("{api}/builder/view-preview"),
+            Some(json!({ "view": "Missing" })),
+        )
+        .await;
+    refused(status, &body, &["`Missing`"]);
+
+    // --- 6.3: deleting an item something places asks first.
+    let (status, body) = client
+        .send("DELETE", &format!("{library}/{id}"), None)
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["references"],
+        json!({ "views": ["Show Book"], "pages": ["Start page"], "library": [] })
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("`Title card`") && e.contains("confirm=true")),
+        "{body}"
+    );
+    let (status, body) = client
+        .send("DELETE", &format!("{library}/{id}?confirm=true"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], true);
+    // What placed it renders blank there, and the rest of it still renders.
+    let (status, html) = client.app_get(&show_dune).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(
+        html.contains("Dune") && !html.contains("Header, again"),
+        "{html}"
+    );
+
+    // --- 6.6: every one of these refuses an application that is not Saltcorn UI.
+    sc_catalog::save_file_store(
+        &catalog,
+        &sc_files::FileStoreDef::local("apps", server._root.0.to_string_lossy()),
+    )
+    .await?;
+    let code = sc_app::Application::new(
+        "Code",
+        "code",
+        sc_app::FrameworkRef::new("code")
+            .with("store", "apps")
+            .with("source", "web")
+            .with("output", "web/dist")
+            .with("command", "sh build.sh"),
+    )
+    .with_table(sc_catalog::TableId("books".to_owned()));
+    let code = sc_app::save_application(&catalog, &code).await?.id.0;
+    let item = uuid::Uuid::new_v4();
+    let code_api = format!("/api/applications/{code}");
+    for (method, path, body) in [
+        (
+            "PUT",
+            "views/Show%20Book/layout".to_owned(),
+            json!({ "step": 0, "columns": [], "layout": {} }),
+        ),
+        (
+            "PUT",
+            "pages/Home/layout".to_owned(),
+            json!({ "layout": {} }),
+        ),
+        ("GET", "pages/Home/references".to_owned(), Value::Null),
+        ("GET", "library".to_owned(), Value::Null),
+        ("GET", format!("library/{item}"), Value::Null),
+        (
+            "POST",
+            "library".to_owned(),
+            json!({ "name": "x", "layout": {} }),
+        ),
+        ("PUT", format!("library/{item}"), json!({ "name": "x" })),
+        (
+            "POST",
+            "library/updates".to_owned(),
+            json!({ "libraryUpdates": [] }),
+        ),
+        ("DELETE", format!("library/{item}"), Value::Null),
+        (
+            "POST",
+            "builder/field-preview".to_owned(),
+            json!({ "table": "books", "field": "title", "fieldview": "as_text" }),
+        ),
+        (
+            "POST",
+            "builder/fieldview-config".to_owned(),
+            json!({ "table": "books" }),
+        ),
+        (
+            "POST",
+            "builder/view-preview".to_owned(),
+            json!({ "view": "Show Book" }),
+        ),
+        (
+            "POST",
+            "builder/page-preview".to_owned(),
+            json!({ "page": "Home" }),
+        ),
+        (
+            "GET",
+            "builder/distinct/books/title".to_owned(),
+            Value::Null,
+        ),
+    ] {
+        let body = (!body.is_null()).then_some(body);
+        let (status, answer) = client
+            .send(method, &format!("{code_api}/{path}"), body)
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {path}: {answer}");
+        assert!(
+            answer.to_string().contains("uses the `code` framework"),
+            "{method} {path}: {answer}"
+        );
+    }
     Ok(())
 }

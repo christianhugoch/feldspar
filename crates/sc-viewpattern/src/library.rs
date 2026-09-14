@@ -247,7 +247,15 @@ pub async fn save_library_item(catalog: &Catalog, item: &LibraryItem) -> Result<
         Value::Json(item.layout.clone()),
         Value::Json(Json::Object(item.attributes.clone())),
     ];
-    write_row(catalog, LIBRARY_TABLE, &columns, values, existing.is_some()).await?;
+    write_row(
+        catalog,
+        None,
+        LIBRARY_TABLE,
+        &columns,
+        values,
+        existing.is_some(),
+    )
+    .await?;
     Ok(item.clone())
 }
 

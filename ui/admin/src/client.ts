@@ -139,12 +139,36 @@ export type CreateViewRequest = { name: string; description?: string | null; vie
 export type CreateViewResponse = { id: string; name: string; description: string; viewpattern: string; table_name?: string | null; configuration: unknown; min_role: number; slug?: unknown | null; attributes: unknown };
 export type ViewConfigStepRequest = { viewpattern: string; table_name?: string | null; name?: string | null; step: number; context: unknown };
 export type ViewConfigStepResponse = { index: number; name: string; count: number; builder: boolean; builder_options?: unknown | null; skip: boolean; context_field?: string | null; blurb?: string | null; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; values: unknown; issues: Array<string> };
-export type ViewReferencesResponse = { embedded_in: Array<string>; linked_from: Array<string>; pages: Array<string> };
+export type ViewReferencesResponse = { embedded_in: Array<string>; linked_from: Array<string>; pages: Array<string>; library: Array<string>; places: Array<string> };
 export type ListPagesResponse = Array<{ id: string; name: string; title: string; description: string; layout: unknown; min_role: number; attributes: unknown }>;
 export type GetPageResponse = { id: string; name: string; title: string; description: string; layout: unknown; min_role: number; attributes: unknown };
 export type SavePageRequest = { name: string; title: string; description: string; layout: unknown; min_role: number; attributes: unknown };
 export type SavePageResponse = { id: string; name: string; title: string; description: string; layout: unknown; min_role: number; attributes: unknown };
 export type DeletePageResponse = { deleted: boolean };
+export type SaveViewLayoutRequest = { step: number; columns: unknown; layout: unknown; libraryUpdates?: Array<{ library_id: string; layout: unknown }> | null };
+export type SaveViewLayoutResponse = { id: string; name: string; description: string; viewpattern: string; table_name?: string | null; configuration: unknown; min_role: number; slug?: unknown | null; attributes: unknown };
+export type SavePageLayoutRequest = { layout: unknown; libraryUpdates?: Array<{ library_id: string; layout: unknown }> | null };
+export type SavePageLayoutResponse = { id: string; name: string; title: string; description: string; layout: unknown; min_role: number; attributes: unknown };
+export type PageReferencesResponse = { menu: Array<string>; home_page_for: Array<string>; views: Array<string>; pages: Array<string>; library: Array<string>; places: Array<string> };
+export type ListLibraryResponse = Array<{ id: string; name: string; description: string; icon: string; layout: unknown; attributes: unknown; used_by: { views: Array<string>; pages: Array<string>; library: Array<string> } }>;
+export type GetLibraryItemResponse = { id: string; name: string; description: string; icon: string; layout: unknown; attributes: unknown };
+export type CreateLibraryItemRequest = { name: string; icon?: string | null; description?: string | null; layout: unknown };
+export type CreateLibraryItemResponse = { id: string; name: string; description: string; icon: string; layout: unknown; attributes: unknown };
+export type SaveLibraryItemRequest = { name: string; icon?: string | null; description?: string | null };
+export type SaveLibraryItemResponse = { id: string; name: string; description: string; icon: string; layout: unknown; attributes: unknown };
+export type SaveLibraryUpdatesRequest = { libraryUpdates: Array<{ library_id: string; layout: unknown }> };
+export type SaveLibraryUpdatesResponse = { updated: number };
+export type DeleteLibraryItemQuery = { confirm?: boolean };
+export type DeleteLibraryItemResponse = { deleted: boolean; references: { views: Array<string>; pages: Array<string>; library: Array<string> } };
+export type BuilderFieldPreviewRequest = { table: string; field: string; fieldview: string; configuration?: unknown | null; row_id?: unknown | null };
+export type BuilderFieldPreviewResponse = { html: string };
+export type BuilderFieldviewConfigFormRequest = { table: string; field_name?: string | null; fieldview?: string | null; type?: string | null; join_field?: string | null; join_fieldview?: string | null; agg_outcome_type?: string | null; agg_fieldview?: string | null; agg_field?: string | null; mode?: string | null; _columndef?: string | null };
+export type BuilderFieldviewConfigFormResponse = unknown;
+export type BuilderViewPreviewRequest = { view: string; state?: unknown | null };
+export type BuilderViewPreviewResponse = { html: string };
+export type BuilderPagePreviewRequest = { page: string };
+export type BuilderPagePreviewResponse = { html: string };
+export type BuilderDistinctValuesResponse = { success: unknown };
 export type ListViewPatternsResponse = Array<{ name: string; label: string; description: string; table_required: boolean; view_quantity?: string | null; routes: Array<string>; steps: Array<string>; module?: string | null }>;
 export type ListFrameworksResponse = Array<{ name: string; label: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; has_views: boolean }>;
 export type ListApiProvidersResponse = Array<{ name: string; label: string; description: string; default_mount: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; supports_custom_queries: boolean }>;
@@ -311,6 +335,20 @@ export interface ApiClient {
   getPage(id: string, name: string): Promise<GetPageResponse>;
   savePage(id: string, name: string, body: SavePageRequest): Promise<SavePageResponse>;
   deletePage(id: string, name: string): Promise<DeletePageResponse>;
+  saveViewLayout(id: string, name: string, body: SaveViewLayoutRequest): Promise<SaveViewLayoutResponse>;
+  savePageLayout(id: string, name: string, body: SavePageLayoutRequest): Promise<SavePageLayoutResponse>;
+  pageReferences(id: string, name: string): Promise<PageReferencesResponse>;
+  listLibrary(id: string): Promise<ListLibraryResponse>;
+  getLibraryItem(id: string, item: string): Promise<GetLibraryItemResponse>;
+  createLibraryItem(id: string, body: CreateLibraryItemRequest): Promise<CreateLibraryItemResponse>;
+  saveLibraryItem(id: string, item: string, body: SaveLibraryItemRequest): Promise<SaveLibraryItemResponse>;
+  saveLibraryUpdates(id: string, body: SaveLibraryUpdatesRequest): Promise<SaveLibraryUpdatesResponse>;
+  deleteLibraryItem(id: string, item: string, query?: DeleteLibraryItemQuery): Promise<DeleteLibraryItemResponse>;
+  builderFieldPreview(id: string, body: BuilderFieldPreviewRequest): Promise<BuilderFieldPreviewResponse>;
+  builderFieldviewConfigForm(id: string, body: BuilderFieldviewConfigFormRequest): Promise<BuilderFieldviewConfigFormResponse>;
+  builderViewPreview(id: string, body: BuilderViewPreviewRequest): Promise<BuilderViewPreviewResponse>;
+  builderPagePreview(id: string, body: BuilderPagePreviewRequest): Promise<BuilderPagePreviewResponse>;
+  builderDistinctValues(id: string, table: string, field: string): Promise<BuilderDistinctValuesResponse>;
   listViewPatterns(): Promise<ListViewPatternsResponse>;
   listFrameworks(): Promise<ListFrameworksResponse>;
   listApiProviders(): Promise<ListApiProvidersResponse>;
@@ -1169,6 +1207,130 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("deletePage", res);
       return (await res.json()) as DeletePageResponse;
+    },
+    async saveViewLayout(id, name, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/views/${name}/layout`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("saveViewLayout", res);
+      return (await res.json()) as SaveViewLayoutResponse;
+    },
+    async savePageLayout(id, name, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages/${name}/layout`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("savePageLayout", res);
+      return (await res.json()) as SavePageLayoutResponse;
+    },
+    async pageReferences(id, name) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages/${name}/references`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("pageReferences", res);
+      return (await res.json()) as PageReferencesResponse;
+    },
+    async listLibrary(id) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/library`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listLibrary", res);
+      return (await res.json()) as ListLibraryResponse;
+    },
+    async getLibraryItem(id, item) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/library/${item}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getLibraryItem", res);
+      return (await res.json()) as GetLibraryItemResponse;
+    },
+    async createLibraryItem(id, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/library`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("createLibraryItem", res);
+      return (await res.json()) as CreateLibraryItemResponse;
+    },
+    async saveLibraryItem(id, item, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/library/${item}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("saveLibraryItem", res);
+      return (await res.json()) as SaveLibraryItemResponse;
+    },
+    async saveLibraryUpdates(id, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/library/updates`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("saveLibraryUpdates", res);
+      return (await res.json()) as SaveLibraryUpdatesResponse;
+    },
+    async deleteLibraryItem(id, item, query) {
+      const search = new URLSearchParams();
+      if (query?.confirm !== undefined && query?.confirm !== null) search.append("confirm", String(query?.confirm));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/library/${item}${qs ? `?${qs}` : ""}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteLibraryItem", res);
+      return (await res.json()) as DeleteLibraryItemResponse;
+    },
+    async builderFieldPreview(id, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/field-preview`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("builderFieldPreview", res);
+      return (await res.json()) as BuilderFieldPreviewResponse;
+    },
+    async builderFieldviewConfigForm(id, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/fieldview-config`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("builderFieldviewConfigForm", res);
+      return (await res.json()) as BuilderFieldviewConfigFormResponse;
+    },
+    async builderViewPreview(id, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/view-preview`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("builderViewPreview", res);
+      return (await res.json()) as BuilderViewPreviewResponse;
+    },
+    async builderPagePreview(id, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/page-preview`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("builderPagePreview", res);
+      return (await res.json()) as BuilderPagePreviewResponse;
+    },
+    async builderDistinctValues(id, table, field) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/distinct/${table}/${field}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("builderDistinctValues", res);
+      return (await res.json()) as BuilderDistinctValuesResponse;
     },
     async listViewPatterns() {
       const res = await doFetch(`${baseUrl}/api/view-patterns`, {

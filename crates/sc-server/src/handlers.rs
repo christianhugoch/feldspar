@@ -3769,13 +3769,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     .get("name")
                     .and_then(Json::as_str)
                     .filter(|n| !n.is_empty());
-                let index = obj
-                    .get("step")
-                    .and_then(Json::as_u64)
-                    .and_then(|s| usize::try_from(s).ok())
-                    .ok_or_else(|| {
-                        Error::invalid("`step` must be a step number, counting from 0")
-                    })?;
+                let index = step_member(obj)?;
                 let context = match obj.get("context") {
                     None | Some(Json::Null) => json!({}),
                     Some(context @ Json::Object(_)) => context.clone(),
@@ -3819,10 +3813,29 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     .await?
                     .references(name)
                     .await?;
+                // The library, both ways (TODO "The builder" §8): the items
+                // whose layouts show the view, and the items the view places.
+                let set = sc_viewpattern::view_sets().get(&catalog, app.id).await?;
+                let library: Vec<&str> = set
+                    .library
+                    .iter()
+                    .filter(|i| {
+                        sc_viewpattern::referenced_views(&i.layout)
+                            .iter()
+                            .any(|v| v == name)
+                    })
+                    .map(|i| i.name.as_str())
+                    .collect();
+                let places = set
+                    .view(name)
+                    .map(|view| item_names(set.library_placed_by_view(view)))
+                    .unwrap_or_default();
                 Ok(HandlerResponse::ok(json!({
                     "embedded_in": references.embedded_in,
                     "linked_from": references.linked_from,
                     "pages": references.pages,
+                    "library": library,
+                    "places": places,
                 })))
             }
         }
@@ -3886,6 +3899,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     .await?
                     .map_or_else(sc_viewpattern::PageId::new, |p| p.id);
                 let page = page_from_body(id, app.id, &ctx.body)?;
+                // A page's layout names actions and views, and they are the
+                // application's (TODO "The builder" §6); the store checks the
+                // rest.
+                sc_viewpattern::validate_page(&catalog, &page).await?;
                 let saved = sc_viewpattern::view_sets()
                     .save_page(&catalog, &page)
                     .await?;
@@ -3908,6 +3925,392 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     return Err(no_such("page", &app, name));
                 }
                 Ok(HandlerResponse::ok(json!({ "deleted": true })))
+            }
+        }
+    });
+
+    // --- The builder (TODO "The builder" §6, §10) --------------------------------
+
+    // A layout from a view's builder step. The step says where the layout lands
+    // and that it is a layout; then every check `saveView` makes runs over the
+    // merged configuration, and the view and its library edits are written in
+    // one transaction.
+    reg.register("saveViewLayout", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                let mut view = sc_viewpattern::load_view(&catalog, app.id, name)
+                    .await?
+                    .ok_or_else(|| no_such("view", &app, name))?;
+                let obj = require_object(&ctx.body)?;
+                let index = step_member(obj)?;
+                let columns = required_member(obj, "columns", "the columns the builder wrote")?;
+                let layout = required_member(obj, "layout", "the layout the builder wrote")?;
+                let updates = library_updates_member(obj)?;
+                let configurer = view_configurer(&catalog, &app, ctx.user.as_ref(), &apps).await?;
+                let step = configurer
+                    .step(
+                        &view.viewpattern,
+                        view.table_name.as_deref(),
+                        Some(&view.name),
+                        index,
+                        &Json::Object(view.configuration.clone()),
+                    )
+                    .await?;
+                if !step.builder {
+                    return Err(Error::invalid(format!(
+                        "step {index} of view `{}`, {}, is a form rather than a layout; its \
+                         settings are saved with saveView",
+                        view.name, step.name
+                    )));
+                }
+                sc_viewpattern::merge_view_layout(
+                    &view.name,
+                    &mut view.configuration,
+                    step.context_field.as_deref(),
+                    columns,
+                    layout,
+                )?;
+                sc_viewpattern::validate_view(&catalog, &view).await?;
+                configurer.check(&view).await?;
+                let saved = sc_viewpattern::view_sets()
+                    .save_view_layout(&catalog, &view, &updates)
+                    .await?;
+                Ok(HandlerResponse::ok(view_json(&saved)))
+            }
+        }
+    });
+
+    // A page's layout, replacing the page's: checked as a page is, and written
+    // with its library edits in one transaction.
+    reg.register("savePageLayout", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                let mut page = sc_viewpattern::load_page(&catalog, app.id, name)
+                    .await?
+                    .ok_or_else(|| no_such("page", &app, name))?;
+                let obj = require_object(&ctx.body)?;
+                page.layout = required_member(obj, "layout", "the layout the builder wrote")?;
+                let updates = library_updates_member(obj)?;
+                let saved = sc_viewpattern::view_sets()
+                    .save_page_layout(&catalog, &page, &updates)
+                    .await?;
+                Ok(HandlerResponse::ok(page_json(&saved)))
+            }
+        }
+    });
+
+    reg.register("pageReferences", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                let set = sc_viewpattern::view_sets().get(&catalog, app.id).await?;
+                let page = set.page(name).ok_or_else(|| no_such("page", &app, name))?;
+                let roles: Vec<(u8, String)> = sc_auth::list_roles(&catalog)
+                    .await?
+                    .into_iter()
+                    .map(|r| (r.role, r.name))
+                    .collect();
+                let references = set.page_references(&app, name, &roles);
+                Ok(HandlerResponse::ok(json!({
+                    "menu": references.menu,
+                    "home_page_for": references.home_page_for,
+                    "views": references.views,
+                    "pages": references.pages,
+                    "library": references.library,
+                    "places": item_names(set.library_placed_by_page(page)),
+                })))
+            }
+        }
+    });
+
+    // The library (§8). Reads answer from the view set, which every write here
+    // reloads; `getLibraryItem` reads the row, because a placed instance must
+    // start from the latest layout.
+
+    reg.register("listLibrary", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let set = sc_viewpattern::view_sets().get(&catalog, app.id).await?;
+                let items = set
+                    .library
+                    .iter()
+                    .map(|item| {
+                        let mut listed = library_item_json(item);
+                        listed["used_by"] =
+                            library_references_json(&set.library_references(item.id));
+                        listed
+                    })
+                    .collect();
+                Ok(HandlerResponse::ok(Json::Array(items)))
+            }
+        }
+    });
+
+    reg.register("getLibraryItem", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let id = parse_library_id(ctx.path_param("item")?)?;
+                let item = sc_viewpattern::load_library_item(&catalog, app.id, id)
+                    .await?
+                    .ok_or_else(|| no_library_item(&app, id))?;
+                Ok(HandlerResponse::ok(library_item_json(&item)))
+            }
+        }
+    });
+
+    reg.register("createLibraryItem", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let item = library_item_from_body(
+                    sc_viewpattern::LibraryItemId::new(),
+                    app.id,
+                    &ctx.body,
+                )?;
+                let library = sc_viewpattern::list_library(&catalog, app.id).await?;
+                sc_viewpattern::check_library_placements(
+                    &format!("the library item `{}`", item.name),
+                    std::iter::once(&item.layout),
+                    &app.name,
+                    &library,
+                )?;
+                let saved = sc_viewpattern::view_sets()
+                    .save_library_item(&catalog, &item)
+                    .await?;
+                Ok(HandlerResponse::ok(library_item_json(&saved)).with_status(201))
+            }
+        }
+    });
+
+    reg.register("saveLibraryItem", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let id = parse_library_id(ctx.path_param("item")?)?;
+                let mut item = sc_viewpattern::load_library_item(&catalog, app.id, id)
+                    .await?
+                    .ok_or_else(|| no_library_item(&app, id))?;
+                let obj = require_object(&ctx.body)?;
+                non_empty_str_field(obj, "name")?.clone_into(&mut item.name);
+                if let Some(icon) = obj.get("icon").and_then(Json::as_str) {
+                    icon.clone_into(&mut item.icon);
+                }
+                if let Some(description) = obj.get("description").and_then(Json::as_str) {
+                    description.clone_into(&mut item.description);
+                }
+                let saved = sc_viewpattern::view_sets()
+                    .save_library_item(&catalog, &item)
+                    .await?;
+                Ok(HandlerResponse::ok(library_item_json(&saved)))
+            }
+        }
+    });
+
+    reg.register("saveLibraryUpdates", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let updates = library_updates_member(require_object(&ctx.body)?)?;
+                let library = sc_viewpattern::list_library(&catalog, app.id).await?;
+                sc_viewpattern::check_update_placements(&updates, &app.name, &library)?;
+                sc_viewpattern::view_sets()
+                    .apply_library_updates(&catalog, app.id, &updates)
+                    .await?;
+                Ok(HandlerResponse::ok(json!({ "updated": updates.len() })))
+            }
+        }
+    });
+
+    reg.register("deleteLibraryItem", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let id = parse_library_id(ctx.path_param("item")?)?;
+                let item = sc_viewpattern::load_library_item(&catalog, app.id, id)
+                    .await?
+                    .ok_or_else(|| no_library_item(&app, id))?;
+                let references = sc_viewpattern::view_sets()
+                    .get(&catalog, app.id)
+                    .await?
+                    .library_references(id);
+                if !references.is_empty() && ctx.query_get("confirm") != Some("true") {
+                    return Ok(HandlerResponse::ok(json!({
+                        "error": format!(
+                            "the library item `{}` is placed by {}; delete it with confirm=true \
+                             to leave those places blank",
+                            item.name,
+                            describe_library_references(&references)
+                        ),
+                        "references": library_references_json(&references),
+                    }))
+                    .with_status(409));
+                }
+                sc_viewpattern::view_sets()
+                    .delete_library_item(&catalog, app.id, id)
+                    .await?;
+                Ok(HandlerResponse::ok(json!({
+                    "deleted": true,
+                    "references": library_references_json(&references),
+                })))
+            }
+        }
+    });
+
+    // The canvas's calls: v1's server routes, run in the worker as the admin by
+    // the configuration calls' `Configurer`. What they may name — a table in the
+    // subset, a view or page of the application — is checked here first, so a
+    // refusal names it rather than failing inside v1's code.
+
+    reg.register("builderFieldPreview", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let obj = require_object(&ctx.body)?;
+                let table = non_empty_str_field(obj, "table")?;
+                let field = non_empty_str_field(obj, "field")?;
+                let fieldview = non_empty_str_field(obj, "fieldview")?;
+                require_subset_table(&app, table)?;
+                // v1's body, with only what was sent: `{ ...undefined }` and
+                // `{ ...null }` differ nowhere, but a fieldview may read either.
+                let body: Map<String, Json> = ["configuration", "row_id"]
+                    .into_iter()
+                    .filter_map(|key| {
+                        obj.get(key)
+                            .filter(|v| !v.is_null())
+                            .map(|v| (key.to_owned(), v.clone()))
+                    })
+                    .collect();
+                let html = view_configurer(&catalog, &app, ctx.user.as_ref(), &apps)
+                    .await?
+                    .field_preview(table, field, fieldview, &Json::Object(body))
+                    .await?;
+                Ok(HandlerResponse::ok(json!({ "html": html })))
+            }
+        }
+    });
+
+    reg.register("builderFieldviewConfigForm", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let obj = require_object(&ctx.body)?;
+                let table = non_empty_str_field(obj, "table")?;
+                require_subset_table(&app, table)?;
+                let form = view_configurer(&catalog, &app, ctx.user.as_ref(), &apps)
+                    .await?
+                    .fieldview_config(table, &ctx.body)
+                    .await?;
+                Ok(HandlerResponse::ok(form))
+            }
+        }
+    });
+
+    reg.register("builderViewPreview", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let obj = require_object(&ctx.body)?;
+                let name = non_empty_str_field(obj, "view")?;
+                if sc_viewpattern::load_view(&catalog, app.id, name)
+                    .await?
+                    .is_none()
+                {
+                    return Err(no_such("view", &app, name));
+                }
+                let state = match obj.get("state") {
+                    None | Some(Json::Null) => json!({}),
+                    Some(state @ Json::Object(_)) => state.clone(),
+                    Some(_) => return Err(Error::invalid("`state` must be an object")),
+                };
+                let html = view_configurer(&catalog, &app, ctx.user.as_ref(), &apps)
+                    .await?
+                    .view_preview(name, &state)
+                    .await?;
+                Ok(HandlerResponse::ok(json!({ "html": html })))
+            }
+        }
+    });
+
+    reg.register("builderPagePreview", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let obj = require_object(&ctx.body)?;
+                let name = non_empty_str_field(obj, "page")?;
+                if sc_viewpattern::load_page(&catalog, app.id, name)
+                    .await?
+                    .is_none()
+                {
+                    return Err(no_such("page", &app, name));
+                }
+                let html = view_configurer(&catalog, &app, ctx.user.as_ref(), &apps)
+                    .await?
+                    .page_preview(name)
+                    .await?;
+                Ok(HandlerResponse::ok(json!({ "html": html })))
+            }
+        }
+    });
+
+    reg.register("builderDistinctValues", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
+                let table = &crate::router::path_decode(ctx.path_param("table")?);
+                let field = &crate::router::path_decode(ctx.path_param("field")?);
+                require_subset_table(&app, table)?;
+                let values = view_configurer(&catalog, &app, ctx.user.as_ref(), &apps)
+                    .await?
+                    .distinct_values(table, field)
+                    .await?;
+                Ok(HandlerResponse::ok(values))
             }
         }
     });
@@ -6591,6 +6994,129 @@ async fn require_views_app(catalog: &Catalog, raw_id: &str) -> Result<Applicatio
         )));
     }
     Ok(app)
+}
+
+/// The `step` of a configuration call's body: a step number, counting from 0.
+fn step_member(obj: &Map<String, Json>) -> Result<usize> {
+    obj.get("step")
+        .and_then(Json::as_u64)
+        .and_then(|s| usize::try_from(s).ok())
+        .ok_or_else(|| Error::invalid("`step` must be a step number, counting from 0"))
+}
+
+/// A member a body must carry, `null` counting as absent; `what` says what it
+/// is in the refusal.
+fn required_member(obj: &Map<String, Json>, key: &str, what: &str) -> Result<Json> {
+    obj.get(key)
+        .filter(|v| !v.is_null())
+        .cloned()
+        .ok_or_else(|| Error::invalid(format!("`{key}` is required: {what}")))
+}
+
+/// v1's `libraryUpdates`: `[{ library_id, layout }]`, absent meaning none. Each
+/// refusal names the update by its place in the list.
+fn library_updates_member(obj: &Map<String, Json>) -> Result<Vec<sc_viewpattern::LibraryUpdate>> {
+    let updates = match obj.get("libraryUpdates") {
+        None | Some(Json::Null) => return Ok(Vec::new()),
+        Some(Json::Array(updates)) => updates,
+        Some(_) => {
+            return Err(Error::invalid(
+                "`libraryUpdates` must be a list of `{ library_id, layout }`",
+            ));
+        }
+    };
+    updates
+        .iter()
+        .enumerate()
+        .map(|(n, update)| {
+            let raw = match update.get("library_id") {
+                Some(Json::String(id)) => id.clone(),
+                Some(other) => other.to_string(),
+                None => String::new(),
+            };
+            let library_id = uuid::Uuid::parse_str(&raw)
+                .map(sc_viewpattern::LibraryItemId)
+                .map_err(|_| {
+                    Error::invalid(format!(
+                        "library update {} names `{raw}`, which is not a library item id",
+                        n + 1
+                    ))
+                })?;
+            let layout = update
+                .get("layout")
+                .filter(|l| !l.is_null())
+                .cloned()
+                .ok_or_else(|| {
+                    Error::invalid(format!("library update {} has no `layout`", n + 1))
+                })?;
+            Ok(sc_viewpattern::LibraryUpdate { library_id, layout })
+        })
+        .collect()
+}
+
+/// A library item id from a path.
+fn parse_library_id(raw: &str) -> Result<sc_viewpattern::LibraryItemId> {
+    uuid::Uuid::parse_str(raw)
+        .map(sc_viewpattern::LibraryItemId)
+        .map_err(|_| Error::invalid(format!("`{raw}` is not a library item id")))
+}
+
+/// The 404 for a library item `id` that `app` does not have.
+fn no_library_item(app: &Application, id: sc_viewpattern::LibraryItemId) -> Error {
+    Error::not_found(format!(
+        "application `{}` has no library item {}",
+        app.name, id.0
+    ))
+}
+
+/// Refuse a table outside `app`'s subset, as a configuration step does (§11).
+fn require_subset_table(app: &Application, table: &str) -> Result<()> {
+    if app.tables.iter().any(|t| t.0 == table) {
+        return Ok(());
+    }
+    Err(Error::invalid(format!(
+        "the table `{table}` is not in application `{}`'s table subset",
+        app.name
+    )))
+}
+
+/// Library items' names, in the order given.
+fn item_names(items: Vec<&sc_viewpattern::LibraryItem>) -> Vec<String> {
+    items.into_iter().map(|i| i.name.clone()).collect()
+}
+
+/// What places a library item, on the wire.
+fn library_references_json(references: &sc_viewpattern::LibraryReferences) -> Json {
+    json!({
+        "views": references.views,
+        "pages": references.pages,
+        "library": references.library,
+    })
+}
+
+/// What places a library item, as a clause: "the views `A` and the page `B`".
+fn describe_library_references(references: &sc_viewpattern::LibraryReferences) -> String {
+    let group = |one: &str, many: &str, names: &[String]| match names {
+        [] => None,
+        [name] => Some(format!("the {one} `{name}`")),
+        names => Some(format!(
+            "the {many} {}",
+            names
+                .iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    };
+    [
+        group("view", "views", &references.views),
+        group("page", "pages", &references.pages),
+        group("library item", "library items", &references.library),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" and ")
 }
 
 /// The 404 for a view or page `name` that `app` does not have.

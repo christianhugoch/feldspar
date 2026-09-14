@@ -295,6 +295,128 @@ impl ViewRuntime for ModuleViewRuntime {
                 )
             })
     }
+    async fn builder_field_preview(
+        &self,
+        table: &str,
+        field: &str,
+        fieldview: &str,
+        body: &Json,
+        ctx: ViewContext<'_>,
+    ) -> Result<String> {
+        let (call, request) = call_of(ctx);
+        let answer = self
+            .host
+            .view_call(
+                "view_builder_field_preview",
+                json!({
+                    "table": table,
+                    "field": field,
+                    "fieldview": fieldview,
+                    "body": body,
+                    "request": request,
+                }),
+                call,
+            )
+            .await
+            .map_err(|e| {
+                failed(
+                    &format!("the preview of `{table}.{field}` as {fieldview}"),
+                    "rendered",
+                    e,
+                )
+            })?;
+        Ok(html_of(answer))
+    }
+
+    async fn builder_fieldview_config(
+        &self,
+        table: &str,
+        body: &Json,
+        ctx: ViewContext<'_>,
+    ) -> Result<Json> {
+        let (call, request) = call_of(ctx);
+        self.host
+            .view_call(
+                "view_builder_fieldview_config",
+                json!({ "table": table, "body": body, "request": request }),
+                call,
+            )
+            .await
+            .map_err(|e| {
+                failed(
+                    &format!("a fieldview configuration form of the table `{table}`"),
+                    "built",
+                    e,
+                )
+            })
+    }
+
+    async fn builder_view_preview(
+        &self,
+        view: &str,
+        state: &Json,
+        ctx: ViewContext<'_>,
+    ) -> Result<String> {
+        let (call, request) = call_of(ctx);
+        let answer = self
+            .host
+            .view_call(
+                "view_builder_view_preview",
+                json!({ "view": view, "state": state, "request": request }),
+                call,
+            )
+            .await
+            .map_err(|e| failed(&format!("the preview of the view `{view}`"), "rendered", e))?;
+        Ok(html_of(answer))
+    }
+
+    async fn builder_page_preview(&self, page: &str, ctx: ViewContext<'_>) -> Result<String> {
+        let (call, request) = call_of(ctx);
+        let answer = self
+            .host
+            .view_call(
+                "view_builder_page_preview",
+                json!({ "page": page, "request": request }),
+                call,
+            )
+            .await
+            .map_err(|e| failed(&format!("the preview of the page `{page}`"), "rendered", e))?;
+        Ok(html_of(answer))
+    }
+
+    async fn builder_distinct_values(
+        &self,
+        table: &str,
+        field: &str,
+        ctx: ViewContext<'_>,
+    ) -> Result<Json> {
+        let (call, request) = call_of(ctx);
+        self.host
+            .view_call(
+                "view_builder_distinct_values",
+                json!({ "table": table, "field": field, "request": request }),
+                call,
+            )
+            .await
+            .map_err(|e| {
+                failed(
+                    &format!("the distinct values of `{table}.{field}`"),
+                    "found",
+                    e,
+                )
+            })
+    }
+}
+
+/// What a preview route sent, as the HTML the canvas shows: a string as it is,
+/// nothing as the empty string, and anything else as its JSON, which is what
+/// v1's `res.send` makes of an object.
+fn html_of(answer: Json) -> String {
+    match answer {
+        Json::String(html) => html,
+        Json::Null => String::new(),
+        other => other.to_string(),
+    }
 }
 
 /// A `view_config_step` answer as a [`ConfigStep`], its v1 form translated into

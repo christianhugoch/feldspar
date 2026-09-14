@@ -1466,6 +1466,145 @@ async fn the_six_patterns_render_their_golden_html() -> sc_error::Result<()> {
     Ok(())
 }
 
+/// The builder 6.4, 6.6: the builder canvas's calls over the BooksDB import —
+/// a field previewed as text, through a join, as a key's select and at a given
+/// row; *Show Books* and *BooksOverview* previewed; a fieldview's configuration
+/// form; and the distinct values of a key and of a number — each exactly the
+/// committed golden (`fixtures/saltcorn-ui-golden/builder-*`).
+///
+/// Then the subset: with `Publishers` dropped from the application, the join
+/// through `publisher` previews nothing and the key has no values to offer.
+#[tokio::test]
+async fn the_builder_canvas_calls_answer_their_goldens() -> sc_error::Result<()> {
+    let Some(bundle) = bundle_dir() else {
+        eprintln!(
+            "skipping: the Saltcorn UI bundle is not built (npm ci && npm run build in ui/saltcorn-ui)"
+        );
+        return Ok(());
+    };
+    let mut server = setup("builder-canvas", bundle).await?;
+    let catalog = server._catalog.clone();
+    let mut app = booksdb(&catalog).await;
+    let api = format!("/api/applications/{}/builder", app.id.0);
+    let golden =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/saltcorn-ui-golden");
+    let update = std::env::var_os("SC_UPDATE_GOLDEN").is_some();
+    let field = |field: &str, fieldview: &str| json!({ "table": "Books", "field": field, "fieldview": fieldview });
+    let cases: [(&str, &str, &str, Option<Value>); 9] = [
+        (
+            "field-title",
+            "POST",
+            "field-preview",
+            Some(field("title", "as_text")),
+        ),
+        (
+            "field-join",
+            "POST",
+            "field-preview",
+            Some(field("publisher.name", "as_text")),
+        ),
+        (
+            "field-key-select",
+            "POST",
+            "field-preview",
+            Some(field("author", "select")),
+        ),
+        (
+            "field-at-row",
+            "POST",
+            "field-preview",
+            Some(
+                json!({ "table": "Books", "field": "title", "fieldview": "as_text", "row_id": 2 }),
+            ),
+        ),
+        (
+            "view-show-books",
+            "POST",
+            "view-preview",
+            Some(json!({ "view": "Show Books", "state": {} })),
+        ),
+        (
+            "page-booksoverview",
+            "POST",
+            "page-preview",
+            Some(json!({ "page": "BooksOverview" })),
+        ),
+        (
+            "fieldview-config-date",
+            "POST",
+            "fieldview-config",
+            Some(json!({
+                "table": "Books", "type": "Field", "field_name": "published_on",
+                "fieldview": "format", "mode": "show",
+            })),
+        ),
+        ("distinct-author", "GET", "distinct/Books/author", None),
+        ("distinct-pages", "GET", "distinct/Books/pages", None),
+    ];
+    let mut wrong = Vec::new();
+    for (name, method, path, body) in cases {
+        let (status, answer) = server
+            .client
+            .send(method, &format!("{api}/{path}"), body)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{name}: {answer}");
+        let (file, rendered) = match answer.get("html").and_then(Value::as_str) {
+            Some(html) => (golden.join(format!("builder-{name}.html")), normalise(html)),
+            None => (
+                golden.join(format!("builder-{name}.json")),
+                format!("{}\n", serde_json::to_string_pretty(&answer).unwrap()),
+            ),
+        };
+        if update {
+            std::fs::create_dir_all(&golden)?;
+            std::fs::write(&file, &rendered)?;
+            continue;
+        }
+        let expected = std::fs::read_to_string(&file).unwrap_or_default();
+        if rendered != expected {
+            wrong.push(format!(
+                "{name} differs from {}:\n{rendered}",
+                file.display()
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{}\n\n(SC_UPDATE_GOLDEN=1 rewrites the expected files)",
+        wrong.join("\n\n")
+    );
+
+    // The table the builder names is the application's, and so is every table
+    // it reaches through a key.
+    app.tables.retain(|t| t.0 != "Publishers");
+    save_application(&catalog, &app).await?;
+    sc_viewpattern::view_sets().reload(&catalog, app.id).await?;
+    let (status, preview) = server
+        .client
+        .send(
+            "POST",
+            &format!("{api}/field-preview"),
+            Some(field("publisher.name", "as_text")),
+        )
+        .await;
+    assert_eq!((status, &preview), (StatusCode::OK, &json!({ "html": "" })));
+    let (status, values) = server
+        .client
+        .send("GET", &format!("{api}/distinct/Books/publisher"), None)
+        .await;
+    assert_eq!(
+        (status, &values),
+        (StatusCode::OK, &json!({ "success": [] }))
+    );
+    let (status, body) = server
+        .client
+        .send("GET", &format!("{api}/distinct/Publishers/name"), None)
+        .await;
+    assert!(status.is_client_error(), "{status} {body}");
+    assert!(body.to_string().contains("`Publishers`"), "{body}");
+    Ok(())
+}
+
 /// The builder 5.7: the options the builder is opened with, computed in the
 /// worker by v1's own code over the BooksDB import, are what a real Saltcorn 1
 /// passes to `renderBuilder` over the same backup (`fixtures/builder-options/`,
@@ -1503,8 +1642,7 @@ async fn the_builder_options_are_what_saltcorn_1_passes() -> sc_error::Result<()
             .await;
         assert!(status.is_success(), "{extra}: {status} {body}");
     }
-    let recorded =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/builder-options");
+    let recorded = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/builder-options");
     let dump = std::env::var_os("SC_DUMP_BUILDER_OPTIONS").map(PathBuf::from);
     let step_path = format!("/api/applications/{}/view-config-step", app.id.0);
 
@@ -1533,7 +1671,10 @@ async fn the_builder_options_are_what_saltcorn_1_passes() -> sc_error::Result<()
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{name}: {step}");
-        assert_eq!(step["builder"], true, "{name}'s first step is its layout: {step}");
+        assert_eq!(
+            step["builder"], true,
+            "{name}'s first step is its layout: {step}"
+        );
         let options = &step["builder_options"];
         assert!(options.is_object(), "{name}: {step}");
         // What the differences below take out, checked for what it is here.
@@ -1544,9 +1685,14 @@ async fn the_builder_options_are_what_saltcorn_1_passes() -> sc_error::Result<()
     let page = sc_viewpattern::load_page(&catalog, app.id, "BooksOverview")
         .await?
         .expect("the import has BooksOverview");
-    let configurer =
-        sc_viewpattern::Configurer::new(sc_viewpattern::view_runtime()?, &catalog, &app, None, None)
-            .await?;
+    let configurer = sc_viewpattern::Configurer::new(
+        sc_viewpattern::view_runtime()?,
+        &catalog,
+        &app,
+        None,
+        None,
+    )
+    .await?;
     let page_options = configurer.page_builder_options(&page).await?;
     drop(configurer);
     assert_eq!(page_options["page_id"], json!(page.id.0.to_string()));
@@ -1638,7 +1784,9 @@ async fn the_builder_options_are_what_saltcorn_1_passes() -> sc_error::Result<()
     assert_eq!(joins, ["author"], "{options}");
     let parents = options["parent_field_list"].as_array().unwrap();
     assert!(
-        parents.iter().all(|p| !p.as_str().unwrap().starts_with("publisher.")),
+        parents
+            .iter()
+            .all(|p| !p.as_str().unwrap().starts_with("publisher.")),
         "{parents:?}"
     );
     let tables: Vec<&str> = options["tables"]
@@ -1647,7 +1795,10 @@ async fn the_builder_options_are_what_saltcorn_1_passes() -> sc_error::Result<()
         .iter()
         .filter_map(|t| t["name"].as_str())
         .collect();
-    assert!(!tables.contains(&"Publishers") && tables.contains(&"Books"), "{tables:?}");
+    assert!(
+        !tables.contains(&"Publishers") && tables.contains(&"Books"),
+        "{tables:?}"
+    );
     Ok(())
 }
 
@@ -1752,7 +1903,10 @@ fn normalise_builder_options(side: Side, options: &mut Value) {
     if let Some(Value::Array(parents)) = map.get_mut("parent_field_list") {
         parents.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
     }
-    if let Some(Value::Array(joins)) = map.get_mut("join_field_picker_data").and_then(|j| j.get_mut("join_field_options")) {
+    if let Some(Value::Array(joins)) = map
+        .get_mut("join_field_picker_data")
+        .and_then(|j| j.get_mut("join_field_options"))
+    {
         for join in joins {
             if let Some(sub) = join.get_mut("subFields") {
                 by_name(sub);
@@ -1849,13 +2003,20 @@ fn normalise_actions(side: Side, map: &mut serde_json::Map<String, Value>) {
     let Some(Value::Array(groups)) = map.get_mut("actions") else {
         return;
     };
-    let builtin = groups.first().and_then(|g| g["label"].as_str()).map(str::to_owned);
+    let builtin = groups
+        .first()
+        .and_then(|g| g["label"].as_str())
+        .map(str::to_owned);
     let mut kept = Vec::new();
     for mut group in std::mem::take(groups) {
         let label = group["label"].as_str().unwrap_or_default().to_owned();
         let names: Vec<String> = group["options"]
             .as_array()
-            .map(|o| o.iter().filter_map(|n| n.as_str().map(str::to_owned)).collect())
+            .map(|o| {
+                o.iter()
+                    .filter_map(|n| n.as_str().map(str::to_owned))
+                    .collect()
+            })
             .unwrap_or_default();
         if Some(&label) == builtin.as_ref() {
             kept.push(group);
@@ -1865,7 +2026,12 @@ fn normalise_actions(side: Side, map: &mut serde_json::Map<String, Value>) {
             if side == Side::V1 {
                 gone.extend(names.iter().filter(|n| *n != "Multi-step action").cloned());
             }
-            group["options"] = json!(names.iter().filter(|n| *n == "Multi-step action").collect::<Vec<_>>());
+            group["options"] = json!(
+                names
+                    .iter()
+                    .filter(|n| *n == "Multi-step action")
+                    .collect::<Vec<_>>()
+            );
             kept.push(group);
         } else if side == Side::V1 {
             gone.extend(names);
@@ -1874,7 +2040,11 @@ fn normalise_actions(side: Side, map: &mut serde_json::Map<String, Value>) {
         }
     }
     *groups = kept;
-    for key in ["actionConfigForms", "actionDescriptions", "actionConstraints"] {
+    for key in [
+        "actionConfigForms",
+        "actionDescriptions",
+        "actionConstraints",
+    ] {
         if let Some(Value::Object(by_action)) = map.get_mut(key) {
             by_action.retain(|name, _| !gone.contains(name));
         }
