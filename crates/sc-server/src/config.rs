@@ -59,6 +59,13 @@ pub struct ServerConfig {
     /// where an application whose framework is `saltcorn-ui` fails to mount with
     /// a sentence naming the missing bundle.
     pub saltcorn_ui_dir: Option<PathBuf>,
+    /// Directory holding the built `ui/builder` bundle: v1's layout builder,
+    /// served under `/builder/` (TODO "The builder" §2).
+    ///
+    /// **Not a command-line setting**, for the reason `ide_dir` is not. A build
+    /// with `SC_BUILD_ADMIN=0` records none, and `None` is a server whose builder
+    /// routes answer a page saying the builder is not built.
+    pub builder_dir: Option<PathBuf>,
     /// Directory holding the **bundled modules** — `plugins/`, the modules this
     /// server ships with and can install from itself (`sc_module::bundled`).
     ///
@@ -189,6 +196,7 @@ impl Default for ServerConfig {
             static_dir: None,
             ide_dir: None,
             saltcorn_ui_dir: None,
+            builder_dir: None,
             plugins_dir: None,
             session_ttl_hours: sc_auth::DEFAULT_TTL_HOURS,
             secure_cookies: false,

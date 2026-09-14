@@ -2,6 +2,112 @@
 
 Changes in reverse chronological order.
 
+## The builder, Phase 8: the builder routes
+
+The admin server now serves v1's builder. It is a document of its own under `/builder/`, like
+the IDE, admin-only and under a policy of its own. A view's builder step or a page opens on
+v1's canvas, with the worker's options and the stored layout. *Next* and *Done* save through the
+typed client and go where v1 would. The admin screens that link here are Phase 9.
+
+- **The routes (8.1)**, in the new `sc-server/src/builder.rs`, reached from the router's fallback
+  after the admin check (a navigation without a session goes to `/`, anything else gets the auth
+  rejection):
+  - `GET /builder/applications/:app/views/:view?step=n` (step counts from 0, default 0);
+  - `GET /builder/applications/:app/pages/:page`.
+
+  Each refusal is a 404 document naming the first thing that failed, in this order:
+  - the bundle;
+  - the application id, the application, and its framework;
+  - the view or page;
+  - the step: a number, in range, a layout and not a form, not skipped;
+  - a page whose layout is an `html_file`;
+  - the mode.
+
+  **The mode is the one key Rust reads of the options.** §12's allow-list is about which toolbox
+  v1 draws, and `options.mode` is what decides that. The allow-list is `BUILDER_VIEW_MODES` and
+  `BUILDER_PAGE_MODE`, unit-tested in `builder.rs`, since no pattern this server has answers
+  another mode.
+
+  A server without the bundle (`ServerConfig::builder_dir`, filled from `SC_BUILDER_BUNDLE_DIR`
+  by `sc-cli`) answers a page saying so, and that layouts stay JSON in the admin UI.
+- **The document (8.2)** is v1's `saltcorn-markup/builder.ts` output in Saltcorn UI's head.
+  - It loads the subdomain's stylesheets, then `builder.css`, then jQuery, Bootstrap,
+    `saltcorn-common.js`, `saltcorn.js`, CKEditor, the boot data and the bundle as a module
+    script.
+  - The chrome: the application, *View X* with "Step n of m (name)" and **Back to
+    configuration**, or *Page X* with **Page properties** and **Back to pages**. Also
+    `#builder-header-actions`, `#saltcorn-builder`, and `#scbuildform` with v1's hidden inputs.
+  - v1's inline `builder.renderBuilder(...)` becomes `<script type="application/json"
+    id="builder-boot">`: application id and name, application origin, target (view name and
+    step, or page name), step count and name, CSRF token, options, layout, mode, and
+    `afterSave`. `<`, `>`, `&`, U+2028 and U+2029 are escaped, so a layout's text cannot close
+    the element.
+  - `afterSave` is computed here: the wizard's next step (`#/applications/:id/views/:name?step=n`),
+    the view list after a view's last step, or the Pages tab.
+  - `ui/builder/src/boot.ts` reads it. `index.ts` boots from it when imported, and a document
+    without it (the jsdom test's) starts nothing.
+- **The policy (8.3).** `BUILDER_CONTENT_SECURITY_POLICY` in `security.rs` is on every answer
+  under `/builder/`: documents, assets (a worker takes its policy from its own response) and
+  refusals.
+  - **It is the admin policy with one relaxation:** `builder_content_security_policy(origin)`
+    adds the application's origin to `img-src` for a document, because the canvas's images are
+    redirected there (8.5).
+  - The relaxations §2 expected were checked and left out, each resting on a fact that
+    `the_builder_policy_is_what_the_bundle_needs` holds:
+    - **`worker-src 'self'`, no `blob:`.** Monaco's workers are files, from `new URL(…)`.
+    - **No `frame-src` and no inline script.** CKEditor 4's iframe editor writes an inline
+      `<script id="cke_actscrpt">` into its frame, but every editor the builder mounts is
+      `type="inline"`.
+    - **No `font-src data:`.** `builder.css`'s `data:` URLs are all images.
+  - It has no `'unsafe-eval'` and no third-party origin.
+  - **Not verified here:** what a real browser reports. That is the by-hand definition of done
+    (Phase 10), where a violation report counts as a failure.
+- **Saving (8.4)**, `ui/builder/src/save-form.ts`.
+  - v1's *Next* calls `form.submit()`, which fires no submit event, so the host replaces the
+    form's `submit`. A `submit` event is the same save, with the default prevented.
+  - It reads the two inputs as `NextButton` wrote them. A view calls `saveViewLayout` at its
+    step, and a page calls `savePageLayout`. Then it goes to `afterSave`.
+  - A refusal is shown with v1's `notifyAlert`, the canvas stays, and it can be saved again.
+  - **It waits for the builder's other writes before leaving.** *Next* sends a shared
+    component's edits as a separate fire-and-forget request just before it submits, which v1
+    protects with `keepalive`. `builderFetch` now records its writes in flight, and
+    `writesInFlight()` settles them.
+  - The autosave needed nothing new: it already reaches the same calls through §3, and v1's
+    `Library.js` shows the `{ error }` it gets back.
+- **Assets and files (8.5).**
+  - `/builder/static/:tag/*` serves the builder `dist`. The tag is the server version plus a
+    hash of `builder.js`'s size and mtime, so a rebuilt bundle is a new URL without a version
+    bump.
+  - `/builder/saltcorn-ui/:tag/*` serves Saltcorn UI's `public/` on the admin origin. The
+    document's scripts must be same-origin under `script-src 'self'`.
+  - Both are cached immutable.
+  - **`/files/serve/*` on the admin origin** redirects (307) to the application's origin, the
+    catalog's public origin or else the request's port under the base domain. The path alone
+    does not say which application, so the builder document is served with
+    `Referrer-Policy: same-origin`, and only a referrer that is a builder document on this host
+    is believed.
+  - The router's `Referrer-Policy` layer is now `if_not_present`, like its CSP layer, so
+    `no-referrer` is still the default everywhere else.
+- **Tests (8.6).**
+  - `tests/builder_route.rs`, against Postgres with BooksDB restored:
+    - *Show Books*, *Edit Books*, *List Books*, *Filter books* and *BooksOverview* open with
+      their boot data (the worker's options and ids, the stored layout, the target, `afterSave`,
+      the CSRF token), the document's elements, the six scripts in order with no inline script,
+      every asset served under the constant policy, and the document's per-application policy
+      and referrer policy;
+    - the eight refusals, each a 404 naming its subject under the policy, plus List's form step
+      named as step 2;
+    - the redirect for a builder referrer, and a 404 for none, the admin UI and another host;
+    - a stranger redirected, and an asset refused.
+  - `without_the_builder_bundle_the_routes_say_so` and `the_builder_policy_is_what_the_bundle_needs`
+    need no database.
+  - `saltcorn_ui_render.rs`'s client and setup are `pub(crate)` for reuse, and its server now
+    has the builder bundle.
+  - Unit tests in `builder.rs`: the modes, the boot data's escaping, name encoding, the
+    referrer rule, the paths, the step parameter.
+  - vitest: `boot.test.ts` (4) and `save-form.test.ts` (5). `cd ui/builder && npm test` is now
+    39 tests in 6 files.
+
 ## The builder, Phase 7: `ui/builder`, vendored and bundled
 
 v1's builder is now in the repository, unedited. It builds into a bundle the admin server can

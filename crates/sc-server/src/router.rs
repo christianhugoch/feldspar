@@ -109,6 +109,8 @@ pub(crate) struct AppState {
     ide_dir: Option<Arc<PathBuf>>,
     /// Directory holding the built `ui/admin` bundle, if configured.
     static_dir: Option<Arc<PathBuf>>,
+    /// Directory holding the built `ui/builder` bundle, if configured.
+    builder_dir: Option<Arc<PathBuf>>,
     /// Whether to set `Secure` on the session cookie.
     secure_cookies: bool,
     /// The applications served on their own subdomains, if any.
@@ -197,6 +199,7 @@ pub fn build_router_with_apps(
         sessions,
         static_dir: config.static_dir.clone().map(Arc::new),
         ide_dir: config.ide_dir.clone().map(Arc::new),
+        builder_dir: config.builder_dir.clone().map(Arc::new),
         secure_cookies: config.secure_cookies,
         apps,
         base_domain: config.base_domain.clone().map(Arc::new),
@@ -282,7 +285,10 @@ pub fn build_router_with_apps(
             header::X_FRAME_OPTIONS,
             HeaderValue::from_static("DENY"),
         ))
-        .layer(SetResponseHeaderLayer::overriding(
+        // `if_not_present`, like CSP: one document states its own. The builder's
+        // is `same-origin`, because its canvas's image requests must say which
+        // application they are for (`builder::redirect_file`).
+        .layer(SetResponseHeaderLayer::if_not_present(
             header::REFERRER_POLICY,
             HeaderValue::from_static("no-referrer"),
         ))
@@ -631,12 +637,17 @@ async fn dispatch(
                 ),
             }
         }
-        // Not an API route: the IDE under its own prefix, otherwise the SPA
-        // bundle / bootstrap for navigations.
+        // Not an API route: the IDE or the builder under its own prefix,
+        // otherwise the SPA bundle / bootstrap for navigations.
         Err(_) => {
             if method == axum::http::Method::GET || method == axum::http::Method::HEAD {
                 if is_ide_path(uri.path()) {
                     serve_ide(&state, &uri, &headers, &jar).await
+                } else if crate::builder::is_builder_path(uri.path())
+                    || crate::builder::is_files_serve_path(uri.path())
+                {
+                    let csrf = csrf.map(|axum::Extension(token)| token.0);
+                    serve_builder(&state, &uri, &headers, &jar, csrf).await
                 } else {
                     serve_static(&state, &uri).await
                 }
@@ -1226,6 +1237,42 @@ async fn serve_ide(
     response
 }
 
+/// Serve the builder (TODO "The builder" §2): its documents and assets under
+/// [`BUILDER_PREFIX`](crate::builder::BUILDER_PREFIX), and `/files/serve/*` for
+/// its canvas. Admin-only, for the IDE's reasons: a navigation without a session
+/// goes to the admin UI, anything else gets the auth rejection.
+async fn serve_builder(
+    state: &AppState,
+    uri: &Uri,
+    headers: &axum::http::HeaderMap,
+    jar: &CookieJar,
+    csrf: Option<String>,
+) -> Response {
+    let user = match session_user(state, jar).await {
+        Ok(user) => user,
+        Err(response) => return *response,
+    };
+    if let Some(rejection) = enforce_auth(&AuthRequirement::admin(), user.as_ref()) {
+        if accepts_html(headers) {
+            return Redirect::to("/").into_response();
+        }
+        return rejection;
+    }
+    let Some(user) = user else {
+        return json_error(StatusCode::UNAUTHORIZED, "not signed in");
+    };
+    let env = crate::builder::BuilderEnv {
+        bundle: state.builder_dir.as_deref().map(PathBuf::as_path),
+        apps: &state.apps,
+        base_domain: state.base_domain.as_deref().map(String::as_str),
+        secure: state.secure_cookies,
+    };
+    if crate::builder::is_files_serve_path(uri.path()) {
+        return crate::builder::redirect_file(&env, uri, headers).await;
+    }
+    crate::builder::serve_builder(&env, uri, headers, &user, csrf.as_deref().unwrap_or("")).await
+}
+
 /// Whether a request is a browser navigation rather than a programmatic fetch.
 fn accepts_html(headers: &axum::http::HeaderMap) -> bool {
     headers
@@ -1281,7 +1328,7 @@ async fn serve_static(state: &AppState, uri: &Uri) -> Response {
 }
 
 /// One file out of a built bundle, or `None` if the bundle has no such file.
-async fn serve_file(dir: &std::path::Path, path: &str) -> Option<Response> {
+pub(crate) async fn serve_file(dir: &std::path::Path, path: &str) -> Option<Response> {
     let request = Request::builder().uri(path).body(Body::empty()).ok()?;
     // `ServeDir`'s error type is `Infallible`, so a match (not `if let`) keeps
     // the compiler from flagging an irrefutable pattern.

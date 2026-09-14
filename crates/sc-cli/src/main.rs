@@ -108,6 +108,9 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // them. `build.rs` always records a path; whether the directory is there is
     // a property of the artifact, and a missing one is an empty catalog rather
     // than a failure (`sc_module::bundled`).
+    // The builder, likewise only when this binary was built with it: without
+    // one, its routes say so and the admin UI keeps the layout as JSON.
+    config.builder_dir = option_env!("SC_BUILDER_BUNDLE_DIR").map(std::path::PathBuf::from);
     config.plugins_dir = Some(std::path::PathBuf::from(
         option_env!("SC_PLUGINS_DIR").unwrap_or(sc_server::BUNDLED_IN_CHECKOUT),
     ));

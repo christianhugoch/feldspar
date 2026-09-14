@@ -159,6 +159,16 @@ function urlOf(input: RequestInfo | URL): string {
   return input.url;
 }
 
+/** The writes `builderFetch` has started and not finished. */
+const inFlight = new Set<Promise<unknown>>();
+
+/** Resolves once every write started through `builderFetch` so far has
+ * finished, whether or not it succeeded. `save-form.ts` waits for it before
+ * leaving the page, which v1 does with `keepalive` instead. */
+export async function writesInFlight(): Promise<void> {
+  await Promise.allSettled([...inFlight]);
+}
+
 export async function builderFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const asked = urlOf(input);
   const url = new URL(asked, window.location.href);
@@ -169,10 +179,17 @@ export async function builderFetch(input: RequestInfo | URL, init?: RequestInit)
     if (match?.route.column !== "refused") console.error(sentence);
     return refused(sentence);
   }
-  try {
-    const body = typeof init?.body === "string" && init.body ? (JSON.parse(init.body) as Body) : {};
-    return await handler(builderContext(), match.params, body);
-  } catch (e) {
-    return refused(e instanceof Error ? e.message : String(e));
+  const answer = (async () => {
+    try {
+      const body = typeof init?.body === "string" && init.body ? (JSON.parse(init.body) as Body) : {};
+      return await handler(builderContext(), match.params, body);
+    } catch (e) {
+      return refused(e instanceof Error ? e.message : String(e));
+    }
+  })();
+  if ((init?.method ?? "GET").toUpperCase() !== "GET") {
+    inFlight.add(answer);
+    void answer.finally(() => inFlight.delete(answer));
   }
+  return answer;
 }

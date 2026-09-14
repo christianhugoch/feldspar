@@ -7,9 +7,14 @@
 // - it defines the v1 globals the page must have (`globals.ts`);
 // - it installs the link listener (`links.ts`);
 // - it renders v1's builder into its container.
+//
+// The builder route's document names what to build in its boot data
+// (`boot.ts`), and importing this module starts it. A document without boot
+// data, such as the jsdom test's, starts nothing.
 
 import { renderBuilder } from "@saltcorn/builder";
 
+import { bootFromDocument } from "./boot";
 import { createClient, type ApiClient } from "./client";
 import { setBuilderContext, type BuilderTarget } from "./context";
 import { installGlobals, missingDocumentGlobals } from "./globals";
@@ -58,3 +63,6 @@ export function startBuilder(start: StartBuilder, client: ApiClient = createClie
 }
 
 export { builderFetch } from "./builder-fetch";
+export { bootFromDocument, readBootData, type BootData } from "./boot";
+
+if (typeof document !== "undefined") bootFromDocument(document, startBuilder);

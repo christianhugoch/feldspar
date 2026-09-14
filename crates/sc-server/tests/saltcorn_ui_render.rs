@@ -67,7 +67,7 @@ const TRIM_PAGES: &str = "const [book] = await db.Books.where({ id: payload.id }
      return { notify: `Trimmed ${book.title}` };";
 
 /// The built bundle's directory, if there is one.
-fn bundle_dir() -> Option<PathBuf> {
+pub(crate) fn bundle_dir() -> Option<PathBuf> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(sc_viewpattern::BUNDLE_DIR_IN_CHECKOUT);
@@ -78,15 +78,15 @@ fn bundle_dir() -> Option<PathBuf> {
 
 /// A cookie-carrying client over the router, which can also speak to an
 /// application's subdomain.
-struct Client {
+pub(crate) struct Client {
     router: Router,
-    cookies: HashMap<String, String>,
+    pub(crate) cookies: HashMap<String, String>,
 }
 
-struct Answer {
-    status: StatusCode,
-    headers: axum::http::HeaderMap,
-    body: String,
+pub(crate) struct Answer {
+    pub(crate) status: StatusCode,
+    pub(crate) headers: axum::http::HeaderMap,
+    pub(crate) body: String,
 }
 
 impl Client {
@@ -134,7 +134,7 @@ impl Client {
         .await
     }
 
-    async fn request(
+    pub(crate) async fn request(
         &mut self,
         method: &str,
         host: Option<&str>,
@@ -215,11 +215,11 @@ impl Client {
 /// A server with the modules (and so the view runtime) running, BooksDB
 /// restored, the admin signed in, and the BooksDB Saltcorn UI application
 /// mounted with the backup's views, one Feed, one ListShowList and its page.
-struct Server {
-    client: Client,
+pub(crate) struct Server {
+    pub(crate) client: Client,
     /// What `/api/backup/restore` answered: `{ restored, warnings }`.
     restore_report: Value,
-    apps: Arc<AppMounts>,
+    pub(crate) apps: Arc<AppMounts>,
     _catalog: Arc<Catalog>,
     _modules: Arc<ModuleServices>,
     _db: TestDb,
@@ -235,7 +235,7 @@ impl Drop for TempDir {
     }
 }
 
-async fn setup(tag: &str, bundle: PathBuf) -> sc_error::Result<Server> {
+pub(crate) async fn setup(tag: &str, bundle: PathBuf) -> sc_error::Result<Server> {
     setup_with(tag, bundle, true).await
 }
 
@@ -310,6 +310,7 @@ async fn setup_from(
     );
     let config = ServerConfig {
         base_domain: Some(BASE_DOMAIN.to_owned()),
+        builder_dir: crate::builder_route::builder_bundle_dir(),
         ..ServerConfig::default()
     };
     let router = build_router_with_apps(
@@ -1007,7 +1008,7 @@ async fn a_restored_backup_serves_although_a_trigger_it_names_was_refused() -> s
 }
 
 /// The BooksDB application, as it is saved.
-async fn booksdb(catalog: &Catalog) -> Application {
+pub(crate) async fn booksdb(catalog: &Catalog) -> Application {
     sc_app::list_applications(catalog)
         .await
         .unwrap()
@@ -1017,7 +1018,7 @@ async fn booksdb(catalog: &Catalog) -> Application {
 }
 
 /// A browser with nothing in it yet, on the same server as `client`.
-fn visitor(client: &Client) -> Client {
+pub(crate) fn visitor(client: &Client) -> Client {
     Client {
         router: client.router.clone(),
         cookies: HashMap::new(),

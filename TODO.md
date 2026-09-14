@@ -712,33 +712,36 @@ entry plus its §3 URLs, not a surprise.
 
 ## Phase 8 — The builder routes
 
-- [ ] 8.1 `/builder/applications/:app/views/:view?step=n` and
+- [x] 8.1 `/builder/applications/:app/views/:view?step=n` and
       `/builder/applications/:app/pages/:page` in `sc-server`: admin session, §2's 404s, the
       `html_file` refusal, §12's mode allow-list, the no-bundle page.
-- [ ] 8.2 The document (§4): v1's `builder.ts` output rendered in Rust around the page chrome for
+- [x] 8.2 The document (§4): v1's `builder.ts` output rendered in Rust around the page chrome for
       each mode, boot data as JSON (application id, view or page name, step and step count for
       a view, CSRF token, options, layout, mode), the Saltcorn UI stylesheets and scripts in v1's
       order, the builder bundle, and CKEditor.
-- [ ] 8.3 `BUILDER_CONTENT_SECURITY_POLICY` in `security.rs`, served per response on the routes
+- [x] 8.3 `BUILDER_CONTENT_SECURITY_POLICY` in `security.rs`, served per response on the routes
       and their assets, each relaxation justified in its comment by the test that needed it.
-- [ ] 8.4 `#scbuildform`'s submit → `saveViewLayout` → the wizard's next step, or →
+- [x] 8.4 `#scbuildform`'s submit → `saveViewLayout` → the wizard's next step, or →
       `savePageLayout` → the Pages tab; autosave through the same calls; a refused save shown
       with `notifyAlert` and the canvas kept.
-- [ ] 8.5 The builder's static assets (bundle, CSS, CKEditor) served from the builder `dist`
+- [x] 8.5 The builder's static assets (bundle, CSS, CKEditor) served from the builder `dist`
       under a versioned prefix, like `/static_assets/:tag/`; and `/files/serve/*` on the
       builder's origin redirected to the application's, because an image `src` or CSS `url()` the
       builder renders does not pass through the link listener (7.4, `routes.ts`).
-- [ ] 8.6 HTTP tests: the document for each of the four patterns and a page, the 404s, the
+- [x] 8.6 HTTP tests: the document for each of the four patterns and a page, the 404s, the
       refused mode and page, the CSP header, the no-bundle page.
 
 ## Phase 9 — The admin UI
 
 - [ ] 9.1 `ViewEditor.tsx`: **Open in builder** on a builder step, the collapsed JSON, the
-      no-bundle variant; `step` in the hash route honoured on return.
+      no-bundle variant; `step` in the hash route honoured on return. The builder route (8.2)
+      links to and saves back to `#/applications/:id/views/:name?step=n`, which `App.tsx`'s
+      route match does not accept yet (it matches the whole hash, query included).
 - [ ] 9.2 Creating a view whose first unskipped step is a builder step lands in the builder.
 - [ ] 9.3 The Pages tab: **New page** (the properties form → the builder), **Edit**,
       **Properties**, rename with `pageReferences`; `pageForm.ts` for the form's validation
-      (name required and unique in the application, the role list) with vitest.
+      (name required and unique in the application, the role list) with vitest. The page
+      builder's **Page properties** link is `#/applications/:id/pages/:name/properties`.
 - [ ] 9.4 The **Library** tab: list with icon and `used_by`, rename, delete with references,
       read-only layout; hidden for non-Saltcorn-UI applications.
 - [ ] 9.5 View and page rename and delete warnings include the library items a layout places.

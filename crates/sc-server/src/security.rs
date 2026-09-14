@@ -103,6 +103,76 @@ form-action 'self'; \
 frame-ancestors 'none'; \
 object-src 'none'";
 
+/// The Content-Security-Policy served with **the builder** under `/builder/`
+/// (TODO "The builder" §2, 8.3): its documents, its assets, and its refusals.
+///
+/// It is the admin UI's policy with **one** relaxation, and each of the ones
+/// §2 expected was checked against the builder as vendored and left out. The
+/// facts that make each one unnecessary are asserted by
+/// `tests/builder_route.rs`'s `the_builder_policy_is_what_the_bundle_needs`, so a
+/// refresh of the vendored builder that changes one fails there, naming the
+/// directive.
+///
+/// - **`img-src` + the application's origin**, added per document by
+///   [`builder_content_security_policy`]. The canvas renders an application's
+///   images as `/files/serve/…`, which the admin server redirects to the
+///   application (8.5). An image follows a redirect under the policy of the
+///   document that asked for it, so the application's origin must be in it.
+///   Only that application's origin, and only for images.
+/// - `style-src 'unsafe-inline'` is **not new**: the admin policy has it.
+///   Craft's inline `style` props and CKEditor's and Monaco's injected `<style>`
+///   elements need it.
+/// - `worker-src 'self'` is **not a relaxation**: it is what `script-src 'self'`
+///   already allows, written down. Monaco's workers are files beside the bundle,
+///   created from `new URL(…, import.meta.url)` (`src/shims/monaco.ts`), so there
+///   is no `blob:`.
+/// - **No `frame-src`, and no inline script, for CKEditor.** CKEditor 4's
+///   iframe editor writes an inline `<script id="cke_actscrpt">` into its frame,
+///   which this policy would block. Every editor the builder mounts is
+///   `type="inline"` (`elements/Text.js`), a `contenteditable` element with no
+///   frame.
+/// - **No `font-src data:`.** Every font in `builder.css` is a file in the
+///   bundle; its `data:` URLs are images, which `img-src data:` already allows.
+/// - **No `'unsafe-eval'`** and no third-party origin. The boot data is a JSON
+///   `<script type="application/json">`, never executed.
+///
+/// What it cannot be sure of from here is what a browser reports at run time.
+/// The milestone's definition of done is run by hand with the console open, and
+/// a violation report there counts as a failure (TODO "The builder" §13).
+pub const BUILDER_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
+script-src 'self'; \
+style-src 'self' 'unsafe-inline'; \
+img-src 'self' data:; \
+font-src 'self'; \
+connect-src 'self'; \
+worker-src 'self'; \
+base-uri 'none'; \
+form-action 'self'; \
+frame-ancestors 'none'; \
+object-src 'none'";
+
+/// [`BUILDER_CONTENT_SECURITY_POLICY`] for a document building a layout of the
+/// application served at `application_origin`: its images may come from there.
+///
+/// An origin with anything in it but a scheme, a host and a port is left out
+/// rather than written into a header.
+pub fn builder_content_security_policy(application_origin: Option<&str>) -> String {
+    let origin = application_origin.filter(|origin| {
+        (origin.starts_with("http://") || origin.starts_with("https://"))
+            && origin.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '/' | '-' | '[' | ']')
+            })
+    });
+    match origin {
+        Some(origin) => BUILDER_CONTENT_SECURITY_POLICY.replacen(
+            "img-src 'self' data:;",
+            &format!("img-src 'self' data: {origin};"),
+            1,
+        ),
+        None => BUILDER_CONTENT_SECURITY_POLICY.to_owned(),
+    }
+}
+
 /// A fresh, unguessable CSRF token (256 bits from two v4 UUIDs, hex-encoded).
 pub(crate) fn new_csrf_token() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
