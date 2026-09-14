@@ -324,6 +324,10 @@ impl Framework for SaltcornUiFramework {
                     ["view", name, rest @ ..] if !name.is_empty() => {
                         self.post_view(&req, cat, &percent_decode(name), rest).await
                     }
+                    ["page", name, "action", rndid] if !name.is_empty() && !rndid.is_empty() => {
+                        self.page_action(&req, cat, &percent_decode(name), &percent_decode(rndid))
+                            .await
+                    }
                     ["delete", table, id] if !table.is_empty() && !id.is_empty() => {
                         self.delete(&req, cat, &percent_decode(table), &percent_decode(id))
                             .await
@@ -574,6 +578,48 @@ impl SaltcornUiFramework {
             schema: Some(&schema),
         };
         match self.runtime.route(view, route, &request.body, ctx).await {
+            Err(e) if e.kind() == ErrorKind::Application => {
+                eprintln!("feldspar: application `{}`: {e}", self.app.subdomain);
+                json_response(500, &serde_json::json!({ "error": reason_of(&e) }))
+            }
+            out => self.respond(req, out, &request),
+        }
+    }
+
+    /// `POST /page/:name/action/:rndid` (The builder, 3.1): v1's
+    /// `routes/page.ts`, which an action button on a page posts to through
+    /// `saltcorn.js`'s `page_post_action`.
+    ///
+    /// The rules are a view route's: the page's `min_role` first, with the
+    /// refusal rendering gives; the CSRF check has run in front of every
+    /// application; and the action runs in the worker under the viewer's
+    /// authority. v1 answers a page that does not exist with its "Action not
+    /// found", and so does this.
+    async fn page_action(
+        &self,
+        req: &AppRequest,
+        cat: &Catalog,
+        name: &str,
+        rndid: &str,
+    ) -> Result<AppResponse> {
+        let set = view_sets().get(cat, self.app.id).await?;
+        let Some(page) = set.page(name) else {
+            return json_response(404, &serde_json::json!({ "error": "Action not found" }));
+        };
+        if let Some(refused) = self.refused(req, &format!("the page {name}"), page.min_role) {
+            return Ok(refused);
+        }
+        let request = self.view_request(req, None);
+        let snapshot = self.snapshot(cat, &set, &req.base_url).await?;
+        let schema = schema_snapshot(cat)?;
+        let hosts = self.viewer_hosts(cat, req);
+        let ctx = ViewContext {
+            snapshot: &snapshot,
+            request: &request,
+            hosts: hosts.surfaces(),
+            schema: Some(&schema),
+        };
+        match self.runtime.page_action(page, rndid, ctx).await {
             Err(e) if e.kind() == ErrorKind::Application => {
                 eprintln!("feldspar: application `{}`: {e}", self.app.subdomain);
                 json_response(500, &serde_json::json!({ "error": reason_of(&e) }))
@@ -877,11 +923,20 @@ impl SaltcornUiFramework {
         } else {
             page.title.clone()
         };
+        // v1's page route passes both attributes to `sendWrap` (3.2).
+        let flag = |key: &str| {
+            page.attributes
+                .get(key)
+                .and_then(Json::as_bool)
+                .unwrap_or(false)
+        };
         let request = self.view_request(
             req,
             (!is_xhr(req)).then(|| Wrap {
                 title,
                 current_url: req.path.clone(),
+                no_menu: flag("no_menu"),
+                fluid: flag("request_fluid_layout"),
             }),
         );
         let snapshot = self.snapshot(cat, set, &req.base_url).await?;
@@ -988,6 +1043,7 @@ impl SaltcornUiFramework {
         (!is_xhr(req)).then(|| Wrap {
             title,
             current_url: req.path.clone(),
+            ..Wrap::default()
         })
     }
 

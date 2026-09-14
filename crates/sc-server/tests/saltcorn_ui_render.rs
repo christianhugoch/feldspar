@@ -47,7 +47,7 @@ use sc_server::{
     install_triggers,
 };
 use sc_test_harness::TestDb;
-use sc_viewpattern::{LibraryItem, View};
+use sc_viewpattern::{LibraryItem, Page, View};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -1592,6 +1592,192 @@ async fn a_placed_library_item_renders_as_its_inline_equivalent() -> sc_error::R
         "the page's placed items render as their inline layouts"
     );
     Ok(())
+}
+
+/// The builder 3.1 and 3.2: what a page built in the builder needs to run.
+///
+/// An action button on a page posts to `/page/:name/action/:rndid`, which runs
+/// the segment's trigger — a button inside a placed library item included — and
+/// answers v1's JSON: success, the action's error with 400, and 404 for an
+/// action or a page that is not there. The post is refused without the CSRF
+/// token and below the page's role. And a page's `no_menu` and
+/// `request_fluid_layout` reach the document.
+#[tokio::test]
+async fn a_pages_action_buttons_run_and_its_properties_shape_the_document() -> sc_error::Result<()>
+{
+    let Some(bundle) = bundle_dir() else {
+        eprintln!(
+            "skipping: the Saltcorn UI bundle is not built (npm ci && npm run build in ui/saltcorn-ui)"
+        );
+        return Ok(());
+    };
+    let mut server = setup("page-action", bundle).await?;
+    let catalog = server._catalog.clone();
+
+    // Two triggers a page's buttons run, neither needing a row: one answers,
+    // one throws. `SayHello` also writes an author, so its running is seen.
+    let say_hello = "await db.Authors.insert({ first_name: \"Page\", last_name: \"Button\" });\n\
+                     return { notify: \"Hello from the page\" };";
+    for (name, code) in [
+        ("SayHello", say_hello),
+        ("Refuses", "throw new Error(\"no books today\");"),
+    ] {
+        let (status, created) = server
+            .client
+            .send(
+                "POST",
+                "/api/triggers",
+                Some(json!({
+                    "name": name, "description": "", "when": "none", "channel": Value::Null,
+                    "only_if": Value::Null, "action": "run_js_code",
+                    "configuration": { "code": code }, "min_role": Value::Null, "enabled": true,
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+    }
+    let mut app = booksdb(&catalog).await;
+    app.triggers.push(sc_app::TriggerRef::new("SayHello"));
+    app.triggers.push(sc_app::TriggerRef::new("Refuses"));
+    let app = save_application(&catalog, &app).await?;
+
+    let button = |rndid: &str, action: &str| {
+        json!({
+            "type": "action", "action_name": action, "rndid": rndid,
+            "action_style": "btn-primary", "action_label": format!("Run {rndid}"),
+        })
+    };
+    let card = sc_viewpattern::save_library_item(
+        &catalog,
+        &LibraryItem::new(app.id, "A card with a button").layout(json!({ "above": [
+            { "type": "blank", "contents": "In a card" },
+            button("11b0a2", "SayHello"),
+        ]})),
+    )
+    .await?;
+    let actions = Page::new(app.id, "Actions").layout(json!({ "above": [
+        button("a1b2c3", "SayHello"),
+        button("fa11ed", "Refuses"),
+        { "type": "library", "library_id": card.id.0.to_string() },
+    ]}));
+    sc_viewpattern::save_page(&catalog, &actions).await?;
+    let mut quiet =
+        Page::new(app.id, "Quiet").layout(json!({ "type": "blank", "contents": "No menu here" }));
+    quiet.attributes.insert("no_menu".to_owned(), json!(true));
+    sc_viewpattern::save_page(&catalog, &quiet).await?;
+    let mut wide =
+        Page::new(app.id, "Wide").layout(json!({ "type": "blank", "contents": "Wide open" }));
+    wide.attributes
+        .insert("request_fluid_layout".to_owned(), json!(true));
+    sc_viewpattern::save_page(&catalog, &wide).await?;
+    build_and_mount(&server.apps, booksdb(&catalog).await).await?;
+
+    let client = &mut server.client;
+    let csrf = client.cookies.get(CSRF_COOKIE).cloned().unwrap();
+
+    // The buttons post where the route is, the one in the item included.
+    let rendered = client.app_get("/page/Actions", &[]).await;
+    assert_eq!(rendered.status, StatusCode::OK, "{}", rendered.body);
+    for rndid in ["a1b2c3", "fa11ed", "11b0a2"] {
+        assert!(
+            rendered
+                .body
+                .contains(&format!("/page/Actions/action/{rndid}")),
+            "{rndid}: {}",
+            rendered.body
+        );
+    }
+
+    // Success, as `page_post_action` posts it.
+    let authors = row_count(client, "Authors").await;
+    let ran = post_page_action(client, "/page/Actions/action/a1b2c3", Some(&csrf)).await;
+    assert_eq!(ran.status, StatusCode::OK, "{}", ran.body);
+    let answer: Value = serde_json::from_str(&ran.body).unwrap();
+    assert_eq!(answer["success"], json!("ok"), "{answer}");
+    assert_eq!(row_count(client, "Authors").await, authors + 1);
+
+    // A button inside a placed library item.
+    let in_item = post_page_action(client, "/page/Actions/action/11b0a2", Some(&csrf)).await;
+    assert_eq!(in_item.status, StatusCode::OK, "{}", in_item.body);
+    assert_eq!(row_count(client, "Authors").await, authors + 2);
+
+    // The action's own failure, with 400.
+    let failed = post_page_action(client, "/page/Actions/action/fa11ed", Some(&csrf)).await;
+    assert_eq!(failed.status, StatusCode::BAD_REQUEST, "{}", failed.body);
+    let answer: Value = serde_json::from_str(&failed.body).unwrap();
+    assert!(
+        answer["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("no books today")),
+        "{answer}"
+    );
+
+    // No such action, and no such page.
+    for path in ["/page/Actions/action/000000", "/page/Nowhere/action/a1b2c3"] {
+        let missing = post_page_action(client, path, Some(&csrf)).await;
+        assert_eq!(
+            missing.status,
+            StatusCode::NOT_FOUND,
+            "{path}: {}",
+            missing.body
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&missing.body).unwrap(),
+            json!({ "error": "Action not found" })
+        );
+    }
+
+    // No CSRF token: refused before anything runs.
+    let forged = post_page_action(client, "/page/Actions/action/a1b2c3", None).await;
+    assert_eq!(forged.status, StatusCode::FORBIDDEN, "{}", forged.body);
+    assert_eq!(row_count(client, "Authors").await, authors + 2);
+
+    // The page's role: an admin-only page refuses a stranger and a member.
+    sc_viewpattern::save_page(&catalog, &actions.clone().min_role(1)).await?;
+    build_and_mount(&server.apps, booksdb(&catalog).await).await?;
+    let mut stranger = visitor(&server.client);
+    stranger.app_get("/auth/login", &[]).await;
+    let token = stranger.cookies.get(CSRF_COOKIE).cloned().unwrap();
+    let refused =
+        post_page_action(&mut stranger, "/page/Actions/action/a1b2c3", Some(&token)).await;
+    assert_eq!(refused.status, StatusCode::UNAUTHORIZED, "{}", refused.body);
+    create_user(&catalog, "member@example.com", PASSWORD, 80).await?;
+    let mut member = sign_in(&server.client, "member@example.com", PASSWORD).await;
+    let token = member.cookies.get(CSRF_COOKIE).cloned().unwrap();
+    let refused = post_page_action(&mut member, "/page/Actions/action/a1b2c3", Some(&token)).await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    let client = &mut server.client;
+    assert_eq!(row_count(client, "Authors").await, authors + 2);
+
+    // 3.2: the navbar, left out by `no_menu`, and fluid by `request_fluid_layout`.
+    let normal = client.app_get("/page/Actions", &[]).await;
+    assert!(normal.body.contains("id=\"mainNav\""), "{}", normal.body);
+    assert!(!normal.body.contains("container-fluid"), "{}", normal.body);
+    let quiet = client.app_get("/page/Quiet", &[]).await;
+    assert_eq!(quiet.status, StatusCode::OK, "{}", quiet.body);
+    assert!(quiet.body.contains("No menu here"), "{}", quiet.body);
+    assert!(!quiet.body.contains("mainNav"), "{}", quiet.body);
+    let wide = client.app_get("/page/Wide", &[]).await;
+    assert!(wide.body.contains("Wide open"), "{}", wide.body);
+    assert!(wide.body.contains("id=\"mainNav\""), "{}", wide.body);
+    assert!(
+        wide.body.contains("<div class=\"container-fluid\">"),
+        "{}",
+        wide.body
+    );
+    Ok(())
+}
+
+/// A post to a page's action route as `saltcorn.js`'s `page_post_action` makes
+/// it: JSON, v1's `CSRF-Token` header, as ajax.
+async fn post_page_action(client: &mut Client, path: &str, csrf: Option<&str>) -> Answer {
+    let mut headers = vec![("X-Requested-With", "XMLHttpRequest")];
+    if let Some(csrf) = csrf {
+        headers.push(("CSRF-Token", csrf));
+    }
+    client
+        .app_post(path, "application/json", b"{}".to_vec(), &headers)
+        .await
 }
 
 /// Save `view` with `layout` as its layout, deploy, and render `path` as the

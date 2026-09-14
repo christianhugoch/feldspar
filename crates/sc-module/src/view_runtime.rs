@@ -128,6 +128,31 @@ impl ViewRuntime for ModuleViewRuntime {
         output(answer)
     }
 
+    async fn page_action(
+        &self,
+        page: &Page,
+        rndid: &str,
+        ctx: ViewContext<'_>,
+    ) -> Result<ViewOutput> {
+        let (call, request) = call_of(ctx);
+        let answer = self
+            .host
+            .view_call(
+                "view_page_action",
+                json!({ "page": page.name, "rndid": rndid, "request": request }),
+                call,
+            )
+            .await
+            .map_err(|e| {
+                failed(
+                    &format!("the action `{rndid}` of the page `{}`", page.name),
+                    "run",
+                    e,
+                )
+            })?;
+        output(answer)
+    }
+
     async fn post(&self, view: &View, body: &Json, ctx: ViewContext<'_>) -> Result<ViewOutput> {
         let (call, request) = call_of(ctx);
         let answer = self

@@ -2,6 +2,87 @@
 
 Changes in reverse chronological order.
 
+## The builder, Phase 3: pages, running what a built page contains
+
+A page's action buttons now work. Until now they posted to
+`/page/:name/action/:rndid`, which did not exist, so every one 404'd. A page's
+`no_menu` and `request_fluid_layout` now shape its document. They were
+imported and ignored before. A page embedded in a page was already rendered
+under the depth cap, and that now has a test.
+
+- **`POST /page/:name/action/:rndid` (3.1)**, ported from v1's
+  `server/routes/page.ts`.
+  - **The framework** routes it beside `POST /view/…`, with a view route's
+    rules:
+    - the page's `min_role` is checked first, with the refusal rendering gives;
+    - the CSRF check has already run in front of the application;
+    - the call carries the viewer's surfaces.
+  - A page that does not exist answers v1's 404 `{ error: "Action not found" }`.
+  - A seam failure answers `{ error }` with 500, as a view route's does.
+  - **`ViewRuntime::page_action`** is the new seam method.
+    `ModuleViewRuntime` implements it as the worker op `view_page_action`.
+  - **In the worker** (`viewPageAction` in `module-host.mjs`), the `action`
+    segment with that `rndid` is run with the vendored `run_action_column`,
+    inside `db.withTransaction`. It answers v1's three ways:
+    - `{ success: "ok", ...result }`;
+    - `{ error }` with 400 when the action threw, logged through `Crash.create`;
+    - 404 "Action not found".
+- **Where this differs from v1:**
+  - **Buttons inside library items are found.** v1 finds the segment with
+    `traverseSync` over the stored layout, which never looks inside a placed
+    library item, even though `Page.run` renders that item's buttons with this
+    URL. So in v1 those buttons 404. Here the walk resolves `library` segments
+    with v1's own `resolveSegment` first. An item whose whole layout is one
+    action segment is matched after it is resolved too.
+  - **The role refusal** is the one a view post gets: 401 for nobody, 403 for a
+    signed-in role that may not. v1 answers 404 "Action not found" for both.
+  - **No database transaction.** The spec asks for one, and the worker's
+    `withTransaction` opens none. That is the same `db` shim `list.ts`'s
+    `run_action` goes through, and its comment says why: no surface holds a
+    transaction open across host calls. The trigger an action names is one
+    dispatch through the trigger surface.
+- **`no_menu` and `request_fluid_layout` (3.2).**
+  - `Wrap` gains `no_menu` and `fluid`. The page render fills them from the
+    page's `attributes`, as v1's page route passes them to `sendWrap`. A view's
+    wrap leaves both off.
+  - **`no_menu`** renders the layout's body without the navbar. v1 hands the
+    layout no brand and no menu, and a theme then draws no navbar. The emergency
+    layout's `wrap` would still draw an empty bar, so its `renderBody` is called
+    alone.
+  - **`request_fluid_layout`**: the emergency layout's `wrap` takes no
+    `requestFluidLayout`. It is `navbar(…) + renderBody(…)`, so a fluid page
+    makes those two calls itself, with `navbar`'s own `fluid` option. That makes
+    the navbar's container `container-fluid`, which is the only container this
+    layout draws; the body has none either way. No vendored file is edited.
+- **A page embedded in a page (3.3)** was already implemented:
+  `Page.renderEachEmbeddedPageInLayout` runs each embedded page inside
+  `withinView`, the cap views have. Nothing was changed.
+  - v1 refuses only a page that embeds itself directly, so A → B → A recurses
+    there. Here the cap stops it and names the cycle.
+  - A `page` segment naming no page fails with that sentence.
+- **Tests (3.4).**
+  - `saltcorn_ui_render::a_pages_action_buttons_run_and_its_properties_shape_the_document`
+    runs over the restored BooksDB. It sets up two row-less triggers (one writes
+    an author and answers, one throws), a page with a button for each, and a
+    placed library item holding a third button. It asserts:
+    - the rendered buttons point at the route, the item's included;
+    - success, seen as a new author row, and the same for the button in the
+      item;
+    - the thrown error with 400;
+    - 404 `{ error: "Action not found" }` for an unknown `rndid` and an unknown
+      page;
+    - 403 with no CSRF token;
+    - on an admin-only page, 401 for a stranger and 403 for a signed-in member,
+      with nothing run;
+    - a normal page's navbar, `no_menu`'s document without one, and
+      `request_fluid_layout`'s `container-fluid`.
+  - `view_runtime::a_page_embeds_a_page_and_a_cycle_of_pages_is_named` (sc-module)
+    checks that:
+    - an embedded page renders inside its host, after the host's own content;
+    - Ping ↔ Pong fails as an Application error naming
+      `the page Pong → the page Ping → the page Pong`;
+    - a page naming a missing page says so.
+
 ## The builder, Phase 2: the library, rendered
 
 A `library` segment in a Saltcorn UI view or page now renders as its item's

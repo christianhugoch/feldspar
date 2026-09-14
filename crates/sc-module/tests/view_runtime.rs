@@ -217,6 +217,78 @@ async fn the_built_in_view_runtime_loads_with_no_modules_root_at_all() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The builder 3.3: a `page` segment renders the page it names inside the page
+/// that embeds it; pages that embed each other stop at the depth cap views have,
+/// naming the cycle; and a `page` segment naming no page says so.
+#[tokio::test]
+async fn a_page_embeds_a_page_and_a_cycle_of_pages_is_named() {
+    skip_without!(bundle().is_some(), NO_BUNDLE);
+    let root = temp_root("view-runtime-page-in-page");
+    let host = Arc::new(ModuleHost::new(&root).with_view_runtime(bundle()));
+    let runtime = ModuleViewRuntime::new(&host);
+    let app = AppId::new();
+    let views = snapshot(
+        app,
+        1,
+        &json!({
+            "application": { "name": "Books" },
+            "views": [],
+            "pages": [
+                { "name": "Outer", "min_role": 100, "layout": { "above": [
+                    { "type": "blank", "contents": "Outer text" },
+                    { "type": "page", "page": "Inner" },
+                ]}},
+                { "name": "Inner", "min_role": 100,
+                  "layout": { "type": "blank", "contents": "Inner text" } },
+                { "name": "Ping", "min_role": 100, "layout": { "type": "page", "page": "Pong" } },
+                { "name": "Pong", "min_role": 100, "layout": { "above": [
+                    { "type": "blank", "contents": "pong" },
+                    { "type": "page", "page": "Ping" },
+                ]}},
+                { "name": "Lost", "min_role": 100, "layout": { "type": "page", "page": "Nowhere" } },
+            ],
+        }),
+    );
+    let request = ViewRequest::default();
+
+    let out = runtime
+        .render_page(
+            &Page::new(app, "Outer"),
+            ViewContext::bare(&views, &request),
+        )
+        .await
+        .unwrap();
+    let html = out.body.as_str().unwrap();
+    let outer = html.find("Outer text").expect("the outer page's text");
+    let inner = html.find("Inner text").expect("the embedded page's text");
+    assert!(outer < inner, "{html}");
+
+    let err = runtime
+        .render_page(&Page::new(app, "Ping"), ViewContext::bare(&views, &request))
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Application);
+    let msg = err.to_string();
+    assert!(msg.contains("the page `Ping`"), "{msg}");
+    assert!(
+        msg.contains("this cycle embeds itself: the page Pong → the page Ping → the page Pong"),
+        "{msg}"
+    );
+
+    let err = runtime
+        .render_page(&Page::new(app, "Lost"), ViewContext::bare(&views, &request))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("the page \"Nowhere\", which does not exist"),
+        "{err}"
+    );
+
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// §4: the JSON crosses when the worker does not hold the generation, and not
 /// otherwise. Told by lying: the second call carries different JSON at the same
 /// generation, and the worker must still answer from the first.

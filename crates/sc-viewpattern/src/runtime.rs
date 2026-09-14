@@ -111,6 +111,14 @@ pub struct Wrap {
     pub title: String,
     /// The path the navbar marks as current.
     pub current_url: String,
+    /// Leave the navbar out: a page's `no_menu` attribute, which v1's page
+    /// route passes to `sendWrap` (The builder, 3.2).
+    #[serde(default)]
+    pub no_menu: bool,
+    /// Draw the layout's container fluid: a page's `request_fluid_layout`
+    /// attribute, v1's `requestFluidLayout` (The builder, 3.2).
+    #[serde(default)]
+    pub fluid: bool,
 }
 
 /// Everything one call through the seam may reach.
@@ -247,6 +255,17 @@ pub trait ViewRuntime: Send + Sync {
     /// v1's `Page.run` and `renderLayout`: the page's HTML, with every view it
     /// embeds rendered in place.
     async fn render_page(&self, page: &Page, ctx: ViewContext<'_>) -> Result<ViewOutput>;
+
+    /// v1's `POST /page/:name/action/:rndid`: run the `action` segment of the
+    /// page's layout whose `rndid` is `rndid` — found inside the library items
+    /// the layout places too — and answer v1's JSON: `{ success: "ok", … }`,
+    /// `{ error }` with 400 when the action failed, or 404 "Action not found".
+    async fn page_action(
+        &self,
+        page: &Page,
+        rndid: &str,
+        ctx: ViewContext<'_>,
+    ) -> Result<ViewOutput>;
 
     /// v1's `View.runPost`: a form posted to the view.
     async fn post(&self, view: &View, body: &Json, ctx: ViewContext<'_>) -> Result<ViewOutput>;

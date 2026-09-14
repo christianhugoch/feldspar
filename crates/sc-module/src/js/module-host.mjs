@@ -3194,16 +3194,27 @@ function wrapped(value, request, req, response, set) {
   const wrap = request && request.wrap;
   if (!wrap || typeof value !== "string") return value;
   if (response.redirect !== null || "json" in response || "sent" in response) return value;
-  return builtInLayout().wrap({
-    title: wrap.title,
-    brand: { name: configValue(set, "site_name") },
-    menu: menuSections(set, req),
-    alerts: response.flashes.map((f) => ({ type: f.kind, msg: f.message })),
-    currentUrl: wrap.current_url || req.path,
-    body: value,
-    headers: [],
-    req,
-  });
+  const layout = builtInLayout();
+  const alerts = response.flashes.map((f) => ({ type: f.kind, msg: f.message }));
+  const currentUrl = wrap.current_url || req.path;
+  // A page's `no_menu` (The builder, 3.2). v1's page route hands the layout no
+  // brand and no menu, which a theme answers by drawing no navbar; the
+  // emergency layout would draw an empty bar, so its body is rendered alone.
+  if (wrap.no_menu) return layout.renderBody({ title: wrap.title, body: value, alerts, req });
+  const brand = { name: configValue(set, "site_name") };
+  const menu = menuSections(set, req);
+  // A page's `request_fluid_layout` (3.2): the emergency layout's `wrap` is
+  // `navbar(brand, menu, currentUrl) + renderBody(…)` and takes no
+  // `requestFluidLayout`, so it is those two calls with `navbar`'s own `fluid`
+  // option — the one container this layout draws.
+  if (wrap.fluid) {
+    const { navbar } = loadedRuntime("getState().getLayout").library["@saltcorn/markup/layout_utils"];
+    return (
+      navbar(brand, menu, currentUrl, { fixedTop: true, fluid: true }) +
+      layout.renderBody({ title: wrap.title, body: value, alerts, req })
+    );
+  }
+  return layout.wrap({ title: wrap.title, brand, menu, alerts, currentUrl, body: value, headers: [], req });
 }
 
 /** The pattern manifest (§3.3): the bundle's registry, with each pattern's
@@ -3288,6 +3299,63 @@ async function viewRenderPage({ page: name, request }) {
           is_owner: false,
         });
   return viewAnswer(wrapped(value, request, req, response, set), response);
+}
+
+/** v1's `POST /page/:name/action/:rndid` (`server/routes/page.ts`; The builder,
+ * 3.1): the `action` segment with that `rndid`, run with `run_action_column`,
+ * answered as v1 answers — `{ success: "ok", ...result }`, `{ error }` with 400
+ * when the action threw, or 404 "Action not found". The page's role has been
+ * checked by the framework, as a view route's is.
+ *
+ * v1 finds the segment with `traverseSync` over the stored layout, which never
+ * looks inside a placed library item, although `Page.run` renders the item's
+ * buttons with this URL. So the layout's `library` segments are resolved first,
+ * by v1's own `resolveSegment`, and a button inside an item is found.
+ *
+ * `withTransaction` is the `db` one `list.ts`'s `run_action` uses, and like it
+ * opens no database transaction ([`v1Db`] says why): the trigger the action
+ * names is one dispatch through the trigger surface. */
+async function viewPageAction({ page: name, rndid, request }) {
+  const runtime = await requireViewRuntime();
+  const set = currentViews();
+  const { req, res, response } = viewRequest(request, set);
+  const page = Page.findOne({ name });
+  const col = page ? await actionSegment(runtime, page.layout, rndid, req) : undefined;
+  if (!col) {
+    res.status(404).json({ error: "Action not found" });
+    return viewAnswer(null, response);
+  }
+  const { run_action_column } = runtime.library["@saltcorn/data/plugin-helper"];
+  try {
+    const result = await v1Db.withTransaction(() =>
+      run_action_column({ col, referrer: req.get("Referrer"), req, res }),
+    );
+    res.json({ success: "ok", ...(result || {}) });
+  } catch (e) {
+    await V1Crash.create(e, req);
+    res.status(400).json({ error: (e && e.message) || String(e) });
+  }
+  return viewAnswer(null, response);
+}
+
+/** The `action` segment of `layout` whose `rndid` is `rndid`, placed library
+ * items resolved on the way — the last one, as v1's walk keeps the last. */
+async function actionSegment(runtime, layout, rndid, req) {
+  const Library = runtime.library["@saltcorn/data/models/library"];
+  let col;
+  const found = (segment) => {
+    if (segment.type === "action" && segment.rndid === rndid) col = segment;
+  };
+  await runtime.internals.traverse(layout, {
+    action: found,
+    // An item whose whole layout is one action is that segment once resolved,
+    // and the walk has already passed its type.
+    library: async (segment) => {
+      await Library.resolveSegment(segment, req);
+      found(segment);
+    },
+  });
+  return col;
 }
 
 /** The context a configuration call is made over: what the caller gathered, the
@@ -3412,6 +3480,8 @@ async function handle(request) {
       return await viewRender(request);
     case "view_render_page":
       return await viewRenderPage(request);
+    case "view_page_action":
+      return await viewPageAction(request);
     case "view_post":
       return await viewPost(request);
     case "view_route":

@@ -625,14 +625,14 @@ entry plus its §3 URLs, not a surprise.
 
 ## Phase 3 — Pages, running what a built page contains
 
-- [ ] 3.1 `POST /page/:name/action/:rndid` (§7): routed by the framework, run in the worker with
+- [x] 3.1 `POST /page/:name/action/:rndid` (§7): routed by the framework, run in the worker with
       `run_action_column` under the viewer's authority in a transaction, `min_role`, CSRF, the
       segment found inside resolved library items too, v1's three answers.
-- [ ] 3.2 `no_menu` and `request_fluid_layout` from the page's `attributes` into
+- [x] 3.2 `no_menu` and `request_fluid_layout` from the page's `attributes` into
       `emergency_layout`'s wrap.
-- [ ] 3.3 A `page` segment embedded in a page renders under the depth cap, naming a cycle
+- [x] 3.3 A `page` segment embedded in a page renders under the depth cap, naming a cycle
       (verify; implement if missing).
-- [ ] 3.4 Tests: the action route's answers; the two properties in the document; an embedded
+- [x] 3.4 Tests: the action route's answers; the two properties in the document; an embedded
       page and a page cycle.
 
 ## Phase 4 — The library and pages, imported and backed up
