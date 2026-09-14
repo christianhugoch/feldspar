@@ -113,14 +113,14 @@ pub(crate) fn module_registries() -> &'static tokio::sync::RwLock<()> {
     LOCK.get_or_init(|| tokio::sync::RwLock::new(()))
 }
 
-#[path = "saltcorn_ui_mount.rs"]
-mod saltcorn_ui_mount;
-#[path = "saltcorn_ui_plugins.rs"]
-mod saltcorn_ui_plugins;
 #[path = "saltcorn_ui_admin_api.rs"]
 mod saltcorn_ui_admin_api;
 #[path = "saltcorn_ui_configure.rs"]
 mod saltcorn_ui_configure;
+#[path = "saltcorn_ui_mount.rs"]
+mod saltcorn_ui_mount;
+#[path = "saltcorn_ui_plugins.rs"]
+mod saltcorn_ui_plugins;
 #[path = "saltcorn_ui_render.rs"]
 mod saltcorn_ui_render;
 #[path = "schema_edit_api.rs"]

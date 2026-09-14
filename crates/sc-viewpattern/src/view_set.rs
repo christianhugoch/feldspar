@@ -1,5 +1,6 @@
-//! [`ViewSet`] and [`ViewSets`]: an application's views and pages, loaded once
-//! and stamped with a generation (TODO "Saltcorn UI" §4).
+//! [`ViewSet`] and [`ViewSets`]: an application's views, pages and library,
+//! loaded once and stamped with a generation (TODO "Saltcorn UI" §4, TODO "The
+//! builder" §8).
 //!
 //! The worker the views render on holds a snapshot of every view and page of an
 //! application, because v1's `View.findOne` is synchronous. Sending that snapshot
@@ -14,18 +15,22 @@
 //! with a smaller stamp: two writes racing cannot leave the cache holding the
 //! older read.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use sc_app::AppId;
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
+use serde_json::Value as Json;
 
+use crate::library::{
+    self, LibraryItem, LibraryItemId, LibraryReferences, LibraryUpdate, collect_library_ids,
+};
 use crate::store;
 use crate::view::{Page, View};
 
-/// Every view and page of one application, as of one generation.
+/// Every view, page and library item of one application, as of one generation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewSet {
     /// The application.
@@ -37,6 +42,8 @@ pub struct ViewSet {
     pub views: Vec<View>,
     /// The pages, ordered by name.
     pub pages: Vec<Page>,
+    /// The library items, ordered by name.
+    pub library: Vec<LibraryItem>,
 }
 
 impl ViewSet {
@@ -47,6 +54,7 @@ impl ViewSet {
             generation,
             views: store::list_views(catalog, application).await?,
             pages: store::list_pages(catalog, application).await?,
+            library: library::list_library(catalog, application).await?,
         })
     }
 
@@ -58,6 +66,83 @@ impl ViewSet {
     /// The page named `name`, if the set has one.
     pub fn page(&self, name: &str) -> Option<&Page> {
         self.pages.iter().find(|p| p.name == name)
+    }
+
+    /// The library item `id`, if the set has one.
+    pub fn library_item(&self, id: LibraryItemId) -> Option<&LibraryItem> {
+        self.library.iter().find(|i| i.id == id)
+    }
+
+    /// The library items a view's configuration places, directly or inside an
+    /// item it places, ordered by name.
+    pub fn library_placed_by_view(&self, view: &View) -> Vec<&LibraryItem> {
+        self.placed(view.configuration.values())
+    }
+
+    /// The library items a page's layout places, directly or inside an item it
+    /// places, ordered by name.
+    pub fn library_placed_by_page(&self, page: &Page) -> Vec<&LibraryItem> {
+        self.placed(std::iter::once(&page.layout))
+    }
+
+    /// The library items an item's layout places, directly or nested, ordered by
+    /// name. An item that places itself, however deeply, is in its own answer.
+    pub fn library_placed_by_item(&self, item: &LibraryItem) -> Vec<&LibraryItem> {
+        self.placed(std::iter::once(&item.layout))
+    }
+
+    /// The views, pages and other items that place the item `id`, directly or
+    /// through an item they place.
+    pub fn library_references(&self, id: LibraryItemId) -> LibraryReferences {
+        let places = |items: Vec<&LibraryItem>| items.iter().any(|i| i.id == id);
+        LibraryReferences {
+            views: self
+                .views
+                .iter()
+                .filter(|v| places(self.library_placed_by_view(v)))
+                .map(|v| v.name.clone())
+                .collect(),
+            pages: self
+                .pages
+                .iter()
+                .filter(|p| places(self.library_placed_by_page(p)))
+                .map(|p| p.name.clone())
+                .collect(),
+            library: self
+                .library
+                .iter()
+                .filter(|i| i.id != id && places(self.library_placed_by_item(i)))
+                .map(|i| i.name.clone())
+                .collect(),
+        }
+    }
+
+    /// The set's items that `roots` place, followed through each item's own
+    /// layout. An id that names no item of the set is skipped: it renders blank
+    /// (v1's `resolveSegment`), so it places nothing. The visited set is what
+    /// stops an item that contains itself.
+    fn placed<'a>(&self, roots: impl Iterator<Item = &'a Json>) -> Vec<&LibraryItem> {
+        let mut pending = BTreeSet::new();
+        for root in roots {
+            collect_library_ids(root, &mut pending);
+        }
+        let mut seen: BTreeSet<LibraryItemId> = BTreeSet::new();
+        while let Some(raw) = pending.pop_first() {
+            let Some(item) = uuid::Uuid::parse_str(&raw)
+                .ok()
+                .and_then(|id| self.library_item(LibraryItemId(id)))
+            else {
+                continue;
+            };
+            if seen.insert(item.id) {
+                collect_library_ids(&item.layout, &mut pending);
+            }
+        }
+        // `library` is ordered by name, so filtering it keeps that order.
+        self.library
+            .iter()
+            .filter(|i| seen.contains(&i.id))
+            .collect()
     }
 }
 
@@ -150,6 +235,41 @@ impl ViewSets {
         let deleted = store::delete_page(catalog, application, name).await?;
         self.reload(catalog, application).await?;
         Ok(deleted)
+    }
+
+    /// [`library::save_library_item`], then reload the item's application.
+    pub async fn save_library_item(
+        &self,
+        catalog: &Catalog,
+        item: &LibraryItem,
+    ) -> Result<LibraryItem> {
+        let saved = library::save_library_item(catalog, item).await?;
+        self.reload(catalog, saved.application).await?;
+        Ok(saved)
+    }
+
+    /// [`library::delete_library_item`], then reload the application.
+    pub async fn delete_library_item(
+        &self,
+        catalog: &Catalog,
+        application: AppId,
+        id: LibraryItemId,
+    ) -> Result<bool> {
+        let deleted = library::delete_library_item(catalog, application, id).await?;
+        self.reload(catalog, application).await?;
+        Ok(deleted)
+    }
+
+    /// [`library::apply_library_updates`], then reload the application.
+    pub async fn apply_library_updates(
+        &self,
+        catalog: &Catalog,
+        application: AppId,
+        updates: &[LibraryUpdate],
+    ) -> Result<()> {
+        library::apply_library_updates(catalog, application, updates).await?;
+        self.reload(catalog, application).await?;
+        Ok(())
     }
 
     fn cached(&self, application: AppId) -> Result<Option<Arc<ViewSet>>> {

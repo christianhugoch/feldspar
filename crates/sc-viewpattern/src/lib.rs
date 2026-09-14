@@ -23,7 +23,12 @@
 //!   and whatever an installed module declares (Phase 11) — and the headers and
 //!   `public/` directory such a module brings with its patterns
 //!   ([`installed_plugin_assets`]).
-//! - [`ViewSet`] — every view and page of one application, loaded once — and
+//! - [`LibraryItem`] — a named, reusable layout fragment of one Saltcorn UI
+//!   application (TODO "The builder" §8) — its row path ([`save_library_item`],
+//!   [`list_library`], …), [`apply_library_updates`] in one transaction, and the
+//!   layout walk its references are built from ([`placed_library_ids`]).
+//! - [`ViewSet`] — every view, page and library item of one application, loaded
+//!   once — and
 //!   [`ViewSets`], the cache that reloads a set on a write and stamps it with the
 //!   **generation** the worker's view snapshot is keyed on (§4).
 //! - Where the view runtime is ([`require_view_runtime`]): the `ui/saltcorn-ui`
@@ -42,6 +47,7 @@
 mod bundle;
 mod configure;
 mod framework;
+mod library;
 mod patterns;
 mod plugins;
 mod runtime;
@@ -61,6 +67,11 @@ pub use framework::{
     SaltcornUiFramework, check_saltcorn_ui_config, install_saltcorn_ui, saltcorn_ui_config_spec,
     saltcorn_ui_csp, view_sets,
 };
+pub use library::{
+    LibraryItem, LibraryItemId, LibraryReferences, LibraryUpdate, apply_library_updates,
+    apply_library_updates_in, delete_library_item, list_library, load_library_item,
+    placed_library_ids, save_library_item,
+};
 pub use patterns::{
     BUILTIN_PATTERNS, PatternInfo, builtin_patterns, find_pattern, install_patterns,
     registered_patterns,
@@ -75,13 +86,13 @@ pub use runtime::{
 };
 pub use snapshot::{MENU_CONFIG_KEY, ViewSnapshot};
 pub use store::{
-    delete_application_views_and_pages, delete_page, delete_view, list_pages, list_views,
+    delete_application_views_pages_and_library, delete_page, delete_view, list_pages, list_views,
     load_page, load_view, save_page, save_view, validate_view,
 };
 pub use tables::{
-    COL_APPLICATION, COL_ATTRIBUTES, COL_CONFIGURATION, COL_DESCRIPTION, COL_ID, COL_LAYOUT,
-    COL_MIN_ROLE, COL_NAME, COL_SLUG, COL_TABLE_NAME, COL_TITLE, COL_VIEWPATTERN, PAGES_TABLE,
-    VIEWS_TABLE, bootstrap,
+    COL_APPLICATION, COL_ATTRIBUTES, COL_CONFIGURATION, COL_DESCRIPTION, COL_ICON, COL_ID,
+    COL_LAYOUT, COL_MIN_ROLE, COL_NAME, COL_SLUG, COL_TABLE_NAME, COL_TITLE, COL_VIEWPATTERN,
+    LIBRARY_TABLE, PAGES_TABLE, VIEWS_TABLE, bootstrap,
 };
 pub use validate::{
     VIEW_ACTIONS, check_name, check_view_actions, configured_actions, referenced_views,

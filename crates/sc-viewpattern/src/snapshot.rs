@@ -1,5 +1,5 @@
-//! [`ViewSnapshot`]: an application's views and pages as the worker sees them
-//! (TODO "Saltcorn UI" §4).
+//! [`ViewSnapshot`]: an application's views, pages and library as the worker
+//! sees them (TODO "Saltcorn UI" §4, TODO "The builder" §8).
 //!
 //! v1's `View.findOne` is synchronous, and so are `getState().getConfig(…)` and
 //! `getState().roles`, so none of them can be a host call. They are answered from
@@ -17,6 +17,7 @@ use sc_auth::Role;
 use sc_error::{Error, Result};
 use serde_json::{Value as Json, json};
 
+use crate::library::LibraryItem;
 use crate::view::{Page, View};
 use crate::view_set::ViewSet;
 
@@ -24,7 +25,8 @@ use crate::view_set::ViewSet;
 /// key, so a restored backup's menu crosses unrenamed.
 pub const MENU_CONFIG_KEY: &str = "menu_items";
 
-/// One application's views, pages and settings, serialised at one generation.
+/// One application's views, pages, library and settings, serialised at one
+/// generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewSnapshot {
     application: AppId,
@@ -92,6 +94,8 @@ impl ViewSnapshot {
             "triggers": application.triggers.iter().map(|t| json!({ "name": t.0, "action": action_of(&t.0) })).collect::<Vec<_>>(),
             "views": set.views.iter().map(view_json).collect::<Vec<_>>(),
             "pages": set.pages.iter().map(page_json).collect::<Vec<_>>(),
+            // What v1's `Library.find` reads (§8): the application's items only.
+            "library": set.library.iter().map(library_json).collect::<Vec<_>>(),
         });
         let json = serde_json::to_string(&value)
             .map_err(|e| Error::serde(format!("serialising the view snapshot: {e}")))?;
@@ -163,6 +167,17 @@ fn page_json(page: &Page) -> Json {
     })
 }
 
+/// A library item as v1's `_sc_library` row is shaped. `id` is the UUID that a
+/// `library` segment's `library_id` holds.
+fn library_json(item: &LibraryItem) -> Json {
+    json!({
+        "id": item.id.0.to_string(),
+        "name": item.name,
+        "icon": item.icon,
+        "layout": item.layout,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -201,6 +216,11 @@ mod tests {
             generation: 7,
             views: vec![View::new(app.id, "List Books", "List", "books").min_role(1)],
             pages: vec![Page::new(app.id, "BooksOverview").title("Books")],
+            library: vec![
+                LibraryItem::new(app.id, "Book header")
+                    .icon("fas fa-heading")
+                    .layout(json!({ "type": "blank", "contents": "Header" })),
+            ],
         };
         let snapshot = ViewSnapshot::build(
             &app,
@@ -237,6 +257,11 @@ mod tests {
         assert_eq!(view["table_id"], json!("books"));
         assert_eq!(view["min_role"], json!(1));
         assert_eq!(value["pages"][0]["title"], json!("Books"));
+        let item = &value["library"][0];
+        assert_eq!(item["id"], json!(set.library[0].id.0.to_string()));
+        assert_eq!(item["name"], json!("Book header"));
+        assert_eq!(item["icon"], json!("fas fa-heading"));
+        assert_eq!(item["layout"]["contents"], json!("Header"));
     }
 
     #[test]
@@ -249,6 +274,7 @@ mod tests {
             generation: 1,
             views: Vec::new(),
             pages: Vec::new(),
+            library: Vec::new(),
         };
         let snapshot = ViewSnapshot::build_with_trigger_actions(&app, &set, &[], "", &|name| {
             (name == "TrimPages").then(|| "run_js_code".to_owned())
@@ -272,6 +298,7 @@ mod tests {
             generation: 1,
             views: Vec::new(),
             pages: Vec::new(),
+            library: Vec::new(),
         };
         let msg = ViewSnapshot::build(&app, &set, &[], "")
             .unwrap_err()

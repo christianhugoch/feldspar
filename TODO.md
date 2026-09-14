@@ -594,17 +594,17 @@ entry plus its §3 URLs, not a surprise.
 
 ## Phase 1 — The library, stored
 
-- [ ] 1.1 `_fd_library` in `sc-viewpattern/src/tables.rs`: the §9 columns, `application`,
+- [x] 1.1 `_fd_library` in `sc-viewpattern/src/tables.rs`: the §9 columns, `application`,
       `icon`, `layout`, the (`application`, `name`) key, bootstrapped with the other two.
-- [ ] 1.2 `LibraryItem` and `LibraryItemId`; `save_library_item` / `load_library_item` /
+- [x] 1.2 `LibraryItem` and `LibraryItemId`; `save_library_item` / `load_library_item` /
       `list_library` / `delete_library_item` / `apply_library_updates` (transactional), refusing
       a non-Saltcorn-UI application naming its framework, and a duplicate name naming it.
-- [ ] 1.3 Deleting an application deletes its library; rename
+- [x] 1.3 Deleting an application deletes its library; rename
       `delete_application_views_and_pages` to say so.
-- [ ] 1.4 `ViewSet` and `ViewSnapshot` carry the library; a library write moves the generation.
-- [ ] 1.5 References: the items a view's or page's layout places (a layout walk over `library`
+- [x] 1.4 `ViewSet` and `ViewSnapshot` carry the library; a library write moves the generation.
+- [x] 1.5 References: the items a view's or page's layout places (a layout walk over `library`
       segments, including inside nested items), and the views and pages that place an item.
-- [ ] 1.6 Live tests: round trip, uniqueness per application, framework refusal, cascade,
+- [x] 1.6 Live tests: round trip, uniqueness per application, framework refusal, cascade,
       references both ways, generation bump.
 
 ## Phase 2 — The library, rendered

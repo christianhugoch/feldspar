@@ -1,7 +1,7 @@
-//! The `_fd_views` and `_fd_pages` tables: their schema and one-time bootstrap
-//! (TODO "Saltcorn UI" §1).
+//! The `_fd_views`, `_fd_pages` and `_fd_library` tables: their schema and
+//! one-time bootstrap (TODO "Saltcorn UI" §1, TODO "The builder" §8).
 //!
-//! Both obey §9's required columns (UUID `id`, `name`, `description`,
+//! All three obey §9's required columns (UUID `id`, `name`, `description`,
 //! `attributes`). The one addition to v1's shape is `application`, and the
 //! uniqueness moves with it: a name is unique on (`application`, `name`), not on
 //! its own, so two applications may each hold a `List Books`.
@@ -9,8 +9,9 @@
 //! `application` is **not** a foreign key onto `_fd_applications`, for the
 //! reason `_fd_workflow_versions.workflow` is not one: the schema layer renders
 //! no `ON DELETE` action, so a key would make deleting an application impossible
-//! rather than tidy. Deleting an application deletes its views and pages, and
-//! [`delete_application_views_and_pages`](crate::delete_application_views_and_pages)
+//! rather than tidy. Deleting an application deletes its views, pages and
+//! library, and
+//! [`delete_application_views_pages_and_library`](crate::delete_application_views_pages_and_library)
 //! is what does it. `min_role` is not a key onto `_fd_roles` either: it is
 //! checked on save, where the refusal can name the role.
 
@@ -23,6 +24,8 @@ use sc_types::{BasicType, TypeRef};
 pub const VIEWS_TABLE: &str = "_fd_views";
 /// Name of the pages table in the primary database.
 pub const PAGES_TABLE: &str = "_fd_pages";
+/// Name of the library table in the primary database.
+pub const LIBRARY_TABLE: &str = "_fd_library";
 
 /// The UUID primary-key column (§9).
 pub const COL_ID: &str = "id";
@@ -44,8 +47,11 @@ pub const COL_MIN_ROLE: &str = "min_role";
 pub const COL_SLUG: &str = "slug";
 /// A page's title.
 pub const COL_TITLE: &str = "title";
-/// A page's v1-shaped layout — JSON.
+/// A page's or library item's v1-shaped layout — JSON.
 pub const COL_LAYOUT: &str = "layout";
+/// A library item's v1 icon class. Nullable; `NULL` reads back as the empty
+/// string.
+pub const COL_ICON: &str = "icon";
 /// The sparse per-row values column (§9) — JSON, always an object.
 pub const COL_ATTRIBUTES: &str = "attributes";
 
@@ -92,6 +98,19 @@ pub(crate) fn pages_fields() -> Vec<DataField> {
     ]
 }
 
+/// The fields of `_fd_library`, in declaration order.
+pub(crate) fn library_fields() -> Vec<DataField> {
+    vec![
+        DataField::plain(COL_ID, uuid()).required().primary_key(),
+        DataField::plain(COL_APPLICATION, uuid()).required(),
+        DataField::plain(COL_NAME, text()).required(),
+        DataField::plain(COL_DESCRIPTION, text()),
+        DataField::plain(COL_ICON, text()),
+        DataField::plain(COL_LAYOUT, json()).required(),
+        DataField::plain(COL_ATTRIBUTES, json()).required(),
+    ]
+}
+
 /// The jointly-unique key (`application`, `name`). Save checks it first so the
 /// refusal names the clash; the database is still the authority, because two
 /// admins saving at once cannot see each other's transaction.
@@ -101,7 +120,7 @@ pub(crate) fn name_key() -> ConstraintKind {
     }
 }
 
-/// Ensure `_fd_views` and `_fd_pages` exist, each with its (`application`,
+/// Ensure `_fd_views`, `_fd_pages` and `_fd_library` exist, each with its (`application`,
 /// `name`) key.
 ///
 /// Idempotent and additively reconciled, like every other bootstrap: an existing
@@ -110,6 +129,7 @@ pub(crate) fn name_key() -> ConstraintKind {
 pub async fn bootstrap(catalog: &Catalog) -> Result<()> {
     bootstrap_one(catalog, VIEWS_TABLE, &views_fields()).await?;
     bootstrap_one(catalog, PAGES_TABLE, &pages_fields()).await?;
+    bootstrap_one(catalog, LIBRARY_TABLE, &library_fields()).await?;
     Ok(())
 }
 
@@ -136,8 +156,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn both_tables_have_the_section_9_columns_and_an_application() {
-        for fields in [views_fields(), pages_fields()] {
+    fn every_table_has_the_section_9_columns_and_an_application() {
+        for fields in [views_fields(), pages_fields(), library_fields()] {
             let by_name = |n: &str| fields.iter().find(|f| f.base.name == n).unwrap();
             assert!(by_name(COL_ID).primary_key && by_name(COL_ID).required);
             assert!(by_name(COL_NAME).required);
@@ -162,5 +182,14 @@ mod tests {
         assert!(!by_name(COL_TABLE_NAME).required);
         assert!(!by_name(COL_SLUG).required);
         assert!(by_name(COL_CONFIGURATION).required);
+    }
+
+    #[test]
+    fn a_library_item_has_a_layout_and_may_have_no_icon() {
+        let fields = library_fields();
+        let by_name = |n: &str| fields.iter().find(|f| f.base.name == n).unwrap();
+        assert!(by_name(COL_LAYOUT).required);
+        assert_eq!(by_name(COL_LAYOUT).base.type_, json());
+        assert!(!by_name(COL_ICON).required);
     }
 }

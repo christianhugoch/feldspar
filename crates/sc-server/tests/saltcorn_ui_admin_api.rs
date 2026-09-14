@@ -422,9 +422,7 @@ async fn an_applications_views_and_pages_are_managed_over_http() -> sc_error::Re
     assert_eq!(got["title"], "Welcome");
     assert_eq!(got["layout"], layout);
     assert_eq!(got["attributes"]["root_page_for_roles"], json!([100]));
-    let (status, deleted) = client
-        .send("DELETE", &format!("{pages}/Home"), None)
-        .await;
+    let (status, deleted) = client.send("DELETE", &format!("{pages}/Home"), None).await;
     assert_eq!(status, StatusCode::OK, "{deleted}");
     let (_, listed) = client.send("GET", &pages, None).await;
     assert_eq!(listed, json!([]));

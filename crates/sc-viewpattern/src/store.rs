@@ -19,8 +19,8 @@ use serde_json::Value as Json;
 use crate::patterns::registered_patterns;
 use crate::tables::{
     COL_APPLICATION, COL_ATTRIBUTES, COL_CONFIGURATION, COL_DESCRIPTION, COL_ID, COL_LAYOUT,
-    COL_MIN_ROLE, COL_NAME, COL_SLUG, COL_TABLE_NAME, COL_TITLE, COL_VIEWPATTERN, PAGES_TABLE,
-    VIEWS_TABLE,
+    COL_MIN_ROLE, COL_NAME, COL_SLUG, COL_TABLE_NAME, COL_TITLE, COL_VIEWPATTERN, LIBRARY_TABLE,
+    PAGES_TABLE, VIEWS_TABLE,
 };
 use crate::validate::{check_name, check_view_actions, check_view_shape};
 use crate::view::{Page, PageId, View, ViewId};
@@ -217,18 +217,18 @@ pub async fn delete_page(catalog: &Catalog, application: AppId, name: &str) -> R
     delete_scoped(catalog, PAGES_TABLE, application, name).await
 }
 
-/// Delete every view and page of `application` — what deleting the application
-/// does, since `application` is not a foreign key (see
+/// Delete every view, page and library item of `application` — what deleting
+/// the application does, since `application` is not a foreign key (see
 /// [`tables`](crate::tables)).
 ///
 /// A database whose tables were never bootstrapped has nothing to delete, and
 /// that is not an error: an application can be deleted from a server that has
 /// never served a Saltcorn UI app.
-pub async fn delete_application_views_and_pages(
+pub async fn delete_application_views_pages_and_library(
     catalog: &Catalog,
     application: AppId,
 ) -> Result<()> {
-    for table in [VIEWS_TABLE, PAGES_TABLE] {
+    for table in [VIEWS_TABLE, PAGES_TABLE, LIBRARY_TABLE] {
         if catalog.get(table)?.is_none() {
             continue;
         }
@@ -277,16 +277,20 @@ async fn delete_scoped(
     application: AppId,
     name: &str,
 ) -> Result<bool> {
-    let existed = load_one(catalog, table, scoped(application, name))
-        .await?
-        .is_some();
-    let delete = Delete::from(table).filter(scoped(application, name));
+    delete_where(catalog, table, scoped(application, name)).await
+}
+
+/// Delete the rows of `table` matching `filter`, returning whether there were
+/// any.
+pub(crate) async fn delete_where(catalog: &Catalog, table: &str, filter: Expr) -> Result<bool> {
+    let existed = load_one(catalog, table, filter.clone()).await?.is_some();
+    let delete = Delete::from(table).filter(filter);
     run(catalog, Statement::from(delete)).await?;
     Ok(existed)
 }
 
 /// Insert a row, or update the one with the same id.
-async fn write_row(
+pub(crate) async fn write_row(
     catalog: &Catalog,
     table: &str,
     columns: &[&str],
@@ -354,21 +358,21 @@ fn page_from_row(row: &Row) -> Result<Page> {
     })
 }
 
-fn uuid(row: &Row, table: &str, column: &str) -> Result<uuid::Uuid> {
+pub(crate) fn uuid(row: &Row, table: &str, column: &str) -> Result<uuid::Uuid> {
     match row.get(column) {
         Some(Value::Uuid(u)) => Ok(*u),
         other => Err(bad_column(table, column, "a uuid", other)),
     }
 }
 
-fn text(row: &Row, table: &str, column: &str) -> Result<String> {
+pub(crate) fn text(row: &Row, table: &str, column: &str) -> Result<String> {
     match row.get(column) {
         Some(Value::Text(t)) => Ok(t.clone()),
         other => Err(bad_column(table, column, "text", other)),
     }
 }
 
-fn optional_text(row: &Row, table: &str, column: &str) -> Result<Option<String>> {
+pub(crate) fn optional_text(row: &Row, table: &str, column: &str) -> Result<Option<String>> {
     match row.get(column) {
         Some(Value::Text(t)) => Ok(Some(t.clone())),
         Some(Value::Null) | None => Ok(None),
@@ -376,7 +380,7 @@ fn optional_text(row: &Row, table: &str, column: &str) -> Result<Option<String>>
     }
 }
 
-fn object(row: &Row, table: &str, column: &str) -> Result<Attrs> {
+pub(crate) fn object(row: &Row, table: &str, column: &str) -> Result<Attrs> {
     match row.get(column) {
         Some(Value::Json(Json::Object(o))) => Ok(o.clone()),
         other => Err(bad_column(table, column, "a json object", other)),
@@ -397,7 +401,7 @@ fn role(row: &Row, table: &str) -> Result<u8> {
     }
 }
 
-fn bad_column(table: &str, column: &str, expected: &str, got: Option<&Value>) -> Error {
+pub(crate) fn bad_column(table: &str, column: &str, expected: &str, got: Option<&Value>) -> Error {
     match got {
         Some(value) => Error::invalid(format!(
             "{table}.{column} should be {expected}, got {}",
@@ -419,7 +423,7 @@ async fn run(catalog: &Catalog, statement: Statement) -> Result<()> {
 }
 
 /// The rows of `table` matching `filter`.
-async fn rows(catalog: &Catalog, table: &str, filter: Expr) -> Result<Vec<Row>> {
+pub(crate) async fn rows(catalog: &Catalog, table: &str, filter: Expr) -> Result<Vec<Row>> {
     let select = Select::from(Source::table(table)).filter(filter);
     catalog
         .primary()
@@ -430,7 +434,7 @@ async fn rows(catalog: &Catalog, table: &str, filter: Expr) -> Result<Vec<Row>> 
 }
 
 /// The single row of `table` matching `filter`, if any.
-async fn load_one(catalog: &Catalog, table: &str, filter: Expr) -> Result<Option<Row>> {
+pub(crate) async fn load_one(catalog: &Catalog, table: &str, filter: Expr) -> Result<Option<Row>> {
     let select = Select::from(Source::table(table)).filter(filter).limit(1);
     Ok(catalog
         .primary()

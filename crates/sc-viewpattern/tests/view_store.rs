@@ -15,8 +15,8 @@ use sc_db_postgres::PgDriver;
 use sc_error::Result;
 use sc_test_harness::TestDb;
 use sc_viewpattern::{
-    Page, View, ViewSets, bootstrap, delete_application_views_and_pages, delete_page, delete_view,
-    list_pages, list_views, load_page, load_view, save_page, save_view,
+    Page, View, ViewSets, bootstrap, delete_application_views_pages_and_library, delete_page,
+    delete_view, list_pages, list_views, load_page, load_view, save_page, save_view,
 };
 use serde_json::json;
 
@@ -209,7 +209,7 @@ async fn two_applications_hold_same_named_views_over_the_same_table() -> Result<
     assert!(msg.contains("another application"), "{msg}");
 
     // Deleting one application's views leaves the other's.
-    delete_application_views_and_pages(&catalog, one).await?;
+    delete_application_views_pages_and_library(&catalog, one).await?;
     assert!(list_views(&catalog, one).await?.is_empty());
     assert_eq!(list_views(&catalog, two).await?, vec![second]);
     Ok(())

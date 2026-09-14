@@ -2,6 +2,69 @@
 
 Changes in reverse chronological order.
 
+## The builder, Phase 1: the library, stored
+
+A Saltcorn UI application can hold **library items**, v1's `_sc_library` rows
+("shared components" in current v1): named layout fragments that a view's or a
+page's layout places as `{ type: "library", library_id, slots }`. Nothing
+creates or renders them yet. This phase is the storage, the references, and the
+snapshot the worker will resolve them from.
+
+- **`_fd_library` (1.1)**, bootstrapped with `_fd_views` and `_fd_pages` in
+  `sc-viewpattern/src/tables.rs`. It has the §9 columns, plus `application`,
+  `icon` (nullable, read back as empty) and `layout` (JSON, stored untouched),
+  and is unique on (`application`, `name`). Like the other two tables,
+  `application` is not a foreign key.
+- **`LibraryItem` and `LibraryItemId` (1.2)** in a new
+  `sc-viewpattern/src/library.rs`, with `save_library_item`,
+  `load_library_item` (scoped by application, so another application's item is
+  not found), `list_library` (by name), `delete_library_item` and
+  `apply_library_updates`.
+  - Every write refuses an application whose framework is not `saltcorn-ui`,
+    naming the framework. A read answers an empty library.
+  - Also refused, each named: a duplicate name in the application, an empty or
+    whitespace-padded name, and an id that belongs to another application.
+  - `apply_library_updates` checks every id belongs to the application before
+    writing, then writes the whole batch in one transaction.
+    `apply_library_updates_in` does the same inside a caller's `SharedTx`, so
+    Phase 6's layout saves can commit a view or page and its library edits
+    together.
+  - The store's row helpers are now `pub(crate)` so the library reuses them.
+    Deleting by filter is factored into `delete_where`.
+- **Deleting an application deletes its library (1.3).**
+  `delete_application_views_and_pages` is renamed
+  `delete_application_views_pages_and_library` and covers `_fd_library` too.
+  `deleteApplication` in `sc-server` calls it under the new name.
+- **The view set and the snapshot carry the library (1.4).**
+  - `ViewSet` gains `library`, loaded with the views and pages.
+  - `ViewSets` gains `save_library_item`, `delete_library_item` and
+    `apply_library_updates`. Each reloads the set, so a library write moves the
+    generation.
+  - `ViewSnapshot` gains `library`, one entry per item in v1's row shape
+    `{ id, name, icon, layout }`, with the UUID as `id`.
+- **References (1.5).**
+  - `placed_library_ids` walks any JSON for `library` segments' `library_id`s,
+    slots included. Ids come back as written, so a later save can name an
+    untranslated v1 serial when it refuses one.
+  - `ViewSet::library_placed_by_view` / `_page` / `_item` follow those ids
+    through each placed item's own layout. A visited set stops an item that
+    contains itself. An id naming no item is skipped, because it renders blank.
+  - `ViewSet::library_references(id)` answers `LibraryReferences { views, pages,
+    library }`: what places the item, directly or through another item. An item
+    is not listed as referring to itself.
+- **Tests (1.6).**
+  - `tests/library_store.rs`, over real Postgres: round trip, update and delete;
+    uniqueness per application, and an item staying in its own application; the
+    framework refusal on save, delete and updates.
+  - It also covers deleting an application (its library and views go, another
+    application's library stays) and updates being all or none: an unknown id
+    applies nothing, and a caller's rollback discards the edit.
+  - References are tested both ways through a nested item, with a
+    self-containing item and an unknown id. The generation moves on an item's
+    save, an in-place update and a delete.
+  - Unit tests cover the layout walk, the table's columns, and the snapshot's
+    `library` entry.
+
 ## Saltcorn UI: an App settings tab
 
 Creating a Saltcorn UI application showed all thirteen of the framework's

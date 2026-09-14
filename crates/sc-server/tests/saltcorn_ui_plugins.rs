@@ -35,8 +35,7 @@ use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_server::{
     AppMounts, CSRF_COOKIE, CSRF_HEADER, ModuleServices, SESSION_COOKIE, ServerConfig,
-    admin_handlers, build_router_with_apps, default_js_evaluator, install_agents,
-    install_triggers,
+    admin_handlers, build_router_with_apps, default_js_evaluator, install_agents, install_triggers,
 };
 use sc_test_harness::TestDb;
 use serde_json::{Value, json};
@@ -194,7 +193,11 @@ impl Client {
     /// A route call as `saltcorn.js` makes one: JSON, by ajax, with the token
     /// in v1's `CSRF-Token` header.
     async fn app_route(&mut self, host: &str, path: &str, body: &Value) -> Answer {
-        let csrf = self.cookies.get(CSRF_COOKIE).cloned().expect("a CSRF token");
+        let csrf = self
+            .cookies
+            .get(CSRF_COOKIE)
+            .cloned()
+            .expect("a CSRF token");
         self.request(
             "POST",
             Some(host),
@@ -218,7 +221,13 @@ impl Client {
             ADMIN.replace('@', "%40")
         );
         let signed = self
-            .request("POST", Some(host), "/auth/login", &[], Some((form.into_bytes(), FORM)))
+            .request(
+                "POST",
+                Some(host),
+                "/auth/login",
+                &[],
+                Some((form.into_bytes(), FORM)),
+            )
             .await;
         assert_eq!(signed.status, StatusCode::FOUND, "{}", signed.body);
         assert!(self.cookies.contains_key(SESSION_COOKIE));
@@ -427,7 +436,13 @@ async fn application(client: &mut Client, subdomain: &str, tables: &[&str]) -> S
 }
 
 /// `createView`: the view as created, with its pattern's initial configuration.
-async fn create_view(client: &mut Client, app: &str, name: &str, pattern: &str, table: &str) -> Value {
+async fn create_view(
+    client: &mut Client,
+    app: &str,
+    name: &str,
+    pattern: &str,
+    table: &str,
+) -> Value {
     let (status, created) = client
         .send(
             "POST",
@@ -494,9 +509,10 @@ fn options_of(step: &Value, field: &str) -> Vec<String> {
                 .iter()
                 .map(|o| match o {
                     Value::String(s) => s.clone(),
-                    other => other.get("value").map_or_else(|| other.to_string(), |v| {
-                        v.as_str().map_or_else(|| v.to_string(), str::to_owned)
-                    }),
+                    other => other.get("value").map_or_else(
+                        || other.to_string(),
+                        |v| v.as_str().map_or_else(|| v.to_string(), str::to_owned),
+                    ),
                 })
                 .collect()
         })
@@ -522,7 +538,8 @@ async fn a_plugins_view_pattern_is_configured_rendered_with_its_headers_and_post
     assert_eq!(card["view_patterns"], json!(["Greeting"]), "{card}");
     let issues = card["issues"].to_string();
     assert!(
-        issues.contains("`List` is not available: that is the name of one of Saltcorn 1's built-in"),
+        issues
+            .contains("`List` is not available: that is the name of one of Saltcorn 1's built-in"),
         "{card}"
     );
     assert!(issues.contains("declares virtual triggers"), "{card}");
@@ -549,8 +566,14 @@ async fn a_plugins_view_pattern_is_configured_rendered_with_its_headers_and_post
     let app = application(client, "greetings", &["books"]).await;
     let hello = create_view(client, &app, "Hello", "Greeting", "books").await;
     let step = config_step(client, &app, &hello, 0).await;
-    assert_eq!((step["name"].as_str(), step["count"].as_u64()), (Some("Greeting"), Some(1)));
-    assert!(options_of(&step, "field").contains(&"title".to_owned()), "{step}");
+    assert_eq!(
+        (step["name"].as_str(), step["count"].as_u64()),
+        (Some("Greeting"), Some(1))
+    );
+    assert!(
+        options_of(&step, "field").contains(&"title".to_owned()),
+        "{step}"
+    );
     save_view(
         client,
         &app,
@@ -568,10 +591,16 @@ async fn a_plugins_view_pattern_is_configured_rendered_with_its_headers_and_post
     browser.sign_in(HOST).await;
     let page = browser.app_get(HOST, "/view/Hello").await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.body);
-    assert!(page.body.contains("Hi, Dune") && page.body.contains("Hi, Emma"), "{}", page.body);
     assert!(
+        page.body.contains("Hi, Dune") && page.body.contains("Hi, Emma"),
+        "{}",
         page.body
-            .contains(&format!("data-version=\"{}\"", sc_viewpattern::ASSET_VERSION_TAG)),
+    );
+    assert!(
+        page.body.contains(&format!(
+            "data-version=\"{}\"",
+            sc_viewpattern::ASSET_VERSION_TAG
+        )),
         "{}",
         page.body
     );
@@ -580,11 +609,18 @@ async fn a_plugins_view_pattern_is_configured_rendered_with_its_headers_and_post
     let head = page.body.split("</head>").next().unwrap();
     assert_eq!(head.matches(script).count(), 1, "{head}");
     assert_eq!(head.matches(css).count(), 1, "{head}");
-    assert!(!head.contains("greeting'"), "a header this version does not inject: {head}");
+    assert!(
+        !head.contains("greeting'"),
+        "a header this version does not inject: {head}"
+    );
     // A List renders no Greeting, so it gets the stylesheet and not the script.
     let list = browser.app_get(HOST, "/view/Books").await;
     assert_eq!(list.status, StatusCode::OK, "{}", list.body);
-    assert!(list.body.contains(css) && !list.body.contains(script), "{}", list.body);
+    assert!(
+        list.body.contains(css) && !list.body.contains(script),
+        "{}",
+        list.body
+    );
 
     // --- 11.2: its public directory, and nothing beside it.
     let asset = browser
@@ -609,7 +645,12 @@ async fn a_plugins_view_pattern_is_configured_rendered_with_its_headers_and_post
         "/plugins/public/nobody@1.0.0/greet.js",
     ] {
         let answer = browser.app_get(HOST, outside).await;
-        assert_eq!(answer.status, StatusCode::NOT_FOUND, "{outside}: {}", answer.body);
+        assert_eq!(
+            answer.status,
+            StatusCode::NOT_FOUND,
+            "{outside}: {}",
+            answer.body
+        );
     }
 
     // --- A route of the plugin's pattern, posted to as `saltcorn.js` posts.
@@ -642,11 +683,20 @@ async fn a_plugins_view_pattern_is_configured_rendered_with_its_headers_and_post
     assert!(status.is_success(), "{body}");
     let (_, patterns) = client.send("GET", "/api/view-patterns", None).await;
     assert!(
-        !patterns.as_array().unwrap().iter().any(|p| p["name"] == "Greeting"),
+        !patterns
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "Greeting"),
         "{patterns}"
     );
     let gone = browser.app_get(HOST, "/view/Hello").await;
-    assert_eq!(gone.status, StatusCode::INTERNAL_SERVER_ERROR, "{}", gone.body);
+    assert_eq!(
+        gone.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        gone.body
+    );
     assert!(gone.body.contains("Greeting"), "{}", gone.body);
     let list = browser.app_get(HOST, "/view/Books").await;
     assert!(!list.body.contains("greet.css"), "{}", list.body);
@@ -682,7 +732,11 @@ async fn kanban_installs_and_works_and_mind_map_fails_naming_the_raw_sql_it_need
 
     // --- Both install, and their patterns register.
     let kanban = install(client, &kanban_dir).await;
-    assert_eq!(kanban["view_patterns"], json!(["Kanban", "KanbanAllocator"]), "{kanban}");
+    assert_eq!(
+        kanban["view_patterns"],
+        json!(["Kanban", "KanbanAllocator"]),
+        "{kanban}"
+    );
     let version = kanban["version"].as_str().unwrap().to_owned();
     let mind_map = install(client, &mind_map_dir).await;
     assert_eq!(mind_map["view_patterns"], json!(["Mind map"]), "{mind_map}");
@@ -702,8 +756,14 @@ async fn kanban_installs_and_works_and_mind_map_fails_naming_the_raw_sql_it_need
     create_view(client, &app, "Task card", "Show", "tasks").await;
     let board = create_view(client, &app, "Board", "Kanban", "tasks").await;
     let step = config_step(client, &app, &board, 0).await;
-    assert!(options_of(&step, "show_view").contains(&"Task card".to_owned()), "{step}");
-    assert!(options_of(&step, "column_field").contains(&"status".to_owned()), "{step}");
+    assert!(
+        options_of(&step, "show_view").contains(&"Task card".to_owned()),
+        "{step}"
+    );
+    assert!(
+        options_of(&step, "column_field").contains(&"status".to_owned()),
+        "{step}"
+    );
     save_view(
         client,
         &app,
@@ -728,10 +788,18 @@ async fn kanban_installs_and_works_and_mind_map_fails_naming_the_raw_sql_it_need
     let page = browser.app_get(HOST, "/view/Board").await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.body);
     assert!(page.body.contains("kanboard"), "{}", page.body);
-    assert!(page.body.contains("Write it") && page.body.contains("Ship it"), "{}", page.body);
+    assert!(
+        page.body.contains("Write it") && page.body.contains("Ship it"),
+        "{}",
+        page.body
+    );
     let dragula = format!("/plugins/public/kanban@{version}/dragula.min.js");
     assert!(
-        page.body.split("</head>").next().unwrap().contains(&dragula),
+        page.body
+            .split("</head>")
+            .next()
+            .unwrap()
+            .contains(&dragula),
         "{}",
         page.body
     );
@@ -768,12 +836,21 @@ async fn kanban_installs_and_works_and_mind_map_fails_naming_the_raw_sql_it_need
     let client = &mut server.client;
     create_view(client, &app, "Map", "Mind map", "tasks").await;
     let map = browser.app_get(HOST, &format!("/view/Map?id={id}")).await;
-    assert_eq!(map.status, StatusCode::INTERNAL_SERVER_ERROR, "{}", map.body);
+    assert_eq!(
+        map.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        map.body
+    );
     assert!(
         map.body.contains("db.query") && map.body.contains("raw SQL"),
         "{}",
         map.body
     );
-    assert!(!map.body.contains("    at "), "a stack reached the page: {}", map.body);
+    assert!(
+        !map.body.contains("    at "),
+        "a stack reached the page: {}",
+        map.body
+    );
     Ok(())
 }

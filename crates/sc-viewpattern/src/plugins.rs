@@ -116,9 +116,7 @@ pub fn plugin_public_file(
         Some((name, version)) if !name.is_empty() => (name, Some(version)),
         _ => (plugin, None),
     };
-    let asset = assets
-        .iter()
-        .find(|a| a.names.iter().any(|n| n == name))?;
+    let asset = assets.iter().find(|a| a.names.iter().any(|n| n == name))?;
     let dir = asset.public_dir.as_ref()?;
     if parts.is_empty() || !crate::framework::confined(parts) {
         return None;
@@ -226,11 +224,18 @@ mod tests {
             plugin_public_file(&assets, "kanban@0.5.5", &parts("dragula.min.js")).unwrap();
         assert!(file.ends_with("dragula.min.js") && current);
         // Another version tag still finds the installed file, uncached.
-        let (_, current) = plugin_public_file(&assets, "kanban@0.4.0", &parts("css/all.css")).unwrap();
+        let (_, current) =
+            plugin_public_file(&assets, "kanban@0.4.0", &parts("css/all.css")).unwrap();
         assert!(!current);
         assert!(plugin_public_file(&assets, "kanban", &parts("css/all.css")).is_some());
 
-        for bad in ["../package.json", "css/../../package.json", "", "missing.js", "css"] {
+        for bad in [
+            "../package.json",
+            "css/../../package.json",
+            "",
+            "missing.js",
+            "css",
+        ] {
             assert!(
                 plugin_public_file(&assets, "kanban@0.5.5", &parts(bad)).is_none(),
                 "{bad:?}"
