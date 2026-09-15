@@ -580,6 +580,13 @@ const v1Utils = {
  * a later one fails. */
 const v1Db = {
   is_node: true,
+  // v1's `db.supports_multiple_schemas` is true for Postgres, and then
+  // `stateFieldsToWhere` qualifies a search with `db.getTenantSchema()`, which is
+  // refused below as raw SQL. This server has no tenant schemas, so it is false,
+  // as it is for v1's SQLite (`@saltcorn/sqlite`). Left unset, it was not
+  // undefined but a truthy stub, and every search on a view failed naming
+  // `db.getTenantSchema` (TODO "The builder" 10.4).
+  supports_multiple_schemas: false,
   // v1's `@saltcorn/db-common/internal`, verbatim.
   sqlsanitize(nm) {
     if (typeof nm === "symbol") return nm.description ? v1Db.sqlsanitize(nm.description) : "";

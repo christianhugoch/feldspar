@@ -40,8 +40,9 @@ own, for every other kind of box. (Design and planning docs live under
 - **Saltcorn 1's views, running.** An application whose framework is **Saltcorn UI** owns
   views (List, Show, Edit, Feed, Filter, ListShowList — and any a v1 plugin such as
   `@saltcorn/kanban` supplies) and pages, rendered on the server by v1's own view code. Restoring
-  a Saltcorn 1 backup creates one, with its views and pages. There is no build step; the
-  drag-and-drop layout builder is not here yet. See
+  a Saltcorn 1 backup creates one, with its views, pages and library. There is no build step.
+  Layouts are edited in Saltcorn 1's own drag-and-drop builder, and a library of shared
+  components lets one layout fragment be placed in many views and pages. See
   [`docs/tutorial-saltcorn-ui.md`](docs/tutorial-saltcorn-ui.md).
 
 What is still out of scope, and what each milestone since the MVP added, is in
@@ -439,7 +440,7 @@ database (§7).
 | **Rust** (with `cargo`) | 1.85+ (edition 2024) | building the `feldspar` binary |
 | **PostgreSQL** | 13 or newer (16 recommended) | the primary data store — *or* SQLite, see §5 Option C |
 | **libclang** (`libclang-dev`) | any recent | building the module runtime (`deno_runtime` → `bindgen`); build time only |
-| **npm** (and the Node.js it ships with) | **npm 9.3.0+** (Node 18+) | building the three front-end bundles — the admin UI, the IDE and Saltcorn UI (optional; see §6), **and** *installing* modules (Settings → Modules). Debian's and Ubuntu's own package is npm 9.2.0, which cannot install a module at all — install Node from NodeSource (§2.1) or `npm install -g npm@latest` |
+| **npm** (and the Node.js it ships with) | **npm 9.3.0+** (Node 18+) | building the four front-end bundles — the admin UI, the IDE, Saltcorn UI and its builder (optional; see §6), **and** *installing* modules (Settings → Modules). Debian's and Ubuntu's own package is npm 9.2.0, which cannot install a module at all — install Node from NodeSource (§2.1) or `npm install -g npm@latest` |
 | **CPython** + `pip`, and `python3-dev` to build against | 3.11+ | **only** for a server that runs Python trigger bodies or installs Python modules — and only in a build that has the `python` feature (below) |
 
 **The built-in model providers are a cargo feature, and it is on.** `sc-model`'s
@@ -487,11 +488,12 @@ that supplies a **table** rather than an action.
 **Saltcorn UI needs npm at build time and nothing at run time.** Its view runtime is
 Saltcorn 1's own rendering source, vendored in [`ui/saltcorn-ui`](ui/saltcorn-ui) and
 bundled by esbuild into one file, which `cargo build` makes as the third front-end bundle
-(§6). At run time that file is evaluated on the same in-process JavaScript worker modules
+(§6). Its layout builder, [`ui/builder`](ui/builder), is the fourth, and is served to the
+admin's browser as files like the admin UI. At run time that file is evaluated on the same in-process JavaScript worker modules
 use, so a Saltcorn UI application needs no `node`, no npm and no build step of its own:
 saving a view is the deployment. A binary built without the UI bundles (`SC_BUILD_ADMIN=0`,
-or `build-static.sh --no-ui`) has no Saltcorn UI, and there is no run-time flag that adds it
-back. See [`docs/tutorial-saltcorn-ui.md`](docs/tutorial-saltcorn-ui.md).
+or `build-static.sh --no-ui`) has no Saltcorn UI and no builder, and there is no run-time flag
+that adds either back. See [`docs/tutorial-saltcorn-ui.md`](docs/tutorial-saltcorn-ui.md).
 
 ### Python, which is a build and not a flag
 
@@ -709,12 +711,12 @@ put it in a file store and add it under **Tables → Connections**, choosing
 The admin SPA lives in [`ui/admin`](ui/admin) and is compiled to a static bundle
 that the server serves. **`cargo build` builds it for you**: `sc-cli`'s build
 script runs `npm ci && npm run build` in `ui/admin` (and in [`ui/ide`](ui/ide),
-below, and in [`ui/saltcorn-ui`](ui/saltcorn-ui), the view runtime Saltcorn UI
-applications render with), embeds the resulting paths in the binary, and
+below, in [`ui/saltcorn-ui`](ui/saltcorn-ui), the view runtime Saltcorn UI
+applications render with, and in [`ui/builder`](ui/builder), their layout builder), embeds the resulting paths in the binary, and
 `feldspar serve` then serves the UI with no `--static-dir` needed:
 
 ```bash
-cargo build --release -p sc-cli     # builds the Rust binary *and* all three front ends
+cargo build --release -p sc-cli     # builds the Rust binary *and* all four front ends
 target/release/feldspar serve ...   # serves the admin UI, no flags
 ```
 
@@ -738,6 +740,12 @@ error per such application at boot, naming the application, the missing bundle a
 `SC_BUILD_ADMIN` (a save through the API answers the same sentence as `mount_error`;
 the admin UI does not show it yet); every other application is unaffected. Unlike the admin UI, it has no `--static-dir` equivalent: the only fix is
 a build with the variable unset.
+
+**And the builder.** The fourth bundle is skipped as well. Saltcorn UI still mounts and serves
+if its own bundle is there, and views and pages can still be created, configured and saved,
+but nothing edits a layout. The builder's routes answer a page saying the server was built
+without it, and the admin UI shows each layout as JSON with the same sentence in place of
+**Open in builder** and **Edit**. As with Saltcorn UI, no run-time flag supplies it.
 
 > **`SC_BUILD_ADMIN` is a _build-time_ variable, read by `cargo build` — not by
 > `feldspar serve`.** Putting it on the run command has **no effect** either way:
@@ -808,6 +816,25 @@ so it has the same tools and the same grants (whether it may write, whether it m
 project's scripts) and its runs are listed on the agent's screen. There is nothing to
 configure and no model to choose here: which LLM answers is the agent's own setting. A
 store that has no agent scoped to it simply has no chat panel.
+
+### The builder (`ui/builder`)
+
+The fourth bundle: **Saltcorn 1's own drag-and-drop layout builder**, vendored unedited from
+`@saltcorn/builder`, for the layout of a Saltcorn UI view (Show, Edit, List, Filter) and of a
+page. It opens from **Open in builder** on a view's layout step, from **Edit** on the Pages
+tab, and directly after creating a view whose first step is its layout. It is served at
+`/builder/applications/<app id>/views/<view>?step=<n>` and
+`/builder/applications/<app id>/pages/<page>`, **admin-only**, as a page of its own rather than
+a screen in the SPA, because its canvas renders with the application's own stylesheets. There
+is nothing to configure. A walk-through is in
+[`docs/tutorial-saltcorn-ui.md`](docs/tutorial-saltcorn-ui.md).
+
+**Its Content-Security-Policy** is the admin UI's, with one addition: the builder document may
+load images from **its application's** origin, because an image from the application's file
+store is shown on the canvas and the admin server redirects `/files/serve/…` there. No
+`'unsafe-eval'`, no `blob:`, no inline script and no other origin. It is sent on every response
+under `/builder/`, and it is fixed: unlike an application's CSP, it has no setting. (The
+builder's text editor is CKEditor 4, which is served from the bundle, not from a CDN.)
 
 ---
 

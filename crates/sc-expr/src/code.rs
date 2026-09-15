@@ -8847,6 +8847,16 @@ mod tests {
                  in:        W({ id: { in: [1, 2] } }),
                  not_in:    W({ id: { not: { in: [1, 2] } } }),
                  ilike:     W({ author: { ilike: "tol" } }),
+                 fts:       W({ _fts: { searchTerm: "tol", fields: [
+                              { name: "title", type: { sql_name: "text" } },
+                              { name: "pages", type: { sql_name: "int8" } },
+                              { name: "note", sql_type: "text" },
+                              { name: "shout", type: { sql_name: "text" }, calculated: true },
+                              { name: "kept", type: { sql_name: "text" }, calculated: true, stored: true },
+                            ] } }),
+                 fts_one:   W({ _fts: { searchTerm: "tol", fields: [{ name: "title", sql_type: "text" }] }, pages: 1 }),
+                 fts_empty: W({ _fts: { searchTerm: "", fields: [{ name: "title", sql_type: "text" }] } }),
+                 fts_none:  W({ _fts: { searchTerm: "tol", fields: [{ name: "pages", sql_type: "int8" }] } }),
                  full:      W({ author: { ilike: "tol", fullMatch: true } }),
                  or:        W({ or: [{ pages: 1 }, { pages: 2 }] }),
                  and:       W({ and: [{ pages: 1 }, { title: "x" } ] }),
@@ -8878,6 +8888,24 @@ mod tests {
         // v1's implicit `%…%`, and the spelling that turns it off.
         assert_eq!(out["ilike"], json!({ "author": { "ilike": "%tol%" } }));
         assert_eq!(out["full"], json!({ "author": { "ilike": "tol" } }));
+        // v1's `_fts`: any text column containing the term, stored calculated
+        // columns included and live ones not, as v1's `ftsFieldsSqlExpr` picks.
+        assert_eq!(
+            out["fts"],
+            json!({ "or": [
+                { "title": { "ilike": "%tol%" } },
+                { "note": { "ilike": "%tol%" } },
+                { "kept": { "ilike": "%tol%" } },
+            ] })
+        );
+        assert_eq!(
+            out["fts_one"],
+            json!({ "and": [{ "title": { "ilike": "%tol%" } }, { "pages": { "eq": 1 } }] })
+        );
+        // An empty search is no condition, as v1's `LIKE '%%'` is none.
+        assert_eq!(out["fts_empty"], json!(null));
+        // No text column: v1 searches `''`, which nothing contains.
+        assert_eq!(out["fts_none"], json!({ "formula": "false" }));
         assert_eq!(
             out["or"],
             json!({ "or": [{ "pages": { "eq": 1 } }, { "pages": { "eq": 2 } }] })
@@ -8925,7 +8953,6 @@ mod tests {
                  inSelectWithLevels: () => W({ id: { inSelectWithLevels: {} } }),
                  json: () => W({ meta: { json: ["a", 1] } }),
                  slugify: () => W({ slugify: "x" }),
-                 _fts: () => W({ _fts: { fields: [], searchTerm: "x" } }),
                  day_only: () => W({ when: { day_only: true } }),
                  eq: () => W({ eq: [{ field: "a" }, { field: "b" }] }),
                  RegExp: () => W({ author: /tol/ }),
@@ -8946,7 +8973,6 @@ mod tests {
             ("inSelectWithLevels", "inSelectWithLevels"),
             ("json", "json"),
             ("slugify", "slugify"),
-            ("_fts", "_fts"),
             ("day_only", "day_only"),
             ("eq", "eq"),
             ("RegExp", "regular expression"),
@@ -9109,6 +9135,11 @@ mod tests {
                      foreign: books.getForeignKeys().map((f) => f.name),
                      owner: books.owner_fieldname(),
                      formula: books.ownership_formula,
+                     santized_name: books.santized_name,
+                     owner_row: books.is_owner({{ id: 7 }}, {{ id: 1, owner: 7 }}),
+                     other_row: books.is_owner({{ id: 7 }}, {{ id: 2, owner: 8 }}),
+                     nobody: books.is_owner(undefined, {{ id: 1, owner: 7 }}),
+                     no_rule: Table.findOne("authors").is_owner({{ id: 7 }}, {{ id: 7 }}),
                      cached: Table.findOne("books") === books,
                      by_object: Table.findOne({{ name: "authors" }}).name,
                      missing: Table.findOne("nope") === undefined,
@@ -9157,6 +9188,14 @@ mod tests {
         assert_eq!(out["foreign"], json!(["author"]));
         assert_eq!(out["owner"], json!("owner"));
         assert_eq!(out["formula"], json!("owner === user.id"));
+        // v1's `sqlsanitize(name)`, which names a table's search state.
+        assert_eq!(out["santized_name"], json!("books"));
+        // v1's `is_owner`: the formula over the row and the user, and false for
+        // nobody and for a table with no rule.
+        assert_eq!(out["owner_row"], json!(true));
+        assert_eq!(out["other_row"], json!(false));
+        assert_eq!(out["nobody"], json!(false));
+        assert_eq!(out["no_rule"], json!(false));
         // v1's is a state cache and plugins compare what comes out of it.
         assert_eq!(out["cached"], json!(true));
         assert_eq!(out["by_object"], json!("authors"));

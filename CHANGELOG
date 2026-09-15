@@ -2,6 +2,132 @@
 
 Changes in reverse chronological order.
 
+## The builder, Phase 10: documentation, and the definition of done run by hand
+
+The builder is written down, and its definition of done was run by hand: a release build on a
+fresh database, driven in Chrome with the console open and a `securitypolicyviolation` listener
+on every builder document. All six steps pass. The run found four faults no test had caught, and
+each is fixed with a test: the builder's formula checks were refused by its own CSP, a search on a
+Saltcorn UI list failed outright, a public List with a Delete column failed for anyone but an
+admin, and the search bar named its state for no table.
+
+- **The design document (10.1).** §13.3 has three new subsections after *Saltcorn UI*:
+  - *The builder*: what is vendored and why, the GOALS TypeScript exception confined to
+    `vendor/`, its own document and routes, the refusal order, the mode allow-list, the port of
+    `builder.ts`, the CSP and the relaxations checked and left out, the formula checks as
+    parses, the URL partition, where the options come from, saving, and the no-bundle build;
+  - *Pages*: the properties, `POST /page/:name/action/:rndid` and where it departs from v1,
+    embedded pages, `pageReferences`;
+  - *The library*: per application and only for Saltcorn UI, v1's `models/library.ts` behind a
+    keyed `db` shim, the admin API, references, and the import's two translations (the
+    `library_id` rewrite by pack position, the fixed-state fold).
+
+  Also: the framework bullet, the seam's method list, the snapshot, the routes, the import and
+  the admin UI paragraphs; a *Search, and the owner check* paragraph; §2's tree gains `ide/`,
+  `saltcorn-ui/` and `builder/` as built; §2.1's `ViewRuntime` row; §9's table and ER diagram
+  gain `_fd_library`; §12's `ui/builder` bullet says what was built.
+- **The tutorial (10.2).** `docs/tutorial-saltcorn-ui.md`:
+  - "the builder is not here" and the browser-console page are gone;
+  - Part A gains *A7 — Open a view and a page in the builder* (a join field on *Show Books*, a
+    text on *BooksOverview*);
+  - Part B's List, Show and Edit are built in the builder, the Show, Edit and Delete columns are
+    added there (*B5*), a Filter is new (*B6*), and the page is built from the Pages tab with the
+    filter and a shared-state list (*B7*);
+  - a new section, *The library*: saving, placing, which components are offered where, slots,
+    editing in place, the Library tab;
+  - *Who sees what*, *Actions* and *Things that trip people up* gain what the run found.
+
+  Every label is the one the run showed.
+- **README and OPERATIONS (10.3).**
+  - README §1 and §3 name the builder, and §6 has four bundles, what a build without the builder
+    does, and a new *The builder (`ui/builder`)* subsection with its routes and CSP.
+  - OPERATIONS §1 has four bundles, §2's `--no-ui` row names the builder, §5.3 adds
+    `SC_BUILDER_BUNDLE_DIR` and what a build without it costs, and §8.5 has two rows (the
+    no-builder page, a builder CSP violation).
+  - `build-static.sh --help` said `--no-ui` skips two bundles; it skips four.
+- **The definition of done, run by hand (10.4)**, written up under Phase 10 in `TODO.md`.
+  - `feldspar serve` (release) on a fresh `feldspar_builder_dod` database, port 3052, BooksDB
+    restored over the API: "application `booksdb` serving".
+  - **Step 1**: Configure → *Open in builder*; a Join dropped under the header, `publisher.name`
+    picked through the Fields menu; *Next* saved and returned to the view list;
+    `/view/Show%20Books?id=1` shows *Penguin*.
+  - **Step 2**: *Recent books* landed in the builder with v1's columns; Show, Edit and Delete
+    columns added; *Next* went to *Create new row* (`?step=1`); every link answers 200.
+  - **Step 3**: *Find books* landed on an empty canvas; a search bar, an author dropdown and
+    *Clear*; saved.
+  - **Step 4**: *Home* from *New page* → *Create and build*; heading, two columns with *Find
+    books* and *Recent books* (shared), *GoBack*; *Done* returned to the Pages tab; set as the
+    public home page. Anonymously in Chrome, searching *Moby* narrowed the list, *Clear* cleared
+    it, the author dropdown narrowed it, and *GoBack* went back.
+  - **Step 5**: *BooksOverview* opened with its filter and list; a text added above them renders.
+  - **Step 6**: a component saved from *Show Books*, placed on *Home*, its text edited there;
+    *Show Books* and `/` both show the edit, and the Library tab lists it as "1 view, 1 page".
+  - No CSP violation was reported by any builder document after the fix below.
+- **Fixed: v1's formula checks were refused by the builder's CSP.**
+  - v1 checks a formula's syntax by constructing a function and discarding it:
+    `Function("return " + fml)` in `View.js`, `ViewLink.js` and `utils.js`, and `AsyncFunction` in
+    `saltcorn-common.js`'s `validate_expression_elem` and `validate_bool_expression_elem`.
+  - Under `script-src 'self'` every one is a refused `eval`. A ViewLink's settings showed "Refused
+    to evaluate a string as JavaScript…" under *Extra state Formula*, empty or not, with six
+    violation reports. jsdom enforces no policy, so the mount tests could not see it.
+  - `ui/builder/src/formula-syntax.ts` answers the same question with a parse (acorn) of the
+    source the constructor would compile, and refuses text that closes the wrapper.
+    `build.mjs` imports its `syntaxCheckedFunction` as `Function` into the vendored files only,
+    beside the `fetch` import. The two validators move from `DOCUMENT_GLOBALS` to
+    `HOST_GLOBALS`, ported over the same check, with the message set as text.
+  - The boolean validator's constant check ran the formula; here only a literal is recognised.
+  - `acorn` moves from `devDependencies` to `dependencies`, since it is now bundled.
+  - The `'unsafe-eval'` §2 allowed for "if proven necessary" stays out.
+- **Fixed: a search on a Saltcorn UI list failed.**
+  - `db.supports_multiple_schemas` was a truthy stub in the worker, so `stateFieldsToWhere` called
+    `db.getTenantSchema()`, which is refused as raw SQL: every `_fts` state failed naming it.
+    `module-host.mjs`'s `v1Db` now says `false`, as v1's SQLite does.
+  - The `Table` shim refused `_fts` by name. `v1_api.js` now translates it: the rows where any
+    text field (stored calculated ones included) contains the term, as an `or` of `ilike`s, since
+    one clause must mean the same on both databases. The differences from v1's Postgres search
+    (stemming, a phrase across fields, key summaries) are written beside it and in the tutorial.
+  - `table.santized_name` was missing, so v1's search bar named its state `_fts_undefined`.
+    It is v1's `sqlsanitize(name)`.
+- **Fixed: a List with a Delete column failed for anyone but an admin.** v1 asks
+  `table.is_owner(user, row)`, synchronously, before drawing each Delete link for a viewer below
+  `min_role_write`, and the shim had no `is_owner`. It is ported: the ownership formula over the
+  row and `user`, else the owner field. A formula the worker cannot evaluate answers false. It
+  decides what is drawn; the delete is still checked when posted.
+- **Docs corrected on the way.** `tutorial-triggers.md`'s compatibility table listed
+  `get_join_field_options`, `get_relation_options`, `get_relation_data`, the two relation
+  getters and `delete_url` as refused; all are implemented (the builder's since Phase 5). It
+  gains `is_owner`, `santized_name` among the properties, and `_fts` among the translated keys.
+- **Tests.**
+  - `ui/builder` vitest: `formula-syntax.test.ts` (the parse's answers, nothing constructed, the
+    wrapper cannot be closed, and every vendored `Function` is a discarded syntax check) and six
+    validator tests in `globals.test.ts`. 51 tests in 7 files.
+  - `sc-expr`: `_fts` translations (several text fields, stored and live calculated ones, one
+    field beside another condition, an empty term, no text field) replace its refusal case;
+    `santized_name` and `is_owner` in the table shim test. 267 passed.
+  - `saltcorn_ui_render::a_search_narrows_a_list_and_a_stranger_is_not_drawn_delete`, over
+    Postgres with the bundle: both search spellings narrow *List Books*, a search matching
+    nothing lists nothing, the admin is drawn Delete, and with the tables public-readable a
+    stranger sees every row, no Delete, and a working search.
+  - `saltcorn_ui_render`, `builder_route` and `saltcorn_ui_configure` together: 19 passed.
+  - `repo_hygiene` was failing before this phase, on archived `TODO-post-mvp-24.md` links
+    written as `./docs/…` and four lines naming `_sc_library` without saying it is v1's
+    (`backup/v1.rs`, the fixtures README, `library-db.ts`). Both fixed; 35 passed.
+- **Notes for review.**
+  - A public view over a table the viewer may not read answers **500** "This could not be shown",
+    and the server logs it as an application "configuration error". It is a permission refusal,
+    and a 403 and a quieter log line would say so.
+  - `/builder/saltcorn-ui/:tag/*` is cached immutable under a tag that is only the server version,
+    so rebuilt Saltcorn UI assets keep their old URL. The builder bundle's tag has a hash.
+  - Where the fixture differs from the TODO's script: Show Books has no card; its header row
+    holds a **field**, which v1's `suitableFor("page")` does not offer on a page, so step 6 used a
+    heading component; *GoBack* goes back in the browser and posts nothing; neither book had a
+    publisher (set on book 1 for step 1); the BooksDB tables are admin-read, so step 4's public
+    page needed them opened.
+  - Driving the canvas needed page-dispatched HTML5 drag events (a synthetic mouse drag fires no
+    `dragstart`) and CKEditor's own `setData` for a text inside a placed component. Neither is a
+    product fault. Chrome's screenshots also timed out several times while view previews were
+    rendering; the page stayed responsive to script, and this was not diagnosed further.
+
 ## The builder, Phase 9: the admin UI
 
 The admin screens now open the builder. A view's layout step has **Open in builder**, and a

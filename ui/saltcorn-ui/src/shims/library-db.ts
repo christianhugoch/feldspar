@@ -15,7 +15,7 @@ import { satisfies } from "../../vendor/saltcorn-data/utils.js";
 
 type Obj = Record<string, any>;
 
-const LIBRARY_TABLE = "_sc_library";
+const LIBRARY_TABLE = "_sc_library"; // v1's table, the name models/library.ts selects from
 
 /** The application's library, for a read of `table`, which must be v1's. */
 function libraryRows(table: string, call: string): Obj[] {

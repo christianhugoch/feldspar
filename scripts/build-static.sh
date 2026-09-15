@@ -153,7 +153,7 @@ Packaging
                         Compiled into the binary as the admin/IDE bundle location.
                         (default ${PREFIX})
   -o, --output DIR      Where to write the tarball (default ${OUTPUT_DIR}).
-      --no-ui           Skip the admin SPA and IDE bundles (SC_BUILD_ADMIN=0).
+      --no-ui           Skip the four front-end bundles (SC_BUILD_ADMIN=0).
                         The server then serves the API only, or a --static-dir
                         you point at a bundle yourself.
       --no-strip        Keep debug symbols (the binary is ~2x larger).

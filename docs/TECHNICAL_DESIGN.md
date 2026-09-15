@@ -121,7 +121,12 @@ feldspar/
 │  ├─ admin/                      # React + TypeScript + react-bootstrap admin SPA over the
 │  │                              #    generated typed API client (table editor, file mgr, and
 │  │                              #    the workflow editor: React Flow + dagre, §10.3)
-│  ├─ builder/                    # React + Craft.js + react-flow drag-and-drop builder
+│  ├─ ide/                        # the file-store IDE: the VS Code workbench (§12.1)
+│  ├─ saltcorn-ui/                # Saltcorn 1's view code, vendored + esbuilt for the module
+│  │                              #    worker, and the browser assets its HTML loads (§13.3)
+│  ├─ builder/                    # Saltcorn 1's Craft.js layout builder, vendored (JSX) and
+│  │                              #    hosted by a TypeScript `src/`: its own admin document
+│  │                              #    under `/builder/` (§13.3, "The builder")
 │  └─ form-runtime/               # React dynamic-form framework (conditional/repeated/dynamic)
 ├─ plugins/                       # the bundled modules (§15.1a): first-party plugins that
 │                                #    ship in the release and install in one click
@@ -291,7 +296,7 @@ bundle that registers zero or more implementations of these into the catalog at 
 | `LlmProvider` | `sc-llm` | Rust | One configured chat model, streamed; hides the vendor's API |
 | `Importer` / `Exporter` | `sc-catalog` | any | Move table data to/from a format |
 | `ModelProvider` | `sc-model` | any | Fit/inspect/apply a predictive model over table data |
-| `ViewRuntime` | `sc-viewpattern` | JavaScript (v1's) | Render, post to and configure v1 view patterns — the six vendored ones and any a module's `viewtemplates` supplies (§13.3) |
+| `ViewRuntime` | `sc-viewpattern` | JavaScript (v1's) | Render, post to and configure v1 view patterns — the six vendored ones and any a module's `viewtemplates` supplies — render pages and run their action buttons, and answer the builder's options, previews and lookups (§13.3) |
 | `FileStore` | `sc-files` | any | A named directory/object store |
 | `ApiProvider` | `sc-api` | any | Expose tables, actions & custom routes over a protocol; emit a typed TS client |
 | `Framework` | `sc-app` | any | Own an application's primary UI (React/Next/Svelte/v1); declares its settings for the admin UI |
@@ -1199,7 +1204,8 @@ a sparse value goes into `attributes`.**
 | `_fd_acme_cache` | ACME account + issued certificates | not configuration and not admin-visible: opaque bytes keyed by the digest of the domain list and the CA directory URL (§13.5), in the database so a renewal survives a restart and a second node does not order its own |
 | `_fd_applications` | applications | framework + its config, subdomain, table/store subset, API config, static dirs, CSP; **not an overlay** — the row is the app's only definition (§13.2), so this table is needed as soon as apps are (MVP) |
 | `_fd_views` | a Saltcorn UI application's views | **not an overlay**, and **per application** (§13.3): `(application, name)` is unique, so two applications may each have a `List Books` over one table. The pattern name, the table (which must be in the application's subset), `min_role`, `slug`, and a `configuration` that is **v1's shape, stored untouched** — it is what v1's own `list.ts` reads. `application` is by value, so deleting an application deletes its views itself |
-| `_fd_pages` | a Saltcorn UI application's pages | the same rules as `_fd_views`: per application, unique by name, a v1-shaped `layout` stored untouched, `min_role`, and `root_page_for_roles` in `attributes` |
+| `_fd_pages` | a Saltcorn UI application's pages | the same rules as `_fd_views`: per application, unique by name, a v1-shaped `layout` stored untouched, `min_role`, and `root_page_for_roles`, `no_menu` and `request_fluid_layout` in `attributes` |
+| `_fd_library` | a Saltcorn UI application's library ("shared components" in current v1) | the same rules again: per application, unique by name, deleted with the application. `icon` and a v1-shaped `layout` stored untouched. A layout places an item as `{ type: "library", library_id, slots }`, with `library_id` this table's UUID. Only a `saltcorn-ui` application may write one, and only the admin API writes it; the worker reads it from the view snapshot (§13.3, "The library") |
 | `_fd_models` | model definitions | **not an overlay** — the row is the model's only definition (§14.2): the provider, the `dataset` (which rows and which derived values, as a list of `sc-expr` formulas), the provider's configuration, the hyperparameter *space* (per key a value or a list to search over) and the split's fractions and seed. `table_name` is derived from the dataset on the way out and checked against it on the way in, so the list can be filtered by table without reading every dataset |
 | `_fd_model_instances` | one fit each | the provider's serialised `state`, its `parameters` (structured for display), the **host's** `metrics` per split, and the `encoding` the fit was made with — which is the load-bearing one: a prediction is encoded the way its fit was, or it fails. `status` is a column because every row has one and it is what the list filters on; the failure **sentence** is in `attributes`, because it is present only on the rows that failed. `active` is a column and at most one row per model carries it |
 | `_fd_roles` | roles | **not an overlay** — a role is a row carrying a name and role-specific settings; `users.role` is a foreign key onto it (§7.4). Two built-ins (admin, public) seeded at bootstrap |
@@ -1515,7 +1521,16 @@ erDiagram
     text description
     json layout "v1-shaped, untouched"
     int min_role "checked on save, NOT a foreign key"
-    json attributes "root_page_for_roles"
+    json attributes "root_page_for_roles, no_menu, request_fluid_layout"
+  }
+  LIBRARY["_fd_library"] {
+    uuid id PK "what a layout's library_id names"
+    uuid application "the app, by value; UNIQUE (application, name)"
+    text name
+    text description
+    text icon "a Font Awesome class; nullable"
+    json layout "v1-shaped, untouched"
+    json attributes
   }
   MODULES["_fd_modules"] {
     uuid id PK
@@ -1553,6 +1568,9 @@ erDiagram
   APPS }o--o{ TRIGGERS : "triggers[] -- by name"
   APPS ||--o{ VIEWS : "application -- by value, deleted with the app"
   APPS ||--o{ PAGES : "application -- by value, deleted with the app"
+  APPS ||--o{ LIBRARY : "application -- by value, deleted with the app"
+  VIEWS }o--o{ LIBRARY : "library_id -- inside configuration JSON"
+  PAGES }o--o{ LIBRARY : "library_id -- inside layout JSON"
   VIEWS }o--o| TABLES : "table_name -- by name"
   MODULES |o--o{ TRIGGERS : "action -- by name, an action the module supplies"
 ```
@@ -3568,14 +3586,17 @@ generated typed client (§13.1), so the API and the UI cannot drift.
 - **`ui/ide`** — the file-store IDE: the VS Code workbench embedded on its own admin route, for
   editing a store that holds an application's source. It is *not* part of the SPA, for reasons
   that are structural rather than stylistic (§12.1).
-- **`ui/builder`** — the Craft.js + react-flow drag-and-drop builder is *not* built yet. The
-  view/page experience it edits exists (§13.3, Saltcorn UI): views and pages render, and every
-  configuration step of a view but its layout is edited in the admin UI. The builder is what
-  will edit the layout step, and it is the next milestone.
 - **`ui/saltcorn-ui`** — not an SPA and not React: Saltcorn 1's rendering source, vendored,
   bundled by esbuild into one file the module worker evaluates, plus the browser assets v1's
   HTML needs (Bootstrap, jQuery, `saltcorn.js`). The third bundle `sc-cli`'s build script makes
   (§13.3).
+- **`ui/builder`** — Saltcorn 1's drag-and-drop layout builder (`@saltcorn/builder`, Craft.js),
+  **vendored unedited** beside `ui/saltcorn-ui` and at the same commit, and hosted by a
+  TypeScript `src/` that routes every URL it reaches through the generated client. It edits the
+  layout step of a Show, Edit, List or Filter view and a page's layout. Like the IDE it is a
+  document of its own under an admin route with a policy of its own, not a screen in the SPA:
+  its canvas must render under the subdomain's stylesheets rather than Tabler, it expects a v1
+  page around it, and a CSP belongs to a route. The fourth bundle (§13.3, "The builder").
 
 The XSS-safety story is now the ordinary React one — values are escaped by the framework and
 `dangerouslySetInnerHTML` is banned by lint — pairing with the structural SQL-injection
@@ -4258,8 +4279,9 @@ would make a build fail for a reason unrelated to building.
   conventions and the project created by the server. See "Two code frameworks" below.
 - **The `saltcorn-ui` framework (Saltcorn UI)** — the v1 views/pages experience: an
   application that owns views and pages, rendered on the server by **v1's own view patterns**
-  and served on its subdomain. No source tree and no build. See "Saltcorn UI" below; the
-  drag-and-drop layout editor (`ui/builder`) is the part still to come.
+  and served on its subdomain. No source tree and no build. Layouts are edited in v1's own
+  builder (`ui/builder`), and a per-application library holds shared layout fragments. See
+  "Saltcorn UI", "The builder" and "The library" below.
 
 #### Two code frameworks, and why
 
@@ -4403,8 +4425,9 @@ every export to exactly one side. `room` and `workflow-room` are not vendored.
 what a module already has — a `Module._load` patch answering `@saltcorn/*`, a call table, a
 timeout, a heap cap, a permission set — so it is the module `@feldspar/saltcorn-ui`, loaded
 from the bundle directory with an **empty** permission set and pinned to one worker. The seam
-is `sc_viewpattern::ViewRuntime` (`patterns`, `render`, `render_page`, `post`, `route`,
-`config_step`, `initial_config`, `references`), implemented by `sc_module::ModuleViewRuntime`.
+is `sc_viewpattern::ViewRuntime` (`patterns`, `render`, `render_page`, `page_action`, `post`,
+`route`, `config_step`, `initial_config`, `references`, and the builder's `page_builder_options`
+and five `builder_*` calls), implemented by `sc_module::ModuleViewRuntime`.
 Not a second runtime and not a Rust renderer: two implementations of one thing disagree by
 the third bug fixed in one of them. **An embedded view does not cross the seam** — a page
 embeds a Filter which embeds a List, and `View.run` recurses inside the worker, under a depth
@@ -4412,9 +4435,10 @@ cap of 16 that names the cycle it broke.
 
 **The snapshot rule, extended.** v1's `View.findOne` and `getState().getConfig` are
 synchronous, as `Table.findOne` is, so they are answered from a `ViewSnapshot` — the
-application, its menu and settings, the roles, its triggers, every view and page — sent
-beside the `SchemaSnapshot` behind a generation stamp and re-sent only when a view or page
-write, an application save or `SIGHUP` moves it. Rows are host calls. `getState()` is built
+application, its menu and settings, the roles, its triggers, every view and page, and its
+library — sent
+beside the `SchemaSnapshot` behind a generation stamp and re-sent only when a view, page or
+library write, an application save or `SIGHUP` moves it. Rows are host calls. `getState()` is built
 **per application**, not per tenant: `site_name` is the app's, `base_url` its subdomain, and
 `getConfig` answers a declared key set (`CONFIG_KEYS`), which a test holds equal to the
 framework's `config_spec`. An undeclared key answers the caller's default, which is v1's
@@ -4445,7 +4469,8 @@ inventing a second configuration format to keep in step with a file it does not 
 registered at boot, consulted after `react` and `code` and before a module's declarations.
 `build()` answers `None`: saving a view is the whole deployment, and saving the application
 mounts it. It routes `/` (the role's root page, else a document naming what exists),
-`/view/:name[/*slug]`, `/page/:name`, `POST` to a view (its `runPost`) and to a view's declared
+`/view/:name[/*slug]`, `/page/:name`, `POST /page/:name/action/:rndid` (a page's action
+buttons), `POST` to a view (its `runPost`) and to a view's declared
 routes (`run_action`, `update_matching_rows`), `POST /delete/:table/:id`, `/auth/login`,
 `/auth/logout` and `/auth/signup` (the last only when `allow_signup` is on),
 `/static_assets/:tag/*`, `/files/serve/*` under the store's access rules, and a plugin's public
@@ -4464,6 +4489,16 @@ the framework builds the view's table surface with `TableHost::viewer_only`, whi
 caller's authority a ceiling, so a pattern or plugin read that forgets `forUser` gets the
 viewer's rows rather than the admin's, and naming another user is refused. The table subset is
 checked on save and again on render, inside the worker, for embedded views too.
+
+**Search, and the owner check.** v1's search bars (Filter's and List's) set `_fts_<table>`
+state, which `stateFieldsToWhere` turns into an `_fts` where over the view's fields. The `Table`
+shim translates it into this server's filter vocabulary as the rows where **any text field
+contains the term, case-insensitively** — v1's SQLite reading, applied per field, since one clause
+must mean the same on both databases. It is narrower than v1's Postgres search, which matches
+stemmed words across the text fields concatenated, and a key's summary field is not searched (that
+would be a subquery). v1's `table.is_owner(user, row)` is the synchronous check v1's patterns make
+before drawing what only an owner may use, a List's Delete link above all; the shim evaluates the
+ownership formula as v1 does, and it decides what is drawn, never what is allowed.
 
 **Actions.** A view's action column names one of three things, in this order: v1's fixed set of
 view actions (`Delete`, `Save`, `GoBack`, …, which no trigger can shadow); a trigger **the
@@ -4485,8 +4520,10 @@ a subdomain derived from it, every imported table, file store and trigger in its
 views and pages one-to-one with their configuration and layout unchanged, and the menu from
 `menu_items` minus the entries that point at v1's admin UI. A view whose pattern this server
 lacks, or whose table did not import, is a report line and not a failed restore. Restoring the
-same backup again matches the application by name and replaces its views and pages, keeping its
-subdomain, settings and CSP.
+same backup again matches the application by name and replaces its views, pages and library,
+keeping its subdomain, settings and CSP. "Configuration unchanged" gives way in exactly two
+places, both described under "The library": `library_id` serials are rewritten to UUIDs, and a
+page's legacy `fixed_states` are folded into its `view` segments.
 
 **The admin UI** gives such an application **Views** and **Pages** tabs, and no Build button.
 A view is created from a table and a pattern (the pattern's `initial_config` supplies the first
@@ -4494,9 +4531,15 @@ configuration) and configured through the pattern's own `configuration_workflow`
 one `config_step` call per step carrying what has been answered so far, because a step's form
 does not exist without a table — rendered by the same `FormField` form every other settings
 screen uses. A save **replays the steps**, so a configuration a step would refuse is refused
-naming the step and the field. The layout step is shown as read-only JSON; that is what
-`ui/builder` will edit. Pages have no editor yet: they are listed, deleted, restored, and saved
-through the `savePage` endpoint.
+naming the step and the field. A layout step has **Open in builder** (the JSON is underneath,
+collapsed), and a new view whose first unskipped step is a layout lands in the builder, as v1's
+*Configure* does. **Pages** has **New page** and a properties form (name, title, description,
+minimum role, *no menu*, *fluid layout*), whose **Create** opens the new page in the builder,
+and **Edit**, **Properties**, rename and delete per row. Renaming or deleting a view or a page
+first shows what refers to it: menu entries, home pages, the views, pages and library items
+that embed or link to it, and the items its own layout places. A **Library** tab lists the
+application's items with what uses each. Whether the builder exists is asked
+(`builderStatus`), not assumed, so a binary without its bundle shows JSON and says why.
 
 **Tested at five levels**, because it fails at five: Rust units over a real Postgres; the
 compatibility layer's JavaScript through a real worker; golden HTML for each of the six patterns
@@ -4504,6 +4547,278 @@ over the BooksDB fixture (the test that catches a shim returning a plausible wro
 the restored BooksDB driven over HTTP (sign in, page, filter, list, show, edit, save, delete);
 and an ignored-by-default test that installs `@saltcorn/kanban` from its checkout — the only
 test written, in effect, by somebody who did not know what was shimmed.
+
+#### The builder: v1's layout editor, vendored and hosted
+
+The layout step of a Show, Edit, List or Filter view, and a page's whole layout, are edited in
+**v1's own builder**: `@saltcorn/builder`, the Craft.js canvas with its toolbox, its thirty-odd
+elements and `storage.js`, which translates between Craft's node tree and v1's layout JSON.
+
+**Vendored, for the patterns' reason with more force.** The builder and the renderers are one
+contract. A layout is right when `storage.js` writes it and `show.ts`, `filter.ts` or
+`renderLayout` reads it the same way. A rewrite would be a second writer of v1's layout format,
+checked against a reader it does not own, and every drift would be a layout that looks right on
+the canvas and wrong on the subdomain. So `ui/builder/vendor/saltcorn-builder/` is
+`packages/saltcorn-builder/src/` **at the same commit as `ui/saltcorn-ui/vendor/`**
+(`0508c45ac2`, which `refresh.sh` enforces), unedited, with v1's two stylesheets, the icon
+picker's font and CKEditor 4.16.2 beside it in `public/`.
+
+It is JSX, and that is **GOALS' "use TypeScript" with a stated exception confined to
+`vendor/`**. `ui/builder/src/` is TypeScript, and it reaches this server only through its own
+copy of the generated client. `admin_client_sync` holds all three copies to the generator.
+
+esbuild bundles it into `dist/builder.js`, an ES module. Monaco is a chunk imported the first
+time a code editor mounts, with its workers as same-origin files, and CKEditor is copied whole
+into `dist/ckeditor/`. It is the **fourth bundle** `sc-cli`'s build script makes. Two packages
+would load code from a CDN, so both are shimmed for the vendored importers only:
+`@monaco-editor/react` gets the bundled ESM Monaco, and `ckeditor4-react` gets `dist/ckeditor/`.
+
+**A document of its own, not a screen in the SPA**, for the IDE's reasons (§12.1) and three
+more:
+
+- The canvas must render under the stylesheets the subdomain serves (Bootstrap 5.3, Font
+  Awesome, `saltcorn.css`) or it stops being WYSIWYG, and `saltcorn-builder.css` is a thousand
+  lines of un-namespaced selectors.
+- The builder expects a v1 page around it.
+- A CSP belongs to a route.
+
+`sc-server/src/builder.rs` serves, to an admin session only:
+
+- `GET /builder/applications/:app/views/:view?step=n`;
+- `GET /builder/applications/:app/pages/:page`;
+- the bundle at `/builder/static/:tag/*`;
+- Saltcorn UI's `public/` at `/builder/saltcorn-ui/:tag/*`, because the document's scripts must
+  be same-origin under `script-src 'self'`.
+
+Both asset paths are cached immutable, under a tag that moves when the bundle is rebuilt.
+
+A refusal is a 404 naming the first thing that failed: the bundle, the application or its
+framework, the view or page, the step (a number, in range, a layout, not skipped), an
+`html_file` page, or the mode.
+
+**The mode is the one key of the options Rust reads.** It is an allow-list: `show`, `edit`,
+`list` and `filter` for a view, `page` for a page. A plugin pattern with a builder step is
+refused by name until someone adds it on purpose, with its URLs.
+
+**The document is a port of v1's `saltcorn-markup/builder.ts`.** It has:
+
+- `#saltcorn-builder`, `#scbuildform` with v1's hidden inputs, and `#builder-header-actions`;
+- the chrome v1's `viewedit` and `pageedit` routes supplied: "Step *n* of *m*" and **Back to
+  configuration** for a view, **Page properties** and **Back to pages** for a page.
+
+v1's inline `renderBuilder(...)` call becomes boot data in a `<script type="application/json">`:
+the application, the target, the step, the CSRF token, the options, the layout, the mode, and
+where a save goes next. So the document has no inline script.
+
+The globals the vendored code reaches are held to two lists by `globals.test.ts`:
+
+- **defined by the Saltcorn UI scripts the document loads:** jQuery, Bootstrap, and v1's own
+  `notifyAlert`, `validate_expression_elem` and `apply_showif` from `saltcorn-common.js`, loaded
+  whole rather than copied out;
+- **installed by `src/globals.ts`:** the stubs v1's `builder.ts` installs, and `ajax_modal`,
+  refused.
+
+**Its CSP** is `BUILDER_CONTENT_SECURITY_POLICY` in `security.rs`, on every answer under
+`/builder/`. It is the admin UI's policy with **one** relaxation: a document's `img-src` gains
+*its own application's* origin. The canvas renders an application's images as
+`/files/serve/…`, and the admin server redirects that path to the application with a 307. It
+believes only a referrer that is a builder document, and the document is served with
+`Referrer-Policy: same-origin` so that there is one.
+
+Everything else the design expected to relax was checked and left out. Each omission rests on a
+fact `the_builder_policy_is_what_the_bundle_needs` asserts, so a refresh that changes one fails
+there, naming the directive:
+
+- Monaco's workers are files, so `worker-src 'self'` and no `blob:`.
+- Every CKEditor the builder mounts is `type="inline"`, so there is no editing iframe and no
+  inline script.
+- `builder.css`'s `data:` URLs are all images, so no `font-src data:`.
+
+There is no `'unsafe-eval'` and no third-party origin. **v1's formula checks are parses.** v1's
+builder checks a formula's syntax as it is typed by constructing a function from it and throwing
+the function away (`Function("return " + fml)` in three vendored elements, `AsyncFunction` in
+`saltcorn-common.js`'s two validators). Under this policy each of those is a refused `eval`, and
+the builder showed the refusal under every formula setting — which jsdom, enforcing no policy,
+could not see, and the by-hand definition of done did. So `src/formula-syntax.ts` answers the
+same question with a parse (acorn) of the source the constructor would compile. The build imports
+it as `Function` into the vendored files only, as it does `fetch`, with a test holding every
+vendored use of `Function` to that throw-away kind. The two validators are ported into
+`globals.ts` over the same check.
+
+**The seam is every URL the vendored builder reaches, held to a table.** v1's builder talks to
+v1's server through fetches and hrefs. None of those paths exist here, and some collide with
+paths that do (v1's `/api/:table/distinct/:field` against this server's `/api/`).
+`ui/builder/src/routes.ts` puts each URL shape in exactly one column:
+
+- **mapped:** a typed-client call, or a URL on this server. This covers the layout saves, the
+  library calls, the previews and lookups, `getlayout` to `getView`/`getPage`,
+  `/viewedit/config/:name` to the admin wizard, and `/view/:name` to the subdomain.
+- **refused:** a sentence naming the feature. This covers copilot layout generation, uploading
+  a file, help topics, TypeScript declarations, configuring a trigger, and page groups.
+- **unreachable:** with the option or shim that makes it so written beside it. `/monaco` is the
+  one.
+
+The build prepends `import { builderFetch as fetch }` to every vendored file and no other. A
+vendored `fetch` therefore answers from the table and never reaches the network, and one
+capturing click listener does the same for hrefs. An unknown URL is refused naming it, never
+passed through.
+
+`routes.test.ts` parses every vendored file. It fails on a URL-shaped literal in no column, and
+on a route that no literal names. That is what makes `refresh.sh` safe to run.
+
+**The options are computed in the worker, by v1's code.** Rust hands them on whole.
+
+- **For a view,** `config_step` answers `builder_options` for a builder step. That is the step's
+  own `builder(context)`, then `Workflow.runStep`'s additions, then `viewedit.ts`'s, computed as
+  the admin over the snapshot.
+- **For a page,** v1 computes the options in *server* code (`pageBuilderData`), so there is
+  nothing to vendor. It is ported into `ui/saltcorn-ui/src/builder-routes.ts` as
+  `pageBuilderOptions` and reached through `ViewRuntime::page_builder_options`.
+
+What that code calls moved from refused to implemented, each ported from its v1 source and
+restricted to the application's table subset, so the builder never offers a join to a table the
+application cannot see:
+
+- `get_join_field_options`, `get_relation_options`, `get_relation_data` and
+  `build_schema_data`;
+- `File.findImagesForBuilder`, over the application's file stores;
+- v1's default fonts, icons and keyframes.
+
+`PageGroup.find` answers `[]`, and `copilot_generate_layout` is absent.
+
+The options are golden-tested against **what a real Saltcorn 1.7.0-alpha.1 passes to
+`renderBuilder`** over the BooksDB backup, recorded by `record-builder-options.sh`. The
+comparison is key for key, and every intended difference is written in the test with its
+reason. That is the test that catches a shim returning a plausible wrong thing.
+
+The canvas's previews and lookups are v1 server routes too, ported beside it:
+`builderFieldPreview`, `builderFieldviewConfigForm`, `builderViewPreview`, `builderPagePreview`
+and `builderDistinctValues`. Each is a `ViewRuntime` method run as the admin in the worker. The
+handler refuses a table outside the subset, or a view or page the application lacks, before
+the worker is asked. Distinct values are answered on the admin API only. Nothing adds v1's
+public row API to a subdomain.
+
+**Saving a layout is a save, and is checked like one** (`sc-viewpattern/src/layout.rs`).
+
+- `saveViewLayout` merges `{ columns, layout }` under the step's `contextField`, or at the top
+  level, as the `step.builder` branch of v1's `Workflow.run` does. Then it runs everything
+  `saveView` runs, including the replay of the other steps and the action resolution.
+- `savePageLayout` replaces the page's layout and runs `validate_page`. A page's actions must be
+  v1's page actions (`GoBack`) or the application's triggers, and the views it embeds or links
+  to must be the application's.
+
+Both refuse a `library` segment naming an item the application does not have. Both write the
+`libraryUpdates` they carry (v1's in-place edits of a shared component) **in one transaction
+with the view or page**, so a refused save leaves no edit half-applied. That is the one
+improvement on v1, which writes them one after another.
+
+In the browser:
+
+- The host replaces `#scbuildform`'s `submit`, because v1's *Next* calls `form.submit()`, which
+  fires no event.
+- It waits for the builder's other writes in flight, then goes to the wizard's next step, the
+  view list, or the Pages tab.
+- A refusal is v1's `notifyAlert`, with the canvas kept.
+- The autosave reaches the same two calls through the table.
+
+**No normalisation, in either direction.** What `storage.js` wrote is what is stored. A jsdom
+test loads every BooksDB layout into the canvas, saves it with v1's own *Next* button, and
+asserts it comes back as it went in. The exceptions are a named list: additions `storage.js`
+makes at their default value, and the unwrapping of an older builder's one-segment `above`.
+
+**Without the bundle** (`SC_BUILD_ADMIN=0`), the builder routes answer a page saying the server
+was built without it. The admin screens ask `builderStatus` and show a layout as JSON with the
+same reason, so such a build degrades rather than breaks.
+
+#### Pages: the rest of the page editor, and what a built page needs to run
+
+A page is created and its properties edited in the admin UI, through `savePage`: name, title,
+description, minimum role, `no_menu` and `request_fluid_layout`. The last two live in
+`attributes` and shape the document, as v1's page route passes them to `sendWrap`. `no_menu`
+renders the layout's body with no navbar, and a fluid page's navbar container is
+`container-fluid`. v1's `html_file` property (a page that is an HTML file from a store) is not
+offered, and a page carrying one is refused by name by both the runtime and the builder.
+
+**`POST /page/:name/action/:rndid`** is where an `action` segment on a page posts. It is ported
+from v1's `routes/page.ts`, routed by the framework beside a view's post, and run in the worker
+(`ViewRuntime::page_action`) with the vendored `run_action_column`, under the viewer's
+authority. It answers v1's three ways: `{ success: "ok", … }`, `{ error }` with 400, or 404
+"Action not found". It departs from v1 in three places:
+
+- **The segment is found inside placed library items.** v1's `traverseSync` does not look
+  there, even though `Page.run` renders those buttons with this URL, so in v1 they 404.
+- **The page's `min_role` refuses as a view post does:** 401 for nobody, 403 for a signed-in
+  role that may not. v1 answers 404 for both.
+- **There is no database transaction.** The worker's `withTransaction` opens none, for the
+  reason `list.ts`'s `run_action` has none: no surface holds a transaction open across host
+  calls. The trigger an action names is one dispatch.
+
+**A page embedded in a page** renders inside `withinView`, under the depth cap views have. The
+cycle it breaks is named, where v1 refuses only a page that embeds itself directly.
+
+**`pageReferences`** answers what names a page: menu entries (nested under headers too), the
+roles it is the home page for, the views, pages and library items that embed it or link to it,
+and the items its own layout places. A rename through `savePage` refuses nothing and rewrites
+nothing. The admin UI shows the references first, as it does for a view.
+
+#### The library
+
+A library item is v1's `_sc_library` row, `{ name, icon, layout }` ("shared components" in
+current v1). A layout places one as `{ type: "library", library_id, slots }`. Editing inside a
+placed instance saves back to the item, so everything that places it changes. A **slot** is a
+hole each placement fills on its own, with a field and fieldview or with dropped-in content.
+
+**Per application, and only for Saltcorn UI.** It is stored in `_fd_library` (§9), beside
+`_fd_views` and `_fd_pages`, under their rules, and deleted with the application. It is per
+application for the argument that made views per application. An item's layout names fields,
+join paths, views, pages and actions, and each means something only inside one application's
+table subset and view set. A global item would place a join to a table the application cannot
+see. Every write refuses an application whose framework is not `saltcorn-ui`, naming it.
+Nothing outside `sc-viewpattern` and the Saltcorn UI screens knows the table exists: it is
+framework storage, not an overlay and not visible to agents.
+
+**Rendered by v1's own `models/library.ts`, vendored.** `resolveSegment` (the slot filling, and
+the guard against an item that contains itself) and `suitableFor` (which toolbox offers which
+item) are v1's. A second copy of the slot rules would be the first thing to drift. The file's
+one `db` import resolves, **for that importer only**, to `src/shims/library-db.ts`. That shim
+answers `select` and `selectMaybeOne` from the snapshot's library and refuses every write by
+name, and `bundle_shape` checks no other file reaches it.
+
+v1 resolves `library` segments in `show.ts`, `edit.ts`, `list.ts`, `filter.ts` and `Page.run`,
+and so does this server. One of v1's quirks carries over: `Page.run` renders embedded views
+*before* resolving library items, so a `view` segment inside an item placed on a page does not
+render, there or here.
+
+**Only the admin API writes it:** `createLibraryItem` (v1's `savefrombuilder`),
+`getLibraryItem` (read fresh, so a placed instance starts from the latest layout),
+`saveLibraryItem` (name, icon, description), `saveLibraryUpdates` (transactional over the
+batch), `deleteLibraryItem` and `listLibrary`, whose items carry `used_by`.
+
+**References run both ways.** The items a layout places are found by walking it, following each
+item through its own layout, with a visited set. An item's references are the views, pages and
+items that place it, directly or through another item. Deleting an item that something places
+answers 409 with those references unless `?confirm=true`. Once it is gone, a placement renders
+blank, which is v1's `resolveSegment` behaviour. That is deliberately not an error: a missing
+shared component must not take a working page down.
+
+**The import makes two translations, and they are the only two.**
+
+- **`library_id` becomes a UUID.** A v1 layout's `library_id` is a serial, meaningless here, so
+  the restore mints a UUID per item and rewrites every placement, in views, pages and the items'
+  own layouts. A v1 pack carries no library ids at all (`Library.toJson` drops `id`). Serials
+  are therefore mapped by position, since v1's `install_pack` recreates the entries in pack
+  order onto an empty table, and that is the only reading under which the backup resolves in v1
+  itself. The alternative, an integer column kept forever, is compatibility code for data this
+  server never held.
+- **v1's fixed state is folded into its one modern spelling.** v1 stores an embedded view's
+  fixed state either as `configuration` on the `view` segment, which the builder writes, or as
+  the legacy `page.fixed_states[name]`. The restore does `getEditNormalPage`'s fold once. From
+  then on there is one spelling, and no fallback reader for the old one.
+
+This server's own backup carries `applications/<subdomain>/library.json` under the views
+choice. It is restored before the views and pages, replacing rather than appending, so the save
+checks find the items those layouts place. A placement left naming an item that did not come is
+a warning line.
 
 #### The agent that builds the application
 

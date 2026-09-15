@@ -591,8 +591,9 @@ await books.run_trigger("send_invoice", { id });
 `{ pages: { gt: 100, equal: true } }`, `{ id: { in: [1, 2] } }`, `{ id: { not: { in: […] } } }`,
 `{ author: { ilike: "tol" } }` (v1's implicit `%…%`, and `fullMatch: true` when the pattern is
 already whole), `{ or: […] }`, `{ and: […] }`, `{ not: {…} }`, an array of conditions on one
-field, and `{ _false: true }` all mean here what they mean there. What is refused —
-`inSelect`, `inSelectWithLevels`, `json`, `slugify`, `_fts`, `day_only`, `eq`'s
+field, `{ _false: true }` and `{ _fts: { searchTerm, fields } }` (a search box's term: here, the
+rows where any text field contains it) all mean here what they mean there. What is refused —
+`inSelect`, `inSelectWithLevels`, `json`, `slugify`, `day_only`, `eq`'s
 two-expression form, a `RegExp` value and a `Symbol` value (v1's raw-SQL escape) — says which
 key it was and what to write instead, because a condition quietly dropped would compute the
 wrong answer inside your trigger rather than fail. The same rule holds for the options object:
@@ -661,6 +662,7 @@ throws when called, naming itself and why — never a quiet `undefined`.
 | `table.getField` | implemented | Walks a dotted path: `getField("author.name")` is the author's field |
 | `table.getForeignKeys` | implemented | |
 | `table.owner_fieldname` | different | Answers a field name only where the ownership formula says exactly what v1's owner field said; a formula this server can evaluate and v1 could not express is not reduced to one |
+| `table.is_owner` | implemented | v1's check, over the row and `user`: the ownership formula as JavaScript, or the owner field. It decides what a view draws for an owner, never what is allowed — a formula it cannot evaluate (this server's `Ⱶ` join) answers false |
 | `table.to_json` | implemented | |
 | `Field.find`, `Field.findOne`, `Field.findCached` | implemented | Synchronous, from the snapshot. Everything here is cached, so `findCached` and `find` answer alike |
 | `Field.labelToName`, `Field.nameToLabel` | implemented | |
@@ -676,11 +678,13 @@ throws when called, naming itself and why — never a quiet `undefined`.
 | `table.latestSyncInfo`, `table.latestSyncInfos` | refused | v1's mobile offline sync has no counterpart here |
 | `table.update_stored_calculateds`, `table.recalculate_for_stored` | refused | Calculated fields are recomputed by the server, on read; there is nothing to drive by hand |
 | `Table.create_from_csv`, `table.import_csv_file`, `table.import_json_file`, `table.dump_to_json` | refused | Import and export are this server's own, through the API and the admin UI |
-| `table.get_join_field_options`, `table.get_relation_options`, `table.get_relation_data`, `table.get_parent_relations`, `table.get_child_relations`, `table.field_options`, `table.slug_options`, `table.delete_url`, `table.getTags`, `table.getFormulaExamples` | refused | v1's view builder talking to itself; this server builds its views another way |
+| `table.get_join_field_options`, `table.get_relation_options`, `table.get_relation_data`, `table.get_parent_relations`, `table.get_child_relations` | implemented | What v1's builder offers as joins and relations, from the snapshot, inside the table subset the running code may see |
+| `table.delete_url` | implemented | Where a Delete link posts; a URL, not a deletion |
+| `table.field_options`, `table.slug_options`, `table.getTags`, `table.getFormulaExamples` | refused | v1's view builder talking to itself; this server's builder does not ask for them |
 | `field.fill_fkey_options`, `field.generate`, `field.validate` | refused | Likewise |
 
 The properties come with v1's names too — `table.name`, `label`, `description`,
-`min_role_read`, `min_role_write`, `pk_name`, `pk_type`, `fields`, `sql_name`,
+`min_role_read`, `min_role_write`, `pk_name`, `pk_type`, `fields`, `sql_name`, `santized_name`,
 `ownership_formula`, `ownership_field_id`; `field.name`, `label`, `type`, `typename`,
 `required`, `is_unique`, `primary_key`, `calculated`, `stored`, `expression`, `is_fkey`,
 `reftable_name`, `reftype`, `refname`, `attributes`, `fieldview`, `sublabel`, `table_id`,

@@ -2,16 +2,22 @@
 // workers and CKEditor, for the builder's admin route (TODO "The builder" §1, §2).
 //
 // esbuild, not v1's webpack and babel: JSX for the vendored files, React 18, and
-// the dependency versions v1's lock file resolved (`package.json`). Three things
-// make v1's source work here without editing it, and all three are **keyed on
+// the dependency versions v1's lock file resolved (`package.json`). Four things
+// make v1's source work here without editing it, and all four are **keyed on
 // the importer being in `vendor/`**, so `src/` and `node_modules` see the real
-// modules:
+// modules and globals:
 //
 // - **`fetch`** (§3). Every vendored file is loaded with
 //   `import { builderFetch as fetch } from "src/builder-fetch.ts"` in front of it,
 //   so its free `fetch` calls go through `routes.ts`. §3 says esbuild's `inject`,
 //   but `inject` rewrites the free `fetch` of *every* file in the bundle,
 //   Monaco's and CKEditor's integration included, and those must not be.
+// - **`Function`**. Every vendored file is also loaded with
+//   `import { syntaxCheckedFunction as Function } from "src/formula-syntax.ts"`,
+//   because v1 checks a formula's syntax by constructing a function from it,
+//   which the builder's CSP refuses as `eval` (`formula-syntax.ts` says why a
+//   parse answers the same question, and its test holds every vendored use of
+//   `Function` to that one kind).
 // - **Shims** (`VENDOR_SHIMS`, 7.3): packages that would load code from another
 //   origin.
 // - **Aliases** (`ALIASES`): v1 packages that are vendored rather than installed.
@@ -33,6 +39,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const vendor = path.join(here, "vendor", "saltcorn-builder");
 const dist = path.join(here, "dist");
 const builderFetch = path.join(here, "src", "builder-fetch.ts");
+const formulaSyntax = path.join(here, "src", "formula-syntax.ts");
 
 /** A bare specifier a vendored file imports → the shim it gets instead, with
  * the reason in the shim's header. */
@@ -71,7 +78,9 @@ const builderPlugin = {
       const source = await fs.promises.readFile(args.path, "utf8");
       return {
         // One line in front, so a stack trace is one line off, not rewritten.
-        contents: `import { builderFetch as fetch } from ${JSON.stringify(builderFetch)};${source}`,
+        contents:
+          `import { builderFetch as fetch } from ${JSON.stringify(builderFetch)};` +
+          `import { syntaxCheckedFunction as Function } from ${JSON.stringify(formulaSyntax)};${source}`,
         loader: "jsx",
       };
     });

@@ -28,7 +28,7 @@ writes or reads at that version:
 | Addition | Shape taken from |
 |---|---|
 | The two `library` entries: `{ name, icon, layout }` and **no `id`** | `Library.toJson` in `packages/saltcorn-data/models/library.ts`, which `create_backup` (`saltcorn-admin-models/models/backup.ts`) uses for the pack's `library` |
-| `library_id` as the item's serial, 1 and 2 by pack order | `install_pack` in `saltcorn-admin-models/models/pack.ts` creates the entries in order with `Library.create`, so on an empty `_sc_library` the first entry becomes id 1 |
+| `library_id` as the item's serial, 1 and 2 by pack order | `install_pack` in `saltcorn-admin-models/models/pack.ts` creates the entries in order with `Library.create`, so on v1's empty `_sc_library` the first entry becomes id 1 |
 | `{ type: "library", library_id, slots }`; a slot as `{ name, kind: "field", field, fieldview }` or `{ name, kind: "content", contents }`; `{ type: "library-slot", name }` in the item | `Library.resolveSegment`, vendored at `ui/saltcorn-ui/vendor/saltcorn-data/models/library.ts` |
 | The page's keys (`name`, `title`, `description`, `min_role`, `layout`, `fixed_states`, `attributes`, `root_page_for_roles`) | the pack's own `BooksOverview` entry |
 | `fixed_states: { <segment name>: <state> }` beside a `view` segment with `state: "fixed"` and no `configuration` | `getEditNormalPage` in `packages/server/routes/pageedit.ts`, which folds exactly that, and `Page.run` in `saltcorn-data/models/page.ts`, which reads `segment.configuration \|\| this.fixed_states[segment.name]` |

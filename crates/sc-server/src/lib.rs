@@ -116,6 +116,7 @@ pub fn python_adapter(config: &ServerConfig) -> std::sync::Arc<sc_python::Python
 pub fn default_python_adapter() -> std::sync::Arc<sc_python::PythonRuntime> {
     python_adapter(&ServerConfig::default())
 }
+pub use builder::{BUILDER_BOOT_ID, BUILDER_PAGE_MODE, BUILDER_PREFIX, BUILDER_VIEW_MODES};
 pub use config::{DEFAULT_BIND, PythonMode, ServerConfig};
 pub use handler::{
     BoxFuture, HandlerCtx, HandlerFn, HandlerRegistry, HandlerResponse, SessionAction,
@@ -137,7 +138,6 @@ pub use sc_expr::CodeAdapter;
 /// Where the bundled modules are in the checkout, re-exported: `sc-cli` needs to
 /// name the fallback and `sc-module` is not otherwise its dependency.
 pub use sc_module::BUNDLED_IN_CHECKOUT;
-pub use builder::{BUILDER_BOOT_ID, BUILDER_PAGE_MODE, BUILDER_PREFIX, BUILDER_VIEW_MODES};
 pub use security::IDE_CONTENT_SECURITY_POLICY;
 pub use security::{BUILDER_CONTENT_SECURITY_POLICY, builder_content_security_policy};
 pub use security::{CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};

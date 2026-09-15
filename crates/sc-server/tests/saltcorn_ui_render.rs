@@ -1007,6 +1007,120 @@ async fn a_restored_backup_serves_although_a_trigger_it_names_was_refused() -> s
     Ok(())
 }
 
+/// The builder, 10.4: what the definition of done's public page asks of a List
+/// it embeds, found by running it in a browser.
+///
+/// - **A search narrows it.** Filter's and List's search bars set v1's `_fts`
+///   state, as `_fts_<table>` (`table.santized_name`). The list failed naming
+///   `db.getTenantSchema`, because the worker's `db` answered
+///   `supports_multiple_schemas` with a truthy stub, and the Table shim then
+///   refused `_fts` outright.
+/// - **A stranger is not drawn Delete.** A viewer allowed the view but not the
+///   table's writes gets v1's owner check (`table.is_owner`) before each Delete
+///   link, and the whole list failed with "is_owner is not a function".
+#[tokio::test]
+async fn a_search_narrows_a_list_and_a_stranger_is_not_drawn_delete() -> sc_error::Result<()> {
+    let Some(bundle) = bundle_dir() else {
+        eprintln!(
+            "skipping: the Saltcorn UI bundle is not built (npm ci && npm run build in ui/saltcorn-ui)"
+        );
+        return Ok(());
+    };
+    let mut server = setup("search", bundle).await?;
+    let app = booksdb(&server._catalog).await;
+    let client = &mut server.client;
+
+    let titles: Vec<String> = rows_of(client, "Books")
+        .await
+        .iter()
+        .map(|row| row["title"].as_str().unwrap().to_owned())
+        .collect();
+    let found = titles
+        .iter()
+        .find(|t| t.contains("Moby"))
+        .expect("Moby Dick")
+        .clone();
+    let others: Vec<&String> = titles.iter().filter(|t| **t != found).collect();
+    assert!(!others.is_empty(), "{titles:?}");
+
+    // Both of v1's spellings: the table's own and the bare one, which also
+    // shows the match is case-insensitive.
+    for query in ["_fts_Books=Moby", "_fts=moby"] {
+        let list = client
+            .app_get(&format!("/view/List%20Books?{query}"), &[])
+            .await;
+        assert_eq!(list.status, StatusCode::OK, "{query}: {}", list.body);
+        assert!(list.body.contains(&found), "{query}: {}", list.body);
+        for other in &others {
+            assert!(
+                !list.body.contains(other.as_str()),
+                "{query} kept {other}: {}",
+                list.body
+            );
+        }
+    }
+    let nothing = client
+        .app_get("/view/List%20Books?_fts_Books=no-such-words", &[])
+        .await;
+    assert_eq!(nothing.status, StatusCode::OK, "{}", nothing.body);
+    for title in &titles {
+        assert!(
+            !nothing.body.contains(title.as_str()),
+            "{title}: {}",
+            nothing.body
+        );
+    }
+
+    // The admin is drawn Delete.
+    let admin_list = client.app_get("/view/List%20Books", &[]).await;
+    assert_eq!(admin_list.status, StatusCode::OK, "{}", admin_list.body);
+    assert!(
+        admin_list.body.contains("/delete/Books/"),
+        "{}",
+        admin_list.body
+    );
+
+    // A public List over tables anybody may read and only an admin may write.
+    for table in ["Books", "Authors", "Publishers"] {
+        let (status, body) = client
+            .send(
+                "PUT",
+                &format!("/api/tables/{table}"),
+                Some(json!({
+                    "label": "",
+                    "description": "",
+                    "min_role_read": 100,
+                    "min_role_write": 1,
+                    "ownership_formula": "",
+                    "rls_enabled": false,
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{table}: {body}");
+    }
+    let view_path = format!("/api/applications/{}/views/List%20Books", app.id.0);
+    let (status, mut view) = client.send("GET", &view_path, None).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    view["min_role"] = json!(100);
+    let (status, body) = client.send("PUT", &view_path, Some(view)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let mut stranger = visitor(client);
+    let list = stranger.app_get("/view/List%20Books", &[]).await;
+    assert_eq!(list.status, StatusCode::OK, "{}", list.body);
+    for title in &titles {
+        assert!(list.body.contains(title.as_str()), "{title}: {}", list.body);
+    }
+    assert!(!list.body.contains("/delete/Books/"), "{}", list.body);
+    // And the search works for them too.
+    let searched = stranger
+        .app_get("/view/List%20Books?_fts_Books=Moby", &[])
+        .await;
+    assert_eq!(searched.status, StatusCode::OK, "{}", searched.body);
+    assert!(searched.body.contains(&found), "{}", searched.body);
+    Ok(())
+}
+
 /// The BooksDB application, as it is saved.
 pub(crate) async fn booksdb(catalog: &Catalog) -> Application {
     sc_app::list_applications(catalog)

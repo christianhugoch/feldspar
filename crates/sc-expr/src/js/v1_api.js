@@ -291,9 +291,6 @@
       "a JSON path condition is not part of this server's plan seam; select the " +
       "value with a formula and compare that",
     slugify: "slug matching is not part of this server's where vocabulary",
-    _fts:
-      "full-text search is not part of this server's where vocabulary; " +
-      "{ ilike: \"...\" } is the nearest thing",
     day_only:
       "date truncation is not part of this server's where vocabulary; compare " +
       "against the two ends of the day instead",
@@ -430,6 +427,45 @@
     return out;
   };
 
+  // v1's `_fts`: a search box's text, looked for across a table's text fields.
+  // `stateFieldsToWhere` (plugin-helper.ts) writes it for a view's `_fts` or
+  // `_fts_<table>` state, which is what Filter's search bar and List's own
+  // search bar set, with the view's fields beside the term.
+  //
+  // v1 turns it into SQL over the text fields **concatenated**
+  // (`@saltcorn/db-common/internal`, `ftsFieldsSqlExpr`): Postgres matches it
+  // with `to_tsvector … @@ to_tsquery('term:*')` (stemmed words, prefix-matched),
+  // and SQLite with `LIKE '%term%'`. There is no text-search operator in this
+  // server's filter vocabulary, and one clause has to mean the same on both
+  // databases, so here it is SQLite's reading applied per field: the rows where
+  // **any** text field contains the term, case-insensitively. Two differences
+  // follow, and both are narrower rather than wrong:
+  // - a term that only occurs across two fields ("Moby Melville") matches
+  //   nothing, where v1's concatenation could match it;
+  // - Postgres's stemming ("books" finding "book") is not done.
+  // v1 also searches a key's summary field when the key has `include_fts`, with
+  // a subquery; a subquery is not part of this seam (`inSelect` above), so keys
+  // are not searched.
+  const ftsClause = (value) => {
+    if (!isObject(value)) {
+      throw new Error("`_fts` takes v1's { searchTerm, fields }, e.g. what stateFieldsToWhere writes");
+    }
+    const term = value.searchTerm === undefined || value.searchTerm === null ? "" : String(value.searchTerm);
+    // v1: an empty term is `LIKE '%%'`, which every row satisfies.
+    if (term === "") return null;
+    const textFields = (Array.isArray(value.fields) ? value.fields : []).filter((f) => {
+      if (!f || typeof f.name !== "string") return false;
+      const sqlName = (isObject(f.type) && f.type.sql_name) || f.sql_type;
+      // v1's rule: text columns, and a calculated one only if it is stored.
+      return sqlName === "text" && (!f.calculated || f.stored);
+    });
+    // v1 searches `''` when there is no text field, which matches nothing.
+    if (textFields.length === 0) return { formula: "false" };
+    const pattern = "%" + term + "%";
+    const parts = textFields.map((f) => keyed(f.name, { ilike: pattern }));
+    return parts.length === 1 ? parts[0] : { or: parts };
+  };
+
   // One field's conditions, as clauses of this server's filter object. The
   // three that are not comparisons — `not`, `or`, `and` — are combinators
   // *about that field*, so they nest the field name back inside themselves.
@@ -492,6 +528,11 @@
       // was not passed is not a condition that nothing satisfies.
       if (value === undefined) continue;
       refuseKey(key);
+      if (key === "_fts") {
+        const clause = ftsClause(value);
+        if (clause !== null) clauses.push(clause);
+        continue;
+      }
       if (key === "or" || key === "and") {
         if (!Array.isArray(value)) {
           throw new Error("`" + key + "` takes an array of where-expressions");
@@ -1298,6 +1339,48 @@
       get_relation_data: (unique) =>
         Promise.resolve(relationData(api, spec.name, unique === undefined ? true : unique)),
       owner_fieldname: () => spec.ownership_field_id || undefined,
+      // v1's getter, `sqlsanitize(this.name)` (`@saltcorn/db-common/internal`):
+      // what Filter's search bar and List's `_fts_search_bar` name a table's
+      // search state with, `_fts_<santized_name>` (v1's spelling). Without it
+      // the state was `_fts_undefined`, which matched no table.
+      santized_name: (() => {
+        const s = String(spec.name).replace(/[^\p{Letter}_0-9]*/gu, "");
+        return s[0] >= "0" && s[0] <= "9" ? "_" + s : s;
+      })(),
+      // v1's `is_owner(user, row)` (`models/table.ts`), which v1's patterns ask
+      // **synchronously** before drawing what only an owner may use: a List's
+      // Delete link for a viewer below `min_role_write` (`viewable_fields.ts`),
+      // Show's and Edit's owner-only parts. It decides what is drawn, never what
+      // is allowed: the write behind the link is checked by the row layer, under
+      // the table's own ownership rule, as every write is.
+      //
+      // The formula is v1's: a JavaScript expression over the row's columns and
+      // `user`, evaluated here as v1's `get_expression_function` evaluates it.
+      // One this worker cannot evaluate — this server's own `Ⱶ` join, say — is
+      // not ownership as far as drawing goes, so it answers false, and the
+      // viewer sees what a non-owner sees.
+      is_owner: (user, row) => {
+        if (!user) return false;
+        if (spec.ownership_formula) {
+          try {
+            const names = fields.map((f) => f.name).filter((n) => /^[A-Za-z_$][\w$]*$/.test(n));
+            // eslint-disable-next-line no-new-func
+            const test = new Function("{" + names.join(",") + "}", "user", "return (" + spec.ownership_formula + ");");
+            return !!test(row || {}, user);
+          } catch (_error) {
+            return false;
+          }
+        }
+        const owner = spec.ownership_field_id;
+        // v1: a user owns their own row in `users` when nothing else is said.
+        if (spec.name === "users" && !owner) {
+          return !!user.id && String(row && row.id) === String(user.id);
+        }
+        return (
+          typeof owner === "string" && !!row &&
+          (row[owner] === user.id || (isObject(row[owner]) && row[owner].id === user.id))
+        );
+      },
       to_json: () => ({
         id: spec.name,
         name: spec.name,

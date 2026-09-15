@@ -9,9 +9,8 @@
 //   which is v1's:
 //   - jQuery;
 //   - Bootstrap's bundle, so `.dropdown("toggle")` works;
-//   - `saltcorn-common.js`, which is v1's own `notifyAlert` (a Bootstrap toast),
-//     `validate_expression_elem` and `apply_showif`, taken whole rather than
-//     copied;
+//   - `saltcorn-common.js`, which is v1's own `notifyAlert` (a Bootstrap toast)
+//     and `apply_showif`, taken whole rather than copied;
 //   - `saltcorn.js`, whose `$.debounce` `saltcorn-common.js` uses as the page
 //     initialises.
 // - **HOST_GLOBALS** are defined here by `installGlobals`, which runs after those
@@ -21,7 +20,11 @@
 //     definitions in its `domReady`.
 //   - `ajax_modal`, likewise replaced, and refused.
 //   - The two values a v1 page's header sets.
+//   - `saltcorn-common.js`'s two expression validators, ported: v1's check a
+//     formula by constructing an `AsyncFunction` from it, which the builder's
+//     CSP refuses as `eval` (`formula-syntax.ts`).
 
+import { checkFormulaSyntax, nonBooleanConstant } from "./formula-syntax";
 import { notify } from "./notify";
 import { matchRoute, refusalSentence } from "./routes";
 
@@ -32,8 +35,6 @@ export const DOCUMENT_GLOBALS: Readonly<Record<string, string>> = {
   jQuery: "jquery-3.6.0.min.js",
   bootstrap: "bootstrap.bundle.min.js",
   notifyAlert: "saltcorn-common.js",
-  validate_expression_elem: "saltcorn-common.js",
-  validate_bool_expression_elem: "saltcorn-common.js",
   apply_showif: "saltcorn-common.js",
 };
 
@@ -45,6 +46,10 @@ export const HOST_GLOBALS: Readonly<Record<string, string>> = {
   pjax_to: "server/public/saltcorn.js. A no-op, as saltcorn-markup/builder.ts stubs it",
   _sc_lightmode: "a v1 layout's header, from the theme",
   _sc_globalCsrf: "a v1 layout's header, the session's CSRF token",
+  validate_expression_elem:
+    "server/public/saltcorn-common.js. Ported, with the syntax check a parse, not an AsyncFunction the CSP refuses",
+  validate_bool_expression_elem:
+    "server/public/saltcorn-common.js. Ported likewise; only a literal is recognised as a constant",
 };
 
 /** The host globals v1's `saltcorn-markup/builder.ts` stubs. Nothing in the
@@ -72,6 +77,58 @@ function ensureToastsArea(doc: Document): void {
   doc.body.appendChild(area);
 }
 
+/** A jQuery collection, from the document's `jquery-3.6.0.min.js`. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type JQueryCollection = any;
+
+/**
+ * v1's `validate_expression_elem` (`bool` false) and
+ * `validate_bool_expression_elem` (`bool` true), from `saltcorn-common.js`.
+ *
+ * `targetOrVal` is the input as a jQuery collection, or the formula as a string
+ * with `ref` the element to put the message after (Monaco's editor calls it that
+ * way). A previous message is removed, and a new one is put after the input.
+ * Where this differs from v1:
+ * - the syntax check is a parse (`checkFormulaSyntax`), not a construction;
+ * - the message is set as text, where v1 interpolates it into HTML;
+ * - the boolean check: v1 runs a formula that needs no row and says so if it
+ *   does not return a boolean. Running it is what the policy refuses (v1's own
+ *   code then catches the refusal and checks nothing), so here only a literal
+ *   is recognised as a constant.
+ */
+function expressionValidator(win: Window, bool: boolean) {
+  return (targetOrVal: unknown, ref: unknown = null): void => {
+    const $ = (win as unknown as { $: (x: unknown) => JQueryCollection }).$;
+    let val: unknown;
+    let target: JQueryCollection;
+    if (typeof targetOrVal === "string") {
+      val = targetOrVal;
+      target = $(ref);
+    } else {
+      target = targetOrVal;
+      val = target.val();
+    }
+    const next = target.next();
+    if (next.hasClass("expr-error")) next.remove();
+    if (!bool && target.hasClass("validate-expression-conditional")) {
+      // v1: a setting that is a formula only when its "_formula" box is ticked
+      const box = target.closest(".form-namespace").find(`[name="${target.attr("name")}_formula"]`);
+      if (!box.prop("checked")) return;
+    }
+    if (!val) return;
+    const show = (text: string) =>
+      target.after($('<small class="text-danger font-monospace d-block expr-error"></small>').text(text));
+    const expression = String(val);
+    try {
+      checkFormulaSyntax([], "return " + expression, true);
+    } catch (error) {
+      show((error as Error).message);
+      return;
+    }
+    if (bool && nonBooleanConstant(expression)) show("Expression must return a boolean"); // v1's sentence
+  };
+}
+
 /** Define every `HOST_GLOBALS` entry on `win`. */
 export function installGlobals(win: Window, options: GlobalsOptions): void {
   const noop = () => {};
@@ -84,6 +141,8 @@ export function installGlobals(win: Window, options: GlobalsOptions): void {
     pjax_to: noop,
     _sc_lightmode: options.lightmode ?? "light", // v1 draws the light variant by default
     _sc_globalCsrf: options.csrfToken, // v1 sends it as the CSRF-Token header
+    validate_expression_elem: expressionValidator(win, false),
+    validate_bool_expression_elem: expressionValidator(win, true),
   };
   Object.assign(win, defined);
   ensureToastsArea(win.document);

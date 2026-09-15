@@ -749,21 +749,63 @@ entry plus its §3 URLs, not a surprise.
 
 ## Phase 10 — Documentation and the definition of done
 
-- [ ] 10.1 `docs/TECHNICAL_DESIGN.md`: §13.3's Saltcorn UI section gains the builder, the page
+- [x] 10.1 `docs/TECHNICAL_DESIGN.md`: §13.3's Saltcorn UI section gains the builder, the page
       editor and the library (what is vendored, the routes and their CSP, the URL partition,
       where the options come from, the page action route, the library's per-application storage,
       the import's id rewrite and fixed-state fold); the `ui/builder` bullet and the repository
       tree say what was built; `_fd_library` in §9's table.
-- [ ] 10.2 `docs/tutorial-saltcorn-ui.md`: remove "the builder is not here" and the
+- [x] 10.2 `docs/tutorial-saltcorn-ui.md`: remove "the builder is not here" and the
       browser-console page; Part B's List, Show, Edit and a new Filter built in the builder, with
       the Show/Edit/Delete columns added there instead of through `saveView`; the page built from
       the Pages tab with the filter and list on it; a section on the library (save a component,
       place it, slots, edit in place, the Library tab); Part A gains "open an imported view and
       page in the builder".
-- [ ] 10.3 `README.md` and `docs/OPERATIONS.md`: the fourth bundle, what a build without it does,
+- [x] 10.3 `README.md` and `docs/OPERATIONS.md`: the fourth bundle, what a build without it does,
       the builder routes' CSP.
-- [ ] 10.4 The definition of done, run by hand against a real server in a real browser with the
+- [x] 10.4 The definition of done, run by hand against a real server in a real browser with the
        console open, written up below with whatever it found.
+
+### 10.4, written up
+
+Run on 2026-09-14: `feldspar serve` (release build with all four bundles) on a fresh database,
+`--base-domain localhost` on port 3052, BooksDB restored over the API, driven in Chrome with the
+console open and a `securitypolicyviolation` listener installed in every builder document.
+
+| Step | Result |
+|---|---|
+| 1. A view | Passes. Configure shows **Open in builder**; toolbox, canvas and settings as in v1. A Join picked as `publisher.name` through **Fields**; **Next »** saved and returned to the view list; `/view/Show%20Books?id=1` shows the publisher. |
+| 2. A List from nothing | Passes. *Recent books* opened in the builder with v1's columns; Show, Edit and Delete columns added; **Next »** landed on *Create new row*; the list works and every link answers 200. |
+| 3. A Filter from nothing | Passes. Empty canvas; a search bar, a dropdown on *author* and a *Clear* button; saved. |
+| 4. A page from nothing | Passes after the fixes. **New page → Create and build**; heading, *Find books* and *Recent books* (shared) in two columns, *GoBack*; **Done »** back to Pages; set as the public home page. On `booksdb.localhost/`, anonymously: search narrows, *Clear* clears, the dropdown narrows, *GoBack* goes back. |
+| 5. The imported page | Passes. *BooksOverview* opens with its filter and list; a text added above them renders. |
+| 6. The library | Passes, with a heading component rather than the title row (below). Saved from *Show Books*, placed on *Home*, edited there; *Show Books* and `/` both show the edit; **Library** lists it as used by 1 view, 1 page. |
+
+**What it found, all fixed with tests** (CHANGELOG, *Phase 10*):
+
+- **The builder's formula checks were refused by its own CSP.** v1 checks a formula by
+  constructing a function from it (`Function(…)` in three vendored elements, `AsyncFunction` in
+  `saltcorn-common.js`'s validators), which `script-src 'self'` refuses as `eval`: a ViewLink showed
+  "Refused to evaluate a string as JavaScript" under an empty formula, with six violation reports.
+  Now a parse (`src/formula-syntax.ts`), imported as `Function` into vendored files only; the two
+  validators are ported. The policy keeps no `'unsafe-eval'`.
+- **A search on a list failed**, naming `db.getTenantSchema`: the worker's `db` answered
+  `supports_multiple_schemas` with a truthy stub, and the `Table` shim then refused `_fts` by
+  name. Now `false`, and `_fts` is translated (any text field containing the term).
+- **The search bar named its state `_fts_undefined`**: `table.santized_name` was missing.
+- **A public List with a Delete column failed for anyone but an admin**: `table.is_owner` was
+  missing. Ported.
+
+**Where the fixture and v1 differ from the script above:**
+
+- *Show Books* has no card. Its header row holds a **field**, and v1's `suitableFor("page")` does
+  not offer a component with a field on a page, so step 6 saved a heading as the component.
+- *GoBack* goes back in the browser and posts nothing. The page action route was checked with an
+  unknown id (404 "Action not found") and without CSRF (403); a trigger button's success is
+  Phase 3's test.
+- The join in step 1 landed just above the title rather than under it.
+- Neither book has a publisher; book 1 was given one so step 1 has something to show.
+- The BooksDB tables are admin-read. Step 4's public page embeds lists over them, so their read
+  role was opened; before that, a stranger got "This could not be shown" (a note for review).
 
 ---
 

@@ -175,4 +175,92 @@ describe("the host document's scripts", () => {
     });
     g.notifyAlert = original;
   });
+
+  describe("v1's expression validators, ported", () => {
+    type Validator = (targetOrVal: unknown, ref?: unknown) => void;
+    const g = window as unknown as Record<string, unknown> & { $: (x: unknown) => { val: (v: string) => void } };
+    const validate = (name: string) => g[name] as Validator;
+
+    /** An input in a form namespace, validated with `value`; the message after
+     * it, if any. */
+    function check(name: string, value: string, extra: (ns: HTMLElement, input: HTMLInputElement) => void = () => {}) {
+      const ns = document.createElement("div");
+      ns.className = "form-namespace";
+      const input = document.createElement("input");
+      input.name = "fml";
+      ns.appendChild(input);
+      document.body.appendChild(ns);
+      extra(ns, input);
+      const $input = g.$(input);
+      $input.val(value);
+      validate(name)($input);
+      const next = input.nextElementSibling;
+      ns.remove();
+      return next?.classList.contains("expr-error") ? next : null;
+    }
+
+    beforeAll(() => installGlobals(window, { csrfToken: "token-1" }));
+
+    it("replace saltcorn-common.js's, which construct an AsyncFunction the CSP refuses", () => {
+      for (const name of ["validate_expression_elem", "validate_bool_expression_elem"]) {
+        expect(String(g[name]), name).not.toContain("AsyncFunction");
+      }
+    });
+
+    it("accept a formula that would compile, and name the syntax error in one that would not", () => {
+      expect(check("validate_expression_elem", "row.id + 1")).toBeNull();
+      expect(check("validate_expression_elem", "await fetch_row(id)")).toBeNull(); // v1's check is async
+      expect(check("validate_expression_elem", "")).toBeNull();
+      expect(check("validate_expression_elem", "row.id +")?.textContent).toMatch(/^Unexpected token$/);
+    });
+
+    it("put the message in as text, and replace an earlier one", () => {
+      const ns = document.createElement("div");
+      const input = document.createElement("input");
+      ns.appendChild(input);
+      document.body.appendChild(ns);
+      const $input = g.$(input);
+      $input.val("<img src=x onerror=alert(1)> +");
+      validate("validate_expression_elem")($input);
+      expect(ns.querySelectorAll(".expr-error")).toHaveLength(1);
+      expect(ns.querySelector("img")).toBeNull();
+      validate("validate_expression_elem")($input);
+      expect(ns.querySelectorAll(".expr-error")).toHaveLength(1);
+      $input.val("1 + 1");
+      validate("validate_expression_elem")($input);
+      expect(ns.querySelectorAll(".expr-error")).toHaveLength(0);
+      ns.remove();
+    });
+
+    it("skip a conditional setting whose formula box is not ticked, as v1's does", () => {
+      const conditional = (ticked: boolean) => (ns: HTMLElement, input: HTMLInputElement) => {
+        input.classList.add("validate-expression-conditional");
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.name = "fml_formula";
+        box.checked = ticked;
+        ns.appendChild(box);
+      };
+      expect(check("validate_expression_elem", "a b", conditional(false))).toBeNull();
+      expect(check("validate_expression_elem", "a b", conditional(true))).not.toBeNull();
+    });
+
+    it("take the formula as a string with the element to follow, as Monaco's editor calls them", () => {
+      const ref = document.createElement("div");
+      document.body.appendChild(ref);
+      validate("validate_bool_expression_elem")("status ==", ref);
+      expect(ref.nextElementSibling?.classList.contains("expr-error")).toBe(true);
+      validate("validate_bool_expression_elem")("status == 'done'", ref);
+      expect(ref.nextElementSibling?.classList.contains("expr-error") ?? false).toBe(false);
+      ref.remove();
+    });
+
+    it("refuse a literal that is not a boolean in the boolean one, with v1's sentence", () => {
+      expect(check("validate_bool_expression_elem", "1")?.textContent).toBe("Expression must return a boolean");
+      expect(check("validate_bool_expression_elem", "'yes'")?.textContent).toBe("Expression must return a boolean");
+      expect(check("validate_bool_expression_elem", "true")).toBeNull();
+      expect(check("validate_bool_expression_elem", "pages > 100")).toBeNull();
+      expect(check("validate_expression_elem", "1")).toBeNull(); // the other one takes any value
+    });
+  });
 });

@@ -44,7 +44,7 @@
 //!   exactly as it is if it is, like every other restored store.
 //! - **Library items are keyed differently too** (TODO "The builder" §8). A v1
 //!   layout places an item as `{ type: "library", library_id: 3 }`, a serial of
-//!   `_sc_library`; here an item's id is a UUID. Each item gets one here, and
+//!   v1's `_sc_library`; here an item's id is a UUID. Each item gets one here, and
 //!   every `library_id` in every view's configuration, page's layout and item's
 //!   own layout is rewritten to it in the same pass ([`LibraryKeys`]).
 //! - **A page's legacy fixed states are folded into its layout** (§7). v1 has
@@ -1042,7 +1042,7 @@ fn convert_application(
 ///
 /// **By position, because the pack has no ids.** v1 writes a library entry as
 /// `Library.toJson`, which drops `id`, and its `install_pack` restores the
-/// entries in pack order with `Library.create` onto an empty `_sc_library` — so
+/// entries in pack order with `Library.create` onto v1's empty `_sc_library` — so
 /// the first entry becomes serial 1, the second serial 2. That is the only
 /// reading under which a v1 backup's own layouts resolve in v1 after a restore,
 /// and so the one taken here. A `library_id` that names no position is left as
