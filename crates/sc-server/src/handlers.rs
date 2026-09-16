@@ -6775,6 +6775,11 @@ fn run_summary_json(run: &sc_agent::Run) -> Json {
         "subject_version": run.subject_version,
         "current_step": sc_workflow::run_current_step(run),
         "wake_at": run.wake_at,
+        // How an agent run's loop concluded — `{"conclusion": "stuck", "reason":
+        // …}` — so a run list can tell an answer from a stuck or over-budget
+        // run, which share the `done` state. Null while running and for a
+        // workflow run.
+        "conclusion": run.conclusion(),
     })
 }
 

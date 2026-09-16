@@ -776,21 +776,23 @@ default.
 
 ## Phase 3 — Loop control (`sc-agent`)
 
-- [ ] 3.1 Validate tool arguments against the declared JSON schema before dispatch
+- [x] 3.1 Validate tool arguments against the declared JSON schema before dispatch
       (`jsonschema` crate or the repo's existing validator). Violations come back as a failed
       result naming each path. Tests: missing required argument, wrong type, extra property.
-- [ ] 3.2 Canonical fingerprints plus the `AgentTrait::fingerprint` hook (default: canonical
+      *(An in-crate checker for the subset tool schemas use, `sc_agent::schema`; unknown keywords
+      are ignored.)*
+- [x] 3.2 Canonical fingerprints plus the `AgentTrait::fingerprint` hook (default: canonical
       JSON).
-- [ ] 3.3 The three detectors (identical consecutive, repeated fan-out, repeated text), with
+- [x] 3.3 The three detectors (identical consecutive, repeated fan-out, repeated text), with
       state in the loop so they survive a resume. Thresholds are attributes.
-- [ ] 3.4 The malformed-call cap (unknown tool, unparseable arguments, schema failure;
+- [x] 3.4 The malformed-call cap (unknown tool, unparseable arguments, schema failure;
       default 3 consecutive).
-- [ ] 3.5 `TraitContext::signal(Signal)` with `EditFailed` and `CheckFailed`, counted by the
-      ladder.
-- [ ] 3.6 The escalation ladder: warn (a note appended to the tool result) → one step on the
+- [x] 3.5 `TraitContext::signal(Signal)` with `EditFailed` and `CheckFailed`, counted by the
+      ladder. *(Nothing raises them yet: the edit engine and `check` do, in Phases 5 and 6.)*
+- [x] 3.6 The escalation ladder: warn (a note appended to the tool result) → one step on the
       strong role → `Conclusion::Stuck { reason }`. Tests script each rung with
       `FakeProvider` and assert which role answered each step.
-- [ ] 3.7 The chat socket, the run list and `run_agent` (§11.5) handle `Stuck` and
+- [x] 3.7 The chat socket, the run list and `run_agent` (§11.5) handle `Stuck` and
       `OverBudget`. A trigger-run agent that ends `Stuck` reports it as the action's failure
       reason.
 

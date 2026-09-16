@@ -8047,6 +8047,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "regex-lite",
  "sc-action",
  "sc-agent",
  "sc-auth",

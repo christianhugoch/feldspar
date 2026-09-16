@@ -24,6 +24,8 @@ mod common;
 mod agent_loop;
 #[path = "agent_store.rs"]
 mod agent_store;
+#[path = "loop_control.rs"]
+mod loop_control;
 #[path = "roles_modes_budgets.rs"]
 mod roles_modes_budgets;
 #[path = "run_store.rs"]

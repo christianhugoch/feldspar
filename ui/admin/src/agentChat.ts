@@ -31,7 +31,17 @@ export type ServerEvent =
   | { type: "reasoning"; delta: string }
   | { type: "tool_call"; id: string; name: string; arguments: unknown }
   | { type: "tool_result"; id: string; name: string; content: string; is_error: boolean }
-  | { type: "done"; run: string | null; state: string; answer: string }
+  | {
+      type: "done";
+      run: string | null;
+      state: string;
+      answer: string;
+      /** How the loop concluded, when it did: `answered`, `max_steps`,
+       * `aborted`, `over_budget` (with `budget`) or `stuck` (with `reason`). */
+      conclusion?: string;
+      budget?: string;
+      reason?: string;
+    }
   | { type: "error"; message: string }
   | { type: "controls"; controls: unknown };
 
@@ -86,7 +96,10 @@ export type Entry =
     }
   /** A failure, in the transcript where it happened. A chat window that
    * silently stops is unfixable by the person watching it (§11.4). */
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string }
+  /** Why the loop stopped on its own — a budget, or loop control deciding the
+   * agent was stuck. Not a failure: the conversation can be continued. */
+  | { kind: "notice"; message: string };
 
 /** The whole of what the panel draws. */
 export type ChatState = {
@@ -242,13 +255,50 @@ export function applyEvent(state: ChatState, event: ServerEvent): ChatState {
         controlValues: defaultControlValues(controls, state.controlValues),
       };
     }
-    case "done":
+    case "done": {
+      const notice = conclusionNotice(event);
       return {
         ...state,
+        entries: notice ? [...state.entries, { kind: "notice", message: notice }] : state.entries,
         running: false,
         runId: event.run ?? state.runId,
         lastState: event.state,
       };
+    }
+  }
+}
+
+/** A loop conclusion as the server spells it, on a `done` event or in a stored
+ * run's context. */
+export type Conclusion = { conclusion?: string; budget?: string; reason?: string };
+
+/** What the person is told when the loop stopped without answering, or `null`
+ * for an answer or a stop they pressed themselves. */
+export function conclusionNotice(conclusion: Conclusion | null | undefined): string | null {
+  switch (conclusion?.conclusion) {
+    case "max_steps":
+      return "The agent used all of its steps without finishing.";
+    case "over_budget":
+      return `The agent ran out of its ${(conclusion.budget ?? "").replace("_", " ")} budget.`;
+    case "stuck":
+      return `The agent was stopped because it was going round in circles: ${conclusion.reason ?? ""}`;
+    default:
+      return null;
+  }
+}
+
+/** A short label for a run list, beside its state: `stuck`, `over budget`,
+ * `out of steps`, or `null` when the state says enough. */
+export function conclusionLabel(conclusion: Conclusion | null | undefined): string | null {
+  switch (conclusion?.conclusion) {
+    case "max_steps":
+      return "out of steps";
+    case "over_budget":
+      return "over budget";
+    case "stuck":
+      return "stuck";
+    default:
+      return null;
   }
 }
 
@@ -379,6 +429,10 @@ export function transcriptFromRun(context: unknown): Entry[] {
       }
     }
   }
+  // How it ended, where the loop stopped on its own.
+  const phase = (context as { phase?: { phase?: string; conclusion?: Conclusion } })?.phase;
+  const notice = phase?.phase === "done" ? conclusionNotice(phase.conclusion) : null;
+  if (notice) entries.push({ kind: "notice", message: notice });
   return entries;
 }
 

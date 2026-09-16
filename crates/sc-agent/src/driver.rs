@@ -22,6 +22,7 @@ use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use sc_expr::JsEvaluator;
 use sc_llm::{AssistantMessage, ConnectedModel, LlmDelta, LlmRequest, ToolCall, ToolSpec};
+use serde_json::Value as Json;
 
 use crate::agent::{Agent, ModelRole};
 use crate::agent_trait::{RunCaller, ToolsContext, TraitContext, Turn};
@@ -293,8 +294,23 @@ impl<'a> Runner<'a> {
                     );
                     return Ok(conclusion);
                 }
-                Step::CallModel { messages, step } => {
+                Step::CallModel {
+                    messages,
+                    step,
+                    escalated,
+                } => {
                     let began = std::time::Instant::now();
+                    // One step on the strong role, when the ladder says so.
+                    let role = if escalated {
+                        sc_log::log_info!(
+                            "agent `{}` run {}: step {step} escalated to the strong role",
+                            self.agent.name,
+                            run.id
+                        );
+                        ModelRole::Strong
+                    } else {
+                        role
+                    };
                     let answered = match self.model(role).await {
                         Ok(model) => {
                             let request = self.request(messages, step, mode, &model).await?;
@@ -348,7 +364,17 @@ impl<'a> Runner<'a> {
                                 .await,
                         );
                     }
+                    let rung = state.control().rung();
                     state.tool_results(outcomes)?;
+                    if state.control().rung() != rung && !state.is_done() {
+                        sc_log::log_warn!(
+                            "agent `{}` run {}: loop control moved to {:?} after step {}",
+                            self.agent.name,
+                            run.id,
+                            state.control().rung(),
+                            state.step()
+                        );
+                    }
                     let ledger = state.ledger_mut();
                     ledger.add_working(began.elapsed());
                     for child in lock(&children).drain(..) {
@@ -458,7 +484,7 @@ impl<'a> Runner<'a> {
         }
         let started = std::time::Instant::now();
         let outcome = match self.owner(&call.name, tools) {
-            None => ToolOutcome::failed(
+            None => ToolOutcome::malformed(
                 call.clone(),
                 format!(
                     "there is no tool named `{}`; the tools available are {}",
@@ -466,11 +492,37 @@ impl<'a> Runner<'a> {
                     self.tool_names(tools).join(", ")
                 ),
             ),
-            Some(trait_index) => {
+            // A provider hands on arguments that never parsed as a string,
+            // rather than failing the whole answer over one call.
+            Some(_) if !call.arguments.is_object() => ToolOutcome::malformed(
+                call.clone(),
+                match &call.arguments {
+                    Json::String(raw) => format!(
+                        "the arguments for `{}` are not valid JSON: {}",
+                        call.name,
+                        excerpt(raw)
+                    ),
+                    other => format!(
+                        "the arguments for `{}` must be a JSON object, got {}",
+                        call.name,
+                        crate::schema::json_type(other)
+                    ),
+                },
+            ),
+            Some((trait_index, spec)) => {
                 let enabled = &self.agent.traits[trait_index];
+                let violations = crate::schema::validate(&spec.parameters, &call.arguments);
                 match self.registry.require(&enabled.trait_) {
                     Err(e) => ToolOutcome::failed(call.clone(), e),
+                    Ok(_) if !violations.is_empty() => ToolOutcome::malformed(
+                        call.clone(),
+                        crate::schema::describe(&call.name, &violations),
+                    ),
                     Ok(trait_) => {
+                        let fingerprint = crate::control::fingerprint(
+                            &call.name,
+                            &trait_.fingerprint(&enabled.config, &call.name, &call.arguments),
+                        );
                         let delegation = RunDelegation {
                             runner: self,
                             parent_mode: mode,
@@ -491,14 +543,18 @@ impl<'a> Runner<'a> {
                             // needs one gets `require_delegate`'s configuration
                             // error rather than a runner that cannot finish.
                             delegate: self.connector.map(|_| &delegation as &dyn Delegator),
+                            signals: Vec::new(),
                         };
-                        match trait_
+                        let result = trait_
                             .call(&enabled.config, &call.name, &call.arguments, &mut ctx)
-                            .await
-                        {
+                            .await;
+                        let signals = std::mem::take(&mut ctx.signals);
+                        match result {
                             Ok(value) => ToolOutcome::ok(call.clone(), &value),
                             Err(e) => ToolOutcome::failed(call.clone(), e),
                         }
+                        .with_fingerprint(fingerprint)
+                        .with_signals(signals)
                     }
                 }
             }
@@ -526,17 +582,21 @@ impl<'a> Runner<'a> {
         outcome
     }
 
-    /// Which enabled trait offers `tool` in this mode, by position — the answer
-    /// validation guaranteed is unique.
-    fn owner(&self, tool: &str, cx: &ToolsContext<'_>) -> Option<usize> {
-        self.agent.traits.iter().position(|enabled| {
-            self.registry.require(&enabled.trait_).is_ok_and(|trait_| {
+    /// Which enabled trait offers `tool` in this mode, by position, and the
+    /// tool's spec — the answer validation guaranteed is unique.
+    fn owner(&self, tool: &str, cx: &ToolsContext<'_>) -> Option<(usize, ToolSpec)> {
+        self.agent
+            .traits
+            .iter()
+            .enumerate()
+            .find_map(|(index, enabled)| {
+                let trait_ = self.registry.require(&enabled.trait_).ok()?;
                 trait_
                     .tools(cx, &enabled.config)
-                    .iter()
-                    .any(|spec| spec.name == tool)
+                    .into_iter()
+                    .find(|spec| spec.name == tool)
+                    .map(|spec| (index, spec))
             })
-        })
     }
 
     /// Every tool this agent offers in this mode, for the message a model that
@@ -755,6 +815,19 @@ fn conclusion_label(conclusion: &Conclusion) -> String {
         Conclusion::MaxSteps => "ran out of steps".to_owned(),
         Conclusion::Aborted => "was aborted".to_owned(),
         Conclusion::OverBudget { budget } => format!("ran out of its {budget} budget"),
+        Conclusion::Stuck { reason } => format!("was stopped as stuck ({reason})"),
+    }
+}
+
+/// The start of an argument string that did not parse, for the model to see
+/// what it sent without being handed all of it back.
+fn excerpt(raw: &str) -> String {
+    const MAX: usize = 200;
+    if raw.chars().count() <= MAX {
+        format!("`{raw}`")
+    } else {
+        let head: String = raw.chars().take(MAX).collect();
+        format!("`{head}…` ({} characters)", raw.chars().count())
     }
 }
 

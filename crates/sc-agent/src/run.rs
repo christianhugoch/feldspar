@@ -335,12 +335,35 @@ impl Run {
             None => RunState::Running,
             Some(Conclusion::Aborted) => RunState::Aborted,
             // A budget that ran out concluded the run: the transcript is intact
-            // and the limit was the admin's, so it is not a failure.
+            // and the limit was the admin's, so it is not a failure. A stuck run
+            // is the same: nothing outside the conversation went wrong, and
+            // `conclusion` says why it stopped.
             Some(
-                Conclusion::Answered { .. } | Conclusion::MaxSteps | Conclusion::OverBudget { .. },
+                Conclusion::Answered { .. }
+                | Conclusion::MaxSteps
+                | Conclusion::OverBudget { .. }
+                | Conclusion::Stuck { .. },
             ) => RunState::Done,
         };
         self.updated_at = Utc::now();
+    }
+
+    /// How the run's loop concluded, read from its stored context: `None` for
+    /// a run still going, a workflow run, or one whose context is unreadable.
+    ///
+    /// What a run list shows beside `done`, so a run that answered and one that
+    /// was stopped as stuck do not read the same.
+    pub fn conclusion(&self) -> Option<Conclusion> {
+        if self.kind != RunKind::Agent {
+            return None;
+        }
+        // Read from the one field rather than the whole loop, because a run
+        // list does this for dozens of transcripts.
+        let phase = self.context.get("phase")?;
+        if phase.get("phase")?.as_str()? != "done" {
+            return None;
+        }
+        serde_json::from_value(phase.get("conclusion")?.clone()).ok()
     }
 
     /// Mark the run failed, with the reason a reader will see.

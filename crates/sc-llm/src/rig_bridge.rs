@@ -20,9 +20,11 @@
 //! - **Only emitting a tool call whose arguments parse.** rig assembles the
 //!   partial JSON both providers stream, but it hands back whatever it
 //!   assembled: a string that was never valid JSON arrives as a `Value::String`.
-//!   A tool call with unparsed arguments would reach a trait's `call` as a
-//!   string where an object was declared, so it is repaired here (a JSON string
-//!   is parsed) or dropped with an error (a fragment that never parsed).
+//!   A JSON string holding an object is repaired here (it is parsed). A
+//!   fragment that never parsed is passed on **as a string**, so the loop can
+//!   answer it as a malformed call the model can correct, and count it
+//!   (TODO §10), rather than failing the whole answer over one call. The loop
+//!   never hands a non-object to a trait.
 //! - **Carrying the correlation id a provider will ask for back.** rig's tool
 //!   call and tool result each have *two* identifiers: `id`, the item's own,
 //!   and `call_id`, which the Responses API pairs a call with its output by and
@@ -361,7 +363,14 @@ fn assistant_content(
             id: call.id,
             function: ToolFunction {
                 name: call.name,
-                arguments: call.arguments,
+                // A call whose arguments never parsed goes back as an empty
+                // object: every vendor requires an object here, and the tool
+                // result beside it already says what was wrong.
+                arguments: if call.arguments.is_object() {
+                    call.arguments
+                } else {
+                    Json::Object(serde_json::Map::new())
+                },
             },
             signature: None,
             additional_params: None,
@@ -570,11 +579,12 @@ struct PartialToolCall {
 }
 
 impl PartialToolCall {
-    /// The assembled call, or an error naming what did not parse.
+    /// The assembled call, or an error for a call with no name.
     ///
-    /// An unparseable fragment is an **error**, not a call with empty
-    /// arguments: running a tool with arguments the model did not ask for is a
-    /// worse outcome than telling it the call was malformed.
+    /// An unparseable fragment is kept as a JSON **string**, not replaced by
+    /// empty arguments: running a tool with arguments the model did not ask for
+    /// is a worse outcome than telling it the call was malformed, which the
+    /// loop does.
     fn finish(self) -> Result<ToolCall> {
         if self.name.is_empty() {
             return Err(Error::msg(
@@ -584,12 +594,7 @@ impl PartialToolCall {
         let arguments = if self.arguments.trim().is_empty() {
             Json::Object(serde_json::Map::new())
         } else {
-            serde_json::from_str(&self.arguments).map_err(|e| {
-                Error::msg(format!(
-                    "the provider's arguments for tool `{}` are not valid JSON: {e}",
-                    self.name
-                ))
-            })?
+            serde_json::from_str(&self.arguments).unwrap_or(Json::String(self.arguments))
         };
         Ok(ToolCall {
             id: self.id,
@@ -612,12 +617,10 @@ fn complete_tool_call(call: &RigToolCall) -> Result<ToolCall> {
     let arguments = match &call.function.arguments {
         Json::Null => Json::Object(serde_json::Map::new()),
         Json::String(text) if text.trim().is_empty() => Json::Object(serde_json::Map::new()),
-        Json::String(text) => serde_json::from_str(text).map_err(|e| {
-            Error::msg(format!(
-                "the provider's arguments for tool `{}` are not valid JSON: {e}",
-                call.function.name
-            ))
-        })?,
+        // Kept as the string it was when it does not parse — see `finish`.
+        Json::String(text) => {
+            serde_json::from_str(text).unwrap_or_else(|_| call.function.arguments.clone())
+        }
         other => other.clone(),
     };
     Ok(ToolCall {
@@ -678,6 +681,34 @@ mod tests {
 
     fn caps(backend: &str, model: &str) -> ModelCapabilities {
         ModelCapabilities::built_in(backend, model)
+    }
+
+    #[test]
+    fn arguments_that_never_parsed_reach_the_loop_as_a_string_and_go_back_as_an_object() {
+        let assembled = PartialToolCall {
+            id: "c1".to_owned(),
+            name: "edit".to_owned(),
+            arguments: "{\"path\": \"a.ts\"".to_owned(),
+        }
+        .finish()
+        .unwrap();
+        assert_eq!(assembled.arguments, json!("{\"path\": \"a.ts\""));
+        let parsed = PartialToolCall {
+            id: "c2".to_owned(),
+            name: "edit".to_owned(),
+            arguments: "{\"path\": \"a.ts\"}".to_owned(),
+        }
+        .finish()
+        .unwrap();
+        assert_eq!(parsed.arguments, json!({"path": "a.ts"}));
+
+        // Replayed in the history, the broken call is an empty object: every
+        // vendor requires one, and its result already says what was wrong.
+        let content = assistant_content(Vec::new(), String::new(), vec![assembled]);
+        let AssistantContent::ToolCall(replayed) = content.first() else {
+            panic!("a tool call");
+        };
+        assert_eq!(replayed.function.arguments, json!({}));
     }
 
     #[test]

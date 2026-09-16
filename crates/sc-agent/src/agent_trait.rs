@@ -34,6 +34,7 @@ use sc_llm::{ModelCapabilities, ToolSpec};
 use sc_types::{Attrs, FormField};
 use serde_json::Value as Json;
 
+use crate::control::Signal;
 use crate::delegate::Delegator;
 use crate::run::{RunId, RunMode};
 
@@ -124,6 +125,19 @@ pub trait AgentTrait: Send + Sync {
     async fn on_turn(&self, config: &Attrs, turn: &mut Turn<'_>) -> Result<()> {
         let _ = (config, turn);
         Ok(())
+    }
+
+    /// What makes two calls of `tool` **the same call**, for the doom-loop
+    /// detectors (TODO §10).
+    ///
+    /// The loop fingerprints a call as the tool's name plus the canonical JSON
+    /// of what this returns: the arguments themselves by default, with keys
+    /// sorted and whitespace normalised. Override it to ignore what does not
+    /// change the call's meaning — `read_file` of the same file at another
+    /// offset is still the same file read again.
+    fn fingerprint(&self, config: &Attrs, tool: &str, args: &Json) -> Json {
+        let _ = (config, tool);
+        args.clone()
     }
 }
 
@@ -270,6 +284,9 @@ pub struct TraitContext<'a> {
     /// [`require_delegate`](TraitContext::require_delegate)'s configuration error
     /// is the honest answer rather than a second, weaker way to run an agent.
     pub delegate: Option<&'a dyn Delegator>,
+    /// The signals this call has raised so far. Reach it through
+    /// [`signal`](TraitContext::signal).
+    pub signals: Vec<Signal>,
 }
 
 impl TraitContext<'_> {
@@ -280,6 +297,15 @@ impl TraitContext<'_> {
     /// of its shape.
     pub fn state(&mut self) -> &mut Json {
         self.trait_state
+    }
+
+    /// Tell the loop that something it should count happened — an edit that
+    /// failed after the whole cascade, a check with new errors (TODO §10).
+    ///
+    /// Raising a signal changes nothing about this call's result. Repeated
+    /// signals of one kind climb the escalation ladder.
+    pub fn signal(&mut self, signal: Signal) {
+        self.signals.push(signal);
     }
 
     /// The engine, or the configuration error that says the server has none.

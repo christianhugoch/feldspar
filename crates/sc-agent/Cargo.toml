@@ -48,6 +48,8 @@ uuid.workspace = true
 chrono.workspace = true
 # `Stream` combinators for the scripted provider's failure stream.
 futures.workspace = true
+# The `pattern` keyword of a tool's argument schema, checked before dispatch.
+regex-lite.workspace = true
 
 [features]
 # The scripted provider the loop, the traits and the chat socket are tested

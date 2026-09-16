@@ -17,6 +17,7 @@ import {
   emptyChat,
   applyEvent,
   applyUserMessage,
+  conclusionLabel,
   normalizeControls,
   splitCodeBlocks,
   transcriptFromRun,
@@ -159,6 +160,59 @@ describe("a turn, as it arrives", () => {
     expect(state.running).toBe(false);
     expect(state.runId).toBe("run-1");
     expect(state.lastState).toBe("done");
+  });
+});
+
+describe("a loop that stopped on its own says why", () => {
+  it("adds a notice for a stuck or over-budget run, and none for an answer", () => {
+    let state = applyUserMessage(emptyChat(), "fix it");
+    state = applyEvent(state, {
+      type: "done",
+      run: "run-9",
+      state: "done",
+      answer: "",
+      conclusion: "stuck",
+      reason: "3 malformed tool calls in a row, the last to `edit`",
+    });
+    expect(state.entries.map((e) => e.kind)).toEqual(["user", "notice"]);
+    expect(state.entries[1]).toMatchObject({
+      message: expect.stringContaining("3 malformed tool calls"),
+    });
+    expect(state.running).toBe(false);
+
+    state = applyUserMessage(state, "again");
+    state = applyEvent(state, {
+      type: "done",
+      run: "run-9",
+      state: "done",
+      answer: "",
+      conclusion: "over_budget",
+      budget: "wall_time",
+    });
+    expect(state.entries[3]).toEqual({
+      kind: "notice",
+      message: "The agent ran out of its wall time budget.",
+    });
+
+    const answered = applyEvent(applyUserMessage(emptyChat(), "hi"), {
+      type: "done",
+      run: "r",
+      state: "done",
+      answer: "hello",
+      conclusion: "answered",
+    });
+    expect(answered.entries.map((e) => e.kind)).toEqual(["user"]);
+  });
+
+  it("rebuilds the notice from a stored run, and labels it for the list", () => {
+    const entries = transcriptFromRun({
+      messages: [{ role: "user", content: "fix it" }],
+      phase: { phase: "done", conclusion: { conclusion: "stuck", reason: "looping" } },
+    });
+    expect(entries.map((e) => e.kind)).toEqual(["user", "notice"]);
+    expect(conclusionLabel({ conclusion: "stuck", reason: "looping" })).toBe("stuck");
+    expect(conclusionLabel({ conclusion: "answered" })).toBeNull();
+    expect(conclusionLabel(null)).toBeNull();
   });
 });
 

@@ -281,6 +281,12 @@ impl AgentTrait for Subagent {
                      smaller piece of the task, or do the work here.",
                     outcome.steps, outcome.run
                 ),
+                sc_agent::Conclusion::Stuck { reason } => format!(
+                    "`{agent}` was stopped after {} steps because it was going round in \
+                     circles: {reason}. Its transcript is run {}. Do the work here, or \
+                     ask for it differently.",
+                    outcome.steps, outcome.run
+                ),
                 _ => format!(
                     "`{agent}` finished without reporting anything (run {}). It may \
                      have done the work and failed to say so. Ask again, stating in \

@@ -190,6 +190,15 @@ impl Action for RunAgent {
         let conclusion = runner.drive(&mut run).await.map_err(|e| {
             Error::invalid(format!("trigger `{}`: agent `{name}`: {e}", ctx.trigger))
         })?;
+        // A stuck agent did not do what the trigger asked, and nobody is
+        // watching to notice: it is this action's failure, with the reason. The
+        // run row keeps the transcript to read it against.
+        if let Conclusion::Stuck { reason } = &conclusion {
+            return Err(Error::invalid(format!(
+                "trigger `{}`: agent `{name}` got stuck (run {}): {reason}",
+                ctx.trigger, run.id
+            )));
+        }
 
         Ok(json!({
             "agent": agent.name,
@@ -235,6 +244,7 @@ fn conclusion_name(conclusion: &Conclusion) -> &'static str {
         Conclusion::MaxSteps => "max_steps",
         Conclusion::Aborted => "aborted",
         Conclusion::OverBudget { .. } => "over_budget",
+        Conclusion::Stuck { .. } => "stuck",
     }
 }
 
@@ -281,6 +291,12 @@ mod tests {
                 budget: sc_agent::Budget::Cost
             }),
             "over_budget"
+        );
+        assert_eq!(
+            conclusion_name(&Conclusion::Stuck {
+                reason: "looping".to_owned()
+            }),
+            "stuck"
         );
     }
 }

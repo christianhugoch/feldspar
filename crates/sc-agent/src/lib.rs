@@ -17,6 +17,9 @@
 //!   [`AgentRegistry`], the twin of `sc-action`'s `ActionRegistry`.
 //! - The **loop** ([`machine`]): [`AgentLoop`], a steppable, serialisable state
 //!   machine that decides and does no IO.
+//! - **Loop control** ([`control`], [`schema`]): fingerprints, the doom-loop
+//!   detectors, the malformed-call cap, trait [`Signal`]s and the escalation
+//!   ladder, plus the check of a call's arguments against its tool's schema.
 //! - The **driver** ([`driver`]): [`Runner`], the one thing that does IO for it —
 //!   streams the provider, dispatches tools as the run's caller, and writes
 //!   `_fd_runs` after every step.
@@ -40,6 +43,7 @@
 
 pub mod agent;
 pub mod agent_trait;
+pub mod control;
 pub mod delegate;
 pub mod driver;
 pub mod ledger;
@@ -47,6 +51,7 @@ pub mod machine;
 pub mod registry;
 pub mod run;
 pub mod run_store;
+pub mod schema;
 pub mod store;
 pub mod validate;
 
@@ -63,6 +68,11 @@ pub use agent::{
     EnabledTrait,
 };
 pub use agent_trait::{AgentTrait, RunCaller, ToolsContext, TraitCheck, TraitContext, Turn};
+pub use control::{
+    ATTR_CALM_ROUNDS, ATTR_MAX_IDENTICAL_CALLS, ATTR_MAX_MALFORMED_CALLS, ATTR_MAX_REPEATED_ROUNDS,
+    ATTR_MAX_REPEATED_TEXT, ATTR_MAX_SIGNALS, ControlLimits, LoopControl, Rung, Signal,
+    canonical_json, fingerprint,
+};
 pub use delegate::{
     ATTR_DELEGATED_BY, ATTR_PARENT_RUN, DEFAULT_MAX_DEPTH, DelegateRequest, Delegated, Delegator,
 };

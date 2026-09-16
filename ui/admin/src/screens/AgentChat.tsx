@@ -58,11 +58,14 @@ import type { ListRunsResponse } from "../client";
 import {
   ChatSession,
   agentChatUrl,
+  conclusionLabel,
+  conclusionNotice,
   emptyChat,
   splitCodeBlocks,
   transcriptFromRun,
   type ChatState,
   type ComposerControl,
+  type Conclusion,
   type ControlValue,
   type Entry,
   type SocketLike,
@@ -582,6 +585,14 @@ function ConversationRail({
                   <StatusBadge tone={stateTone(run.state)} title={run.error ?? undefined}>
                     {run.state}
                   </StatusBadge>
+                  {conclusionLabel(run.conclusion as Conclusion | null) && (
+                    <StatusBadge
+                      tone="yellow"
+                      title={conclusionNotice(run.conclusion as Conclusion | null) ?? undefined}
+                    >
+                      {conclusionLabel(run.conclusion as Conclusion | null)}
+                    </StatusBadge>
+                  )}
                   <span className="text-secondary" style={{ fontSize: "0.6875rem" }}>
                     {new Date(run.created_at).toLocaleTimeString([], {
                       hour: "2-digit",
@@ -815,6 +826,14 @@ function TranscriptEntry({ entry }: { entry: Entry }) {
         )}
         <AgentText text={entry.text} />
       </div>
+    );
+  }
+  if (entry.kind === "notice") {
+    return (
+      <Alert variant="warning" className="py-2 d-flex align-items-start gap-2">
+        <IconAlertTriangle className="icon-2 flex-shrink-0 mt-1" />
+        <div className="text-break small">{entry.message}</div>
+      </Alert>
     );
   }
   if (entry.kind === "error") {

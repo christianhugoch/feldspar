@@ -177,6 +177,7 @@ impl Env {
             // through — which is what a `subagent` trait tested this way gets
             // told, and why its own test drives a whole run instead.
             delegate: None,
+            signals: Vec::new(),
         };
         trait_.call(config, tool, &args, &mut ctx).await
     }
@@ -262,6 +263,7 @@ impl Env {
             // through — which is what a `subagent` trait tested this way gets
             // told, and why its own test drives a whole run instead.
             delegate: None,
+            signals: Vec::new(),
         };
         trait_.call(config, &tool, &args, &mut ctx).await
     }

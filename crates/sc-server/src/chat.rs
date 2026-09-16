@@ -24,9 +24,11 @@
 //! - `{"type":"tool_call","id":…,"name":…,"arguments":{…}}`
 //! - `{"type":"tool_result","id":…,"name":…,"content":"…","is_error":bool}`
 //! - `{"type":"done","run":"<uuid>","state":"done"|"failed"|"aborted","answer":"…",
-//!   "conclusion":"answered"|"max_steps"|"aborted"|"over_budget"?,"budget":"cost"|"wall_time"|"context"?}`
-//!   — `conclusion` is present when the loop concluded, and `budget` names the
-//!   budget an `over_budget` run ran out of.
+//!   "conclusion":"answered"|"max_steps"|"aborted"|"over_budget"|"stuck"?,
+//!   "budget":"cost"|"wall_time"|"context"?,"reason":"…"?}`
+//!   — `conclusion` is present when the loop concluded, `budget` names the
+//!   budget an `over_budget` run ran out of, and `reason` says why a `stuck`
+//!   run was stopped.
 //! - `{"type":"error","message":"…"}`
 //!
 //! ## A failure is an event, not a dropped connection
@@ -451,16 +453,20 @@ fn done_event(run: &Run, conclusion: &Conclusion) -> Json {
         "state": run.state.as_str(),
         "answer": conclusion.answer().unwrap_or(""),
     });
-    let (name, budget) = match conclusion {
-        Conclusion::Answered { .. } => ("answered", None),
-        Conclusion::MaxSteps => ("max_steps", None),
-        Conclusion::Aborted => ("aborted", None),
-        Conclusion::OverBudget { budget } => ("over_budget", Some(budget.as_str())),
+    let name = match conclusion {
+        Conclusion::Answered { .. } => "answered",
+        Conclusion::MaxSteps => "max_steps",
+        Conclusion::Aborted => "aborted",
+        Conclusion::OverBudget { budget } => {
+            event["budget"] = json!(budget.as_str());
+            "over_budget"
+        }
+        Conclusion::Stuck { reason } => {
+            event["reason"] = json!(reason);
+            "stuck"
+        }
     };
     event["conclusion"] = json!(name);
-    if let Some(budget) = budget {
-        event["budget"] = json!(budget);
-    }
     event
 }
 
@@ -600,6 +606,16 @@ mod tests {
         );
         assert_eq!(event["conclusion"], "answered");
         assert_eq!(event["answer"], "hi");
+        assert!(event.get("budget").is_none());
+
+        let event = done_event(
+            &run,
+            &Conclusion::Stuck {
+                reason: "3 malformed tool calls in a row".to_owned(),
+            },
+        );
+        assert_eq!(event["conclusion"], "stuck");
+        assert_eq!(event["reason"], "3 malformed tool calls in a row");
         assert!(event.get("budget").is_none());
     }
 

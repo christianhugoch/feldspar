@@ -4006,6 +4006,12 @@ fn run_summary_schema() -> TypeSchema {
         // person can wake this", which is what the run list has to be able to
         // show as an approval somebody is sitting on.
         StructField::new("wake_at", TypeSchema::optional(TypeSchema::timestamp())),
+        // How an agent run's loop concluded, as the loop stores it:
+        // `{"conclusion": "answered" | "max_steps" | "aborted" | "over_budget" |
+        // "stuck", "budget"?, "reason"?}`. `done` covers an answer, a budget
+        // and a stuck run alike, and this is what tells them apart. Null while
+        // running and for a workflow run.
+        StructField::new("conclusion", TypeSchema::optional(TypeSchema::json())),
     ])
 }
 

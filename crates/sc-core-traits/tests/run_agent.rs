@@ -306,6 +306,48 @@ async fn a_prompt_that_computes_nothing_refuses_before_the_model_is_called() -> 
     Ok(())
 }
 
+/// An agent that ends `Stuck` did not do what the trigger asked, and nobody was
+/// watching: the action fails with the reason, and the run keeps the transcript.
+#[tokio::test]
+async fn a_stuck_agent_is_the_actions_failure_with_its_reason() -> Result<()> {
+    // Three calls to a tool the agent does not have: the malformed-call cap.
+    let (env, _providers) = setup(std::iter::repeat_n(
+        Reply::calls("delete_everything", json!({})),
+        3,
+    ))
+    .await?;
+    let trigger = Trigger::new("summarise_now", EventKind::None, "run_agent")
+        .config(CFG_AGENT, "summariser")
+        .config(CFG_PROMPT, "`Summarise: ${payload.title}`");
+    save_trigger(&env.catalog, &registry(&env), &trigger).await?;
+    env.reload_triggers().await?;
+
+    let err = env
+        .dispatcher
+        .as_ref()
+        .expect("a dispatcher")
+        .run_trigger(
+            &env.catalog,
+            "summarise_now",
+            json!({ "title": "Ubik" }),
+            None,
+        )
+        .await
+        .unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("got stuck"), "{message}");
+    assert!(message.contains("3 malformed tool calls"), "{message}");
+
+    let runs = list_runs(&env.catalog, "summariser").await?;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].state, RunState::Done);
+    assert!(matches!(
+        runs[0].conclusion(),
+        Some(sc_agent::Conclusion::Stuck { .. })
+    ));
+    Ok(())
+}
+
 /// The configuration is checked **on save**, in front of the admin: an agent
 /// that does not exist, and a prompt naming something the event will not have.
 #[tokio::test]

@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
 use crate::agent::{Agent, DEFAULT_MAX_STEPS, ModelRole};
+use crate::control::{ControlLimits, LoopControl, RoundCall, Signal, Verdict, fingerprint};
 use crate::ledger::{Ledger, LedgerStep};
 
 /// What the driver must do next to advance an [`AgentLoop`].
@@ -57,6 +58,9 @@ pub enum Step {
         /// [`on_turn`](crate::AgentTrait::on_turn) is told, and what the step
         /// budget is spent from.
         step: u32,
+        /// Whether the escalation ladder hands this one call to the **strong**
+        /// role, whatever role the run is answered by otherwise (TODO §10).
+        escalated: bool,
     },
     /// Run these tool calls **in this order** and feed the outcomes back through
     /// [`tool_results`](AgentLoop::tool_results).
@@ -99,6 +103,16 @@ pub enum Conclusion {
     OverBudget {
         /// Which budget.
         budget: Budget,
+    },
+    /// Loop control stopped the run: the model kept repeating itself after a
+    /// warning and an escalation, or kept making malformed calls (TODO §10).
+    ///
+    /// Not an error either — the transcript is intact and can be continued —
+    /// but for a run nobody is watching it is a failure to report, which is
+    /// what `run_agent` does.
+    Stuck {
+        /// What the detectors saw, for the admin.
+        reason: String,
     },
 }
 
@@ -180,7 +194,10 @@ impl Conclusion {
     pub fn answer(&self) -> Option<&str> {
         match self {
             Conclusion::Answered { answer } => Some(answer),
-            Conclusion::MaxSteps | Conclusion::Aborted | Conclusion::OverBudget { .. } => None,
+            Conclusion::MaxSteps
+            | Conclusion::Aborted
+            | Conclusion::OverBudget { .. }
+            | Conclusion::Stuck { .. } => None,
         }
     }
 }
@@ -196,6 +213,15 @@ pub struct ToolOutcome {
     /// Whether this is a failure — for the transcript, which renders a failed
     /// tool differently, and for nothing else: the model sees only `content`.
     pub is_error: bool,
+    /// Whether the call itself was malformed: an unknown tool, or arguments
+    /// that did not parse or did not match the schema. Counted by the
+    /// malformed-call cap.
+    pub malformed: bool,
+    /// The call's fingerprint as its trait computes it, or `None` for the
+    /// default: the tool and its canonical arguments.
+    pub fingerprint: Option<String>,
+    /// The signals the call's trait raised.
+    pub signals: Vec<Signal>,
 }
 
 impl ToolOutcome {
@@ -213,6 +239,9 @@ impl ToolOutcome {
             call,
             content,
             is_error: false,
+            malformed: false,
+            fingerprint: None,
+            signals: Vec::new(),
         }
     }
 
@@ -227,7 +256,31 @@ impl ToolOutcome {
             call,
             content: format!("error: {error}"),
             is_error: true,
+            malformed: false,
+            fingerprint: None,
+            signals: Vec::new(),
         }
+    }
+
+    /// A call the harness refused before any trait saw it: an unknown tool, or
+    /// arguments that did not parse or did not match the schema.
+    pub fn malformed(call: ToolCall, error: impl std::fmt::Display) -> ToolOutcome {
+        ToolOutcome {
+            malformed: true,
+            ..ToolOutcome::failed(call, error)
+        }
+    }
+
+    /// Set the fingerprint, returning `self` for chaining.
+    pub fn with_fingerprint(mut self, fingerprint: String) -> ToolOutcome {
+        self.fingerprint = Some(fingerprint);
+        self
+    }
+
+    /// Add the signals the trait raised, returning `self` for chaining.
+    pub fn with_signals(mut self, signals: Vec<Signal>) -> ToolOutcome {
+        self.signals.extend(signals);
+        self
     }
 }
 
@@ -269,6 +322,10 @@ pub struct AgentLoop {
     /// and restored on resume.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     trait_state: BTreeMap<String, Json>,
+    /// The doom-loop detectors, the malformed-call count and the escalation
+    /// ladder.
+    #[serde(default)]
+    control: LoopControl,
     /// Which side is next.
     phase: Phase,
 }
@@ -304,13 +361,22 @@ impl AgentLoop {
             budgets: Budgets::default(),
             ledger: Ledger::default(),
             trait_state: BTreeMap::new(),
+            control: LoopControl::default(),
             phase: Phase::Model,
         }
     }
 
-    /// An empty conversation within `agent`'s budgets.
+    /// An empty conversation within `agent`'s budgets and loop-control limits.
     pub fn for_agent(agent: &Agent) -> AgentLoop {
-        AgentLoop::new(agent.max_steps()).with_budgets(Budgets::of(agent))
+        AgentLoop::new(agent.max_steps())
+            .with_budgets(Budgets::of(agent))
+            .with_control_limits(ControlLimits::of(agent))
+    }
+
+    /// Set the loop-control thresholds, returning `self` for chaining.
+    pub fn with_control_limits(mut self, limits: ControlLimits) -> AgentLoop {
+        self.control = LoopControl::new(limits);
+        self
     }
 
     /// Set the budgets besides the step budget, returning `self` for chaining.
@@ -337,6 +403,8 @@ impl AgentLoop {
             ));
         }
         self.messages.push(LlmMessage::user(text));
+        // The person has weighed in, so whatever was repeating starts again.
+        self.control.reset();
         self.phase = Phase::Model;
         Ok(())
     }
@@ -369,6 +437,7 @@ impl AgentLoop {
                 Step::CallModel {
                     messages: self.messages.clone(),
                     step: self.step + 1,
+                    escalated: self.control.escalating(),
                 }
             }
         }
@@ -413,6 +482,7 @@ impl AgentLoop {
             ));
         }
         self.step += 1;
+        self.control.escalation_taken();
         self.usage.add(answer.usage);
         self.ledger.record_step(LedgerStep {
             step: self.step,
@@ -463,11 +533,54 @@ impl AgentLoop {
                 outcomes.len()
             )));
         }
-        for outcome in outcomes {
+        let text = match self.messages.last() {
+            Some(LlmMessage::Assistant { content, .. }) => content.clone(),
+            _ => String::new(),
+        };
+        let round: Vec<RoundCall> = outcomes
+            .iter()
+            .map(|o| RoundCall {
+                tool: o.call.name.clone(),
+                fingerprint: o
+                    .fingerprint
+                    .clone()
+                    .unwrap_or_else(|| fingerprint(&o.call.name, &o.call.arguments)),
+                malformed: o.malformed,
+                signals: o.signals.clone(),
+            })
+            .collect();
+        let verdict = self.control.observe_round(&text, &round);
+
+        // The signals go on the step that asked for these calls.
+        if let Some(step) = self.ledger.last_step_mut() {
+            step.signals.extend(
+                round
+                    .iter()
+                    .flat_map(|c| &c.signals)
+                    .map(|s| s.as_str().to_owned()),
+            );
+        }
+
+        let last = outcomes.len().saturating_sub(1);
+        for (i, mut outcome) in outcomes.into_iter().enumerate() {
+            // On the result, not the system prompt: the cached prefix survives.
+            if i == last
+                && let Verdict::Continue { note: Some(note) } = &verdict
+            {
+                outcome.content.push_str("\n\n");
+                outcome.content.push_str(note);
+            }
             self.messages
                 .push(LlmMessage::tool_result(&outcome.call, outcome.content));
         }
-        self.phase = Phase::Model;
+        self.phase = match verdict {
+            // Every call has its result first, so a person can continue the
+            // conversation from here.
+            Verdict::Stuck { reason } => Phase::Done {
+                conclusion: Conclusion::Stuck { reason },
+            },
+            Verdict::Continue { .. } => Phase::Model,
+        };
         Ok(())
     }
 
@@ -507,6 +620,11 @@ impl AgentLoop {
     /// The budgets besides the step budget.
     pub fn budgets(&self) -> Budgets {
         self.budgets
+    }
+
+    /// The loop-control state: the detectors and the ladder.
+    pub fn control(&self) -> &LoopControl {
+        &self.control
     }
 
     /// What each step cost and who answered it.
@@ -576,7 +694,7 @@ mod tests {
         let mut run = AgentLoop::new(20);
         run.push_user("hello").unwrap();
 
-        let Step::CallModel { messages, step } = run.next_step() else {
+        let Step::CallModel { messages, step, .. } = run.next_step() else {
             panic!("the first step is a model call");
         };
         assert_eq!(step, 1);
@@ -611,7 +729,7 @@ mod tests {
             .unwrap();
 
         // Back to the model, with the call and its result in the history.
-        let Step::CallModel { messages, step } = run.next_step() else {
+        let Step::CallModel { messages, step, .. } = run.next_step() else {
             panic!("after tools, the model runs again");
         };
         assert_eq!(step, 2);
@@ -885,7 +1003,7 @@ mod tests {
 
         run.push_user("and again").unwrap();
         assert!(!run.is_done());
-        let Step::CallModel { messages, step } = run.next_step() else {
+        let Step::CallModel { messages, step, .. } = run.next_step() else {
             panic!("the second turn is a model call");
         };
         // The budget is the run's, not the turn's, and the history is kept.

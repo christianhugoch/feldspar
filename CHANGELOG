@@ -2,6 +2,67 @@
 
 Changes in reverse chronological order.
 
+## The loop learns to notice when it is stuck (coding agent milestone, Phase 3)
+
+Everything here is in `sc-agent` and true of every agent (TODO §10, R§10). `sc-llm`, the
+built-in traits, `run_agent`, the chat socket, the run list and the admin chat panel were updated
+to match.
+
+- **Tool arguments are checked against the tool's schema** before dispatch (`schema.rs`).
+  - Each violation is named by its JSON Pointer path: a missing required argument, a wrong type,
+    an unknown property, an enum, a bound, a pattern, or an item inside an array.
+  - It is a small in-crate checker for the part of JSON Schema that tool schemas use, not the
+    `jsonschema` crate, whose dependency tree would land in every binary that links the loop.
+    Unknown keywords (`format`, `$ref`) are ignored rather than refused.
+- **Fingerprints.** A call's fingerprint is its tool plus canonical JSON (keys sorted at every
+  depth, no whitespace). The new `AgentTrait::fingerprint` hook says what counts as the same
+  call, and defaults to the arguments.
+- **The detectors** (`control.rs`), with their state in `AgentLoop`, so it survives a save and a
+  resume:
+  - identical consecutive calls (`max_identical_calls`, default 3)
+  - the same set of two or more calls in consecutive rounds (`max_repeated_rounds`, default 2)
+  - the same normalised assistant text in consecutive rounds (`max_repeated_text`, default 3)
+- **The malformed-call cap.** An unknown tool, arguments that did not parse, or a schema failure
+  is a malformed call. `max_malformed_calls` of them in a row (default 3) end the run as `Stuck`.
+  - The rig bridge no longer fails a whole answer over one call whose arguments never parsed.
+    It passes them on as a JSON string, the loop answers that call as malformed, and the call is
+    replayed to the vendor with `{}`.
+- **Signals.** `TraitContext::signal(Signal)` raises `EditFailed` or `CheckFailed`.
+  - Each is recorded on the step's ledger entry.
+  - `max_signals` raises of one kind (default 3) climb the ladder.
+  - No built-in trait raises one yet. The edit engine and `check` arrive in Phases 5 and 6.
+- **The escalation ladder.** Each round in which a detector or a signal fires climbs one rung:
+  1. **Warn:** a `[harness]` note is appended to the round's last tool result. The system prompt
+     is unchanged, so the cached prefix survives.
+  2. **Escalate:** the next model call goes to the strong role. `Step::CallModel` gains
+     `escalated`, and the ledger records `strong` for that step.
+  3. **Stop:** the run ends as `Conclusion::Stuck { reason }`.
+
+  `calm_rounds` untroubled rounds in a row (default 5) bring the ladder back to the bottom, and a
+  new user message resets everything. All thresholds are agent attributes read when the run is
+  created, and zero reads as the default.
+- **`Stuck` everywhere a conclusion is shown.**
+  - A stuck run is stored as `done`, and `Run::conclusion()` reads why from its context.
+  - The chat socket's `done` event carries `conclusion: "stuck"` and a `reason`.
+  - `run_agent` fails the action with the reason. Its result names `stuck` and `over_budget`.
+  - `subagent` tells the delegating model that the sub-agent was going round in circles.
+  - The admin run summary gains `conclusion`, and the three generated clients were regenerated.
+  - The chat panel shows a warning notice for a stuck, over-budget or out-of-steps run, both live
+    and when a stored run is reopened. The conversation rail labels such runs.
+  - The attributes are not yet on the agent form (10.6).
+- **Tests.**
+  - `sc-agent/tests/loop_control.rs`, against the scripted provider and a real `_fd_runs`:
+    - schema violations naming each path
+    - three malformed calls of each kind ending the run stuck
+    - each rung of the ladder, asserting which role answered every step
+    - signals and a trait fingerprint climbing the ladder, and a strong step recovering the run
+    - detector state surviving a failed provider call, a reload and a resume, with a threshold
+      set by attribute
+  - Unit tests for the schema checker, canonical JSON and each detector.
+  - A `run_agent` test in which a stuck agent fails the trigger.
+  - A rig bridge test for unparsed arguments.
+  - Chat `done` event and UI notice tests.
+
 ## The loop learns roles, modes, per-run state and budgets (coding agent milestone, Phase 2)
 
 Everything here is in `sc-agent` and true of every agent, not only coding ones (TODO §3, §5,
