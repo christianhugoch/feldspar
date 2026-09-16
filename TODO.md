@@ -1,101 +1,49 @@
-# Saltcorn v2 — The builder: v1's drag-and-drop editor for views and pages, and the library
+# Saltcorn v2 — The coding agent, rebuilt for cheap models
 
-Ordered, checkable task list for the twenty-fifth milestone after the MVP. Earlier lists are
-archived in [docs/TODO-mvp.md](./docs/TODO-mvp.md) (the MVP),
-[docs/TODO-post-mvp-1.md](./docs/TODO-post-mvp-1.md) (file stores + the React framework),
-[docs/TODO-post-mvp-2.md](./docs/TODO-post-mvp-2.md) (the `_sc_tables`/`_sc_fields` overlays,
-rich types and File fields), [docs/TODO-post-mvp-3.md](./docs/TODO-post-mvp-3.md) (ownership
-formulae, calculated fields and row-level security),
-[docs/TODO-post-mvp-4.md](./docs/TODO-post-mvp-4.md) (actions and triggers),
-[docs/TODO-post-mvp-5.md](./docs/TODO-post-mvp-5.md) (the file-store IDE),
-[docs/TODO-post-mvp-6.md](./docs/TODO-post-mvp-6.md) (agents),
-[docs/TODO-post-mvp-7.md](./docs/TODO-post-mvp-7.md) (the GraphQL provider),
-[docs/TODO-post-mvp-8.md](./docs/TODO-post-mvp-8.md) (REST queries, custom SQL and the
-generated client), [docs/TODO-post-mvp-9.md](./docs/TODO-post-mvp-9.md) (table constraints
-and indexes), [docs/TODO-post-mvp-10.md](./docs/TODO-post-mvp-10.md) (email),
-[docs/TODO-post-mvp-11.md](./docs/TODO-post-mvp-11.md) (tables in code),
-[docs/TODO-post-mvp-12.md](./docs/TODO-post-mvp-12.md) (concurrent code bodies),
-[docs/TODO-post-mvp-13.md](./docs/TODO-post-mvp-13.md) (modules),
-[docs/TODO-post-mvp-14.md](./docs/TODO-post-mvp-14.md) (SQLite),
-[docs/TODO-post-mvp-15.md](./docs/TODO-post-mvp-15.md) (modules in-process),
-[docs/TODO-post-mvp-16.md](./docs/TODO-post-mvp-16.md) (table providers),
-[docs/TODO-post-mvp-17.md](./docs/TODO-post-mvp-17.md) (writable table providers),
-[docs/TODO-post-mvp-18.md](./docs/TODO-post-mvp-18.md) (workflows),
-[docs/TODO-post-mvp-19.md](./docs/TODO-post-mvp-19.md) (the Python code adapter),
-[docs/TODO-post-mvp-20.md](./docs/TODO-post-mvp-20.md) (the administration MCP server),
-[docs/TODO-post-mvp-21.md](./docs/TODO-post-mvp-21.md) (bundled modules),
-[docs/TODO-post-mvp-22.md](./docs/TODO-post-mvp-22.md) (predictive models),
-[docs/TODO-post-mvp-23.md](./docs/TODO-post-mvp-23.md) (the v1 `Table` API) and
-[docs/TODO-post-mvp-24.md](./docs/TODO-post-mvp-24.md) (Saltcorn UI: the v1 views, running).
-Scope and rationale remain in [docs/GOALS.md](./docs/GOALS.md) ("builder is not built in to
-the admin ui … This needs to be implemented in react due to high availability of underlying
-libraries i.e. craft and react-flow") and [docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md)
-(**§13.3**, "Saltcorn UI", and the `ui/builder` bullet, which says this milestone is next).
+Ordered, checkable task list for the twenty-sixth milestone after the MVP. Earlier lists are
+archived in [docs/TODO-mvp.md](./docs/TODO-mvp.md) (the MVP) and
+`docs/TODO-post-mvp-1.md` … [docs/TODO-post-mvp-25.md](./docs/TODO-post-mvp-25.md) (the builder
+and the library). The agents milestone that this one reworks is
+[docs/TODO-post-mvp-6.md](./docs/TODO-post-mvp-6.md). Scope and rationale are in
+[docs/saltcorn-coding-agent-design.md](./docs/saltcorn-coding-agent-design.md) ("the report",
+cited as *R§n*) and [docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md) **§11.1–§11.3** (the
+LLM seam, the loop, the built-in traits) and **§12.1** (the IDE's chat panel).
 
-The last milestone made a Saltcorn UI application run. An imported List lists, an imported Edit
-saves, and a view can be created from nothing and configured step by step, **except for one
-step**: the layout. That step is the one that makes a Show, an Edit or a Filter anything at
-all, and right now the admin UI shows it as read-only JSON with a sentence apologising for it.
-A new Show gets v1's default (a label and a value per field) and can never be anything else. A
-new List gets a column per field and no Show link, no Edit link and no Delete. A new Filter
-gets an **empty** layout (`initial_config` is `{ layout: {}, columns: [] }`), so it filters
-nothing. Pages are worse off: they have **no editor at all**, and the tutorial creates one by
-pasting a `fetch` into the browser console. That is not "the saltcorn1 experience"; it is the
-saltcorn1 renderer with the experience taken out.
+Every application built from source gets a coding agent when it is created
+(`sc_app::framework_builder_agent`): a `coding` trait over its source tree plus
+`build_application`. That agent works, but its harness is the simplest one that could work,
+and the report shows that the harness moves results about as much as the model does (R§1:
+the same model scored 19.1% or 73.4% depending on the harness). With a strong model the gaps
+cost money. With a cheap model they cost the result. The gaps today:
 
-This milestone puts the experience back: **the builder**. It is v1's `@saltcorn/builder`, the
-Craft.js canvas Saltcorn 1 has shipped for years, **vendored the same way the view patterns
-were** and served on its own admin route. It edits the layout of **Show**, **Edit**, **List**
-and **Filter** views, and of **pages**. Pages also get the rest of v1's page editor: a
-properties form to create and edit them, and the `POST /page/:name/action/:rndid` route a page's
-action buttons post to. **Page groups** stay out, because they sit on top of pages (A/B
-testing, dispatching device widths to different pages) and a page can be built, served and
-used without them. It also brings the **library**: named, reusable layout fragments ("shared
-components" in current v1) that are saved from the builder, placed in any view's or page's
-layout, edited in place so everything that uses them changes, and rendered by v1's own
-`Library.resolveSegment`. Library items belong to the Saltcorn UI framework and are stored per
-application, beside that application's views and pages. No other framework sees them.
+- `read_file` returns up to 60 000 characters **without line numbers**, and has no offset.
+- `edit_file` needs an exact match, and on a miss it says only "does not appear". It does not
+  check that the file was read first, or whether it changed since.
+- Nothing checks the work unless the model decides to. Diagnostics come only from a full
+  application build, and nothing tells new errors from ones that were already there.
+- The loop has a step budget and nothing else. It has no token or cost budget, no doom-loop
+  detection, no cap on malformed calls, and no escalation.
+- The context grows until the step budget ends the run. Nothing is cleared or compacted, and
+  nothing arranges the request so that its prefix can be cached.
+- One model does everything: planning, editing, summarising. There is no plan outside the
+  transcript and no fresh context per unit of work.
+- The only map of the code is `list_files`, one directory at a time.
 
-**Milestone definition of done:** an admin restores `saltcorn-v1-BooksDB.zip`.
+This milestone fixes those gaps and keeps the shape: the agent stays an ordinary agent, its
+coding capability stays **one trait**, and the provider layer stays our own Rust seam over
+several vendors and API styles.
 
-1. **A view.** **Applications → BooksDB → Views → Show Books → Configure**: the *Layout* step
-   has an **Open in builder** button instead of a JSON dump. The builder opens: toolbox on the
-   left, the imported layout on the canvas exactly as the subdomain renders it, settings on
-   the right. They drag the *Publisher → name* join field under the title, press **Save**, and
-   `booksdb.localhost:3032/view/Show%20Books?id=1` shows the publisher.
-2. **A List, from nothing.** A List called *Recent books* over Books opens straight into the
-   builder with v1's default columns. They add a *Show* link column, an *Edit* link column and
-   a *Delete* action column, press **Next**, and the wizard carries on at *Create new row*, a
-   form step. They save, and the list works on the subdomain with every link going somewhere.
-3. **A Filter, from nothing.** A Filter called *Find books* opens on an empty canvas. They drop
-   in a search bar, a dropdown filter on *author* and a *Clear* action button, and save.
-4. **A page, from nothing.** **Pages → New page**: name *Home*, title *Library*, minimum role
-   *public*. **Create** opens the page in the builder. They lay out two columns: *Find books*
-   on the left, *Recent books* on the right with state *shared*, a heading above both, and a
-   *GoBack* action button below. They save and set *Home* as the public home page. On
-   `booksdb.localhost:3032/`, searching narrows the list, *Clear* clears it, and the action
-   button posts to `/page/Home/action/<rndid>` and answers instead of 404ing.
-5. **The imported page.** *BooksOverview* opens in the builder with its filter and list in
-   place. A text block added above them is saved and rendered.
-6. **The library.** In *Show Books* they select the card holding the title, choose **Save as
-   library component** and name it *Book header*. They place *Book header* on the *Home* page
-   and change its heading there, and *Show Books* shows the changed heading too. **Library** on
-   the application lists *Book header*, used by one view and one page.
+**Milestone definition of done:** a new React application's builder agent runs with a cheap
+executor model and a strong planner model. Asked for a three-feature change, it:
 
-Everything is still v1's source: the canvas is v1's `Builder.js`, the saved layouts are v1's
-JSON, and the rendered HTML comes from v1's `show.ts`, `filter.ts` and `renderLayout`,
-resolving `library` segments with v1's `resolveSegment`.
+1. writes a plan,
+2. implements each feature in a fresh child run,
+3. passes `check` after each feature, with no weakened tests,
+4. commits each feature to the application's git store.
 
-**Not in this milestone:** **page groups**. A page group is a named set of pages with a rule
-choosing among them by screen size, role or random split. It is another resolution step in
-front of `/page/:name` with its own editor, and pages work without it. The builder's
-page-group options answer an empty list, so it never offers a link to one. Also out:
-**HTML-file pages** (v1's `html_file` property: a page whose content is an HTML file from the
-file store, which the runtime already refuses by name), *Generate layout with copilot*,
-uploading an image from inside the builder, v1's help topics, TypeScript completions in the
-builder's formula editors, replacing CKEditor 4, sharing a library item between applications,
-editing the menu in anything but JSON, and several people building one layout at once.
-*Explicitly OUT* names each one and what it would take.
+The whole run stays within its budgets. The same scenario passes in `cargo test` against the
+scripted provider. `feldspar agent eval` runs the seed suite against a real provider and
+reports the pass rate, tokens, cache hits and cost.
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -103,758 +51,1032 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 # The specification
 
-### 1. The builder is v1's source, vendored, and GOALS' "TypeScript" applies to the host
+### 1. What is taken from the report, and what is not
 
-`@saltcorn/builder` is about 17 400 lines of React 18 JSX. The parts that matter are
-`Builder.js` (1 150), `Toolbox.js` (980), `storage.js` (870, the Craft node tree ⇄ v1 layout
-JSON translation), `Library.js` (590), `elements/Container.js` (1 310), `elements/utils.js`
-(2 170) and thirty element components. The last milestone did not reimplement `list.ts`, for a
-reason that applies here with more force: the builder and the renderers form **one contract**.
-A layout is correct if and only if `storage.js` writes it, the pattern or `renderLayout` reads
-it, and the two agree. A TypeScript rewrite of `storage.js` would be a second writer of v1's
-layout format, checked against a reader it does not own. Every drift would appear as a layout
-that looks right in the canvas and wrong on the subdomain.
+**Taken:** R§3's tool discipline, including its **`bash` tool** (as `coding`'s `shell` grant,
+off by default, §7a; this reverses §11.3's "No shell" for agents whose admin opts in),
+R§3.1's edit engine, R§4's layered prompt, R§5's plan/execute split
+with fresh sessions, R§6's absolute context budget with clearing before summarising, R§7's plan
+and progress record (kept in the planner run, not in files, §8), R§8's repo map, R§9's deterministic `check`, R§10's loop control,
+and R§11's model roles.
 
-So it is **vendored, not rewritten, not depended on**, and the rules are the ones
-`ui/saltcorn-ui/vendor/README.md` already states:
+**Not taken, as the request directs:**
 
-- `ui/builder/vendor/saltcorn-builder/` is `packages/saltcorn-builder/src/` taken at **the same
-  commit as `ui/saltcorn-ui/vendor/`** (`@saltcorn/data` 1.7.0-alpha.1, saltcorn/saltcorn
-  `0508c45ac2`). The builder and the renderers it writes for must never come from two versions.
-  `refresh.sh` takes both from one checkout or refuses.
-- Every file gets the two-line upstream header. **No vendored file is edited.** Behaviour that
-  must differ goes in `ui/builder/src/`, as an alias, a shim or an injected module, each with a
-  sentence saying why.
-- `saltcorn-builder.css` and `fonticonpicker.react.css` come from `packages/server/public/` and
-  CKEditor 4 from `packages/server/public/ckeditor/` (v1 ships 4.16.2), the same way
-  `saltcorn.js` came for the view runtime.
+- **R§12's integration.** The loop stays in Rust in `sc-agent`, over `sc-llm`. Nothing here
+  uses TypeScript, Node, the Vercel AI SDK or `@saltcorn/large-language-model`.
+- **Responses-only.** Every feature must work on every backend. Where a backend lacks
+  something (native `apply_patch`, reasoning replay, server compaction), the harness does it
+  instead and the capability table (§4) records the difference. This milestone adds a
+  **Chat Completions** backend, because that is the API most cheap open-weight hosts serve
+  (vLLM, llama.cpp, Ollama, OpenRouter, DeepSeek).
 
-**GOALS says "Use TypeScript for the React code", and this is a stated exception, not a
-quiet one.** The exception is the vendored directory and only that directory. `ui/builder/src/`
-is TypeScript, and every call it makes to this server goes through the generated typed client,
-as GOALS requires ("Interactions with the Admin UI API must go through a typed Typescript
-library consumer"). The vendored JSX calls this server through `fetch` and `href`, never
-directly (§3). That is how the typed-client rule holds for code nobody here wrote.
+**Not taken, for reasons of this codebase:**
 
-It is bundled by **esbuild**, like `ui/saltcorn-ui`, not by v1's webpack + babel: JSX loader,
-`react`/`react-dom` 18, one output file, one CSS file, with the dependency versions pinned to
-v1's `package.json` at that commit. It is the **fourth** bundle `sc-cli`'s build script makes.
+- **A git worktree per task.** It changes what the IDE shows while a feature is in progress,
+  so it is carried past this milestone. The container half of R§10's sandbox *is* taken, as
+  the shell's optional sandbox (§7a).
+- **R§9's mobile and embedded verifiers.** Saltcorn has no such framework. Browser checks for
+  React work through the project's own declared e2e script as one of its `checks`.
+- **Sandbox hygiene about git history.** The repository is the application's own. There is no
+  reference solution to leak.
 
-### 2. Where it runs: its own admin route, like the IDE, not inside the SPA
+### 2. Where everything lives: seam, loop, trait
 
-The builder is **not** a screen in `ui/admin`. It is a separate document at two routes,
-`/builder/applications/:app/views/:view` and `/builder/applications/:app/pages/:page`, served by
-the admin server under the admin session, the way `/ide/` is (§12.1). The reasons are
-structural:
+There are three layers, and each item in this plan belongs to exactly one of them:
 
-- **Its CSS and the admin UI's CSS cannot share a document.** The admin UI is Tabler over
-  Bootstrap 5.3. The builder's canvas must render with the **same stylesheet the subdomain
-  serves** (plain Bootstrap 5.3, Font Awesome 5.15, `saltcorn.css`, `saltcorn-builder.css`),
-  or it stops being a WYSIWYG editor. `saltcorn-builder.css` is 1 000 lines of un-namespaced
-  selectors.
-- **It expects a v1 page around it.** It uses jQuery with Bootstrap's `.dropdown("toggle")`
-  bridge (`JoinField.js`, `RelationOnDemandPicker.js`), `window.notifyAlert`,
-  `window.ajax_modal`, `validate_expression_elem`, `window._sc_lightmode`, and it looks up
-  `#saltcorn-builder`, `#scbuildform` and `#builder-header-actions` by id. v1's
-  `saltcorn-markup/builder.ts` renders that page, and the host document is a port of it (§4).
-- **Its CSP differs from the admin UI's, and a relaxation belongs to a route.** Details below.
-  An SPA screen cannot have a different policy from the SPA.
-- It weighs megabytes (Craft.js, CKEditor, Monaco, react-select, the icon picker), and only
-  an admin building a layout should pay for that.
+- **`sc-llm`** (§11.1) is the provider seam. It gets **LLM models as rows of their own**
+  under their provider (§3a), with capabilities and prices on each model. It also gets cache
+  hints, reasoning replay, token estimates and the new backend. It still knows nothing about
+  agents.
+- **`sc-agent`** (§11.2) owns the loop. **Anything that is true of every agent goes here**:
+  model roles, budgets, doom-loop detection, malformed-call caps, escalation, context budgets,
+  tool-result clearing, compaction, cache-stable request layout, per-run trait state, and
+  delegation to the agent itself. A table-querying agent gets a runaway loop just as easily as
+  a coding agent, so this is not coding-specific. Traits influence the loop through a few new
+  **hooks** (`fingerprint`, `elide`, `session_header`), each with a default.
+- **The `coding` trait** (§11.3) gets **everything that is about code**: the rebuilt tools,
+  the edit engine, the change ledger and diff, `check` and the test ratchet, the `shell` tool
+  and its sandbox, `view_app` over a preview mount, the repo map, the plan (kept in the planner run's state, §8), and the
+  planner/executor/explorer modes with their tools.
 
-**Its Content-Security-Policy** is `BUILDER_CONTENT_SECURITY_POLICY`, beside
-`IDE_CONTENT_SECURITY_POLICY` in `sc-server/src/security.rs`, served per response on the
-builder's routes only. It starts from the admin UI's strict policy. The only relaxations are
-the ones a failing test proves necessary, each written beside the constant with the reason. The
-expected set is `style-src 'unsafe-inline'` (already in the admin policy: styled-components and
-Craft's inline `style` props), `worker-src 'self' blob:` for Monaco's workers, and whatever
-CKEditor 4's editing iframe needs. It gets **no third-party origin, no `'unsafe-eval'` unless
-Monaco or CKEditor is proven to need it, and no `'unsafe-inline'` script**. The host document's
-boot data is a JSON `<script type="application/json">`, not an inline script.
-`@monaco-editor/react` loads Monaco from `/monaco` via its AMD loader, which is a CDN pattern
-in all but name. It is aliased to a shim that hands the loader the ESM `monaco-editor` this
-bundle already imports, with same-origin workers, the way `ui/admin/src/CodeEditor.tsx` does.
-Nothing is fetched from `/monaco`.
+**No new trait is created.** The request prefers one coding trait, and every new capability
+fits into `coding`'s single scope. One trait also leaves the builder agent's shape
+unchanged. There is one consolidation:
+**`coding` gains an optional `application` setting**, and when it is set, `check` includes the
+application build. The builder agent is then created with **`coding` alone** (§12).
+`build_application` stays registered for agents that build without editing, which includes
+the case §11.3 raised: one source tree building two applications.
 
-**The routes answer only for a Saltcorn UI application and a view or page in it.** The view
-route also requires a pattern whose current step is a builder step. Anything else is a 404
-naming which condition failed. A page whose layout is an `html_file` is refused, naming it,
-because that page has no layout to build. A binary built without the builder bundle serves a
-short page saying so, and the admin screens keep today's read-only JSON (§9), so a
-`SC_BUILD_ADMIN=0` build degrades rather than breaks.
+### 3. Model roles
 
-### 3. The seam is every URL the vendored builder reaches, held to a table
+An agent names one provider and one model (§3a). It gains two optional **roles**, each a
+(provider, model) pair naming an `_fd_llm_models` row, that fall back to the agent's own
+model:
 
-v1's builder talks to v1's server through about twenty URL shapes. Some are `fetch` calls
-(`/library/content/:id`, `/viewedit/savebuilder/:id`, `/field/preview/...`) and some are hrefs
-it renders (`/viewedit/config/:name`, `/actions/configure/:name`, `/admin/help/:topic`). None of
-those paths exist here, and some collide with paths that do (`/api/:table/distinct/:field`
-against this server's own `/api/`). This is `plugin-helper.ts` again (TODO-post-mvp-24 §2): a
-foreign module's contact surface with a server it was not written for. The answer is the same
-one: **a partition, in one file, held by a test**.
+- **`strong`** plans, re-plans, reviews diffs, and takes single-step escalations.
+- **`cheap`** summarises during compaction, writes commit messages and runs `explore`.
 
-`ui/builder/src/routes.ts` is that file. Every v1 URL shape is in exactly one of three columns:
+The agent's own model is the **executor**. Roles are agent attributes, validated on save and
+on load like the agent's own model: the named model row must exist under the named provider.
+A run's ledger (§9) records usage and cost **per role**, so routing can be tuned from data
+(R§11). A framework cannot choose roles, because it cannot know the deployment's models. The
+builder agent is created without them, and until the admin adds some, every role uses the
+agent's model.
 
-| Column | What it does | Members |
+### 3a. Providers and models are two tables
+
+A provider has always offered several models, and nearly everything this milestone adds
+describes a **model**: its prices, context window, working budget, edit format and
+capabilities. Before this split, those facts could only go in a JSON map inside the provider's
+config, keyed by model name. The form system cannot render such a map, nothing can validate it
+field by field, and a price under a mistyped name is silently never used. So the one table
+becomes two:
+
+- **`_fd_llm_providers`** keeps `id`, `name` (unique), `description`, `backend`, `config`
+  (API key, base URL) and `attributes`. It **loses the default model**: that is a model row
+  now. It is still the backend's settings, declared as `FormField`s, entered once for every
+  model the provider serves.
+- **`_fd_llm_models`** is new, named to avoid the predictive models' `_fd_models`. Its
+  columns:
+  - `id` (UUID)
+  - `provider_id`, a **foreign key** to the provider
+  - `name`: the vendor's model id, as sent on the wire
+  - `description`
+  - `is_default`: at most one per provider, enforced on save
+  - `config`: the model's settings, declared as `FormField`s **per backend**, with prices
+    (input, cached input, cache write, output, per million tokens), context window, working
+    budget, edit format, and the capability overrides of §4
+  - `attributes`
+
+  (`provider_id`, `name`) is unique. The same model name under two providers is **two rows**,
+  on purpose: the same model bought directly and through a gateway can differ in price and in
+  what the host supports.
+- **Deleting.** The schema layer has no `ON DELETE`, which is why sessions and tokens avoid
+  foreign keys to users. A model belongs to its provider, though, so here the foreign key is
+  right. Deleting a provider deletes its models **in the same transaction**, and both deletes
+  keep today's rule for providers: the delete is refused while an agent refers to the provider
+  or its models, and the refusal names the agents. `sc-llm` cannot see agents, so the caller
+  passes them in, as `delete_llm_provider`'s `extra_referents` already does.
+- **Agents keep naming things, not holding UUIDs.** `_fd_agents` keeps its `provider` and
+  `model` text columns. `model` must now name a model row under that provider, and when it is
+  empty the provider's default model is used. Roles use the same pair. A reference that stops
+  resolving drops the agent from the live set with its reason, as a missing provider does
+  today, and a transcript or backup stays readable.
+- **Blank settings mean "use the built-in default".** A capability, context window or budget
+  left blank on a model row comes from the built-in rules (the backend plus model-name
+  patterns, §4). Improving those rules then reaches every existing row, and a row records only
+  where it differs. **A blank price is unknown, never zero.**
+- **Discovering models.** *Fetch models* on a provider calls the host's model listing
+  (`GET /models` on the OpenAI-style and Anthropic APIs, and on most Chat Completions hosts)
+  and offers the names that have no row yet. Each is added with blank settings, which means
+  built-in defaults. A host with no listing endpoint is told so, and the admin types the name.
+- **Connecting.** `connect_provider(def, model)` becomes `connect_model(provider, model_row)`,
+  which returns the provider together with the model's **resolved capabilities and prices**,
+  so the loop is never asked to look them up a second time. *Test connection* moves to the
+  model, since what is tested is one model through one key.
+
+### 4. The provider seam learns what the loop needs
+
+- **Capabilities** (`ModelCapabilities`) are resolved from the backend plus model-name
+  patterns, and a **model row** (§3a) can override each one:
+  - parallel tool calls: supported, and whether they are off by default
+  - native `apply_patch`
+  - reasoning replay
+  - prompt caching: explicit breakpoints, automatic, or none
+  - the preferred edit format
+  - the context window, and a default **working budget**
+  - **vision**: whether a tool result may carry an image (§7b)
+- **`LlmRequest`** gains:
+  - `parallel_tool_calls: Option<bool>`, which is **off unless the agent says otherwise**
+    (R§12), because sequential calls are easier to fingerprint
+  - a `CachePlan`: breakpoints after the stable prefix, after the session header, and at the
+    tail
+  - an optional `prompt_cache_key`
+
+  Each adapter maps these fields onto its vendor or ignores them. Anthropic uses
+  `cache_control`. OpenAI uses automatic caching plus `prompt_cache_key`. Chat Completions
+  sends what the host accepts.
+- **Reasoning replay.** An `AssistantMessage` carries opaque `provider_items`: encrypted
+  reasoning for Responses (`store: false`), and thinking signatures for Anthropic. The adapter
+  sends them back when the capability allows. §11.1 decided to drop reasoning from the history,
+  and this reverses that **only for the opaque, vendor-signed items**. Readable reasoning text
+  still does not travel back.
+- **Pricing.** Prices are settings on the **model row** (§3a): input, cached input, cache
+  write and output, per million tokens. `Usage::cost(&Prices)` computes a step's cost. When a
+  model has no price, the cost is unknown, which is different from zero. A cost budget is
+  refused on save for an agent whose own model or any role's model has no price.
+- **Images in tool results.** A `ToolResult` carries text plus optional **image parts**
+  (media type and bytes). Anthropic and Responses accept an image inside a tool result.
+  Chat Completions hosts mostly accept images only in user messages, so there the adapter
+  sends the text as the tool result and the image in a user message immediately after it,
+  labelled with the call id. A model without `vision` is never sent an image: the loop
+  replaces it with a stub saying why, and `view_app` never offers screenshots to it anyway.
+- **Token estimate.** `estimate_tokens(&LlmRequest)` is a character heuristic, calibrated
+  per run against the `input_tokens` reported on the previous step. It exists to decide when
+  to compact, not to bill.
+
+### 5. Sessions, modes and delegating to oneself
+
+A **session** is one run with a fresh context. The outer loop (R§2) is a planner run that
+starts one **child run of the same agent** per feature. That is §11.3's `Delegator` with two
+changes:
+
+- **Self-delegation is allowed once.** The cycle check refuses it today. It is allowed when the
+  child is in a different **mode**, and never below depth 1.
+- **A child run carries a mode and a role.**
+
+Modes are a run attribute passed to the traits. Tools may vary by mode, and `coding`'s do:
+
+| Mode | Role | `coding` offers |
 |---|---|---|
-| **mapped** | becomes a typed-client call, or a URL on this server | `POST /viewedit/savebuilder/:id` → `saveViewLayout` · `POST /pageedit/savebuilder/:id` → `savePageLayout` · `GET /library/content/:id` → `getLibraryItem` · `POST /library/savefrombuilder` → `createLibraryItem` · `POST /library/save-updates` → `saveLibraryUpdates` · `POST /field/preview/:table/:field/:fieldview` → `builderFieldPreview` · `GET /field/fieldviewcfgform/:table` → `builderFieldviewConfigForm` · `POST /view/:name/preview` → `builderViewPreview` · `POST /page/:name/preview` → `builderPagePreview` · `GET /api/:table/distinct/:field` → `builderDistinctValues` · `/files/serve/:id` → the application's file-store serve URL · `/viewedit/config/:name` → the admin wizard's hash route · `/pageedit/edit/:page` → the page builder route · `/view/:name` and `/page/:name` → the subdomain's URLs · `POST /crashlog/` → the browser console and a notice |
-| **refused** | answers v1's error JSON (`{ error }`) with a sentence naming the feature and saying it is not in this version; hrefs render disabled with the same sentence as a tooltip | `POST /viewedit/copilot-generate-layout` · `POST /files/upload` · `/admin/help/:topic` · `/admin/ts-declares` · `/actions/configure/:name` · anything naming a page group |
-| **unreachable** | the builder cannot reach it with the options this server sends (§5) | none initially; a URL moves here only with the option that makes it unreachable written beside it (e.g. `has_copilot_generate: false`) |
+| `plan` | strong | read, find, search, repo_map, `save_plan`, `implement_feature`, `explore` |
+| `act` | executor | read, find, search, repo_map, edit/patch/write, `check`, `shell`*, `view_app`†, `explore` |
+| `explore` | cheap | read, find, search, repo_map |
 
-`/api/:table/distinct/:field` is v1's public row API, and the builder calls it from `Tabs.js`
-(tabs generated from a field's distinct values) in every table mode. `builderDistinctValues`
-answers the same `{ success: [...] }` as the **admin**, for a table in the application's
-subset only. It is not a public route on the subdomain, and nothing here adds one.
+\* only when `may_use_shell` is on (§7a). `plan` and `explore` never get the shell: both modes
+are read-only, and a shell cannot be made read-only.
 
-**How the vendored code is made to go through it without editing it:** esbuild `inject`s a
-module that exports `fetch`, so every free `fetch` identifier in `vendor/` resolves to
-`builderFetch(url, init)`. That function matches the URL against the table, calls the typed
-client and answers with a `Response`. `src/` code uses `globalThis.fetch` explicitly and is
-not rewritten. Rendered hrefs are handled by one delegated click listener on the document that
-matches `a[href]` against the same table: mapped hrefs navigate to their mapping, refused ones
-show their sentence. An unknown URL is **refused, never passed through**, and the refusal names
-the URL, so a v1 refresh that adds an endpoint fails visibly rather than 404ing into a blank
-panel.
+† only when `may_view_app` is on and `application` is set (§7b). It is kept out of `plan` and
+`explore` for the same reason: clicking a submit button writes real rows. The planner still
+sees the application, through the snapshots `implement_feature` returns (§8).
 
-**The test** (`ui/builder/src/routes.test.ts`, vitest) walks every string and template literal
-in `vendor/` that begins with `/` or is passed to `fetch`/`url:`/`href`, normalises template
-holes to `:param`, and asserts that each lands in exactly one column. It is the
-`bundle_shape` test's twin, and it is what makes `refresh.sh` safe to run.
+Each mode stays at about seven or eight tools (R§3). `coding`'s `workflow` setting picks what a chat run
+starts in:
 
-### 4. The host document is a port of `saltcorn-markup/builder.ts`
+- `direct` starts in `act`, which is today's behaviour.
+- `planned` starts in `plan`, and is the builder agent's default.
 
-v1's builder page is one function in `@saltcorn/markup`, and it is already vendored. It emits:
-the bundle script, `ckeditor/ckeditor.js`, the two stylesheets, `div#saltcorn-builder`, a
-`form#scbuildform` with hidden `contextEnc`, `stepName`, `columns`, `layout` and `_csrf`
-inputs, `builder.renderBuilder("saltcorn-builder", options, layout, mode)`, and a `domReady` that
-stubs `set_state_fields`, `set_state_field` and `pjax_to` and applies the dark theme. The host
-document is **that output**, rendered by Rust, around a page chrome that v1's viewedit and
-pageedit routes supplied and this server must supply itself:
+In `planned`, a one-line fix is a one-feature plan. That costs one strong call, and it keeps a
+single path.
 
-- the application and the view or page name; for a view, the step name, "step *n* of *m*" and
-  a **Back to configuration** link to the admin wizard; for a page, **Page properties** and
-  **Back to pages** links;
-- `#builder-header-actions`, where the builder portals its own header buttons;
-- the globals it calls, from one host module (`src/globals.ts`), each commented with its v1
-  origin. `notifyAlert` becomes a Bootstrap toast. `ajax_modal` is refused (§3's help topics).
-  `validate_expression_elem` is v1's, taken from `saltcorn-common.js` (already vendored
-  under `ui/saltcorn-ui/public/`). jQuery and `bootstrap.bundle.min.js` are served in that order
-  from the Saltcorn UI assets, so `.dropdown("toggle")` works.
+### 6. The edit engine
 
-**`#scbuildform` does not post to a URL.** For a view, v1 posts it to the workflow route, which
-decodes `columns` and `layout` into the context under the step's `contextField` and runs the
-next step (`models/workflow.ts`, the `step.builder` branch of `run`). The host intercepts the
-submit, reads the same two inputs, and calls `saveViewLayout` (§6) with them. On success it
-navigates to the wizard at the next step, or to the view list if the layout was the last step,
-which is what v1's **Next** does. For a page, v1's builder saves through `pageedit/savebuilder`
-and its **Done** returns to the page list, so the host calls `savePageLayout` and returns to
-the Pages tab. In both modes, the builder's autosave (`Library.js` `doSave` on blur, pagehide
-and beforeunload) posts to `savebuilder` and lands on the same endpoint through §3, so an
-abandoned tab keeps what it had, as it does in v1.
+R§3.1 says the model edits and the harness produces the diff:
 
-### 5. The builder's options are computed in the worker, by v1's code
+- **The edit format is a `coding` setting:** `auto` | `str_replace` | `apply_patch` |
+  `whole_file`. `auto` resolves from the model's capabilities:
+  - OpenAI-family models get `apply_patch` (V4A), as a native tool where the backend has one
+    and as a function tool otherwise.
+  - Everything else gets `str_replace`.
+  - `whole_file` withholds the edit tools, and `write_file`'s description says so.
+- **The match cascade** tries each step in turn:
+  1. exact
+  2. ignoring trailing whitespace and CRLF
+  3. ignoring indentation, then re-indenting the replacement to fit
+  4. fuzzy: the unique best match above a similarity threshold
 
-`renderBuilder`'s `options` is the biggest object in the exchange: `fields` (each
-`field.toBuilder`), `actions`, `triggerActions`, `builtInActions`, `actionConfigForms`,
-`actionDescriptions`, `field_view_options`, `parent_field_list`, `child_field_list`,
-`agg_field_opts`, `roles`, `min_role`, `library`, `views`, `pages`, `page_groups`, `images`,
-`mode`, `tableName`, and so on. It comes from two places in v1, and both run on the worker here.
-**Rust never assembles it and never looks inside it.**
+  Each step must produce **exactly one** match. The result says which step matched. The same
+  cascade anchors V4A context lines.
+- **A failure is actionable.** It returns the closest region, with line numbers, and one
+  instruction. A success returns the edited region with line numbers, so the model does not
+  need to re-read the file.
+- **The guards:**
+  - Every path is confined, as now.
+  - **Read before edit or overwrite.** A path's content hash from its last read is kept in
+    per-run trait state. An edit refuses a file that changed since that read, and asks for a
+    re-read. The agent's own edits update the hash.
+  - A multi-file patch applies **all or nothing**.
+- **The change ledger.** The first time a run touches a path, the ledger records its
+  pre-image, and deletes and moves are recorded too. The run's **diff** is computed in Rust
+  from the ledger (`similar`), so every backend gets one, including S3. A git store also gets
+  a commit per feature (§8). The ledger is also where the test ratchet (§7) looks. The shell
+  changes files behind the ledger's back, and §7a says how the ledger still sees them.
+- **Feedback after an edit.** Formatting and diagnostics run once, **after the last edit in a
+  model turn**, and not after every call:
+  - The project's own `prettier` (`node_modules/.bin`) formats **only the edited files**, if
+    the project has it installed.
+  - The configured `diagnose` check (default: `typecheck`) runs, and its capped diagnostics
+    are attached to the last edit's result. The edited files come first, and each diagnostic
+    is marked new or pre-existing.
 
-**For a view, the pattern computes it.** Each pattern's builder step is an
-`async (context) => options` function: `list.ts`, `show.ts`, `edit.ts` and `filter.ts`.
-`Workflow.runStep` adds `fonts`, `icons`, `keyframes`, `join_field_picker_data`, `tables`,
-`views` and `max_relations_layer_depth`. All of that code is vendored. So `config_step` for a
-builder step stops answering "`builder: true`, no form" and answers **`builder_options`**: the
-object v1 would have passed to `renderBuilder`, computed by v1's code, as the admin, over the
-application's snapshot.
+### 7. `check`, the baseline, and the ratchet
 
-**For a page, v1's server route computes it.** `pageBuilderData` is in
-`server/routes/pageedit.ts`, not `@saltcorn/data`, so there is nothing to vendor. It is
-**ported** into `ui/saltcorn-ui/src/builder-routes.ts` as `page_builder_options`, headed with its
-upstream path, and reached through a new `ViewRuntime` method. Everything it reads it reads
-from the snapshot:
-- the application's views (as `select_option`), its pages and its images;
-- the roles;
-- the actions that do not require a row, plus `GoBack` and the application's triggers whose
-  event is *API call* or *Never*, with their config forms and descriptions;
-- the library items `suitableFor("page")`;
-- `fixed_state_fields` per view (from `view.get_state_fields`, which the `View` shim already
-  has);
-- `page_name`, `page_id` and `mode: "page"`.
+- **`check`** runs the ordered `checks` the configuration lists: `package.json` script names,
+  plus the application build when `application` is set. It returns a structured summary: each
+  check's pass or fail and duration, the first N diagnostics as file:line:message, and whether
+  each diagnostic is **new or pre-existing**. The model is never told a command to remember.
+- **Parsers** are shared, starting from `sc_app::build_diagnostics`, and cover tsc, eslint,
+  vitest/jest, and a generic `path:line:col`. When a check's output parses to nothing, its
+  output tail is returned instead.
+- **Baseline.** The first `check` or `diagnose` in a session records the diagnostics that are
+  already there. Later runs compare against that record. A feature is green when it adds **no
+  new** failures, so a project that was already broken can still be worked on.
+- **The ratchet** is a pseudo-check computed from the ledger. It fails when a run:
+  - deleted a test file
+  - reduced the number of `it(`/`test(`/`describe(` blocks in one
+  - added `.skip`, `.only`, `xit` or `xdescribe`
 
-`page_groups` is `[]`, `translations` is `{}` and `isRTL` is `false`.
+  The prompt states the same rule (R§4), and the harness enforces it.
+- **Grants.** `check` runs only scripts that someone other than the model chose, so it gets
+  its own checkbox, **`may_check`**. This is a smaller grant than `may_run_scripts`, which lets
+  the model choose from every declared script, and much smaller than `may_use_shell` (§7a).
+  The builder agent gets `may_check` and neither of the other two.
 
-The work is making the code they call answer instead of refuse. Today these are named
-refusals or inert stubs, and each moves to *implemented* with its v1 upstream cited:
+### 7a. The shell
 
-- `table.get_join_field_options`, `table.get_relation_options` and
-  `table.get_relation_data` (in `v1_api.js`'s `BUILDER` group), and
-  `table.get_child_relations` / `get_parent_relations` if the Filter step reaches a form the
-  shim lacks. They are pure over the schema: v1's `models/table.ts` walks fields and key
-  references, and `common-code/relations` (vendored) does the relation search. They are ported
-  over the `SchemaSnapshot`, restricted to the **application's table subset**, so the builder
-  never offers a join to a table the app cannot see.
-- `plugin-helper`'s `build_schema_data`, refused today because v1 builds it with `db`. It is
-  rebuilt from the same snapshot, subset-restricted. It moves from *refused* to *kept*, and the
-  partition test is updated in the same change.
-- `File.findImagesForBuilder` (the `FILES` group): the image files in the application's file
-  stores, as v1's `{ id, filename, location }` shape, where `location` is §3's serve URL.
-  (Filter's own step sends `images: []`, v1's "temp fix till we rebuild builder", and that is
-  kept as v1 wrote it.)
-- `PageGroup.find` answers `[]`. `getState().fonts`, `icons` and `keyframes` answer v1's
-  built-in defaults. `getState().keyFieldviews` already answers, which gives Filter its
-  `has_select2`. `getState().functions.copilot_generate_layout` is absent, so
-  `has_copilot_generate` is `false` and the copilot button is never drawn.
-- `Library.find` and `Library.findOne` answer from the snapshot (§8).
-- `field.toBuilder` and `table.getFields` for key fields with `reftable` loaded, if the
-  `Field` shim lacks them.
+R§3's `bash` tool, as `coding`'s **`shell_<slug>`** tool, behind the
+**`may_use_shell`** checkbox, which is **off by default**. A shell is every other grant at
+once: it can edit files, run scripts and reach the network. So the form places it last and
+says so, and it implies nothing about the other checkboxes. Turning it on does not turn on
+`may_edit`.
 
-The options are **golden-tested against v1 itself** (§13). The fixtures are what a real
-Saltcorn 1.7.0-alpha.1 passes to `renderBuilder` for *Show Books*, *Edit Books*, *List Books*
-and *Filter books*, and for the page *BooksOverview*, over the BooksDB backup. They are
-recorded once by a script committed beside them. That is the test that catches a shim returning
-a plausible wrong thing, which a round trip through our own code cannot.
+- **The implementation follows R§3:**
+  - Each call is one stateless `bash -c` in the scope's directory, with no state carried
+    between calls. The model is told to `cd` inside its command when it needs another
+    directory.
+  - The environment is non-interactive: `CI=1`, `PAGER=cat`, `GIT_PAGER=cat`,
+    `GIT_TERMINAL_PROMPT=0`, stdin closed.
+  - The timeout defaults to 120 s. The model may ask for more, up to the configured maximum
+    (`shell_timeout_max`).
+  - Output is truncated to its **head and tail**, with the elided byte count stated.
+  - The exit code is always returned. A non-zero exit is a result, not an error.
+- **Long-running processes** go through managed helpers, not `&`. The helpers are the
+  `start`/`stop`/`logs` actions on a `process_<slug>` tool offered with the shell. Each process
+  is named, belongs to the run, is killed when the run ends or is aborted, and has capped log
+  ring buffers. A command ending in `&` is refused with a pointer to that tool.
+- **Doom-loop detection.** The fingerprint (§10) is the command with whitespace normalised, so
+  a repeated command counts as a repeat.
+- **Scope.** The shell needs a store with a local path, as `run_script` does, and validation
+  on save refuses the grant otherwise. It also needs an **admin caller**, as `admin_copilot`
+  does. A shell runs as the server's OS user, so it can read that user's files, including
+  `~/.config/feldspar/feldspar.toml` and its database credentials. Letting a non-admin chat
+  user reach it would hand them the server.
+- **The sandbox** is a `shell_sandbox` setting. It covers the container half of R§10, which
+  the report recommends:
+  - **`none`** (the default) runs directly on the host. The form's help text says what that
+    means (the admin-only rule above is the only protection).
+  - **`container`** runs each command through `docker` or `podman` (whichever is found, or
+    named) in a configured image. Only the scope's directory is mounted, read-write. The
+    network is `none`, or unrestricted when `shell_network` is on. The image is checked on
+    save. Managed processes run in a long-lived container per run.
 
-### 6. Saving a layout is a save, and is checked like one
+  An allowlist that permits only package registries needs a proxy, so it is carried past this
+  milestone.
+- **The ledger still sees shell changes.** Before a session's first shell call, the harness
+  snapshots the scope, skipping §11.3's excluded directories: content hashes plus a copy of
+  every file. For a git store, only `HEAD` and copies of the files already modified or
+  untracked at that moment are needed, because git holds every other pre-image. After each shell call, the harness compares against
+  the snapshot:
+  - changed paths enter the ledger with their pre-images
+  - stale-read hashes for those paths are cleared, so the next edit asks for a re-read
+  - the result lists the changed paths, so the model knows what it did
+- **The IDE relay** refreshes the whole listing and source control after a `shell_` call,
+  because the paths it changed are known only from that result.
 
-**`saveViewLayout`** (`PUT /api/applications/:id/views/:name/layout`) takes `{ step, columns,
-layout, libraryUpdates? }` and does what v1's two view save paths do between them:
+### 7b. Looking at the application: `view_app` and the preview mount
 
-- It merges `{ columns, layout }` into the configuration under the step's `contextField`, else
-  at the top level. That is the `workflow.ts` builder branch (the wizard's Next). v1's
-  `viewedit/savebuilder` spreads the whole body into the configuration, which is the same thing
-  for the four patterns in scope, none of which has a `contextField` on its builder step. The
-  one merge rule serves both.
-- It saves through the same `save_view` path as `saveView`, so **every existing save check
-  runs**. That includes the replay of the non-builder steps (a layout that changes what a later
-  step's form would accept is refused naming that step), the action resolution (a layout
-  naming an action the app does not declare is refused naming it), the table subset for
-  embedded views and join fields, and `min_role`.
+External agents get a whole loop from the scaffold's `AGENTS.md`: build, `pkill -HUP
+feldspar`, `feldspar auth token`, then Playwright. None of it reaches an agent running inside
+the server. Its build does not change what is served (§11.3: an agent's build is a check), no
+tool gives it a session, it has no browser, and a tool result cannot carry an image. This
+section adds all four, without a shell and without writing a credential to disk.
 
-**`savePageLayout`** (`PUT /api/applications/:id/pages/:name/layout`) takes `{ layout,
-libraryUpdates? }` and replaces the page's layout, which is all v1's `pageedit/savebuilder`
-does. It saves through the same path as `savePage`, so the page's existing checks run: every
-embedded view exists in the application. It adds the view checks that apply to a page: an
-`action` segment names v1's page actions or a trigger the application declares, and a view link
-or embed names one of the application's views.
+- **The preview mount.** After a green application build in a run, the harness mounts that
+  build as a **preview**: `AppMounts` gains a second registry, keyed by a random label and
+  owned by the run. The preview is served at `<label>--<subdomain>.<base-domain>`, which is
+  one DNS label, so a wildcard certificate and wildcard DNS for the base domain already
+  cover it.
+  - It is the same `MountedApp` a real mount builds from the same `dist/`, with the same API
+    providers, and it **replaces nothing**. The live subdomain keeps serving the last build
+    the admin published. Publishing is still the admin's Build button, after reading the
+    run's diff.
+  - Every later green build in the run re-mounts the preview under the same label.
+  - The preview is unmounted when its run ends, fails or is aborted, and a sweep removes
+    previews whose run has not been written to for a configured time (default an hour), so a
+    crashed run does not leave one behind.
+  - **Only the run's own session reaches it.** A request to a preview host without that
+    session is answered 404, the answer for an unknown subdomain. A preview is not a way to
+    show unreviewed code to anyone else, including other admins.
+  - **Its data is the live data.** The preview talks to the application's real tables as the
+    caller, because a preview with no data shows nothing useful and a copy of the data is a
+    different feature. So `view_app`'s description says that `click` and `fill` on a form
+    write real rows, exactly as the caller doing it by hand would.
+  - Previews are held in the serving process's memory, like mounts. On a multi-node
+    deployment the browser runs on the node holding the run, and it reaches its own listener
+    directly (below), so no other node needs the preview.
+- **The session is created inside the server, for the caller.** `view_app` calls
+  `sc_auth::create_session`, the same call `auth token` makes, for **the run's caller**, not
+  for an admin, so the agent sees what the person chatting would see. The cookies are put
+  straight into the browser context and **never written to a file**. The session is deleted
+  when the run ends. A run started by a trigger has no user, so it uses the `view_app_user`
+  setting (an email, validated on save). Without one, the tool is refused by name, which
+  follows `AGENTS.md`'s advice to give an agent its own low-privilege account.
+- **The browser is a headless Chromium** driven over the DevTools protocol from Rust
+  (`chromiumoxide`). This is in-process, so it needs no Node, no `agent-browser` install and
+  no shell, and it can set cookies and read the accessibility tree directly.
+  - It needs **an external Chromium binary** on the host. The server finds it by the
+    `browser` setting in `feldspar.toml` or on `PATH` (`chromium`, `chromium-browser`,
+    `google-chrome`). `scripts/setup-host.sh` must install one that works under a systemd
+    service user (on Ubuntu, the apt `chromium-browser` package is a snap shim, so that needs
+    checking).
+  - Without a binary, the grant is refused on save, with the reason and the setting to fill
+    in, and the tool is not offered.
+  - One browser process serves the whole server, with a **fresh context per run**. The
+    number of concurrent contexts is capped, and a call beyond the cap waits, within the
+    tool's timeout.
+  - Chromium is started with `--host-resolver-rules` mapping the base domain's hosts to the
+    server's own listener, so a preview is reached without DNS. It trusts the listener's
+    certificate **for that mapping only**. Every navigation outside the preview host is
+    refused: the tool is a view of this application, not a way to browse the internet from
+    the server.
+- **The tool.** `view_app_<slug>` takes one action per call, over one page per run:
+  - `goto(path)`, `click(ref)`, `fill(ref, text)`, `press(key)`, `wait_for(text | ref,
+    timeout)`
+  - `snapshot()`: **the default result of every action**. It is a compact accessibility
+    tree, with interactive elements given short refs (`@e12`) that the next `click`/`fill`
+    names. It is text, costs a few hundred tokens a page (R§9), and works with **any**
+    model, including cheap ones without vision.
+  - `screenshot(full_page?)`: a JPEG, capped in size, returned as an image part. It is
+    offered **only when the executor's model has `vision`**.
+  - Every result also reports the URL, the HTTP status of the last document, and the
+    **console errors and failed requests** since the previous call, capped. A white screen
+    caused by a thrown error is then a line of text the model can act on.
+  - The fingerprint (§10) is the action plus its target. `elide` (§9) turns an old snapshot
+    into `[elided snapshot of /tasks: 41 lines]` and an old screenshot into a stub. **Images
+    are elided first**, being the most expensive thing in the context.
+  - If no preview is mounted yet, the tool says so and names `check`.
+- **In the outer loop.** A feature gains an optional `pages` list (routes). After a green
+  `check`, `implement_feature` snapshots each listed page on the preview (and screenshots
+  them when the strong model has `vision`) and returns them with the diff. That is the
+  planner's review of what the feature looks like, not only of what it changed.
+- **In the transcript.** Screenshots are kept with the run so the chat can show them. They are
+  stored as JPEG, and a run keeps at most N of them (default 20), with older ones replaced
+  by stubs in the stored transcript as well. A screenshot is never logged, even at trace.
+- **Grant.** The `may_view_app` checkbox requires `application`. The builder agent gets it
+  (§12). It is separate from `may_check` because it starts a browser and a session, and
+  separate from `may_use_shell` because it needs no shell at all.
 
-**Both** do the following:
+### 8. The plan, in the planner run, and the outer loop
 
-- Refuse a `library` segment whose `library_id` is not an item of this application, naming the
-  id.
-- Apply `libraryUpdates` (`[{ library_id, layout }]`, v1's in-place edits to a shared
-  component) **in the same transaction as the view or page**, so a refused save does not leave
-  its library edits half-applied. v1 does them one after another, last write wins. The
-  transaction is the one improvement taken, because this server has one.
-- Bump the view-set generation once, so the subdomain serves the new layout from its next
-  request.
+**The plan lives in the database**, as the `coding` trait's per-run state (2.3) inside the
+**planner run's** `context` in `_fd_runs`. It is not a file in the store. There are no
+`.agent/` files, and nothing lands in the application's repository.
 
-**No layout normalisation, in either direction.** What `storage.js` wrote is what is stored. A
-Craft round-trip test (§13) guards the loading direction: every view and page layout in the
-BooksDB fixture, loaded into the canvas and saved without a change, is byte-for-byte what it
-was, apart from a listed and justified set of differences `storage.js` itself introduces (key
-order, defaulted props), each named in the test.
+**Plans do not need to be shared across runs**, because a plan's whole life is one planner run:
 
-### 7. Pages get the rest of v1's page editor, and what a built page needs to run
+- **Child runs** are that run's sessions. Each child gets its feature and the handoff notes in
+  its briefing, which is the channel §11.3 already made the only channel between a parent and
+  a child. Each child records its parent run's id (`ATTR_PARENT_RUN`, which already exists),
+  so its transcript links back.
+- **Continuing tomorrow** means continuing the same chat, which already continues the same run
+  (§11.4). The plan is there when the run is loaded.
+- **A new chat** starts with no plan. It does not start with no history: for a git store the
+  harness puts the recent `git log` in the session header, and each feature's commit message
+  records what was done. For a non-git store, only the code itself carries over.
+- **The report's reason for files** (R§7) was handing work between *independent* sessions with
+  no shared store. Here the sessions share the database, so a file adds nothing a run cannot
+  hold. The file version also has costs: it can be edited mid-run, it needs a "model may not
+  write this" rule, and it lands in the application's repository.
+- **What files did give,** humans reading the plan, the admin UI now gives (§12): the chat's
+  plan checklist and the run's state, served by the runs API.
+- **R§7's `notes.md`** (learned project facts) was the one memory meant to outlast a plan. It
+  becomes a suggestion in the prompt to propose edits to `AGENTS.md`, which is where §11.3
+  already puts such facts, and which humans review.
 
-Building a page's layout is not enough to make pages first-class. v1's `pageedit.ts` also
-creates pages and edits their properties, and a page layout can contain things the renderer
-here does not yet answer.
+The plan state holds:
 
-**Properties.** v1's `pagePropertiesForm` is name, title, description, minimum role,
-`html_file`, `no_menu` and `request_fluid_layout`. All of them except `html_file` (*Explicitly
-OUT*) go into a **page properties form** in the admin UI, saved through the existing
-`savePage`. `no_menu` and `request_fluid_layout` live in the page's `attributes`, where the v1
-import already puts `no_menu`. **New page** is that form, and **Create** opens the new page in
-the builder, which is v1's redirect to `/pageedit/edit/:name`. A new page's layout is `{}`, as
-in v1. Renaming a page shows what refers to it (menu entries, home page per role, links in
-layouts) before confirming, the way renaming a view does.
+- **`features`**: each has an `id`, `title`, `description`, `kind` (`feature` | `bug`),
+  `acceptance` (a list), `files` (likely touched), `pages` (routes to look at, §7b),
+  `checks`, `status` (`todo` |
+  `in_progress` | `done` | `failed` | `blocked`), `attempts`, `runs` (child run ids, latest
+  last) and `notes`. `save_plan` takes the plan as schema-validated arguments and replaces the
+  feature list, keeping `status`, `attempts` and `runs` for ids that already exist. A weak
+  model has no JSON file to corrupt.
+- **`progress`**: the handoff entries. The harness appends one per session: the executor's
+  closing summary, the check results, and the diffstat.
 
-**The document honours the properties.** `no_menu` omits the navbar and `request_fluid_layout`
-uses a fluid container. Both are passed into `emergency_layout`'s wrap the way v1's `page.ts`
-passes them to the layout's `sendWrap`. Today both are imported and ignored.
+A plan survives compaction because it is state, not history. The planner's session header
+does not repeat it. Instead, each `save_plan` and `implement_feature` result ends with the
+current checklist in a compact form, so the latest one is always the freshest thing in the
+context.
 
-**`POST /page/:name/action/:rndid`.** An `action` segment in a page layout renders as
-`page_post_action('/page/<name>/action/<rndid>')`. The runtime already emits that, and the
-framework has no such route, so every action button on a page 404s. The route is ported from
-v1's `routes/page.ts`, implemented in the worker, and follows the framework's existing
-view-route rules:
-- the page's `min_role` against the viewer, with the same redirect-or-403 as rendering;
-- a CSRF check;
-- find the `action` segment by `rndid` in the layout, **including inside resolved library
-  items**;
-- run it with the vendored `run_action_column` under the viewer's authority, inside a
-  transaction;
-- answer v1's `{ success: "ok", ... }`, `{ error }` with 400, or 404 "Action not found".
+**`implement_feature(id)`** is the whole outer step, and every part of it is harness code:
 
-**Fixed state, in one form.** v1 has two spellings of an embedded view's fixed state: the
-modern one, `configuration` on the `view` segment, which the builder writes, and the legacy
-`page.fixed_states[segmentName]`, which v1's `getEditNormalPage` folds into the segments before
-opening the builder. The v1 import currently copies `fixed_states` into `attributes`, and the
-renderer here reads neither. So the **import** does v1's fold once: each `view` segment with
-`state: "fixed"` and no `configuration` gets the legacy entry, and `fixed_states` is not kept.
-From then on there is one spelling, the builder's, and the renderer reads it. There is no
-fallback reader for the old spelling, because nothing on this server ever wrote it.
+1. Mark the feature `in_progress` in the planner run's state, and save the run.
+2. Brief the child run with the feature, the last few progress entries, the recent `git log`
+   (for a git store), and a repo map focused on the feature's `files`.
+3. Start the child run: `act` mode, executor role, fresh context.
+4. **Run `check` independently.** The child's report of success is not trusted.
+5. Apply the ratchet. If green and the feature lists `pages`, snapshot them on the preview
+   (§7b).
+6. **If green:** commit (for a git store with `commit` on), using a message from the cheap
+   role. Mark the feature `done` and append a progress entry.
+7. **If red:** increment `attempts`. On the second consecutive failure, mark the feature
+   `failed`.
+8. Return to the planner: the status, the child's summary, the diffstat, the capped diff,
+   the check summary, and the page snapshots.
 
-**A page embedded in a page.** The builder's *Page* element (`Page.js`) embeds another page and
-previews it through `/page/:name/preview`. The runtime's `renderLayout` must render a `page`
-segment the way v1's `Page.run` does, with the same depth cap as embedded views, naming the
-cycle it breaks. If it does not already, that is a task, and there is a test either way.
+The diff and check summary in step 8 are **the review** (R§5), done by the strong model on a
+short input. The planner can accept the result, re-plan with `save_plan`, or retry. Two
+limits apply:
 
-### 8. The library: per application, belonging to Saltcorn UI, and v1's model everywhere else
+- `max_sessions_per_feature` (default 3) caps retries.
+- A child that ends `Stuck` (§10) returns its reason to the planner as a re-plan trigger.
 
-A library item is v1's `_sc_library` row, `{ name, icon, layout }`, and placing one in a layout
-writes `{ type: "library", library_id, slots }` (or, from older v1 builders, a copied layout).
-Current v1 calls these **shared components**: editing inside a placed instance saves back to
-the item, so everything using it updates. A **slot** (`library-slot`) is a hole that each
-placement fills independently, with a field and fieldview or with dropped-in content. At render
-time `Library.resolveSegment` swaps the reference for the item's layout, fills the slots and
-guards against an item that contains itself. `show.ts` and `edit.ts` call it on every `library`
-segment. Pages and filters must too: the runtime's page render and `filter.ts`'s layout walk
-resolve `library` segments as v1's do, checked by the golden tests either way. Which toolbox
-offers which item is v1's `suitableFor(mode)`, for all five modes.
+**Resuming.** A feature that is `in_progress` records its child run in the plan state, which
+is saved *before* the child starts. When the server restarts
+mid-feature, the resumed planner's re-dispatched `implement_feature` call **drives that
+existing child run** rather than starting a second one. Aborting the planner aborts the child.
 
-**Storage: `_fd_library`, in `sc-viewpattern`, beside `_fd_views` and `_fd_pages`, with the
-same rules** (TODO-post-mvp-24 §1): the §9 required columns (UUID `id`, `name`, `description`,
-`attributes`), plus `application`, `icon` and `layout` (JSON, v1-shaped, stored untouched). It
-is unique on (`application`, `name`). `application` is not a foreign key, and deleting the
-application deletes its library in `delete_application_views_and_pages`, which is renamed to
-say so.
+**Bugs.** When `kind` is `bug`, the briefing asks the executor to reproduce the bug first, with
+a failing test or check, before fixing it (R§2's shortened loop). The harness records whether a
+failing check came before the fix, and reports it. It does not refuse a fix that skipped the
+reproduction.
 
-**Per application, not global, and not shared across applications.** A library item's layout
-names fields, join paths, views, pages and actions, and each of those means something only
-inside one application's table subset and view set. A global item would place a join to a
-table the application cannot see, or a link to a view it does not have. That is exactly the
-argument that made views per-application, and it lands the same way here. Copying an item to
-another application is a plausible follow-up and is out (*Explicitly OUT*).
+### 9. The context: layout, budget, clearing, compaction
 
-**Only Saltcorn UI applications have one.** Every library write refuses an application whose
-framework is not `saltcorn-ui`, naming the framework. The admin UI only draws the Library tab
-for such an application, and nothing outside `sc-viewpattern` and the Saltcorn UI admin screens
-knows the table exists. It is not an overlay, not a module facility and not visible to agents'
-table traits, because it is framework storage, like `_fd_views`.
+- **Layout, from most to least stable** (R§6.6):
+  1. **The stable prefix:** the agent's prompt plus each trait's static contribution, and the
+     tools in a deterministic order.
+  2. **The session header:** a first user-side block that traits build **once per session**
+     through a new `session_header` hook. For `coding` it holds `AGENTS.md`, a small repo map,
+     the recent `git log` for a git store, and the feature brief for a child run.
+  3. **The history**, which is append-only.
 
-**In the worker: `models/library.ts` is vendored, not shimmed.** It is 230 lines, and all but
-four of them are pure: `suitableFor` and `resolveSegment`. Reimplementing `resolveSegment`
-would be a second copy of v1's slot-filling rules, so it is not. The file is added to
-`vendor/saltcorn-data/models/` and removed from `build.mjs`'s `HOST_DATA_MODULES`. Its one
-`../db/index.js` import is resolved **for that importer only** to `src/shims/library-db.ts`,
-which answers `db.select("_sc_library", …)` and `db.selectMaybeOne("_sc_library", …)` from the
-`ViewSnapshot`'s library list and refuses every write by name. The worker never writes the
-library: `create`, `update`, `delete` and `saveLibraryUpdates` belong to the admin API (§6,
-§10). The `ViewSnapshot` gains `library`, and a library write moves the generation like a view
-write.
+  `on_turn` stays, but anything it appends breaks caching. Its docs say so, and `coding` does
+  not use it. A test asserts that two consecutive requests share a byte-identical prefix up to
+  the history.
+- **An absolute budget.** The `context_budget` agent attribute defaults to the executor
+  model's working budget (§4), for example 32k tokens for an unknown model. The budget is
+  measured from the last reported `input_tokens` plus an estimate for what has been appended
+  since. At **75%** the loop compacts before the next model call.
+- **Pass 1: clear tool results.** Old outputs are replaced by stubs, which the owning trait
+  writes through the new **`elide`** hook. The default stub is
+  `[elided: N characters of <tool> output]`. `coding` goes further:
+  - It keeps only the latest read of each file.
+  - A read followed by an edit of the same file becomes a stub.
+  - An old `check` result becomes one line, for example
+    `[elided check: typecheck failed, 2 new errors in src/App.tsx]`.
 
-**v1's integer ids become UUIDs, and that is one of the two translations the import makes.**
-`library_id` in a v1 layout is `_sc_library.id`, a serial and a meaningless number on this
-server. The v1 restore (§11) mints a UUID per item and rewrites `library_id` in every imported
-view's and page's layout, and in every imported item's own layout (nested items). The
-alternative, an integer column kept forever so untranslated layouts keep resolving, is
-backwards-compatibility code for data this server has never held, which CLAUDE.md rules out.
-It and §7's fixed-state fold are the two places TODO-post-mvp-24 §1's "configuration stored
-untouched" gives way, which is why both are written down here and in the restore's module
-comment.
+  Tool calls and their results are never separated. Everything elided goes in one batch, so
+  the cache breaks once and not on every step.
+- **Pass 2: summarise**, only if pass 1 did not get below 50%. The cheap role writes a
+  summary with fixed sections: goal, decisions, files changed, failing checks, next step. The
+  summary replaces everything before the last K turns.
+- **Where the full transcript goes.** The run keeps the whole transcript, and compactions are
+  stored as `(up_to_index, summary)` records. The request is built from those records, while
+  the chat and the admin see everything, with a compaction marker.
 
-**References.** A view's or page's references (`viewReferences`, and the rename and delete
-warnings) include the library items its layout places. A library item's references are the
-views and pages whose layouts place it, found by walking layouts in the snapshot. Deleting an
-item with references shows them and asks. Once deleted, a reference renders blank, which is
-v1's own `resolveSegment` behaviour and deliberately not a hard error: a missing shared
-component must not take a working page down.
+### 10. Loop control
 
-### 9. The admin UI: views and pages open the builder, and the application gets a Library tab
+- **Fingerprints.** A call's fingerprint is `(tool, canonical JSON arguments)`, with keys
+  sorted and whitespace normalised. A trait can override this with the new **`fingerprint`**
+  hook to say what counts as the same call. For example, `read_file` with a different offset
+  is the same file.
+- **The detectors** (R§10):
+  - three identical consecutive calls
+  - the same *set* of fingerprints in two consecutive rounds (a repeated fan-out)
+  - repeated assistant text, after normalisation
+- **The malformed-call cap.** A malformed call is one naming an unknown tool, with arguments
+  that do not parse, or with arguments that fail the tool's **JSON schema**. The harness now
+  checks arguments against the schema before dispatching, and names each violation. After
+  three consecutive malformed calls the run ends `Stuck`.
+- **The escalation ladder.** Thresholds are agent attributes, and the state is part of the
+  run:
+  1. **Warn:** a harness note is appended to the tool *result*, not to the system prompt, so
+     caching survives.
+  2. **Escalate:** the next single step goes to the strong role.
+  3. **Stop:** the run ends as **`Conclusion::Stuck { reason }`**.
 
-- **The layout step in `ViewEditor.tsx`** shows **Open in builder** as its primary action, with
-  the JSON underneath, collapsed. The button navigates to §2's view route with the step index.
-  `LAYOUT_READ_ONLY`'s sentence goes, and a binary without the builder bundle keeps a variant of
-  it that says why.
-- **Creating a view whose first unskipped step is a builder step** (Show and Filter always, and
-  Edit and List when every step before the layout is skipped) lands in the builder directly
-  after `createView`, the way v1's "Configure" does.
-- **The wizard returns to the right place.** §4's navigation back lands on
-  `#/applications/:id/views/:name/configure?step=n`. The wizard reads `step` and reloads the
-  configuration, because the builder saved it.
-- **The Pages tab** gains **New page** (§7's properties form, then the builder), and each row
-  gets **Edit** (opens the builder), **Properties** (the form) and a rename with references.
-  Delete and the existing *Home page for* column stay as they are. The tutorial's
-  browser-console step goes.
-- **A Library tab** on a Saltcorn UI application, beside Views and Pages: name, icon, "used by"
-  (expandable to the views and pages, each linking to its editor), rename, delete (§8's
-  references first), and a read-only view of the item's layout JSON. Items are **created and
-  edited in the builder** (*Save as library component*, and editing a placed instance), as in
-  v1, whose `/library/list` has no editor either. This tab is where an admin finds and tidies
-  them.
-- All of it goes through the regenerated typed client, and each screen's logic that is not
-  JSX (the step index, the landing decision, the properties form's validation, the references
-  expansion) lives in a `.ts` beside it with a vitest file, the way `views.ts` does now.
+  Traits can raise signals through `TraitContext::signal`. An edit that still fails after the
+  cascade raises `EditFailed`, and repeated `EditFailed` signals climb the ladder.
+- **Budgets.** The agent attributes are `max_steps` (existing), `max_cost` (in the models' priced
+  currency, which is one per deployment), `max_wall_seconds` and `context_budget`. A budget that runs out ends the
+  run as **`Conclusion::OverBudget { budget }`**. That is not an error: the transcript is intact
+  and the limit is the admin's.
+- **The ledger.** Each step records its role, usage, cost, elapsed time, signals and whether
+  it compacted. A run's totals include its children's. The closing log line reports cost and
+  the cache-hit ratio.
 
-### 10. The admin API grows by the builder's calls, the page editor's, and the library's
+### 11. The repo map
 
-Every endpoint is declared in `sc-api/src/admin.rs` with its schemas, so it lands in the
-generated client and the OpenAPI document. The `ui/builder` host uses nothing that is not
-there. All are admin-only, CSRF-checked, and scoped to an application that must be a Saltcorn
-UI application. Creating a page and editing its properties need nothing new: `savePage`
-already creates and updates. The builder's options are not an endpoint, because the builder
-route renders them into the document's boot data (§4, §5).
+R§8 calls the repo map the highest-leverage addition after search. It is a port of Aider's
+algorithm to Rust:
 
-| Operation | Path | Does |
-|---|---|---|
-| `saveViewLayout` | `PUT /api/applications/:id/views/:name/layout` | §6 |
-| `savePageLayout` | `PUT /api/applications/:id/pages/:name/layout` | §6 |
-| `pageReferences` | `GET /api/applications/:id/pages/:name/references` | what names the page (menu, home page per role, layouts), for rename and delete |
-| `listLibrary` | `GET /api/applications/:id/library` | items with `used_by` |
-| `getLibraryItem` | `GET /api/applications/:id/library/:item` | one item, fresh (v1's `/library/content/:id`: a placed instance must start from the latest layout, not the page-load snapshot) |
-| `createLibraryItem` | `POST /api/applications/:id/library` | v1's `savefrombuilder`: `{ name, icon, layout }` → the new id; a duplicate name is refused naming it |
-| `saveLibraryItem` | `PUT /api/applications/:id/library/:item` | rename, icon, description |
-| `saveLibraryUpdates` | `POST /api/applications/:id/library/updates` | v1's `save-updates`, for the builder's standalone call; transactional over the batch |
-| `deleteLibraryItem` | `DELETE /api/applications/:id/library/:item` | with `references` in the answer's refusal unless `?confirm=true` |
-| `builderFieldPreview` | `POST /api/applications/:id/builder/field-preview` | a fieldview rendered over the first readable row (v1's `routes/fields.ts` `/preview`), in the worker |
-| `builderFieldviewConfigForm` | `POST /api/applications/:id/builder/fieldview-config` | a fieldview's `configFields` as v1's form JSON (v1's `/field/fieldviewcfgform`), in the worker |
-| `builderViewPreview` | `POST /api/applications/:id/builder/view-preview` | an embedded view rendered for the canvas with the state given, as the admin, in the worker (v1's `/view/:name/preview`) |
-| `builderPagePreview` | `POST /api/applications/:id/builder/page-preview` | an embedded page rendered for the canvas, as the admin, in the worker (v1's `/page/:name/preview`) |
-| `builderDistinctValues` | `GET /api/applications/:id/builder/distinct/:table/:field` | §3: v1's `{ success: [...] }`, subset-restricted, as the admin |
+1. **Tags:** tree-sitter extracts them, using vendored `tags.scm` queries for TypeScript, TSX,
+   JavaScript and Python. Other files get a filename entry only.
+2. **Graph:** each file links to the symbols it defines and references.
+3. **Ranking:** PageRank **personalised** towards the files in play (read or edited this
+   session, named in the feature, named in the request).
+4. **Fitting:** the ranked definitions are rendered as `path` headers with `line│ signature`
+   rows, and a binary search fits them into a token budget (`repo_map_tokens`, default 1024).
+5. **Caching:** tags are cached per file content hash, in memory, per store.
 
-The `builder*` calls are **v1 server route code**, so they are ported beside
-`page_builder_options` in `ui/saltcorn-ui/src/builder-routes.ts`, each function headed with the
-upstream route it ports, and reached through new `ViewRuntime` methods. The previews' output is
-HTML for the canvas. It is what the subdomain would render, and the builder shows it inside its
-preview scratchpad, which is how v1 does it too.
+The map is offered as the `repo_map(focus?, tokens?)` tool and in the session header (§9).
+Tree-sitter grammars compile C, so the crate needs a build that is kind to this machine (see
+the memory note on `systemd-oomd`). The grammars sit behind a cargo feature that is on by
+default.
 
-### 11. The import, and this server's own backup
+### 12. The builder agent, the scaffold, the IDE and the admin UI
 
-- **v1 restore** (`backup::v1`) stops noting `library` as not imported. The pack's library
-  entries go into the one application the backup becomes, with §8's id rewrite applied to
-  items, views and pages together, before any is saved. Pages get §7's fixed-state fold. A
-  library item whose name collides on re-import is replaced, the same rule as views. The report
-  gets a line, `n library items into application x`. Page groups are still noted as not
-  imported.
-- **This server's backup** carries `applications/<subdomain>/library.json` beside `views.json`
-  and `pages.json`, under the same "views" choice, restored in the same replace-not-append way,
-  and **before** the views and pages, so the save checks in §6 find the items they place.
+- **`framework_builder_agent`** declares `coding` alone, with:
+  - `may_edit`, `may_check` and `may_view_app` on, and `may_run_scripts` and `may_use_shell`
+    off
+  - `application` set to the subdomain
+  - `workflow: planned`
+  - `edit_format: auto`
+  - `checks`, taken from the framework: React gets `typecheck` then the build, `code` gets
+    none (the admin adds them, and until then `check` says so), and a declared framework may
+    declare `checks`
 
-### 12. Five modes, allow-listed; a plugin's mode is not claimed
+  The framework prompts shrink to **role and platform**. `SHARED_PROMPT`'s workflow moves into
+  `coding`'s static contribution, where it can depend on the mode and the active edit format.
+- **The React scaffold** gets a `typecheck` script (`tsc --noEmit`). Its `AGENTS.md` names the
+  checks. Its build-reload-screenshot section is still for **external** agents. The in-server
+  agent is told about `view_app` by its prompt, not by `AGENTS.md`, because a project file
+  that describes two loops invites a model to use the wrong one.
+- **The IDE's `chatRelay.ts`** learns the new tool prefixes:
+  - `apply_patch_` announces **every** path in the patch.
+  - `implement_feature_` announces the paths in its result's diffstat, and refreshes source
+    control after a commit.
+  - `check_` renders as progress.
+  - `shell_` and `process_` render the command as progress. After a `shell_` call the
+    relay drops every cached listing and refreshes source control (§7a).
+- **The admin UI:**
+  - The agent form gains roles and budgets.
+  - The chat renders `view_app` screenshots inline, and snapshots collapsed.
+  - The chat renders `Stuck` and `OverBudget`, compaction markers, a run's cost, and a
+    **plan checklist read from the planner run's state** (served with the run by the runs
+    API), with each feature linking to its child runs.
+  - The `coding` form groups `may_use_shell` with the sandbox settings, and shows the
+    `none` sandbox warning.
+  - A run gets a **diff view** backed by `GET /api/runs/{id}/diff`.
 
-The builder routes allow **`show`, `edit`, `list` and `filter`** for views and **`page`** for
-pages, and refuse any other mode, naming it. A plugin pattern whose workflow has a builder step
-goes through the same `config_step` and would reach the builder in whatever mode its options
-name. This milestone neither builds that nor tests it. When one arrives, it is an allow-list
-entry plus its §3 URLs, not a surprise.
+### 13. Tests and evaluation
 
-### 13. Tests
+- **No test may spend a token**, the same rule as §11.2. Everything in `cargo test` runs
+  against `FakeProvider`, extended so that a script can depend on the **role** and the
+  **mode**, and can assert what each request contained: prefix stability, elisions, the
+  session header.
+- **The eval harness** is `feldspar agent eval <suite>`, which is **not** part of
+  `cargo test`. A suite is a directory of tasks. Each task has a fixture project, a prompt, a
+  verification script, and optional budgets. The harness copies the fixture into a temporary
+  local store and runs it against named models (`provider/model`) for the executor and each
+  role. It records:
+  - pass or fail (the verification script's exit status)
+  - steps, sessions, input, cached and output tokens, and cost
+  - edit-cascade levels and edit failures
+  - detector firings, escalations and compactions
 
-- **Rust, over real Postgres:**
-  - `_fd_library`: bootstrap and round trip, per-application uniqueness, the framework
-    refusal, application delete cascading;
-  - `saveViewLayout` and `savePageLayout`: merge and replace rules, each refusal naming what
-    it names (unknown action, unknown library id, table outside the subset, missing embedded
-    view, a later step that no longer accepts), and the transaction (a refused save leaves
-    `libraryUpdates` unapplied);
-  - references in every direction, and page rename references;
-  - the backup round trip;
-  - v1 restore with the id rewrite (including a nested item) and the fixed-state fold.
-- **The worker:**
-  - the five option goldens against the fixtures recorded from v1 (§5), key for key, with any
-    intended difference (images' `location`, `has_copilot_generate`, `translations`) listed in
-    the test with its reason;
-  - `get_join_field_options`, `build_schema_data` and `builderDistinctValues` refusing to see
-    outside the subset;
-  - `resolveSegment` in a Show, an Edit, a Filter and a page, with a field slot and a content
-    slot, rendering the same golden HTML as the equivalent inline layout; a self-containing item
-    rendering blank;
-  - a page embedding a page, and the cycle refused;
-  - the `builder*` routes' output against goldens.
-- **HTTP on the subdomain:**
-  - `POST /page/:name/action/:rndid`: success, an action inside a placed library item, the
-    404, the role check, CSRF;
-  - `no_menu` and `request_fluid_layout` in the document;
-  - a page built from nothing with a filter and a shared-state list, driven: search, clear,
-    the action.
-- **HTTP on the admin server:**
-  - the builder routes' answers: the document for each of the four patterns and for a page;
-    the 404s naming application, view, page or step; the refused mode; the refused `html_file`
-    page; the no-bundle page;
-  - their CSP header.
-- **The partition tests:**
-  - §3's URL table (vitest);
-  - `bundle_shape` for `build_schema_data` moving to kept and `models/library` moving from host
-    to vendored;
-  - a globals test that the host document defines every global in §4's list.
-- **The builder bundle, in jsdom** (v1's builder package already runs under `jsdom` +
-  `react-test-renderer` in its own tests): mounting `Builder` with each recorded options object
-  does not throw, and the **Craft round trip** of §6 holds for every view and page layout in
-  the fixture.
-- **`ui/admin` vitest** for §9's logic.
-- **The definition of done, by hand**, in a real browser, with the console open. A CSP
-  violation report counts as a failure.
+  It writes JSON and a Markdown table. The seed suite is 10 tasks on the React scaffold, to
+  grow towards R§14's 30. R§14's decision triggers go in the docs beside it.
 
 ---
 
 # The work
 
-## Phase 1 — The library, stored
+## Phase 1 — Providers and models, two tables (`sc-llm`)
 
-- [x] 1.1 `_fd_library` in `sc-viewpattern/src/tables.rs`: the §9 columns, `application`,
-      `icon`, `layout`, the (`application`, `name`) key, bootstrapped with the other two.
-- [x] 1.2 `LibraryItem` and `LibraryItemId`; `save_library_item` / `load_library_item` /
-      `list_library` / `delete_library_item` / `apply_library_updates` (transactional), refusing
-      a non-Saltcorn-UI application naming its framework, and a duplicate name naming it.
-- [x] 1.3 Deleting an application deletes its library; rename
-      `delete_application_views_and_pages` to say so.
-- [x] 1.4 `ViewSet` and `ViewSnapshot` carry the library; a library write moves the generation.
-- [x] 1.5 References: the items a view's or page's layout places (a layout walk over `library`
-      segments, including inside nested items), and the views and pages that place an item.
-- [x] 1.6 Live tests: round trip, uniqueness per application, framework refusal, cascade,
-      references both ways, generation bump.
+- [ ] 1.1 `_fd_llm_models` in `sc-llm/src/storage.rs`: the §3a columns, the (`provider_id`,
+      `name`) key, and a foreign key to `_fd_llm_providers`, bootstrapped after the providers
+      table (and in `sc-cli`'s bootstrap). `LlmModelDef`/`LlmModelDefId`;
+      `save_llm_model` / `load_llm_model` / `list_llm_models(provider)` / `delete_llm_model`,
+      read strictly like the providers. At most one `is_default` per provider, enforced
+      transactionally on save.
+- [ ] 1.2 Remove the default model from the providers' backend specs (`openai_config_spec`,
+      `anthropic_config_spec`), `LlmProviderDef::default_model`, and `LlmProviderDef::anthropic`
+      / `::openai`. Tests that built a provider with a model now build a provider plus a model
+      row (`sc-llm`, `sc-agent` and `sc-core-traits` test `common` modules, and the server
+      tests).
+- [ ] 1.3 The per-backend model settings (`model_config_spec(backend)`) as `FormField`s: the
+      four prices, context window, working budget, edit format, and each capability override.
+      All optional, where blank means the built-in default. Validated on save and on load.
+- [ ] 1.4 `delete_llm_provider` deletes the provider's models in the same transaction.
+      `delete_llm_model` exists. Both refuse while agents refer to the provider or model, with
+      referents passed in by the caller as today, naming the agents. Live tests: cascade,
+      refusal, uniqueness per provider, the same name under two providers, one default.
+- [ ] 1.5 `ModelCapabilities` and its resolution (backend + model-name patterns, then the
+      model row's non-blank overrides). Table test covering all backends, several model
+      names, and an override.
+- [ ] 1.6 `connect_model(&LlmProviderDef, &LlmModelDef) -> ConnectedModel` (the provider, the
+      resolved capabilities and prices), replacing `connect_provider(def, model)`. The call
+      log names provider and model.
+- [ ] 1.7 Agents: `validate_agent` resolves `model` as a row under `provider`, or the
+      provider's default when `model` is empty, and says which is missing: no such model, or
+      no default. `ProviderConnector::connect` returns a `ConnectedModel`. Update
+      `sc-agent/src/validate.rs`, `driver.rs` and their tests.
+- [ ] 1.8 Admin API: `listLlmModels` (by provider), `createLlmModel`, `updateLlmModel`,
+      `deleteLlmModel`, `listLlmModelSettings` (the backend's model spec), and
+      `fetchLlmModels` (the host's model listing, minus names that already have rows).
+      `testLlmProvider` becomes `testLlmModel`, which also reports the
+      capabilities and prices it resolved. Handlers in `sc-server/src/handlers.rs`, and
+      the schema in `sc-api/src/admin.rs`. Tests in `llm_provider_admin_api.rs`.
+- [ ] 1.9 Admin UI: `LlmProviderForm` loses the model and gains a **Models** list (add, edit,
+      delete, make default, *Fetch models*, *Test*). `AgentForm`'s model becomes a pick-list
+      of the chosen provider's models (a `server_query`), with the default marked. Update
+      `client.ts`.
+- [ ] 1.10 `create_builder_agent` (`sc-server/src/handlers.rs`) picks the first provider **and
+      its default model**. A provider with no default model is reported beside the created
+      application, as a missing provider is. Update `app_builder_agent.rs`.
+- [ ] 1.11 `LlmRequest.parallel_tool_calls`, `CachePlan`, `prompt_cache_key`. Map them in
+      `rig_bridge` for Responses (`parallel_tool_calls`, `prompt_cache_key`) and Anthropic
+      (`cache_control` breakpoints). First verify what `rig-core` 0.41 exposes. Where it
+      exposes nothing, use `additional_params`, and record any gap in §11.1.
+- [ ] 1.12 Cached-token reporting: confirm both adapters fill `cached_input_tokens`
+      (Anthropic: cache read), and add `cache_write_input_tokens` for Anthropic's cache
+      creation, which has its own price.
+- [ ] 1.13 `AssistantMessage.provider_items`: opaque, serialised with the run, and replayed
+      when the capability allows (encrypted reasoning with `store: false`; Anthropic thinking
+      signatures). Readable reasoning still does not travel back. Round-trip test through
+      `to_rig_messages`.
+- [ ] 1.14 The `openai_chat` backend (Chat Completions) over rig's completions provider:
+      provider settings `api_key` (optional for a local host) and `base_url` (required);
+      built-in capabilities (no native `apply_patch`, no reasoning replay, parallel tool calls
+      configurable per model); and a model listing via `GET /models`. Register it in
+      `registered_backends`, `provider_config_spec`, `model_config_spec` and `connect_model`.
+      Tests: request mapping, and merging consecutive tool results where the host needs it.
+- [ ] 1.15 `Prices` read from a model row, and `Usage::cost(&Prices) -> Option<f64>`. An
+      unknown price is `None`, never zero. Unit tests including cached and cache-write
+      tokens.
+- [ ] 1.16 `estimate_tokens(&LlmRequest)` plus a per-run calibration factor taken from the
+      last reported `input_tokens`. Unit tests on stable text and a calibration step.
+      Images are counted by each vendor's published per-image rule.
+- [ ] 1.17 Image parts on `LlmMessage::ToolResult` (media type plus bytes; serialised base64),
+      mapped per adapter: an image inside the tool result for Anthropic and Responses, and a
+      following user message for `openai_chat`. The `vision` capability (built-in by model
+      pattern, overridable on the model row). An image sent to a model without `vision` is
+      replaced by a stub. Mapping tests for all three backends.
 
-## Phase 2 — The library, rendered
+## Phase 2 — The loop: roles, modes, state, budgets (`sc-agent`)
 
-- [x] 2.1 Vendor `models/library.ts` (header, `refresh.sh` entry); remove `models/library` from
-      `HOST_DATA_MODULES`.
-- [x] 2.2 `src/shims/library-db.ts`: reads from the snapshot, every write refused by name,
-      resolved for `models/library.ts`'s import only (an esbuild `onResolve` keyed on the
-      importer, with a test that no other vendored file reaches it).
-- [x] 2.3 `bundle_shape` updated for the move; the snapshot's library reaches `getState()` and
-      `Library.find`/`findOne` answer from it.
-- [x] 2.4 `library` segments resolved in a page's render and in `filter.ts`'s layout, as v1
-      does (verify against v1's `models/page.ts` and `filter.ts`; add the call where the runtime
-      lacks it).
-- [x] 2.5 Golden tests: a Show, an Edit, a Filter and a page placing an item with a field slot
-      and a content slot render the same HTML as the inline equivalent; a missing item and a
-      self-containing item render blank.
+- [ ] 2.1 Model roles on `Agent` (`strong`, `cheap`, each an optional provider+model pair
+      naming a model row), stored as attributes. `validate_agent` resolves them as it resolves
+      the agent's own model (1.7). `Runner` connects each role lazily through `connect_model`,
+      and each role falls back to the agent's own model. The agent form gains the two
+      pick-lists (with 10.6).
+- [ ] 2.2 Run modes: `mode` on the run (attribute), passed to traits. Replace
+      `AgentTrait::tools(catalog, config)` with `tools(&ToolsContext, config)`, where the
+      context carries the catalog, mode and model capabilities. Update every built-in trait
+      and the collision check. The collision check compares the union over all modes.
+- [ ] 2.3 Per-run trait state: `TraitContext::state()` is a JSON value scoped to one enabled
+      trait, persisted in the `AgentLoop` with the run and restored on resume. Test: a
+      value written in step 1 survives a save, a load and step 2.
+- [ ] 2.4 Self-delegation: `DelegateRequest` gains `mode` and `role`. The same agent is allowed
+      once, in a different mode, at depth ≤ 1, and every other cycle is still refused. The
+      child's ledger rolls up into the parent's. Aborting the parent aborts the child.
+      Resuming (`drive` of an existing child run) is exposed to traits.
+- [ ] 2.5 The ledger: per-step role, usage, cost, elapsed time, signals and compaction flag in
+      the run's state, with per-role totals. Log the closing line with cost and the cache-hit
+      ratio.
+- [ ] 2.6 Budgets: `max_cost` (refused on save when the agent's model or any role's model
+      has no price), `max_wall_seconds` and
+      `context_budget` attributes. Add `Conclusion::OverBudget { budget }`, with storage
+      spelling, the chat event and a `RunState` mapping. Tests with `FakeProvider` for each
+      budget.
+- [ ] 2.7 `parallel_tool_calls` is sent as `false` unless the `parallel_tool_calls` agent
+      attribute is set. Test that the request carries it.
 
-## Phase 3 — Pages, running what a built page contains
+## Phase 3 — Loop control (`sc-agent`)
 
-- [x] 3.1 `POST /page/:name/action/:rndid` (§7): routed by the framework, run in the worker with
-      `run_action_column` under the viewer's authority in a transaction, `min_role`, CSRF, the
-      segment found inside resolved library items too, v1's three answers.
-- [x] 3.2 `no_menu` and `request_fluid_layout` from the page's `attributes` into
-      `emergency_layout`'s wrap.
-- [x] 3.3 A `page` segment embedded in a page renders under the depth cap, naming a cycle
-      (verify; implement if missing).
-- [x] 3.4 Tests: the action route's answers; the two properties in the document; an embedded
-      page and a page cycle.
+- [ ] 3.1 Validate tool arguments against the declared JSON schema before dispatch
+      (`jsonschema` crate or the repo's existing validator). Violations come back as a failed
+      result naming each path. Tests: missing required argument, wrong type, extra property.
+- [ ] 3.2 Canonical fingerprints plus the `AgentTrait::fingerprint` hook (default: canonical
+      JSON).
+- [ ] 3.3 The three detectors (identical consecutive, repeated fan-out, repeated text), with
+      state in the loop so they survive a resume. Thresholds are attributes.
+- [ ] 3.4 The malformed-call cap (unknown tool, unparseable arguments, schema failure;
+      default 3 consecutive).
+- [ ] 3.5 `TraitContext::signal(Signal)` with `EditFailed` and `CheckFailed`, counted by the
+      ladder.
+- [ ] 3.6 The escalation ladder: warn (a note appended to the tool result) → one step on the
+      strong role → `Conclusion::Stuck { reason }`. Tests script each rung with
+      `FakeProvider` and assert which role answered each step.
+- [ ] 3.7 The chat socket, the run list and `run_agent` (§11.5) handle `Stuck` and
+      `OverBudget`. A trigger-run agent that ends `Stuck` reports it as the action's failure
+      reason.
 
-## Phase 4 — The library and pages, imported and backed up
+## Phase 4 — Context management (`sc-agent`)
 
-- [x] 4.1 `backup::v1`: import `library` into the application; mint UUIDs and rewrite
-      `library_id` in item, view and page layouts (nested items included) before saving; remove
-      the "not imported" note for it; the report line; replace on re-import.
-- [x] 4.2 `backup::v1`: §7's fixed-state fold into pages' `view` segments; stop copying
-      `fixed_states` into `attributes`.
-- [x] 4.3 A fixture: extend the BooksDB pack (or add a second small v1 pack) with a library item
-      that has slots and is placed in a Show view and a page, and a page with legacy
-      `fixed_states`, so the rewrite and the fold have something real to work on. Record how it
-      was made beside the fixture.
-- [x] 4.4 This server's backup: `applications/<subdomain>/library.json`, restored before views and
-      pages, replace-not-append.
-- [x] 4.5 Tests: the v1 import with the rewrite and the fold, rendered on the subdomain; the
-      backup round trip.
+- [ ] 4.1 Request layout: stable prefix → session header → history. Add the
+      `AgentTrait::session_header` hook, called once per session and stored in the run.
+      Sort tools deterministically. Document that `on_turn` breaks caching. Set `CachePlan`
+      breakpoints from this layout.
+- [ ] 4.2 Test: two consecutive requests in one session are byte-identical up to the history,
+      and the header is not rebuilt on step 2 or on resume.
+- [ ] 4.3 Budget accounting from reported `input_tokens` plus estimates. Trigger at 75% of
+      `context_budget`.
+- [ ] 4.4 Pass 1, clearing: the `AgentTrait::elide` hook (default stub), applied in one batch.
+      Tool calls and results are never separated. Test: the elided request is under budget,
+      and every tool result still has its call.
+- [ ] 4.5 Pass 2, the structured summary on the cheap role (fixed sections), replacing all but
+      the last K turns. Compaction records `(up_to_index, summary)` live in the loop state,
+      the request is built from them, and the stored transcript stays whole.
+- [ ] 4.6 The chat and run views show a compaction marker, and the admin can expand the
+      summary.
+- [ ] 4.7 `FakeProvider` gains role- and mode-aware scripts and request assertions (§13).
 
-## Phase 5 — The builder's options, from the worker
+## Phase 5 — The coding tools, rebuilt (`sc-core-traits/src/coding`)
 
-- [x] 5.1 `ConfigStep` gains `builder_options: Option<Json>`, filled for a builder step by
-      `module-host.mjs`'s `view_config_step` running the step's `builder(context)` plus
-      `Workflow.runStep`'s additions, as the admin; `ui/saltcorn-ui/src/index.ts` answers it.
-- [x] 5.2 Port `table.get_join_field_options`, `get_relation_options` and `get_relation_data`
-      over the `SchemaSnapshot`, restricted to the application's subset; off the `BUILDER`
-      refusal list, each citing `models/table.ts`.
-- [x] 5.3 `build_schema_data` from the snapshot, subset-restricted; moved to *kept* in the
-      `plugin-helper.ts` partition.
-- [x] 5.4 `File.findImagesForBuilder` over the application's file stores; `PageGroup.find` → `[]`;
-      `getState().fonts`/`icons`/`keyframes` defaults; `copilot_generate_layout` absent; any
-      `Field`/`Table` member the four builder steps reach that the shims lack (found by running
-      them, Filter's `get_child_relations`/`get_parent_relations(true)` included, each added
-      with its upstream cited).
-- [x] 5.5 `page_builder_options` in `builder-routes.ts`, ported from `pageBuilderData`, and its
-      `ViewRuntime` method.
-- [x] 5.6 The v1 recording script (`crates/sc-server/tests/fixtures/record-builder-options.*`)
-      and its five fixtures (four views, one page), recorded against a Saltcorn 1.7.0-alpha.1
-      over the BooksDB backup.
-- [x] 5.7 Tests: the five goldens with their listed differences; subset restriction; a
-      non-builder step still answers `builder_options: null`.
+- [ ] 5.1 `read_file`: numbered lines, `offset`/`limit` in lines (default 2000), a per-line
+      character cap, paging instructions on truncation, binary detection, and the content hash
+      recorded in trait state. Compact text output, not JSON.
+- [ ] 5.2 `find_files` replaces `list_files`: glob patterns plus `dir`, directories marked,
+      sorted by modification time, capped with a narrowing hint. Hidden-by-§9 entries and
+      excluded directories are skipped, as `search_store` skips them.
+- [ ] 5.3 `search_files`: compact `path:line: text` output, optional context lines, a
+      "narrow your query" hint when capped, and a default cap of 100.
+- [ ] 5.4 `write_file`: refuses to overwrite an existing file this run has not read or written,
+      naming the read tool.
+- [ ] 5.5 The match cascade (`coding/matching.rs`): exact → trailing-whitespace/CRLF →
+      indentation-normalised with re-indent → fuzzy unique best above a threshold. Report the
+      level used. Table tests at each level, and ambiguity at each level.
+- [ ] 5.6 `edit_file` over the cascade: `old_text`/`new_text`/`replace_all`. Stale-read
+      refusal. On failure, the closest region with line numbers. On success, the edited
+      region with line numbers. `EditFailed` signal. Tests for each outcome.
+- [ ] 5.7 `apply_patch` (V4A): parser (add/update/delete/move, context-anchored hunks) and
+      applier over the cascade, all-or-nothing across files, a failure `status` with a
+      message. Tests from Codex's V4A examples, plus a failing hunk that leaves every file
+      untouched.
+- [ ] 5.8 The `edit_format` setting and its `auto` resolution from capabilities. The native
+      `apply_patch` tool type is used when the backend supports it through rig, and the
+      function tool otherwise. `whole_file` withholds both edit tools.
+- [ ] 5.9 The change ledger: pre-images on first touch, deletes and moves, in trait state (or
+      a run-scoped directory for large files). `run_diff()` builds a unified diff and a
+      diffstat with `similar`.
+- [ ] 5.10 Post-turn feedback: after the last edit of a model turn, format the edited files
+      with the project's `prettier` if installed, then run `diagnose`, and attach capped
+      new/pre-existing diagnostics to the last edit result. Needs a driver hook: "tools of
+      this turn finished" (`AgentTrait::after_tools`).
+- [ ] 5.11 `validate_config` checks the longest derived tool name (`implement_feature_…`)
+      against the 64-character limit. Update the tool-name tests in `lib.rs`.
+- [ ] 5.12 Tool descriptions rewritten short, since their tokens are paid on every request.
+      Measured in 8.3.
 
-## Phase 6 — The admin API
+## Phase 6 — `check` and the ratchet (`sc-core-traits`)
 
-- [x] 6.1 `saveViewLayout` and `savePageLayout` (§6): the merge and replace rules, the existing
-      save checks, the page's action and view checks, the library-id check, `libraryUpdates` in
-      the same transaction, one generation bump.
-- [x] 6.2 `pageReferences`, and page rename through `savePage` refusing nothing but reporting
-      what refers to the old name, as view rename does.
-- [x] 6.3 The library endpoints (§10): `listLibrary`, `getLibraryItem`, `createLibraryItem`,
-      `saveLibraryItem`, `saveLibraryUpdates`, `deleteLibraryItem` with references.
-- [x] 6.4 The `builder*` endpoints: `ViewRuntime` gains field preview, fieldview config form,
-      view preview, page preview and distinct values; `builder-routes.ts` ports v1's routes;
-      `ModuleViewRuntime` implements them.
-- [x] 6.5 Regenerate `ui/admin/src/client.ts` (and the builder's copy of it, or a shared import;
-      decide in 7.1 and say which).
-- [x] 6.6 Tests: every refusal naming its subject; the transaction; the previews' and distinct
-      values' goldens; a non-Saltcorn-UI application refused on every endpoint.
+- [ ] 6.1 Settings: `checks` (ordered script names), `diagnose` (default `typecheck`),
+      `application` (optional subdomain, validated as `build_application` validates it), and
+      the `may_check` grant.
+- [ ] 6.2 The shared diagnostic parsers (tsc, eslint, vitest/jest, generic) in `sc-app` beside
+      `build_diagnostics`, with fixture-output tests.
+- [ ] 6.3 `check`: runs each check in order (the build included when `application` is set,
+      through `sc_app::build_application`, not mounted). Skips the build after a failed
+      typecheck and says so. Returns the structured summary.
+- [ ] 6.4 The baseline: recorded at the first `check`/`diagnose` of a session. Every
+      diagnostic is classified new or pre-existing. Test with a project that is broken before
+      the run starts.
+- [ ] 6.5 The ratchet pseudo-check from the ledger: deleted test files, fewer test blocks,
+      added skip/only. Tests for each.
+- [ ] 6.6 The `CheckFailed` signal on new failures.
 
-## Phase 7 — `ui/builder`: vendored and bundled
+## Phase 6a — The shell (`sc-core-traits/src/coding/shell.rs`)
 
-- [x] 7.1 `ui/builder/`: `package.json` pinned to v1's builder dependency versions at the
-      vendored commit, `tsconfig.json` for `src/`, `build.mjs` (esbuild: JSX, the `fetch`
-      inject, the aliases, one JS and one CSS output), `vendor/README.md`.
-- [x] 7.2 `ui/builder/vendor/refresh.sh`: copies `packages/saltcorn-builder/src/` and the CSS and
-      CKEditor assets with headers; refuses a checkout at a different commit from
-      `ui/saltcorn-ui/vendor/`'s.
-- [x] 7.3 Shims in `src/shims/`, each with its reason: `@monaco-editor/react` onto bundled ESM
-      Monaco with same-origin workers; anything else the first build or the jsdom mount shows
-      reaching outside the document's origin.
-- [x] 7.4 `src/routes.ts` (§3) and `builderFetch`; the delegated href listener; `routes.test.ts`
-      walking the vendored literals.
-- [x] 7.5 `src/globals.ts` (§4) and its test.
-- [x] 7.6 `crates/sc-cli/build.rs`: the fourth bundle; `SC_BUILD_ADMIN=0` records none;
-      `scripts/build-static.sh` and the static-build Dockerfile carry it.
-- [x] 7.7 jsdom tests: the mount with each recorded options object; the Craft round trip over
-      every BooksDB view and page layout, with the listed normalisations.
+- [ ] 6a.1 Settings: `may_use_shell` (default off), `shell_timeout` (default 120),
+      `shell_timeout_max`, `shell_sandbox` (`none` | `container`), `shell_image`,
+      `shell_runtime` (`docker` | `podman` | auto), `shell_network`. Validation on save:
+      the store has a local path, and for `container`, the runtime is found and the image
+      exists. Update `each_trait_declares_the_settings_its_semantics_need`.
+- [ ] 6a.2 The admin-caller check at call time, refused by name. Tools are only offered to
+      a run whose caller is an admin, and that is re-checked in `call` for a stale transcript.
+- [ ] 6a.3 `shell_<slug>`: stateless `bash -c` in the scope directory, non-interactive env,
+      timeout (the model may request up to the max), head+tail truncation with the elided
+      byte count, and the exit code as a result. Refuse a trailing `&` with a pointer to
+      `process_<slug>`. Tests: exit codes, timeout kill, truncation, env, refusal.
+- [ ] 6a.4 `process_<slug>` (`start`/`stop`/`logs`/`list`): named processes owned by the
+      run, capped ring-buffer logs, killed on run end or abort, and killed with the server.
+      Tests: start a sleeper, read its logs, stop it, and check abort cleans it up.
+- [ ] 6a.5 The container sandbox: each command runs in a container with only the scope
+      directory mounted, the network off unless `shell_network` is on, and a long-lived
+      container per run for managed processes. Tests are skipped when no runtime is
+      installed, and say so.
+- [ ] 6a.6 The ledger sees shell changes: the scope snapshot before the first shell call
+      (hashes and copies, or `HEAD` and dirty files for git), a comparison after each call,
+      changed paths entered with pre-images, stale-read hashes cleared, and changed paths
+      listed in the result. Test: `sed -i` through the shell appears in the run diff and
+      makes the next `edit_file` ask for a re-read.
+- [ ] 6a.7 The shell `fingerprint` (whitespace-normalised command), plus the prompt's short
+      shell usage note in `act` mode, shown only when the grant is on.
 
-## Phase 8 — The builder routes
+## Phase 6b — `view_app` and the preview mount (§7b)
 
-- [x] 8.1 `/builder/applications/:app/views/:view?step=n` and
-      `/builder/applications/:app/pages/:page` in `sc-server`: admin session, §2's 404s, the
-      `html_file` refusal, §12's mode allow-list, the no-bundle page.
-- [x] 8.2 The document (§4): v1's `builder.ts` output rendered in Rust around the page chrome for
-      each mode, boot data as JSON (application id, view or page name, step and step count for
-      a view, CSRF token, options, layout, mode), the Saltcorn UI stylesheets and scripts in v1's
-      order, the builder bundle, and CKEditor.
-- [x] 8.3 `BUILDER_CONTENT_SECURITY_POLICY` in `security.rs`, served per response on the routes
-      and their assets, each relaxation justified in its comment by the test that needed it.
-- [x] 8.4 `#scbuildform`'s submit → `saveViewLayout` → the wizard's next step, or →
-      `savePageLayout` → the Pages tab; autosave through the same calls; a refused save shown
-      with `notifyAlert` and the canvas kept.
-- [x] 8.5 The builder's static assets (bundle, CSS, CKEditor) served from the builder `dist`
-      under a versioned prefix, like `/static_assets/:tag/`; and `/files/serve/*` on the
-      builder's origin redirected to the application's, because an image `src` or CSS `url()` the
-      builder renders does not pass through the link listener (7.4, `routes.ts`).
-- [x] 8.6 HTTP tests: the document for each of the four patterns and a page, the 404s, the
-      refused mode and page, the CSP header, the no-bundle page.
+- [ ] 6b.1 `scripts/setup-host.sh` installs a headless-capable Chromium that runs under the
+      service user, on each supported distribution (Debian 12/13: `chromium`; Ubuntu 24.04:
+      check whether `chromium-browser` is the snap shim, and if it is, install a non-snap
+      build instead). The script's dry run lists it, and its verification step runs
+      `<browser> --headless --dump-dom about:blank` as the service user. Document it in the
+      script's header and in `docs/OPERATIONS.md`.
+- [ ] 6b.2 The `browser` setting in `feldspar.toml` (`sc-config`), plus detection on `PATH`.
+      The server logs at startup which browser it found, or that `view_app` is unavailable
+      and why.
+- [ ] 6b.3 The preview registry in `sc-server/src/apps.rs`: `mount_preview(label, run,
+      MountedApp)`, `unmount_preview`, and a sweep of previews whose run is idle (setting,
+      default one hour). The router resolves `<label>--<subdomain>` hosts to a preview
+      (`router.rs`). Answer 404 unless the request carries the owning run's session. Tests:
+      routing, isolation from the live mount, 404 without the session and with another
+      user's session, unmount on run end, the sweep.
+- [ ] 6b.4 A `sc-agent` seam for the two capabilities `sc-core-traits` cannot reach:
+      `TraitContext::previews` (`AppPreviewer`: mount/refresh/unmount a preview for this run)
+      and `TraitContext::browser` (`BrowserDriver`), both `Option` with `require_*` like the
+      evaluator. `Runner::with_previews` / `with_browser`, wired in the server. The run-end
+      hook in the driver calls unmount and closes the browser context.
+- [ ] 6b.5 `check`'s application build mounts or refreshes the run's preview on success.
+      Test: a green build makes the preview serve the new bundle while the live mount still
+      serves the old one.
+- [ ] 6b.6 The browser driver (`chromiumoxide`) in `sc-server`: one process, a context per
+      run, the concurrency cap, `--host-resolver-rules` onto the local listener with
+      certificate trust scoped to that mapping, navigation outside the preview host refused,
+      and console errors and failed requests captured per context.
+- [ ] 6b.7 The session for the caller: `create_session` for the run's user, or for
+      `view_app_user` on a trigger-started run. Cookies are injected into the context, the
+      session is deleted at run end, and nothing is written to disk. Tests: a user run sees
+      that user's rows only, a system run without `view_app_user` is refused by name, and
+      the session row is gone after the run.
+- [ ] 6b.8 The accessibility snapshot renderer: a compact tree from CDP's accessibility
+      domain, refs on interactive nodes, stable for an unchanged page, and capped with a
+      "narrow with `wait_for`/scroll" hint.
+- [ ] 6b.9 `view_app_<slug>` in `coding`: the actions of §7b, snapshot by default,
+      screenshot only offered with `vision`, the console/network summary, and the
+      fingerprint and `elide` hooks. Settings `may_view_app` (requires `application`),
+      `view_app_user`, and `view_app_timeout`. `validate_config` refuses the grant with no
+      browser detected. Tests against a fixture app, skipped with a stated reason when no
+      Chromium is installed: goto, snapshot refs, click and fill, a thrown error reported,
+      navigation off-host refused.
+- [ ] 6b.10 `implement_feature` snapshots the feature's `pages` after a green check
+      (screenshots when the strong model has `vision`) and includes them in its result. The
+      `pages` field joins the plan schema.
+- [ ] 6b.11 Screenshot retention in the run (JPEG, per-run cap, older ones stubbed), never
+      logged. Chat and IDE relay: screenshots inline in the admin chat. The IDE relay renders
+      `view_app_` as progress with the path.
 
-## Phase 9 — The admin UI
+## Phase 7 — The repo map (`sc-core-traits` or a new `sc-repomap` crate)
 
-- [x] 9.1 `ViewEditor.tsx`: **Open in builder** on a builder step, the collapsed JSON, the
-      no-bundle variant; `step` in the hash route honoured on return. The builder route (8.2)
-      links to and saves back to `#/applications/:id/views/:name?step=n`, which `App.tsx`'s
-      route match does not accept yet (it matches the whole hash, query included).
-- [x] 9.2 Creating a view whose first unskipped step is a builder step lands in the builder.
-- [x] 9.3 The Pages tab: **New page** (the properties form → the builder), **Edit**,
-      **Properties**, rename with `pageReferences`; `pageForm.ts` for the form's validation
-      (name required and unique in the application, the role list) with vitest. The page
-      builder's **Page properties** link is `#/applications/:id/pages/:name/properties`.
-- [x] 9.4 The **Library** tab: list with icon and `used_by`, rename, delete with references,
-      read-only layout; hidden for non-Saltcorn-UI applications.
-- [x] 9.5 View and page rename and delete warnings include the library items a layout places.
-- [x] 9.6 vitest for the step-index, landing and references logic.
+- [ ] 7.1 Decide the crate: a new `sc-repomap` crate keeps the tree-sitter C builds out of
+      everything that depends on `sc-core-traits`. Grammar crates for TypeScript/TSX,
+      JavaScript and Python. Vendor the `tags.scm` queries with licence headers.
+- [ ] 7.2 Tag extraction plus a per-content-hash in-memory cache. Tests on small fixture files.
+- [ ] 7.3 The graph and personalised PageRank (hand-rolled power iteration, no new graph
+      dependency unless one is already in the tree).
+- [ ] 7.4 Rendering plus the binary search to a token budget. Test: the output is under budget,
+      and the focus files' definitions rank first.
+- [ ] 7.5 The `repo_map` tool (`focus`, `tokens`) in all three modes, and the map in
+      `coding`'s session header at `repo_map_tokens`.
 
-## Phase 10 — Documentation and the definition of done
+## Phase 8 — The prompt
 
-- [x] 10.1 `docs/TECHNICAL_DESIGN.md`: §13.3's Saltcorn UI section gains the builder, the page
-      editor and the library (what is vendored, the routes and their CSP, the URL partition,
-      where the options come from, the page action route, the library's per-application storage,
-      the import's id rewrite and fixed-state fold); the `ui/builder` bullet and the repository
-      tree say what was built; `_fd_library` in §9's table.
-- [x] 10.2 `docs/tutorial-saltcorn-ui.md`: remove "the builder is not here" and the
-      browser-console page; Part B's List, Show, Edit and a new Filter built in the builder, with
-      the Show/Edit/Delete columns added there instead of through `saveView`; the page built from
-      the Pages tab with the filter and list on it; a section on the library (save a component,
-      place it, slots, edit in place, the Library tab); Part A gains "open an imported view and
-      page in the builder".
-- [x] 10.3 `README.md` and `docs/OPERATIONS.md`: the fourth bundle, what a build without it does,
-      the builder routes' CSP.
-- [x] 10.4 The definition of done, run by hand against a real server in a real browser with the
-       console open, written up below with whatever it found.
+- [ ] 8.1 `coding`'s static contribution, per mode and edit format, as R§4's
+      `<workflow>`/`<rules>`/`<edit_format>` blocks: locate before reading, reproduce bugs,
+      smallest change, edit only what you read, `check` until green, never weaken tests, stay
+      in the feature's scope, and a 3–5 line closing summary.
+- [ ] 8.2 `coding`'s `session_header`: `AGENTS.md` (root, plus the nearest one to the
+      feature's files for a child run), the repo map, the recent `git log` for a git store,
+      and the feature brief with the last few progress entries.
+- [ ] 8.3 A size test: the React builder agent's stable prefix plus tool definitions in `act`
+      mode is ≤ 1 500 estimated tokens, and in `plan` mode likewise.
 
-### 10.4, written up
+## Phase 9 — Planning and sessions (`coding`)
 
-Run on 2026-09-14: `feldspar serve` (release build with all four bundles) on a fresh database,
-`--base-domain localhost` on port 3052, BooksDB restored over the API, driven in Chrome with the
-console open and a `securitypolicyviolation` listener installed in every builder document.
+- [ ] 9.1 The `workflow` setting (`direct` | `planned`), and the tool set per mode (§5).
+- [ ] 9.2 The plan state (`features`, `progress`) in `coding`'s per-run trait state (2.3),
+      with a typed Rust struct and a JSON schema. `save_plan` validates the plan and replaces
+      the feature list, keeping `status`/`attempts`/`runs` for ids that already exist. Each
+      plan tool's result ends with the compact checklist. Tests: round trip through
+      `_fd_runs`, and the plan survives a compaction.
+- [ ] 9.3 `implement_feature`: the steps in §8, run through self-delegation (2.4), with an
+      independent `check` plus the ratchet, and `max_sessions_per_feature`.
+- [ ] 9.4 Commit per feature for a git store (`commit` setting, default on for a git store),
+      using `GitRepo::stage`/`commit` and a message written by the cheap role. A non-git store
+      gets the ledger diff only.
+- [ ] 9.5 Resume and abort: the child run id is saved into the plan state before the child
+      starts, and an `in_progress` feature's recorded child run is driven, not replaced. Aborting the planner aborts the child. Test by stopping mid-child and
+      resuming.
+- [ ] 9.6 Re-plan triggers: two consecutive failures, or a child that ended `Stuck`, return a
+      re-plan instruction with the failure summary.
+- [ ] 9.7 The `bug` kind's reproduce-first brief, and recording whether a failing check came
+      before the fix.
+- [ ] 9.8 `explore(question)`: self-delegation in `explore` mode on the cheap role, returning
+      a brief of at most ~300 words.
+- [ ] 9.9 The scripted end-to-end test (the definition of done): a planner script and
+      executor scripts on `FakeProvider` against a temporary git store with the React
+      scaffold. Three features planned, implemented, checked and committed, with the ledger
+      totals and roles asserted. Where a Chromium is installed, the features' `pages` are
+      snapshotted from the preview, and the live mount is asserted unchanged.
 
-| Step | Result |
-|---|---|
-| 1. A view | Passes. Configure shows **Open in builder**; toolbox, canvas and settings as in v1. A Join picked as `publisher.name` through **Fields**; **Next »** saved and returned to the view list; `/view/Show%20Books?id=1` shows the publisher. |
-| 2. A List from nothing | Passes. *Recent books* opened in the builder with v1's columns; Show, Edit and Delete columns added; **Next »** landed on *Create new row*; the list works and every link answers 200. |
-| 3. A Filter from nothing | Passes. Empty canvas; a search bar, a dropdown on *author* and a *Clear* button; saved. |
-| 4. A page from nothing | Passes after the fixes. **New page → Create and build**; heading, *Find books* and *Recent books* (shared) in two columns, *GoBack*; **Done »** back to Pages; set as the public home page. On `booksdb.localhost/`, anonymously: search narrows, *Clear* clears, the dropdown narrows, *GoBack* goes back. |
-| 5. The imported page | Passes. *BooksOverview* opens with its filter and list; a text added above them renders. |
-| 6. The library | Passes, with a heading component rather than the title row (below). Saved from *Show Books*, placed on *Home*, edited there; *Show Books* and `/` both show the edit; **Library** lists it as used by 1 view, 1 page. |
+## Phase 10 — The builder agent, the scaffold, the IDE, the admin UI
 
-**What it found, all fixed with tests** (CHANGELOG, *Phase 10*):
+- [ ] 10.1 `sc-app/src/builder_agent.rs`: `coding` alone with the §12 configuration. Remove
+      `build_application` from the declaration. `FrameworkDecl` may declare `checks`. Shrink
+      the prompts to role and platform. Update `TRAIT_CFG_*` constants, `builder_agent.rs`
+      tests, `sc-core-traits/tests/builder_agent_traits.rs`,
+      `sc-server/tests/app_builder_agent.rs` and `sc-app/tests/declared_framework.rs`.
+- [ ] 10.2 `delete_builder_agent` and the sidebar's *New chat* find the agent by a `coding`
+      trait naming the application (not `build_application`). Update both.
+- [ ] 10.3 React scaffold: add the `typecheck` script, and have `AGENTS.md` name the checks.
+      Update the scaffold tests.
+- [ ] 10.4 `ui/ide/src/chatRelay.ts`: new prefixes, `apply_patch` paths,
+      `implement_feature` diffstat paths, a full refresh after `shell_`, and an SCM refresh
+      after a commit. Update
+      `chat.test.ts`.
+- [ ] 10.5 Admin API: `GET /api/runs/{id}/diff` (ledger diff, including children), and the
+      run's plan state in the run read (`getRun`) for a planner run. Add both to the admin
+      client.
+- [ ] 10.6 Admin UI: roles and budgets on the agent form; `Stuck`/`OverBudget`, compaction
+      markers, cost, and the plan checklist from run state in the chat, linking to child runs;
+      the run diff view; the shell settings grouped with the `none` sandbox warning.
 
-- **The builder's formula checks were refused by its own CSP.** v1 checks a formula by
-  constructing a function from it (`Function(…)` in three vendored elements, `AsyncFunction` in
-  `saltcorn-common.js`'s validators), which `script-src 'self'` refuses as `eval`: a ViewLink showed
-  "Refused to evaluate a string as JavaScript" under an empty formula, with six violation reports.
-  Now a parse (`src/formula-syntax.ts`), imported as `Function` into vendored files only; the two
-  validators are ported. The policy keeps no `'unsafe-eval'`.
-- **A search on a list failed**, naming `db.getTenantSchema`: the worker's `db` answered
-  `supports_multiple_schemas` with a truthy stub, and the `Table` shim then refused `_fts` by
-  name. Now `false`, and `_fts` is translated (any text field containing the term).
-- **The search bar named its state `_fts_undefined`**: `table.santized_name` was missing.
-- **A public List with a Delete column failed for anyone but an admin**: `table.is_owner` was
-  missing. Ported.
+## Phase 11 — Evaluation
 
-**Where the fixture and v1 differ from the script above:**
+- [ ] 11.1 `feldspar agent eval <suite> --model <provider/model> [--strong <provider/model>]
+      [--cheap <provider/model>]` in `sc-cli`, each naming a model row:
+      task format, temporary store per task, verification script, and JSON plus Markdown
+      output of the §13 metrics.
+- [ ] 11.2 A harness self-test on `FakeProvider` (one passing task, one failing task) that
+      runs in `cargo test`.
+- [ ] 11.3 The seed suite under `tests/agent-eval/`: 10 React-scaffold tasks (a new page, a
+      form field, a list filter, a bug with a reproducing test, a refactor, and so on), each
+      with a verification script.
+- [ ] 11.4 Run it once against a cheap model and a strong model, and record the results and
+      R§14's decision triggers in `docs/tutorial-agents.md` (or a new `docs/AGENT_EVAL.md`).
 
-- *Show Books* has no card. Its header row holds a **field**, and v1's `suitableFor("page")` does
-  not offer a component with a field on a page, so step 6 saved a heading as the component.
-- *GoBack* goes back in the browser and posts nothing. The page action route was checked with an
-  unknown id (404 "Action not found") and without CSRF (403); a trigger button's success is
-  Phase 3's test.
-- The join in step 1 landed just above the title rather than under it.
-- Neither book has a publisher; book 1 was given one so step 1 has something to show.
-- The BooksDB tables are admin-read. Step 4's public page embeds lists over them, so their read
-  role was opened; before that, a stranger got "This could not be shown" (a note for review).
+## Phase 12 — Documentation and the definition of done
+
+- [ ] 12.1 TECHNICAL_DESIGN §9 (`_fd_llm_models`, and the entity-relationship section), §11.1
+      (providers and models as two tables and why, capabilities, cache plan, reasoning replay,
+      `openai_chat`, prices), §11.2 (roles, modes, state, budgets, loop control, context), §11.3 (the
+      `coding` rework, why `build_application` left the builder agent, and the shell
+      reversing "No shell" behind an off-by-default, admin-only grant), §12.1 (the relay), and
+      §13.2 (preview mounts beside the mount registry).
+      Each gets a "what was built, where it deviates" note.
+- [ ] 12.2 `docs/tutorial-agents.md`: configuring roles and budgets, the `planned` workflow,
+      reading a plan and a run diff, previews and `view_app` (what a preview shows, whose
+      session it uses, that its data is live, and the browser the host needs), and turning on
+      the shell (the admin-only rule and the
+      sandbox choice, stated plainly).
+- [ ] 12.3 Walk the definition of done by hand against a real provider. Record the eval numbers
+      and anything that deviated, then write the CHANGELOG entry.
 
 ---
 
 ## Explicitly OUT of scope for this milestone
 
-- **Page groups.** A named set of pages and a rule choosing one by screen width, role or random
-  split (A/B testing). They sit on top of pages: a second resolution step in front of
-  `/page/:name`, plus an editor for the members and their conditions. Pages are complete without
-  them, so the builder's `page_groups` is `[]`, a URL naming one is refused (§3), and the v1
-  import keeps noting them as not imported.
-- **HTML-file pages** (v1's `html_file` property). The page's content is an HTML file from the
-  file store, edited in v1 with an iframe preview rather than the builder. The runtime already
-  refuses them by name, and the properties form does not offer the field. It needs a file-store
-  picker and a decision about what CSP such a page is served under.
-- **Generate layout with copilot.** v1 calls a `copilot_generate_layout` function supplied by a
-  plugin. The equivalent here is an agent with a layout-writing tool (§11.3), a design of its
-  own. `has_copilot_generate` is `false` meanwhile.
-- **Uploading an image from the builder.** `/files/upload` is refused. Images already in the
-  application's file stores are offered, and a file is uploaded through the file manager. It
-  needs a choice of which store an upload lands in.
-- **v1's help topics** (`/admin/help/:topic`, 47 markdown files in v1's server). Vendoring them
-  is easy; rendering them in a modal under the builder's CSP and keeping them true of this
-  server is not.
-- **TypeScript completions in the builder's formula editors** (`/admin/ts-declares`). The
-  editors work without completions. This server already generates row types for code bodies,
-  so this is a mapping, not an invention.
-- **Replacing CKEditor 4.** v1 ships 4.16.2, and CKEditor 4 is end-of-life as open source.
-  Vendoring it keeps v1's Text element working. Replacing it is a change to v1's builder, and
-  belongs upstream first.
-- **A menu editor.** v1's pageedit has *Add to menu* and the menu is edited in its own builder.
-  Here the menu stays the application's JSON setting, as it is today. It is a form over v1's
-  `menu_items` shape plus an "add this page" shortcut, and it is independent of the canvas.
-- **Cloning a page or a view.** v1 has both. Cloning is a copy with a new name plus a references
-  question (does the copy's layout still point at the original's embedded views?), and it is
-  easy to add once the editors exist.
-- **Sharing a library item between applications**, or copying one. §8 says why an item is
-  per-application. A copy action that checks the target's subset is the likely shape.
-- **Several people building one layout at once.** v1's model is last write wins, and so is this
-  one, apart from §6's transaction. Realtime collaboration is a message-bus feature (GOALS),
-  not a builder feature.
-- **i18n of the builder's strings.** `useTranslation` answers the identity, as `__` does in
-  the view runtime, and `translations` is `{}`.
-- **The builder in a plugin pattern's mode** (§12).
+- **A registry-only network allowlist for the shell sandbox.** Doing it needs an egress
+  proxy. Until then the container's network is either off or unrestricted (§7a).
+- **Sharing a plan across runs, and plan files in the store.** §8 explains why a plan is one
+  planner run's state.
+- **A git worktree per task.** Isolation matters once agents run unattended in
+  parallel on one tree. A worktree per feature fits the git store naturally
+  (`GitRepo::checkout` plus a merge on green), but it changes what the IDE shows while a
+  feature is in progress.
+- **Server-side compaction** (`/responses/compact`). R§12 advises treating it as optional,
+  and the harness's compaction works on every backend.
+- **LSP navigation tools** (definition/references). The IDE's language-server bridge
+  (`sc-server/src/lsp.rs`) could serve them, but it lives in the server layer, and R§8 puts
+  diagnostics ahead of navigation.
+- **Embeddings or semantic search.** R§8 says only if localisation fails in the eval, and the
+  eval does not exist yet.
+- **Mobile and embedded verifiers** (agent-device, PlatformIO, Renode, Wokwi). Saltcorn has no
+  such framework.
+- **Parallel tool execution.** Parallel tool calls are turned *off* here. Running independent
+  calls concurrently is still §11.2's open question.
+- **A coding agent for Saltcorn UI applications.** They have no source tree. A layout-writing
+  trait is the builder milestone's *Explicitly OUT* item, and it stays there.
 
 ## Carried past this milestone
 
+- From TODO-post-mvp-25: page groups, HTML-file pages, copilot layout generation, uploading
+  from the builder, v1's help topics, formula-editor completions, replacing CKEditor 4, a menu
+  editor, cloning pages and views, sharing library items, collaborative editing, builder i18n,
+  and the builder in a plugin pattern's mode. The reasons are recorded in that file.
 - From TODO-post-mvp-24: `room`/`workflow-room` and realtime, tags, file upload from an Edit
   view, themes as plugins, i18n, a v1 `db` module for plugins, and externalising inline
-  handlers to drop `'unsafe-inline'` from Saltcorn UI's CSP. That last one now also covers
-  `page_post_action` and any inline handler the builder's preview HTML carries, since the
-  preview is what the subdomain would render. Page groups move from that list to this
-  milestone's *Explicitly OUT*, with the reason stated there.
+  handlers to drop `'unsafe-inline'` from Saltcorn UI's CSP.
