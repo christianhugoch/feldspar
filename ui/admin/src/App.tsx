@@ -12,7 +12,7 @@
 // already owns the DOM, so vendoring a second script to add one class would buy
 // nothing.
 
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import Spinner from "react-bootstrap/Spinner";
 
 import { api } from "./api";
@@ -20,8 +20,9 @@ import { splitRoute, stepParam } from "./builder";
 import { PoppedChats } from "./PoppedChats";
 import { useChatWindows } from "./chatWindows";
 import type { AuthStatusResponse } from "./client";
+import { showAppOutcome } from "./appActions";
+import { AppOutcomeToast, ApplicationsNav } from "./AppSidebar";
 import {
-  IconApps,
   IconBolt,
   IconChartHistogram,
   IconChevronLeft,
@@ -159,6 +160,9 @@ type NavItem = {
   matches: string[];
 };
 
+/** The Data Layer section of the sidebar: the installation's shared furniture.
+ * Applications are the other section, and are not entries here — that section is
+ * about one application at a time, picked in the sidebar (`AppSidebar.tsx`). */
 export const NAV: NavItem[] = [
   {
     href: "#/tables",
@@ -168,12 +172,6 @@ export const NAV: NavItem[] = [
     // its own, the way LLM providers hang off Agents: a connection exists to put
     // tables in the tables list, and the way to it is a button on that screen.
     matches: ["/tables", "/db-connections"],
-  },
-  {
-    href: "#/applications",
-    label: "Applications",
-    icon: <IconApps />,
-    matches: ["/applications"],
   },
   {
     href: "#/triggers",
@@ -255,6 +253,19 @@ function Shell({
   // screen the collapse is not rendered as a drawer, so this is a no-op there.
   useEffect(() => setMenuOpen(false), [route]);
 
+  // The applications list shows a build's news in its own banner, and the shell
+  // shows it as a toast everywhere else — so news already read on the list is
+  // cleared on the way out rather than following the admin to the next screen.
+  // A build still running then reports when it finishes, wherever that is.
+  const { path } = splitRoute(route);
+  const previousPath = useRef(path);
+  useEffect(() => {
+    if (previousPath.current === "/applications" && path !== "/applications") {
+      showAppOutcome(null);
+    }
+    previousPath.current = path;
+  }, [path]);
+
   const logout = async () => {
     try {
       await api.logout();
@@ -335,6 +346,9 @@ function Shell({
             id="sidebar-menu"
           >
             <ul className="navbar-nav pt-lg-3">
+              {/* Tabler's section titles: folded to a rail, each becomes a short
+                  rule between the groups of icons. */}
+              <li className="nav-section-title">Data Layer</li>
               {NAV.map((item) => {
                 const active = item.matches.some((prefix) =>
                   route.startsWith(prefix),
@@ -361,6 +375,8 @@ function Shell({
                   </li>
                 );
               })}
+              <li className="nav-section-title">Applications</li>
+              <ApplicationsNav route={route} folded={folded} />
             </ul>
             {/* The nav list above is `flex-grow: 1` in a column collapse, so
                 everything below it settles at the bottom of the sidebar.
@@ -439,6 +455,9 @@ function Shell({
           chat is furniture of the whole admin, and it stays in the corner while
           everything above changes underneath it (`PoppedChats.tsx`). */}
       <PoppedChats />
+      {/* A build started from the sidebar finishes wherever the admin has got
+          to by then; the applications list has its own banner for the news. */}
+      {path !== "/applications" && <AppOutcomeToast />}
     </div>
   );
 }

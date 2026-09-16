@@ -13,6 +13,7 @@ import Button from "react-bootstrap/Button";
 import Table from "react-bootstrap/Table";
 
 import { api, errorMessage } from "../api";
+import { noteApplicationsChanged } from "../appActions";
 import type { ListAgentsResponse } from "../client";
 import { navigate } from "../App";
 import { IconPlus } from "../icons";
@@ -69,6 +70,9 @@ export function Agents() {
     try {
       await api.deleteAgent(agent.id);
       await load();
+      // It may have been an application's builder, whose chat link the sidebar
+      // offers.
+      noteApplicationsChanged();
     } catch (err) {
       setError(errorMessage(err, "Could not remove the agent."));
     }

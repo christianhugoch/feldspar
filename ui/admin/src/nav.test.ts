@@ -51,6 +51,15 @@ describe("the admin sidebar", () => {
     expect(activeLabels("/settings")).toEqual(["Settings"]);
   });
 
+  /** Applications are the sidebar's other section, about one application at a
+   * time (`appNav.ts`), so the Data Layer list has no entry for them and no
+   * application route lights any of its entries up. */
+  it("keeps applications out of the Data Layer section", () => {
+    expect(NAV.map((item) => item.label)).not.toContain("Applications");
+    expect(activeLabels("/applications")).toEqual([]);
+    expect(activeLabels("/applications/a1/views")).toEqual([]);
+  });
+
   it("gives every entry a route that lights it up", () => {
     for (const item of NAV) {
       expect(activeLabels(item.href.replace(/^#/, ""))).toContain(item.label);

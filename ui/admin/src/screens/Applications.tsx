@@ -19,12 +19,18 @@ import { ideUrl, navigate } from "../App";
 import { graphqlMount } from "../graphqlExplorer";
 import { IconPlus } from "../icons";
 import { AlertBody, PageBody, PageHeader, StatusBadge } from "../layout";
-import { takeNotice, type Notice } from "../notice";
+import {
+  buildApplication,
+  buildStatus,
+  noteApplicationsChanged,
+  showAppOutcome,
+  updateApplicationClient,
+  useAppActions,
+  type BuildStatus,
+} from "../appActions";
+import { takeNotice } from "../notice";
 
 type AppItem = ListApplicationsResponse[number];
-
-/** Per-app build state, tracked client-side (the server persists none). */
-type BuildStatus = "unbuilt" | "building" | "built" | "failed";
 
 /** The URL an app is served at: `<subdomain>.<the admin's host>`. The admin runs
  * on the base domain, so its own host (with port) is what the subdomain sits on —
@@ -41,18 +47,12 @@ function filesUrl(store: string, path: string): string {
 
 export function Applications() {
   const [apps, setApps] = useState<AppItem[] | null>(null);
-  const [status, setStatus] = useState<Record<string, BuildStatus>>({});
-  // The app whose generated code is being rewritten, if any. Separate from the
-  // build status: regenerating does not build, so it must not claim an app is
-  // built — nor forget that it was.
-  const [updating, setUpdating] = useState<string | null>(null);
+  // Builds, client updates and the news they leave behind live in a store the
+  // sidebar shares (`appActions.ts`): the same buttons are there, for the
+  // current application, and a build started from either is one build.
+  const actions = useAppActions();
+  const { outcome } = actions;
   const [error, setError] = useState<string | null>(null);
-  // The most recent outcome, surfaced so a tool's log or diagnostics are visible
-  // rather than buried in a per-row badge. A build fills this in directly; a
-  // scaffold happens on the form, which leaves its message for this screen to
-  // pick up — one banner for both, because to an admin they are the same news
-  // about the same app.
-  const [outcome, setOutcome] = useState<Notice | null>(null);
 
   const load = async () => {
     try {
@@ -64,58 +64,12 @@ export function Applications() {
 
   useEffect(() => {
     void load();
-    setOutcome(takeNotice());
+    // A scaffold happens on the form, which leaves its message for this screen
+    // to pick up — the same banner as a build's, because to an admin they are
+    // the same news about the same app.
+    const notice = takeNotice();
+    if (notice) showAppOutcome(notice);
   }, []);
-
-  const build = async (app: AppItem) => {
-    setStatus((s) => ({ ...s, [app.id]: "building" }));
-    setOutcome(null);
-    try {
-      const report = await api.buildApplication(app.id);
-      setStatus((s) => ({ ...s, [app.id]: "built" }));
-      setOutcome({
-        ok: true,
-        title: `Build succeeded — ${app.name}`,
-        text: report.log.trim() || "Build succeeded.",
-      });
-    } catch (err) {
-      setStatus((s) => ({ ...s, [app.id]: "failed" }));
-      setOutcome({
-        ok: false,
-        title: `Build failed — ${app.name}`,
-        text: errorMessage(err, "The build failed."),
-      });
-    }
-  };
-
-  // Rewrite the app's generated code (`src/feldspar/**`) without building it.
-  // The server does this by itself whenever the API definition changes, so this
-  // is the "now, please" case: a store that was unreachable when a table
-  // changed, or a project directory that was emptied — which the server
-  // rescaffolds rather than filling with generated files that cannot build. It
-  // says which of the two it did, because they are not the same news.
-  const updateClient = async (app: AppItem) => {
-    setUpdating(app.id);
-    setOutcome(null);
-    try {
-      const report = await api.updateApplicationClient(app.id);
-      setOutcome({
-        ok: true,
-        title: report.scaffolded
-          ? `Project scaffolded — ${app.name}`
-          : `Generated code updated — ${app.name}`,
-        text: report.log,
-      });
-    } catch (err) {
-      setOutcome({
-        ok: false,
-        title: `Could not update the generated code — ${app.name}`,
-        text: errorMessage(err, "The generated code could not be rewritten."),
-      });
-    } finally {
-      setUpdating(null);
-    }
-  };
 
   const remove = async (app: AppItem) => {
     if (
@@ -132,8 +86,9 @@ export function Applications() {
       // admin who edited that agent should not have to notice its absence.
       const result = await api.deleteApplication(app.id);
       await load();
+      noteApplicationsChanged();
       if (result.agent) {
-        setOutcome({
+        showAppOutcome({
           ok: true,
           title: `Application deleted — ${app.name}`,
           text: `Its builder agent, ${result.agent}, was deleted with it. Its past runs are kept.`,
@@ -161,7 +116,7 @@ export function Applications() {
         {outcome && (
           <Alert
             variant={outcome.ok ? "success" : "danger"}
-            onClose={() => setOutcome(null)}
+            onClose={() => showAppOutcome(null)}
             dismissible
           >
             <AlertBody>
@@ -191,7 +146,7 @@ export function Applications() {
                 </tr>
               )}
               {apps?.map((app) => {
-                const state = status[app.id] ?? "unbuilt";
+                const state = buildStatus(actions, app.id);
                 return (
                   <tr key={app.id}>
                     <td>
@@ -271,17 +226,17 @@ export function Applications() {
                             <Button
                               size="sm"
                               variant="outline-secondary"
-                              disabled={updating === app.id}
-                              onClick={() => void updateClient(app)}
+                              disabled={Boolean(actions.updating[app.id])}
+                              onClick={() => void updateApplicationClient(app)}
                               title="Rewrite this application's generated client, hooks and schema from its current definition — no build"
                             >
-                              {updating === app.id ? "Updating…" : "Update code"}
+                              {actions.updating[app.id] ? "Updating…" : "Update code"}
                             </Button>
                             <Button
                               size="sm"
                               variant="outline-primary"
                               disabled={state === "building"}
-                              onClick={() => void build(app)}
+                              onClick={() => void buildApplication(app)}
                             >
                               {state === "building" ? "Building…" : "Build"}
                             </Button>

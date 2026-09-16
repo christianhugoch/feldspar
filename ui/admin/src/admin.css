@@ -112,6 +112,28 @@ div.navbar-brand > a:hover {
   text-decoration: none;
 }
 
+/* The application picker's toggle in the sidebar carries an application's name,
+ * which can be longer than the sidebar is wide: it truncates rather than wraps,
+ * so the links under it stay where the eye expects them. */
+.app-picker-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A build log in the outcome toast: long enough to read the error, not so long
+ * the toast covers the page. */
+.app-outcome-toast {
+  width: 28rem;
+  max-width: calc(100vw - 2rem);
+}
+
+.app-outcome-log {
+  max-height: 16rem;
+  overflow: auto;
+}
+
 /* The folded sidebar.
  *
  * Tabler 1.5 owns this mode: `navbar-folded` on the aside (`App.tsx`) narrows

@@ -2,6 +2,45 @@
 
 Changes in reverse chronological order.
 
+## The admin sidebar is split into Data Layer and Applications
+
+The sidebar's main list now has two sections, titled with Tabler's own `nav-section-title`.
+When the sidebar is folded, Tabler turns each title into a short divider line. **Data Layer**
+has everything that was there before except Applications. **Applications** is about one
+application at a time: the admin picks the current application in the sidebar, and the links
+for working on it appear under the picker.
+
+- **The picker is a Tabler sidebar submenu** (`nav-item dropdown`), not a `<select>`. Tabler styles
+  it for both sidebar states: inline under the toggle when unfolded, and as a flyout beside the
+  rail when folded. The toggle's label is the current application's name. With no application
+  picked it reads *Choose application*, and with none created it reads *No applications*. The
+  menu lists every application, then *All applications* and *New application*. The choice is
+  remembered in `localStorage` (`saltcorn-admin-application`). Opening any
+  `/applications/<id>/…` route also makes that application current, so following a link from
+  the list brings the sidebar along. The list is fetched again on each route change, and when a
+  screen calls `noteApplicationsChanged()` (after deleting an application or an agent).
+- **Links per application** (`appNav.ts`, drawn by `AppSidebar.tsx`):
+  - An app that builds (React, code) gets *Edit code*, which opens the IDE in a new tab and only
+    appears when the app has a source directory, plus *Update client* and *Build*.
+  - An app with views (Saltcorn UI) gets *Views*, *Pages* and *Library*.
+  - Either kind gets *New chat* when it has a coding agent. That agent is found the way the
+    server's `delete_builder_agent` finds it: by a `build_application` trait naming the app's
+    subdomain, not by the `build-<subdomain>` name.
+  - *Settings* is always last. There is never a Delete.
+  - The GraphQL button on the list rows is not in the sidebar.
+- **Build and client-update state moved into a shared store** (`appActions.ts`, pure transitions
+  plus a `useSyncExternalStore` shell, like `chatWindows.ts`). The applications list and the
+  sidebar therefore show the same build in progress. The list keeps its banner. On any other
+  screen the result appears as a toast (`AppOutcomeToast`) that stays until it is closed, so a
+  failed build's diagnostics can be read. The shell clears old news when the admin leaves the
+  list; it does this rather than the screen's unmount cleanup because StrictMode's double mount
+  would otherwise swallow a scaffold notice.
+- **Icons** added: code, refresh, hammer, books, layout-dashboard.
+- **Tests.** `appNav.test.ts` covers the link sets per framework, New chat, Settings last with no
+  Delete, active-link matching, agent lookup by trait, and which app a route names.
+  `appActions.test.ts` covers the build and update transitions. `nav.test.ts` checks that
+  Applications is not a Data Layer entry.
+
 ## The sidebar fold is a button again, on Tabler's `navbar-folded`
 
 The hover-unfolding rail (`navbar-folded-hover`) from the Tabler 1.5.1 upgrade was tried and
