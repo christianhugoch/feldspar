@@ -52,7 +52,7 @@ async fn a_two_turn_conversation_runs_with_no_traits_at_all() -> Result<()> {
         &catalog,
         &registry,
         &agent,
-        provider.clone(),
+        common::model(provider.clone()),
         RunCaller::system(),
     );
 
@@ -96,7 +96,7 @@ async fn a_tool_call_runs_and_the_conversation_continues() -> Result<()> {
         &catalog,
         &registry,
         &agent,
-        provider.clone(),
+        common::model(provider.clone()),
         RunCaller::system(),
     );
 
@@ -147,7 +147,13 @@ async fn two_tool_calls_in_one_turn_run_in_the_order_the_model_asked() -> Result
         ]),
         Reply::says("Three and seven."),
     ]));
-    let runner = Runner::new(&catalog, &registry, &agent, provider, RunCaller::system());
+    let runner = Runner::new(
+        &catalog,
+        &registry,
+        &agent,
+        common::model(provider),
+        RunCaller::system(),
+    );
     let (run, _) = runner.start("count both").await?;
 
     // Sequentially, in the model's order — which is the order the arguments
@@ -189,7 +195,13 @@ async fn a_tool_that_fails_leaves_its_error_in_the_transcript_and_the_run_goes_o
         Reply::calls("count_books", json!({})),
         Reply::says("I could not count them."),
     ]));
-    let runner = Runner::new(&catalog, &registry, &agent, provider, RunCaller::system());
+    let runner = Runner::new(
+        &catalog,
+        &registry,
+        &agent,
+        common::model(provider),
+        RunCaller::system(),
+    );
     let (run, conclusion) = runner.start("how many?").await?;
 
     // The run finished normally: a failing tool is a result, not an exception.
@@ -220,7 +232,13 @@ async fn a_tool_the_model_invented_comes_back_as_a_result_naming_the_real_ones()
         Reply::calls("delete_everything", json!({})),
         Reply::says("Sorry, I cannot."),
     ]));
-    let runner = Runner::new(&catalog, &registry, &agent, provider, RunCaller::system());
+    let runner = Runner::new(
+        &catalog,
+        &registry,
+        &agent,
+        common::model(provider),
+        RunCaller::system(),
+    );
     let (run, conclusion) = runner.start("delete it all").await?;
     assert_eq!(conclusion.answer(), Some("Sorry, I cannot."));
 
@@ -253,7 +271,7 @@ async fn a_model_that_never_stops_asking_is_stopped_by_the_step_budget() -> Resu
         &catalog,
         &registry,
         &agent,
-        provider.clone(),
+        common::model(provider.clone()),
         RunCaller::system(),
     );
     let (run, conclusion) = runner.start("keep going").await?;
@@ -281,7 +299,13 @@ async fn a_provider_failure_fails_the_run_and_keeps_what_had_happened() -> Resul
         Reply::calls("count_books", json!({})),
         Reply::fails("401 invalid x-api-key"),
     ]));
-    let runner = Runner::new(&catalog, &registry, &agent, provider, RunCaller::system());
+    let runner = Runner::new(
+        &catalog,
+        &registry,
+        &agent,
+        common::model(provider),
+        RunCaller::system(),
+    );
 
     let mut state = AgentLoop::new(agent.max_steps());
     state.push_user("how many?")?;
@@ -311,7 +335,13 @@ async fn a_run_is_written_after_every_step_and_resumes_from_the_row() -> Result<
     // First process: it gets as far as the tool result and then "dies" — its
     // provider script has no second turn.
     let dying = Arc::new(FakeProvider::new([Reply::calls("count_books", json!({}))]));
-    let runner = Runner::new(&catalog, &registry, &agent, dying, RunCaller::system());
+    let runner = Runner::new(
+        &catalog,
+        &registry,
+        &agent,
+        common::model(dying),
+        RunCaller::system(),
+    );
     let mut state = AgentLoop::new(agent.max_steps());
     state.push_user("how many books?")?;
     let mut run = Run::new(&agent.name, &RunCaller::system(), &state);
@@ -329,7 +359,13 @@ async fn a_run_is_written_after_every_step_and_resumes_from_the_row() -> Result<
     let mut resumed = load_run(&catalog, run.id).await?.expect("run");
     resumed.state = RunState::Running;
     let provider = Arc::new(FakeProvider::new([Reply::says("There are three.")]));
-    let runner = Runner::new(&catalog, &registry, &agent, provider, RunCaller::system());
+    let runner = Runner::new(
+        &catalog,
+        &registry,
+        &agent,
+        common::model(provider),
+        RunCaller::system(),
+    );
     let conclusion = runner.drive(&mut resumed).await?;
     assert_eq!(conclusion.answer(), Some("There are three."));
 
@@ -360,7 +396,7 @@ async fn a_trait_speaks_before_every_turn_and_the_run_records_its_caller() -> Re
         &catalog,
         &registry,
         &agent,
-        provider.clone(),
+        common::model(provider.clone()),
         RunCaller::user(user),
     );
     let (run, _) = runner.start("how many books?").await?;
@@ -409,7 +445,7 @@ async fn a_run_at_trace_logs_every_tool_it_ran_and_how_it_ended() -> Result<()> 
         &catalog,
         &registry,
         &agent,
-        provider.clone(),
+        common::model(provider.clone()),
         RunCaller::system(),
     );
 

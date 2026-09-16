@@ -82,7 +82,12 @@ impl Scripts {
 
 #[async_trait::async_trait]
 impl ProviderConnector for Scripts {
-    async fn connect(&self, _catalog: &Catalog, agent: &Agent) -> Result<ConnectedModel> {
+    async fn connect(
+        &self,
+        _catalog: &Catalog,
+        agent: &Agent,
+        _role: sc_agent::ModelRole,
+    ) -> Result<ConnectedModel> {
         match self.by_agent.lock().unwrap().get(&agent.name) {
             Some(provider) => Ok(ConnectedModel::unconfigured(
                 Arc::clone(provider) as Arc<dyn LlmProvider>
@@ -141,9 +146,11 @@ async fn chat(
     message: &str,
 ) -> Result<(sc_agent::Run, Conclusion)> {
     let connector = Arc::clone(scripts) as Arc<dyn ProviderConnector>;
-    let provider = connector.connect(&env.catalog, agent).await?.provider;
-    let mut runner = Runner::new(&env.catalog, &env.registry, agent, provider, caller)
-        .with_subagents(&connector);
+    let executor = connector
+        .connect(&env.catalog, agent, sc_agent::ModelRole::Executor)
+        .await?;
+    let mut runner = Runner::new(&env.catalog, &env.registry, agent, executor, caller)
+        .with_connector(&connector);
     if let Some(evaluator) = &env.evaluator {
         runner = runner.with_evaluator(evaluator);
     }

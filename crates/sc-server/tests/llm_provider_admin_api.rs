@@ -645,6 +645,50 @@ async fn a_model_an_agent_calls_is_not_deleted_or_renamed_out_from_under_it() ->
 }
 
 #[tokio::test]
+async fn a_model_only_a_role_names_is_not_deleted_out_from_under_it() -> sc_error::Result<()> {
+    let (mut client, catalog, _db) = setup().await?;
+    let house = create_provider(&mut client, "house", json!({ "api_key": "sk-ant-x" })).await;
+    create_model(
+        &mut client,
+        &house,
+        json!({ "name": "claude-sonnet-5", "description": "", "is_default": true, "config": {} }),
+    )
+    .await;
+    let gateway = create_provider(&mut client, "gateway", json!({ "api_key": "sk-ant-y" })).await;
+    let opus = create_model(
+        &mut client,
+        &gateway,
+        json!({ "name": "claude-opus-5", "description": "", "is_default": false, "config": {} }),
+    )
+    .await;
+
+    // The agent itself calls `house`; only its strong role reaches `gateway`.
+    sc_agent::save_agent(
+        &catalog,
+        &sc_agent::AgentRegistry::new(),
+        &sc_agent::Agent::new("planner", "house").role(
+            sc_agent::ModelRole::Strong,
+            sc_agent::ModelRef::new("gateway", Some("claude-opus-5")),
+        ),
+    )
+    .await?;
+
+    let opus_id = opus["id"].as_str().unwrap();
+    let (status, err) = client
+        .send("DELETE", &format!("/api/llm-models/{opus_id}"), None)
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert!(err.to_string().contains("planner"), "{err}");
+
+    let (status, err) = client
+        .send("DELETE", &format!("/api/llm-providers/{gateway}"), None)
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert!(err.to_string().contains("planner"), "{err}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn fetch_models_offers_the_names_that_have_no_row() -> sc_error::Result<()> {
     let (mut client, _catalog, _db) = setup().await?;
     let base = stub_provider(

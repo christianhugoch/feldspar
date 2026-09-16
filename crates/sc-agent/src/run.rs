@@ -17,8 +17,69 @@ use sc_types::Attrs;
 use serde_json::Value as Json;
 use uuid::Uuid;
 
+use crate::agent::ModelRole;
 use crate::agent_trait::RunCaller;
 use crate::machine::{AgentLoop, Conclusion};
+
+/// The run attribute holding the run's [`RunMode`]. Sparse: absent is
+/// [`RunMode::Act`].
+pub const ATTR_MODE: &str = "mode";
+/// The run attribute holding the [`ModelRole`] whose model answers the run's
+/// steps. Sparse: absent is [`ModelRole::Executor`].
+pub const ATTR_ROLE: &str = "role";
+
+/// What a run is doing, which decides the tools its traits offer (TODO §5).
+///
+/// A run attribute rather than an agent setting, because one agent runs in
+/// several: a planner run starts one child run of the *same* agent per feature,
+/// in `act`. Traits that do not care about modes offer the same tools in all
+/// three.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RunMode {
+    /// Plan the work: read-only tools plus planning.
+    Plan,
+    /// Do the work — every tool the grants allow. Today's behaviour, and the
+    /// default.
+    #[default]
+    Act,
+    /// Look around: read-only tools only.
+    Explore,
+}
+
+impl RunMode {
+    /// Every mode.
+    pub const ALL: [RunMode; 3] = [RunMode::Plan, RunMode::Act, RunMode::Explore];
+
+    /// The stored spelling.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RunMode::Plan => "plan",
+            RunMode::Act => "act",
+            RunMode::Explore => "explore",
+        }
+    }
+
+    /// Parse a stored spelling, strictly.
+    pub fn parse(s: &str) -> Result<RunMode> {
+        match s {
+            "plan" => Ok(RunMode::Plan),
+            "act" => Ok(RunMode::Act),
+            "explore" => Ok(RunMode::Explore),
+            other => Err(Error::invalid(format!(
+                "unknown run mode `{other}`; expected `plan`, `act` or `explore`"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for RunMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// Identifies a run: the UUID primary key of its `_fd_runs` row (§9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -273,7 +334,11 @@ impl Run {
         self.state = match state.conclusion() {
             None => RunState::Running,
             Some(Conclusion::Aborted) => RunState::Aborted,
-            Some(Conclusion::Answered { .. } | Conclusion::MaxSteps) => RunState::Done,
+            // A budget that ran out concluded the run: the transcript is intact
+            // and the limit was the admin's, so it is not a failure.
+            Some(
+                Conclusion::Answered { .. } | Conclusion::MaxSteps | Conclusion::OverBudget { .. },
+            ) => RunState::Done,
         };
         self.updated_at = Utc::now();
     }
@@ -291,6 +356,58 @@ impl Run {
     /// Set the description, returning `self` for chaining.
     pub fn description(mut self, description: impl Into<String>) -> Run {
         self.description = description.into();
+        self
+    }
+
+    /// The run's mode. Strict, like the context: an unreadable mode is an
+    /// error rather than `act`, which would hand a read-only run its edit tools.
+    pub fn mode(&self) -> Result<RunMode> {
+        match self.attributes.get(ATTR_MODE) {
+            None | Some(Json::Null) => Ok(RunMode::Act),
+            Some(Json::String(s)) => {
+                RunMode::parse(s).map_err(|e| Error::invalid(format!("run {}: {e}", self.id)))
+            }
+            Some(other) => Err(Error::invalid(format!(
+                "run {}: its `{ATTR_MODE}` should be a string, got {other}",
+                self.id
+            ))),
+        }
+    }
+
+    /// The role whose model answers this run's steps.
+    pub fn role(&self) -> Result<ModelRole> {
+        match self.attributes.get(ATTR_ROLE) {
+            None | Some(Json::Null) => Ok(ModelRole::Executor),
+            Some(Json::String(s)) => {
+                ModelRole::parse(s).map_err(|e| Error::invalid(format!("run {}: {e}", self.id)))
+            }
+            Some(other) => Err(Error::invalid(format!(
+                "run {}: its `{ATTR_ROLE}` should be a string, got {other}",
+                self.id
+            ))),
+        }
+    }
+
+    /// Set the mode, returning `self` for chaining. `act` is stored as absent.
+    pub fn with_mode(mut self, mode: RunMode) -> Run {
+        if mode == RunMode::Act {
+            self.attributes.remove(ATTR_MODE);
+        } else {
+            self.attributes
+                .insert(ATTR_MODE.to_owned(), mode.as_str().into());
+        }
+        self
+    }
+
+    /// Set the role, returning `self` for chaining. The executor is stored as
+    /// absent.
+    pub fn with_role(mut self, role: ModelRole) -> Run {
+        if role == ModelRole::Executor {
+            self.attributes.remove(ATTR_ROLE);
+        } else {
+            self.attributes
+                .insert(ATTR_ROLE.to_owned(), role.as_str().into());
+        }
         self
     }
 }
@@ -359,6 +476,28 @@ mod tests {
         run.context = Json::String("not a loop".to_owned());
         let err = run.agent_loop().unwrap_err();
         assert!(err.to_string().contains("unreadable"), "{err}");
+    }
+
+    #[test]
+    fn a_run_carries_its_mode_and_role_as_sparse_attributes() {
+        let run = Run::new("a", &RunCaller::system(), &AgentLoop::new(20));
+        assert_eq!(run.mode().unwrap(), RunMode::Act);
+        assert_eq!(run.role().unwrap(), ModelRole::Executor);
+        assert!(run.attributes.is_empty());
+
+        let run = run.with_mode(RunMode::Plan).with_role(ModelRole::Strong);
+        assert_eq!(run.mode().unwrap(), RunMode::Plan);
+        assert_eq!(run.role().unwrap(), ModelRole::Strong);
+        assert_eq!(run.attributes[ATTR_MODE], "plan");
+
+        let mut broken = run.clone();
+        broken
+            .attributes
+            .insert(ATTR_MODE.to_owned(), "dream".into());
+        assert!(broken.mode().is_err());
+        for mode in RunMode::ALL {
+            assert_eq!(RunMode::parse(mode.as_str()).unwrap(), mode);
+        }
     }
 
     #[test]

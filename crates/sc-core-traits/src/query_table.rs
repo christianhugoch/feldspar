@@ -19,8 +19,8 @@
 //!   a ceiling the `limit` argument is clamped to rather than a default it can
 //!   raise. An agent cannot widen its own grant by asking nicely.
 
-use sc_agent::{AgentTrait, TraitCheck, TraitContext};
-use sc_catalog::{Catalog, Table};
+use sc_agent::{AgentTrait, ToolsContext, TraitCheck, TraitContext};
+use sc_catalog::Table;
 use sc_error::{Error, Result};
 use sc_llm::ToolSpec;
 use sc_query::{Expr, OrderBy};
@@ -84,7 +84,8 @@ impl AgentTrait for QueryTable {
         Ok(())
     }
 
-    fn tools(&self, catalog: &Catalog, config: &Attrs) -> Vec<ToolSpec> {
+    fn tools(&self, cx: &ToolsContext<'_>, config: &Attrs) -> Vec<ToolSpec> {
+        let catalog = cx.catalog;
         let configured = config_str(config, CFG_TABLE);
         let name = tool_name(&configured);
         // The table is gone, or the configuration never validated. Keep the tool

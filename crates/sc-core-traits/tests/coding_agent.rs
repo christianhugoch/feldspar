@@ -128,7 +128,7 @@ async fn an_agent_greps_edits_builds_reads_the_error_it_caused_and_fixes_it() ->
         &env.catalog,
         &env.registry,
         &agent,
-        provider.clone(),
+        sc_llm::ConnectedModel::unconfigured(provider.clone()),
         RunCaller::system(),
     );
     let (run, conclusion) = runner.start("add a done field to the to-do type").await?;

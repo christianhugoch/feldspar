@@ -66,7 +66,12 @@ struct Scripted(Arc<FakeProvider>);
 
 #[async_trait]
 impl ProviderConnector for Scripted {
-    async fn connect(&self, _catalog: &Catalog, _agent: &Agent) -> Result<ConnectedModel> {
+    async fn connect(
+        &self,
+        _catalog: &Catalog,
+        _agent: &Agent,
+        _role: sc_agent::ModelRole,
+    ) -> Result<ConnectedModel> {
         Ok(ConnectedModel::unconfigured(
             Arc::clone(&self.0) as Arc<dyn LlmProvider>
         ))
@@ -80,7 +85,12 @@ struct Unreachable;
 
 #[async_trait]
 impl ProviderConnector for Unreachable {
-    async fn connect(&self, _catalog: &Catalog, _agent: &Agent) -> Result<ConnectedModel> {
+    async fn connect(
+        &self,
+        _catalog: &Catalog,
+        _agent: &Agent,
+        _role: sc_agent::ModelRole,
+    ) -> Result<ConnectedModel> {
         Err(sc_error::Error::msg("401 invalid x-api-key"))
     }
 }

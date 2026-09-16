@@ -771,3 +771,38 @@ fn which_npm() -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
+
+#[tokio::test]
+async fn plan_and_explore_runs_are_offered_only_the_read_only_tools() -> Result<()> {
+    let env = Env::new().await?;
+    env.with_file_store("code", None).await?;
+    let cfg = at("code", "");
+    let trait_ = env.registry.require("coding")?.clone();
+
+    let capabilities = sc_llm::ModelCapabilities::built_in("", "");
+    let names = |mode| {
+        trait_
+            .tools(
+                &sc_agent::ToolsContext::new(&env.catalog, mode, &capabilities),
+                &cfg,
+            )
+            .into_iter()
+            .map(|t| t.name)
+            .collect::<Vec<_>>()
+    };
+    // `act` offers every granted tool.
+    assert_eq!(names(sc_agent::RunMode::Act), offered(&env, &cfg));
+    assert!(names(sc_agent::RunMode::Act).contains(&tool("edit_file", &cfg)));
+    for mode in [sc_agent::RunMode::Plan, sc_agent::RunMode::Explore] {
+        assert_eq!(
+            names(mode),
+            vec![
+                tool("read_file", &cfg),
+                tool("list_files", &cfg),
+                tool("search_files", &cfg)
+            ],
+            "{mode}"
+        );
+    }
+    Ok(())
+}

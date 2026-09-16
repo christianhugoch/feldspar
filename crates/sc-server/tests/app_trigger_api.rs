@@ -216,7 +216,12 @@ struct Scripted;
 
 #[async_trait]
 impl ProviderConnector for Scripted {
-    async fn connect(&self, _catalog: &Catalog, _agent: &Agent) -> Result<ConnectedModel> {
+    async fn connect(
+        &self,
+        _catalog: &Catalog,
+        _agent: &Agent,
+        _role: sc_agent::ModelRole,
+    ) -> Result<ConnectedModel> {
         Ok(ConnectedModel::unconfigured(
             Arc::new(FakeProvider::new([Reply::says(AGENT_ANSWER)])) as Arc<dyn LlmProvider>,
         ))

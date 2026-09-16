@@ -93,10 +93,9 @@
 //!   used, so the parameters are decided by the model that can see the
 //!   conversation and a refusal reaches the model that can fix it.
 
-use sc_agent::{AgentTrait, TraitCheck, TraitContext};
+use sc_agent::{AgentTrait, ToolsContext, TraitCheck, TraitContext};
 use sc_api::mcp::{Areas, ToolContext, ToolSet};
 use sc_api::schema_edit::{self, Grants};
-use sc_catalog::Catalog;
 use sc_error::Result;
 use sc_llm::ToolSpec;
 use sc_types::{Attrs, BasicType, FormField};
@@ -213,8 +212,8 @@ impl AgentTrait for AdminCopilot {
     /// The schema's two tools always, and each other half's only where its area
     /// checkbox is on — which is [`ToolSet::specs`]'s rule, not one this trait
     /// applies on top of it.
-    fn tools(&self, catalog: &Catalog, config: &Attrs) -> Vec<ToolSpec> {
-        tool_set(config).specs(catalog)
+    fn tools(&self, cx: &ToolsContext<'_>, config: &Attrs) -> Vec<ToolSpec> {
+        tool_set(config).specs(cx.catalog)
     }
 
     async fn call(

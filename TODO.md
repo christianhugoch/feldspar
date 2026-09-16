@@ -744,31 +744,34 @@ default.
 
 ## Phase 2 — The loop: roles, modes, state, budgets (`sc-agent`)
 
-- [ ] 2.1 Model roles on `Agent` (`strong`, `cheap`, each an optional provider+model pair
+- [x] 2.1 Model roles on `Agent` (`strong`, `cheap`, each an optional provider+model pair
       naming a model row), stored as attributes. `validate_agent` resolves them as it resolves
       the agent's own model (1.7). `Runner` connects each role lazily through `connect_model`,
       and each role falls back to the agent's own model. The agent form gains the two
-      pick-lists (with 10.6).
-- [ ] 2.2 Run modes: `mode` on the run (attribute), passed to traits. Replace
+      pick-lists (with 10.6). *(The pick-lists are left to 10.6. `ProviderConnector::connect`
+      takes the role; model and provider deletes are refused while a role names them.)*
+- [x] 2.2 Run modes: `mode` on the run (attribute), passed to traits. Replace
       `AgentTrait::tools(catalog, config)` with `tools(&ToolsContext, config)`, where the
       context carries the catalog, mode and model capabilities. Update every built-in trait
       and the collision check. The collision check compares the union over all modes.
-- [ ] 2.3 Per-run trait state: `TraitContext::state()` is a JSON value scoped to one enabled
+      *(`coding` offers only its read-only tools outside `act`.)*
+- [x] 2.3 Per-run trait state: `TraitContext::state()` is a JSON value scoped to one enabled
       trait, persisted in the `AgentLoop` with the run and restored on resume. Test: a
       value written in step 1 survives a save, a load and step 2.
-- [ ] 2.4 Self-delegation: `DelegateRequest` gains `mode` and `role`. The same agent is allowed
+- [x] 2.4 Self-delegation: `DelegateRequest` gains `mode` and `role`. The same agent is allowed
       once, in a different mode, at depth ≤ 1, and every other cycle is still refused. The
       child's ledger rolls up into the parent's. Aborting the parent aborts the child.
-      Resuming (`drive` of an existing child run) is exposed to traits.
-- [ ] 2.5 The ledger: per-step role, usage, cost, elapsed time, signals and compaction flag in
+      Resuming (`drive` of an existing child run) is exposed to traits. *(`DelegateRequest::resume`;
+      aborting is `abort_run`, which the chat socket calls on stop and disconnect.)*
+- [x] 2.5 The ledger: per-step role, usage, cost, elapsed time, signals and compaction flag in
       the run's state, with per-role totals. Log the closing line with cost and the cache-hit
       ratio.
-- [ ] 2.6 Budgets: `max_cost` (refused on save when the agent's model or any role's model
+- [x] 2.6 Budgets: `max_cost` (refused on save when the agent's model or any role's model
       has no price), `max_wall_seconds` and
       `context_budget` attributes. Add `Conclusion::OverBudget { budget }`, with storage
       spelling, the chat event and a `RunState` mapping. Tests with `FakeProvider` for each
-      budget.
-- [ ] 2.7 `parallel_tool_calls` is sent as `false` unless the `parallel_tool_calls` agent
+      budget. *(Only an explicit `context_budget` ends a run until compaction lands in Phase 4.)*
+- [x] 2.7 `parallel_tool_calls` is sent as `false` unless the `parallel_tool_calls` agent
       attribute is set. Test that the request carries it.
 
 ## Phase 3 — Loop control (`sc-agent`)

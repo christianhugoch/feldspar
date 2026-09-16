@@ -24,11 +24,10 @@
 //!   the agent produced by pressing Build, which is also where they get to look
 //!   at the diff first.
 
-use sc_agent::{AgentTrait, TraitCheck, TraitContext};
+use sc_agent::{AgentTrait, ToolsContext, TraitCheck, TraitContext};
 use sc_app::{
     BuildReport, app_source_from_config, build_diagnostics, load_application_by_subdomain,
 };
-use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use sc_llm::ToolSpec;
 use sc_types::{Attrs, BasicType, FormField};
@@ -84,7 +83,7 @@ impl AgentTrait for BuildApplication {
         Ok(())
     }
 
-    fn tools(&self, _catalog: &Catalog, config: &Attrs) -> Vec<ToolSpec> {
+    fn tools(&self, _cx: &ToolsContext<'_>, config: &Attrs) -> Vec<ToolSpec> {
         let configured = config_str(config, CFG_APPLICATION);
         vec![ToolSpec::new(
             tool_name(&configured),

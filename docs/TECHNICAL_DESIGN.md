@@ -3021,6 +3021,49 @@ its reason kept**, remaining stored, listed and editable, because editing it is 
   intact and the number that stopped it is the admin's own — but it is not an answer either, so
   it needs a name of its own rather than an empty string.
 
+**Roles, modes, per-run state, budgets** (coding agent milestone, Phase 2):
+
+- **Model roles.** An agent's own model is the **executor**. Two optional roles, `strong` and
+  `cheap`, are `{provider, model}` attributes naming `_fd_llm_models` rows, validated on save and
+  load like the agent's own pair, and falling back to it when unset (`Agent::model_for`).
+  `ProviderConnector::connect(catalog, agent, role)` connects one; `Runner::new` takes the
+  executor as a `ConnectedModel` and connects a role lazily, on first use, through
+  `Runner::with_connector` (which replaced `with_subagents`: the one connector serves roles and
+  sub-agents). A run asking for a configured role with no connector is a configuration error, not
+  a silent fallback. Deleting a model or provider is refused while any role names it.
+- **Run modes.** `RunMode` is `plan` | `act` (default) | `explore`, stored sparsely as the run's
+  `mode` attribute beside its `role`. `AgentTrait::tools(&ToolsContext, cfg)` replaced
+  `tools(catalog, cfg)`: the context carries the catalog, the mode and the answering model's
+  `ModelCapabilities`. `TraitContext` and `Turn` carry the mode too. The save-time collision check
+  compares the union of every mode's tools. `coding` offers only its read-only tools outside
+  `act`, and refuses an edit or script call in a read-only run by name.
+- **Per-run trait state.** `AgentLoop` holds one JSON value per enabled trait instance, keyed by
+  position and trait name (`trait_state_key`), reached through `TraitContext::state()`. It is
+  written with the run after the tool step and restored on resume.
+- **Self-delegation.** `DelegateRequest` gains `mode`, `role` and `resume`. A run that is not
+  itself delegated may start one child of its **own agent** in a **different mode**; the child is
+  at depth 1 and may not do it again, and every other cycle is still refused. `resume(id)` drives
+  an existing child of this run (checked by subject and `parent_run`), or starts the child under
+  that id so a trait can record it first. The `Delegator` a tool sees is a per-call wrapper around
+  the runner that knows the parent run's mode and where to roll the child's ledger up.
+  `abort_run` stops a run and every live run below it, which the chat socket uses on stop and
+  disconnect.
+- **The ledger.** Each model call records its role (the role the run asked for, even when an unset
+  role fell back to the executor's model), model name, usage, cost (`None` when unpriced), elapsed
+  time, and the signal and compaction slots Phases 3 and 4 fill. Children's per-role totals are
+  rolled up as one entry per child run. Any unknown term makes a total cost unknown. The run's
+  closing log line reports cost and the cache-hit ratio.
+- **Budgets.** `max_cost`, `max_wall_seconds` and `context_budget` are attributes, copied into
+  the loop state when a run is created (as `max_steps` is), and checked before each model call.
+  One that runs out ends the run as `Conclusion::OverBudget { budget: cost | wall_time | context }`,
+  stored as `done`, sent on the chat's `done` event as `conclusion`/`budget`, and reported by
+  `run_agent` as `over_budget`. Wall time is **working** time (model calls and tools), so a chat
+  left overnight is not over budget. Only an explicit `context_budget` ends a run for now; the
+  working-budget default arrives with compaction (Phase 4). `max_cost` is refused on save unless
+  every model the agent may call has input and output prices.
+- **Parallel tool calls** are sent as `false` unless the agent's `parallel_tool_calls` attribute
+  is set.
+
 ### 11.3 The built-in traits (`sc-core-traits`)
 
 Deliberately few, and split by what they touch. Each names its target in its configuration —
@@ -3398,7 +3441,7 @@ answer, and the child is its own run.
 
 **What was built, where it deviates** (`subagent`):
 
-- **`TraitContext` carries a `Delegator`**, put there by `Runner::with_subagents(connector)` —
+- **`TraitContext` carries a `Delegator`**, put there by `Runner::with_connector(connector)` —
   the third capability offered the way the evaluator and the dispatcher are, and for the same
   reason. A trait that names a sub-agent cannot start a run itself: it has no trait registry, no
   provider connector and no idea how deep the chain already is, and all three live on the runner

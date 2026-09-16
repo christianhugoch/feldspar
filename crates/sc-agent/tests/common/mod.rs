@@ -8,13 +8,14 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use sc_agent::{
-    AgentRegistry, AgentTrait, TraitCheck, TraitContext, bootstrap_agents, bootstrap_runs,
+    AgentRegistry, AgentTrait, ToolsContext, TraitCheck, TraitContext, bootstrap_agents,
+    bootstrap_runs,
 };
 use sc_catalog::Catalog;
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_error::{Error, Result};
-use sc_llm::{ToolSpec, bootstrap_llm_providers};
+use sc_llm::{ConnectedModel, LlmProvider, ToolSpec, bootstrap_llm_providers};
 use sc_test_harness::TestDb;
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Value as Json, json};
@@ -50,6 +51,11 @@ pub async fn catalog(db: &TestDb) -> Result<Catalog> {
     )
     .await?;
     Ok(catalog)
+}
+
+/// A scripted provider as the connected executor a `Runner` takes.
+pub fn model<P: LlmProvider + 'static>(provider: Arc<P>) -> ConnectedModel {
+    ConnectedModel::unconfigured(provider as Arc<dyn LlmProvider>)
 }
 
 /// A trait that counts something in a named collection.
@@ -116,7 +122,7 @@ impl AgentTrait for Counter {
         Ok(())
     }
 
-    fn tools(&self, _catalog: &Catalog, config: &Attrs) -> Vec<ToolSpec> {
+    fn tools(&self, _cx: &ToolsContext<'_>, config: &Attrs) -> Vec<ToolSpec> {
         vec![ToolSpec::new(
             format!("count_{}", collection(config)),
             format!("Count the {} ", collection(config)),
@@ -171,7 +177,7 @@ impl AgentTrait for Preamble {
         vec![FormField::new("text", BasicType::Text).required()]
     }
 
-    fn tools(&self, _catalog: &Catalog, _config: &Attrs) -> Vec<ToolSpec> {
+    fn tools(&self, _cx: &ToolsContext<'_>, _config: &Attrs) -> Vec<ToolSpec> {
         Vec::new()
     }
 
@@ -198,10 +204,96 @@ impl AgentTrait for Preamble {
     }
 }
 
-/// A registry with both test traits in it.
+/// A trait that uses the loop's Phase 2 seams: per-run state (`tally`), a
+/// tool offered only in `plan` mode (`note_plan`), a tool that takes wall time
+/// (`nap`), and a session of its own agent in another mode (`start_session`).
+pub struct Tally;
+
+#[async_trait::async_trait]
+impl AgentTrait for Tally {
+    fn name(&self) -> &str {
+        "tally"
+    }
+
+    fn description(&self) -> &str {
+        "Keep a count in the run's state"
+    }
+
+    fn config_spec(&self) -> Vec<FormField> {
+        Vec::new()
+    }
+
+    fn tools(&self, cx: &ToolsContext<'_>, _config: &Attrs) -> Vec<ToolSpec> {
+        let object = json!({"type": "object", "properties": {}});
+        let mut tools = vec![
+            ToolSpec::new("tally", "Add one to the count", object.clone()),
+            ToolSpec::new("nap", "Sleep for `ms` milliseconds", object.clone()),
+            ToolSpec::new(
+                "start_session",
+                "Start a session of this agent",
+                object.clone(),
+            ),
+        ];
+        if cx.mode == sc_agent::RunMode::Plan {
+            tools.push(ToolSpec::new("note_plan", "Write down the plan", object));
+        }
+        tools
+    }
+
+    async fn call(
+        &self,
+        _config: &Attrs,
+        tool: &str,
+        args: &Json,
+        ctx: &mut TraitContext<'_>,
+    ) -> Result<Json> {
+        match tool {
+            "tally" => {
+                let state = ctx.state();
+                let count = state.get("count").and_then(Json::as_u64).unwrap_or(0) + 1;
+                *state = json!({"count": count});
+                Ok(json!(count))
+            }
+            "note_plan" => Ok(json!("noted")),
+            "nap" => {
+                let ms = args.get("ms").and_then(Json::as_u64).unwrap_or(0);
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                Ok(json!("rested"))
+            }
+            "start_session" => {
+                let mode = sc_agent::RunMode::parse(
+                    args.get("mode").and_then(Json::as_str).unwrap_or("act"),
+                )?;
+                let resume = args
+                    .get("resume")
+                    .and_then(Json::as_str)
+                    .map(|id| uuid::Uuid::parse_str(id).map(sc_agent::RunId))
+                    .transpose()
+                    .map_err(|e| Error::invalid(e.to_string()))?;
+                let agent = ctx.agent.to_owned();
+                let parent = ctx.run;
+                let mut request =
+                    sc_agent::DelegateRequest::new(&agent, "do the feature", parent).mode(mode);
+                if let Some(id) = resume {
+                    request = request.resume(id);
+                }
+                let delegated = ctx.require_delegate()?.delegate(request).await?;
+                Ok(json!({
+                    "run": delegated.run.to_string(),
+                    "answer": delegated.answer(),
+                    "steps": delegated.steps,
+                }))
+            }
+            other => Err(Error::invalid(format!("no tool `{other}`"))),
+        }
+    }
+}
+
+/// A registry with the test traits in it.
 pub fn registry(counter: Arc<Counter>) -> Result<AgentRegistry> {
     let mut registry = AgentRegistry::new();
     registry.register(counter)?;
     registry.register(Arc::new(Preamble))?;
+    registry.register(Arc::new(Tally))?;
     Ok(registry)
 }

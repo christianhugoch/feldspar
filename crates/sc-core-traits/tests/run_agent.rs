@@ -92,7 +92,12 @@ impl Scripted {
 
 #[async_trait::async_trait]
 impl ProviderConnector for Scripted {
-    async fn connect(&self, _catalog: &Catalog, _agent: &Agent) -> Result<ConnectedModel> {
+    async fn connect(
+        &self,
+        _catalog: &Catalog,
+        _agent: &Agent,
+        _role: sc_agent::ModelRole,
+    ) -> Result<ConnectedModel> {
         let provider = Arc::new(FakeProvider::new(self.script.clone()));
         self.made.lock().unwrap().push(Arc::clone(&provider));
         Ok(ConnectedModel::unconfigured(

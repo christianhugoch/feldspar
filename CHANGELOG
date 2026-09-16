@@ -2,6 +2,63 @@
 
 Changes in reverse chronological order.
 
+## The loop learns roles, modes, per-run state and budgets (coding agent milestone, Phase 2)
+
+Everything here is in `sc-agent` and true of every agent, not only coding ones (TODO §3, §5,
+§10). The built-in traits, `run_agent`, the chat socket and the admin handlers were updated to
+match.
+
+- **Model roles.** An agent may name a `strong` and a `cheap` model as `{provider, model}`
+  attributes (`ATTR_STRONG`, `ATTR_CHEAP`). Each falls back to the agent's own model, which is
+  the executor.
+  - `validate_agent` resolves each role like the agent's own pair, and says which role is wrong.
+  - `ProviderConnector::connect` takes a `ModelRole`.
+  - `Runner::new` takes the executor as a `ConnectedModel`, and connects roles on first use
+    through `Runner::with_connector`, which replaces `with_subagents`.
+  - Deleting a model or a provider is refused while an agent's role names it.
+  - The admin form's pick-lists come with 10.6.
+- **Run modes.** `RunMode` (`plan`, `act`, `explore`) is the run's `mode` attribute, beside its
+  `role`.
+  - `AgentTrait::tools` now takes a `ToolsContext`: the catalog, the mode and the model's
+    capabilities.
+  - `TraitContext` and `Turn` also carry the mode.
+  - Tool-name collisions are checked over every mode.
+  - `coding` offers only `read_file`, `list_files` and `search_files` outside `act`, and refuses
+    edits and scripts in a read-only run.
+  - `Runner::starting_in(mode, role)` and `Runner::new_run` create runs. The chat socket and
+    `run_agent` use them.
+- **Per-run trait state.** `TraitContext::state()` is a JSON value for one enabled trait
+  instance. It is kept in `AgentLoop` and saved and restored with the run.
+- **Self-delegation.** `DelegateRequest` gains `mode`, `role` and `resume`.
+  - A run nobody delegated may start one child run of its own agent, in a different mode.
+  - A delegated run may not do it again, and every other cycle is still refused.
+  - `resume(id)` drives an existing child run of this run, or starts the child under that id.
+  - `abort_run` aborts a run and all of its live descendants. The chat socket calls it on stop
+    and on disconnect.
+- **The ledger** (`ledger.rs`) is part of the loop state.
+  - Each model call records its role, model, usage, cost, elapsed time, signals and a compaction
+    flag.
+  - Children's per-role totals roll up into their parent's.
+  - An unknown price makes a total unknown rather than zero.
+  - The run's closing log line reports the cost and the cache-hit ratio.
+- **Budgets.** `max_cost`, `max_wall_seconds` and `context_budget` are agent attributes, checked
+  before each model call. One that runs out ends the run as `Conclusion::OverBudget { budget }`.
+  - The run is stored as `done`, and `run_agent` reports it as `over_budget`.
+  - The chat's `done` event gains `conclusion` and `budget`.
+  - Wall time counts only working time: model calls and tools.
+  - `max_cost` is refused on save unless every model the agent may call has input and output
+    prices.
+  - Only an explicit `context_budget` ends a run until compaction exists (Phase 4).
+- **Parallel tool calls** are requested as `false` unless the `parallel_tool_calls` attribute is
+  set.
+- **Testing.** `testing::FakeModels` is a connector that hands out scripted providers by role.
+- **Tests.** New tests are in `sc-agent/tests/roles_modes_budgets.rs`. They cover role validation,
+  the price rule, trait state across a reload, mode-dependent tools, the parallel flag, a
+  strong-role run and its ledger, a planner session with both refusals, resuming a child,
+  aborting a run tree, and each budget. There are also unit tests for the ledger, the budgets,
+  modes and roles, a `coding` mode test, a chat `done` event test, and an admin API test for a
+  model named only by a role.
+
 ## LLM providers and models are two tables (coding agent milestone, Phase 1)
 
 A provider now holds only what is entered once per key: the backend, the API key and the base

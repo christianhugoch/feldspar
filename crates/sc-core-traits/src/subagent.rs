@@ -54,9 +54,9 @@
 //! as an answer will report to the person that there was nothing to find.
 
 use sc_agent::{
-    AgentTrait, DEFAULT_MAX_DEPTH, DelegateRequest, TraitCheck, TraitContext, load_agent_by_name,
+    AgentTrait, DEFAULT_MAX_DEPTH, DelegateRequest, ToolsContext, TraitCheck, TraitContext,
+    load_agent_by_name,
 };
-use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use sc_llm::ToolSpec;
 use sc_types::{Attrs, BasicType, FormField};
@@ -191,8 +191,7 @@ impl AgentTrait for Subagent {
     /// when to use it. That is the same bargain
     /// [`RunTrigger`](crate::RunTrigger) makes, and it is why `when_to_use` is a
     /// form field rather than something derived.
-    fn tools(&self, catalog: &Catalog, config: &Attrs) -> Vec<ToolSpec> {
-        let _ = catalog;
+    fn tools(&self, _cx: &ToolsContext<'_>, config: &Attrs) -> Vec<ToolSpec> {
         let agent = config_str(config, CFG_AGENT);
         let when = config_str(config, CFG_WHEN_TO_USE);
         let mut description = format!(
@@ -273,6 +272,12 @@ impl AgentTrait for Subagent {
                 sc_agent::Conclusion::MaxSteps => format!(
                     "`{agent}` used its whole budget of {} steps without reaching a \
                      conclusion. Its transcript is run {}. Ask it again for a \
+                     smaller piece of the task, or do the work here.",
+                    outcome.steps, outcome.run
+                ),
+                sc_agent::Conclusion::OverBudget { budget } => format!(
+                    "`{agent}` ran out of its {budget} budget after {} steps without \
+                     reaching a conclusion. Its transcript is run {}. Ask it for a \
                      smaller piece of the task, or do the work here.",
                     outcome.steps, outcome.run
                 ),

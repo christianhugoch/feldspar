@@ -381,7 +381,13 @@ async fn an_agent_answers_a_question_about_its_table_through_a_whole_run() -> Re
         Reply::says("Your longest book is Ilium, at 576 pages."),
     ]));
     let caller = as_user("ada@example.com");
-    let runner = Runner::new(catalog, registry, &agent, provider.clone(), caller);
+    let runner = Runner::new(
+        catalog,
+        registry,
+        &agent,
+        sc_llm::ConnectedModel::unconfigured(provider.clone()),
+        caller,
+    );
 
     let (run, conclusion) = runner.start("what is my longest book?").await?;
     assert_eq!(

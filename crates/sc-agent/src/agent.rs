@@ -50,6 +50,113 @@ pub const ATTR_TEMPERATURE: &str = "temperature";
 pub const ATTR_MAX_TOKENS: &str = "max_tokens";
 /// The attribute capping how many times one run may go round the loop.
 pub const ATTR_MAX_STEPS: &str = "max_steps";
+/// The attribute naming the **strong** role's model: `{"provider", "model"}`.
+pub const ATTR_STRONG: &str = "strong";
+/// The attribute naming the **cheap** role's model: `{"provider", "model"}`.
+pub const ATTR_CHEAP: &str = "cheap";
+/// The attribute capping what one run may cost, in the models' priced currency
+/// (TODO §10). Refused on save unless every model the agent may call has a price.
+pub const ATTR_MAX_COST: &str = "max_cost";
+/// The attribute capping how long one run may spend working, in seconds.
+pub const ATTR_MAX_WALL_SECONDS: &str = "max_wall_seconds";
+/// The attribute capping the context one request may carry, in tokens.
+pub const ATTR_CONTEXT_BUDGET: &str = "context_budget";
+/// The attribute allowing several tool calls in one model turn. Absent is off
+/// (R§12): sequential calls are easier to fingerprint.
+pub const ATTR_PARALLEL_TOOL_CALLS: &str = "parallel_tool_calls";
+
+/// Which of an agent's models answers a step (TODO §3).
+///
+/// The agent's own model is the **executor**. The two roles are optional and
+/// fall back to it, so an agent nobody has tuned behaves as it always did.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRole {
+    /// The agent's own model: does the work.
+    #[default]
+    Executor,
+    /// Plans, re-plans, reviews diffs and takes single-step escalations.
+    Strong,
+    /// Summarises, writes commit messages and explores.
+    Cheap,
+}
+
+impl ModelRole {
+    /// Every role, executor first.
+    pub const ALL: [ModelRole; 3] = [ModelRole::Executor, ModelRole::Strong, ModelRole::Cheap];
+
+    /// The stored spelling.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ModelRole::Executor => "executor",
+            ModelRole::Strong => "strong",
+            ModelRole::Cheap => "cheap",
+        }
+    }
+
+    /// Parse a stored spelling, strictly.
+    pub fn parse(s: &str) -> sc_error::Result<ModelRole> {
+        match s {
+            "executor" => Ok(ModelRole::Executor),
+            "strong" => Ok(ModelRole::Strong),
+            "cheap" => Ok(ModelRole::Cheap),
+            other => Err(sc_error::Error::invalid(format!(
+                "unknown model role `{other}`; expected `executor`, `strong` or `cheap`"
+            ))),
+        }
+    }
+
+    /// The attribute a role's model is stored under, or `None` for the executor,
+    /// whose model is the agent's own columns.
+    pub fn attribute(&self) -> Option<&'static str> {
+        match self {
+            ModelRole::Executor => None,
+            ModelRole::Strong => Some(ATTR_STRONG),
+            ModelRole::Cheap => Some(ATTR_CHEAP),
+        }
+    }
+}
+
+impl std::fmt::Display for ModelRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A (provider, model) pair naming an `_fd_llm_models` row by name. `model`
+/// empty or absent means the provider's default model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRef {
+    /// The `_fd_llm_providers` name.
+    pub provider: String,
+    /// The model row's name under that provider, or `None` for its default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl ModelRef {
+    /// A pair naming `model` under `provider`.
+    pub fn new(provider: impl Into<String>, model: Option<&str>) -> ModelRef {
+        ModelRef {
+            provider: provider.into(),
+            model: model
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(str::to_owned),
+        }
+    }
+}
+
+impl std::fmt::Display for ModelRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.model {
+            Some(model) => write!(f, "{}/{model}", self.provider),
+            None => write!(f, "{} (default model)", self.provider),
+        }
+    }
+}
 
 /// How many model calls one run makes before the loop stops it (§11.2).
 ///
@@ -131,7 +238,9 @@ pub struct Agent {
     /// the access of is not public.
     pub min_role: Option<u8>,
     /// Sparse per-agent values (§9): [`ATTR_TEMPERATURE`], [`ATTR_MAX_TOKENS`],
-    /// [`ATTR_MAX_STEPS`].
+    /// [`ATTR_MAX_STEPS`], the roles ([`ATTR_STRONG`], [`ATTR_CHEAP`]), the
+    /// budgets ([`ATTR_MAX_COST`], [`ATTR_MAX_WALL_SECONDS`],
+    /// [`ATTR_CONTEXT_BUDGET`]) and [`ATTR_PARALLEL_TOOL_CALLS`].
     pub attributes: Attrs,
 }
 
@@ -226,6 +335,98 @@ impl Agent {
             .filter(|n| *n > 0)
             .unwrap_or(DEFAULT_MAX_STEPS)
     }
+
+    /// Name the model a role uses, returning `self` for chaining.
+    pub fn role(mut self, role: ModelRole, model: ModelRef) -> Agent {
+        match role.attribute() {
+            Some(key) => {
+                self.attributes.insert(
+                    key.to_owned(),
+                    serde_json::to_value(model).unwrap_or(Json::Null),
+                );
+            }
+            None => {
+                self.provider = model.provider;
+                self.model = model.model;
+            }
+        }
+        self
+    }
+
+    /// The model `role` is configured with, **without** falling back: `None` for
+    /// a role the admin left unset. The executor is always set.
+    ///
+    /// A stored value of the wrong shape is an error rather than an unset role:
+    /// an agent whose strong model silently became its executor would plan with
+    /// the cheap model and nobody would see why.
+    pub fn configured_role(&self, role: ModelRole) -> sc_error::Result<Option<ModelRef>> {
+        let Some(key) = role.attribute() else {
+            return Ok(Some(ModelRef::new(&self.provider, self.model.as_deref())));
+        };
+        match self.attributes.get(key) {
+            None | Some(Json::Null) => Ok(None),
+            Some(value) => {
+                let parsed: ModelRef = serde_json::from_value(value.clone()).map_err(|e| {
+                    sc_error::Error::invalid(format!(
+                        "the `{key}` role should be {{\"provider\", \"model\"}}: {e}"
+                    ))
+                })?;
+                if parsed.provider.trim().is_empty() {
+                    // A pick-list left on "same as the agent" saves an empty
+                    // provider; that is an unset role, not a broken one.
+                    return Ok(None);
+                }
+                Ok(Some(ModelRef::new(
+                    parsed.provider.trim(),
+                    parsed.model.as_deref(),
+                )))
+            }
+        }
+    }
+
+    /// The model `role` uses: its own when set, the agent's otherwise.
+    pub fn model_for(&self, role: ModelRole) -> ModelRef {
+        self.configured_role(role)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| ModelRef::new(&self.provider, self.model.as_deref()))
+    }
+
+    /// The cost budget per run, if one is set.
+    pub fn max_cost(&self) -> Option<f64> {
+        self.attributes
+            .get(ATTR_MAX_COST)
+            .and_then(Json::as_f64)
+            .filter(|c| c.is_finite() && *c > 0.0)
+    }
+
+    /// The wall-clock budget per run, in seconds, if one is set.
+    pub fn max_wall_seconds(&self) -> Option<u64> {
+        self.attributes
+            .get(ATTR_MAX_WALL_SECONDS)
+            .and_then(Json::as_u64)
+            .filter(|s| *s > 0)
+    }
+
+    /// The context budget in tokens, if one is set explicitly.
+    ///
+    /// Unset means the executor model's working budget (TODO §9), which the
+    /// driver knows and this record does not.
+    pub fn context_budget(&self) -> Option<u64> {
+        self.attributes
+            .get(ATTR_CONTEXT_BUDGET)
+            .and_then(Json::as_u64)
+            .filter(|t| *t > 0)
+    }
+
+    /// Whether the model may make several tool calls in one turn. Off unless the
+    /// agent says so (R§12).
+    pub fn parallel_tool_calls(&self) -> bool {
+        self.attributes
+            .get(ATTR_PARALLEL_TOOL_CALLS)
+            .and_then(Json::as_bool)
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
@@ -290,6 +491,61 @@ mod tests {
         );
         let back: EnabledTrait = serde_json::from_value(text).unwrap();
         assert_eq!(back, enabled);
+    }
+
+    #[test]
+    fn a_role_falls_back_to_the_agents_own_model() {
+        let a = Agent::new("a", "main").model("small");
+        assert_eq!(a.configured_role(ModelRole::Strong).unwrap(), None);
+        assert_eq!(
+            a.model_for(ModelRole::Strong),
+            ModelRef::new("main", Some("small"))
+        );
+
+        let a = a.role(ModelRole::Strong, ModelRef::new("other", Some("big")));
+        assert_eq!(
+            a.attributes[ATTR_STRONG],
+            json!({"provider": "other", "model": "big"})
+        );
+        assert_eq!(
+            a.model_for(ModelRole::Strong),
+            ModelRef::new("other", Some("big"))
+        );
+        assert_eq!(
+            a.model_for(ModelRole::Cheap),
+            ModelRef::new("main", Some("small"))
+        );
+        assert_eq!(
+            a.model_for(ModelRole::Executor),
+            ModelRef::new("main", Some("small"))
+        );
+
+        // An empty pick-list is an unset role; a wrong shape is an error.
+        let a = a.attribute(ATTR_CHEAP, json!({"provider": ""}));
+        assert_eq!(a.configured_role(ModelRole::Cheap).unwrap(), None);
+        let a = a.attribute(ATTR_CHEAP, json!("main"));
+        assert!(a.configured_role(ModelRole::Cheap).is_err());
+    }
+
+    #[test]
+    fn budgets_and_parallel_calls_read_sparsely() {
+        let a = Agent::new("a", "p");
+        assert_eq!(a.max_cost(), None);
+        assert_eq!(a.max_wall_seconds(), None);
+        assert_eq!(a.context_budget(), None);
+        assert!(!a.parallel_tool_calls());
+        let a = a
+            .attribute(ATTR_MAX_COST, 0.5)
+            .attribute(ATTR_MAX_WALL_SECONDS, 60)
+            .attribute(ATTR_CONTEXT_BUDGET, 8000)
+            .attribute(ATTR_PARALLEL_TOOL_CALLS, true);
+        assert_eq!(a.max_cost(), Some(0.5));
+        assert_eq!(a.max_wall_seconds(), Some(60));
+        assert_eq!(a.context_budget(), Some(8000));
+        assert!(a.parallel_tool_calls());
+        for role in ModelRole::ALL {
+            assert_eq!(ModelRole::parse(role.as_str()).unwrap(), role);
+        }
     }
 
     #[test]

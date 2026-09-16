@@ -20,8 +20,8 @@
 //! raises its own update event carrying its own row, exactly as the action of
 //! the same name does.
 
-use sc_agent::{AgentTrait, TraitCheck, TraitContext};
-use sc_catalog::{Catalog, Table};
+use sc_agent::{AgentTrait, ToolsContext, TraitCheck, TraitContext};
+use sc_catalog::Table;
 use sc_error::{Error, Result};
 use sc_llm::ToolSpec;
 use sc_types::{Attrs, BasicType, FormField};
@@ -113,7 +113,8 @@ impl AgentTrait for UpdateRows {
         Ok(())
     }
 
-    fn tools(&self, catalog: &Catalog, config: &Attrs) -> Vec<ToolSpec> {
+    fn tools(&self, cx: &ToolsContext<'_>, config: &Attrs) -> Vec<ToolSpec> {
+        let catalog = cx.catalog;
         let configured = config_str(config, CFG_TABLE);
         let name = tool_name(&configured);
         let Ok(table) = configured_table(catalog, config) else {

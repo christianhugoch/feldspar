@@ -63,7 +63,7 @@ sc-log = { workspace = true, features = ["capture"] }
 sc-db.workspace = true
 sc-db-postgres.workspace = true
 sc-test-harness.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true

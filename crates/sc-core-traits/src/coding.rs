@@ -49,8 +49,7 @@ mod script;
 mod search;
 mod write;
 
-use sc_agent::{AgentTrait, TraitCheck, TraitContext};
-use sc_catalog::Catalog;
+use sc_agent::{AgentTrait, RunMode, ToolsContext, TraitCheck, TraitContext};
 use sc_error::{Error, Result};
 use sc_files::DEFAULT_MAX_RESULTS;
 use sc_llm::ToolSpec;
@@ -169,13 +168,18 @@ impl AgentTrait for Coding {
         Ok(())
     }
 
-    fn tools(&self, _catalog: &Catalog, config: &Attrs) -> Vec<ToolSpec> {
+    /// The read-only tools in every mode; the edit and script tools only in
+    /// `act`, because `plan` and `explore` runs are read-only (TODO §5).
+    fn tools(&self, cx: &ToolsContext<'_>, config: &Attrs) -> Vec<ToolSpec> {
         let scope = scope_as_written(config);
         let mut tools = vec![
             read::spec(&scope, config),
             list::spec(&scope),
             search::spec(&scope, config),
         ];
+        if cx.mode != RunMode::Act {
+            return tools;
+        }
         if may(config, CFG_MAY_EDIT) {
             tools.push(write::spec(&scope));
             tools.push(edit::spec(&scope));
@@ -224,13 +228,20 @@ fn may(config: &Attrs, key: &str) -> bool {
     config.get(key).and_then(Json::as_bool).unwrap_or(false)
 }
 
-/// Refuse a tool whose grant is off, naming the setting that would allow it.
+/// Refuse a tool whose grant is off, or that the run's mode does not offer,
+/// naming what would allow it.
 ///
 /// Unreachable through the tools the model is offered — a withheld tool is not
 /// declared — and kept anyway, because a run resumed from a transcript that
 /// carried the call is the case where "the model cannot see it" stops being the
 /// enforcement.
 fn permit(config: &Attrs, key: &str, what: &str, ctx: &TraitContext<'_>) -> Result<()> {
+    if ctx.mode != RunMode::Act {
+        return Err(Error::invalid(format!(
+            "agent `{}` may not {what} in a `{}` run, which is read-only",
+            ctx.agent, ctx.mode
+        )));
+    }
     if may(config, key) {
         return Ok(());
     }

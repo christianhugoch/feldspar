@@ -47,9 +47,7 @@ use sc_action::{
     Action, ActionContext, ConfigCheck, EVENT_SCOPE, check_formula, event_formula_value,
     required_formula,
 };
-use sc_agent::{
-    AgentLoop, AgentRegistry, Conclusion, ProviderConnector, Run, RunCaller, Runner, save_run,
-};
+use sc_agent::{AgentRegistry, Conclusion, ProviderConnector, RunCaller, Runner, save_run};
 use sc_error::{Error, Result};
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Value as Json, json};
@@ -145,18 +143,17 @@ impl Action for RunAgent {
             .await
             .map_err(&named)?;
         let agent = agents.require(&name).map_err(&named)?;
-        let provider = self
+        let executor = self
             .providers
-            .connect(ctx.catalog, agent)
+            .connect(ctx.catalog, agent, sc_agent::ModelRole::Executor)
             .await
-            .map_err(&named)?
-            .provider;
+            .map_err(&named)?;
 
         let mut runner = Runner::new(
             ctx.catalog,
             &self.traits,
             agent,
-            provider,
+            executor,
             // Decision 5, at the one place a run is created: nobody is present,
             // so the run carries the trigger's authority and records no user.
             RunCaller::system(),
@@ -167,7 +164,7 @@ impl Action for RunAgent {
         // cannot be handed back down without closing an uncounted cycle — a
         // sub-agent run counts its own depth, so there is nothing here to
         // withhold.
-        .with_subagents(&self.providers);
+        .with_connector(&self.providers);
         // A tool that reads a table whose ownership formula does not translate
         // needs the engine; the dispatcher running this action has one wherever
         // the deployment does.
@@ -179,9 +176,9 @@ impl Action for RunAgent {
         // call cannot give it: a description. A run list carries no transcript,
         // so without this a triggered conversation would be a timestamp in the
         // chat panel's history.
-        let mut state = AgentLoop::new(agent.max_steps());
-        state.push_user(&prompt).map_err(&named)?;
-        let mut run = Run::new(&agent.name, runner.caller(), &state)
+        let mut run = runner
+            .new_run(&prompt)
+            .map_err(&named)?
             .description(format!("trigger `{}`", ctx.trigger));
         save_run(ctx.catalog, &run).await.map_err(&named)?;
 
@@ -237,6 +234,7 @@ fn conclusion_name(conclusion: &Conclusion) -> &'static str {
         Conclusion::Answered { .. } => "answered",
         Conclusion::MaxSteps => "max_steps",
         Conclusion::Aborted => "aborted",
+        Conclusion::OverBudget { .. } => "over_budget",
     }
 }
 
@@ -278,5 +276,11 @@ mod tests {
         );
         assert_eq!(conclusion_name(&Conclusion::MaxSteps), "max_steps");
         assert_eq!(conclusion_name(&Conclusion::Aborted), "aborted");
+        assert_eq!(
+            conclusion_name(&Conclusion::OverBudget {
+                budget: sc_agent::Budget::Cost
+            }),
+            "over_budget"
+        );
     }
 }

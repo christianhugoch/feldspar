@@ -30,12 +30,12 @@ use sc_auth::User;
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use sc_expr::JsEvaluator;
-use sc_llm::ToolSpec;
+use sc_llm::{ModelCapabilities, ToolSpec};
 use sc_types::{Attrs, FormField};
 use serde_json::Value as Json;
 
 use crate::delegate::Delegator;
-use crate::run::RunId;
+use crate::run::{RunId, RunMode};
 
 /// One elementary agent capability: configurable, contributing tools.
 ///
@@ -77,11 +77,16 @@ pub trait AgentTrait: Send + Sync {
     /// refused on save by [`validate_agent`](crate::validate_agent), where it is
     /// fixable, rather than discovered when the model picks the wrong one.
     ///
-    /// The `catalog` is here because a tool's **description and JSON schema are
-    /// generated from the thing it is configured against** (§11.3): `query_books`
-    /// tells the model which fields it may filter on rather than leaving it to
-    /// guess, and a guess that misses costs a turn. A declaration built from the
-    /// configuration alone could not say any of that.
+    /// The context carries the `catalog`, because a tool's **description and JSON
+    /// schema are generated from the thing it is configured against** (§11.3):
+    /// `query_books` tells the model which fields it may filter on rather than
+    /// leaving it to guess, and a guess that misses costs a turn. It also carries
+    /// the run's **mode** — a read-only `plan` or `explore` run is offered no
+    /// edit tools — and the answering model's **capabilities**, so a tool may be
+    /// shaped for what the model can do.
+    ///
+    /// Validation checks names over the union of every mode, so a tool offered
+    /// only in one mode still cannot collide with another trait's.
     ///
     /// Infallible, because it is called wherever the tool set is needed —
     /// including while reporting *why* an agent is invalid. A trait whose target
@@ -89,7 +94,7 @@ pub trait AgentTrait: Send + Sync {
     /// configuration gives it, described as best it can: dropping the tool
     /// silently would turn "this agent names a table that is gone" into "this
     /// agent has no tools", and the second is not a repairable message.
-    fn tools(&self, catalog: &Catalog, config: &Attrs) -> Vec<ToolSpec>;
+    fn tools(&self, cx: &ToolsContext<'_>, config: &Attrs) -> Vec<ToolSpec>;
 
     /// Run one of this trait's tools.
     ///
@@ -119,6 +124,32 @@ pub trait AgentTrait: Send + Sync {
     async fn on_turn(&self, config: &Attrs, turn: &mut Turn<'_>) -> Result<()> {
         let _ = (config, turn);
         Ok(())
+    }
+}
+
+/// What [`AgentTrait::tools`] is told about the run it is offering tools to.
+#[derive(Clone, Copy)]
+pub struct ToolsContext<'a> {
+    /// The live catalog.
+    pub catalog: &'a Catalog,
+    /// The run's mode.
+    pub mode: RunMode,
+    /// What the model answering the run can do.
+    pub capabilities: &'a ModelCapabilities,
+}
+
+impl<'a> ToolsContext<'a> {
+    /// A context for `mode`, answered by a model with `capabilities`.
+    pub fn new(
+        catalog: &'a Catalog,
+        mode: RunMode,
+        capabilities: &'a ModelCapabilities,
+    ) -> ToolsContext<'a> {
+        ToolsContext {
+            catalog,
+            mode,
+            capabilities,
+        }
     }
 }
 
@@ -202,6 +233,12 @@ pub struct TraitContext<'a> {
     pub agent: &'a str,
     /// The run this call belongs to, so a trait can record against it.
     pub run: RunId,
+    /// The run's mode.
+    pub mode: RunMode,
+    /// This enabled trait instance's per-run state: `null` until the trait
+    /// writes something. Saved with the run after the step and restored on
+    /// resume. Reach it through [`state`](TraitContext::state).
+    pub trait_state: &'a mut Json,
     /// The JavaScript engine, where the deployment has one.
     ///
     /// A tool that reads rows needs it exactly when the table it reads has an
@@ -236,6 +273,15 @@ pub struct TraitContext<'a> {
 }
 
 impl TraitContext<'_> {
+    /// This trait instance's per-run state, for reading and writing.
+    ///
+    /// Scoped to the one enabled instance: two `coding` traits on one agent
+    /// keep two states. It is JSON because the loop stores it and knows nothing
+    /// of its shape.
+    pub fn state(&mut self) -> &mut Json {
+        self.trait_state
+    }
+
     /// The engine, or the configuration error that says the server has none.
     ///
     /// Fail closed and fail loudly: a trait that cannot evaluate an ownership
@@ -290,6 +336,8 @@ pub struct Turn<'a> {
     /// Which model call this is, counting from 1 — so a trait can say something
     /// different on a later step than on the first.
     pub step: u32,
+    /// The run's mode.
+    pub mode: RunMode,
     /// Paragraphs appended to the system prompt, in the order traits added them.
     extra_system: Vec<String>,
 }
@@ -301,6 +349,7 @@ impl<'a> Turn<'a> {
             caller,
             agent,
             step,
+            mode: RunMode::Act,
             extra_system: Vec::new(),
         }
     }

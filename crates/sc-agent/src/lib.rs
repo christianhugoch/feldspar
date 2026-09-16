@@ -42,6 +42,7 @@ pub mod agent;
 pub mod agent_trait;
 pub mod delegate;
 pub mod driver;
+pub mod ledger;
 pub mod machine;
 pub mod registry;
 pub mod run;
@@ -54,20 +55,27 @@ pub mod validate;
 pub mod testing;
 
 pub use agent::{
+    ATTR_CHEAP, ATTR_CONTEXT_BUDGET, ATTR_MAX_COST, ATTR_MAX_WALL_SECONDS,
+    ATTR_PARALLEL_TOOL_CALLS, ATTR_STRONG, ModelRef, ModelRole,
+};
+pub use agent::{
     ATTR_MAX_STEPS, ATTR_MAX_TOKENS, ATTR_TEMPERATURE, Agent, AgentId, DEFAULT_MAX_STEPS,
     EnabledTrait,
 };
-pub use agent_trait::{AgentTrait, RunCaller, TraitCheck, TraitContext, Turn};
+pub use agent_trait::{AgentTrait, RunCaller, ToolsContext, TraitCheck, TraitContext, Turn};
 pub use delegate::{
     ATTR_DELEGATED_BY, ATTR_PARENT_RUN, DEFAULT_MAX_DEPTH, DelegateRequest, Delegated, Delegator,
 };
 pub use driver::{ProviderConnector, RunObserver, Runner, StoredProviders, connect};
-pub use machine::{AgentLoop, Conclusion, Step, ToolOutcome};
+pub use ledger::{ChildLedger, Ledger, LedgerStep, RoleTotals};
+pub use machine::{
+    AgentLoop, Budget, Budgets, Conclusion, Step, StepMeta, ToolOutcome, trait_state_key,
+};
 pub use registry::AgentRegistry;
-pub use run::{Run, RunId, RunKind, RunState};
+pub use run::{ATTR_MODE, ATTR_ROLE, Run, RunId, RunKind, RunMode, RunState};
 pub use run_store::{
-    RUNS_TABLE, bootstrap_runs, delete_run, list_runs, load_run, note_wakeup, require_run,
-    run_insert, run_update, save_run,
+    RUNS_TABLE, abort_run, bootstrap_runs, delete_run, list_live_children, list_runs, load_run,
+    note_wakeup, require_run, run_insert, run_update, save_run,
 };
 pub use store::{
     AGENTS_TABLE, bootstrap_agents, delete_agent, list_agents, load_agent, load_agent_by_name,

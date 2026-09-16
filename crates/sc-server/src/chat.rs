@@ -23,7 +23,10 @@
 //! - `{"type":"text","delta":"…"}` / `{"type":"reasoning","delta":"…"}`
 //! - `{"type":"tool_call","id":…,"name":…,"arguments":{…}}`
 //! - `{"type":"tool_result","id":…,"name":…,"content":"…","is_error":bool}`
-//! - `{"type":"done","run":"<uuid>","state":"done"|"failed"|"aborted","answer":"…"}`
+//! - `{"type":"done","run":"<uuid>","state":"done"|"failed"|"aborted","answer":"…",
+//!   "conclusion":"answered"|"max_steps"|"aborted"|"over_budget"?,"budget":"cost"|"wall_time"|"context"?}`
+//!   — `conclusion` is present when the loop concluded, and `budget` names the
+//!   budget an `over_budget` run ran out of.
 //! - `{"type":"error","message":"…"}`
 //!
 //! ## A failure is an event, not a dropped connection
@@ -51,7 +54,9 @@ use futures::stream::SplitStream;
 use futures::{SinkExt, StreamExt};
 use sc_action::TriggerDispatcher;
 use sc_agent::validate::Agents;
-use sc_agent::{Agent, AgentLoop, Conclusion, Run, RunCaller, RunObserver, Runner, save_run};
+use sc_agent::{
+    Agent, Conclusion, ModelRole, Run, RunCaller, RunObserver, Runner, abort_run, save_run,
+};
 use sc_auth::User;
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
@@ -303,25 +308,25 @@ async fn turn(
     let agent = agents.require(name)?;
     may_chat(&ctx.caller, agent)?;
 
-    let provider = ctx
+    let executor = ctx
         .services
         .providers()
-        .connect(&ctx.catalog, agent)
-        .await?
-        .provider;
+        .connect(&ctx.catalog, agent, ModelRole::Executor)
+        .await?;
     let observer = SocketObserver { tx: tx.clone() };
     let mut runner = Runner::new(
         &ctx.catalog,
         ctx.services.registry(),
         agent,
-        provider,
+        executor,
         ctx.caller.clone(),
     )
     .observing(&observer)
-    // The same connector this turn's own provider came from, so an agent with a
-    // `subagent` trait can start the sub-agent's run — which needs the
-    // sub-agent's provider and model, not this one's (§11.3).
-    .with_subagents(ctx.services.providers());
+    // The same connector this turn's own provider came from, so the agent's
+    // roles can be connected and an agent with a `subagent` trait can start the
+    // sub-agent's run — which needs the sub-agent's provider and model, not
+    // this one's (§11.3).
+    .with_connector(ctx.services.providers());
     if let Some(evaluator) = &ctx.evaluator {
         runner = runner.with_evaluator(evaluator);
     }
@@ -341,12 +346,10 @@ async fn turn(
             run
         }
         _ => {
-            let mut state = AgentLoop::new(agent.max_steps());
-            state.push_user(&text)?;
             // The first message is the run's description: a history list carries
             // no transcript (that is what `getRun` is for), so without this a
             // list of conversations would be a list of timestamps.
-            let run = Run::new(&agent.name, &ctx.caller, &state).description(summarise(&text));
+            let run = runner.new_run(&text)?.description(summarise(&text));
             save_run(&ctx.catalog, &run).await?;
             run
         }
@@ -382,15 +385,7 @@ async fn turn(
 
     let ended = match ending {
         Turn::Finished(Ok(conclusion)) => {
-            send(
-                tx,
-                json!({
-                    "type": "done",
-                    "run": run.id.0.to_string(),
-                    "state": run.state.as_str(),
-                    "answer": conclusion.answer().unwrap_or(""),
-                }),
-            );
+            send(tx, done_event(&run, &conclusion));
             Ended::Ok
         }
         Turn::Finished(Err(e)) => {
@@ -441,11 +436,32 @@ async fn turn(
 /// The transcript is left exactly as it is: every step wrote the row (§11.2), so
 /// what the agent had already done is what the history will show, and truncating
 /// it would hide the part that explains why someone pressed stop.
+///
+/// A session the run delegated to is stopped with it: its drive was inside
+/// the one that was just dropped.
 async fn stop(ctx: &ChatContext, run: &mut Run) -> Result<()> {
-    let mut state = run.agent_loop()?;
-    state.abort();
-    run.record(&state);
-    save_run(&ctx.catalog, run).await
+    abort_run(&ctx.catalog, run).await
+}
+
+/// The `done` event for a turn the loop concluded.
+fn done_event(run: &Run, conclusion: &Conclusion) -> Json {
+    let mut event = json!({
+        "type": "done",
+        "run": run.id.0.to_string(),
+        "state": run.state.as_str(),
+        "answer": conclusion.answer().unwrap_or(""),
+    });
+    let (name, budget) = match conclusion {
+        Conclusion::Answered { .. } => ("answered", None),
+        Conclusion::MaxSteps => ("max_steps", None),
+        Conclusion::Aborted => ("aborted", None),
+        Conclusion::OverBudget { budget } => ("over_budget", Some(budget.as_str())),
+    };
+    event["conclusion"] = json!(name);
+    if let Some(budget) = budget {
+        event["budget"] = json!(budget);
+    }
+    event
 }
 
 /// What ended the `select!` above.
@@ -557,6 +573,34 @@ mod tests {
             Some(role) => agent.min_role(role),
             None => agent,
         }
+    }
+
+    #[test]
+    fn a_done_event_names_the_conclusion_and_the_budget_that_ran_out() {
+        let run = Run::new(
+            "builder",
+            &RunCaller::system(),
+            &sc_agent::AgentLoop::new(20),
+        );
+        let event = done_event(
+            &run,
+            &Conclusion::OverBudget {
+                budget: sc_agent::Budget::WallTime,
+            },
+        );
+        assert_eq!(event["conclusion"], "over_budget");
+        assert_eq!(event["budget"], "wall_time");
+        assert_eq!(event["answer"], "");
+
+        let event = done_event(
+            &run,
+            &Conclusion::Answered {
+                answer: "hi".to_owned(),
+            },
+        );
+        assert_eq!(event["conclusion"], "answered");
+        assert_eq!(event["answer"], "hi");
+        assert!(event.get("budget").is_none());
     }
 
     /// The route is admin-only today, so this is the check that would refuse a

@@ -40,6 +40,15 @@
 //!   because the depth limit would otherwise report a budget where the real fault
 //!   is a loop the admin can see and fix.
 //!
+//! ## Delegating to oneself
+//!
+//! One cycle is allowed (TODO §5): a run that is **not itself delegated** may
+//! start one child run of **its own agent in a different mode** — the planner
+//! starting an `act` session per feature. The child is at depth 1 and may not do
+//! it again, so the exception cannot recurse. The child carries its mode and the
+//! role whose model answers it on its row, and its ledger rolls up into the
+//! parent's.
+//!
 //! ## Context is not inherited
 //!
 //! The child sees the **briefing and nothing else** — not the parent's
@@ -53,8 +62,10 @@
 
 use sc_error::Result;
 
+use crate::agent::ModelRole;
+use crate::ledger::RoleTotals;
 use crate::machine::Conclusion;
-use crate::run::RunId;
+use crate::run::{RunId, RunMode};
 
 /// The run attribute holding the id of the run that delegated this one.
 ///
@@ -101,6 +112,20 @@ pub struct DelegateRequest<'a> {
     /// How many levels of delegation may be in flight at once, counting this one.
     /// See [`DEFAULT_MAX_DEPTH`].
     pub max_depth: u32,
+    /// The child run's mode. `None` is `act`. Delegating to the *same* agent
+    /// needs a mode, and it must differ from the parent run's.
+    pub mode: Option<RunMode>,
+    /// The role whose model answers the child run. `None` is the executor.
+    pub role: Option<ModelRole>,
+    /// Drive this run rather than starting a fresh one.
+    ///
+    /// When a run with this id exists, it must be a child of
+    /// [`parent_run`](DelegateRequest::parent_run) of the same agent, and it is
+    /// driven on from wherever it stopped — what a resumed planner does with the
+    /// session it had started before the server restarted. When none exists,
+    /// the child is started with this id, so a trait can record the id in its
+    /// state before the child runs.
+    pub resume: Option<RunId>,
 }
 
 impl<'a> DelegateRequest<'a> {
@@ -113,7 +138,28 @@ impl<'a> DelegateRequest<'a> {
             briefing,
             max_steps: None,
             max_depth: DEFAULT_MAX_DEPTH,
+            mode: None,
+            role: None,
+            resume: None,
         }
+    }
+
+    /// Run the child in `mode`.
+    pub fn mode(mut self, mode: RunMode) -> DelegateRequest<'a> {
+        self.mode = Some(mode);
+        self
+    }
+
+    /// Answer the child with `role`'s model.
+    pub fn role(mut self, role: ModelRole) -> DelegateRequest<'a> {
+        self.role = Some(role);
+        self
+    }
+
+    /// Drive the child run `run` (or start it under that id).
+    pub fn resume(mut self, run: RunId) -> DelegateRequest<'a> {
+        self.resume = Some(run);
+        self
     }
 
     /// Bound the sub-agent's steps for this delegation.
@@ -136,7 +182,7 @@ impl<'a> DelegateRequest<'a> {
 /// chat panel reads every other run from, and a tool result that carried the
 /// whole transcript would put back into the parent's context precisely what
 /// delegating it took out.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Delegated {
     /// The sub-agent that ran.
     pub agent: String,
@@ -146,6 +192,8 @@ pub struct Delegated {
     pub conclusion: Conclusion,
     /// How many model calls it made, so a parent can see what the answer cost it.
     pub steps: u32,
+    /// What it spent, over every role and its own children.
+    pub totals: RoleTotals,
 }
 
 impl Delegated {
@@ -163,8 +211,9 @@ impl Delegated {
 
 /// What one agent needs from its own machinery in order to run another.
 ///
-/// Implemented by [`Runner`](crate::Runner) — the thing that already holds the
-/// catalog, the trait registry, the caller and the position in the chain — and
+/// Implemented over [`Runner`](crate::Runner) — the thing that already holds the
+/// catalog, the trait registry, the caller and the position in the chain — by a
+/// per-call wrapper that also knows the asking run's mode, and
 /// reached by a trait through
 /// [`TraitContext::require_delegate`](crate::TraitContext::require_delegate). A
 /// trait object rather than a function so a context that *cannot* delegate says
@@ -204,6 +253,7 @@ mod tests {
             run: RunId::new(),
             conclusion,
             steps: 3,
+            totals: RoleTotals::default(),
         };
         assert_eq!(
             delegated(Conclusion::Answered {

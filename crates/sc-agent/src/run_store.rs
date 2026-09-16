@@ -188,6 +188,52 @@ pub async fn list_runs(catalog: &Catalog, subject: &str) -> Result<Vec<Run>> {
         .collect()
 }
 
+/// The live runs whose [`ATTR_PARENT_RUN`](crate::ATTR_PARENT_RUN) is `parent`,
+/// oldest first.
+pub async fn list_live_children(catalog: &Catalog, parent: RunId) -> Result<Vec<Run>> {
+    let mut select = Select::from(Source::table(RUNS_TABLE))
+        .filter(Expr::col(COL_STATE).eq(Expr::lit(RunState::Running.as_str())));
+    select.order = vec![OrderBy::asc(Expr::col(COL_CREATED_AT))];
+    let parent = parent.to_string();
+    Ok(rows(catalog, select)
+        .await?
+        .iter()
+        .map(run_from_row)
+        .collect::<Result<Vec<Run>>>()?
+        .into_iter()
+        .filter(|run| {
+            run.attributes
+                .get(crate::ATTR_PARENT_RUN)
+                .and_then(Json::as_str)
+                == Some(parent.as_str())
+        })
+        .collect())
+}
+
+/// Stop `run` where it stands, and every live run it delegated to, however
+/// deep, and write them all.
+///
+/// A child is driven inside its parent's tool call, so stopping the parent's
+/// drive stops the child's too — and without this the child's row would say
+/// `running` for ever. Transcripts are left as they are.
+pub async fn abort_run(catalog: &Catalog, run: &mut Run) -> Result<()> {
+    let mut state = run.agent_loop()?;
+    state.abort();
+    run.record(&state);
+    save_run(catalog, run).await?;
+    let mut pending = vec![run.id];
+    while let Some(parent) = pending.pop() {
+        for mut child in list_live_children(catalog, parent).await? {
+            let mut state = child.agent_loop()?;
+            state.abort();
+            child.record(&state);
+            save_run(catalog, &child).await?;
+            pending.push(child.id);
+        }
+    }
+    Ok(())
+}
+
 /// Delete a run, returning whether one was there to delete.
 pub async fn delete_run(catalog: &Catalog, id: RunId) -> Result<bool> {
     if load_run(catalog, id).await?.is_none() {

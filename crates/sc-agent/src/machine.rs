@@ -34,12 +34,15 @@
 //! its runs exist: a conversation resumed after a trait was added must get the
 //! new tool, not the one that was current when it started.
 
+use std::collections::BTreeMap;
+
 use sc_error::{Error, Result};
 use sc_llm::{AssistantMessage, LlmMessage, ToolCall, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
-use crate::agent::DEFAULT_MAX_STEPS;
+use crate::agent::{Agent, DEFAULT_MAX_STEPS, ModelRole};
+use crate::ledger::{Ledger, LedgerStep};
 
 /// What the driver must do next to advance an [`AgentLoop`].
 #[derive(Debug, Clone, PartialEq)]
@@ -89,6 +92,87 @@ pub enum Conclusion {
     MaxSteps,
     /// Someone pressed stop.
     Aborted,
+    /// A budget other than the step budget ran out (TODO §10).
+    ///
+    /// Not an error, for the reason [`MaxSteps`](Conclusion::MaxSteps) is not:
+    /// the transcript is intact and the limit is the admin's.
+    OverBudget {
+        /// Which budget.
+        budget: Budget,
+    },
+}
+
+/// Which budget ended a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Budget {
+    /// `max_cost`: what the run and its children have spent.
+    Cost,
+    /// `max_wall_seconds`: the time the run has spent working.
+    WallTime,
+    /// `context_budget`: the size of the context the last request carried.
+    Context,
+}
+
+impl Budget {
+    /// The stored spelling.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Budget::Cost => "cost",
+            Budget::WallTime => "wall_time",
+            Budget::Context => "context",
+        }
+    }
+}
+
+impl std::fmt::Display for Budget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The budgets a run is kept within, besides its steps. Each is optional:
+/// absent is unlimited.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Budgets {
+    /// The most the run (with its children) may cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost: Option<f64>,
+    /// The most time the run may spend working, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_wall_ms: Option<u64>,
+    /// The most input tokens one request may carry.
+    ///
+    /// Only an explicit `context_budget` ends a run here. Once compaction exists
+    /// (Phase 4) the executor model's working budget is where it is measured
+    /// from; ending a run at that default before anything can compact would stop
+    /// every long conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+}
+
+impl Budgets {
+    /// The budgets `agent` sets.
+    pub fn of(agent: &Agent) -> Budgets {
+        Budgets {
+            max_cost: agent.max_cost(),
+            max_wall_ms: agent.max_wall_seconds().map(|s| s.saturating_mul(1000)),
+            context_tokens: agent.context_budget(),
+        }
+    }
+}
+
+/// What the driver knows about a model call that the answer does not carry.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StepMeta {
+    /// The role whose model answered.
+    pub role: ModelRole,
+    /// That model's name.
+    pub model: String,
+    /// What the call cost, or `None` when the model has no price.
+    pub cost: Option<f64>,
+    /// How long the call took.
+    pub elapsed: std::time::Duration,
 }
 
 impl Conclusion {
@@ -96,7 +180,7 @@ impl Conclusion {
     pub fn answer(&self) -> Option<&str> {
         match self {
             Conclusion::Answered { answer } => Some(answer),
-            Conclusion::MaxSteps | Conclusion::Aborted => None,
+            Conclusion::MaxSteps | Conclusion::Aborted | Conclusion::OverBudget { .. } => None,
         }
     }
 }
@@ -173,8 +257,27 @@ pub struct AgentLoop {
     max_steps: u32,
     /// Every call's usage, accumulated.
     usage: Usage,
+    /// The budgets besides the step budget.
+    #[serde(default)]
+    budgets: Budgets,
+    /// What each step cost and who answered it.
+    #[serde(default)]
+    ledger: Ledger,
+    /// Per-run state, one JSON value per enabled trait instance, keyed by
+    /// [`trait_state_key`]. What a trait keeps across its tool calls — a plan, the
+    /// hashes of the files it has read — lives here, so it is saved with the run
+    /// and restored on resume.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    trait_state: BTreeMap<String, Json>,
     /// Which side is next.
     phase: Phase,
+}
+
+/// The key one enabled trait instance's state is kept under: its position in
+/// the agent's trait list and its name. The name is part of it so that a list
+/// reordered by the admin hands no trait another's state.
+pub fn trait_state_key(index: usize, trait_name: &str) -> String {
+    format!("{index}:{trait_name}")
 }
 
 impl Default for AgentLoop {
@@ -198,8 +301,22 @@ impl AgentLoop {
             step: 0,
             max_steps: max_steps.max(1),
             usage: Usage::default(),
+            budgets: Budgets::default(),
+            ledger: Ledger::default(),
+            trait_state: BTreeMap::new(),
             phase: Phase::Model,
         }
+    }
+
+    /// An empty conversation within `agent`'s budgets.
+    pub fn for_agent(agent: &Agent) -> AgentLoop {
+        AgentLoop::new(agent.max_steps()).with_budgets(Budgets::of(agent))
+    }
+
+    /// Set the budgets besides the step budget, returning `self` for chaining.
+    pub fn with_budgets(mut self, budgets: Budgets) -> AgentLoop {
+        self.budgets = budgets;
+        self
     }
 
     /// Add what the person said, starting or continuing the conversation.
@@ -237,11 +354,17 @@ impl AgentLoop {
                 calls: calls.clone(),
             },
             Phase::Model => {
-                if self.step >= self.max_steps {
+                let over = if self.step >= self.max_steps {
+                    Some(Conclusion::MaxSteps)
+                } else {
+                    self.spent_budget()
+                        .map(|budget| Conclusion::OverBudget { budget })
+                };
+                if let Some(conclusion) = over {
                     self.phase = Phase::Done {
-                        conclusion: Conclusion::MaxSteps,
+                        conclusion: conclusion.clone(),
                     };
-                    return Step::Done(Conclusion::MaxSteps);
+                    return Step::Done(conclusion);
                 }
                 Step::CallModel {
                     messages: self.messages.clone(),
@@ -251,11 +374,39 @@ impl AgentLoop {
         }
     }
 
-    /// Feed back what the model said.
+    /// The first budget that has run out, if any. Checked before every model
+    /// call, so a run is never stopped halfway through its tools.
+    fn spent_budget(&self) -> Option<Budget> {
+        if let Some(max) = self.budgets.max_cost
+            && let Some(spent) = self.ledger.total().cost
+            && spent >= max
+        {
+            return Some(Budget::Cost);
+        }
+        if let Some(max) = self.budgets.max_wall_ms
+            && self.ledger.working_ms() >= max
+        {
+            return Some(Budget::WallTime);
+        }
+        if let Some(max) = self.budgets.context_tokens
+            && self.ledger.last_input_tokens().is_some_and(|t| t >= max)
+        {
+            return Some(Budget::Context);
+        }
+        None
+    }
+
+    /// Feed back what the model said, as the executor with nothing known about
+    /// its cost or time.
+    pub fn model_answered(&mut self, answer: AssistantMessage) -> Result<()> {
+        self.model_answered_with(answer, StepMeta::default())
+    }
+
+    /// Feed back what the model said, and record the step in the ledger.
     ///
     /// The reasoning is not appended: it is not part of the conversation, and
     /// [`AssistantMessage::message`] is where that decision lives.
-    pub fn model_answered(&mut self, answer: AssistantMessage) -> Result<()> {
+    pub fn model_answered_with(&mut self, answer: AssistantMessage, meta: StepMeta) -> Result<()> {
         if !matches!(self.phase, Phase::Model) {
             return Err(Error::msg(
                 "the agent loop was given a model answer it did not ask for",
@@ -263,6 +414,16 @@ impl AgentLoop {
         }
         self.step += 1;
         self.usage.add(answer.usage);
+        self.ledger.record_step(LedgerStep {
+            step: self.step,
+            role: meta.role,
+            model: meta.model,
+            usage: answer.usage,
+            cost: meta.cost,
+            elapsed_ms: u64::try_from(meta.elapsed.as_millis()).unwrap_or(u64::MAX),
+            signals: Vec::new(),
+            compacted: false,
+        });
         self.messages.push(answer.message());
         self.phase = if answer.tool_calls.is_empty() {
             Phase::Done {
@@ -341,6 +502,32 @@ impl AgentLoop {
     /// The budget.
     pub fn max_steps(&self) -> u32 {
         self.max_steps
+    }
+
+    /// The budgets besides the step budget.
+    pub fn budgets(&self) -> Budgets {
+        self.budgets
+    }
+
+    /// What each step cost and who answered it.
+    pub fn ledger(&self) -> &Ledger {
+        &self.ledger
+    }
+
+    /// The ledger, for the driver to add working time and children to.
+    pub fn ledger_mut(&mut self) -> &mut Ledger {
+        &mut self.ledger
+    }
+
+    /// One trait instance's state (see [`trait_state_key`]), `null` until the
+    /// trait writes something.
+    pub fn trait_state(&self, key: &str) -> Option<&Json> {
+        self.trait_state.get(key)
+    }
+
+    /// One trait instance's state, for writing. Created as `null`.
+    pub fn trait_state_mut(&mut self, key: &str) -> &mut Json {
+        self.trait_state.entry(key.to_owned()).or_insert(Json::Null)
     }
 
     /// Whether the run is over.
@@ -591,6 +778,101 @@ mod tests {
                 calls: vec![call("c1", "query_books")]
             }
         );
+    }
+
+    fn answer_costing(cost: f64, input: u64) -> (AssistantMessage, StepMeta) {
+        (
+            AssistantMessage {
+                tool_calls: vec![call("c", "read")],
+                usage: Usage {
+                    input_tokens: input,
+                    output_tokens: 1,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                },
+                ..AssistantMessage::default()
+            },
+            StepMeta {
+                cost: Some(cost),
+                ..StepMeta::default()
+            },
+        )
+    }
+
+    fn one_tool_round(run: &mut AgentLoop, cost: f64, input: u64) {
+        let Step::CallModel { .. } = run.next_step() else {
+            panic!("expected a model call");
+        };
+        let (answer, meta) = answer_costing(cost, input);
+        run.model_answered_with(answer, meta).unwrap();
+        run.next_step();
+        run.tool_results(vec![ToolOutcome::ok(call("c", "read"), &json!("x"))])
+            .unwrap();
+    }
+
+    #[test]
+    fn a_cost_budget_ends_the_run_before_the_next_model_call() {
+        let mut run = AgentLoop::new(20).with_budgets(Budgets {
+            max_cost: Some(1.0),
+            ..Budgets::default()
+        });
+        run.push_user("go").unwrap();
+        one_tool_round(&mut run, 0.6, 10);
+        one_tool_round(&mut run, 0.6, 10);
+        assert_eq!(
+            run.next_step(),
+            Step::Done(Conclusion::OverBudget {
+                budget: Budget::Cost
+            })
+        );
+        assert_eq!(run.ledger().steps().len(), 2);
+    }
+
+    #[test]
+    fn wall_time_and_context_budgets_end_the_run() {
+        let mut run = AgentLoop::new(20).with_budgets(Budgets {
+            max_wall_ms: Some(1000),
+            ..Budgets::default()
+        });
+        run.push_user("go").unwrap();
+        one_tool_round(&mut run, 0.0, 10);
+        assert!(matches!(run.next_step(), Step::CallModel { .. }));
+        run.ledger_mut()
+            .add_working(std::time::Duration::from_millis(1000));
+        assert_eq!(
+            run.next_step(),
+            Step::Done(Conclusion::OverBudget {
+                budget: Budget::WallTime
+            })
+        );
+
+        let mut run = AgentLoop::new(20).with_budgets(Budgets {
+            context_tokens: Some(500),
+            ..Budgets::default()
+        });
+        run.push_user("go").unwrap();
+        one_tool_round(&mut run, 0.0, 400);
+        assert!(matches!(run.next_step(), Step::CallModel { .. }));
+        one_tool_round(&mut run, 0.0, 600);
+        let Step::Done(conclusion) = run.next_step() else {
+            panic!("the context budget ends the run");
+        };
+        assert_eq!(
+            serde_json::to_value(&conclusion).unwrap(),
+            json!({"conclusion": "over_budget", "budget": "context"})
+        );
+    }
+
+    #[test]
+    fn trait_state_round_trips_with_the_run() {
+        let mut run = AgentLoop::new(20);
+        *run.trait_state_mut(&trait_state_key(0, "coding")) = json!({"plan": [1, 2]});
+        let back: AgentLoop = serde_json::from_value(serde_json::to_value(&run).unwrap()).unwrap();
+        assert_eq!(
+            back.trait_state(&trait_state_key(0, "coding")),
+            Some(&json!({"plan": [1, 2]}))
+        );
+        assert_eq!(back.trait_state(&trait_state_key(1, "coding")), None);
     }
 
     #[test]

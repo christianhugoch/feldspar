@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use sc_action::{ActionRegistry, TriggerDispatcher, bootstrap_triggers};
 use sc_agent::{
-    AgentRegistry, RunCaller, RunId, TraitCheck, TraitContext, bootstrap_agents, bootstrap_runs,
+    AgentRegistry, RunCaller, RunId, ToolsContext, TraitCheck, TraitContext, bootstrap_agents,
+    bootstrap_runs,
 };
 use sc_auth::User;
 use sc_catalog::{
@@ -167,6 +168,9 @@ impl Env {
             caller,
             agent: "librarian",
             run: RunId::new(),
+            mode: sc_agent::RunMode::Act,
+            // Fresh per call: a tool called outside a run keeps nothing.
+            trait_state: &mut Json::Null,
             evaluator: self.evaluator.as_ref(),
             triggers: self.dispatcher.as_ref(),
             // A tool called directly, outside a run, has no runner to delegate
@@ -211,7 +215,15 @@ impl Env {
         self.registry
             .require(trait_)
             .expect("a built-in trait")
-            .tools(&self.catalog, config)
+            .tools(&self.tools_context(), config)
+    }
+
+    /// What `tools` is told: an `act` run on a model with the built-in
+    /// capabilities of an unknown one.
+    pub fn tools_context(&self) -> ToolsContext<'_> {
+        static CAPABILITIES: std::sync::LazyLock<sc_llm::ModelCapabilities> =
+            std::sync::LazyLock::new(|| sc_llm::ModelCapabilities::built_in("", ""));
+        ToolsContext::new(&self.catalog, sc_agent::RunMode::Act, &CAPABILITIES)
     }
 
     /// The trait's own configuration check — the admin's Save button.
@@ -235,12 +247,15 @@ impl Env {
         caller: &RunCaller,
     ) -> Result<Json> {
         let trait_ = self.registry.require(trait_)?.clone();
-        let tool = trait_.tools(&self.catalog, config)[0].name.clone();
+        let tool = trait_.tools(&self.tools_context(), config)[0].name.clone();
         let mut ctx = TraitContext {
             catalog: &self.catalog,
             caller,
             agent: "librarian",
             run: RunId::new(),
+            mode: sc_agent::RunMode::Act,
+            // Fresh per call: a tool called outside a run keeps nothing.
+            trait_state: &mut Json::Null,
             evaluator: self.evaluator.as_ref(),
             triggers: self.dispatcher.as_ref(),
             // A tool called directly, outside a run, has no runner to delegate

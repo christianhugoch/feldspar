@@ -18,11 +18,18 @@
 //! ]);
 //! ```
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use sc_catalog::Catalog;
 use sc_error::{Error, Result};
-use sc_llm::{LlmDelta, LlmProvider, LlmRequest, LlmStream, StopReason, ToolCall, Usage};
+use sc_llm::{
+    ConnectedModel, LlmDelta, LlmProvider, LlmRequest, LlmStream, Prices, StopReason, ToolCall,
+    Usage,
+};
 use serde_json::Value as Json;
+
+use crate::agent::{Agent, ModelRole};
+use crate::driver::ProviderConnector;
 
 /// One scripted answer.
 ///
@@ -192,6 +199,65 @@ impl LlmProvider for FakeProvider {
             }
         };
         Ok(LlmStream::from_deltas(deltas))
+    }
+}
+
+/// A [`ProviderConnector`] that hands out scripted providers **by role** (TODO
+/// §13), so a test can assert which role answered each step.
+///
+/// A role with no script of its own gets the executor's, which is the fallback
+/// an agent with the role unset gets anyway. Every agent that asks gets the same
+/// providers, so a self-delegated child shares its parent's scripts.
+#[derive(Default)]
+pub struct FakeModels {
+    models: Mutex<Vec<(ModelRole, ConnectedModel)>>,
+}
+
+impl FakeModels {
+    /// No models yet.
+    pub fn new() -> FakeModels {
+        FakeModels::default()
+    }
+
+    /// `role` is answered by `provider`, with unknown prices.
+    pub fn role(self, role: ModelRole, provider: Arc<FakeProvider>) -> FakeModels {
+        self.priced(role, provider, Prices::default())
+    }
+
+    /// `role` is answered by `provider`, at `prices`.
+    pub fn priced(
+        self,
+        role: ModelRole,
+        provider: Arc<FakeProvider>,
+        prices: Prices,
+    ) -> FakeModels {
+        let mut model = ConnectedModel::unconfigured(provider as Arc<dyn LlmProvider>);
+        model.prices = prices;
+        lock(&self.models).push((role, model));
+        self
+    }
+
+    /// The model for `role`, falling back to the executor's.
+    pub fn model(&self, role: ModelRole) -> Result<ConnectedModel> {
+        let models = lock(&self.models);
+        models
+            .iter()
+            .find(|(r, _)| *r == role)
+            .or_else(|| models.iter().find(|(r, _)| *r == ModelRole::Executor))
+            .map(|(_, m)| m.clone())
+            .ok_or_else(|| Error::config(format!("no scripted model for the `{role}` role")))
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderConnector for FakeModels {
+    async fn connect(
+        &self,
+        _catalog: &Catalog,
+        _agent: &Agent,
+        role: ModelRole,
+    ) -> Result<ConnectedModel> {
+        self.model(role)
     }
 }
 

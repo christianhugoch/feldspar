@@ -6979,9 +6979,22 @@ async fn agents_using_provider(catalog: &Catalog, id: LlmProviderDefId) -> Resul
     Ok(sc_agent::list_agents(catalog)
         .await?
         .into_iter()
-        .filter(|agent| agent.provider.trim() == def.name.trim())
+        .filter(|agent| {
+            model_refs(agent)
+                .iter()
+                .any(|named| named.provider.trim() == def.name.trim())
+        })
         .map(|agent| format!("agent `{}`", agent.name))
         .collect())
+}
+
+/// Every model an agent names: its own, and each role it sets (TODO §3). A
+/// role stored in a shape that does not read names nothing.
+fn model_refs(agent: &sc_agent::Agent) -> Vec<sc_agent::ModelRef> {
+    sc_agent::ModelRole::ALL
+        .iter()
+        .filter_map(|role| agent.configured_role(*role).ok().flatten())
+        .collect()
 }
 
 /// The agents that call the model row `model` of `provider`, by name: those
@@ -7000,10 +7013,14 @@ async fn agents_using_model(
     Ok(sc_agent::list_agents(catalog)
         .await?
         .into_iter()
-        .filter(|agent| agent.provider.trim() == provider.name.trim())
-        .filter(|agent| match agent.model.as_deref().map(str::trim) {
-            Some(name) if !name.is_empty() => by_name && name == model.name,
-            _ => by_default && model.is_default,
+        .filter(|agent| {
+            model_refs(agent).iter().any(|named| {
+                named.provider.trim() == provider.name.trim()
+                    && match named.model.as_deref() {
+                        Some(name) => by_name && name == model.name,
+                        None => by_default && model.is_default,
+                    }
+            })
         })
         .map(|agent| format!("agent `{}`", agent.name))
         .collect())

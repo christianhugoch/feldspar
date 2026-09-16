@@ -16,8 +16,8 @@ use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use sc_types::validate_attrs;
 
-use crate::agent::Agent;
-use crate::agent_trait::TraitCheck;
+use crate::agent::{Agent, ModelRef, ModelRole};
+use crate::agent_trait::{ToolsContext, TraitCheck};
 use crate::registry::AgentRegistry;
 use crate::store::list_agents;
 
@@ -46,25 +46,47 @@ pub async fn validate_agent(
     }
     let problem = |msg: String| Error::invalid(format!("agent `{name}`: {msg}"));
 
-    // The provider must be *connected*, not merely named: an agent pointing at a
-    // provider nobody configured cannot answer, and the admin who deleted the
-    // provider is the one who needs telling.
-    let provider = agent.provider.trim();
-    if provider.is_empty() {
+    if agent.provider.trim().is_empty() {
         return Err(problem("no LLM provider is set".to_owned()));
     }
-    let Some(provider_def) = sc_llm::load_llm_provider_by_name(catalog, provider).await? else {
-        return Err(problem(format!("no LLM provider named `{provider}`")));
-    };
-    // And the model must be a row under it: the one named, or the provider's
-    // default when none is. The two failures are fixed in different places, so
-    // the message says which it is.
-    sc_llm::require_llm_model(catalog, &provider_def, agent.model.as_deref())
-        .await
-        .map_err(|e| match e.repr() {
-            sc_error::Repr::NotFound(msg) => problem(msg.clone()),
-            _ => e,
-        })?;
+    // The agent's own model and each role's (TODO §3) resolve the same way. A
+    // role left unset is the agent's own model, which is already checked.
+    let (backend, executor) = resolve_model(
+        catalog,
+        &ModelRef::new(agent.provider.trim(), agent.model.as_deref()),
+    )
+    .await
+    .map_err(|e| reword(e, &problem, None))?;
+    let mut priced = vec![(ModelRole::Executor, executor.prices())];
+    for role in [ModelRole::Strong, ModelRole::Cheap] {
+        let named = agent
+            .configured_role(role)
+            .map_err(|e| problem(e.to_string()))?;
+        if let Some(named) = named {
+            let (_, model) = resolve_model(catalog, &named)
+                .await
+                .map_err(|e| reword(e, &problem, Some(role)))?;
+            priced.push((role, model.prices()));
+        }
+    }
+
+    // A cost budget cannot be kept against a model whose cost is unknown, so
+    // it is refused here rather than silently never reached.
+    if agent.max_cost().is_some() {
+        let unpriced: Vec<String> = priced
+            .iter()
+            .filter(|(_, prices)| prices.input.is_none() || prices.output.is_none())
+            .map(|(role, _)| format!("`{role}`"))
+            .collect();
+        if !unpriced.is_empty() {
+            return Err(problem(format!(
+                "a cost budget needs every model the agent calls to have input and \
+                 output prices, and the {} model has none; set the prices on the \
+                 model, or clear `max_cost`",
+                unpriced.join(" and ")
+            )));
+        }
+    }
 
     if let Some(role) = agent.min_role
         && !(1..=100).contains(&role)
@@ -80,6 +102,7 @@ pub async fn validate_agent(
     //
     // Numbered, because a trait may be enabled more than once and "trait
     // `query_table`" would otherwise not say which of them is wrong.
+    let capabilities = executor.capabilities(&backend);
     let mut tool_names: Vec<(String, String)> = Vec::new();
     for (i, enabled) in agent.traits.iter().enumerate() {
         let position = i + 1;
@@ -103,7 +126,18 @@ pub async fn validate_agent(
             .await
             .map_err(|e| where_(e.to_string()))?;
 
-        for tool in trait_.tools(catalog, &enabled.config) {
+        // Over every mode: a tool offered only while planning must still not
+        // collide with another trait's. The same tool in two modes is one tool.
+        let mut offered: Vec<sc_llm::ToolSpec> = Vec::new();
+        for mode in crate::run::RunMode::ALL {
+            let cx = ToolsContext::new(catalog, mode, &capabilities);
+            for tool in trait_.tools(&cx, &enabled.config) {
+                if !offered.iter().any(|t| t.name == tool.name) {
+                    offered.push(tool);
+                }
+            }
+        }
+        for tool in offered {
             if tool.name.is_empty()
                 || tool.name.len() > MAX_TOOL_NAME
                 || !tool
@@ -132,6 +166,38 @@ pub async fn validate_agent(
     }
 
     Ok(())
+}
+
+/// The provider's backend and the model row `named` resolves to.
+async fn resolve_model(
+    catalog: &Catalog,
+    named: &ModelRef,
+) -> Result<(String, sc_llm::LlmModelDef)> {
+    // The provider must be *connected*, not merely named: an agent pointing at a
+    // provider nobody configured cannot answer, and the admin who deleted the
+    // provider is the one who needs telling.
+    let provider = named.provider.trim();
+    let Some(provider_def) = sc_llm::load_llm_provider_by_name(catalog, provider).await? else {
+        return Err(Error::not_found(format!(
+            "no LLM provider named `{provider}`"
+        )));
+    };
+    // And the model must be a row under it: the one named, or the provider's
+    // default when none is. The two failures are fixed in different places, so
+    // the message says which it is.
+    let model = sc_llm::require_llm_model(catalog, &provider_def, named.model.as_deref()).await?;
+    Ok((provider_def.backend, model))
+}
+
+/// A resolution failure as the agent's problem, naming the role when it is one.
+fn reword(e: Error, problem: &impl Fn(String) -> Error, role: Option<ModelRole>) -> Error {
+    match e.repr() {
+        sc_error::Repr::NotFound(msg) => problem(match role {
+            Some(role) => format!("its `{role}` role: {msg}"),
+            None => msg.clone(),
+        }),
+        _ => e,
+    }
 }
 
 /// Why one stored agent is not in the live set.

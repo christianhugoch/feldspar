@@ -315,7 +315,7 @@ async fn an_agent_answers_a_question_and_then_performs_the_action() -> Result<()
         &env.catalog,
         &env.registry,
         &agent,
-        provider.clone(),
+        sc_llm::ConnectedModel::unconfigured(provider.clone()),
         as_user("ada@example.com"),
     )
     .with_triggers(&dispatcher);

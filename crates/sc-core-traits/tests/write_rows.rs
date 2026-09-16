@@ -480,7 +480,7 @@ async fn an_agent_reads_and_then_changes_its_table_through_a_whole_run() -> Resu
         &env.catalog,
         &env.registry,
         &agent,
-        provider.clone(),
+        sc_llm::ConnectedModel::unconfigured(provider.clone()),
         as_user("ada@example.com"),
     )
     .with_evaluator(&engine);

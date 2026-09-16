@@ -25,8 +25,7 @@
 //!   {mount}/actions/{name}` sends and what the admin's Run button sends, so a
 //!   trigger behaves the same however it was asked.
 
-use sc_agent::{AgentTrait, TraitCheck, TraitContext};
-use sc_catalog::Catalog;
+use sc_agent::{AgentTrait, ToolsContext, TraitCheck, TraitContext};
 use sc_error::{Error, Result};
 use sc_llm::ToolSpec;
 use sc_types::{Attrs, BasicType, FormField};
@@ -84,13 +83,12 @@ impl AgentTrait for RunTrigger {
         Ok(())
     }
 
-    fn tools(&self, catalog: &Catalog, config: &Attrs) -> Vec<ToolSpec> {
+    fn tools(&self, _cx: &ToolsContext<'_>, config: &Attrs) -> Vec<ToolSpec> {
         let configured = config_str(config, CFG_TRIGGER);
         // The catalog cannot answer "what does this trigger do?" — the trigger
         // set is `sc-action`'s and reading it is async, which this is not. So the
         // description is what the configuration knows, and it is enough: the
         // trigger's name is the admin's own word for it.
-        let _ = catalog;
         vec![ToolSpec::new(
             tool_name(&configured),
             format!(
