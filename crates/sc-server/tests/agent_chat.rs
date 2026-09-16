@@ -38,7 +38,7 @@ use sc_catalog::{Catalog, DataField};
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_error::Result;
-use sc_llm::{LlmProvider, LlmProviderDef};
+use sc_llm::{ConnectedModel, LlmProvider};
 use sc_server::{
     AGENT_CHAT_ROUTE, AgentServices, AppMounts, ProviderConnector, SESSION_COOKIE, ServerConfig,
     admin_handlers, build_router_with_apps,
@@ -66,8 +66,10 @@ struct Scripted(Arc<FakeProvider>);
 
 #[async_trait]
 impl ProviderConnector for Scripted {
-    async fn connect(&self, _catalog: &Catalog, _agent: &Agent) -> Result<Arc<dyn LlmProvider>> {
-        Ok(Arc::clone(&self.0) as Arc<dyn LlmProvider>)
+    async fn connect(&self, _catalog: &Catalog, _agent: &Agent) -> Result<ConnectedModel> {
+        Ok(ConnectedModel::unconfigured(
+            Arc::clone(&self.0) as Arc<dyn LlmProvider>
+        ))
     }
 }
 
@@ -78,7 +80,7 @@ struct Unreachable;
 
 #[async_trait]
 impl ProviderConnector for Unreachable {
-    async fn connect(&self, _catalog: &Catalog, _agent: &Agent) -> Result<Arc<dyn LlmProvider>> {
+    async fn connect(&self, _catalog: &Catalog, _agent: &Agent) -> Result<ConnectedModel> {
         Err(sc_error::Error::msg("401 invalid x-api-key"))
     }
 }
@@ -135,7 +137,15 @@ async fn serve_with(agent: Agent, providers: Arc<dyn ProviderConnector>) -> Resu
     sc_llm::bootstrap_llm_providers(&catalog).await?;
     sc_llm::save_llm_provider(
         &catalog,
-        &LlmProviderDef::anthropic("house", "sk-ant-test", "claude-sonnet-4-5"),
+        &sc_llm::LlmProviderDef::new("house", sc_llm::ANTHROPIC_BACKEND)
+            .with(sc_llm::CFG_API_KEY, "sk-ant-test"),
+    )
+    .await?;
+    // The model an agent naming no model calls: the provider's default row.
+    let provider = sc_llm::require_llm_provider(&catalog, "house").await?;
+    sc_llm::save_llm_model(
+        &catalog,
+        &sc_llm::LlmModelDef::new(provider.id, "claude-sonnet-4-5").default_model(),
     )
     .await?;
     catalog

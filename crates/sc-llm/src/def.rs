@@ -2,6 +2,11 @@
 //! backend registry that turns one into a connected
 //! [`LlmProvider`](crate::LlmProvider) — design §11.1.
 //!
+//! A provider holds what is entered once per key: the backend, the API key and
+//! the base URL. What differs per model (prices, capabilities, the context
+//! window) is a model row ([`LlmModelDef`]), and [`connect_model`] joins the
+//! two.
+//!
 //! This follows `sc-files`' file-store backends exactly, and the parallel is
 //! worth stating because it is what makes the admin UI generic: a **definition**
 //! is inert data (a name, which backend, that backend's settings), a backend
@@ -17,7 +22,7 @@
 //! - **Currently not working** — a well-formed definition with a revoked key, an
 //!   endpoint that is down, a model that was retired. Not a typo, often not the
 //!   admin's fault, and it can become true after a successful save. Only a real
-//!   request finds it, which is what *Test connection* is for.
+//!   request finds it, which is what a model's *Test* is for.
 //!
 //! Only the first blocks a save.
 
@@ -29,7 +34,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::anthropic::Anthropic;
+use crate::model::{ConnectedModel, LlmModelDef, validate_model_config};
 use crate::openai::OpenAiResponses;
+use crate::openai_chat::OpenAiChat;
 use crate::provider::LlmProvider;
 
 /// The backend speaking **OpenAI's Responses API** — including every
@@ -39,6 +46,10 @@ pub const OPENAI_RESPONSES_BACKEND: &str = "openai_responses";
 /// The backend speaking **Anthropic's messages API**.
 pub const ANTHROPIC_BACKEND: &str = "anthropic";
 
+/// The backend speaking **Chat Completions**: the API most cheap and
+/// open-weight hosts serve (vLLM, llama.cpp, Ollama, OpenRouter, DeepSeek).
+pub const OPENAI_CHAT_BACKEND: &str = "openai_chat";
+
 /// The `base_url` setting: which endpoint to call. Blank means the backend's own
 /// default.
 pub const CFG_BASE_URL: &str = "base_url";
@@ -47,10 +58,6 @@ pub const CFG_BASE_URL: &str = "base_url";
 /// redacted wherever the record is serialised and preserved when a save submits
 /// the sentinel back (§11.1).
 pub const CFG_API_KEY: &str = "api_key";
-
-/// The `model` setting: the model this provider calls when an agent does not
-/// override it.
-pub const CFG_MODEL: &str = "model";
 
 /// Identifies a stored provider definition. A UUID, per §9's rule that every
 /// system metadata table has a UUID primary key.
@@ -81,6 +88,10 @@ impl Default for LlmProviderDefId {
 /// backend and backend config, so each gets a column, and anything sparse goes
 /// in [`attributes`](LlmProviderDef::attributes).
 ///
+/// **No model.** A provider serves several models, and each is a row of its own
+/// in `_fd_llm_models` ([`LlmModelDef`]), with its own prices and capabilities.
+/// The provider's default model is the model row marked `is_default`.
+///
 /// **No `min_role`.** A file store has one because an application's users browse
 /// it; a provider is reached only through an agent, and it is the *agent* that
 /// carries who may chat with it (§11.2). Putting a floor here as well would be a
@@ -93,8 +104,8 @@ pub struct LlmProviderDef {
     pub name: String,
     /// A human description; empty when none was given.
     pub description: String,
-    /// Which backend serves it: [`OPENAI_RESPONSES_BACKEND`] or
-    /// [`ANTHROPIC_BACKEND`].
+    /// Which backend serves it: [`OPENAI_RESPONSES_BACKEND`],
+    /// [`ANTHROPIC_BACKEND`] or [`OPENAI_CHAT_BACKEND`].
     pub backend: String,
     /// The backend's settings, validated against that backend's declared
     /// [`config_spec`](provider_config_spec) on save and on load.
@@ -115,30 +126,6 @@ impl LlmProviderDef {
             config: Attrs::new(),
             attributes: Attrs::new(),
         }
-    }
-
-    /// An [`anthropic`](ANTHROPIC_BACKEND) provider with a key and a default
-    /// model.
-    pub fn anthropic(
-        name: impl Into<String>,
-        api_key: impl Into<String>,
-        model: impl Into<String>,
-    ) -> LlmProviderDef {
-        LlmProviderDef::new(name, ANTHROPIC_BACKEND)
-            .with(CFG_API_KEY, api_key.into())
-            .with(CFG_MODEL, model.into())
-    }
-
-    /// An [`openai_responses`](OPENAI_RESPONSES_BACKEND) provider with a key and
-    /// a default model, on OpenAI's own endpoint.
-    pub fn openai(
-        name: impl Into<String>,
-        api_key: impl Into<String>,
-        model: impl Into<String>,
-    ) -> LlmProviderDef {
-        LlmProviderDef::new(name, OPENAI_RESPONSES_BACKEND)
-            .with(CFG_API_KEY, api_key.into())
-            .with(CFG_MODEL, model.into())
     }
 
     /// Set a backend setting, returning `self` for chaining.
@@ -164,13 +151,6 @@ impl LlmProviderDef {
     pub fn setting(&self, key: &str) -> Option<&str> {
         self.config.get(key).and_then(serde_json::Value::as_str)
     }
-
-    /// The model this provider calls when nothing overrides it.
-    pub fn default_model(&self) -> Option<&str> {
-        self.setting(CFG_MODEL)
-            .map(str::trim)
-            .filter(|m| !m.is_empty())
-    }
 }
 
 /// The settings the [`openai_responses`](OPENAI_RESPONSES_BACKEND) backend
@@ -186,10 +166,6 @@ pub fn openai_config_spec() -> Vec<FormField> {
             .label("API key")
             .required()
             .secret(),
-        FormField::new(CFG_MODEL, BasicType::Text)
-            .label("Default model")
-            .required()
-            .default_value("gpt-5.1"),
         FormField::new(CFG_BASE_URL, BasicType::Text)
             .label("Base URL (blank for OpenAI)")
             .default_value(crate::openai::DEFAULT_BASE_URL),
@@ -197,7 +173,7 @@ pub fn openai_config_spec() -> Vec<FormField> {
 }
 
 /// The settings the [`anthropic`](ANTHROPIC_BACKEND) backend needs — the same
-/// three, since the difference between the vendors is not in what an admin has
+/// two, since the difference between the vendors is not in what an admin has
 /// to type.
 pub fn anthropic_config_spec() -> Vec<FormField> {
     vec![
@@ -205,16 +181,25 @@ pub fn anthropic_config_spec() -> Vec<FormField> {
             .label("API key")
             .required()
             .secret(),
-        // A default rather than a fixed list: model names change faster than
-        // releases do, and an admin who has to type one is better served than
-        // one whose model is missing from a select nobody has updated.
-        FormField::new(CFG_MODEL, BasicType::Text)
-            .label("Default model")
-            .required()
-            .default_value("claude-sonnet-5"),
         FormField::new(CFG_BASE_URL, BasicType::Text)
             .label("Base URL (blank for Anthropic)")
             .default_value(crate::anthropic::DEFAULT_BASE_URL),
+    ]
+}
+
+/// The settings the [`openai_chat`](OPENAI_CHAT_BACKEND) backend needs.
+///
+/// The reverse of the other two: the key is optional, because a local host
+/// (llama.cpp, Ollama, vLLM on a workstation) takes none, and the base URL is
+/// required, because there is no one host this backend means.
+pub fn openai_chat_config_spec() -> Vec<FormField> {
+    vec![
+        FormField::new(CFG_API_KEY, BasicType::Text)
+            .label("API key (blank for a local host)")
+            .secret(),
+        FormField::new(CFG_BASE_URL, BasicType::Text)
+            .label("Base URL (for example http://localhost:11434/v1)")
+            .required(),
     ]
 }
 
@@ -222,10 +207,12 @@ pub fn anthropic_config_spec() -> Vec<FormField> {
 /// can pick one and be shown its [`provider_config_spec`].
 ///
 /// The single place that enumerates them: a new backend is added here, to
-/// [`provider_config_spec`] and to [`connect_provider`].
+/// [`provider_config_spec`], to [`model_config_spec`](crate::model_config_spec)
+/// and to [`connect_model`].
 pub fn registered_backends() -> Vec<String> {
     vec![
         ANTHROPIC_BACKEND.to_owned(),
+        OPENAI_CHAT_BACKEND.to_owned(),
         OPENAI_RESPONSES_BACKEND.to_owned(),
     ]
 }
@@ -239,12 +226,13 @@ pub fn provider_config_spec(name: &str) -> Result<Vec<FormField>> {
     match name {
         OPENAI_RESPONSES_BACKEND => Ok(openai_config_spec()),
         ANTHROPIC_BACKEND => Ok(anthropic_config_spec()),
+        OPENAI_CHAT_BACKEND => Ok(openai_chat_config_spec()),
         other => Err(unknown_backend(other)),
     }
 }
 
 /// The error for a backend nothing implements, naming what there is.
-fn unknown_backend(name: &str) -> Error {
+pub(crate) fn unknown_backend(name: &str) -> Error {
     Error::config(format!(
         "unknown LLM provider backend `{name}`; the registered backends are {}",
         registered_backends().join(", ")
@@ -272,43 +260,50 @@ pub fn validate_provider_config(def: &LlmProviderDef) -> Result<()> {
     })
 }
 
-/// Turn a stored definition into a callable provider — the one place a
-/// definition becomes an instance.
+/// Turn a stored provider and one of its models into a callable model — the one
+/// place a definition becomes an instance.
 ///
-/// `model` overrides the definition's [`default_model`](LlmProviderDef::default_model),
-/// which is how an agent names a different model against the same key (§11.2).
-/// Passing `None` uses the definition's own.
+/// What comes back carries the model's **resolved capabilities and prices**
+/// beside the provider, so the loop never looks them up a second time.
 ///
 /// Building a client sends nothing, so an error here means the *configuration*
-/// cannot produce a client — a missing key, an unparseable URL — never that the
-/// provider is down. Reachability is a request, and the admin form's *Test
-/// connection* is the deliberate way to make one.
-pub fn connect_provider(def: &LlmProviderDef, model: Option<&str>) -> Result<Arc<dyn LlmProvider>> {
-    validate_provider_config(def)?;
+/// cannot produce a client — a missing key, an unparseable URL, a model row
+/// that belongs to another provider — never that the provider is down.
+/// Reachability is a request, and the admin form's *Test* is the deliberate way
+/// to make one.
+pub fn connect_model(provider: &LlmProviderDef, model: &LlmModelDef) -> Result<ConnectedModel> {
+    validate_provider_config(provider)?;
+    if model.provider_id != provider.id {
+        return Err(Error::invalid(format!(
+            "LLM model `{}` does not belong to provider `{}`",
+            model.name, provider.name
+        )));
+    }
+    validate_model_config(&provider.backend, model)?;
+    let name = model.name.trim();
+    if name.is_empty() {
+        return Err(Error::invalid(format!(
+            "an LLM model of provider `{}` has no name",
+            provider.name
+        )));
+    }
 
-    let api_key = def.setting(CFG_API_KEY).unwrap_or_default();
-    let base_url = def.setting(CFG_BASE_URL).unwrap_or_default();
-    let model = match model.map(str::trim).filter(|m| !m.is_empty()) {
-        Some(model) => model,
-        None => def.default_model().ok_or_else(|| {
-            // Unreachable while `model` is required and validation ran above,
-            // but the alternative is an `unwrap` (principle 5), and a provider
-            // whose model is blank is a real error worth naming.
-            Error::invalid(format!(
-                "LLM provider `{}` has no `{CFG_MODEL}` setting and no model was given",
-                def.name
-            ))
-        })?,
-    };
+    let capabilities = model.capabilities(&provider.backend);
+    let prices = model.prices();
+    let api_key = provider.setting(CFG_API_KEY).unwrap_or_default();
+    let base_url = provider.setting(CFG_BASE_URL).unwrap_or_default();
 
-    // Every connected provider is wrapped in the call log (§16): this is the one
+    // Every connected model is wrapped in the call log (§16): this is the one
     // place a stored record becomes something callable, so wrapping here is what
     // makes "every model call this server makes" true of the log — the agent
-    // loop, the chat socket and the test-connection button all arrive through
-    // this function.
-    let connected: Arc<dyn LlmProvider> = match def.backend.as_str() {
-        OPENAI_RESPONSES_BACKEND => Arc::new(OpenAiResponses::new(base_url, api_key, model)?),
-        ANTHROPIC_BACKEND => Arc::new(Anthropic::new(base_url, api_key, model)?),
+    // loop, the chat socket and the test button all arrive through this
+    // function.
+    let connected: Arc<dyn LlmProvider> = match provider.backend.as_str() {
+        OPENAI_RESPONSES_BACKEND => {
+            Arc::new(OpenAiResponses::new(base_url, api_key, name, capabilities)?)
+        }
+        ANTHROPIC_BACKEND => Arc::new(Anthropic::new(base_url, api_key, name, capabilities)?),
+        OPENAI_CHAT_BACKEND => Arc::new(OpenAiChat::new(base_url, api_key, name, capabilities)?),
         // Unreachable while `validate_provider_config` runs first; kept so
         // adding a backend to the registry without adding it here is a clear
         // error rather than a fallthrough.
@@ -318,15 +313,26 @@ pub fn connect_provider(def: &LlmProviderDef, model: Option<&str>) -> Result<Arc
             )));
         }
     };
-    Ok(Arc::new(crate::logging::LoggedProvider::new(
-        connected, &def.name,
-    )))
+    Ok(ConnectedModel {
+        provider: Arc::new(crate::logging::LoggedProvider::new(
+            connected,
+            &provider.name,
+        )),
+        provider_name: provider.name.clone(),
+        backend: provider.backend.clone(),
+        capabilities,
+        prices,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use sc_types::SECRET_SENTINEL;
+
+    fn anthropic(name: &str) -> LlmProviderDef {
+        LlmProviderDef::new(name, ANTHROPIC_BACKEND).with(CFG_API_KEY, "sk-x")
+    }
 
     #[test]
     fn every_backend_declares_its_key_as_a_secret() {
@@ -336,7 +342,14 @@ mod tests {
             let spec = provider_config_spec(&backend).unwrap();
             let key = spec.iter().find(|f| f.name() == CFG_API_KEY).unwrap();
             assert!(key.secret, "{backend}'s API key must be declared secret");
-            assert!(key.required, "{backend} cannot be called without a key");
+            // A local Chat Completions host takes no key.
+            assert_eq!(
+                key.required,
+                backend != OPENAI_CHAT_BACKEND,
+                "{backend}'s key requirement"
+            );
+            // The model is a row of its own now, never a provider setting.
+            assert!(spec.iter().all(|f| f.name() != "model"), "{backend}");
         }
     }
 
@@ -349,6 +362,10 @@ mod tests {
         assert_eq!(
             provider_config_spec(ANTHROPIC_BACKEND).unwrap(),
             anthropic_config_spec()
+        );
+        assert_eq!(
+            provider_config_spec(OPENAI_CHAT_BACKEND).unwrap(),
+            openai_chat_config_spec()
         );
         let err = provider_config_spec("bedrock").unwrap_err().to_string();
         assert!(err.contains("bedrock"), "{err}");
@@ -368,11 +385,19 @@ mod tests {
             base.default,
             Some(serde_json::json!(crate::openai::DEFAULT_BASE_URL))
         );
+        // Chat Completions has no one host, so it must be told which.
+        let spec = openai_chat_config_spec();
+        assert!(
+            spec.iter()
+                .find(|f| f.name() == CFG_BASE_URL)
+                .unwrap()
+                .required
+        );
     }
 
     #[test]
     fn a_missing_key_is_refused_on_save_naming_the_provider() {
-        let def = LlmProviderDef::new("main", ANTHROPIC_BACKEND).with(CFG_MODEL, "claude-opus-4");
+        let def = LlmProviderDef::new("main", ANTHROPIC_BACKEND);
         let err = validate_provider_config(&def).unwrap_err().to_string();
         assert!(err.contains("main"), "{err}");
         assert!(err.contains(CFG_API_KEY), "{err}");
@@ -380,55 +405,73 @@ mod tests {
 
     #[test]
     fn an_unknown_setting_is_refused_rather_than_ignored() {
-        let def = LlmProviderDef::anthropic("main", "sk-x", "claude-opus-4").with("temp", 0.5);
+        // Including the old default model, which is a model row now.
+        let def = anthropic("main").with("model", "claude-opus-4");
         let err = validate_provider_config(&def).unwrap_err().to_string();
-        assert!(err.contains("temp"), "{err}");
+        assert!(err.contains("model"), "{err}");
     }
 
     #[test]
-    fn connecting_resolves_the_model_from_the_override_then_the_definition() {
-        let def = LlmProviderDef::anthropic("main", "sk-x", "claude-sonnet-4-5");
-        assert_eq!(
-            connect_provider(&def, None).unwrap().model(),
-            "claude-sonnet-4-5"
-        );
-        assert_eq!(
-            connect_provider(&def, Some("claude-opus-4-1"))
-                .unwrap()
-                .model(),
-            "claude-opus-4-1"
-        );
-        // A blank override is not an override — it is an agent that left the
-        // field empty, which means "the provider's default".
-        assert_eq!(
-            connect_provider(&def, Some("  ")).unwrap().model(),
-            "claude-sonnet-4-5"
-        );
+    fn connecting_a_model_resolves_its_capabilities_and_prices() {
+        let provider = anthropic("main");
+        let model = LlmModelDef::new(provider.id, "claude-sonnet-5")
+            .with(crate::CFG_PRICE_INPUT, 3.0)
+            .with(crate::CFG_PRICE_OUTPUT, 15.0)
+            .with(crate::CFG_VISION, "no");
+        let connected = connect_model(&provider, &model).unwrap();
+        assert_eq!(connected.provider.model(), "claude-sonnet-5");
+        assert_eq!(connected.provider_name, "main");
+        assert_eq!(connected.prices.input, Some(3.0));
+        assert!(!connected.capabilities.vision, "the row's override");
+        assert_eq!(connected.capabilities.context_window, 200_000, "the rule");
     }
 
     #[test]
     fn a_structurally_broken_definition_will_not_connect() {
-        let def = LlmProviderDef::new("main", ANTHROPIC_BACKEND);
-        assert!(connect_provider(&def, None).is_err());
-        let def = LlmProviderDef::new("main", "bedrock");
-        assert!(connect_provider(&def, None).is_err());
+        let broken = LlmProviderDef::new("main", ANTHROPIC_BACKEND);
+        let model = LlmModelDef::new(broken.id, "claude-sonnet-5");
+        assert!(connect_model(&broken, &model).is_err());
+
+        let unknown = LlmProviderDef::new("main", "bedrock");
+        let model = LlmModelDef::new(unknown.id, "x");
+        assert!(connect_model(&unknown, &model).is_err());
+
+        // A model row of another provider.
+        let provider = anthropic("main");
+        let other = LlmModelDef::new(LlmProviderDefId::new(), "claude-sonnet-5");
+        let err = connect_model(&provider, &other).unwrap_err().to_string();
+        assert!(err.contains("does not belong"), "{err}");
+
+        // A model setting the backend does not declare.
+        let model = LlmModelDef::new(provider.id, "claude-sonnet-5").with("temperature", 0.2);
+        assert!(connect_model(&provider, &model).is_err());
     }
 
     #[test]
-    fn both_backends_connect_against_an_arbitrary_base_url() {
+    fn every_backend_connects_against_an_arbitrary_base_url() {
         // Building a client sends nothing, so this asserts exactly what
-        // `connect_provider` promises: a well-formed definition produces a
-        // callable provider without reaching the network.
-        let openai = LlmProviderDef::openai("gateway", "sk-x", "gpt-5.1")
-            .with(CFG_BASE_URL, "http://127.0.0.1:9/v1");
-        assert_eq!(connect_provider(&openai, None).unwrap().model(), "gpt-5.1");
-
-        let anthropic = LlmProviderDef::anthropic("proxy", "sk-y", "claude-opus-4-1")
-            .with(CFG_BASE_URL, "http://127.0.0.1:9");
-        assert_eq!(
-            connect_provider(&anthropic, None).unwrap().model(),
-            "claude-opus-4-1"
-        );
+        // `connect_model` promises: a well-formed definition produces a
+        // callable model without reaching the network.
+        for (backend, base) in [
+            (OPENAI_RESPONSES_BACKEND, "http://127.0.0.1:9/v1"),
+            (ANTHROPIC_BACKEND, "http://127.0.0.1:9"),
+            (OPENAI_CHAT_BACKEND, "http://127.0.0.1:9/v1"),
+        ] {
+            let provider = LlmProviderDef::new("p", backend)
+                .with(CFG_API_KEY, "sk-x")
+                .with(CFG_BASE_URL, base);
+            let model = LlmModelDef::new(provider.id, "some-model");
+            assert_eq!(
+                connect_model(&provider, &model).unwrap().provider.model(),
+                "some-model",
+                "{backend}"
+            );
+        }
+        // A local Chat Completions host with no key at all.
+        let local = LlmProviderDef::new("local", OPENAI_CHAT_BACKEND)
+            .with(CFG_BASE_URL, "http://127.0.0.1:11434/v1");
+        let model = LlmModelDef::new(local.id, "llama3.2");
+        assert!(connect_model(&local, &model).is_ok());
     }
 
     #[test]
@@ -437,7 +480,9 @@ mod tests {
         // and `merge_secrets` is what stops one being built. Asserted here
         // because this crate is where the two meet.
         let spec = provider_config_spec(ANTHROPIC_BACKEND).unwrap();
-        let stored = LlmProviderDef::anthropic("main", "sk-real", "claude-opus-4").config;
+        let stored = LlmProviderDef::new("main", ANTHROPIC_BACKEND)
+            .with(CFG_API_KEY, "sk-real")
+            .config;
         let redacted = sc_types::redact_attrs(&spec, &stored);
         assert_eq!(
             redacted.get(CFG_API_KEY),

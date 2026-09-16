@@ -97,6 +97,10 @@ pub enum LlmMessage {
         /// The tool calls the model made, in the order it made them.
         #[serde(default)]
         tool_calls: Vec<ToolCall>,
+        /// Opaque, vendor-signed items to send back with this turn (§4's
+        /// reasoning replay). Empty for every backend and model that has none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provider_items: Vec<ProviderItem>,
     },
     /// What a tool returned, answering one [`ToolCall`] by its id.
     ///
@@ -111,6 +115,93 @@ pub enum LlmMessage {
         name: String,
         /// What the tool produced, or the error it produced.
         content: String,
+        /// Images the tool produced beside its text, such as a screenshot
+        /// (§7b). An adapter sends them where its vendor accepts them, and a
+        /// model without `vision` gets a stub instead.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImagePart>,
+    },
+}
+
+/// One image in a tool result: its media type and its bytes.
+///
+/// The bytes are serialised as base64, so a run's history stays JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImagePart {
+    /// The media type, such as `image/png` or `image/jpeg`.
+    pub media_type: String,
+    /// The encoded image.
+    #[serde(with = "base64_bytes")]
+    pub data: Vec<u8>,
+}
+
+impl ImagePart {
+    /// An image of `media_type` holding `data`.
+    pub fn new(media_type: impl Into<String>, data: impl Into<Vec<u8>>) -> ImagePart {
+        ImagePart {
+            media_type: media_type.into(),
+            data: data.into(),
+        }
+    }
+
+    /// The bytes as base64, which is how every vendor takes them.
+    pub fn base64(&self) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(&self.data)
+    }
+}
+
+/// Serde for bytes as a base64 string.
+mod base64_bytes {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(d)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(text.as_bytes())
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// An opaque item a vendor asks to be sent back with the assistant turn that
+/// produced it (§4's reasoning replay).
+///
+/// **Only vendor-signed or encrypted items.** The readable reasoning text in
+/// [`AssistantMessage::reasoning`] never travels back. An Anthropic thinking
+/// block is the one case that carries text, because its signature covers that
+/// text and Anthropic refuses the signature without it. It is still sent back
+/// only as the signed block, never as reasoning the harness wrote.
+///
+/// The loop does not look inside these. It stores them with the run and hands
+/// them back to the adapter, which sends them when the model's capabilities
+/// allow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProviderItem {
+    /// A Responses API reasoning item with its encrypted content
+    /// (`store: false`).
+    EncryptedReasoning {
+        /// The reasoning item's id (`rs_…`).
+        id: String,
+        /// The encrypted payload.
+        encrypted_content: String,
+    },
+    /// An Anthropic thinking block and its signature.
+    SignedThinking {
+        /// The thinking text the signature covers.
+        thinking: String,
+        /// The signature.
+        signature: String,
+    },
+    /// An Anthropic redacted thinking block.
+    RedactedThinking {
+        /// The opaque payload.
+        data: String,
     },
 }
 
@@ -127,6 +218,19 @@ impl LlmMessage {
         LlmMessage::Assistant {
             content: content.into(),
             tool_calls: Vec::new(),
+            provider_items: Vec::new(),
+        }
+    }
+
+    /// An assistant message with text and tool calls, and no provider items.
+    pub fn assistant_with_calls(
+        content: impl Into<String>,
+        tool_calls: Vec<ToolCall>,
+    ) -> LlmMessage {
+        LlmMessage::Assistant {
+            content: content.into(),
+            tool_calls,
+            provider_items: Vec::new(),
         }
     }
 
@@ -136,16 +240,59 @@ impl LlmMessage {
             tool_call_id: call.id.clone(),
             name: call.name.clone(),
             content: content.into(),
+            images: Vec::new(),
         }
+    }
+}
+
+/// Where a request asks the provider to cache its prompt (§4, §9).
+///
+/// The layout a request is built in runs from most to least stable: the system
+/// prompt and tools, then the session header, then the history. A breakpoint
+/// after each stable part lets the next request reuse it. Each adapter maps
+/// this onto its vendor or ignores it: Anthropic marks `cache_control`, and
+/// hosts that cache automatically need nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachePlan {
+    /// A breakpoint after the stable prefix: the system prompt and the tools.
+    #[serde(default)]
+    pub prefix: bool,
+    /// A breakpoint after the session header, which ends with the message at
+    /// this index.
+    #[serde(default)]
+    pub session_header: Option<usize>,
+    /// A breakpoint at the tail of the history.
+    #[serde(default)]
+    pub tail: bool,
+}
+
+impl CachePlan {
+    /// No breakpoints.
+    pub fn none() -> CachePlan {
+        CachePlan::default()
+    }
+
+    /// Breakpoints after the prefix, after the session header (if there is
+    /// one), and at the tail.
+    pub fn standard(session_header: Option<usize>) -> CachePlan {
+        CachePlan {
+            prefix: true,
+            session_header,
+            tail: true,
+        }
+    }
+
+    /// Whether the plan asks for any breakpoint.
+    pub fn is_empty(&self) -> bool {
+        !self.prefix && self.session_header.is_none() && !self.tail
     }
 }
 
 /// One request to a model (§11.1).
 ///
-/// Deliberately small. Everything a *particular* provider can additionally be
-/// told — reasoning effort, cache control, structured outputs — is left out
-/// until something needs it, because a field here is a field every adapter must
-/// answer for and every caller must consider.
+/// Kept small. A field here is a field every adapter must answer for and every
+/// caller must consider, so a vendor-specific option is added only when the
+/// loop needs it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LlmRequest {
     /// The system prompt, sent once per request rather than as a message.
@@ -159,6 +306,19 @@ pub struct LlmRequest {
     pub max_tokens: Option<u32>,
     /// Sampling temperature, if the caller sets one.
     pub temperature: Option<f64>,
+    /// Whether the model may make several tool calls in one turn. `None` sends
+    /// nothing and leaves the host's default. The loop sends `false` unless the
+    /// agent says otherwise (R§12), because sequential calls are easier to
+    /// fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
+    /// Where to ask for prompt-cache breakpoints.
+    #[serde(default, skip_serializing_if = "CachePlan::is_empty")]
+    pub cache: CachePlan,
+    /// A stable key routing requests with a shared prefix to the same cache,
+    /// where the host takes one (OpenAI's `prompt_cache_key`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
 }
 
 impl LlmRequest {
@@ -213,20 +373,31 @@ pub enum StopReason {
     ToolCalls,
 }
 
-/// What a request cost, as the provider reports it.
+/// The tokens a request used, as the provider reports them.
 ///
 /// Zero throughout means "the provider did not say", which both vendors do for
 /// some responses. It is not distinguished from a genuinely free call because
-/// there is no such thing.
+/// there is no such thing. What it *cost* is [`Usage::cost`], which needs the
+/// model's prices.
+///
+/// **`input_tokens` is the whole prompt on every backend.** Anthropic reports
+/// cache reads and cache writes apart from its `input_tokens`, and its adapter
+/// adds them back, so the two cache counts are always parts of the input and
+/// never on top of it. That is what makes the count usable for measuring a
+/// context (§9) whichever vendor answered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
-    /// Tokens in the prompt.
+    /// Tokens in the prompt, cached or not.
     pub input_tokens: u64,
     /// Tokens generated.
     pub output_tokens: u64,
-    /// Prompt tokens served from the provider's cache, where it reports them.
+    /// Prompt tokens read from the provider's cache, where it reports them.
     #[serde(default)]
     pub cached_input_tokens: u64,
+    /// Prompt tokens written to the provider's cache, where it reports them
+    /// (Anthropic's cache creation, which has its own price).
+    #[serde(default)]
+    pub cache_write_input_tokens: u64,
 }
 
 impl Usage {
@@ -236,6 +407,7 @@ impl Usage {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
         self.cached_input_tokens += other.cached_input_tokens;
+        self.cache_write_input_tokens += other.cache_write_input_tokens;
     }
 
     /// Input plus output. Not stored, because the two halves are priced
@@ -265,6 +437,8 @@ pub enum LlmDelta {
     Reasoning(String),
     /// A complete tool call, emitted **only once its arguments parse**.
     ToolCall(ToolCall),
+    /// An opaque item to send back with this turn (see [`ProviderItem`]).
+    ProviderItem(ProviderItem),
     /// The end of the response.
     Stop {
         /// Why it ended.
@@ -293,6 +467,9 @@ pub struct AssistantMessage {
     /// order the loop must run them in (§11.2).
     #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
+    /// Opaque items to send back with this turn (see [`ProviderItem`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_items: Vec<ProviderItem>,
     /// Why the model stopped.
     pub stop_reason: Option<StopReason>,
     /// What the response cost.
@@ -303,13 +480,16 @@ pub struct AssistantMessage {
 impl AssistantMessage {
     /// This response as the [`LlmMessage`] that goes back into the history.
     ///
-    /// The reasoning is dropped, deliberately: it is not part of the
+    /// The readable reasoning is dropped, deliberately: it is not part of the
     /// conversation, and replaying a model's own notes to it is neither what
     /// either provider expects nor something either would accept unchanged.
+    /// The opaque [`provider_items`](AssistantMessage::provider_items) are
+    /// kept, because they are what a vendor asks to have back.
     pub fn message(&self) -> LlmMessage {
         LlmMessage::Assistant {
             content: self.content.clone(),
             tool_calls: self.tool_calls.clone(),
+            provider_items: self.provider_items.clone(),
         }
     }
 
@@ -321,6 +501,7 @@ impl AssistantMessage {
             LlmDelta::Text(text) => self.content.push_str(&text),
             LlmDelta::Reasoning(text) => self.reasoning.push_str(&text),
             LlmDelta::ToolCall(call) => self.tool_calls.push(call),
+            LlmDelta::ProviderItem(item) => self.provider_items.push(item),
             LlmDelta::Stop { reason, usage } => {
                 self.stop_reason = Some(reason);
                 self.usage = usage;
@@ -348,11 +529,16 @@ mod tests {
                     name: "query_books".to_owned(),
                     arguments: json!({"where": {"author": "Melville"}}),
                 }],
+                provider_items: vec![ProviderItem::EncryptedReasoning {
+                    id: "rs_1".to_owned(),
+                    encrypted_content: "gAAA…".to_owned(),
+                }],
             },
             LlmMessage::ToolResult {
                 tool_call_id: "call_1".to_owned(),
                 name: "query_books".to_owned(),
                 content: "3".to_owned(),
+                images: vec![ImagePart::new("image/png", vec![0x89, b'P', b'N', b'G', 0])],
             },
         ];
         let text = serde_json::to_string(&history).unwrap();
@@ -376,7 +562,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 10,
                 output_tokens: 4,
-                cached_input_tokens: 0,
+                ..Usage::default()
             },
         });
 
@@ -385,6 +571,70 @@ mod tests {
         assert_eq!(msg.tool_calls.len(), 1);
         assert_eq!(msg.stop_reason, Some(StopReason::ToolCalls));
         assert_eq!(msg.usage.total_tokens(), 14);
+    }
+
+    #[test]
+    fn an_image_is_serialised_as_base64_and_an_empty_list_not_at_all() {
+        let result = LlmMessage::ToolResult {
+            tool_call_id: "c".to_owned(),
+            name: "view_app".to_owned(),
+            content: "screenshot".to_owned(),
+            images: vec![ImagePart::new("image/jpeg", b"hi".to_vec())],
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["images"][0]["data"], json!("aGk="));
+        assert_eq!(value["images"][0]["media_type"], json!("image/jpeg"));
+
+        // A history stored before images existed still reads, and a result
+        // without images writes no key.
+        let plain = LlmMessage::tool_result(
+            &ToolCall {
+                id: "c".to_owned(),
+                name: "t".to_owned(),
+                arguments: json!({}),
+            },
+            "ok",
+        );
+        let value = serde_json::to_value(&plain).unwrap();
+        assert!(value.get("images").is_none(), "{value}");
+        assert_eq!(serde_json::from_value::<LlmMessage>(value).unwrap(), plain);
+    }
+
+    #[test]
+    fn provider_items_go_back_but_readable_reasoning_does_not() {
+        let mut msg = AssistantMessage::default();
+        msg.push(LlmDelta::Reasoning("my private notes".to_owned()));
+        msg.push(LlmDelta::ProviderItem(ProviderItem::SignedThinking {
+            thinking: "signed".to_owned(),
+            signature: "sig".to_owned(),
+        }));
+        msg.push(LlmDelta::Text("done".to_owned()));
+        let LlmMessage::Assistant {
+            provider_items,
+            content,
+            ..
+        } = msg.message()
+        else {
+            panic!("an assistant message");
+        };
+        assert_eq!(content, "done");
+        assert_eq!(provider_items.len(), 1);
+        assert!(
+            !serde_json::to_string(&provider_items)
+                .unwrap()
+                .contains("private")
+        );
+    }
+
+    #[test]
+    fn a_request_without_the_new_fields_reads_and_writes_as_before() {
+        let req = LlmRequest::prompt("hi");
+        let value = serde_json::to_value(&req).unwrap();
+        assert!(value.get("cache").is_none(), "{value}");
+        assert!(value.get("parallel_tool_calls").is_none(), "{value}");
+        assert_eq!(serde_json::from_value::<LlmRequest>(value).unwrap(), req);
+        assert!(CachePlan::none().is_empty());
+        assert!(!CachePlan::standard(None).is_empty());
     }
 
     #[test]
@@ -404,15 +654,18 @@ mod tests {
             input_tokens: 100,
             output_tokens: 20,
             cached_input_tokens: 80,
+            cache_write_input_tokens: 10,
         });
         total.add(Usage {
             input_tokens: 130,
             output_tokens: 5,
             cached_input_tokens: 100,
+            cache_write_input_tokens: 0,
         });
         assert_eq!(total.input_tokens, 230);
         assert_eq!(total.output_tokens, 25);
         assert_eq!(total.cached_input_tokens, 180);
+        assert_eq!(total.cache_write_input_tokens, 10);
         assert_eq!(total.total_tokens(), 255);
     }
 
@@ -429,6 +682,7 @@ mod tests {
                 tool_call_id: "call_42".to_owned(),
                 name: "insert_row".to_owned(),
                 content: "ok".to_owned(),
+                images: Vec::new(),
             }
         );
     }

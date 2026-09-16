@@ -33,6 +33,7 @@ import { IconArrowLeft } from "../icons";
 import { PageBody, PageHeader } from "../layout";
 import { OptionalRoleSelect } from "../roleSelect";
 import { useRoles } from "../roles";
+import { modelOptions, type ModelItem } from "../llmModels";
 import { SettingsFields, buildConfig, readConfig } from "../settings";
 
 type TraitInfo = ListAgentTraitsResponse[number];
@@ -68,6 +69,7 @@ export function AgentForm({ agentId }: { agentId?: string }) {
   const roles = useRoles();
   const [traits, setTraits] = useState<TraitInfo[] | null>(null);
   const [providers, setProviders] = useState<ProviderItem[]>([]);
+  const [models, setModels] = useState<ModelItem[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -128,6 +130,28 @@ export function AgentForm({ agentId }: { agentId?: string }) {
       cancelled = true;
     };
   }, [agentId]);
+
+  // The chosen provider's models, for the model pick-list. Fetched again when
+  // the provider changes; a provider that is missing has none to offer.
+  useEffect(() => {
+    const chosen = providers.find((p) => p.name === provider);
+    if (!chosen) {
+      setModels([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .listLlmModels(chosen.id)
+      .then((list) => {
+        if (!cancelled) setModels(list);
+      })
+      .catch(() => {
+        if (!cancelled) setModels([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [providers, provider]);
 
   const specOf = (trait: string) => traits?.find((t) => t.name === trait)?.config_spec ?? [];
 
@@ -252,7 +276,12 @@ export function AgentForm({ agentId }: { agentId?: string }) {
                     </Form.Label>
                     <Form.Select
                       value={provider}
-                      onChange={(e) => setProvider(e.target.value)}
+                      onChange={(e) => {
+                        setProvider(e.target.value);
+                        // A model name belongs to one provider; another
+                        // provider's default is the safe starting point.
+                        setModel("");
+                      }}
                     >
                       {/* A provider that was deleted out from under a saved
                           agent still has to be shown, or saving this form would
@@ -271,13 +300,16 @@ export function AgentForm({ agentId }: { agentId?: string }) {
                 <Col md={6}>
                   <Form.Group className="mb-3" controlId="agentModel">
                     <Form.Label>Model</Form.Label>
-                    <Form.Control
-                      value={model}
-                      placeholder="the provider's default"
-                      onChange={(e) => setModel(e.target.value)}
-                    />
+                    <Form.Select value={model} onChange={(e) => setModel(e.target.value)}>
+                      {modelOptions(models, model).map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </Form.Select>
                     <Form.Text muted>
-                      Overrides the model the provider was configured with.
+                      One of the provider's models. Models, their prices and the default are
+                      set on the provider.
                     </Form.Text>
                   </Form.Group>
                 </Col>

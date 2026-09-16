@@ -667,71 +667,76 @@ default.
 
 ## Phase 1 — Providers and models, two tables (`sc-llm`)
 
-- [ ] 1.1 `_fd_llm_models` in `sc-llm/src/storage.rs`: the §3a columns, the (`provider_id`,
+- [x] 1.1 `_fd_llm_models` in `sc-llm/src/storage.rs`: the §3a columns, the (`provider_id`,
       `name`) key, and a foreign key to `_fd_llm_providers`, bootstrapped after the providers
       table (and in `sc-cli`'s bootstrap). `LlmModelDef`/`LlmModelDefId`;
       `save_llm_model` / `load_llm_model` / `list_llm_models(provider)` / `delete_llm_model`,
       read strictly like the providers. At most one `is_default` per provider, enforced
       transactionally on save.
-- [ ] 1.2 Remove the default model from the providers' backend specs (`openai_config_spec`,
+- [x] 1.2 Remove the default model from the providers' backend specs (`openai_config_spec`,
       `anthropic_config_spec`), `LlmProviderDef::default_model`, and `LlmProviderDef::anthropic`
       / `::openai`. Tests that built a provider with a model now build a provider plus a model
       row (`sc-llm`, `sc-agent` and `sc-core-traits` test `common` modules, and the server
       tests).
-- [ ] 1.3 The per-backend model settings (`model_config_spec(backend)`) as `FormField`s: the
+- [x] 1.3 The per-backend model settings (`model_config_spec(backend)`) as `FormField`s: the
       four prices, context window, working budget, edit format, and each capability override.
       All optional, where blank means the built-in default. Validated on save and on load.
-- [ ] 1.4 `delete_llm_provider` deletes the provider's models in the same transaction.
+- [x] 1.4 `delete_llm_provider` deletes the provider's models in the same transaction.
       `delete_llm_model` exists. Both refuse while agents refer to the provider or model, with
       referents passed in by the caller as today, naming the agents. Live tests: cascade,
       refusal, uniqueness per provider, the same name under two providers, one default.
-- [ ] 1.5 `ModelCapabilities` and its resolution (backend + model-name patterns, then the
+- [x] 1.5 `ModelCapabilities` and its resolution (backend + model-name patterns, then the
       model row's non-blank overrides). Table test covering all backends, several model
       names, and an override.
-- [ ] 1.6 `connect_model(&LlmProviderDef, &LlmModelDef) -> ConnectedModel` (the provider, the
+- [x] 1.6 `connect_model(&LlmProviderDef, &LlmModelDef) -> ConnectedModel` (the provider, the
       resolved capabilities and prices), replacing `connect_provider(def, model)`. The call
       log names provider and model.
-- [ ] 1.7 Agents: `validate_agent` resolves `model` as a row under `provider`, or the
+- [x] 1.7 Agents: `validate_agent` resolves `model` as a row under `provider`, or the
       provider's default when `model` is empty, and says which is missing: no such model, or
       no default. `ProviderConnector::connect` returns a `ConnectedModel`. Update
       `sc-agent/src/validate.rs`, `driver.rs` and their tests.
-- [ ] 1.8 Admin API: `listLlmModels` (by provider), `createLlmModel`, `updateLlmModel`,
+- [x] 1.8 Admin API: `listLlmModels` (by provider), `createLlmModel`, `updateLlmModel`,
       `deleteLlmModel`, `listLlmModelSettings` (the backend's model spec), and
       `fetchLlmModels` (the host's model listing, minus names that already have rows).
       `testLlmProvider` becomes `testLlmModel`, which also reports the
       capabilities and prices it resolved. Handlers in `sc-server/src/handlers.rs`, and
       the schema in `sc-api/src/admin.rs`. Tests in `llm_provider_admin_api.rs`.
-- [ ] 1.9 Admin UI: `LlmProviderForm` loses the model and gains a **Models** list (add, edit,
+- [x] 1.9 Admin UI: `LlmProviderForm` loses the model and gains a **Models** list (add, edit,
       delete, make default, *Fetch models*, *Test*). `AgentForm`'s model becomes a pick-list
       of the chosen provider's models (a `server_query`), with the default marked. Update
-      `client.ts`.
-- [ ] 1.10 `create_builder_agent` (`sc-server/src/handlers.rs`) picks the first provider **and
+      `client.ts`. *(Done with `listLlmModels` for the chosen provider rather than a
+      `server_query`: the agent form's model box is hand-built, not spec-rendered, and the
+      options depend on another box's value.)*
+- [x] 1.10 `create_builder_agent` (`sc-server/src/handlers.rs`) picks the first provider **and
       its default model**. A provider with no default model is reported beside the created
       application, as a missing provider is. Update `app_builder_agent.rs`.
-- [ ] 1.11 `LlmRequest.parallel_tool_calls`, `CachePlan`, `prompt_cache_key`. Map them in
+- [x] 1.11 `LlmRequest.parallel_tool_calls`, `CachePlan`, `prompt_cache_key`. Map them in
       `rig_bridge` for Responses (`parallel_tool_calls`, `prompt_cache_key`) and Anthropic
       (`cache_control` breakpoints). First verify what `rig-core` 0.41 exposes. Where it
-      exposes nothing, use `additional_params`, and record any gap in §11.1.
-- [ ] 1.12 Cached-token reporting: confirm both adapters fill `cached_input_tokens`
+      exposes nothing, use `additional_params`, and record any gap in §11.1. *(Gaps: rig cannot
+      place Anthropic's session-header breakpoint; Chat Completions is not sent
+      `prompt_cache_key`.)*
+- [x] 1.12 Cached-token reporting: confirm both adapters fill `cached_input_tokens`
       (Anthropic: cache read), and add `cache_write_input_tokens` for Anthropic's cache
       creation, which has its own price.
-- [ ] 1.13 `AssistantMessage.provider_items`: opaque, serialised with the run, and replayed
+- [x] 1.13 `AssistantMessage.provider_items`: opaque, serialised with the run, and replayed
       when the capability allows (encrypted reasoning with `store: false`; Anthropic thinking
       signatures). Readable reasoning still does not travel back. Round-trip test through
       `to_rig_messages`.
-- [ ] 1.14 The `openai_chat` backend (Chat Completions) over rig's completions provider:
+- [x] 1.14 The `openai_chat` backend (Chat Completions) over rig's completions provider:
       provider settings `api_key` (optional for a local host) and `base_url` (required);
       built-in capabilities (no native `apply_patch`, no reasoning replay, parallel tool calls
       configurable per model); and a model listing via `GET /models`. Register it in
       `registered_backends`, `provider_config_spec`, `model_config_spec` and `connect_model`.
       Tests: request mapping, and merging consecutive tool results where the host needs it.
-- [ ] 1.15 `Prices` read from a model row, and `Usage::cost(&Prices) -> Option<f64>`. An
+- [x] 1.15 `Prices` read from a model row, and `Usage::cost(&Prices) -> Option<f64>`. An
       unknown price is `None`, never zero. Unit tests including cached and cache-write
       tokens.
-- [ ] 1.16 `estimate_tokens(&LlmRequest)` plus a per-run calibration factor taken from the
+- [x] 1.16 `estimate_tokens(&LlmRequest)` plus a per-run calibration factor taken from the
       last reported `input_tokens`. Unit tests on stable text and a calibration step.
-      Images are counted by each vendor's published per-image rule.
-- [ ] 1.17 Image parts on `LlmMessage::ToolResult` (media type plus bytes; serialised base64),
+      Images are counted by each vendor's published per-image rule. *(`TokenEstimator`; the loop
+      uses it from 4.3.)*
+- [x] 1.17 Image parts on `LlmMessage::ToolResult` (media type plus bytes; serialised base64),
       mapped per adapter: an image inside the tool result for Anthropic and Responses, and a
       following user message for `openai_chat`. The `vision` capability (built-in by model
       pattern, overridable on the model row). An image sent to a model without `vision` is

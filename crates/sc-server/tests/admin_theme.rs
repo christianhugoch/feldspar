@@ -143,7 +143,10 @@ fn the_sidebar_folds_the_way_tabler_folds_it() {
     );
 
     // The furniture rules that are ours key on the same class.
-    for element in ["ms-2 sidebar-wide-only", "text-truncate mb-2 sidebar-wide-only"] {
+    for element in [
+        "ms-2 sidebar-wide-only",
+        "text-truncate mb-2 sidebar-wide-only",
+    ] {
         assert!(
             app.contains(element),
             "App.tsx should mark `{element}` as surviving only the unfolded sidebar"

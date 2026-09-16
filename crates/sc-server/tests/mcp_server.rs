@@ -219,7 +219,15 @@ async fn setup() -> sc_error::Result<Harness> {
     // One provider for an agent to name. Nothing calls it: no turn is run here.
     sc_llm::save_llm_provider(
         &catalog,
-        &sc_llm::LlmProviderDef::anthropic("house", "sk-ant-test", "claude-sonnet-4-5"),
+        &sc_llm::LlmProviderDef::new("house", sc_llm::ANTHROPIC_BACKEND)
+            .with(sc_llm::CFG_API_KEY, "sk-ant-test"),
+    )
+    .await?;
+    // The model an agent naming no model calls: the provider's default row.
+    let provider = sc_llm::require_llm_provider(&catalog, "house").await?;
+    sc_llm::save_llm_model(
+        &catalog,
+        &sc_llm::LlmModelDef::new(provider.id, "claude-sonnet-4-5").default_model(),
     )
     .await?;
     let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;

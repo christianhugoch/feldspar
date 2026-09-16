@@ -149,7 +149,8 @@ impl Action for RunAgent {
             .providers
             .connect(ctx.catalog, agent)
             .await
-            .map_err(&named)?;
+            .map_err(&named)?
+            .provider;
 
         let mut runner = Runner::new(
             ctx.catalog,

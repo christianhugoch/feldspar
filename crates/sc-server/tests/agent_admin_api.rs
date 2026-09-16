@@ -29,7 +29,6 @@ use sc_auth::SessionStore;
 use sc_catalog::{Catalog, DataField};
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
-use sc_llm::LlmProviderDef;
 use sc_server::{AppMounts, CSRF_COOKIE, CSRF_HEADER, ServerConfig, admin_handlers, build_router};
 use sc_test_harness::TestDb;
 use sc_types::{BasicType, TypeRef};
@@ -131,7 +130,21 @@ async fn setup() -> sc_error::Result<(Client, Arc<Catalog>, TestDb)> {
     // test resolve it by name and never open a connection.
     sc_llm::save_llm_provider(
         &catalog,
-        &LlmProviderDef::anthropic("house", "sk-ant-test", "claude-sonnet-4-5"),
+        &sc_llm::LlmProviderDef::new("house", sc_llm::ANTHROPIC_BACKEND)
+            .with(sc_llm::CFG_API_KEY, "sk-ant-test"),
+    )
+    .await?;
+    // The model an agent naming no model calls: the provider's default row.
+    let provider = sc_llm::require_llm_provider(&catalog, "house").await?;
+    sc_llm::save_llm_model(
+        &catalog,
+        &sc_llm::LlmModelDef::new(provider.id, "claude-sonnet-4-5").default_model(),
+    )
+    .await?;
+    // And one an agent names explicitly.
+    sc_llm::save_llm_model(
+        &catalog,
+        &sc_llm::LlmModelDef::new(provider.id, "claude-opus-4-1"),
     )
     .await?;
 
@@ -536,8 +549,21 @@ async fn the_posted_agent_is_the_stored_agent() -> sc_error::Result<()> {
         "trait": "query_table",
         "config": { "table": "books", "max_rows": 25 },
     }]);
-    let (status, _) = client.send("POST", "/api/agents", Some(create)).await;
+    let (status, _) = client
+        .send("POST", "/api/agents", Some(create.clone()))
+        .await;
     assert_eq!(status, StatusCode::CREATED);
+
+    // A model the provider has no row for is refused, naming it.
+    let mut unknown = create;
+    unknown["name"] = json!("other");
+    unknown["model"] = json!("gpt-5.1");
+    let (status, err) = client.send("POST", "/api/agents", Some(unknown)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert!(
+        err.to_string().contains("no model named `gpt-5.1`"),
+        "{err}"
+    );
 
     let stored = sc_agent::load_agent_by_name(&catalog, "librarian")
         .await?

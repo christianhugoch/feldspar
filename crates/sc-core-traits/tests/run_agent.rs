@@ -35,7 +35,7 @@ use sc_catalog::Catalog;
 use sc_core_actions::builtin_actions;
 use sc_core_traits::{CFG_AGENT, CFG_PROMPT, builtin_traits, register_agent_actions};
 use sc_error::Result;
-use sc_llm::LlmProvider;
+use sc_llm::{ConnectedModel, LlmProvider};
 use sc_types::Attrs;
 use serde_json::json;
 
@@ -92,10 +92,12 @@ impl Scripted {
 
 #[async_trait::async_trait]
 impl ProviderConnector for Scripted {
-    async fn connect(&self, _catalog: &Catalog, _agent: &Agent) -> Result<Arc<dyn LlmProvider>> {
+    async fn connect(&self, _catalog: &Catalog, _agent: &Agent) -> Result<ConnectedModel> {
         let provider = Arc::new(FakeProvider::new(self.script.clone()));
         self.made.lock().unwrap().push(Arc::clone(&provider));
-        Ok(provider as Arc<dyn LlmProvider>)
+        Ok(ConnectedModel::unconfigured(
+            provider as Arc<dyn LlmProvider>,
+        ))
     }
 }
 

@@ -33,7 +33,7 @@ use sc_catalog::{Catalog, TableId};
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_error::Result;
-use sc_llm::{LlmProvider, LlmProviderDef};
+use sc_llm::{ConnectedModel, LlmProvider};
 use sc_server::{
     AppMounts, CSRF_COOKIE, CSRF_HEADER, MountedApp, ServerConfig, admin_handlers,
     build_router_with_apps, default_js_evaluator, install_triggers,
@@ -216,8 +216,10 @@ struct Scripted;
 
 #[async_trait]
 impl ProviderConnector for Scripted {
-    async fn connect(&self, _catalog: &Catalog, _agent: &Agent) -> Result<Arc<dyn LlmProvider>> {
-        Ok(Arc::new(FakeProvider::new([Reply::says(AGENT_ANSWER)])) as Arc<dyn LlmProvider>)
+    async fn connect(&self, _catalog: &Catalog, _agent: &Agent) -> Result<ConnectedModel> {
+        Ok(ConnectedModel::unconfigured(
+            Arc::new(FakeProvider::new([Reply::says(AGENT_ANSWER)])) as Arc<dyn LlmProvider>,
+        ))
     }
 }
 
@@ -284,7 +286,15 @@ async fn setup() -> sc_error::Result<Server> {
     sc_llm::bootstrap_llm_providers(&catalog).await?;
     sc_llm::save_llm_provider(
         &catalog,
-        &LlmProviderDef::anthropic("house", "sk-ant-test", "claude-sonnet-4-5"),
+        &sc_llm::LlmProviderDef::new("house", sc_llm::ANTHROPIC_BACKEND)
+            .with(sc_llm::CFG_API_KEY, "sk-ant-test"),
+    )
+    .await?;
+    // The model an agent naming no model calls: the provider's default row.
+    let provider = sc_llm::require_llm_provider(&catalog, "house").await?;
+    sc_llm::save_llm_model(
+        &catalog,
+        &sc_llm::LlmModelDef::new(provider.id, "claude-sonnet-4-5").default_model(),
     )
     .await?;
     let agents = sc_server::install_agents(&catalog)

@@ -130,6 +130,63 @@ async fn an_agent_naming_a_provider_that_is_not_connected_is_refused_on_save() -
 }
 
 #[tokio::test]
+async fn an_agent_whose_model_does_not_resolve_says_which_is_missing() -> Result<()> {
+    let db = TestDb::new().await?;
+    let catalog = catalog(&db).await?;
+    let registry = registry(Counter::new())?;
+
+    // A model the provider has no row for.
+    let err = save_agent(
+        &catalog,
+        &registry,
+        &Agent::new("a", "main").model("gpt-5.1"),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("agent `a`"), "{err}");
+    assert!(err.contains("no model named `gpt-5.1`"), "{err}");
+
+    // A provider with models but no default, and an agent that names none.
+    let bare = sc_llm::LlmProviderDef::new("bare", sc_llm::ANTHROPIC_BACKEND)
+        .with(sc_llm::CFG_API_KEY, "sk-x");
+    sc_llm::save_llm_provider(&catalog, &bare).await?;
+    sc_llm::save_llm_model(
+        &catalog,
+        &sc_llm::LlmModelDef::new(bare.id, "claude-haiku-4-5"),
+    )
+    .await?;
+    let err = save_agent(&catalog, &registry, &Agent::new("b", "bare"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no default model"), "{err}");
+    // Naming the model it does have is fine.
+    save_agent(
+        &catalog,
+        &registry,
+        &Agent::new("b", "bare").model("claude-haiku-4-5"),
+    )
+    .await?;
+
+    // A model deleted later drops the agent from the live set, with its reason.
+    let model = sc_llm::require_llm_model(&catalog, &bare, Some("claude-haiku-4-5")).await?;
+    sc_llm::delete_llm_model(&catalog, model.id, &[]).await?;
+    let agents = Agents::load(&catalog, &registry).await?;
+    let issue = agents
+        .issues()
+        .iter()
+        .find(|i| i.agent == "b")
+        .expect("the agent whose model went");
+    assert!(
+        issue.problem.contains("claude-haiku-4-5"),
+        "{}",
+        issue.problem
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_unknown_trait_and_a_bad_configuration_are_both_refused() -> Result<()> {
     let db = TestDb::new().await?;
     let catalog = catalog(&db).await?;

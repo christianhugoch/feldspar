@@ -1,11 +1,11 @@
 //! What a model call prints, driven through the **production path**: a stored
-//! provider definition, [`connect_provider`], a stub server replaying a
+//! provider definition, [`connect_model`], a stub server replaying a
 //! recorded SSE body (§16).
 //!
 //! The unit tests beside [`LoggedProvider`](sc_llm::LoggedProvider) pin the
 //! lines; what can only be checked here is that the lines are *emitted at all*
 //! for a provider an admin configured — the wrapping happens inside
-//! `connect_provider`, so a refactor that returned the bare adapter would leave
+//! `connect_model`, so a refactor that returned the bare adapter would leave
 //! every other test passing and the log empty.
 //!
 //! The lines are read back through `sc-log`'s capture sink (its `capture`
@@ -17,7 +17,10 @@ use crate::common;
 
 use common::{Reply, serve, sse_events};
 use sc_error::Result;
-use sc_llm::{CFG_BASE_URL, LlmProviderDef, LlmRequest, ToolSpec, connect_provider};
+use sc_llm::{
+    CFG_API_KEY, CFG_BASE_URL, LlmModelDef, LlmProviderDef, LlmRequest, OPENAI_RESPONSES_BACKEND,
+    ToolSpec, connect_model,
+};
 use sc_log::{Verbosity, capture};
 use serde_json::{Value as Json, json};
 
@@ -66,9 +69,11 @@ async fn logged_call(level: Verbosity) -> Result<Vec<String>> {
 
     // The admin's record, as it would be stored — and the same call
     // `sc_agent::driver::connect` makes.
-    let def = LlmProviderDef::openai("house", "sk-not-a-real-key", "gpt-5.1")
+    let def = LlmProviderDef::new("house", OPENAI_RESPONSES_BACKEND)
+        .with(CFG_API_KEY, "sk-not-a-real-key")
         .with(CFG_BASE_URL, format!("{base}/v1"));
-    let provider = connect_provider(&def, None)?;
+    let model = LlmModelDef::new(def.id, "gpt-5.1").default_model();
+    let provider = connect_model(&def, &model)?.provider;
 
     let request = LlmRequest::prompt("how many books are there?")
         .system("You are a librarian.")

@@ -123,7 +123,7 @@ export function buildConfig(
       }
       continue;
     }
-    config[field.name] = field.type === "int" ? Number(raw) : raw;
+    config[field.name] = field.type === "int" || field.type === "float" ? Number(raw) : raw;
   }
   return config;
 }
@@ -279,7 +279,14 @@ export function SettingField({
         />
       ) : (
         <Form.Control
-          type={field.secret ? "password" : field.type === "int" ? "number" : "text"}
+          type={
+            field.secret
+              ? "password"
+              : field.type === "int" || field.type === "float"
+                ? "number"
+                : "text"
+          }
+          step={field.type === "float" ? "any" : undefined}
           value={value}
           required={field.required}
           readOnly={fixed}

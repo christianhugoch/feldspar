@@ -30,7 +30,7 @@ use sc_db_postgres::PgDriver;
 use sc_error::{Error, Result};
 use sc_expr::{DenoEvaluator, JsEvaluator};
 use sc_files::FileStoreDef;
-use sc_llm::{LlmProviderDef, ToolSpec, bootstrap_llm_providers, save_llm_provider};
+use sc_llm::{ToolSpec, bootstrap_llm_providers};
 use sc_query::Value;
 use sc_test_harness::TestDb;
 use sc_types::Attrs;
@@ -93,9 +93,17 @@ impl Env {
         // The applications table, for `build_application`: the trait resolves
         // the app it builds from its stored row.
         sc_app::bootstrap(&catalog).await?;
-        save_llm_provider(
+        sc_llm::save_llm_provider(
             &catalog,
-            &LlmProviderDef::anthropic("main", "sk-ant-not-a-real-key", "claude-sonnet-4-5"),
+            &sc_llm::LlmProviderDef::new("main", sc_llm::ANTHROPIC_BACKEND)
+                .with(sc_llm::CFG_API_KEY, "sk-ant-not-a-real-key"),
+        )
+        .await?;
+        // The model an agent naming no model calls: the provider's default row.
+        let provider = sc_llm::require_llm_provider(&catalog, "main").await?;
+        sc_llm::save_llm_model(
+            &catalog,
+            &sc_llm::LlmModelDef::new(provider.id, "claude-sonnet-4-5").default_model(),
         )
         .await?;
         catalog.reload().await?;

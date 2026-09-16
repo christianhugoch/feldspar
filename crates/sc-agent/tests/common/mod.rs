@@ -14,24 +14,39 @@ use sc_catalog::Catalog;
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_error::{Error, Result};
-use sc_llm::{LlmProviderDef, ToolSpec, bootstrap_llm_providers, save_llm_provider};
+use sc_llm::{ToolSpec, bootstrap_llm_providers};
 use sc_test_harness::TestDb;
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Value as Json, json};
 
-/// A catalog over a per-test database with `_fd_llm_providers`, `_fd_agents` and
-/// `_fd_runs` bootstrapped, and one provider named `main` saved — because an
-/// agent that names no connected provider does not validate, so every test would
-/// otherwise start by writing the same row.
+/// A catalog over a per-test database with `_fd_llm_providers`,
+/// `_fd_llm_models`, `_fd_agents` and `_fd_runs` bootstrapped, and one provider
+/// named `main` saved with two models — `claude-sonnet-4-5`, its default, and
+/// `claude-opus-5` — because an agent that names no connected provider and
+/// model does not validate, so every test would otherwise start by writing the
+/// same rows.
 pub async fn catalog(db: &TestDb) -> Result<Catalog> {
     let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
     let catalog = Catalog::init(driver as Arc<dyn DatabaseDriver>).await?;
     bootstrap_llm_providers(&catalog).await?;
     bootstrap_agents(&catalog).await?;
     bootstrap_runs(&catalog).await?;
-    save_llm_provider(
+    sc_llm::save_llm_provider(
         &catalog,
-        &LlmProviderDef::anthropic("main", "sk-ant-not-a-real-key", "claude-sonnet-4-5"),
+        &sc_llm::LlmProviderDef::new("main", sc_llm::ANTHROPIC_BACKEND)
+            .with(sc_llm::CFG_API_KEY, "sk-ant-not-a-real-key"),
+    )
+    .await?;
+    // The model an agent naming no model calls: the provider's default row.
+    let provider = sc_llm::require_llm_provider(&catalog, "main").await?;
+    sc_llm::save_llm_model(
+        &catalog,
+        &sc_llm::LlmModelDef::new(provider.id, "claude-sonnet-4-5").default_model(),
+    )
+    .await?;
+    sc_llm::save_llm_model(
+        &catalog,
+        &sc_llm::LlmModelDef::new(provider.id, "claude-opus-5"),
     )
     .await?;
     Ok(catalog)

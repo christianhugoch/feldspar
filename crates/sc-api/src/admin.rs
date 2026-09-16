@@ -877,7 +877,7 @@ pub fn admin_endpoints() -> EndpointSet {
     // and these endpoints are that row's lifecycle. The shape is deliberately
     // the file stores' shape one crate over: id-addressed configuration, a
     // backends endpoint carrying each backend's declared settings so the form is
-    // generic, and one act (`testLlmProvider`) that is not a save.
+    // generic. Its models are rows of their own, with their own endpoints below.
     //
     // The one thing that is *not* a copy is what the config carries. A provider's
     // config holds an API key, so every response redacts it
@@ -939,39 +939,131 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
-    // **Test connection.** Sends one trivial prompt and reports what came back,
-    // or the provider's own error text. It exists because a wrong key is
-    // otherwise discovered inside a chat transcript, which is the worst place
-    // for it: the admin is no longer looking at the form, and the failure looks
-    // like the agent rather than the configuration.
-    //
-    // It takes the *config in the body* rather than working from the saved row,
-    // so a provider can be tested before it is saved — the same reason a git
-    // store's deploy key is generated at `Configure` scope. A submitted secret
-    // sentinel still resolves against what is stored, when there is a stored row
-    // to resolve against, so testing an existing provider does not require
-    // retyping its key.
+    // --- LLM models ------------------------------------------------------------
+    // One row per model a provider serves (TODO §3a): the name sent on the wire,
+    // whether it is the provider's default, and the model's own settings
+    // (prices, context window, capability overrides), declared per backend.
+    // Blank settings mean the built-in defaults, so a listed model carries
+    // both what is stored and what that resolves to.
+
     set.register(
         Endpoint::new(
-            "testLlmProvider",
-            Method::Post,
-            api().lit("llm-provider-test"),
+            "listLlmModels",
+            Method::Get,
+            api()
+                .lit("llm-providers")
+                .param("id", ValueType::Uuid)
+                .lit("models"),
         )
-        .input(TypeSchema::struct_of([
-            StructField::new("id", TypeSchema::optional(TypeSchema::uuid())),
-            StructField::new("backend", TypeSchema::text()),
-            StructField::new("config", TypeSchema::json()),
-            StructField::new("model", TypeSchema::optional(TypeSchema::text())),
-        ]))
+        .output(TypeSchema::array(llm_model_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "createLlmModel",
+            Method::Post,
+            api()
+                .lit("llm-providers")
+                .param("id", ValueType::Uuid)
+                .lit("models"),
+        )
+        .input(llm_model_input_schema())
+        .output(llm_model_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "updateLlmModel",
+            Method::Put,
+            api().lit("llm-models").param("id", ValueType::Uuid),
+        )
+        .input(llm_model_input_schema())
+        .output(llm_model_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Refused while an agent calls the model — by name, or as its provider's
+    // default — and the refusal names the agents.
+    set.register(
+        Endpoint::new(
+            "deleteLlmModel",
+            Method::Delete,
+            api().lit("llm-models").param("id", ValueType::Uuid),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // The model settings a backend declares, so the model form renders
+    // controls for a backend it knows nothing about.
+    set.register(
+        Endpoint::new(
+            "listLlmModelSettings",
+            Method::Get,
+            api()
+                .lit("llm-provider-backends")
+                .param("backend", ValueType::Text)
+                .lit("model-settings"),
+        )
+        .output(TypeSchema::array(form_field_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // **Fetch models.** Asks the provider's host which models it serves and
+    // answers the names that have no row yet. A host with no listing is an
+    // `ok: false` with a message saying to type the name, not an error: it is
+    // the answer to the question.
+    set.register(
+        Endpoint::new(
+            "fetchLlmModels",
+            Method::Post,
+            api()
+                .lit("llm-providers")
+                .param("id", ValueType::Uuid)
+                .lit("fetch-models"),
+        )
         .output(TypeSchema::struct_of([
             StructField::new("ok", TypeSchema::bool()),
-            // The model's reply on success, the provider's own words on
-            // failure. One field because the admin reads one thing either
-            // way: "did this work, and what did it say".
             StructField::new("message", TypeSchema::text()),
-            StructField::new("model", TypeSchema::text()),
+            StructField::new("names", TypeSchema::array(TypeSchema::text())),
         ]))
         .auth(AuthRequirement::admin()),
+    );
+
+    // **Test.** Sends one trivial prompt to one model through one key, and
+    // reports what came back — or the provider's own error text — with the
+    // capabilities and prices the model resolved to. It exists because a wrong
+    // key or model name is otherwise discovered inside a chat transcript.
+    //
+    // It takes the provider's config and the model's in the body rather than
+    // working from saved rows, so a model can be tested before it is saved. A
+    // submitted secret sentinel still resolves against the stored provider when
+    // `provider_id` names one, so testing does not require retyping the key.
+    set.register(
+        Endpoint::new("testLlmModel", Method::Post, api().lit("llm-model-test"))
+            .input(TypeSchema::struct_of([
+                StructField::new("provider_id", TypeSchema::optional(TypeSchema::uuid())),
+                StructField::new("backend", TypeSchema::text()),
+                StructField::new("config", TypeSchema::json()),
+                StructField::new("name", TypeSchema::text()),
+                StructField::new("model_config", TypeSchema::optional(TypeSchema::json())),
+            ]))
+            .output(TypeSchema::struct_of([
+                StructField::new("ok", TypeSchema::bool()),
+                // The model's reply on success, the provider's own words on
+                // failure. One field because the admin reads one thing either
+                // way: "did this work, and what did it say".
+                StructField::new("message", TypeSchema::text()),
+                StructField::new("model", TypeSchema::text()),
+                StructField::new("capabilities", TypeSchema::json()),
+                StructField::new("prices", TypeSchema::json()),
+            ]))
+            .auth(AuthRequirement::admin()),
     );
 
     // --- modules (Saltcorn v1 JavaScript plugins) ---------------------------
@@ -3626,8 +3718,8 @@ fn llm_provider_fields() -> Vec<StructField> {
 /// There is no `connected` either, and its absence is the design: connecting a
 /// provider builds an HTTP client and sends nothing, so "connected" would be a
 /// word for "the configuration parsed" — which the admin already knows, because
-/// the save succeeded. Whether the provider *works* is a request, and that is
-/// what `testLlmProvider` is.
+/// the save succeeded. Whether a model *works* is a request, and that is what
+/// `testLlmModel` is.
 fn llm_provider_schema() -> TypeSchema {
     let mut fields = vec![StructField::new("id", TypeSchema::uuid())];
     fields.extend(llm_provider_fields());
@@ -3639,6 +3731,40 @@ fn llm_provider_schema() -> TypeSchema {
 /// update).
 fn llm_provider_input_schema() -> TypeSchema {
     TypeSchema::Struct(llm_provider_fields())
+}
+
+/// The fields of a model row that an admin sets.
+fn llm_model_fields() -> Vec<StructField> {
+    vec![
+        // The vendor's model id, as sent on the wire.
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        // At most one per provider: saving one as the default clears the rest.
+        StructField::new("is_default", TypeSchema::bool()),
+        // The model's settings, per the backend's `listLlmModelSettings`.
+        // Blank settings are dropped on save and mean the built-in default.
+        StructField::new("config", TypeSchema::json()),
+    ]
+}
+
+/// A model row as reported to the admin UI: the row, plus what its settings
+/// resolve to, so the form can show the built-in default beside a blank.
+fn llm_model_schema() -> TypeSchema {
+    let mut fields = vec![
+        StructField::new("id", TypeSchema::uuid()),
+        StructField::new("provider_id", TypeSchema::uuid()),
+    ];
+    fields.extend(llm_model_fields());
+    fields.push(StructField::new("capabilities", TypeSchema::json()));
+    fields.push(StructField::new("prices", TypeSchema::json()));
+    TypeSchema::Struct(fields)
+}
+
+/// The body accepted when creating or updating a model: the row's fields minus
+/// its ids (the provider comes from the path on create, and a model never moves
+/// to another provider).
+fn llm_model_input_schema() -> TypeSchema {
+    TypeSchema::Struct(llm_model_fields())
 }
 
 /// One installed module, as the Modules tab reads it: the row, what the package
@@ -3789,8 +3915,9 @@ fn agent_fields() -> Vec<StructField> {
         // The `_fd_llm_providers` **name** this agent calls through, not its id:
         // that is what the stored row holds, so that is what round-trips.
         StructField::new("provider", TypeSchema::text()),
-        // Null means "the provider's own default model", which is the common
-        // case and a real answer rather than a missing one.
+        // A model row under the provider, by name. Null means "the provider's
+        // default model", which is the common case and a real answer rather
+        // than a missing one.
         StructField::new("model", TypeSchema::optional(TypeSchema::text())),
         StructField::new("system_prompt", TypeSchema::text()),
         // A **list** of `{trait, config}` pairs, not a map: a trait may be

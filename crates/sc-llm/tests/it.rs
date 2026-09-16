@@ -23,6 +23,8 @@ mod common;
 mod anthropic_stream;
 #[path = "call_logging.rs"]
 mod call_logging;
+#[path = "openai_chat_stream.rs"]
+mod openai_chat_stream;
 #[path = "openai_stream.rs"]
 mod openai_stream;
 #[path = "provider_store.rs"]

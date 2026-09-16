@@ -307,7 +307,8 @@ async fn turn(
         .services
         .providers()
         .connect(&ctx.catalog, agent)
-        .await?;
+        .await?
+        .provider;
     let observer = SocketObserver { tx: tx.clone() };
     let mut runner = Runner::new(
         &ctx.catalog,
@@ -511,6 +512,9 @@ impl RunObserver for SocketObserver {
             // instant later, when the loop is about to run it, and emitting both
             // would put every tool in the transcript twice.
             LlmDelta::ToolCall(_) => {}
+            // Opaque and vendor-signed: kept with the run for the next request,
+            // never shown.
+            LlmDelta::ProviderItem(_) => {}
             // The ending is the `done` event, which carries the run's state —
             // something the stream alone cannot say.
             LlmDelta::Stop { .. } => {}

@@ -62,8 +62,10 @@ use sc_files::{
     run_backend_operation, visible_entries,
 };
 use sc_llm::{
-    LlmProviderDef, LlmProviderDefId, LlmRequest, connect_provider, delete_llm_provider,
-    list_llm_providers, load_llm_provider, provider_config_spec, save_llm_provider,
+    LlmModelDef, LlmModelDefId, LlmProviderDef, LlmProviderDefId, LlmRequest, connect_model,
+    delete_llm_model, delete_llm_provider, fetch_host_models, list_llm_models, list_llm_providers,
+    load_llm_model, load_llm_provider, model_config_spec, provider_config_spec, save_llm_model,
+    save_llm_provider,
 };
 use sc_module::{load_module, load_module_by_name, save_module};
 use sc_query::{Expr, OrderBy, Projection, Select, Source, Statement, Value};
@@ -1462,17 +1464,169 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
-    // Send one trivial prompt and report what came back. This is the only
-    // handler in the admin API that waits on a third party, and it is worth it:
-    // without it a wrong key is discovered inside a chat transcript, where it
-    // looks like the agent misbehaving rather than the configuration being
-    // wrong.
+    // --- LLM models -----------------------------------------------------------
+    //
+    // One row per model a provider serves (TODO §3a). A model's config holds no
+    // secret, so nothing is redacted here; what a listed model carries beside
+    // its row is what its blank settings resolve to.
+
+    reg.register("listLlmModels", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let provider = require_provider_by_id(&catalog, ctx.path_param("id")?).await?;
+                let out: Vec<Json> = list_llm_models(&catalog, &provider)
+                    .await?
+                    .iter()
+                    .map(|m| llm_model_json(&provider, m))
+                    .collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("createLlmModel", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let provider = require_provider_by_id(&catalog, ctx.path_param("id")?).await?;
+                let model = llm_model_from_body(LlmModelDefId::new(), provider.id, &ctx.body)?;
+                let saved = save_llm_model(&catalog, &model).await?;
+                Ok(HandlerResponse::ok(llm_model_json(&provider, &saved)).with_status(201))
+            }
+        }
+    });
+
+    reg.register("updateLlmModel", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_llm_model_id(ctx.path_param("id")?)?;
+                let existing = load_llm_model(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no LLM model with id {}", id.0)))?;
+                let provider = load_llm_provider(&catalog, existing.provider_id)
+                    .await?
+                    .ok_or_else(|| {
+                        Error::not_found(format!(
+                            "the provider of LLM model `{}` is gone",
+                            existing.name
+                        ))
+                    })?;
+                let mut model = llm_model_from_body(id, existing.provider_id, &ctx.body)?;
+                model.attributes = existing.attributes.clone();
+                // A rename breaks the agents naming it, and losing the default
+                // flag breaks the agents naming no model, so each is refused the
+                // way a delete is. Making *another* model the default is not a
+                // break: those agents follow the default.
+                let renamed = model.name.trim() != existing.name;
+                let undefaulted = existing.is_default && !model.is_default;
+                if renamed || undefaulted {
+                    let users =
+                        agents_using_model(&catalog, &provider, &existing, renamed, undefaulted)
+                            .await?;
+                    if !users.is_empty() {
+                        return Err(Error::invalid(format!(
+                            "LLM model `{}` is still used by {} as it is now; \
+                             change those agents first",
+                            existing.name,
+                            users.join(", ")
+                        )));
+                    }
+                }
+                let saved = save_llm_model(&catalog, &model).await?;
+                Ok(HandlerResponse::ok(llm_model_json(&provider, &saved)))
+            }
+        }
+    });
+
+    reg.register("deleteLlmModel", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_llm_model_id(ctx.path_param("id")?)?;
+                let Some(model) = load_llm_model(&catalog, id).await? else {
+                    return Ok(HandlerResponse::ok(json!({ "deleted": false })));
+                };
+                let users = match load_llm_provider(&catalog, model.provider_id).await? {
+                    Some(provider) => {
+                        agents_using_model(&catalog, &provider, &model, true, true).await?
+                    }
+                    None => Vec::new(),
+                };
+                let deleted = delete_llm_model(&catalog, id, &users).await?;
+                Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
+            }
+        }
+    });
+
+    reg.register("listLlmModelSettings", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let backend = ctx.path_param("backend")?;
+                let spec = resolve_options(&catalog, model_config_spec(backend)?).await?;
+                Ok(HandlerResponse::ok(Json::Array(
+                    spec.iter().map(form_field_json).collect(),
+                )))
+            }
+        }
+    });
+
+    // Asks the host which models it serves. Like a test, a host that cannot
+    // answer is a 200 with `ok: false`: the refusal *is* the answer, and "type
+    // the name instead" is what the admin needs to read.
+    reg.register("fetchLlmModels", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let provider = require_provider_by_id(&catalog, ctx.path_param("id")?).await?;
+                let existing: Vec<String> = list_llm_models(&catalog, &provider)
+                    .await?
+                    .into_iter()
+                    .map(|m| m.name)
+                    .collect();
+                Ok(HandlerResponse::ok(
+                    match fetch_host_models(&provider).await {
+                        Ok(names) => {
+                            let names: Vec<String> = names
+                                .into_iter()
+                                .filter(|n| !existing.contains(n))
+                                .collect();
+                            json!({
+                                "ok": true,
+                                "message": format!("{} model(s) without a row", names.len()),
+                                "names": names,
+                            })
+                        }
+                        Err(e) => json!({
+                            "ok": false,
+                            "message": sc_error::format_causes(&e),
+                            "names": [],
+                        }),
+                    },
+                ))
+            }
+        }
+    });
+
+    // Send one trivial prompt to one model and report what came back. This is
+    // the only handler in the admin API besides *Fetch models* that waits on a
+    // third party, and it is worth it: without it a wrong key or model name is
+    // discovered inside a chat transcript, where it looks like the agent
+    // misbehaving rather than the configuration being wrong.
     //
     // A failure is a **200 with `ok: false`**, not an error status. The provider
     // refusing is the answer to the question that was asked — "does this work?"
     // — and an error response would make the UI show it as a broken request
     // rather than as the diagnostic it is.
-    reg.register("testLlmProvider", {
+    reg.register("testLlmModel", {
         let catalog = catalog.clone();
         move |ctx| {
             let catalog = catalog.clone();
@@ -1480,39 +1634,47 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let obj = require_object(&ctx.body)?;
                 let backend = non_empty_str_field(obj, "backend")?.to_owned();
                 let submitted = object_field(obj, "config")?;
-                let model = obj.get("model").and_then(Json::as_str).unwrap_or("");
+                let name = non_empty_str_field(obj, "name")?.to_owned();
+                let model_config = match obj.get("model_config") {
+                    None | Some(Json::Null) => sc_types::Attrs::new(),
+                    Some(_) => object_field(obj, "model_config")?,
+                };
 
                 // Testing a *saved* provider must not require retyping its key,
                 // so a submitted sentinel resolves against the stored row when
                 // the body names one.
-                let config = match obj.get("id").and_then(Json::as_str) {
-                    Some(raw) => {
-                        let id = parse_llm_provider_id(raw)?;
-                        match load_llm_provider(&catalog, id).await? {
-                            Some(stored) => {
-                                unredacted_provider_config(&backend, &stored.config, &submitted)
-                            }
-                            None => submitted,
-                        }
-                    }
-                    None => submitted,
+                let stored = match obj.get("provider_id").and_then(Json::as_str) {
+                    Some(raw) => load_llm_provider(&catalog, parse_llm_provider_id(raw)?).await?,
+                    None => None,
                 };
-
-                let def = LlmProviderDef {
-                    config,
-                    ..LlmProviderDef::new("test", &backend)
+                let provider = match &stored {
+                    Some(stored) => LlmProviderDef {
+                        config: unredacted_provider_config(&backend, &stored.config, &submitted),
+                        ..LlmProviderDef::new(&stored.name, &backend).id(stored.id)
+                    },
+                    None => LlmProviderDef {
+                        config: submitted,
+                        ..LlmProviderDef::new("test", &backend)
+                    },
+                };
+                let model = LlmModelDef {
+                    config: model_config,
+                    ..LlmModelDef::new(provider.id, &name)
                 };
                 // A structurally wrong config is an ordinary `Err`: it is the
                 // admin's typo, not the provider's answer, and the form should
                 // show it the way it shows a failed save.
-                let provider = connect_provider(&def, Some(model))?;
-                let model = provider.model().to_owned();
+                let connected = connect_model(&provider, &model)?;
+                let capabilities = serde_json::to_value(connected.capabilities)
+                    .map_err(|e| Error::msg(e.to_string()))?;
+                let prices = serde_json::to_value(connected.prices)
+                    .map_err(|e| Error::msg(e.to_string()))?;
 
                 // Capped hard: the question is "does this endpoint answer",
                 // and a provider that takes it as an invitation to write an
                 // essay would bill the admin for asking.
                 let probe = LlmRequest::prompt("Reply with the single word: ok").max_tokens(16);
-                let outcome = match provider.stream(probe).await {
+                let outcome = match connected.provider.stream(probe).await {
                     Ok(stream) => stream.collect().await,
                     // Failing to *start* — a refused connection, a rejected key
                     // — is the same kind of answer as failing mid-stream, and
@@ -1527,7 +1689,9 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         // at the wrong endpoint sees a wrong answer rather than
                         // a green tick.
                         "message": msg.content.trim(),
-                        "model": model,
+                        "model": name,
+                        "capabilities": capabilities,
+                        "prices": prices,
                     }),
                     // The provider's own words, whole. A category ("auth
                     // failed") would throw away the part that says *which* key
@@ -1535,7 +1699,9 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     Err(e) => json!({
                         "ok": false,
                         "message": sc_error::format_causes(&e),
-                        "model": model,
+                        "model": name,
+                        "capabilities": capabilities,
+                        "prices": prices,
                     }),
                 }))
             }
@@ -5363,7 +5529,8 @@ async fn reemit_app_client(
 /// no builder, a server assembled without agents, or an agent of that name already
 /// there (a re-created application meets its own old builder, which still points
 /// at the same subdomain). An `Err` is news the admin should hear — no provider is
-/// connected, or the agent did not validate — and is reported *beside* the created
+/// connected, the first provider has no default model, or the agent did not
+/// validate — and is reported *beside* the created
 /// application, never instead of it: the row is saved and valid either way.
 async fn create_builder_agent(
     catalog: &Catalog,
@@ -5400,6 +5567,22 @@ async fn create_builder_agent(
                 spec.name
             ))
         })?;
+
+    // And a model to call: the provider's default. A provider with none is
+    // reported the same way as no provider at all, rather than saved as an agent
+    // that cannot answer.
+    if !list_llm_models(catalog, &provider)
+        .await?
+        .iter()
+        .any(|m| m.is_default)
+    {
+        return Err(Error::config(format!(
+            "LLM provider `{}` has no default model, so the `{}` agent that builds this \
+             application was not created; mark one of its models as the default and \
+             create the agent from the Agents screen",
+            provider.name, spec.name
+        )));
+    }
 
     let mut agent = sc_agent::Agent::new(&spec.name, &provider.name)
         .description(spec.description)
@@ -6285,6 +6468,64 @@ fn parse_llm_provider_id(raw: &str) -> Result<LlmProviderDefId> {
         .map_err(|_| Error::invalid(format!("`{raw}` is not a valid LLM provider id")))
 }
 
+/// Parse a model id from a path parameter.
+fn parse_llm_model_id(raw: &str) -> Result<LlmModelDefId> {
+    uuid::Uuid::parse_str(raw)
+        .map(LlmModelDefId)
+        .map_err(|_| Error::invalid(format!("`{raw}` is not a valid LLM model id")))
+}
+
+/// The provider a path's `id` names, or not found.
+async fn require_provider_by_id(catalog: &Catalog, raw: &str) -> Result<LlmProviderDef> {
+    let id = parse_llm_provider_id(raw)?;
+    load_llm_provider(catalog, id)
+        .await?
+        .ok_or_else(|| Error::not_found(format!("no LLM provider with id {}", id.0)))
+}
+
+/// A model row as the API returns it (matching `llm_model_schema`): the row,
+/// plus the capabilities and prices it resolves to on its provider's backend.
+fn llm_model_json(provider: &LlmProviderDef, model: &LlmModelDef) -> Json {
+    json!({
+        "id": model.id.0,
+        "provider_id": model.provider_id.0,
+        "name": model.name,
+        "description": model.description,
+        "is_default": model.is_default,
+        "config": Json::Object(model.config.clone()),
+        "capabilities": serde_json::to_value(model.capabilities(&provider.backend)).unwrap_or(Json::Null),
+        "prices": serde_json::to_value(model.prices()).unwrap_or(Json::Null),
+    })
+}
+
+/// Rebuild a model row from a create/update body.
+fn llm_model_from_body(
+    id: LlmModelDefId,
+    provider: LlmProviderDefId,
+    body: &Json,
+) -> Result<LlmModelDef> {
+    let obj = require_object(body)?;
+    Ok(LlmModelDef {
+        id,
+        provider_id: provider,
+        name: non_empty_str_field(obj, "name")?.trim().to_owned(),
+        description: obj
+            .get("description")
+            .and_then(Json::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        is_default: obj
+            .get("is_default")
+            .and_then(Json::as_bool)
+            .unwrap_or(false),
+        config: match obj.get("config") {
+            None | Some(Json::Null) => sc_types::Attrs::new(),
+            Some(_) => object_field(obj, "config")?,
+        },
+        attributes: sc_types::Attrs::new(),
+    })
+}
+
 /// One loaded module as JSON (matching `module_schema`): the row, what the
 /// package supplies, and everything wrong with it.
 ///
@@ -6739,6 +6980,31 @@ async fn agents_using_provider(catalog: &Catalog, id: LlmProviderDefId) -> Resul
         .await?
         .into_iter()
         .filter(|agent| agent.provider.trim() == def.name.trim())
+        .map(|agent| format!("agent `{}`", agent.name))
+        .collect())
+}
+
+/// The agents that call the model row `model` of `provider`, by name: those
+/// naming it (when `by_name`), and — when it is the default — those naming no
+/// model (when `by_default`).
+async fn agents_using_model(
+    catalog: &Catalog,
+    provider: &LlmProviderDef,
+    model: &LlmModelDef,
+    by_name: bool,
+    by_default: bool,
+) -> Result<Vec<String>> {
+    if catalog.get(sc_agent::AGENTS_TABLE)?.is_none() {
+        return Ok(Vec::new());
+    }
+    Ok(sc_agent::list_agents(catalog)
+        .await?
+        .into_iter()
+        .filter(|agent| agent.provider.trim() == provider.name.trim())
+        .filter(|agent| match agent.model.as_deref().map(str::trim) {
+            Some(name) if !name.is_empty() => by_name && name == model.name,
+            _ => by_default && model.is_default,
+        })
         .map(|agent| format!("agent `{}`", agent.name))
         .collect())
 }

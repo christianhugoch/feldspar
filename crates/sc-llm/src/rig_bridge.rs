@@ -33,13 +33,36 @@
 //!   fail against OpenAI outright.
 //! - **Deriving the stop reason**, which neither provider's streaming response
 //!   carries through rig 0.41. See [`StopReason`].
+//! - **Mapping what differs by vendor** ([`Wire`]): the request options
+//!   (`parallel_tool_calls`, `prompt_cache_key`, encrypted reasoning), the
+//!   opaque items replayed with an assistant turn, where a tool result's images
+//!   go, and what "input tokens" counts.
+//!
+//! ## What rig-core 0.41 exposes, and the gaps
+//!
+//! - **Responses:** `parallel_tool_calls`, `prompt_cache_key`, `store` and
+//!   `include` are all fields of rig's `AdditionalParameters`, so they travel
+//!   through `additional_params`. Reasoning items with an id and encrypted
+//!   content are replayed by rig from an assistant turn's `Reasoning` content.
+//! - **Anthropic:** caching is a switch on the model
+//!   (`with_prompt_caching`), which marks the system prompt, the last tool and
+//!   the last message. That covers the prefix and tail breakpoints of a
+//!   [`CachePlan`](crate::CachePlan); **a breakpoint after the session header
+//!   cannot be placed** through rig's generic messages, and is not sent.
+//!   `disable_parallel_tool_use` has no field and goes in `tool_choice` through
+//!   `additional_params`. Thinking blocks with signatures are replayed from
+//!   `Reasoning` content.
+//! - **Chat Completions:** `parallel_tool_calls` travels through
+//!   `additional_params`. `prompt_cache_key` is not sent, because hosts other
+//!   than OpenAI reject fields they do not know. A tool result cannot carry an
+//!   image, so the image follows in a user message.
 
 use std::collections::BTreeMap;
 
 use futures::StreamExt;
 use rig_core::completion::message::{
-    AssistantContent, Message, Text, ToolCall as RigToolCall, ToolFunction, ToolResult,
-    ToolResultContent, UserContent,
+    AssistantContent, ImageMediaType, Message, MimeType as _, Reasoning, ReasoningContent, Text,
+    ToolCall as RigToolCall, ToolFunction, ToolResult, ToolResultContent, UserContent,
 };
 use rig_core::completion::request::{CompletionRequest, GetTokenUsage, ToolDefinition};
 use rig_core::one_or_many::OneOrMany;
@@ -47,19 +70,40 @@ use rig_core::streaming::{
     StreamedAssistantContent, StreamingCompletionResponse, ToolCallDeltaContent,
 };
 use sc_error::{Error, Result};
-use serde_json::Value as Json;
+use serde_json::{Value as Json, json};
 
-use crate::message::{LlmDelta, LlmMessage, LlmRequest, StopReason, ToolCall, Usage};
+use crate::capabilities::ModelCapabilities;
+use crate::message::{
+    ImagePart, LlmDelta, LlmMessage, LlmRequest, ProviderItem, StopReason, ToolCall, Usage,
+};
 use crate::provider::DeltaStream;
 
-/// Build the rig request one [`LlmRequest`] describes.
+/// Which vendor API a request is shaped for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Wire {
+    /// OpenAI's Responses API.
+    Responses,
+    /// Anthropic's messages API.
+    Anthropic,
+    /// Chat Completions.
+    Chat,
+}
+
+/// Build the rig request one [`LlmRequest`] describes, for `wire`, for a model
+/// with `caps`.
 ///
 /// Fails only when the conversation is empty: rig's `chat_history` is a
 /// `OneOrMany`, so "at least one message" is its type, and a request with
 /// nothing to answer is a caller's bug rather than something to invent a message
 /// for.
-pub(crate) fn to_rig_request(req: LlmRequest) -> Result<CompletionRequest> {
-    let messages = to_rig_messages(req.messages);
+pub(crate) fn to_rig_request(
+    req: LlmRequest,
+    wire: Wire,
+    model: &str,
+    caps: &ModelCapabilities,
+) -> Result<CompletionRequest> {
+    let additional_params = additional_params(&req, wire, caps);
+    let messages = to_rig_messages(req.messages, wire, model, caps);
     let chat_history = OneOrMany::many(messages)
         .map_err(|_| Error::invalid("an LLM request needs at least one message"))?;
 
@@ -80,7 +124,7 @@ pub(crate) fn to_rig_request(req: LlmRequest) -> Result<CompletionRequest> {
         temperature: req.temperature,
         max_tokens: req.max_tokens.map(u64::from),
         tool_choice: None,
-        additional_params: None,
+        additional_params,
         output_schema: None,
         // Local observability policy, never part of the provider payload. Off:
         // switching it on would put prompts, tool arguments and model output on
@@ -90,31 +134,127 @@ pub(crate) fn to_rig_request(req: LlmRequest) -> Result<CompletionRequest> {
     })
 }
 
+/// The vendor-specific request fields, as rig's `additional_params`.
+///
+/// `parallel_tool_calls` is only sent with tools: several hosts refuse the
+/// field on a request that offers none.
+fn additional_params(req: &LlmRequest, wire: Wire, caps: &ModelCapabilities) -> Option<Json> {
+    let mut params = serde_json::Map::new();
+    let parallel = if req.tools.is_empty() || !caps.parallel_tool_calls {
+        None
+    } else {
+        req.parallel_tool_calls
+    };
+    match wire {
+        Wire::Responses => {
+            if let Some(parallel) = parallel {
+                params.insert("parallel_tool_calls".to_owned(), json!(parallel));
+            }
+            if let Some(key) = &req.prompt_cache_key
+                && caps.prompt_caching != crate::PromptCaching::None
+            {
+                params.insert("prompt_cache_key".to_owned(), json!(key));
+            }
+            if caps.reasoning_replay {
+                // Stateless: nothing is kept on OpenAI's side, and the
+                // reasoning comes back encrypted for the next request instead.
+                params.insert("store".to_owned(), json!(false));
+                params.insert("include".to_owned(), json!(["reasoning.encrypted_content"]));
+            }
+        }
+        Wire::Anthropic => {
+            if parallel == Some(false) {
+                params.insert(
+                    "tool_choice".to_owned(),
+                    json!({"type": "auto", "disable_parallel_tool_use": true}),
+                );
+            }
+        }
+        Wire::Chat => {
+            if let Some(parallel) = parallel {
+                params.insert("parallel_tool_calls".to_owned(), json!(parallel));
+            }
+        }
+    }
+    (!params.is_empty()).then_some(Json::Object(params))
+}
+
 /// Our messages as rig's, folding each run of consecutive tool results into one
 /// user message (see the module docs for why).
-fn to_rig_messages(messages: Vec<LlmMessage>) -> Vec<Message> {
+pub(crate) fn to_rig_messages(
+    messages: Vec<LlmMessage>,
+    wire: Wire,
+    model: &str,
+    caps: &ModelCapabilities,
+) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::with_capacity(messages.len());
     // The tool results seen since the last non-tool-result message.
     let mut pending: Vec<UserContent> = Vec::new();
+    // Chat Completions only: images that follow those results in a user
+    // message of their own.
+    let mut pending_images: Vec<UserContent> = Vec::new();
 
     for message in messages {
         match message {
             LlmMessage::ToolResult {
                 tool_call_id,
                 content,
+                images,
                 ..
             } => {
+                let mut parts: Vec<ToolResultContent> = Vec::new();
+                let mut text = content;
+                if !images.is_empty() && !caps.vision {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(&image_stub(images.len(), model));
+                }
+                if !text.is_empty() || images.is_empty() || !caps.vision {
+                    parts.push(ToolResultContent::Text(Text::from(text)));
+                }
+                if caps.vision {
+                    for image in &images {
+                        match wire {
+                            Wire::Responses | Wire::Anthropic => {
+                                parts.push(ToolResultContent::image_base64(
+                                    image.base64(),
+                                    media_type(image),
+                                    None,
+                                ))
+                            }
+                            Wire::Chat => {
+                                pending_images.push(UserContent::Text(Text::from(format!(
+                                    "Image from tool call {tool_call_id}:"
+                                ))));
+                                pending_images.push(UserContent::image_base64(
+                                    image.base64(),
+                                    media_type(image),
+                                    None,
+                                ));
+                            }
+                        }
+                    }
+                    if parts.is_empty() {
+                        parts.push(ToolResultContent::Text(Text::from(
+                            "The image follows in the next message.",
+                        )));
+                    }
+                }
                 pending.push(UserContent::ToolResult(ToolResult {
                     // Both fields, from the one id we keep: Anthropic reads
                     // `id` and ignores `call_id`, the Responses API reads
                     // `call_id` and refuses a result without one.
                     call_id: Some(tool_call_id.clone()),
                     id: tool_call_id,
-                    content: OneOrMany::one(ToolResultContent::Text(Text::from(content))),
+                    content: OneOrMany::many(parts).unwrap_or_else(|_| {
+                        OneOrMany::one(ToolResultContent::Text(Text::from("")))
+                    }),
                 }));
                 continue;
             }
             other => {
+                pending.append(&mut pending_images);
                 flush_tool_results(&mut pending, &mut out);
                 out.push(match other {
                     LlmMessage::User { content } => Message::User {
@@ -123,18 +263,72 @@ fn to_rig_messages(messages: Vec<LlmMessage>) -> Vec<Message> {
                     LlmMessage::Assistant {
                         content,
                         tool_calls,
-                    } => Message::Assistant {
-                        id: None,
-                        content: assistant_content(content, tool_calls),
-                    },
+                        provider_items,
+                    } => {
+                        let replayed = if caps.reasoning_replay {
+                            replayable(provider_items, wire)
+                        } else {
+                            Vec::new()
+                        };
+                        Message::Assistant {
+                            id: None,
+                            content: assistant_content(replayed, content, tool_calls),
+                        }
+                    }
                     // Handled above; the compiler cannot see that.
                     LlmMessage::ToolResult { .. } => continue,
                 });
             }
         }
     }
+    pending.append(&mut pending_images);
     flush_tool_results(&mut pending, &mut out);
     out
+}
+
+/// What replaces an image a model cannot see.
+fn image_stub(count: usize, model: &str) -> String {
+    let what = if count == 1 {
+        "an image".to_owned()
+    } else {
+        format!("{count} images")
+    };
+    format!("[{what} omitted: the model `{model}` does not accept images]")
+}
+
+/// rig's media type for an image part, where it has one.
+fn media_type(image: &ImagePart) -> Option<ImageMediaType> {
+    ImageMediaType::from_mime_type(image.media_type.trim())
+}
+
+/// The provider items that `wire` accepts back, as rig reasoning content.
+/// Items another vendor produced — a history that changed models — are not
+/// sent: no vendor accepts another's signatures.
+fn replayable(items: Vec<ProviderItem>, wire: Wire) -> Vec<AssistantContent> {
+    items
+        .into_iter()
+        .filter_map(|item| match (wire, item) {
+            (
+                Wire::Responses,
+                ProviderItem::EncryptedReasoning {
+                    id,
+                    encrypted_content,
+                },
+            ) => Some(Reasoning::encrypted(encrypted_content).with_id(id)),
+            (
+                Wire::Anthropic,
+                ProviderItem::SignedThinking {
+                    thinking,
+                    signature,
+                },
+            ) => Some(Reasoning::new_with_signature(&thinking, Some(signature))),
+            (Wire::Anthropic, ProviderItem::RedactedThinking { data }) => {
+                Some(Reasoning::redacted(data))
+            }
+            _ => None,
+        })
+        .map(AssistantContent::Reasoning)
+        .collect()
 }
 
 /// Emit the accumulated tool results as one user message, if there are any.
@@ -144,11 +338,16 @@ fn flush_tool_results(pending: &mut Vec<UserContent>, out: &mut Vec<Message>) {
     }
 }
 
-/// An assistant turn's content: its text (dropped when empty — a turn that was
-/// only tool calls must not carry an empty text block, which Anthropic rejects)
-/// followed by its tool calls in order.
-fn assistant_content(content: String, tool_calls: Vec<ToolCall>) -> OneOrMany<AssistantContent> {
-    let mut items: Vec<AssistantContent> = Vec::with_capacity(tool_calls.len() + 1);
+/// An assistant turn's content: the replayed provider items first (both
+/// vendors require reasoning before what it led to), then its text (dropped
+/// when empty — a turn that was only tool calls must not carry an empty text
+/// block, which Anthropic rejects), then its tool calls in order.
+fn assistant_content(
+    replayed: Vec<AssistantContent>,
+    content: String,
+    tool_calls: Vec<ToolCall>,
+) -> OneOrMany<AssistantContent> {
+    let mut items: Vec<AssistantContent> = replayed;
     if !content.is_empty() {
         items.push(AssistantContent::Text(Text::from(content)));
     }
@@ -172,6 +371,38 @@ fn assistant_content(content: String, tool_calls: Vec<ToolCall>) -> OneOrMany<As
         .unwrap_or_else(|_| OneOrMany::one(AssistantContent::Text(Text::from(""))))
 }
 
+/// The provider items in one streamed reasoning block that are worth sending
+/// back: encrypted, signed or redacted content. Readable text with no signature
+/// is not.
+fn provider_items(reasoning: &Reasoning) -> Vec<ProviderItem> {
+    reasoning
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            ReasoningContent::Encrypted(data) => {
+                reasoning
+                    .id
+                    .as_ref()
+                    .map(|id| ProviderItem::EncryptedReasoning {
+                        id: id.clone(),
+                        encrypted_content: data.clone(),
+                    })
+            }
+            ReasoningContent::Text {
+                text,
+                signature: Some(signature),
+            } => Some(ProviderItem::SignedThinking {
+                thinking: text.clone(),
+                signature: signature.clone(),
+            }),
+            ReasoningContent::Redacted { data } => {
+                Some(ProviderItem::RedactedThinking { data: data.clone() })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Turn rig's stream into ours: [`LlmDelta`]s ending in exactly one
 /// [`Stop`](LlmDelta::Stop).
 ///
@@ -180,7 +411,14 @@ fn assistant_content(content: String, tool_calls: Vec<ToolCall>) -> OneOrMany<As
 /// finish reason through rig 0.41. Usage comes from the final response object
 /// where the provider sent one, and is zero where it did not — which is what
 /// [`Usage`] documents zero to mean.
-pub(crate) fn map_stream<R>(mut response: StreamingCompletionResponse<R>) -> DeltaStream
+///
+/// `wire` decides what the reported input tokens mean (see [`Usage`]), and
+/// `replay` whether opaque reasoning items are kept for the next request.
+pub(crate) fn map_stream<R>(
+    mut response: StreamingCompletionResponse<R>,
+    wire: Wire,
+    replay: bool,
+) -> DeltaStream
 where
     R: Clone + Unpin + GetTokenUsage + Send + 'static,
 {
@@ -227,6 +465,11 @@ where
                         if !text.is_empty() {
                             queued.push_back(Ok(LlmDelta::Reasoning(text)));
                         }
+                        if replay {
+                            for item in provider_items(&reasoning) {
+                                queued.push_back(Ok(LlmDelta::ProviderItem(item)));
+                            }
+                        }
                     }
                     Ok(StreamedAssistantContent::ToolCallDelta {
                         id,
@@ -264,10 +507,21 @@ where
                     }
                     Ok(StreamedAssistantContent::Final(final_response)) => {
                         let reported = final_response.token_usage();
+                        // Anthropic counts cache reads and writes apart from
+                        // its input tokens; ours are always the whole prompt.
+                        let input_tokens = match wire {
+                            Wire::Anthropic => {
+                                reported.input_tokens
+                                    + reported.cached_input_tokens
+                                    + reported.cache_creation_input_tokens
+                            }
+                            Wire::Responses | Wire::Chat => reported.input_tokens,
+                        };
                         usage = Usage {
-                            input_tokens: reported.input_tokens,
+                            input_tokens,
                             output_tokens: reported.output_tokens,
                             cached_input_tokens: reported.cached_input_tokens,
+                            cache_write_input_tokens: reported.cache_creation_input_tokens,
                         };
                     }
                     // A provider-native item rig does not model — a hosted web
@@ -375,8 +629,7 @@ fn complete_tool_call(call: &RigToolCall) -> Result<ToolCall> {
 
 /// The readable half of a structured reasoning block. An encrypted or redacted
 /// block yields nothing: there is no text in it to show.
-fn reasoning_text(reasoning: &rig_core::completion::message::Reasoning) -> String {
-    use rig_core::completion::message::ReasoningContent;
+fn reasoning_text(reasoning: &Reasoning) -> String {
     reasoning
         .content
         .iter()
@@ -397,4 +650,264 @@ fn reasoning_text(reasoning: &rig_core::completion::message::Reasoning) -> Strin
 /// connection* shows, which is the point of having it (§11.1).
 pub(crate) fn provider_error(e: &rig_core::completion::CompletionError) -> Error {
     Error::msg(format!("the LLM provider failed: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capabilities::ModelCapabilities;
+    use crate::def::{ANTHROPIC_BACKEND, OPENAI_CHAT_BACKEND, OPENAI_RESPONSES_BACKEND};
+    use crate::message::ToolSpec;
+
+    fn call(id: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_owned(),
+            name: "view_app".to_owned(),
+            arguments: json!({}),
+        }
+    }
+
+    fn with_image(id: &str) -> LlmMessage {
+        LlmMessage::ToolResult {
+            tool_call_id: id.to_owned(),
+            name: "view_app".to_owned(),
+            content: "the page".to_owned(),
+            images: vec![ImagePart::new("image/png", b"png".to_vec())],
+        }
+    }
+
+    fn caps(backend: &str, model: &str) -> ModelCapabilities {
+        ModelCapabilities::built_in(backend, model)
+    }
+
+    #[test]
+    fn provider_items_round_trip_through_to_rig_messages_for_their_own_vendor_only() {
+        let history = vec![
+            LlmMessage::user("go"),
+            LlmMessage::Assistant {
+                content: String::new(),
+                tool_calls: vec![call("c1")],
+                provider_items: vec![
+                    ProviderItem::EncryptedReasoning {
+                        id: "rs_1".to_owned(),
+                        encrypted_content: "enc".to_owned(),
+                    },
+                    ProviderItem::SignedThinking {
+                        thinking: "hmm".to_owned(),
+                        signature: "sig".to_owned(),
+                    },
+                ],
+            },
+        ];
+
+        let reasoning_of = |messages: Vec<Message>| -> Vec<Reasoning> {
+            messages
+                .into_iter()
+                .flat_map(|m| match m {
+                    Message::Assistant { content, .. } => content
+                        .into_iter()
+                        .filter_map(|c| match c {
+                            AssistantContent::Reasoning(r) => Some(r),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                })
+                .collect()
+        };
+
+        // Responses: the encrypted item, with its id, and nothing of Anthropic's.
+        let responses = caps(OPENAI_RESPONSES_BACKEND, "gpt-5.1");
+        let sent = reasoning_of(to_rig_messages(
+            history.clone(),
+            Wire::Responses,
+            "gpt-5.1",
+            &responses,
+        ));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].id.as_deref(), Some("rs_1"));
+        assert_eq!(provider_items(&sent[0]), vec![history_item(&history, 0)]);
+
+        // Anthropic: the signed thinking block.
+        let anthropic = caps(ANTHROPIC_BACKEND, "claude-sonnet-5");
+        let sent = reasoning_of(to_rig_messages(
+            history.clone(),
+            Wire::Anthropic,
+            "claude-sonnet-5",
+            &anthropic,
+        ));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(provider_items(&sent[0]), vec![history_item(&history, 1)]);
+
+        // A model without replay sends none.
+        let no_replay = caps(OPENAI_RESPONSES_BACKEND, "gpt-4.1");
+        assert!(!no_replay.reasoning_replay);
+        assert!(
+            reasoning_of(to_rig_messages(
+                history,
+                Wire::Responses,
+                "gpt-4.1",
+                &no_replay
+            ))
+            .is_empty()
+        );
+    }
+
+    fn history_item(history: &[LlmMessage], index: usize) -> ProviderItem {
+        match &history[1] {
+            LlmMessage::Assistant { provider_items, .. } => provider_items[index].clone(),
+            _ => panic!("the assistant turn"),
+        }
+    }
+
+    fn tool_result_parts(messages: &[Message]) -> Vec<ToolResultContent> {
+        messages
+            .iter()
+            .flat_map(|m| match m {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::ToolResult(r) => {
+                            Some(r.content.iter().cloned().collect::<Vec<_>>())
+                        }
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_image_goes_inside_the_tool_result_for_anthropic_and_responses() {
+        for (wire, backend, model) in [
+            (Wire::Anthropic, ANTHROPIC_BACKEND, "claude-sonnet-5"),
+            (Wire::Responses, OPENAI_RESPONSES_BACKEND, "gpt-5.1"),
+        ] {
+            let caps = caps(backend, model);
+            let messages = to_rig_messages(
+                vec![
+                    LlmMessage::assistant_with_calls("", vec![call("c1")]),
+                    with_image("c1"),
+                ],
+                wire,
+                model,
+                &caps,
+            );
+            let parts = tool_result_parts(&messages);
+            assert_eq!(parts.len(), 2, "{wire:?}: text and image");
+            assert!(matches!(parts[1], ToolResultContent::Image(_)), "{wire:?}");
+            assert_eq!(messages.len(), 2, "{wire:?}: no extra user message");
+        }
+    }
+
+    #[test]
+    fn an_image_follows_the_tool_results_in_a_user_message_for_chat_completions() {
+        let caps = caps(OPENAI_CHAT_BACKEND, "gpt-5.1");
+        let messages = to_rig_messages(
+            vec![
+                LlmMessage::assistant_with_calls("", vec![call("c1"), call("c2")]),
+                with_image("c1"),
+                LlmMessage::tool_result(&call("c2"), "plain"),
+                LlmMessage::user("next"),
+            ],
+            Wire::Chat,
+            "gpt-5.1",
+            &caps,
+        );
+        // Assistant, then one user message holding both results and the
+        // labelled image after them, then the next user message.
+        assert_eq!(messages.len(), 3);
+        let Message::User { content } = &messages[1] else {
+            panic!("the tool results");
+        };
+        let kinds: Vec<&str> = content
+            .iter()
+            .map(|c| match c {
+                UserContent::ToolResult(_) => "result",
+                UserContent::Text(t) if t.text.contains("c1") => "label",
+                UserContent::Image(_) => "image",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["result", "result", "label", "image"]);
+        assert!(
+            tool_result_parts(&messages)
+                .iter()
+                .all(|p| !matches!(p, ToolResultContent::Image(_)))
+        );
+    }
+
+    #[test]
+    fn a_model_without_vision_gets_a_stub_instead_of_the_image() {
+        for (wire, backend) in [
+            (Wire::Anthropic, ANTHROPIC_BACKEND),
+            (Wire::Responses, OPENAI_RESPONSES_BACKEND),
+            (Wire::Chat, OPENAI_CHAT_BACKEND),
+        ] {
+            let caps = caps(backend, "text-only-model");
+            assert!(!caps.vision);
+            let messages = to_rig_messages(
+                vec![
+                    LlmMessage::assistant_with_calls("", vec![call("c1")]),
+                    with_image("c1"),
+                ],
+                wire,
+                "text-only-model",
+                &caps,
+            );
+            let parts = tool_result_parts(&messages);
+            assert_eq!(parts.len(), 1, "{wire:?}");
+            let text = parts[0].as_text().unwrap_or_default();
+            assert!(text.starts_with("the page"), "{text}");
+            assert!(
+                text.contains("omitted") && text.contains("text-only-model"),
+                "{text}"
+            );
+            assert_eq!(messages.len(), 2, "{wire:?}: no image message");
+        }
+    }
+
+    #[test]
+    fn request_options_map_per_wire() {
+        let tools = vec![ToolSpec::new("t", "a tool", json!({"type": "object"}))];
+        let mut req = LlmRequest::prompt("hi").tools(tools);
+        req.parallel_tool_calls = Some(false);
+        req.prompt_cache_key = Some("agent-1".to_owned());
+
+        let responses = additional_params(
+            &req,
+            Wire::Responses,
+            &caps(OPENAI_RESPONSES_BACKEND, "gpt-5.1"),
+        )
+        .unwrap();
+        assert_eq!(responses["parallel_tool_calls"], json!(false));
+        assert_eq!(responses["prompt_cache_key"], json!("agent-1"));
+        assert_eq!(responses["store"], json!(false));
+        assert_eq!(responses["include"], json!(["reasoning.encrypted_content"]));
+
+        let anthropic = additional_params(
+            &req,
+            Wire::Anthropic,
+            &caps(ANTHROPIC_BACKEND, "claude-sonnet-5"),
+        )
+        .unwrap();
+        assert_eq!(
+            anthropic["tool_choice"]["disable_parallel_tool_use"],
+            json!(true)
+        );
+
+        let chat =
+            additional_params(&req, Wire::Chat, &caps(OPENAI_CHAT_BACKEND, "llama3.2")).unwrap();
+        assert_eq!(chat["parallel_tool_calls"], json!(false));
+        assert!(chat.get("prompt_cache_key").is_none());
+
+        // No tools, no parallel_tool_calls; nothing to say, no params at all.
+        let bare = LlmRequest::prompt("hi");
+        assert_eq!(
+            additional_params(&bare, Wire::Chat, &caps(OPENAI_CHAT_BACKEND, "llama3.2")),
+            None
+        );
+    }
 }

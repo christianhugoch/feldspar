@@ -81,8 +81,16 @@ export type UpdateLlmProviderRequest = { name: string; description: string; back
 export type UpdateLlmProviderResponse = { id: string; name: string; description: string; backend: string; config: unknown };
 export type DeleteLlmProviderResponse = { deleted: boolean };
 export type ListLlmProviderBackendsResponse = Array<{ name: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>;
-export type TestLlmProviderRequest = { id?: string | null; backend: string; config: unknown; model?: string | null };
-export type TestLlmProviderResponse = { ok: boolean; message: string; model: string };
+export type ListLlmModelsResponse = Array<{ id: string; provider_id: string; name: string; description: string; is_default: boolean; config: unknown; capabilities: unknown; prices: unknown }>;
+export type CreateLlmModelRequest = { name: string; description: string; is_default: boolean; config: unknown };
+export type CreateLlmModelResponse = { id: string; provider_id: string; name: string; description: string; is_default: boolean; config: unknown; capabilities: unknown; prices: unknown };
+export type UpdateLlmModelRequest = { name: string; description: string; is_default: boolean; config: unknown };
+export type UpdateLlmModelResponse = { id: string; provider_id: string; name: string; description: string; is_default: boolean; config: unknown; capabilities: unknown; prices: unknown };
+export type DeleteLlmModelResponse = { deleted: boolean };
+export type ListLlmModelSettingsResponse = Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>;
+export type FetchLlmModelsResponse = { ok: boolean; message: string; names: Array<string> };
+export type TestLlmModelRequest = { provider_id?: string | null; backend: string; config: unknown; name: string; model_config?: unknown | null };
+export type TestLlmModelResponse = { ok: boolean; message: string; model: string; capabilities: unknown; prices: unknown };
 export type ListModulesResponse = { modules: Array<{ id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; model_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null }>; root: string; npm: boolean; npm_too_old?: { version: string; minimum: string } | null; node: boolean; python: boolean; pip: boolean; python_dir?: string | null; bundled: Array<{ id: string; name: string; language: string; title: string; description: string; supplies: Array<string>; installs: Array<string>; permissions: unknown; installed: boolean }> };
 export type InstallModuleRequest = { source: string; location: string; language?: string | null };
 export type InstallModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; model_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
@@ -294,7 +302,13 @@ export interface ApiClient {
   updateLlmProvider(id: string, body: UpdateLlmProviderRequest): Promise<UpdateLlmProviderResponse>;
   deleteLlmProvider(id: string): Promise<DeleteLlmProviderResponse>;
   listLlmProviderBackends(): Promise<ListLlmProviderBackendsResponse>;
-  testLlmProvider(body: TestLlmProviderRequest): Promise<TestLlmProviderResponse>;
+  listLlmModels(id: string): Promise<ListLlmModelsResponse>;
+  createLlmModel(id: string, body: CreateLlmModelRequest): Promise<CreateLlmModelResponse>;
+  updateLlmModel(id: string, body: UpdateLlmModelRequest): Promise<UpdateLlmModelResponse>;
+  deleteLlmModel(id: string): Promise<DeleteLlmModelResponse>;
+  listLlmModelSettings(backend: string): Promise<ListLlmModelSettingsResponse>;
+  fetchLlmModels(id: string): Promise<FetchLlmModelsResponse>;
+  testLlmModel(body: TestLlmModelRequest): Promise<TestLlmModelResponse>;
   listModules(): Promise<ListModulesResponse>;
   installModule(body: InstallModuleRequest): Promise<InstallModuleResponse>;
   updateModule(id: string, body: UpdateModuleRequest): Promise<UpdateModuleResponse>;
@@ -852,14 +866,64 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (!res.ok) throw await clientError("listLlmProviderBackends", res);
       return (await res.json()) as ListLlmProviderBackendsResponse;
     },
-    async testLlmProvider(body) {
-      const res = await doFetch(`${baseUrl}/api/llm-provider-test`, {
+    async listLlmModels(id) {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${id}/models`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listLlmModels", res);
+      return (await res.json()) as ListLlmModelsResponse;
+    },
+    async createLlmModel(id, body) {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${id}/models`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw await clientError("testLlmProvider", res);
-      return (await res.json()) as TestLlmProviderResponse;
+      if (!res.ok) throw await clientError("createLlmModel", res);
+      return (await res.json()) as CreateLlmModelResponse;
+    },
+    async updateLlmModel(id, body) {
+      const res = await doFetch(`${baseUrl}/api/llm-models/${id}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("updateLlmModel", res);
+      return (await res.json()) as UpdateLlmModelResponse;
+    },
+    async deleteLlmModel(id) {
+      const res = await doFetch(`${baseUrl}/api/llm-models/${id}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteLlmModel", res);
+      return (await res.json()) as DeleteLlmModelResponse;
+    },
+    async listLlmModelSettings(backend) {
+      const res = await doFetch(`${baseUrl}/api/llm-provider-backends/${backend}/model-settings`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listLlmModelSettings", res);
+      return (await res.json()) as ListLlmModelSettingsResponse;
+    },
+    async fetchLlmModels(id) {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${id}/fetch-models`, {
+        method: "POST",
+        headers: requestHeaders("POST", false),
+      });
+      if (!res.ok) throw await clientError("fetchLlmModels", res);
+      return (await res.json()) as FetchLlmModelsResponse;
+    },
+    async testLlmModel(body) {
+      const res = await doFetch(`${baseUrl}/api/llm-model-test`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("testLlmModel", res);
+      return (await res.json()) as TestLlmModelResponse;
     },
     async listModules() {
       const res = await doFetch(`${baseUrl}/api/modules`, {

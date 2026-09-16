@@ -14,7 +14,10 @@ use crate::common;
 use common::{Reply, serve, sse_events};
 use sc_error::Result;
 use sc_llm::anthropic::Anthropic;
-use sc_llm::{LlmDelta, LlmProvider, LlmRequest, StopReason, ToolSpec, Usage};
+use sc_llm::{
+    ANTHROPIC_BACKEND, CachePlan, LlmDelta, LlmProvider, LlmRequest, ModelCapabilities,
+    ProviderItem, StopReason, ToolSpec, Usage,
+};
 use serde_json::{Value as Json, json};
 
 /// The `message_start` event that opens every Anthropic response, carrying the
@@ -82,10 +85,21 @@ fn message_delta(output_tokens: u64) -> Json {
     })
 }
 
+/// What the adapters under test are connected with: the built-in capabilities
+/// of the model they call.
+fn caps() -> ModelCapabilities {
+    ModelCapabilities::built_in(ANTHROPIC_BACKEND, "claude-sonnet-4-5")
+}
+
 /// Connect an adapter to a stub serving `events`.
 async fn provider_for(events: &[Json]) -> Result<Anthropic> {
     let base = serve(Reply::sse(sse_events(events))).await?;
-    Anthropic::new(&base, "sk-ant-not-a-real-key", "claude-sonnet-4-5")
+    Anthropic::new(
+        &base,
+        "sk-ant-not-a-real-key",
+        "claude-sonnet-4-5",
+        ModelCapabilities::built_in(ANTHROPIC_BACKEND, "claude-sonnet-4-5"),
+    )
 }
 
 /// Every delta the provider yields, or the first error.
@@ -126,6 +140,7 @@ async fn text_deltas_arrive_in_order_and_end_in_a_stop_with_usage() {
                     input_tokens: 31,
                     output_tokens: 7,
                     cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
             },
         ]
@@ -236,6 +251,7 @@ async fn a_tool_call_split_across_chunks_is_emitted_once_its_arguments_parse() {
                 input_tokens: 120,
                 output_tokens: 25,
                 cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
             },
         })
     );
@@ -257,7 +273,7 @@ async fn cached_input_tokens_are_reported_where_the_provider_sends_them() {
             "usage": {
                 "output_tokens": 2,
                 "cache_read_input_tokens": 900,
-                "cache_creation_input_tokens": 0,
+                "cache_creation_input_tokens": 50,
             },
         }),
     ])
@@ -272,6 +288,11 @@ async fn cached_input_tokens_are_reported_where_the_provider_sends_them() {
         .await
         .expect("collecting");
     assert_eq!(msg.usage.cached_input_tokens, 900);
+    // Cache creation has its own price, so it is reported on its own.
+    assert_eq!(msg.usage.cache_write_input_tokens, 50);
+    // Anthropic counts both apart from its input tokens; ours are the whole
+    // prompt, so the three add up.
+    assert_eq!(msg.usage.input_tokens, 10 + 900 + 50);
 }
 
 #[tokio::test]
@@ -282,7 +303,8 @@ async fn a_rejected_key_surfaces_the_providers_own_words() {
     ))
     .await
     .expect("the stub");
-    let provider = Anthropic::new(&base, "sk-ant-wrong", "claude-sonnet-4-5").expect("the adapter");
+    let provider =
+        Anthropic::new(&base, "sk-ant-wrong", "claude-sonnet-4-5", caps()).expect("the adapter");
 
     let err = match provider.stream(LlmRequest::prompt("hi")).await {
         Err(e) => e,
@@ -303,7 +325,8 @@ async fn a_malformed_event_is_an_error_rather_than_a_silent_gap() {
     let base = serve(Reply::sse("data: {not json at all\n\n"))
         .await
         .expect("the stub");
-    let provider = Anthropic::new(&base, "sk-ant-x", "claude-sonnet-4-5").expect("the adapter");
+    let provider =
+        Anthropic::new(&base, "sk-ant-x", "claude-sonnet-4-5", caps()).expect("the adapter");
 
     let result = provider
         .stream(LlmRequest::prompt("hi"))
@@ -329,7 +352,8 @@ async fn a_truncated_stream_is_an_error_rather_than_a_short_answer() {
     )
     .await
     .expect("the stub");
-    let provider = Anthropic::new(&base, "sk-ant-x", "claude-sonnet-4-5").expect("the adapter");
+    let provider =
+        Anthropic::new(&base, "sk-ant-x", "claude-sonnet-4-5", caps()).expect("the adapter");
 
     let result = provider
         .stream(LlmRequest::prompt("hi"))
@@ -358,7 +382,8 @@ async fn consecutive_tool_results_reach_the_wire_as_one_user_message() {
     ])))
     .await
     .expect("the stub");
-    let provider = Anthropic::new(&base, "sk-ant-x", "claude-sonnet-4-5").expect("the adapter");
+    let provider =
+        Anthropic::new(&base, "sk-ant-x", "claude-sonnet-4-5", caps()).expect("the adapter");
 
     let call = |id: &str, name: &str| sc_llm::ToolCall {
         id: id.to_owned(),
@@ -372,6 +397,7 @@ async fn consecutive_tool_results_reach_the_wire_as_one_user_message() {
             sc_llm::LlmMessage::Assistant {
                 content: "Let me check.".to_owned(),
                 tool_calls: vec![call("t1", "count_books"), call("t2", "count_authors")],
+                provider_items: Vec::new(),
             },
             sc_llm::LlmMessage::tool_result(&call("t1", "count_books"), "3"),
             sc_llm::LlmMessage::tool_result(&call("t2", "count_authors"), "2"),
@@ -432,4 +458,87 @@ async fn the_model_the_adapter_reports_is_the_one_it_will_call() {
         .await
         .expect("the stub adapter");
     assert_eq!(provider.model(), "claude-sonnet-4-5");
+}
+
+#[tokio::test]
+async fn a_signed_thinking_block_is_kept_and_sent_back_with_its_turn() {
+    // The first turn thinks, with a signature, and calls a tool.
+    let (base, mut requests) = common::serve_capturing(Reply::sse(sse_events(&[
+        message_start(5),
+        json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+        }),
+        thinking_delta(0, "check the shelf"),
+        json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "signature_delta", "signature": "sig-abc"},
+        }),
+        block_stop(0),
+        text_block_start(1),
+        text_delta(1, "Looking."),
+        block_stop(1),
+        message_delta(3),
+    ])))
+    .await
+    .expect("the stub");
+    let provider =
+        Anthropic::new(&base, "sk-ant-x", "claude-sonnet-4-5", caps()).expect("the adapter");
+
+    let tools = vec![ToolSpec::new(
+        "count_books",
+        "Count",
+        json!({"type": "object"}),
+    )];
+    let mut first = LlmRequest::prompt("how many?").tools(tools.clone());
+    first.parallel_tool_calls = Some(false);
+    first.cache = CachePlan::standard(None);
+    let msg = provider
+        .stream(first)
+        .await
+        .expect("the stream")
+        .collect()
+        .await
+        .expect("collecting");
+    assert_eq!(
+        msg.provider_items,
+        [ProviderItem::SignedThinking {
+            thinking: "check the shelf".to_owned(),
+            signature: "sig-abc".to_owned(),
+        }]
+    );
+
+    // What was asked for: breakpoints, and no parallel tool calls.
+    let body = requests.next_body().await.expect("the first request");
+    assert!(body.to_string().contains("cache_control"), "{body}");
+    assert_eq!(
+        body["tool_choice"]["disable_parallel_tool_use"],
+        json!(true),
+        "{body}"
+    );
+
+    // The second turn sends the signed block back, first in the assistant turn.
+    let second = LlmRequest {
+        messages: vec![
+            sc_llm::LlmMessage::user("how many?"),
+            msg.message(),
+            sc_llm::LlmMessage::user("and now?"),
+        ],
+        ..LlmRequest::default()
+    };
+    provider
+        .stream(second)
+        .await
+        .expect("the stream")
+        .collect()
+        .await
+        .expect("collecting");
+    let body = requests.next_body().await.expect("the second request");
+    let assistant = &body["messages"][1]["content"];
+    assert_eq!(assistant[0]["type"], "thinking", "{body}");
+    assert_eq!(assistant[0]["signature"], "sig-abc", "{body}");
+    // No plan, no breakpoints.
+    assert!(!body.to_string().contains("cache_control"), "{body}");
 }

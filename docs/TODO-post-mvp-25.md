@@ -1,35 +1,35 @@
 # Saltcorn v2 — The builder: v1's drag-and-drop editor for views and pages, and the library
 
 Ordered, checkable task list for the twenty-fifth milestone after the MVP. Earlier lists are
-archived in [docs/TODO-mvp.md](./docs/TODO-mvp.md) (the MVP),
-[docs/TODO-post-mvp-1.md](./docs/TODO-post-mvp-1.md) (file stores + the React framework),
-[docs/TODO-post-mvp-2.md](./docs/TODO-post-mvp-2.md) (the `_sc_tables`/`_sc_fields` overlays,
-rich types and File fields), [docs/TODO-post-mvp-3.md](./docs/TODO-post-mvp-3.md) (ownership
+archived in [docs/TODO-mvp.md](./TODO-mvp.md) (the MVP),
+[docs/TODO-post-mvp-1.md](./TODO-post-mvp-1.md) (file stores + the React framework),
+[docs/TODO-post-mvp-2.md](./TODO-post-mvp-2.md) (the `_sc_tables`/`_sc_fields` overlays,
+rich types and File fields), [docs/TODO-post-mvp-3.md](./TODO-post-mvp-3.md) (ownership
 formulae, calculated fields and row-level security),
-[docs/TODO-post-mvp-4.md](./docs/TODO-post-mvp-4.md) (actions and triggers),
-[docs/TODO-post-mvp-5.md](./docs/TODO-post-mvp-5.md) (the file-store IDE),
-[docs/TODO-post-mvp-6.md](./docs/TODO-post-mvp-6.md) (agents),
-[docs/TODO-post-mvp-7.md](./docs/TODO-post-mvp-7.md) (the GraphQL provider),
-[docs/TODO-post-mvp-8.md](./docs/TODO-post-mvp-8.md) (REST queries, custom SQL and the
-generated client), [docs/TODO-post-mvp-9.md](./docs/TODO-post-mvp-9.md) (table constraints
-and indexes), [docs/TODO-post-mvp-10.md](./docs/TODO-post-mvp-10.md) (email),
-[docs/TODO-post-mvp-11.md](./docs/TODO-post-mvp-11.md) (tables in code),
-[docs/TODO-post-mvp-12.md](./docs/TODO-post-mvp-12.md) (concurrent code bodies),
-[docs/TODO-post-mvp-13.md](./docs/TODO-post-mvp-13.md) (modules),
-[docs/TODO-post-mvp-14.md](./docs/TODO-post-mvp-14.md) (SQLite),
-[docs/TODO-post-mvp-15.md](./docs/TODO-post-mvp-15.md) (modules in-process),
-[docs/TODO-post-mvp-16.md](./docs/TODO-post-mvp-16.md) (table providers),
-[docs/TODO-post-mvp-17.md](./docs/TODO-post-mvp-17.md) (writable table providers),
-[docs/TODO-post-mvp-18.md](./docs/TODO-post-mvp-18.md) (workflows),
-[docs/TODO-post-mvp-19.md](./docs/TODO-post-mvp-19.md) (the Python code adapter),
-[docs/TODO-post-mvp-20.md](./docs/TODO-post-mvp-20.md) (the administration MCP server),
-[docs/TODO-post-mvp-21.md](./docs/TODO-post-mvp-21.md) (bundled modules),
-[docs/TODO-post-mvp-22.md](./docs/TODO-post-mvp-22.md) (predictive models),
-[docs/TODO-post-mvp-23.md](./docs/TODO-post-mvp-23.md) (the v1 `Table` API) and
-[docs/TODO-post-mvp-24.md](./docs/TODO-post-mvp-24.md) (Saltcorn UI: the v1 views, running).
-Scope and rationale remain in [docs/GOALS.md](./docs/GOALS.md) ("builder is not built in to
+[docs/TODO-post-mvp-4.md](./TODO-post-mvp-4.md) (actions and triggers),
+[docs/TODO-post-mvp-5.md](./TODO-post-mvp-5.md) (the file-store IDE),
+[docs/TODO-post-mvp-6.md](./TODO-post-mvp-6.md) (agents),
+[docs/TODO-post-mvp-7.md](./TODO-post-mvp-7.md) (the GraphQL provider),
+[docs/TODO-post-mvp-8.md](./TODO-post-mvp-8.md) (REST queries, custom SQL and the
+generated client), [docs/TODO-post-mvp-9.md](./TODO-post-mvp-9.md) (table constraints
+and indexes), [docs/TODO-post-mvp-10.md](./TODO-post-mvp-10.md) (email),
+[docs/TODO-post-mvp-11.md](./TODO-post-mvp-11.md) (tables in code),
+[docs/TODO-post-mvp-12.md](./TODO-post-mvp-12.md) (concurrent code bodies),
+[docs/TODO-post-mvp-13.md](./TODO-post-mvp-13.md) (modules),
+[docs/TODO-post-mvp-14.md](./TODO-post-mvp-14.md) (SQLite),
+[docs/TODO-post-mvp-15.md](./TODO-post-mvp-15.md) (modules in-process),
+[docs/TODO-post-mvp-16.md](./TODO-post-mvp-16.md) (table providers),
+[docs/TODO-post-mvp-17.md](./TODO-post-mvp-17.md) (writable table providers),
+[docs/TODO-post-mvp-18.md](./TODO-post-mvp-18.md) (workflows),
+[docs/TODO-post-mvp-19.md](./TODO-post-mvp-19.md) (the Python code adapter),
+[docs/TODO-post-mvp-20.md](./TODO-post-mvp-20.md) (the administration MCP server),
+[docs/TODO-post-mvp-21.md](./TODO-post-mvp-21.md) (bundled modules),
+[docs/TODO-post-mvp-22.md](./TODO-post-mvp-22.md) (predictive models),
+[docs/TODO-post-mvp-23.md](./TODO-post-mvp-23.md) (the v1 `Table` API) and
+[docs/TODO-post-mvp-24.md](./TODO-post-mvp-24.md) (Saltcorn UI: the v1 views, running).
+Scope and rationale remain in [docs/GOALS.md](./GOALS.md) ("builder is not built in to
 the admin ui … This needs to be implemented in react due to high availability of underlying
-libraries i.e. craft and react-flow") and [docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md)
+libraries i.e. craft and react-flow") and [docs/TECHNICAL_DESIGN.md](./TECHNICAL_DESIGN.md)
 (**§13.3**, "Saltcorn UI", and the `ui/builder` bullet, which says this milestone is next).
 
 The last milestone made a Saltcorn UI application run. An imported List lists, an imported Edit

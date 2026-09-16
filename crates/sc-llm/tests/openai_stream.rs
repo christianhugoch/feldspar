@@ -17,7 +17,10 @@ use crate::common;
 use common::{Reply, serve, sse_events};
 use sc_error::Result;
 use sc_llm::openai::OpenAiResponses;
-use sc_llm::{LlmDelta, LlmProvider, LlmRequest, StopReason, ToolSpec, Usage};
+use sc_llm::{
+    LlmDelta, LlmProvider, LlmRequest, ModelCapabilities, OPENAI_RESPONSES_BACKEND, ProviderItem,
+    StopReason, ToolSpec, Usage,
+};
 use serde_json::{Value as Json, json};
 
 /// A `response.output_text.delta` event.
@@ -82,10 +85,21 @@ fn completed(seq: u64, usage_in: u64, usage_out: u64) -> Json {
     })
 }
 
+/// What the adapters under test are connected with: the built-in capabilities
+/// of the model they call.
+fn caps() -> ModelCapabilities {
+    ModelCapabilities::built_in(OPENAI_RESPONSES_BACKEND, "gpt-5.1")
+}
+
 /// Connect an adapter to a stub serving `events`.
 async fn provider_for(events: &[Json]) -> Result<OpenAiResponses> {
     let base = serve(Reply::sse(sse_events(events))).await?;
-    OpenAiResponses::new(&format!("{base}/v1"), "sk-not-a-real-key", "gpt-5.1")
+    OpenAiResponses::new(
+        &format!("{base}/v1"),
+        "sk-not-a-real-key",
+        "gpt-5.1",
+        caps(),
+    )
 }
 
 /// Every delta the provider yields, or the first error.
@@ -123,6 +137,7 @@ async fn text_deltas_arrive_in_order_and_end_in_a_stop_with_usage() {
                     input_tokens: 31,
                     output_tokens: 7,
                     cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
             },
         ]
@@ -228,6 +243,7 @@ async fn a_tool_call_split_across_chunks_is_emitted_once_its_arguments_parse() {
                 input_tokens: 120,
                 output_tokens: 25,
                 cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
             },
         })
     );
@@ -254,8 +270,8 @@ async fn a_tool_call_keeps_the_call_id_the_next_turn_has_to_send_back() {
     let (base, mut requests) = common::serve_capturing(Reply::sse(stream))
         .await
         .expect("the stub");
-    let provider =
-        OpenAiResponses::new(&format!("{base}/v1"), "sk-x", "gpt-5.1").expect("the adapter");
+    let provider = OpenAiResponses::new(&format!("{base}/v1"), "sk-x", "gpt-5.1", caps())
+        .expect("the adapter");
 
     // First turn: the model asks for a tool.
     let msg = provider
@@ -347,7 +363,7 @@ async fn a_rejected_key_surfaces_the_providers_own_words() {
     ))
     .await
     .expect("the stub");
-    let provider = OpenAiResponses::new(&format!("{base}/v1"), "sk-wrong", "gpt-5.1")
+    let provider = OpenAiResponses::new(&format!("{base}/v1"), "sk-wrong", "gpt-5.1", caps())
         .expect("building the adapter");
 
     let err = match provider.stream(LlmRequest::prompt("hi")).await {
@@ -371,8 +387,8 @@ async fn a_malformed_body_never_becomes_invented_text() {
     let base = serve(Reply::sse("data: this is not json\n\ndata: {oops\n\n"))
         .await
         .expect("the stub");
-    let provider =
-        OpenAiResponses::new(&format!("{base}/v1"), "sk-x", "gpt-5.1").expect("the adapter");
+    let provider = OpenAiResponses::new(&format!("{base}/v1"), "sk-x", "gpt-5.1", caps())
+        .expect("the adapter");
 
     let result = provider
         .stream(LlmRequest::prompt("hi"))
@@ -404,8 +420,8 @@ async fn a_truncated_stream_is_an_error_rather_than_a_short_answer() {
     let base = serve(Reply::sse(sse_events(&[text_delta(1, "The answer is")])).truncated())
         .await
         .expect("the stub");
-    let provider =
-        OpenAiResponses::new(&format!("{base}/v1"), "sk-x", "gpt-5.1").expect("the adapter");
+    let provider = OpenAiResponses::new(&format!("{base}/v1"), "sk-x", "gpt-5.1", caps())
+        .expect("the adapter");
 
     let result = provider
         .stream(LlmRequest::prompt("hi"))
@@ -424,4 +440,101 @@ async fn the_model_the_adapter_reports_is_the_one_it_will_call() {
         .await
         .expect("the stub adapter");
     assert_eq!(provider.model(), "gpt-5.1");
+}
+
+#[tokio::test]
+async fn encrypted_reasoning_is_kept_and_replayed_statelessly() {
+    let (base, mut requests) = common::serve_capturing(Reply::sse(sse_events(&[
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "sequence_number": 1,
+            "item": {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [],
+                "encrypted_content": "gAAAA-opaque",
+            },
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 1,
+            "sequence_number": 2,
+            "item": function_call_item("{\"limit\": 3}", "completed"),
+        }),
+        completed(3, 10, 2),
+    ])))
+    .await
+    .expect("the stub");
+    let provider = OpenAiResponses::new(&format!("{base}/v1"), "sk-x", "gpt-5.1", caps())
+        .expect("the adapter");
+
+    let mut first = LlmRequest::prompt("how many?").tools([ToolSpec::new(
+        "query_books",
+        "Query",
+        json!({"type": "object"}),
+    )]);
+    first.parallel_tool_calls = Some(false);
+    first.prompt_cache_key = Some("agent-librarian".to_owned());
+    let msg = provider
+        .stream(first)
+        .await
+        .expect("the stream")
+        .collect()
+        .await
+        .expect("collecting");
+    assert_eq!(
+        msg.provider_items,
+        [ProviderItem::EncryptedReasoning {
+            id: "rs_1".to_owned(),
+            encrypted_content: "gAAAA-opaque".to_owned(),
+        }]
+    );
+
+    let body = requests.next_body().await.expect("the first request");
+    assert_eq!(body["parallel_tool_calls"], json!(false), "{body}");
+    assert_eq!(body["prompt_cache_key"], json!("agent-librarian"), "{body}");
+    assert_eq!(body["store"], json!(false), "{body}");
+    assert!(
+        body["include"]
+            .to_string()
+            .contains("reasoning.encrypted_content"),
+        "{body}"
+    );
+
+    let call = msg.tool_calls[0].clone();
+    let second = LlmRequest {
+        messages: vec![
+            sc_llm::LlmMessage::user("how many?"),
+            msg.message(),
+            sc_llm::LlmMessage::tool_result(&call, "3"),
+        ],
+        ..LlmRequest::default()
+    };
+    provider
+        .stream(second)
+        .await
+        .expect("the stream")
+        .collect()
+        .await
+        .expect("collecting");
+    let body = requests.next_body().await.expect("the second request");
+    let input = body["input"].as_array().expect("an input array");
+    let reasoning = input
+        .iter()
+        .position(|item| item["type"] == "reasoning")
+        .unwrap_or_else(|| panic!("no reasoning item replayed: {body}"));
+    let call_at = input
+        .iter()
+        .position(|item| item["type"] == "function_call")
+        .unwrap_or_else(|| panic!("no function call: {body}"));
+    assert!(
+        reasoning < call_at,
+        "reasoning comes before its call: {body}"
+    );
+    assert_eq!(input[reasoning]["id"], "rs_1", "{body}");
+    assert_eq!(
+        input[reasoning]["encrypted_content"], "gAAAA-opaque",
+        "{body}"
+    );
 }

@@ -18,9 +18,10 @@ use rig_core::completion::CompletionModel as _;
 use rig_core::providers::openai;
 use sc_error::{Error, Result};
 
+use crate::capabilities::ModelCapabilities;
 use crate::message::LlmRequest;
 use crate::provider::{LlmProvider, LlmStream};
-use crate::rig_bridge::{map_stream, provider_error, to_rig_request};
+use crate::rig_bridge::{Wire, map_stream, provider_error, to_rig_request};
 
 /// The default endpoint, used when the provider's `base_url` is left blank.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -29,6 +30,7 @@ pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub struct OpenAiResponses {
     model: openai::responses_api::ResponsesCompletionModel<reqwest::Client>,
     model_name: String,
+    capabilities: ModelCapabilities,
 }
 
 impl OpenAiResponses {
@@ -40,7 +42,15 @@ impl OpenAiResponses {
     /// definition and an unreachable one (§14.1) — and it is why the admin form
     /// has a **Test connection** button, which is the deliberate way to find out
     /// now rather than inside a chat transcript.
-    pub fn new(base_url: &str, api_key: &str, model: impl Into<String>) -> Result<OpenAiResponses> {
+    ///
+    /// `capabilities` decide what the requests carry: encrypted reasoning,
+    /// parallel tool calls, a cache key, images.
+    pub fn new(
+        base_url: &str,
+        api_key: &str,
+        model: impl Into<String>,
+        capabilities: ModelCapabilities,
+    ) -> Result<OpenAiResponses> {
         let base_url = if base_url.trim().is_empty() {
             DEFAULT_BASE_URL
         } else {
@@ -59,6 +69,7 @@ impl OpenAiResponses {
         Ok(OpenAiResponses {
             model: client.completion_model(&model_name),
             model_name,
+            capabilities,
         })
     }
 }
@@ -70,12 +81,16 @@ impl LlmProvider for OpenAiResponses {
     }
 
     async fn stream(&self, req: LlmRequest) -> Result<LlmStream> {
-        let request = to_rig_request(req)?;
+        let request = to_rig_request(req, Wire::Responses, &self.model_name, &self.capabilities)?;
         let response = self
             .model
             .stream(request)
             .await
             .map_err(|e| provider_error(&e))?;
-        Ok(LlmStream::new(map_stream(response)))
+        Ok(LlmStream::new(map_stream(
+            response,
+            Wire::Responses,
+            self.capabilities.reasoning_replay,
+        )))
     }
 }

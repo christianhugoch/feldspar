@@ -50,7 +50,7 @@ use crate::provider::{LlmProvider, LlmStream};
 
 /// A provider that logs every call it forwards.
 ///
-/// Applied by [`connect_provider`](crate::connect_provider), which is the one
+/// Applied by [`connect_model`](crate::connect_model), which is the one
 /// place a stored provider record becomes something callable — so every model
 /// call this server makes, from the agent loop, the chat socket or the
 /// "test connection" button, comes through here. A test that builds an adapter
@@ -319,6 +319,7 @@ mod tests {
                     input_tokens: 1200,
                     output_tokens: 300,
                     cached_input_tokens: 1024,
+                    cache_write_input_tokens: 0,
                 },
             }),
         ]

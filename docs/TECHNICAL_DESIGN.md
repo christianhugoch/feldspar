@@ -1196,7 +1196,8 @@ a sparse value goes into `attributes`.**
 | `_fd_triggers` | triggers, whose body is an action **or a workflow** | **not an overlay** — the row is the trigger's only definition (§10.2): event, channel, `only_if`, `body` (`action` \| `workflow`), the action + configuration an `action` body carries, `min_role`, and in `attributes` the sparse `enabled` flag and periodic timing. `last_run_at` is the scheduler's own column, never written by a save. A workflow body's steps are **not** here: they are versioned in `_fd_workflow_versions`, so a suspended run finishes on its own version (§10.3) |
 | `_fd_workflow_versions` | one row per saved version of a workflow | `(workflow, version)` is unique and the table is **append-only**: saving an edited workflow mints `version + 1`, and a run records the version it started on and loads that one for its whole life (§10.3). `steps` holds the whole workflow document — the same JSON the API answers and the editor round-trips |
 | `_fd_agents` | agents | **not an overlay** — the row is the agent's only definition (§11.2): provider + model, system prompt, enabled traits with their configurations, `min_role`, and in `attributes` the sparse temperature / max tokens / max steps |
-| `_fd_llm_providers` | LLM connections | name + backend (`openai_responses` \| `anthropic`) + config (§11.1); the same shape as `_fd_file_stores`, and the API key is a `secret` field, redacted on read |
+| `_fd_llm_providers` | LLM connections | name + backend (`openai_responses` \| `anthropic` \| `openai_chat`) + config (§11.1); the same shape as `_fd_file_stores`, and the API key is a `secret` field, redacted on read. No model: that is `_fd_llm_models` |
+| `_fd_llm_models` | the models a provider serves | `provider_id` is a **foreign key** to `_fd_llm_providers`, and (`provider_id`, `name`) is unique, so one model name under two providers is two rows. `is_default` (at most one per provider, enforced in the save's transaction) and `config`: prices, context window, working budget, edit format and capability overrides, all optional, blank meaning the built-in default (§11.1). Deleting a provider deletes its models in the same transaction |
 | `_fd_runs` | workflow & agent runs | current context + state, updated after each step; `kind` discriminates `agent` from `workflow`, so a chat session and a durable run are one mechanism (§11.4) |
 | `_fd_run_traces` | per-step context + timing | one row per completed step attempt: when it ran, which attempt it was, how it came out, and the context **after** it. Written only when tracing is enabled for that workflow, and in the same batch as the run's own advance (§10.3) |
 | `_fd_errors` | error log | one row per logged error; `kind` = Application \| System (§16); message, source chain, and context (app/route/table/run/step/role); a runtime stream, **not cached** |
@@ -1375,7 +1376,7 @@ erDiagram
     text name UK
     text description
     text provider "-> _fd_llm_providers.name"
-    text model
+    text model "-> _fd_llm_models.name under that provider; blank is its default"
     text system_prompt
     json traits "enabled traits + their configuration"
     int min_role
@@ -1412,8 +1413,17 @@ erDiagram
     uuid id PK
     text name UK
     text description
-    text backend "openai_responses | anthropic"
+    text backend "openai_responses | anthropic | openai_chat"
     json config "api_key is a redacted secret"
+    json attributes
+  }
+  LLMMODELS["_fd_llm_models"] {
+    uuid id PK
+    uuid provider_id FK "-> _fd_llm_providers.id"
+    text name "unique per provider"
+    text description
+    bool is_default "at most one per provider"
+    json config "prices, window, budget, capability overrides"
     json attributes
   }
   DBCONN["_fd_db_connections"] {
@@ -1557,6 +1567,8 @@ erDiagram
   TABLES ||--o{ FIELDS : "table_name -- same subject, joined by name"
   FIELDS }o--o| TABLES : "attributes.target_table -- Key fields"
   LLM ||--o{ AGENTS : "provider -- by name"
+  LLM ||--o{ LLMMODELS : "provider_id"
+  LLMMODELS |o--o{ AGENTS : "model -- by name, or the default"
   AGENTS ||--o{ RUNS : "subject -- by name, when kind = agent"
   TRIGGERS ||--o{ WFVERSIONS : "workflow -- by value, append-only"
   WFVERSIONS ||--o{ RUNS : "version -- a run is pinned to the one it started on"
@@ -2711,18 +2723,34 @@ pub trait LlmProvider: Send + Sync {
 
 pub struct LlmRequest {
     pub system: Option<String>,
-    pub messages: Vec<LlmMessage>,   // User | Assistant{content, tool_calls} | ToolResult
+    pub messages: Vec<LlmMessage>,   // User | Assistant{content, tool_calls, provider_items}
+                                     //  | ToolResult{content, images}
     pub tools: Vec<ToolSpec>,        // name, description, JSON-Schema parameters
     pub max_tokens: Option<u32>,
     pub temperature: Option<f64>,
+    pub parallel_tool_calls: Option<bool>,
+    pub cache: CachePlan,            // breakpoints: prefix, session header, tail
+    pub prompt_cache_key: Option<String>,
 }
 
 pub enum LlmDelta {
     Text(String),
     Reasoning(String),
     ToolCall(ToolCall),              // id, name, arguments (JSON)
+    ProviderItem(ProviderItem),      // opaque, vendor-signed: sent back with its turn
     Stop { reason: StopReason, usage: Usage },
 }
+
+/// A provider row plus one of its model rows, connected. The loop reads what the
+/// model can do and costs from here and never looks it up again.
+pub struct ConnectedModel {
+    pub provider: Arc<dyn LlmProvider>,
+    pub provider_name: String,
+    pub backend: String,
+    pub capabilities: ModelCapabilities,
+    pub prices: Prices,
+}
+pub fn connect_model(provider: &LlmProviderDef, model: &LlmModelDef) -> Result<ConnectedModel>;
 ```
 
 **Streaming is the only shape**, not one of two. A non-streaming call is a stream collected to
@@ -2798,13 +2826,31 @@ revisiting is `rig-agent`'s MCP integration — but it pays off only through rig
 returns to the first bullet, so an `AgentTrait` over the `rmcp` crate is the likelier route.
 
 **Providers are configured entities, like file stores.** A named record in `_fd_llm_providers`
-— `name`, `backend` (`openai_responses` | `anthropic`), `config` (`Attrs`), `description` —
-with the backend's settings declared as `FormField`s and rendered by the same admin form that
-renders a file store's. `openai_responses` takes a `base_url` (defaulted, so any
+— `name`, `backend` (`openai_responses` | `anthropic` | `openai_chat`), `config` (`Attrs`),
+`description` — with the backend's settings declared as `FormField`s and rendered by the same
+admin form that renders a file store's. `openai_responses` takes a `base_url` (defaulted, so any
 OpenAI-compatible endpoint — a local server, a gateway, an alternative vendor — is a value in a
-field rather than a code change), an API key and a default model; `anthropic` takes an API key,
-a default model and an optional base URL. An agent names a provider and may override the model.
-This is what makes "OpenAI-compatible" a configuration fact.
+field rather than a code change) and an API key; `anthropic` takes an API key and an optional
+base URL; `openai_chat` (Chat Completions, what most cheap and open-weight hosts serve) takes a
+required base URL and an optional key, since a local host has none. This is what makes
+"OpenAI-compatible" a configuration fact.
+
+**Models are rows of their own.** A provider serves several models, and what differs between
+them — prices, context window, working budget, edit format, capabilities — is a row of
+`_fd_llm_models` under the provider (§9), with settings declared as `FormField`s **per backend**
+(`model_config_spec`). Every model setting is optional, and **blank means the built-in
+default**: `ModelCapabilities::resolve` applies rules over the backend and the model's name, then
+the row's non-blank overrides, so an improved rule reaches every row that did not set its own. A
+blank price is unknown, never zero, and `Usage::cost(&Prices)` is `None` when a used token class
+has no price. An agent names a provider and a model row under it, or no model for the
+provider's `is_default` row; a reference that stops resolving drops the agent from the live set
+with its reason. The admin UI lists a provider's models, adds them by hand or from the host's own
+listing (*Fetch models*, `GET /models`), and tests one model at a time.
+
+**`usage.input_tokens` is the whole prompt on every backend.** Anthropic reports cache reads and
+cache writes apart from its input tokens, and its adapter adds them back, so the cached and
+cache-write counts are parts of the input. That makes the count usable for measuring a context,
+and it is what `TokenEstimator` calibrates its character heuristic against.
 
 **Secrets.** `FormField` gains `secret: bool`. It is a property of the *declaration*, so it
 travels to every consumer at once: the admin UI renders a password input, the API **redacts**
@@ -2842,6 +2888,31 @@ for the end of the milestone):
 - **Providers have no `min_role`.** A file store has one because an application's users browse
   it; a provider is reached only through an agent, and §11.2's `min_role` is the single authority
   over who may chat with it.
+
+**What `rig-core` 0.41 exposes for the request options, and the gaps** (coding-agent milestone,
+Phase 1):
+
+- **Responses.** `parallel_tool_calls`, `prompt_cache_key`, `store` and `include` are fields of
+  rig's `AdditionalParameters` and travel through `additional_params`. A model with reasoning
+  replay is called with `store: false` and `include: ["reasoning.encrypted_content"]`, and the
+  encrypted items come back as `ProviderItem`s that rig replays from an assistant turn's
+  `Reasoning` content. Nothing is missing.
+- **Anthropic.** Caching is a switch on rig's model (`with_prompt_caching`) that marks the system
+  prompt, the last tool and the last message, which covers a `CachePlan`'s prefix and tail
+  breakpoints. **The session-header breakpoint cannot be placed**: rig's generic messages carry no
+  per-block `cache_control`, so it is not sent. `disable_parallel_tool_use` has no field either
+  and goes in `tool_choice` through `additional_params`. Signed and redacted thinking blocks are
+  replayed from `Reasoning` content.
+- **Chat Completions.** `parallel_tool_calls` travels through `additional_params`.
+  `prompt_cache_key` is **not sent**, because hosts other than OpenAI refuse fields they do not
+  know. A tool result cannot carry an image, so an image follows the tool results in a user
+  message labelled with its call id. rig emits each tool result as its own `tool` message, so
+  the merged results of `rig_bridge` come apart again on this wire, as the API requires.
+- **Reasoning replay reverses the second bullet above only for opaque items.** Readable
+  reasoning still does not travel back. An Anthropic thinking block does carry its text, because
+  the signature covers it and Anthropic refuses the signature without it.
+- **An image sent to a model without `vision` is replaced by a stub** naming the model, in the
+  adapter, so no backend is ever sent one.
 
 ### 11.2 Agents, traits and the loop (`sc-agent`)
 
@@ -3443,8 +3514,9 @@ history for that agent.
   each transcript to render a list of labels is the reason `getRun` exists separately. A run's
   `description` is set from the first line of the first message, so a list with no transcripts is
   still a list of recognisable conversations.
-- **Deleting an LLM provider is refused while an agent names it.** The `extra_referents` slot
-  §11.1 left open is filled by the server, which can see `_fd_agents` from above. Deleting an
+- **Deleting an LLM provider is refused while an agent names it,** and so is deleting or
+  renaming a model an agent calls, by name or as its provider's default. The `extra_referents`
+  slot §11.1 left open is filled by the server, which can see `_fd_agents` from above. Deleting an
   **agent**, by contrast, leaves its runs: `subject` is the name, and the transcript is the
   record of what happened.
 

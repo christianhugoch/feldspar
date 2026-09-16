@@ -29,6 +29,8 @@ sc-db.workspace = true
 async-trait.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
+# Image parts in a tool result are stored and sent as base64.
+base64.workspace = true
 uuid.workspace = true
 # `Stream` for `LlmStream`, and the combinators the adapters map with.
 futures.workspace = true

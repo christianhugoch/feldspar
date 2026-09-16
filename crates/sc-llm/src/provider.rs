@@ -39,7 +39,7 @@ pub type DeltaStream = Pin<Box<dyn Stream<Item = Result<LlmDelta>> + Send>>;
 /// throughout. What implements it is an adapter over a provider crate
 /// ([`openai_responses`](crate::openai), [`anthropic`](crate::anthropic)), and
 /// what holds it is an `Arc<dyn LlmProvider>` built from stored configuration by
-/// [`connect_provider`](crate::connect_provider).
+/// [`connect_model`](crate::connect_model).
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// Which model this will call — the resolved one, after any per-agent
@@ -135,6 +135,7 @@ mod tests {
                     input_tokens: 42,
                     output_tokens: 7,
                     cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
             },
         ]

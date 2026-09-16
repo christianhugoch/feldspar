@@ -1,5 +1,6 @@
-//! The `_fd_llm_providers` table: its schema, bootstrap, and the
-//! [`LlmProviderDef`] ⇄ row mapping (design §9, §11.1).
+//! The `_fd_llm_providers` and `_fd_llm_models` tables: their schemas,
+//! bootstrap, and the [`LlmProviderDef`] and [`LlmModelDef`] ⇄ row mappings
+//! (design §9, §11.1, TODO §3a).
 //!
 //! Follows `_fd_file_stores` in every respect that matters, because it is the
 //! same kind of thing: a provider, like a store and like an application, has
@@ -18,14 +19,18 @@
 //! database dump would disprove. What *is* guaranteed is that it does not leave
 //! through the API — see [`sc_types::redact_attrs`] and the admin handlers.
 
-use sc_catalog::{Catalog, DataField, Table};
-use sc_db::Row;
+use sc_catalog::{
+    Catalog, ConstraintKind, DataField, DataFieldKind, FieldId, SchemaStep, SharedTx, Table,
+    TableConstraint, TableId,
+};
+use sc_db::{Row, SchemaChange};
 use sc_error::{Error, Result};
 use sc_query::{Assignment, Delete, Expr, Insert, Select, Source, Statement, Update, Value};
 use sc_types::{Attrs, BasicType, TypeRef};
 use serde_json::Value as Json;
 
 use crate::def::{LlmProviderDef, LlmProviderDefId, validate_provider_config};
+use crate::model::{LlmModelDef, LlmModelDefId, normalise_model_config, validate_model_config};
 
 /// Name of the providers table in the primary database.
 pub const LLM_PROVIDERS_TABLE: &str = "_fd_llm_providers";
@@ -64,15 +69,21 @@ fn provider_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure the `_fd_llm_providers` table exists, creating it if absent.
+/// Ensure the `_fd_llm_providers` table exists, and then `_fd_llm_models`
+/// beside it ([`bootstrap_llm_models`]), creating either if absent.
+///
+/// One call for both, because a provider with no models table is not a state
+/// anything can use, and the models' foreign key needs the providers first.
 ///
 /// Idempotent and safe against a database that has never seen Saltcorn — the
 /// same contract `bootstrap_file_stores` has. Call once at startup, after the
 /// [`Catalog`] is initialised.
 pub async fn bootstrap_llm_providers(catalog: &Catalog) -> Result<Table> {
-    catalog
+    let table = catalog
         .bootstrap_table(LLM_PROVIDERS_TABLE, &provider_fields())
-        .await
+        .await?;
+    bootstrap_llm_models(catalog).await?;
+    Ok(table)
 }
 
 /// Save a provider definition: insert its row, or update it in place if a row
@@ -178,15 +189,20 @@ pub async fn list_llm_providers(catalog: &Catalog) -> Result<Vec<LlmProviderDef>
     Ok(defs)
 }
 
-/// Delete a provider definition, returning whether one was there to delete.
+/// Delete a provider definition **and its models**, returning whether one was
+/// there to delete.
+///
+/// The models go in the same transaction, first, because their foreign key
+/// points at the provider and the schema layer has no `ON DELETE`. Either both
+/// go or neither does.
 ///
 /// `extra_referents` is how references this crate cannot see are supplied: an
-/// **agent** names a provider, and `_fd_agents` lives in `sc-agent`, a layer
-/// above this one. Callers that know about agents collect those first and pass
-/// them in; a caller passing an empty slice gets no reference check at all,
-/// which is correct for a system with no agents and wrong for one with them.
-/// The same arrangement `delete_file_store` uses for applications, and for the
-/// same layering reason.
+/// **agent** names a provider and its models, and `_fd_agents` lives in
+/// `sc-agent`, a layer above this one. Callers that know about agents collect
+/// those first and pass them in; a caller passing an empty slice gets no
+/// reference check at all, which is correct for a system with no agents and
+/// wrong for one with them. The same arrangement `delete_file_store` uses for
+/// applications, and for the same layering reason.
 pub async fn delete_llm_provider(
     catalog: &Catalog,
     id: LlmProviderDefId,
@@ -205,9 +221,15 @@ pub async fn delete_llm_provider(
         )));
     }
 
-    let delete =
+    let models =
+        Delete::from(LLM_MODELS_TABLE).filter(Expr::col(COL_PROVIDER_ID).eq(Expr::lit(def.id.0)));
+    let provider =
         Delete::from(LLM_PROVIDERS_TABLE).filter(Expr::col(COL_ID).eq(Expr::lit(def.id.0)));
-    run(catalog, Statement::from(delete)).await?;
+    in_transaction(
+        catalog,
+        vec![Statement::from(models), Statement::from(provider)],
+    )
+    .await?;
     Ok(true)
 }
 
@@ -324,6 +346,371 @@ async fn load_one(catalog: &Catalog, filter: Expr) -> Result<Option<LlmProviderD
     }
 }
 
+// --- models ------------------------------------------------------------------
+
+/// Name of the models table in the primary database. Not `_fd_models`, which
+/// is the predictive models' table.
+pub const LLM_MODELS_TABLE: &str = "_fd_llm_models";
+
+/// The provider a model belongs to: a foreign key onto the providers' `id`.
+pub const COL_PROVIDER_ID: &str = "provider_id";
+/// Whether the model is its provider's default.
+pub const COL_IS_DEFAULT: &str = "is_default";
+
+/// The fields of the `_fd_llm_models` table, in declaration order.
+///
+/// `name` is **not** unique on its own: the same model name under two providers
+/// is two rows. (`provider_id`, `name`) is, as a table constraint added by
+/// [`bootstrap_llm_models`].
+fn model_fields() -> Vec<DataField> {
+    let text = || TypeRef::Basic(BasicType::Text);
+    let json = || TypeRef::Basic(BasicType::Json);
+    let uuid = || TypeRef::Basic(BasicType::Uuid);
+    vec![
+        DataField::plain(COL_ID, uuid()).required().primary_key(),
+        DataField {
+            kind: DataFieldKind::Key {
+                target_table: TableId(LLM_PROVIDERS_TABLE.to_owned()),
+                target_field: FieldId(COL_ID.to_owned()),
+                summary_field: Some(FieldId(COL_NAME.to_owned())),
+            },
+            ..DataField::plain(COL_PROVIDER_ID, uuid()).required()
+        },
+        DataField::plain(COL_NAME, text()).required(),
+        DataField::plain(COL_DESCRIPTION, text()),
+        DataField::plain(COL_IS_DEFAULT, TypeRef::Basic(BasicType::Bool)).required(),
+        DataField::plain(COL_CONFIG, json()).required(),
+        DataField::plain(COL_ATTRIBUTES, json()).required(),
+    ]
+}
+
+/// The jointly-unique key: one row per model name per provider.
+fn model_key() -> ConstraintKind {
+    ConstraintKind::Unique {
+        fields: vec![COL_PROVIDER_ID.to_owned(), COL_NAME.to_owned()],
+    }
+}
+
+/// Ensure `_fd_llm_models` exists, with its key, and return it.
+///
+/// **Runs after the providers table**, because its foreign key points there.
+/// [`bootstrap_llm_providers`] calls it, so a caller bootstrapping providers
+/// gets both.
+pub async fn bootstrap_llm_models(catalog: &Catalog) -> Result<Table> {
+    let table = catalog
+        .bootstrap_table(LLM_MODELS_TABLE, &model_fields())
+        .await?;
+    let key = model_key();
+    if table.constraints.iter().any(|c| c.kind == key) {
+        return Ok(table);
+    }
+    let name = TableConstraint::derived_name(LLM_MODELS_TABLE, &key, "");
+    catalog
+        .apply_schema_batch(&[SchemaStep::Change(SchemaChange::AddUniqueConstraint {
+            table: LLM_MODELS_TABLE.to_owned(),
+            name,
+            columns: vec![COL_PROVIDER_ID.to_owned(), COL_NAME.to_owned()],
+        })])
+        .await?;
+    catalog.reload().await?;
+    catalog.require(LLM_MODELS_TABLE)
+}
+
+/// Save a model row: insert it, or update it in place if a row with its id
+/// exists.
+///
+/// Checked first: a name, a provider that exists, settings matching the
+/// provider's backend, and no other row of the same provider holding the name.
+/// Blank settings are dropped before the row is written, so a row records only
+/// where it differs from the built-in defaults.
+///
+/// **At most one default per provider**, enforced in the same transaction as
+/// the write: saving a row as the default clears the flag on every other row of
+/// its provider, so two concurrent saves cannot both leave a default behind.
+pub async fn save_llm_model(catalog: &Catalog, model: &LlmModelDef) -> Result<LlmModelDef> {
+    let mut model = model.clone();
+    model.name = model.name.trim().to_owned();
+    model.config = normalise_model_config(&model.config);
+    check_model_saveable(catalog, &model).await?;
+
+    let columns = model_columns();
+    let values = model_values(&model);
+    let mut statements = Vec::new();
+    if model.is_default {
+        let clear = Update::new(
+            LLM_MODELS_TABLE,
+            vec![Assignment::new(
+                COL_IS_DEFAULT.to_owned(),
+                Expr::Lit(Value::Bool(false)),
+            )],
+        )
+        .filter(
+            Expr::col(COL_PROVIDER_ID)
+                .eq(Expr::lit(model.provider_id.0))
+                .and(Expr::binary(
+                    sc_query::BinOp::Ne,
+                    Expr::col(COL_ID),
+                    Expr::lit(model.id.0),
+                )),
+        );
+        statements.push(Statement::from(clear));
+    }
+    if load_llm_model(catalog, model.id).await?.is_some() {
+        let assignments = columns
+            .iter()
+            .zip(values)
+            .filter(|(col, _)| *col != COL_ID)
+            .map(|(col, value)| Assignment::new(col.clone(), Expr::Lit(value)))
+            .collect();
+        let update = Update::new(LLM_MODELS_TABLE, assignments)
+            .filter(Expr::col(COL_ID).eq(Expr::lit(model.id.0)));
+        statements.push(Statement::from(update));
+    } else {
+        let insert = Insert::row(
+            LLM_MODELS_TABLE,
+            columns,
+            values.into_iter().map(Expr::Lit).collect(),
+        );
+        statements.push(Statement::from(insert));
+    }
+    in_transaction(catalog, statements).await?;
+    Ok(model)
+}
+
+/// Everything [`save_llm_model`] checks before it writes.
+pub async fn check_model_saveable(catalog: &Catalog, model: &LlmModelDef) -> Result<()> {
+    let name = model.name.trim();
+    if name.is_empty() {
+        return Err(Error::invalid("an LLM model needs a name"));
+    }
+    let provider = load_llm_provider(catalog, model.provider_id)
+        .await?
+        .ok_or_else(|| {
+            Error::invalid(format!(
+                "LLM model `{name}`: its provider {} does not exist",
+                model.provider_id.0
+            ))
+        })?;
+    validate_model_config(&provider.backend, model)?;
+    if let Some(other) = load_llm_model_by_name(catalog, &provider, name).await?
+        && other.id != model.id
+    {
+        return Err(Error::invalid(format!(
+            "LLM provider `{}` already has a model named `{name}`",
+            provider.name
+        )));
+    }
+    // A row cannot move to another provider: its prices and capabilities were
+    // entered for this one.
+    if let Some(stored) = load_llm_model(catalog, model.id).await?
+        && stored.provider_id != model.provider_id
+    {
+        return Err(Error::invalid(format!(
+            "LLM model `{name}` belongs to another provider and cannot be moved"
+        )));
+    }
+    Ok(())
+}
+
+/// Load the model row with this id, if it exists.
+pub async fn load_llm_model(catalog: &Catalog, id: LlmModelDefId) -> Result<Option<LlmModelDef>> {
+    let select = Select::from(Source::table(LLM_MODELS_TABLE))
+        .filter(Expr::col(COL_ID).eq(Expr::lit(id.0)))
+        .limit(1);
+    let Some(row) = rows(catalog, select).await?.into_iter().next() else {
+        return Ok(None);
+    };
+    let model = model_from_row(&row)?;
+    // Read strictly, like the providers: a row whose settings no longer match
+    // its backend is reported, not half-used.
+    if let Some(provider) = load_llm_provider(catalog, model.provider_id).await? {
+        validate_model_config(&provider.backend, &model)?;
+    }
+    Ok(Some(model))
+}
+
+/// The model of `provider` named `name`, if any.
+pub async fn load_llm_model_by_name(
+    catalog: &Catalog,
+    provider: &LlmProviderDef,
+    name: &str,
+) -> Result<Option<LlmModelDef>> {
+    Ok(list_llm_models(catalog, provider)
+        .await?
+        .into_iter()
+        .find(|m| m.name == name.trim()))
+}
+
+/// Every model of `provider`, ordered by name — what the admin UI lists.
+pub async fn list_llm_models(
+    catalog: &Catalog,
+    provider: &LlmProviderDef,
+) -> Result<Vec<LlmModelDef>> {
+    let select = Select::from(Source::table(LLM_MODELS_TABLE))
+        .filter(Expr::col(COL_PROVIDER_ID).eq(Expr::lit(provider.id.0)));
+    let mut models: Vec<LlmModelDef> = rows(catalog, select)
+        .await?
+        .iter()
+        .map(model_from_row)
+        .collect::<Result<_>>()?;
+    for model in &models {
+        validate_model_config(&provider.backend, model)?;
+    }
+    models.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(models)
+}
+
+/// The model an agent's (`provider`, `model`) pair names: the row called
+/// `model`, or the provider's default when `model` is blank.
+///
+/// The error says which is missing — no such model, or no default — because
+/// the two are fixed in different places.
+pub async fn require_llm_model(
+    catalog: &Catalog,
+    provider: &LlmProviderDef,
+    model: Option<&str>,
+) -> Result<LlmModelDef> {
+    match model.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(name) => load_llm_model_by_name(catalog, provider, name)
+            .await?
+            .ok_or_else(|| {
+                Error::not_found(format!(
+                    "LLM provider `{}` has no model named `{name}`",
+                    provider.name
+                ))
+            }),
+        None => list_llm_models(catalog, provider)
+            .await?
+            .into_iter()
+            .find(|m| m.is_default)
+            .ok_or_else(|| {
+                Error::not_found(format!(
+                    "LLM provider `{}` has no default model; mark one of its models as \
+                     the default, or name a model",
+                    provider.name
+                ))
+            }),
+    }
+}
+
+/// Delete a model row, returning whether one was there to delete.
+///
+/// Refused while `extra_referents` is non-empty, naming them — the agents that
+/// call this model, collected by a caller that can see agents, exactly as for
+/// [`delete_llm_provider`].
+pub async fn delete_llm_model(
+    catalog: &Catalog,
+    id: LlmModelDefId,
+    extra_referents: &[String],
+) -> Result<bool> {
+    let select = Select::from(Source::table(LLM_MODELS_TABLE))
+        .filter(Expr::col(COL_ID).eq(Expr::lit(id.0)))
+        .limit(1);
+    let Some(row) = rows(catalog, select).await?.into_iter().next() else {
+        return Ok(false);
+    };
+    let model = model_from_row(&row)?;
+    if !extra_referents.is_empty() {
+        return Err(Error::invalid(format!(
+            "LLM model `{}` is still used by {}; \
+             remove those references before deleting it",
+            model.name,
+            extra_referents.join(", ")
+        )));
+    }
+    let delete = Delete::from(LLM_MODELS_TABLE).filter(Expr::col(COL_ID).eq(Expr::lit(id.0)));
+    run(catalog, Statement::from(delete)).await?;
+    Ok(true)
+}
+
+/// The model row's columns, in the order [`model_values`] produces them.
+fn model_columns() -> Vec<String> {
+    [
+        COL_ID,
+        COL_PROVIDER_ID,
+        COL_NAME,
+        COL_DESCRIPTION,
+        COL_IS_DEFAULT,
+        COL_CONFIG,
+        COL_ATTRIBUTES,
+    ]
+    .iter()
+    .map(|c| (*c).to_owned())
+    .collect()
+}
+
+/// The model serialised to its row's values, in [`model_columns`] order.
+fn model_values(model: &LlmModelDef) -> Vec<Value> {
+    vec![
+        Value::Uuid(model.id.0),
+        Value::Uuid(model.provider_id.0),
+        Value::Text(model.name.trim().to_owned()),
+        Value::Text(model.description.clone()),
+        Value::Bool(model.is_default),
+        Value::Json(Json::Object(model.config.clone())),
+        Value::Json(Json::Object(model.attributes.clone())),
+    ]
+}
+
+/// Rebuild an [`LlmModelDef`] from its row, strictly.
+fn model_from_row(row: &Row) -> Result<LlmModelDef> {
+    let uuid = |column: &str| match row.get(column) {
+        Some(Value::Uuid(u)) => Ok(*u),
+        other => Err(bad_model_column(column, "a uuid", other)),
+    };
+    let description = match row.get(COL_DESCRIPTION) {
+        Some(Value::Text(t)) => t.clone(),
+        Some(Value::Null) | None => String::new(),
+        other => return Err(bad_model_column(COL_DESCRIPTION, "text", other)),
+    };
+    let is_default = match row.get(COL_IS_DEFAULT) {
+        Some(Value::Bool(b)) => *b,
+        other => return Err(bad_model_column(COL_IS_DEFAULT, "a bool", other)),
+    };
+    let name = match row.get(COL_NAME) {
+        Some(Value::Text(t)) => t.clone(),
+        other => return Err(bad_model_column(COL_NAME, "text", other)),
+    };
+    let object = |column: &str| match row.get(column) {
+        Some(Value::Json(Json::Object(o))) => Ok(o.clone()),
+        other => Err(bad_model_column(column, "a json object", other)),
+    };
+    Ok(LlmModelDef {
+        id: LlmModelDefId(uuid(COL_ID)?),
+        provider_id: LlmProviderDefId(uuid(COL_PROVIDER_ID)?),
+        name,
+        description,
+        is_default,
+        config: object(COL_CONFIG)?,
+        attributes: object(COL_ATTRIBUTES)?,
+    })
+}
+
+fn bad_model_column(column: &str, expected: &str, got: Option<&Value>) -> Error {
+    match got {
+        Some(value) => Error::invalid(format!(
+            "{LLM_MODELS_TABLE}.{column} should be {expected}, got {}",
+            value.kind()
+        )),
+        None => Error::invalid(format!("{LLM_MODELS_TABLE} row has no `{column}` column")),
+    }
+}
+
+/// Run `statements` in one transaction on the primary database: all of them,
+/// or none.
+async fn in_transaction(catalog: &Catalog, statements: Vec<Statement>) -> Result<()> {
+    let tx = SharedTx::begin_primary(catalog)?;
+    for statement in &statements {
+        if let Err(e) = tx.run(None, statement).await {
+            // The rollback's own failure would hide the reason; the statement's
+            // error is the one worth reporting.
+            let _ = tx.rollback().await;
+            return Err(e);
+        }
+    }
+    tx.commit().await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,22 +733,48 @@ mod tests {
     }
 
     #[test]
-    fn the_table_is_a_hidden_system_table() {
+    fn the_tables_are_hidden_system_tables() {
         assert!(LLM_PROVIDERS_TABLE.starts_with("_fd_"));
+        assert!(LLM_MODELS_TABLE.starts_with("_fd_"));
+        assert_ne!(LLM_MODELS_TABLE, "_fd_models");
+    }
+
+    #[test]
+    fn a_model_belongs_to_its_provider_by_a_foreign_key_and_is_unique_within_it() {
+        let fields = model_fields();
+        let by_name = |n: &str| fields.iter().find(|f| f.base.name == n).unwrap();
+        assert!(matches!(
+            &by_name(COL_PROVIDER_ID).kind,
+            DataFieldKind::Key { target_table, .. } if target_table.0 == LLM_PROVIDERS_TABLE
+        ));
+        assert!(
+            !by_name(COL_NAME).unique,
+            "unique per provider, not globally"
+        );
+        assert!(by_name(COL_IS_DEFAULT).required);
+        assert_eq!(
+            model_key(),
+            ConstraintKind::Unique {
+                fields: vec![COL_PROVIDER_ID.to_owned(), COL_NAME.to_owned()]
+            }
+        );
     }
 
     #[test]
     fn columns_and_values_stay_in_step() {
         // The insert pairs these two positionally, so a column added to one and
         // not the other would write an API key into the wrong column.
-        let def = LlmProviderDef::anthropic("main", "sk-x", "claude-opus-4");
+        let def = LlmProviderDef::new("main", ANTHROPIC_BACKEND).with("api_key", "sk-x");
         assert_eq!(provider_columns().len(), provider_values(&def).len());
         assert_eq!(provider_columns().len(), provider_fields().len());
+        let model = LlmModelDef::new(def.id, "claude-sonnet-5");
+        assert_eq!(model_columns().len(), model_values(&model).len());
+        assert_eq!(model_columns().len(), model_fields().len());
     }
 
     #[test]
     fn a_definitions_config_reaches_the_row_whole() {
-        let def = LlmProviderDef::anthropic("main", "sk-x", "claude-opus-4");
+        let def = LlmProviderDef::new("main", ANTHROPIC_BACKEND).with("api_key", "sk-x");
         let idx = provider_columns()
             .iter()
             .position(|c| c == COL_CONFIG)

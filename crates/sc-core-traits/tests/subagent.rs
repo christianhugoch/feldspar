@@ -39,7 +39,7 @@ use sc_core_traits::{
     CFG_TABLE, CFG_WHEN_TO_USE, tool_names,
 };
 use sc_error::{Error, Result};
-use sc_llm::{LlmMessage, LlmProvider};
+use sc_llm::{ConnectedModel, LlmMessage, LlmProvider};
 use serde_json::{Value as Json, json};
 
 // --- a model per agent -------------------------------------------------------
@@ -82,9 +82,11 @@ impl Scripts {
 
 #[async_trait::async_trait]
 impl ProviderConnector for Scripts {
-    async fn connect(&self, _catalog: &Catalog, agent: &Agent) -> Result<Arc<dyn LlmProvider>> {
+    async fn connect(&self, _catalog: &Catalog, agent: &Agent) -> Result<ConnectedModel> {
         match self.by_agent.lock().unwrap().get(&agent.name) {
-            Some(provider) => Ok(Arc::clone(provider) as Arc<dyn LlmProvider>),
+            Some(provider) => Ok(ConnectedModel::unconfigured(
+                Arc::clone(provider) as Arc<dyn LlmProvider>
+            )),
             None => Err(Error::config(format!("no script for `{}`", agent.name))),
         }
     }
@@ -139,7 +141,7 @@ async fn chat(
     message: &str,
 ) -> Result<(sc_agent::Run, Conclusion)> {
     let connector = Arc::clone(scripts) as Arc<dyn ProviderConnector>;
-    let provider = connector.connect(&env.catalog, agent).await?;
+    let provider = connector.connect(&env.catalog, agent).await?.provider;
     let mut runner = Runner::new(&env.catalog, &env.registry, agent, provider, caller)
         .with_subagents(&connector);
     if let Some(evaluator) = &env.evaluator {

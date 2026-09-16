@@ -53,12 +53,18 @@ pub async fn validate_agent(
     if provider.is_empty() {
         return Err(problem("no LLM provider is set".to_owned()));
     }
-    if sc_llm::load_llm_provider_by_name(catalog, provider)
-        .await?
-        .is_none()
-    {
+    let Some(provider_def) = sc_llm::load_llm_provider_by_name(catalog, provider).await? else {
         return Err(problem(format!("no LLM provider named `{provider}`")));
-    }
+    };
+    // And the model must be a row under it: the one named, or the provider's
+    // default when none is. The two failures are fixed in different places, so
+    // the message says which it is.
+    sc_llm::require_llm_model(catalog, &provider_def, agent.model.as_deref())
+        .await
+        .map_err(|e| match e.repr() {
+            sc_error::Repr::NotFound(msg) => problem(msg.clone()),
+            _ => e,
+        })?;
 
     if let Some(role) = agent.min_role
         && !(1..=100).contains(&role)

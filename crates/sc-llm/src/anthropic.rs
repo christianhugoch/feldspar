@@ -13,9 +13,10 @@ use rig_core::completion::CompletionModel as _;
 use rig_core::providers::anthropic;
 use sc_error::{Error, Result};
 
+use crate::capabilities::{ModelCapabilities, PromptCaching};
 use crate::message::LlmRequest;
 use crate::provider::{LlmProvider, LlmStream};
-use crate::rig_bridge::{map_stream, provider_error, to_rig_request};
+use crate::rig_bridge::{Wire, map_stream, provider_error, to_rig_request};
 
 /// The default endpoint, used when the provider's `base_url` is left blank.
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -32,13 +33,19 @@ pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 pub struct Anthropic {
     model: anthropic::completion::CompletionModel<reqwest::Client>,
     model_name: String,
+    capabilities: ModelCapabilities,
 }
 
 impl Anthropic {
     /// Connect to `base_url` with `api_key`, ready to call `model`. As with
     /// [`OpenAiResponses::new`](crate::openai::OpenAiResponses::new), nothing is
     /// sent until the first request.
-    pub fn new(base_url: &str, api_key: &str, model: impl Into<String>) -> Result<Anthropic> {
+    pub fn new(
+        base_url: &str,
+        api_key: &str,
+        model: impl Into<String>,
+        capabilities: ModelCapabilities,
+    ) -> Result<Anthropic> {
         let base_url = if base_url.trim().is_empty() {
             DEFAULT_BASE_URL
         } else {
@@ -57,6 +64,7 @@ impl Anthropic {
         Ok(Anthropic {
             model: client.completion_model(&model_name),
             model_name,
+            capabilities,
         })
     }
 }
@@ -69,12 +77,27 @@ impl LlmProvider for Anthropic {
 
     async fn stream(&self, mut req: LlmRequest) -> Result<LlmStream> {
         req.max_tokens = Some(req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS));
-        let request = to_rig_request(req)?;
-        let response = self
-            .model
-            .stream(request)
-            .await
-            .map_err(|e| provider_error(&e))?;
-        Ok(LlmStream::new(map_stream(response)))
+        // rig places Anthropic's breakpoints itself — the system prompt, the
+        // last tool and the last message — so a plan asking for any is a plan
+        // asking for those. A breakpoint after the session header cannot be
+        // placed through rig 0.41 (see `rig_bridge`).
+        let cached =
+            !req.cache.is_empty() && self.capabilities.prompt_caching == PromptCaching::Explicit;
+        let request = to_rig_request(req, Wire::Anthropic, &self.model_name, &self.capabilities)?;
+        let response = if cached {
+            self.model
+                .clone()
+                .with_prompt_caching()
+                .stream(request)
+                .await
+        } else {
+            self.model.stream(request).await
+        }
+        .map_err(|e| provider_error(&e))?;
+        Ok(LlmStream::new(map_stream(
+            response,
+            Wire::Anthropic,
+            self.capabilities.reasoning_replay,
+        )))
     }
 }

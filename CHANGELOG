@@ -2,6 +2,114 @@
 
 Changes in reverse chronological order.
 
+## LLM providers and models are two tables (coding agent milestone, Phase 1)
+
+A provider now holds only what is entered once per key: the backend, the API key and the base
+URL. Each model it serves is a row of its own in the new **`_fd_llm_models`** table, with its
+prices, context window and capabilities. This is Phase 1 of the milestone that rebuilds the coding
+agent for cheap models (TODO §3a, §4). Everything in it is in `sc-llm`, plus what had to change
+above it.
+
+- **`_fd_llm_models`** (`sc-llm/src/storage.rs`) has `id`, `provider_id` (a real foreign key
+  onto the provider), `name`, `description`, `is_default`, `config` and `attributes`.
+  - (`provider_id`, `name`) is a jointly-unique constraint, so the same model under two
+    providers is two rows.
+  - `save_llm_model` clears `is_default` on the provider's other rows in the same transaction.
+  - `delete_llm_provider` deletes the provider's models and then the provider, in one
+    transaction.
+  - Both deletes are refused while the caller-supplied referents are non-empty.
+  - `bootstrap_llm_providers` bootstraps both tables, so `sc-cli` and every test get the models
+    table without a second call.
+  - Rows are read strictly and validated against the provider's backend on load.
+  - `require_llm_model(provider, model)` resolves an agent's pair. Its error says which part is
+    missing: *no model named …* or *no default model*.
+- **Model settings** (`model_config_spec(backend)`, `sc-llm/src/model.rs`) are all optional
+  `FormField`s: four prices (input, cached input, cache write, output, per million tokens),
+  context window, working budget, edit format, parallel tool calls and their default, prompt
+  caching, vision, and, where the backend has them, native `apply_patch` and reasoning replay.
+  Blank settings (empty strings, nulls) are dropped before a row is saved, so a row records only
+  where it differs.
+- **`ModelCapabilities`** (`capabilities.rs`) come from built-in rules over the backend and the
+  model's name, then the row's non-blank overrides. An unknown model gets a 32k window and a 32k
+  working budget. A known one gets half its window as its budget, capped at 100k. Parallel tool
+  calls are off by default for every rule.
+- **`Prices`** (`pricing.rs`) are read from a row. `Usage::cost(&Prices)` is `None` when the input
+  or output price is unknown, or when a token class that was used has no price. A blank price is
+  never treated as zero.
+- **`connect_model(provider, model) -> ConnectedModel`** replaces `connect_provider(def, model)`.
+  It returns the logged provider together with the resolved capabilities and prices, so nothing
+  looks them up twice. `LlmProviderDef::default_model`, `::anthropic`, `::openai` and
+  `CFG_MODEL` are gone.
+- **Usage.** `Usage.input_tokens` is now the whole prompt on every backend: the Anthropic adapter
+  adds cache reads and cache writes back in. `Usage` also gains `cache_write_input_tokens`, taken
+  from Anthropic's cache creation.
+- **`LlmRequest`** gains three fields, mapped per wire in `rig_bridge`:
+  - `parallel_tool_calls`: `parallel_tool_calls` on Responses and Chat Completions, and
+    `tool_choice.disable_parallel_tool_use` on Anthropic. Only sent with tools.
+  - `cache: CachePlan`: Anthropic breakpoints through rig's `with_prompt_caching`.
+  - `prompt_cache_key`: Responses only.
+
+  rig 0.41 cannot place Anthropic's session-header breakpoint, and Chat Completions does not get
+  `prompt_cache_key`. Both gaps are recorded in TECHNICAL_DESIGN §11.1.
+- **Reasoning replay.** `ProviderItem` covers encrypted Responses reasoning and Anthropic's
+  signed or redacted thinking. It arrives as `LlmDelta::ProviderItem`, is kept on
+  `AssistantMessage` and `LlmMessage::Assistant`, and is stored with the run.
+  - It is sent back only to the wire that produced it, and only when the model's
+    `reasoning_replay` capability allows.
+  - Responses models with replay are called with `store: false` and
+    `include: ["reasoning.encrypted_content"]`.
+  - Readable reasoning still never travels back.
+- **Images in tool results.** `LlmMessage::ToolResult.images` holds `ImagePart`s (media type plus
+  bytes, serialised as base64).
+  - Anthropic and Responses: the image goes inside the tool result.
+  - Chat Completions: the image follows the results in a user message labelled with its call id.
+  - A model without `vision`: the image is replaced by a stub naming the model.
+- **The `openai_chat` backend** (`openai_chat.rs`) speaks Chat Completions over rig's completions
+  client. Its base URL is required and its API key is optional. It has no native `apply_patch` and
+  no reasoning replay.
+- **`fetch_host_models`** (`listing.rs`) reads `GET /models` (and `/v1/models` for Anthropic) in
+  the OpenAI and Ollama shapes. A host with no listing is a `NotFound` that tells the admin to
+  type the name.
+- **`TokenEstimator`** (`estimate.rs`) is a character heuristic with a per-run calibration factor
+  (clamped to 0.25–4). Images are counted by each vendor's published rule, with the dimensions
+  read from the PNG or JPEG header.
+- **Agents** (`sc-agent`): `validate_agent` resolves the model row, so an agent naming a missing
+  model, or naming no model on a provider without a default, is refused on save and dropped on
+  load with its reason. `ProviderConnector::connect` and `driver::connect` return a
+  `ConnectedModel`. `ConnectedModel::unconfigured` wraps a scripted fake.
+- **Admin API** (`sc-api/src/admin.rs`, `sc-server/src/handlers.rs`): new endpoints are
+  `listLlmModels`, `createLlmModel`, `updateLlmModel`, `deleteLlmModel`, `listLlmModelSettings`,
+  `fetchLlmModels` and `testLlmModel`.
+  - `testLlmModel` replaces `testLlmProvider`. It also reports the capabilities and prices the
+    model resolved to.
+  - A listed model carries what its settings resolve to.
+  - Deleting a model, renaming it, or taking away its default flag is refused while an agent calls
+    it, and the refusal names the agents.
+- **Builder agent.** `create_builder_agent` needs the first provider to have a default model. If it
+  has none, the error is reported beside the created application, the same way a missing
+  provider is.
+- **Admin UI.**
+  - The provider form loses *Test connection* and gains a **Models** card (`LlmModels.tsx`).
+    Admins can add, edit (the backend's model settings in a modal), delete, make default, test,
+    and *Fetch models* (adding a fetched name with blank settings).
+  - The agent form's model is now a pick-list of the chosen provider's models, with the default
+    named and a missing model kept.
+  - `settings.tsx` renders `float` settings as number inputs and sends them as numbers.
+  - The clients were regenerated.
+- **Tests.**
+  - Unit tests: the capability table and overrides, prices and cost, the estimator and image
+    rules, model settings validation, request options per wire, provider items for their own wire
+    only, and images per wire and without vision.
+  - Stub-server tests: Anthropic's signed thinking is kept and replayed with `cache_control` and
+    `disable_parallel_tool_use`; Responses' encrypted reasoning is replayed before its call with
+    `store: false`; the Chat Completions request mapping.
+  - Live Postgres: round trip, blank settings not stored, uniqueness per provider, the same name
+    under two providers, one default, the delete cascade, and delete refusals.
+  - Agent validation of the model pair.
+  - Server API tests for model CRUD, refusals naming agents, *Fetch models*, *Test*, and the
+    builder agent with no default model.
+  - `llmModels.test.ts` for the pick-list and row summary.
+
 ## The admin sidebar is split into Data Layer and Applications
 
 The sidebar's main list now has two sections, titled with Tabler's own `nav-section-title`.

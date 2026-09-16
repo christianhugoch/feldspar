@@ -5,7 +5,7 @@
 // input because the field says `secret`, not because this file knows what an
 // `api_key` is.
 //
-// Two things here are not in the file-store form, and both follow from what a
+// Three things here are not in the file-store form, and all follow from what a
 // provider is:
 //
 //   - **The key round trip.** An existing provider's key arrives as the
@@ -14,12 +14,14 @@
 //     and the sentinel *is* the "unchanged" signal. What it must not do is
 //     rewrite the field, which is why the config is passed through
 //     `buildConfig` exactly as any other settings bag.
-//   - **Test connection.** A provider that saves fine can still be unusable —
-//     a revoked key, a retired model, an endpoint that is down — and none of
-//     that is knowable without a request. The button makes the request while
-//     the admin is still looking at the form, which is the only place the
-//     answer is actionable; without it the first sign of a wrong key is an
-//     agent failing in a chat transcript.
+//   - **Its models.** A provider serves several models, and each is a row of
+//     its own with its prices and capabilities (`LlmModels`), listed below the
+//     provider's settings once the provider is saved.
+//   - **Testing.** A provider that saves fine can still be unusable — a
+//     revoked key, a retired model, an endpoint that is down — and none of that
+//     is knowable without a request. What is tested is one model through one
+//     key, so the *Test* button is on each model row, and it sends the
+//     provider settings as the form holds them.
 
 import { useEffect, useState, type FormEvent } from "react";
 import Alert from "react-bootstrap/Alert";
@@ -38,20 +40,16 @@ import { navigate } from "../App";
 import { IconArrowLeft } from "../icons";
 import { PageBody, PageHeader } from "../layout";
 import { SettingsFields, buildConfig, readConfig } from "../settings";
+import { LlmModels } from "./LlmModels";
 
 type BackendInfo = ListLlmProviderBackendsResponse[number];
 type ProviderItem = ListLlmProvidersResponse[number];
-
-/** What a Test connection attempt produced. */
-type TestResult = { ok: boolean; message: string; model: string };
 
 export function LlmProviderForm({ providerId }: { providerId?: string }) {
   const [backends, setBackends] = useState<BackendInfo[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [test, setTest] = useState<TestResult | null>(null);
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -119,31 +117,6 @@ export function LlmProviderForm({ providerId }: { providerId?: string }) {
     }
   };
 
-  const runTest = async () => {
-    setTesting(true);
-    setTest(null);
-    setError(null);
-    try {
-      // The provider's id goes with it when there is one, so a stored key the
-      // form only knows as the sentinel still resolves. Without it there is
-      // nothing to resolve against, which is exactly the new-provider case —
-      // where the admin has just typed the real key.
-      const result = await api.testLlmProvider({
-        id: providerId ?? null,
-        backend: backendName,
-        config: buildConfig(spec, config),
-        model: null,
-      });
-      setTest(result);
-    } catch (err) {
-      // A structurally wrong config (no key, unknown backend) fails as an
-      // ordinary request rather than as a provider answer, and reads as the
-      // save error it resembles.
-      setError(errorMessage(err, "Could not test the connection."));
-    }
-    setTesting(false);
-  };
-
   if (loadError) {
     return (
       <PageBody>
@@ -175,22 +148,6 @@ export function LlmProviderForm({ providerId }: { providerId?: string }) {
       />
       <PageBody>
         {error && <Alert variant="danger">{error}</Alert>}
-        {test && (
-          <Alert
-            variant={test.ok ? "success" : "danger"}
-            onClose={() => setTest(null)}
-            dismissible
-          >
-            <Alert.Heading className="h6">
-              {test.ok ? `${test.model} answered` : `${test.model} did not answer`}
-            </Alert.Heading>
-            {/* The provider's own words either way — on success what the model
-                actually replied, so an admin pointed at the wrong endpoint sees
-                a wrong answer rather than a green tick. */}
-            <div className="text-break small mb-0">{test.message}</div>
-          </Alert>
-        )}
-
         <Form onSubmit={submit}>
           <Form.Group className="mb-3" controlId="providerName">
             <Form.Label>Name</Form.Label>
@@ -242,20 +199,26 @@ export function LlmProviderForm({ providerId }: { providerId?: string }) {
             <Button type="submit" disabled={busy}>
               {busy ? "Saving…" : providerId ? "Save changes" : "Create provider"}
             </Button>
-            <Button
-              variant="outline-secondary"
-              disabled={testing || busy}
-              onClick={() => void runTest()}
-            >
-              {testing ? "Testing…" : "Test connection"}
-            </Button>
           </div>
         </Form>
 
-        <p className="text-muted small mt-3">
-          Testing sends one short prompt to the provider, which counts against your
-          account like any other request.
-        </p>
+        <div className="mt-4">
+          {providerId ? (
+            // The saved backend's models. A changed backend is saved first:
+            // model settings are declared per backend, so the list would show
+            // settings the stored rows were not validated against.
+            <LlmModels
+              providerId={providerId}
+              backend={backendName}
+              providerConfig={buildConfig(spec, config)}
+            />
+          ) : (
+            <p className="text-muted small">
+              Save the provider to add its models. Each model it serves is a row of its own,
+              with its own prices and settings.
+            </p>
+          )}
+        </div>
       </PageBody>
     </>
   );

@@ -20,7 +20,9 @@ use sc_action::TriggerDispatcher;
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use sc_expr::JsEvaluator;
-use sc_llm::{AssistantMessage, LlmDelta, LlmProvider, LlmRequest, ToolCall, ToolSpec};
+use sc_llm::{
+    AssistantMessage, ConnectedModel, LlmDelta, LlmProvider, LlmRequest, ToolCall, ToolSpec,
+};
 
 use crate::agent::Agent;
 use crate::agent_trait::{RunCaller, TraitContext, Turn};
@@ -87,7 +89,7 @@ impl<'a> Runner<'a> {
     /// A runner for `agent`, through `provider`, on behalf of `caller`.
     ///
     /// The provider is passed in rather than resolved here because resolving it
-    /// is [`connect_provider`](sc_llm::connect_provider)'s job and doing it once
+    /// is [`connect_model`](sc_llm::connect_model)'s job and doing it once
     /// per run rather than once per step is the caller's decision to make.
     pub fn new(
         catalog: &'a Catalog,
@@ -291,6 +293,9 @@ impl<'a> Runner<'a> {
             tools,
             max_tokens: self.agent.max_tokens(),
             temperature: self.agent.temperature(),
+            // Parallel calls, cache breakpoints and a cache key are the loop's
+            // to decide (TODO Phase 2 and 4); until then the host's defaults.
+            ..LlmRequest::default()
         };
         // An agent with no traits offers no tools, which is a request with an
         // empty list rather than one with a field the vendors read as "call
@@ -516,7 +521,7 @@ impl Delegator for Runner<'_> {
             )));
         }
 
-        let provider = providers.connect(self.catalog, sub).await?;
+        let provider = providers.connect(self.catalog, sub).await?.provider;
         let child = Runner {
             catalog: self.catalog,
             registry: self.registry,
@@ -562,40 +567,45 @@ impl Delegator for Runner<'_> {
     }
 }
 
-/// How a run gets the provider it talks to.
+/// How a run gets the model it talks to.
 ///
 /// In a deployment this is [`StoredProviders`], which is [`connect`]: the agent
-/// names an `_fd_llm_providers` record, that record is loaded and connected, and
-/// the agent's `model` overrides the provider's default. It is a **trait** rather
-/// than that function called directly because everything built on top of a run —
-/// the chat socket's deltas and aborts (§11.4), the `run_agent` action a trigger
-/// fires (§11.5) — has to be testable against a script rather than a vendor
-/// (decision 7, [`FakeProvider`](crate::testing::FakeProvider)), and pointing a
-/// real adapter at a stub endpoint would test the adapter instead.
+/// names an `_fd_llm_providers` record and one of its `_fd_llm_models` rows (or
+/// none, for the provider's default), and the two are loaded and connected. It
+/// is a **trait** rather than that function called directly because everything
+/// built on top of a run — the chat socket's deltas and aborts (§11.4), the
+/// `run_agent` action a trigger fires (§11.5) — has to be testable against a
+/// script rather than a vendor (decision 7,
+/// [`FakeProvider`](crate::testing::FakeProvider)), and pointing a real adapter
+/// at a stub endpoint would test the adapter instead.
 ///
 /// The seam is at the **connection**, not inside the loop: whatever answers, the
 /// driver, the run storage and everything above them are the production ones.
 #[async_trait::async_trait]
 pub trait ProviderConnector: Send + Sync {
-    /// The connected provider for `agent`, or why there is none.
-    async fn connect(&self, catalog: &Catalog, agent: &Agent) -> Result<Arc<dyn LlmProvider>>;
+    /// The connected model for `agent`, with its capabilities and prices, or
+    /// why there is none.
+    async fn connect(&self, catalog: &Catalog, agent: &Agent) -> Result<ConnectedModel>;
 }
 
-/// The production connector: the provider the agent's definition names.
+/// The production connector: the provider and model the agent's definition
+/// names.
 pub struct StoredProviders;
 
 #[async_trait::async_trait]
 impl ProviderConnector for StoredProviders {
-    async fn connect(&self, catalog: &Catalog, agent: &Agent) -> Result<Arc<dyn LlmProvider>> {
+    async fn connect(&self, catalog: &Catalog, agent: &Agent) -> Result<ConnectedModel> {
         connect(catalog, agent).await
     }
 }
 
-/// The connected provider for `agent`, resolved from its stored definition.
+/// The connected model for `agent`, resolved from its stored definition: the
+/// provider it names, and the model row it names under that provider or the
+/// provider's default.
 ///
 /// Separate from [`Runner::new`] so a caller that runs several turns connects
 /// once, and so a test can hand the runner a fake without a database row.
-pub async fn connect(catalog: &Catalog, agent: &Agent) -> Result<Arc<dyn LlmProvider>> {
+pub async fn connect(catalog: &Catalog, agent: &Agent) -> Result<ConnectedModel> {
     let def = sc_llm::load_llm_provider_by_name(catalog, agent.provider.trim())
         .await?
         .ok_or_else(|| {
@@ -604,5 +614,13 @@ pub async fn connect(catalog: &Catalog, agent: &Agent) -> Result<Arc<dyn LlmProv
                 agent.name, agent.provider
             ))
         })?;
-    sc_llm::connect_provider(&def, agent.model.as_deref())
+    let model = sc_llm::require_llm_model(catalog, &def, agent.model.as_deref())
+        .await
+        .map_err(|e| match e.repr() {
+            sc_error::Repr::NotFound(msg) => {
+                Error::invalid(format!("agent `{}`: {msg}", agent.name))
+            }
+            _ => e,
+        })?;
+    sc_llm::connect_model(&def, &model)
 }

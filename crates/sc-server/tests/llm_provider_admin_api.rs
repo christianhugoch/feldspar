@@ -10,9 +10,14 @@
 //! so the only place it can be pinned is here — at the HTTP boundary, which is
 //! the boundary the key must not cross.
 //!
-//! `testLlmProvider` is exercised against a **stub HTTP server**, never a
-//! vendor: no test may require an API key or spend a token (TODO Phase 1,
-//! decision 7).
+//! A provider's **models** are rows of their own (TODO §3a), with their own
+//! endpoints: listed per provider, at most one default, refused on delete while
+//! an agent calls them, discovered from the host's listing, and tested one at a
+//! time.
+//!
+//! `testLlmModel` and `fetchLlmModels` are exercised against a **stub HTTP
+//! server**, never a vendor: no test may require an API key or spend a token
+//! (decision 7).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;
@@ -26,7 +31,7 @@ use sc_auth::SessionStore;
 use sc_catalog::Catalog;
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
-use sc_llm::{CFG_API_KEY, CFG_BASE_URL, CFG_MODEL, list_llm_providers};
+use sc_llm::{CFG_API_KEY, CFG_BASE_URL, list_llm_providers};
 use sc_server::{AppMounts, CSRF_COOKIE, CSRF_HEADER, ServerConfig, admin_handlers, build_router};
 use sc_test_harness::TestDb;
 use sc_types::SECRET_SENTINEL;
@@ -99,8 +104,8 @@ impl Client {
     }
 }
 
-/// A stub Anthropic endpoint replaying `body` with `status`, so *Test
-/// connection* has something to talk to that is not a vendor.
+/// A stub endpoint replaying `body` with `status` to every request, so *Test*
+/// and *Fetch models* have something to talk to that is not a vendor.
 async fn stub_provider(status: u16, content_type: &'static str, body: String) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
         .await
@@ -178,6 +183,7 @@ async fn setup() -> sc_error::Result<(Client, Arc<Catalog>, TestDb)> {
     sc_app::bootstrap(&catalog).await?;
     sc_catalog::bootstrap_file_stores(&catalog).await?;
     sc_llm::bootstrap_llm_providers(&catalog).await?;
+    sc_agent::bootstrap_agents(&catalog).await?;
 
     let sessions = Arc::new(SessionStore::default());
     let apps = Arc::new(AppMounts::new(catalog.clone()));
@@ -218,7 +224,7 @@ async fn a_provider_is_created_listed_edited_and_deleted() -> sc_error::Result<(
                 "name": "house",
                 "description": "The house Anthropic key",
                 "backend": "anthropic",
-                "config": { "api_key": "sk-ant-real", "model": "claude-sonnet-4-5" },
+                "config": { "api_key": "sk-ant-real" },
             })),
         )
         .await;
@@ -236,13 +242,16 @@ async fn a_provider_is_created_listed_edited_and_deleted() -> sc_error::Result<(
                 "name": "house",
                 "description": "Renamed",
                 "backend": "anthropic",
-                "config": { "api_key": SECRET_SENTINEL, "model": "claude-opus-4-1" },
+                "config": { "api_key": SECRET_SENTINEL, "base_url": "https://proxy.internal" },
             })),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{updated}");
     assert_eq!(updated["description"], json!("Renamed"));
-    assert_eq!(updated["config"][CFG_MODEL], json!("claude-opus-4-1"));
+    assert_eq!(
+        updated["config"][CFG_BASE_URL],
+        json!("https://proxy.internal")
+    );
 
     let (_, listed) = client.send("GET", "/api/llm-providers", None).await;
     assert_eq!(listed.as_array().unwrap().len(), 1);
@@ -269,7 +278,7 @@ async fn the_api_key_never_crosses_the_wire_and_a_save_does_not_destroy_it() -> 
                 "name": "house",
                 "description": "",
                 "backend": "anthropic",
-                "config": { "api_key": "sk-ant-real-secret", "model": "claude-sonnet-4-5" },
+                "config": { "api_key": "sk-ant-real-secret" },
             })),
         )
         .await;
@@ -309,7 +318,7 @@ async fn the_api_key_never_crosses_the_wire_and_a_save_does_not_destroy_it() -> 
                 "name": "house-anthropic",
                 "description": "",
                 "backend": "anthropic",
-                "config": { "api_key": SECRET_SENTINEL, "model": "claude-sonnet-4-5" },
+                "config": { "api_key": SECRET_SENTINEL },
             })),
         )
         .await;
@@ -332,7 +341,7 @@ async fn the_api_key_never_crosses_the_wire_and_a_save_does_not_destroy_it() -> 
                 "name": "house-anthropic",
                 "description": "",
                 "backend": "anthropic",
-                "config": { "api_key": "sk-ant-rotated", "model": "claude-sonnet-4-5" },
+                "config": { "api_key": "sk-ant-rotated" },
             })),
         )
         .await;
@@ -349,7 +358,7 @@ async fn the_backends_endpoint_declares_the_key_as_a_secret() -> sc_error::Resul
     let (status, body) = client.send("GET", "/api/llm-provider-backends", None).await;
     assert_eq!(status, StatusCode::OK);
     let backends = body.as_array().unwrap();
-    assert_eq!(backends.len(), 2, "{body}");
+    assert_eq!(backends.len(), 3, "{body}");
 
     for backend in backends {
         let spec = backend["config_spec"].as_array().unwrap();
@@ -360,32 +369,360 @@ async fn the_backends_endpoint_declares_the_key_as_a_secret() -> sc_error::Resul
         // This flag is the whole of what tells the form to render a password
         // input; without it the key would be typed in the clear.
         assert_eq!(key["secret"], json!(true), "{backend}");
-        assert_eq!(key["required"], json!(true), "{backend}");
-        // And the base URL is defaulted rather than required, which is what
-        // makes an OpenAI-compatible endpoint a value the admin types.
+        // The model is a row of its own, never a provider setting.
+        assert!(
+            spec.iter().all(|f| f["name"] != json!("model")),
+            "{backend}"
+        );
         let base = spec
             .iter()
             .find(|f| f["name"] == json!(CFG_BASE_URL))
             .unwrap();
-        assert_eq!(base["required"], json!(false));
-        assert!(base["default"].is_string());
+        if backend["name"] == json!("openai_chat") {
+            // No one host, and a local one takes no key.
+            assert_eq!(base["required"], json!(true), "{backend}");
+            assert_eq!(key["required"], json!(false), "{backend}");
+        } else {
+            // Defaulted rather than required, which is what makes an
+            // OpenAI-compatible endpoint a value the admin types.
+            assert_eq!(key["required"], json!(true), "{backend}");
+            assert_eq!(base["required"], json!(false));
+            assert!(base["default"].is_string());
+        }
     }
     Ok(())
 }
 
+/// Create a provider through the API, answering its id.
+async fn create_provider(client: &mut Client, name: &str, config: Value) -> String {
+    let (status, created) = client
+        .send(
+            "POST",
+            "/api/llm-providers",
+            Some(json!({ "name": name, "description": "", "backend": "anthropic", "config": config })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    created["id"].as_str().unwrap().to_owned()
+}
+
+/// Create a model under `provider` through the API, answering the response.
+async fn create_model(client: &mut Client, provider: &str, body: Value) -> Value {
+    let (status, created) = client
+        .send(
+            "POST",
+            &format!("/api/llm-providers/{provider}/models"),
+            Some(body),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    created
+}
+
 #[tokio::test]
-async fn test_connection_reports_what_the_provider_said() -> sc_error::Result<()> {
+async fn models_are_created_listed_edited_and_deleted_under_their_provider() -> sc_error::Result<()>
+{
+    let (mut client, _catalog, _db) = setup().await?;
+    let provider = create_provider(&mut client, "house", json!({ "api_key": "sk-ant-x" })).await;
+
+    let (status, spec) = client
+        .send(
+            "GET",
+            "/api/llm-provider-backends/anthropic/model-settings",
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{spec}");
+    assert!(
+        spec.as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["name"] == json!("price_input")),
+        "{spec}"
+    );
+
+    // Blank settings are dropped, and what they resolve to comes back beside them.
+    let sonnet = create_model(
+        &mut client,
+        &provider,
+        json!({ "name": "claude-sonnet-5", "description": "", "is_default": true,
+                "config": { "price_input": 3.0, "price_output": 15.0, "vision": "" } }),
+    )
+    .await;
+    assert_eq!(
+        sonnet["config"],
+        json!({ "price_input": 3.0, "price_output": 15.0 })
+    );
+    assert_eq!(
+        sonnet["capabilities"]["context_window"],
+        json!(200_000),
+        "{sonnet}"
+    );
+    assert_eq!(sonnet["prices"]["input"], json!(3.0), "{sonnet}");
+    assert_eq!(
+        sonnet["prices"]["cached_input"],
+        Value::Null,
+        "unknown, not zero: {sonnet}"
+    );
+
+    let opus = create_model(
+        &mut client,
+        &provider,
+        json!({ "name": "claude-opus-5", "description": "", "is_default": false, "config": {} }),
+    )
+    .await;
+
+    // Making opus the default takes the flag from sonnet.
+    let opus_id = opus["id"].as_str().unwrap();
+    let (status, updated) = client
+        .send(
+            "PUT",
+            &format!("/api/llm-models/{opus_id}"),
+            Some(
+                json!({ "name": "claude-opus-5", "description": "the big one",
+                         "is_default": true, "config": { "edit_format": "whole_file" } }),
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["capabilities"]["edit_format"], json!("whole_file"));
+
+    let (_, listed) = client
+        .send(
+            "GET",
+            &format!("/api/llm-providers/{provider}/models"),
+            None,
+        )
+        .await;
+    let defaults: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["is_default"] == json!(true))
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(defaults, ["claude-opus-5"], "{listed}");
+
+    // A setting the backend does not declare is refused, naming it.
+    let (status, err) = client
+        .send(
+            "POST",
+            &format!("/api/llm-providers/{provider}/models"),
+            Some(json!({ "name": "x", "description": "", "is_default": false,
+                         "config": { "native_apply_patch": "yes" } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert!(err.to_string().contains("native_apply_patch"), "{err}");
+
+    // A second row of one name under one provider is refused.
+    let (status, err) = client
+        .send(
+            "POST",
+            &format!("/api/llm-providers/{provider}/models"),
+            Some(json!({ "name": "claude-opus-5", "description": "", "is_default": false, "config": {} })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+
+    let sonnet_id = sonnet["id"].as_str().unwrap();
+    let (status, deleted) = client
+        .send("DELETE", &format!("/api/llm-models/{sonnet_id}"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted["deleted"], json!(true));
+
+    // Deleting the provider takes its remaining model with it.
+    let (status, _) = client
+        .send("DELETE", &format!("/api/llm-providers/{provider}"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = client
+        .send(
+            "GET",
+            &format!("/api/llm-providers/{provider}/models"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_model_an_agent_calls_is_not_deleted_or_renamed_out_from_under_it() -> sc_error::Result<()>
+{
+    let (mut client, catalog, _db) = setup().await?;
+    let provider = create_provider(&mut client, "house", json!({ "api_key": "sk-ant-x" })).await;
+    let sonnet = create_model(
+        &mut client,
+        &provider,
+        json!({ "name": "claude-sonnet-5", "description": "", "is_default": true, "config": {} }),
+    )
+    .await;
+    let opus = create_model(
+        &mut client,
+        &provider,
+        json!({ "name": "claude-opus-5", "description": "", "is_default": false, "config": {} }),
+    )
+    .await;
+
+    // One agent on the default, one naming opus.
+    let registry = sc_agent::AgentRegistry::new();
+    sc_agent::save_agent(
+        &catalog,
+        &registry,
+        &sc_agent::Agent::new("helper", "house"),
+    )
+    .await?;
+    sc_agent::save_agent(
+        &catalog,
+        &registry,
+        &sc_agent::Agent::new("thinker", "house").model("claude-opus-5"),
+    )
+    .await?;
+
+    for (model, agent) in [(&sonnet, "helper"), (&opus, "thinker")] {
+        let id = model["id"].as_str().unwrap();
+        let (status, err) = client
+            .send("DELETE", &format!("/api/llm-models/{id}"), None)
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+        assert!(err.to_string().contains(agent), "{err}");
+    }
+
+    // Renaming opus would break the agent naming it.
+    let opus_id = opus["id"].as_str().unwrap();
+    let (status, err) = client
+        .send(
+            "PUT",
+            &format!("/api/llm-models/{opus_id}"),
+            Some(
+                json!({ "name": "renamed", "description": "", "is_default": false, "config": {} }),
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert!(err.to_string().contains("thinker"), "{err}");
+
+    // Taking the default flag from sonnet would break the agent naming no model.
+    let sonnet_id = sonnet["id"].as_str().unwrap();
+    let (status, err) = client
+        .send(
+            "PUT",
+            &format!("/api/llm-models/{sonnet_id}"),
+            Some(json!({ "name": "claude-sonnet-5", "description": "", "is_default": false, "config": {} })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert!(err.to_string().contains("helper"), "{err}");
+
+    // Opus may become the default: the agent on the default follows it, and the
+    // agent naming opus still finds it.
+    let (status, body) = client
+        .send(
+            "PUT",
+            &format!("/api/llm-models/{opus_id}"),
+            Some(
+                json!({ "name": "claude-opus-5", "description": "now the default",
+                         "is_default": true, "config": {} }),
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // Sonnet, no longer the default and named by nobody, may now go.
+    let (status, body) = client
+        .send("DELETE", &format!("/api/llm-models/{sonnet_id}"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The provider, likewise, names the agents.
+    let (status, err) = client
+        .send("DELETE", &format!("/api/llm-providers/{provider}"), None)
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert!(err.to_string().contains("helper"), "{err}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn fetch_models_offers_the_names_that_have_no_row() -> sc_error::Result<()> {
+    let (mut client, _catalog, _db) = setup().await?;
+    let base = stub_provider(
+        200,
+        "application/json",
+        r#"{"data":[{"id":"claude-sonnet-5"},{"id":"claude-opus-5"},{"id":"claude-haiku-4-5"}]}"#
+            .to_owned(),
+    )
+    .await;
+    let provider = create_provider(
+        &mut client,
+        "house",
+        json!({ "api_key": "sk-ant-x", "base_url": base }),
+    )
+    .await;
+    create_model(
+        &mut client,
+        &provider,
+        json!({ "name": "claude-sonnet-5", "description": "", "is_default": true, "config": {} }),
+    )
+    .await;
+
+    let (status, body) = client
+        .send(
+            "POST",
+            &format!("/api/llm-providers/{provider}/fetch-models"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], json!(true), "{body}");
+    assert_eq!(
+        body["names"],
+        json!(["claude-haiku-4-5", "claude-opus-5"]),
+        "{body}"
+    );
+
+    // A host with no listing is told so: an answer, not a broken request.
+    let nowhere = stub_provider(404, "text/html", "not here".to_owned()).await;
+    let other = create_provider(
+        &mut client,
+        "other",
+        json!({ "api_key": "sk-ant-x", "base_url": nowhere }),
+    )
+    .await;
+    let (status, body) = client
+        .send(
+            "POST",
+            &format!("/api/llm-providers/{other}/fetch-models"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], json!(false), "{body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("type the model name"),
+        "{body}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn testing_a_model_reports_what_it_said_and_what_it_resolved_to() -> sc_error::Result<()> {
     let (mut client, _catalog, _db) = setup().await?;
     let base = stub_provider(200, "text/event-stream", anthropic_answer("ok")).await;
 
     let (status, body) = client
         .send(
             "POST",
-            "/api/llm-provider-test",
+            "/api/llm-model-test",
             Some(json!({
                 "backend": "anthropic",
-                "config": { "api_key": "sk-ant-x", "model": "claude-sonnet-4-5",
-                            "base_url": base },
+                "config": { "api_key": "sk-ant-x", "base_url": base },
+                "name": "claude-sonnet-4-5",
+                "model_config": { "price_input": 3.0, "price_output": 15.0, "vision": "no" },
             })),
         )
         .await;
@@ -395,6 +732,13 @@ async fn test_connection_reports_what_the_provider_said() -> sc_error::Result<()
     // wrong answer rather than a green tick.
     assert_eq!(body["message"], json!("ok"));
     assert_eq!(body["model"], json!("claude-sonnet-4-5"));
+    assert_eq!(body["capabilities"]["vision"], json!(false), "{body}");
+    assert_eq!(
+        body["capabilities"]["prompt_caching"],
+        json!("explicit"),
+        "{body}"
+    );
+    assert_eq!(body["prices"]["output"], json!(15.0), "{body}");
     Ok(())
 }
 
@@ -412,11 +756,11 @@ async fn a_rejected_key_is_a_reported_failure_not_a_broken_request() -> sc_error
     let (status, body) = client
         .send(
             "POST",
-            "/api/llm-provider-test",
+            "/api/llm-model-test",
             Some(json!({
                 "backend": "anthropic",
-                "config": { "api_key": "sk-ant-wrong", "model": "claude-sonnet-4-5",
-                            "base_url": base },
+                "config": { "api_key": "sk-ant-wrong", "base_url": base },
+                "name": "claude-sonnet-4-5",
             })),
         )
         .await;
@@ -435,7 +779,8 @@ async fn a_rejected_key_is_a_reported_failure_not_a_broken_request() -> sc_error
 }
 
 #[tokio::test]
-async fn testing_a_saved_provider_does_not_require_retyping_its_key() -> sc_error::Result<()> {
+async fn testing_a_model_of_a_saved_provider_does_not_require_retyping_its_key()
+-> sc_error::Result<()> {
     let (mut client, _catalog, _db) = setup().await?;
     let base = stub_provider(200, "text/event-stream", anthropic_answer("ok")).await;
 
@@ -447,8 +792,7 @@ async fn testing_a_saved_provider_does_not_require_retyping_its_key() -> sc_erro
                 "name": "house",
                 "description": "",
                 "backend": "anthropic",
-                "config": { "api_key": "sk-ant-real", "model": "claude-sonnet-4-5",
-                            "base_url": base },
+                "config": { "api_key": "sk-ant-real", "base_url": base },
             })),
         )
         .await;
@@ -456,15 +800,16 @@ async fn testing_a_saved_provider_does_not_require_retyping_its_key() -> sc_erro
 
     // The form sends back exactly what it was shown — the sentinel — plus the
     // provider's id. Without the id there is nothing to resolve it against,
-    // which is why the test-connection body carries one.
+    // which is why the test body carries one.
     let (status, body) = client
         .send(
             "POST",
-            "/api/llm-provider-test",
+            "/api/llm-model-test",
             Some(json!({
-                "id": id,
+                "provider_id": id,
                 "backend": "anthropic",
                 "config": created["config"],
+                "name": "claude-sonnet-4-5",
             })),
         )
         .await;
@@ -485,7 +830,7 @@ async fn a_structurally_wrong_provider_is_refused_where_the_admin_can_fix_it()
             "/api/llm-providers",
             Some(json!({
                 "name": "house", "description": "", "backend": "anthropic",
-                "config": { "model": "claude-sonnet-4-5" },
+                "config": {},
             })),
         )
         .await;
@@ -517,7 +862,7 @@ async fn a_structurally_wrong_provider_is_refused_where_the_admin_can_fix_it()
             "/api/llm-providers",
             Some(json!({
                 "name": "house", "description": "", "backend": "anthropic",
-                "config": { "api_key": "x", "model": "m", "temperture": 0.5 },
+                "config": { "api_key": "x", "temperture": 0.5 },
             })),
         )
         .await;
@@ -535,7 +880,7 @@ async fn two_providers_cannot_share_a_name() -> sc_error::Result<()> {
 
     let body = json!({
         "name": "house", "description": "", "backend": "anthropic",
-        "config": { "api_key": "sk-1", "model": "claude-sonnet-4-5" },
+        "config": { "api_key": "sk-1" },
     });
     let (status, _) = client
         .send("POST", "/api/llm-providers", Some(body.clone()))
@@ -570,14 +915,44 @@ async fn every_provider_endpoint_requires_a_session() -> sc_error::Result<()> {
             "/api/llm-providers".to_owned(),
             Some(
                 json!({"name": "x", "description": "", "backend": "anthropic",
-                        "config": {"api_key": "k", "model": "m"}}),
+                        "config": {"api_key": "k"}}),
             ),
         ),
         ("GET", "/api/llm-provider-backends".to_owned(), None),
         (
+            "GET",
+            "/api/llm-provider-backends/anthropic/model-settings".to_owned(),
+            None,
+        ),
+        (
+            "GET",
+            format!("/api/llm-providers/{}/models", uuid::Uuid::new_v4()),
+            None,
+        ),
+        (
             "POST",
-            "/api/llm-provider-test".to_owned(),
-            Some(json!({"backend": "anthropic", "config": {"api_key": "k", "model": "m"}})),
+            format!("/api/llm-providers/{}/models", uuid::Uuid::new_v4()),
+            Some(json!({"name": "m", "description": "", "is_default": true, "config": {}})),
+        ),
+        (
+            "PUT",
+            format!("/api/llm-models/{}", uuid::Uuid::new_v4()),
+            Some(json!({"name": "m", "description": "", "is_default": true, "config": {}})),
+        ),
+        (
+            "DELETE",
+            format!("/api/llm-models/{}", uuid::Uuid::new_v4()),
+            None,
+        ),
+        (
+            "POST",
+            format!("/api/llm-providers/{}/fetch-models", uuid::Uuid::new_v4()),
+            None,
+        ),
+        (
+            "POST",
+            "/api/llm-model-test".to_owned(),
+            Some(json!({"backend": "anthropic", "config": {"api_key": "k"}, "name": "m"})),
         ),
     ] {
         let (status, _) = user.send(method, &path, body).await;

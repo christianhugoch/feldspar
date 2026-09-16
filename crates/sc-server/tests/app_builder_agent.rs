@@ -35,7 +35,6 @@ use sc_catalog::Catalog;
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_files::LocalFileStore;
-use sc_llm::LlmProviderDef;
 use sc_server::{AppMounts, CSRF_COOKIE, CSRF_HEADER, ServerConfig, admin_handlers, build_router};
 use sc_test_harness::TestDb;
 use serde_json::{Value, json};
@@ -164,7 +163,15 @@ async fn setup(tmp: &TempDir, provider: bool) -> sc_error::Result<(Client, Arc<C
         // never runs a turn.
         sc_llm::save_llm_provider(
             &catalog,
-            &LlmProviderDef::anthropic("house", "sk-ant-test", "claude-sonnet-4-5"),
+            &sc_llm::LlmProviderDef::new("house", sc_llm::ANTHROPIC_BACKEND)
+                .with(sc_llm::CFG_API_KEY, "sk-ant-test"),
+        )
+        .await?;
+        // The model an agent naming no model calls: the provider's default row.
+        let provider = sc_llm::require_llm_provider(&catalog, "house").await?;
+        sc_llm::save_llm_model(
+            &catalog,
+            &sc_llm::LlmModelDef::new(provider.id, "claude-sonnet-4-5").default_model(),
         )
         .await?;
     }
@@ -518,6 +525,39 @@ async fn with_no_provider_connected_the_application_is_still_created() -> sc_err
     assert_eq!(status, StatusCode::OK);
     assert!(agents.as_array().unwrap().is_empty(), "{agents}");
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_provider_with_no_default_model_is_reported_beside_the_application()
+-> sc_error::Result<()> {
+    let tmp = TempDir::new("nodefault");
+    let (mut admin, catalog, _db) = setup(&tmp, false).await?;
+    // A provider whose only model is not the default.
+    let provider = sc_llm::LlmProviderDef::new("house", sc_llm::ANTHROPIC_BACKEND)
+        .with(sc_llm::CFG_API_KEY, "sk-ant-test");
+    sc_llm::save_llm_provider(&catalog, &provider).await?;
+    sc_llm::save_llm_model(
+        &catalog,
+        &sc_llm::LlmModelDef::new(provider.id, "claude-opus-5"),
+    )
+    .await?;
+
+    let (status, created) = admin
+        .send(
+            "POST",
+            "/api/applications",
+            Some(react_body("Todo", "todo", "todo")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created.get("agent"), None, "{created}");
+    let reason = created["agent_error"].as_str().unwrap_or_default();
+    assert!(reason.contains("`house` has no default model"), "{reason}");
+    assert!(reason.contains("build-todo"), "{reason}");
+
+    let (_, agents) = admin.send("GET", "/api/agents", None).await;
+    assert!(agents.as_array().unwrap().is_empty(), "{agents}");
     Ok(())
 }
 

@@ -15,15 +15,20 @@
 //! - The **seam** ([`provider`]): the object-safe [`LlmProvider`] trait and
 //!   [`LlmStream`], with [`LlmStream::collect`] as the single place the
 //!   streaming and non-streaming shapes meet.
-//! - Two **adapters** ([`openai`], [`anthropic`]) over `rig-core`, sharing one
-//!   translation module ([`rig_bridge`]).
+//! - Three **adapters** ([`openai`], [`anthropic`], [`openai_chat`]) over
+//!   `rig-core`, sharing one translation module (`rig_bridge`).
+//! - What the loop needs to know about a model: its [`ModelCapabilities`]
+//!   ([`capabilities`]), its [`Prices`] ([`pricing`]) and a token estimate
+//!   ([`estimate`]).
 //! - The **call log** ([`logging`]): every configured provider is wrapped in a
 //!   [`LoggedProvider`], so a model call reports itself — a summary line with
 //!   its token cost at `info`, and the whole request and response at `trace`
 //!   (§16).
-//! - The **configured entity** ([`def`], [`storage`]): [`LlmProviderDef`],
-//!   the backend registry, `_fd_llm_providers`, and [`connect_provider`] — a
-//!   provider is a named record an admin fills in, exactly as a file store is.
+//! - The **configured entities** ([`def`], [`model`], [`storage`]):
+//!   [`LlmProviderDef`] and its [`LlmModelDef`]s, the backend registry,
+//!   `_fd_llm_providers` and `_fd_llm_models`, and [`connect_model`] — a
+//!   provider and its models are named records an admin fills in, exactly as a
+//!   file store is.
 //!
 //! ## What is deliberately not here
 //!
@@ -40,26 +45,50 @@
 //! see [`sc_types::redact_attrs`] and [`FormField::secret`](sc_types::FormField::secret).
 
 pub mod anthropic;
+pub mod capabilities;
 pub mod def;
+pub mod estimate;
+pub mod listing;
 pub mod logging;
 pub mod message;
+pub mod model;
 pub mod openai;
+pub mod openai_chat;
+pub mod pricing;
 pub mod provider;
 mod rig_bridge;
 pub mod storage;
 
-pub use def::{
-    ANTHROPIC_BACKEND, CFG_API_KEY, CFG_BASE_URL, CFG_MODEL, LlmProviderDef, LlmProviderDefId,
-    OPENAI_RESPONSES_BACKEND, anthropic_config_spec, connect_provider, openai_config_spec,
-    provider_config_spec, registered_backends, validate_provider_config,
+pub use capabilities::{
+    CFG_CONTEXT_WINDOW, CFG_EDIT_FORMAT, CFG_NATIVE_APPLY_PATCH, CFG_PARALLEL_TOOL_CALLS,
+    CFG_PARALLEL_TOOL_CALLS_DEFAULT, CFG_PROMPT_CACHING, CFG_REASONING_REPLAY, CFG_VISION,
+    CFG_WORKING_BUDGET, EditFormat, ModelCapabilities, PromptCaching,
 };
+pub use def::{
+    ANTHROPIC_BACKEND, CFG_API_KEY, CFG_BASE_URL, LlmProviderDef, LlmProviderDefId,
+    OPENAI_CHAT_BACKEND, OPENAI_RESPONSES_BACKEND, anthropic_config_spec, connect_model,
+    openai_chat_config_spec, openai_config_spec, provider_config_spec, registered_backends,
+    validate_provider_config,
+};
+pub use estimate::{TokenEstimator, estimate_tokens, image_tokens};
+pub use listing::{fetch_host_models, parse_model_listing};
 pub use logging::{LoggedProvider, request_summary, response_summary};
 pub use message::{
-    AssistantMessage, LlmDelta, LlmMessage, LlmRequest, StopReason, ToolCall, ToolSpec, Usage,
+    AssistantMessage, CachePlan, ImagePart, LlmDelta, LlmMessage, LlmRequest, ProviderItem,
+    StopReason, ToolCall, ToolSpec, Usage,
+};
+pub use model::{
+    ConnectedModel, LlmModelDef, LlmModelDefId, model_config_spec, normalise_model_config,
+    validate_model_config,
+};
+pub use pricing::{
+    CFG_PRICE_CACHE_WRITE, CFG_PRICE_CACHED_INPUT, CFG_PRICE_INPUT, CFG_PRICE_OUTPUT, Prices,
 };
 pub use provider::{DeltaStream, LlmProvider, LlmStream};
 pub use storage::{
-    LLM_PROVIDERS_TABLE, bootstrap_llm_providers, check_provider_saveable, delete_llm_provider,
-    list_llm_providers, load_llm_provider, load_llm_provider_by_name, require_llm_provider,
+    LLM_MODELS_TABLE, LLM_PROVIDERS_TABLE, bootstrap_llm_models, bootstrap_llm_providers,
+    check_model_saveable, check_provider_saveable, delete_llm_model, delete_llm_provider,
+    list_llm_models, list_llm_providers, load_llm_model, load_llm_model_by_name, load_llm_provider,
+    load_llm_provider_by_name, require_llm_model, require_llm_provider, save_llm_model,
     save_llm_provider,
 };
