@@ -78,49 +78,71 @@ fn declares(css: &str, selector: &str, declaration: &str) -> bool {
     })
 }
 
-/// The folded sidebar (Tabler's `navbar-folded-hover`): a rail of icons that
-/// unfolds under the pointer, and the admin's default on a wide screen.
+/// The folded sidebar (Tabler's `navbar-folded`): a rail of icons that the
+/// admin folds and unfolds with a button, and stays that way until clicked.
 ///
 /// Tabler 1.5 owns the geometry — the rail's width, the page wrapper's matching
 /// offset, the collapsed link titles — so there is nothing here to check it
 /// against. What is checkable is the seam: the class `App.tsx` writes has to be
-/// one the vendored stylesheet actually styles, and the furniture rules the
-/// theme knows nothing about have to key on the same state Tabler does.
+/// one the vendored stylesheet actually styles, and the button that undoes the
+/// fold must not be one Tabler hides in the folded state.
 #[test]
 fn the_sidebar_folds_the_way_tabler_folds_it() {
     let app = read("src/App.tsx");
     let css = read("src/admin.css");
     let tabler = read("src/vendor/tabler/tabler.min.css");
 
-    // The switch itself. `navbar-folded-hover` is a Tabler class, so a typo in
-    // it is silent — the sidebar simply never folds.
+    // The switch itself. `navbar-folded` is a Tabler class, so a typo in it is
+    // silent — the sidebar simply never folds.
     assert!(
-        app.contains("navbar-folded-hover") && app.contains("useFoldedSidebar"),
-        "App.tsx should fold the sidebar with Tabler's `navbar-folded-hover`"
+        app.contains(r#"folded ? " navbar-folded" : """#) && app.contains("useFoldedSidebar"),
+        "App.tsx should fold the sidebar with Tabler's `navbar-folded`"
     );
     assert!(
-        tabler.contains(".navbar-folded-hover"),
-        "the vendored Tabler stylesheet should define `.navbar-folded-hover`"
+        tabler.contains(".navbar-folded,") || tabler.contains(".navbar-folded "),
+        "the vendored Tabler stylesheet should define `.navbar-folded`"
+    );
+    // Not the hover variant: a sidebar that springs open under a passing
+    // pointer was tried and rejected.
+    // (Named in prose in App.tsx, explaining why it is not used; a use would
+    // be the class string.)
+    assert!(
+        !app.contains(r#"" navbar-folded-hover""#),
+        "the sidebar should fold statically, not unfold on hover"
+    );
+
+    // Tabler hides `[data-bs-toggle=sidebar-folded]` outright inside a
+    // `navbar-folded` sidebar — it is the pin of the hover variant. On the fold
+    // switch it would leave a folded sidebar with no way back.
+    assert!(
+        tabler.contains(
+            ".navbar-vertical.navbar-expand-lg:is(.navbar-folded,.navbar-folded-hover:not(:hover):not(:has(:focus-visible))) [data-bs-toggle=sidebar-folded]"
+        ),
+        "Tabler should still hide its own fold toggle in a folded sidebar"
+    );
+    assert!(
+        !app.contains(r#"data-bs-toggle="sidebar-folded""#),
+        "the fold switch must not carry the attribute Tabler hides when folded"
+    );
+    assert!(
+        app.contains("onClick={toggleFolded}") && app.contains("aria-pressed={folded}"),
+        "the sidebar should have a button that toggles the fold"
+    );
+    // Folded, a link's icon is all there is to go on.
+    assert!(
+        app.contains("title={folded ? item.label : undefined}"),
+        "a folded nav link should carry its name as a hover label"
     );
 
     // `admin.css` must not restate the geometry: a width or an offset written
     // here is a second opinion about one measurement, and the two drift apart on
-    // the next upgrade. (The variable is *named* in the prose there, explaining
-    // whose measurement it is; reading it would be the mistake.)
+    // the next upgrade.
     assert!(
         !css.contains("var(--tblr-sidebar-folded-width)") && !css.contains("sidebar-narrow"),
         "admin.css should leave the folded sidebar's geometry entirely to Tabler"
     );
 
-    // The rules that are ours. Both are only correct while the rail is folded —
-    // hovered, the sidebar is at full width and the wordmark and the email
-    // belong back on screen — so they carry Tabler's own test for that state.
-    // Written without it they would hide the account block permanently.
-    let folded = ".navbar-folded-hover:not(:hover):not(:has(:focus-visible))";
-    assert!(
-        css.contains(folded),
-        "admin.css should key its folded-sidebar rules on `{folded}`"
-    );
+    // The furniture rules that are ours key on the same class.
     for element in ["ms-2 sidebar-wide-only", "text-truncate mb-2 sidebar-wide-only"] {
         assert!(
             app.contains(element),
@@ -128,35 +150,8 @@ fn the_sidebar_folds_the_way_tabler_folds_it() {
         );
     }
     assert!(
-        css.contains(".sidebar-wide-only"),
-        "admin.css has no rules for `.sidebar-wide-only`, which App.tsx renders"
-    );
-
-    // The pin button, which folds the sidebar and pins it back open. Tabler
-    // hides it in the rail and fades it in on hover, keyed on the attribute —
-    // that is styling, not a call into `tabler.js`, which this SPA does not
-    // load.
-    assert!(
-        app.contains(r#"data-bs-toggle="sidebar-folded""#),
-        "the fold toggle should sit in the slot Tabler styles for it"
-    );
-    // Bootstrap's display utilities are `!important`, so `d-lg-inline-flex` on
-    // that button would outrank Tabler's rule hiding it in the rail, leaving a
-    // 40px button in a 64px sidebar with the brand logo squeezed to nothing
-    // beside it. Hence a plain-specificity class of our own.
-    assert!(
-        app.contains("sidebar-fold-toggle") && css.contains(".sidebar-fold-toggle"),
-        "the fold toggle should be revealed by `.sidebar-fold-toggle`, not a display utility"
-    );
-    // In a `className` only: the classes are named in prose above the button,
-    // explaining why they are not used, and that mention is not a use.
-    let applied = |class: &str| {
-        app.lines()
-            .any(|line| line.contains("className") && line.contains(class))
-    };
-    assert!(
-        !applied("d-lg-inline-flex") && !applied("d-lg-flex"),
-        "an `!important` display utility on the sidebar would outrank Tabler's folded rules"
+        css.contains(".navbar-folded .sidebar-wide-only") && !css.contains("navbar-folded-hover"),
+        "admin.css should hide `.sidebar-wide-only` in Tabler's `navbar-folded` state"
     );
 
     // The mode only exists inside Tabler's `lg` breakpoint, where the sidebar is

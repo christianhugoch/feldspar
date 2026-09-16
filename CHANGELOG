@@ -2,6 +2,37 @@
 
 Changes in reverse chronological order.
 
+## The sidebar fold is a button again, on Tabler's `navbar-folded`
+
+The hover-unfolding rail (`navbar-folded-hover`) from the Tabler 1.5.1 upgrade was tried and
+rejected: a sidebar that springs open under a passing pointer is more distracting than useful.
+The admin is back to a button that switches the sidebar between folded and expanded. This time
+the folding itself is Tabler's own static `navbar-folded` class, not hand-written CSS.
+
+- **`App.tsx`** puts `navbar-folded` on the aside when folded. Tabler provides the 4rem rail, the
+  matching page-wrapper offset and the hidden link titles; `admin.css` still restates none of it.
+  Folded nav links get their name back as a `title` tooltip, since there is no hover-unfold
+  to show it any more.
+- **The toggle is at the foot of the sidebar** again, above the account block, as it was before
+  1.5.1. It does *not* carry `data-bs-toggle="sidebar-folded"` and is not in the brand slot.
+  Tabler treats that attribute as the pin of the hover rail and hides it with `display: none`
+  inside a `navbar-folded` sidebar, so a folded sidebar would have had no way to unfold. The
+  `.sidebar-fold-toggle` rule that worked around Bootstrap's `!important` display utilities
+  in the brand slot is gone with it.
+- **Expanded is the default again** (`useFoldedSidebar` reads `=== "true"`), and the choice is
+  still remembered under `saltcorn-admin-sidebar-folded`.
+- **`admin.css`** keys its two furniture rules (hide `.sidebar-wide-only`, stack the account
+  controls) on `.navbar-folded` inside the `lg` breakpoint. The `px-3` on the toggle row and
+  the account block becomes `px-0` when folded. That swap is done with classes in React rather
+  than in `admin.css` because Bootstrap's spacing utilities are `!important`, and 3rem of
+  padding leaves only 32px in a 64px rail for a 40px button.
+- **Tests.** `admin_theme.rs`'s `the_sidebar_folds_the_way_tabler_folds_it` now checks that
+  `App.tsx` applies `navbar-folded` (and not the hover variant), and that the vendored stylesheet
+  still defines it. It also checks that Tabler still hides its own `sidebar-folded` toggle in a
+  folded sidebar, and that our fold switch doesn't carry that attribute. Finally, it checks for
+  the button, the folded link tooltips, and the `admin.css` rules keyed on `.navbar-folded`.
+  Both states were also rendered in headless Chrome against the built stylesheet.
+
 ## Tabler 1.5.1, and a sidebar that folds to a rail
 
 The admin UI's theme is upgraded from Tabler 1.4.0 to **1.5.1**, and the sidebar now uses the

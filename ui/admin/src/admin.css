@@ -114,44 +114,25 @@ div.navbar-brand > a:hover {
 
 /* The folded sidebar.
  *
- * Tabler 1.5 owns this mode: `navbar-folded-hover` on the aside (`App.tsx`)
- * narrows it to `--tblr-sidebar-folded-width`, collapses the link titles,
- * offsets the page wrapper to match, and unfolds the whole thing as an overlay
- * while the pointer is over it or something in it holds visible keyboard focus.
- * None of that is restated here — this is only the sidebar furniture that is
- * ours rather than Tabler's, and the selector is Tabler's own test for "folded
- * right now", inside the `lg` breakpoint where the sidebar is a rail at all
- * (below it the sidebar is a drawer, which has no width to give back).
+ * Tabler 1.5 owns this mode: `navbar-folded` on the aside (`App.tsx`) narrows
+ * it to `--tblr-sidebar-folded-width`, collapses the link titles and offsets the
+ * page wrapper to match. None of that is restated here — this is only the
+ * sidebar furniture that is ours rather than Tabler's, inside the `lg`
+ * breakpoint where the sidebar is a rail at all (below it the sidebar is a
+ * drawer, which has no width to give back).
  *
  * `.sidebar-wide-only` is the opt-in for the rest: a future addition to the
  * brand or the account block says for itself whether it survives the fold
  * rather than being caught by a blanket rule. The nav-link titles do not need
  * it — Tabler collapses those. */
-
-/* The fold toggle is a wide-screen control: below `lg` the sidebar is a drawer,
- * which has no width to give back. Plain declarations rather than `d-none
- * d-lg-inline-flex`, because Bootstrap's display utilities are `!important` and
- * would outrank Tabler's own rule hiding this button while the rail is folded —
- * leaving a 40px button in a 64px rail with the logo squeezed to nothing beside
- * it. */
-.sidebar-fold-toggle {
-  display: none;
-}
-
 @media (min-width: 992px) {
-  .sidebar-fold-toggle {
-    display: inline-flex;
-  }
-
-  .navbar-folded-hover:not(:hover):not(:has(:focus-visible)) .sidebar-wide-only {
+  .navbar-folded .sidebar-wide-only {
     display: none;
   }
 
-  /* The account block's controls stack instead of overflowing the rail. */
-  .navbar-folded-hover:not(:hover):not(:has(:focus-visible))
-    .navbar-collapse
-    > div:last-child
-    > .d-flex {
+  /* The account block's controls stack, centred, instead of overflowing the
+     rail. */
+  .navbar-folded .navbar-collapse > div:last-child > .d-flex {
     flex-direction: column;
   }
 }
