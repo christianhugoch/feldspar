@@ -2,6 +2,52 @@
 
 Changes in reverse chronological order.
 
+## Tabler 1.5.1, and a sidebar that folds to a rail
+
+The admin UI's theme is upgraded from Tabler 1.4.0 to **1.5.1**, and the sidebar now uses the
+folded sidebar 1.5 introduced: on a wide screen it is a rail of icons, and it unfolds to its full
+width as an overlay while the pointer is over it or something in it holds visible keyboard focus.
+The page beside it keeps the folded offset, so nothing under the sidebar reflows.
+
+- **The stylesheet.** `ui/admin/src/vendor/tabler/tabler.min.css` is the 1.5.1 release build. Its
+  GitHub release zip ships only `core/scss` with no `dist/`, so the built file comes from
+  `npm pack @tabler/core@1.5.1`; the vendored README now says so. The properties the strict CSP
+  depends on still hold and `admin_theme.rs` still checks them — no `@import`, every `url()` a
+  `data:` URI — and 1.5.0 dropped the bundled webfont entirely, so the Inter `@import` that was
+  the standing hazard on an upgrade no longer exists upstream.
+- **The fold replaces the hand-written icons-only mode.** `admin.css` used to restate the rail's
+  width and the page wrapper's matching offset, hide the labels and re-centre the icons — about
+  40 lines for what Tabler now does itself. `App.tsx` puts `navbar-folded-hover` on the aside
+  and that is the whole of it. `useNarrowSidebar` becomes `useFoldedSidebar`, folded is now the
+  default, and the preference is what pins the sidebar open rather than what narrows it.
+- **The pin moved into the brand**, the slot Tabler leaves for it (`space-between`, logo at the
+  start). It carries `data-bs-toggle="sidebar-folded"` for the *styling* Tabler hangs off that
+  attribute — hidden in the rail, faded in on hover — not for `tabler.js`, which this SPA still
+  does not load; React handles the click. It is revealed by a `.sidebar-fold-toggle` class rather
+  than `d-none d-lg-inline-flex`, because Bootstrap's display utilities are `!important` and the
+  utility outranks Tabler's rule hiding the button in the rail: the result was a 40px button in a
+  64px sidebar with the brand logo squeezed to zero width beside it.
+- **`admin.css`'s first 53 lines, reviewed against the new theme** (measured in a browser against
+  the vendored 1.5.1 file, not read off the changelog):
+  - `html, body, #root { height: 100% }` — **kept**. 1.5.1 gives `body` a height but leaves
+    `html` at `auto`, which makes body's own percentage resolve to `auto` too, and it has never
+    heard of `#root`. Without the rule a short screen's `.page` comes out 221px instead of the
+    viewport's height, and the sidebar stops partway down.
+  - `.text-pre-wrap` — **kept**. Reboot's `<pre>` still scrolls sideways instead of wrapping.
+  - `.btn-icon` padding and `.btn-icon .icon { margin: 0 }` — **deleted**. 1.5.1 gives `.btn-icon`
+    a `min-width` off the same formula as `.btn`'s height (upstream `5018aa9`), so an icon button
+    measures 40x40, 28x28 and 48x48 at the default, `sm` and `lg` sizes with no help from us.
+  - The brand wordmark gains `sidebar-wide-only`: Tabler crops the brand to the rail, which left
+    the stems of "S" and "F" showing past the sidebar edge.
+- **Tests.** `admin_theme.rs` replaces `the_narrow_sidebar_moves_the_page_with_it` — the two
+  numbers it reconciled are Tabler's now — with `the_sidebar_folds_the_way_tabler_folds_it` (the
+  class `App.tsx` writes is one the vendored stylesheet defines, `admin.css` restates none of the
+  geometry, the furniture rules carry Tabler's own test for the folded state, and no `!important`
+  display utility is applied inside the sidebar) and `the_gaps_admin_css_fills_are_still_gaps`,
+  which checks each surviving rule against the Tabler rule it compensates for and asserts the
+  `.btn-icon` override is gone. Both read the minified stylesheet through a `declares()` helper
+  that matches a whole selector in a selector list, so they are not order-sensitive.
+
 ## The builder, Phase 10: documentation, and the definition of done run by hand
 
 The builder is written down, and its definition of done was run by hand: a release build on a

@@ -5,10 +5,12 @@
 //
 // The shell is Tabler's **vertical layout**: a dark sidebar holding the brand
 // and the section links, and a `.page-wrapper` beside it in which each screen
-// renders its own `PageHeader` + `PageBody` (see `layout.tsx`). The sidebar
-// collapse on narrow screens is React state toggling Bootstrap's `show` class
-// rather than Bootstrap's own JS — the SPA already owns the DOM, so vendoring a
-// second script to add one class would buy nothing.
+// renders its own `PageHeader` + `PageBody` (see `layout.tsx`). On wide screens
+// the sidebar is folded to a rail that unfolds on hover (Tabler's
+// `navbar-folded-hover`); the collapse on narrow screens is React state
+// toggling Bootstrap's `show` class rather than Bootstrap's own JS — the SPA
+// already owns the DOM, so vendoring a second script to add one class would buy
+// nothing.
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import Spinner from "react-bootstrap/Spinner";
@@ -34,7 +36,7 @@ import {
   IconUsers,
   SaltcornLogo,
 } from "./icons";
-import { useNarrowSidebar, useTheme } from "./layout";
+import { useFoldedSidebar, useTheme } from "./layout";
 import { AgentChat } from "./screens/AgentChat";
 import { AgentForm } from "./screens/AgentForm";
 import { Agents } from "./screens/Agents";
@@ -236,7 +238,7 @@ function Shell({
   const route = useHashRoute();
   const [menuOpen, setMenuOpen] = useState(false);
   const [theme, toggleTheme] = useTheme();
-  const [narrow, toggleNarrow] = useNarrowSidebar();
+  const [folded, toggleFolded] = useFoldedSidebar();
   // A docked chat covers the bottom-right corner of whatever is underneath it.
   // For most screens that is an overlay doing what an overlay does; for the
   // chat *screen* it would be a window sitting on the send button of the page's
@@ -262,12 +264,18 @@ function Shell({
   };
 
   return (
-    // `sidebar-narrow` is the whole of the icons-only mode: it is on `.page`
-    // because both the sidebar's width and the page wrapper's matching offset
-    // hang off it (see `admin.css`), and they have to change together.
-    <div className={`page${narrow ? " sidebar-narrow" : ""}${corner}`}>
+    <div className={`page${corner}`}>
+      {/* `navbar-folded-hover` is Tabler's own folded sidebar: the rail is
+          `--tblr-sidebar-folded-width` wide with the link titles collapsed, and
+          it unfolds to the full width *as an overlay* while the pointer is over
+          it or something inside it holds visible keyboard focus — the page
+          beside it keeps the folded offset, so nothing reflows. Tabler owns
+          both numbers, which is why nothing here (or in `admin.css`) restates
+          the geometry any more. */}
       <aside
-        className="navbar navbar-vertical navbar-expand-lg"
+        className={`navbar navbar-vertical navbar-expand-lg${
+          folded ? " navbar-folded-hover" : ""
+        }`}
         data-bs-theme="dark"
       >
         <div className="container-fluid">
@@ -292,12 +300,44 @@ function Shell({
             >
               <div className="d-flex">
                 <SaltcornLogo />
-                <div className="ms-2">
+                {/* The wordmark is the widest thing in the sidebar; folded, the
+                    rail is the logo mark's width and Tabler would crop this to
+                    the stems of its first two letters. */}
+                <div className="ms-2 sidebar-wide-only">
                   <div className="saltcorn-label">Saltcorn</div>
                   <div className="feldspar-label">Feldspar</div>
                 </div>
               </div>
             </a>
+            {/* The pin, in the slot Tabler leaves for it: the vertical
+                navbar's brand is `space-between`, so the logo stays on the
+                start side and this sits at the end. `data-bs-toggle` is the
+                hook for Tabler's *styling* of that slot — hidden while the
+                rail is folded, faded in once the sidebar is hovered or holds
+                focus — not for its JS, which this SPA does not load; the click
+                is React's. It is offered on `lg` and up only (below that the
+                sidebar is a drawer with no width to give back), and that is
+                `.sidebar-fold-toggle` rather than `d-none d-lg-inline-flex`
+                because Bootstrap's display utilities are `!important`: the
+                utility would outrank Tabler's own rule and leave a 40px button
+                in a 64px rail, squeezing the logo beside it to nothing. */}
+            <button
+              type="button"
+              className="btn btn-icon btn-ghost-secondary sidebar-fold-toggle"
+              data-bs-toggle="sidebar-folded"
+              onClick={toggleFolded}
+              // The name says what the click does and changes with the state,
+              // so there is no `aria-pressed` here: a toggle that announces
+              // both ("Pin the sidebar open, not pressed") reads as a riddle.
+              aria-label={folded ? "Pin the sidebar open" : "Fold the sidebar"}
+              title={folded ? "Pin the sidebar open" : "Fold the sidebar"}
+            >
+              {folded ? (
+                <IconChevronRight className="icon-2" />
+              ) : (
+                <IconChevronLeft className="icon-2" />
+              )}
+            </button>
           </div>
           {/* On a narrow screen the collapse is shut by default, so the account
               controls sit in this always-visible row instead of at the foot of
@@ -338,10 +378,6 @@ function Shell({
                       className={active ? "nav-link active" : "nav-link"}
                       href={item.href}
                       aria-current={active ? "page" : undefined}
-                      // Narrowed, the icon is all there is to go on, so the
-                      // name becomes the hover label. Expanded it is already
-                      // on screen and a tooltip would only repeat it.
-                      title={narrow ? item.label : undefined}
                     >
                       <span className="nav-link-icon d-md-none d-lg-inline-block">
                         {item.icon}
@@ -353,31 +389,9 @@ function Shell({
               })}
             </ul>
             {/* The nav list above is `flex-grow: 1` in a column collapse, so
-                everything below it settles at the bottom of the sidebar. The
-                width switch is only offered on `lg` and up: below that the
-                sidebar is a drawer, which has no width to give back. */}
-            <div className="d-none d-lg-flex justify-content-end px-3 pb-2">
-              <button
-                type="button"
-                className="btn btn-icon btn-ghost-secondary"
-                onClick={toggleNarrow}
-                aria-pressed={narrow}
-                aria-label={
-                  narrow ? "Widen the sidebar" : "Narrow the sidebar to icons"
-                }
-                title={
-                  narrow ? "Widen the sidebar" : "Narrow the sidebar to icons"
-                }
-              >
-                {narrow ? (
-                  <IconChevronRight className="icon-2" />
-                ) : (
-                  <IconChevronLeft className="icon-2" />
-                )}
-              </button>
-            </div>
+                this settles at the bottom of the sidebar. */}
             <div className="d-none d-lg-block px-3 py-3 border-top">
-              {/* Narrowed there is no room for an address, so the email moves
+              {/* Folded there is no room for an address, so the email moves
                   into the log-out button's tooltip (see `admin.css`). */}
               <div className="text-secondary text-truncate mb-2 sidebar-wide-only">
                 {user.email}

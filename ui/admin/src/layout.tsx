@@ -118,26 +118,31 @@ function initialTheme(): Theme {
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-const NARROW_KEY = "saltcorn-admin-sidebar-narrow";
+const FOLDED_KEY = "saltcorn-admin-sidebar-folded";
 
-/** Whether the sidebar is collapsed to icons, remembered across visits.
+/** Whether the sidebar is folded to a rail of icons, remembered across visits.
  *
- * A preference rather than a route or a viewport question: an admin working in
- * the row editor wants the width back, and wants it to still be theirs on the
- * next screen and the next visit. Only meaningful on wide screens — below
- * Tabler's `lg` breakpoint the sidebar is a drawer rather than a rail — which is
- * why the styling for it (`admin.css`) is inside that media query and this hook
- * is not: the stored preference outlives a window resize. */
-export function useNarrowSidebar(): [boolean, () => void] {
-  const [narrow, setNarrow] = useState(
-    () => window.localStorage.getItem(NARROW_KEY) === "true",
+ * Folded is the default: Tabler's folded sidebar (`navbar-folded-hover`, which
+ * `App.tsx` puts on the aside) unfolds under the pointer, so the rail costs
+ * nothing to read and gives ~12rem of the window back to the screen. The
+ * preference is the escape hatch — an admin who wants the menu permanently on
+ * screen pins it open, and wants it still pinned on the next screen and the
+ * next visit, which is why this is stored rather than derived.
+ *
+ * Only meaningful on wide screens: below Tabler's `lg` breakpoint the sidebar
+ * is a drawer rather than a rail, and every rule keyed on the folded state is
+ * inside that breakpoint. This hook is not, so the stored preference outlives a
+ * window resize. */
+export function useFoldedSidebar(): [boolean, () => void] {
+  const [folded, setFolded] = useState(
+    () => window.localStorage.getItem(FOLDED_KEY) !== "false",
   );
 
   useEffect(() => {
-    window.localStorage.setItem(NARROW_KEY, String(narrow));
-  }, [narrow]);
+    window.localStorage.setItem(FOLDED_KEY, String(folded));
+  }, [folded]);
 
-  return [narrow, useCallback(() => setNarrow((n) => !n), [])];
+  return [folded, useCallback(() => setFolded((f) => !f), [])];
 }
 
 /** The colour scheme, applied to the document and remembered across visits.

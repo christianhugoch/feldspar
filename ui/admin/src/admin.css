@@ -10,11 +10,14 @@
  * option, so a missing utility has to be added here.
  */
 
-/* Tabler's `.page` is `min-height: 100%`, and it measures that against its
- * parent chain — which in a static Tabler page is `<body>` (height: 100%) and
- * here is `#root`, the SPA's mount point, sitting in between. Without these the
- * chain resolves to `auto` and a short screen leaves the sidebar and the page
- * background stopping partway down the viewport. */
+/* Tabler's `.page` is `min-height: 100%`, and a percentage height only resolves
+ * against a parent that has one of its own. Tabler gives `<body>` its `height:
+ * 100%`, but nothing above or below it: `<html>` is left at `auto` (which makes
+ * body's own percentage resolve to `auto` too), and `#root`, the SPA's mount
+ * point, is an element Tabler has never heard of. Without these the chain
+ * resolves to `auto` all the way down and a short screen leaves the sidebar and
+ * the page background stopping partway down the viewport — measured against
+ * Tabler 1.5.1: `.page` comes out 221px instead of the viewport's height. */
 html,
 body,
 #root {
@@ -28,27 +31,6 @@ body,
  * that are the reason for the `<pre>` in the first place. */
 .text-pre-wrap {
   white-space: pre-wrap;
-}
-
-/* Tabler's icon-only button has no box.
- *
- * `.btn-icon` zeroes the horizontal padding and then `.btn-icon .icon` pulls the
- * glyph back in by `calc(-1 * var(--tblr-btn-padding-x))` on every side — which
- * on `.btn-sm` is 0.5rem against a 1rem icon, so the content box comes out zero
- * wide and the button is two pixels of border with the icon overflowing it. It
- * *looks* almost right and is nearly impossible to hit, and two of them side by
- * side (a chat window's title bar has four) overlap each other.
- *
- * The padding is restated as the button's own vertical padding, which makes an
- * icon button square at every size, and the icon's negative margin — whose only
- * job was to cancel the horizontal padding that is no longer there — goes. */
-.btn-icon {
-  padding-left: var(--tblr-btn-padding-y);
-  padding-right: var(--tblr-btn-padding-y);
-}
-
-.btn-icon .icon {
-  margin: 0;
 }
 
 /* One action on the table page's "Table data" strip: a large icon over its
@@ -130,52 +112,46 @@ div.navbar-brand > a:hover {
   text-decoration: none;
 }
 
-/* The icons-only sidebar (`.page.sidebar-narrow`, toggled by `useNarrowSidebar`).
+/* The folded sidebar.
  *
- * Tabler has no such mode: its vertical sidebar is a fixed 15rem rail, and the
- * page wrapper is offset by exactly that. So both numbers are restated here,
- * together — they are one measurement, and a rail that shrinks without the
- * wrapper following leaves a 10rem gap down the page.
+ * Tabler 1.5 owns this mode: `navbar-folded-hover` on the aside (`App.tsx`)
+ * narrows it to `--tblr-sidebar-folded-width`, collapses the link titles,
+ * offsets the page wrapper to match, and unfolds the whole thing as an overlay
+ * while the pointer is over it or something in it holds visible keyboard focus.
+ * None of that is restated here — this is only the sidebar furniture that is
+ * ours rather than Tabler's, and the selector is Tabler's own test for "folded
+ * right now", inside the `lg` breakpoint where the sidebar is a rail at all
+ * (below it the sidebar is a drawer, which has no width to give back).
  *
- * Everything is inside Tabler's `lg` breakpoint (992px, where `navbar-expand-lg`
- * turns the sidebar into a rail) because below it the sidebar is a collapsing
- * drawer: it has no width to give back, and hiding the labels there would leave
- * a menu of unexplained icons. The stored preference survives that — it just
- * does not apply until the window is wide again. */
+ * `.sidebar-wide-only` is the opt-in for the rest: a future addition to the
+ * brand or the account block says for itself whether it survives the fold
+ * rather than being caught by a blanket rule. The nav-link titles do not need
+ * it — Tabler collapses those. */
+
+/* The fold toggle is a wide-screen control: below `lg` the sidebar is a drawer,
+ * which has no width to give back. Plain declarations rather than `d-none
+ * d-lg-inline-flex`, because Bootstrap's display utilities are `!important` and
+ * would outrank Tabler's own rule hiding this button while the rail is folded —
+ * leaving a 40px button in a 64px rail with the logo squeezed to nothing beside
+ * it. */
+.sidebar-fold-toggle {
+  display: none;
+}
+
 @media (min-width: 992px) {
-  .sidebar-narrow .navbar-vertical.navbar-expand-lg {
-    width: 4.5rem;
+  .sidebar-fold-toggle {
+    display: inline-flex;
   }
 
-  .sidebar-narrow .navbar-vertical.navbar-expand-lg ~ .page-wrapper {
-    margin-left: 4.5rem;
-  }
-
-  /* The label beside each icon, the brand wordmark, and the account block's
-     prose. `.sidebar-wide-only` is the opt-in for the last of those, so a
-     future addition to the sidebar says for itself whether it survives the
-     narrowing rather than being caught by a blanket rule. */
-  .sidebar-narrow .navbar-vertical .nav-link-title,
-  .sidebar-narrow .navbar-vertical .navbar-brand span,
-  .sidebar-narrow .navbar-vertical .sidebar-wide-only {
+  .navbar-folded-hover:not(:hover):not(:has(:focus-visible)) .sidebar-wide-only {
     display: none;
   }
 
-  /* With no label to sit beside, the icon centres. Tabler's own padding is
-     horizontal room for text that is no longer there. */
-  .sidebar-narrow .navbar-vertical.navbar-expand-lg .navbar-collapse .nav-link {
-    justify-content: center;
-    padding-left: 0;
-    padding-right: 0;
-  }
-
-  .sidebar-narrow .navbar-vertical .navbar-brand,
-  .sidebar-narrow .navbar-vertical .navbar-collapse > div {
-    justify-content: center;
-  }
-
   /* The account block's controls stack instead of overflowing the rail. */
-  .sidebar-narrow .navbar-vertical .navbar-collapse > div:last-child > .d-flex {
+  .navbar-folded-hover:not(:hover):not(:has(:focus-visible))
+    .navbar-collapse
+    > div:last-child
+    > .d-flex {
     flex-direction: column;
   }
 }

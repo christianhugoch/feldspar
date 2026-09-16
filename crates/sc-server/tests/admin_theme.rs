@@ -63,60 +63,155 @@ fn vendored_tabler_css_is_self_contained() {
     }
 }
 
-/// The declaration following `selector` in `css`, e.g. `width` → `4.5rem`.
-fn declaration(css: &str, selector: &str, property: &str) -> String {
-    let at = css
-        .find(selector)
-        .unwrap_or_else(|| panic!("admin.css has no `{selector}` rule"));
-    let block = &css[at + selector.len()..];
-    let block = &block[..block.find('}').expect("unterminated rule")];
-    let value = block
-        .split(';')
-        .find_map(|decl| decl.trim().strip_prefix(&format!("{property}:")))
-        .unwrap_or_else(|| panic!("`{selector}` does not set `{property}`"));
-    value.trim().to_string()
+/// Does any rule in the minified `css` whose selector list includes exactly
+/// `selector` carry `declaration`? Written against the minified file because
+/// that is what ships: `.page` matches `.page{…}` and `a,.page{…}` but not
+/// `.page-wrapper{…}` or `.card .page{…}`, and a rule inside an `@media` block
+/// counts like any other.
+fn declares(css: &str, selector: &str, declaration: &str) -> bool {
+    css.split('}').any(|chunk| {
+        let Some((head, body)) = chunk.rsplit_once('{') else {
+            return false;
+        };
+        let selectors = head.rsplit('{').next().unwrap_or(head);
+        selectors.split(',').any(|one| one.trim() == selector) && body.contains(declaration)
+    })
 }
 
+/// The folded sidebar (Tabler's `navbar-folded-hover`): a rail of icons that
+/// unfolds under the pointer, and the admin's default on a wide screen.
+///
+/// Tabler 1.5 owns the geometry — the rail's width, the page wrapper's matching
+/// offset, the collapsed link titles — so there is nothing here to check it
+/// against. What is checkable is the seam: the class `App.tsx` writes has to be
+/// one the vendored stylesheet actually styles, and the furniture rules the
+/// theme knows nothing about have to key on the same state Tabler does.
 #[test]
-fn the_narrow_sidebar_moves_the_page_with_it() {
-    // Tabler's sidebar is a fixed rail and the page wrapper is offset by exactly
-    // its width, so the icons-only mode has to restate both — and they are one
-    // measurement. A rail narrowed without the wrapper following leaves a band
-    // of dead space down the whole page, which no type checker would notice.
+fn the_sidebar_folds_the_way_tabler_folds_it() {
+    let app = read("src/App.tsx");
     let css = read("src/admin.css");
-    let rail = declaration(
-        &css,
-        ".sidebar-narrow .navbar-vertical.navbar-expand-lg {",
-        "width",
+    let tabler = read("src/vendor/tabler/tabler.min.css");
+
+    // The switch itself. `navbar-folded-hover` is a Tabler class, so a typo in
+    // it is silent — the sidebar simply never folds.
+    assert!(
+        app.contains("navbar-folded-hover") && app.contains("useFoldedSidebar"),
+        "App.tsx should fold the sidebar with Tabler's `navbar-folded-hover`"
     );
-    let offset = declaration(
-        &css,
-        ".sidebar-narrow .navbar-vertical.navbar-expand-lg ~ .page-wrapper {",
-        "margin-left",
-    );
-    assert_eq!(
-        rail, offset,
-        "the narrowed sidebar's width and the page wrapper's offset must match"
+    assert!(
+        tabler.contains(".navbar-folded-hover"),
+        "the vendored Tabler stylesheet should define `.navbar-folded-hover`"
     );
 
-    // The mode is only styled inside Tabler's `lg` breakpoint, where the sidebar
-    // is a rail; below it the sidebar is a drawer and hiding the labels would
-    // leave a menu of unexplained icons.
+    // `admin.css` must not restate the geometry: a width or an offset written
+    // here is a second opinion about one measurement, and the two drift apart on
+    // the next upgrade. (The variable is *named* in the prose there, explaining
+    // whose measurement it is; reading it would be the mistake.)
+    assert!(
+        !css.contains("var(--tblr-sidebar-folded-width)") && !css.contains("sidebar-narrow"),
+        "admin.css should leave the folded sidebar's geometry entirely to Tabler"
+    );
+
+    // The rules that are ours. Both are only correct while the rail is folded —
+    // hovered, the sidebar is at full width and the wordmark and the email
+    // belong back on screen — so they carry Tabler's own test for that state.
+    // Written without it they would hide the account block permanently.
+    let folded = ".navbar-folded-hover:not(:hover):not(:has(:focus-visible))";
+    assert!(
+        css.contains(folded),
+        "admin.css should key its folded-sidebar rules on `{folded}`"
+    );
+    for element in ["ms-2 sidebar-wide-only", "text-truncate mb-2 sidebar-wide-only"] {
+        assert!(
+            app.contains(element),
+            "App.tsx should mark `{element}` as surviving only the unfolded sidebar"
+        );
+    }
+    assert!(
+        css.contains(".sidebar-wide-only"),
+        "admin.css has no rules for `.sidebar-wide-only`, which App.tsx renders"
+    );
+
+    // The pin button, which folds the sidebar and pins it back open. Tabler
+    // hides it in the rail and fades it in on hover, keyed on the attribute —
+    // that is styling, not a call into `tabler.js`, which this SPA does not
+    // load.
+    assert!(
+        app.contains(r#"data-bs-toggle="sidebar-folded""#),
+        "the fold toggle should sit in the slot Tabler styles for it"
+    );
+    // Bootstrap's display utilities are `!important`, so `d-lg-inline-flex` on
+    // that button would outrank Tabler's rule hiding it in the rail, leaving a
+    // 40px button in a 64px sidebar with the brand logo squeezed to nothing
+    // beside it. Hence a plain-specificity class of our own.
+    assert!(
+        app.contains("sidebar-fold-toggle") && css.contains(".sidebar-fold-toggle"),
+        "the fold toggle should be revealed by `.sidebar-fold-toggle`, not a display utility"
+    );
+    // In a `className` only: the classes are named in prose above the button,
+    // explaining why they are not used, and that mention is not a use.
+    let applied = |class: &str| {
+        app.lines()
+            .any(|line| line.contains("className") && line.contains(class))
+    };
+    assert!(
+        !applied("d-lg-inline-flex") && !applied("d-lg-flex"),
+        "an `!important` display utility on the sidebar would outrank Tabler's folded rules"
+    );
+
+    // The mode only exists inside Tabler's `lg` breakpoint, where the sidebar is
+    // a rail; below it the sidebar is a drawer and hiding its prose would leave
+    // a menu of unexplained icons.
     assert!(
         css.contains("@media (min-width: 992px)"),
-        "the narrow-sidebar rules should be scoped to Tabler's `lg` breakpoint"
+        "the folded-sidebar rules should be scoped to Tabler's `lg` breakpoint"
+    );
+}
+
+/// Two `admin.css` rules that Tabler 1.5 still does not make redundant, and one
+/// it does — each checked against the theme it was compensating for, so this
+/// file shrinks on an upgrade rather than accumulating.
+#[test]
+fn the_gaps_admin_css_fills_are_still_gaps() {
+    let css = read("src/admin.css");
+    let tabler = read("src/vendor/tabler/tabler.min.css");
+
+    // 1. `.page` is a percentage of its parent's height, which only resolves
+    //    against ancestors that have a height of their own. Tabler gives `body`
+    //    one; nothing gives `html` or `#root` (the SPA's mount point) one, so
+    //    without this rule the chain falls back to `auto` and the sidebar and
+    //    the page background stop partway down a short screen.
+    assert!(
+        declares(&tabler, ".page", "min-height:100%"),
+        "Tabler's `.page` should still be sized as a percentage of its parent"
+    );
+    assert!(
+        css.contains("html,\nbody,\n#root {\n  height: 100%;\n}"),
+        "admin.css should give the whole chain above `.page` a height"
     );
 
-    // The switch itself, and the hover labels that are the only thing naming a
-    // section once its label is hidden.
-    let app = read("src/App.tsx");
+    // 2. Reboot's `<pre>` scrolls sideways rather than wrapping, which hides the
+    //    end of a long build diagnostic.
     assert!(
-        app.contains("sidebar-narrow") && app.contains("useNarrowSidebar"),
-        "App.tsx should toggle the narrow sidebar"
+        declares(&tabler, "pre", "overflow:auto") && !declares(&tabler, "pre", "white-space"),
+        "Tabler should still leave `<pre>` scrolling sideways rather than wrapping"
     );
     assert!(
-        app.contains("title={narrow ? item.label : undefined}"),
-        "a narrowed nav link should carry its name as a hover label"
+        css.contains(".text-pre-wrap"),
+        "admin.css should provide the wrapping `<pre>` the build logs need"
+    );
+
+    // And the one Tabler took over: 1.5.1 gave `.btn-icon` a `min-width` off the
+    // same formula as `.btn`'s height, so an icon button is square at every size
+    // without help. Restating its padding here would now be a second opinion
+    // about one measurement.
+    assert!(
+        declares(&tabler, ".btn-icon", "min-width:calc("),
+        "Tabler should still square `.btn-icon` itself"
+    );
+    assert!(
+        !css.contains(".btn-icon"),
+        "admin.css should not restate `.btn-icon` sizing — Tabler 1.5.1 fixed it"
     );
 }
 
