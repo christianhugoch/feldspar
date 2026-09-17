@@ -25,6 +25,10 @@
 //! reason: the grants share a scope, and a scope filled in twice is a scope that
 //! can disagree with itself.
 //!
+//! **Looking at the application is a fourth** ([`CFG_MAY_VIEW_APP`]): `view_app`
+//! opens the run's preview of the application — mounted by a green `check` — in
+//! the server's headless browser, as the person chatting ([`view_app`]).
+//!
 //! **The shell is the last checkbox** ([`CFG_MAY_USE_SHELL`]), because it is all
 //! the others at once: `shell` and `process` ([`shell`], [`process`]), offered
 //! only to a run whose caller is an admin, and implying none of the other grants.
@@ -73,10 +77,11 @@ mod search;
 mod shell;
 mod snapshot;
 mod state;
+mod view_app;
 mod write;
 
 use sc_agent::{
-    AfterToolsContext, AgentTrait, RunCaller, RunId, RunMode, ToolsContext, TraitCheck,
+    AfterToolsContext, AgentTrait, Elidable, RunCaller, RunId, RunMode, ToolsContext, TraitCheck,
     TraitContext, Turn,
 };
 use sc_error::{Error, Result};
@@ -108,6 +113,10 @@ pub use shell::{
     tool_name as shell_tool_name,
 };
 pub use state::CodingState;
+pub use view_app::{
+    CFG_VIEW_APP_TIMEOUT, CFG_VIEW_APP_USER, DEFAULT_VIEW_APP_TIMEOUT,
+    tool_name as view_app_tool_name,
+};
 pub use write::tool_name as write_file_tool_name;
 
 /// May create and change files: adds `write_file` and the edit tool. Off by
@@ -128,6 +137,10 @@ pub const CFG_MAY_CHECK: &str = "may_check";
 /// May run shell commands and managed processes (TODO §7a). Off by default,
 /// offered only to an admin caller, and implying no other grant.
 pub const CFG_MAY_USE_SHELL: &str = "may_use_shell";
+
+/// May look at the application's preview in a headless browser (TODO §7b).
+/// Off by default; needs [`crate::CFG_APPLICATION`] and a browser on the server.
+pub const CFG_MAY_VIEW_APP: &str = "may_view_app";
 
 /// The `package.json` script that type-checks the project after a turn's edits.
 pub const CFG_DIAGNOSE: &str = "diagnose";
@@ -166,6 +179,7 @@ pub fn tool_names(scope: &FileScope) -> Vec<String> {
         patch::tool_name(scope),
         script::tool_name(scope),
         check::tool_name(scope),
+        view_app::tool_name(scope),
         shell::tool_name(scope),
         process::tool_name(scope),
     ]
@@ -248,6 +262,7 @@ impl AgentTrait for Coding {
                 .label("Script timeout (seconds)")
                 .default_value(DEFAULT_TIMEOUT_SECONDS as i64),
         );
+        spec.extend(view_app::config_fields());
         // Last, because it is every grant above at once.
         spec.extend(shell::config_fields());
         spec
@@ -269,6 +284,7 @@ impl AgentTrait for Coding {
             CFG_MAY_EDIT,
             CFG_MAY_RUN_SCRIPTS,
             CFG_MAY_CHECK,
+            CFG_MAY_VIEW_APP,
             CFG_MAY_USE_SHELL,
             shell::CFG_SHELL_NETWORK,
         ] {
@@ -291,6 +307,7 @@ impl AgentTrait for Coding {
             }
         }
         check::validate(check.catalog, check.config).await?;
+        view_app::validate(check).await?;
         shell::validate(check.catalog, &scope, check.config).await?;
         for name in tool_names(&scope) {
             check_tool_name(&name)?;
@@ -328,6 +345,9 @@ impl AgentTrait for Coding {
         }
         if may(config, CFG_MAY_CHECK) {
             tools.push(check::spec(&scope));
+        }
+        if may(config, CFG_MAY_VIEW_APP) {
+            tools.push(view_app::spec(&scope, config, cx.capabilities.vision));
         }
         if may(config, CFG_MAY_USE_SHELL) && cx.caller.is_some_and(is_admin) {
             tools.push(shell::spec(&scope, config));
@@ -368,6 +388,10 @@ impl AgentTrait for Coding {
                 permit(config, CFG_MAY_CHECK, "run checks", ctx)?;
                 check::call(&scope, config, args, ctx).await
             }
+            _ if tool == view_app::tool_name(&scope) => {
+                permit(config, CFG_MAY_VIEW_APP, "look at the application", ctx)?;
+                view_app::call(config, args, ctx).await
+            }
             _ if tool == shell::tool_name(&scope) => {
                 permit_shell(config, ctx)?;
                 shell::call(&scope, config, args, ctx).await
@@ -394,9 +418,19 @@ impl AgentTrait for Coding {
 
     /// A shell command is the same call whatever its whitespace (TODO 6a.7).
     fn fingerprint(&self, config: &Attrs, tool: &str, args: &Json) -> Json {
-        match tool == shell::tool_name(&scope_as_written(config)) {
-            true => shell::fingerprint(args),
-            false => args.clone(),
+        let scope = scope_as_written(config);
+        match tool {
+            _ if tool == shell::tool_name(&scope) => shell::fingerprint(args),
+            _ if tool == view_app::tool_name(&scope) => view_app::fingerprint(args),
+            _ => args.clone(),
+        }
+    }
+
+    /// An old look at the application is one line (TODO §7b).
+    fn elide(&self, config: &Attrs, old: &Elidable<'_>) -> Option<String> {
+        match old.call.name == view_app::tool_name(&scope_as_written(config)) {
+            true => Some(view_app::elide(old)),
+            false => Some(old.default_stub()),
         }
     }
 
@@ -505,6 +539,7 @@ mod tests {
                 "apply_patch_app_src_web",
                 "run_script_app_src_web",
                 "check_app_src_web",
+                "view_app_app_src_web",
                 "shell_app_src_web",
                 "process_app_src_web",
             ]

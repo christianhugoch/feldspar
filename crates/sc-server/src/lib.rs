@@ -22,6 +22,7 @@
 mod agents;
 mod apps;
 mod backup;
+mod browser;
 mod builder;
 mod chat;
 mod config;
@@ -40,12 +41,13 @@ mod systemd;
 mod tls;
 mod triggers;
 
-pub use agents::{AgentServices, install_agents};
+pub use agents::{AgentServices, install_agents, install_agents_on};
 pub use apps::{AppMounts, MountedApp, build_and_mount, mount_all, subdomain_of};
 pub use backup::{
     Available as BackupContents, BACKUP_CREATE_ROUTE, BACKUP_UPLOAD_ROUTE, BackupPreferences,
     RestoreReport, Selection as BackupSelection,
 };
+pub use browser::{BROWSER_NAMES, ChromiumDriver, DriverConfig, detect_browser};
 pub use chat::AGENT_CHAT_ROUTE;
 pub use sc_agent::{ProviderConnector, StoredProviders};
 
@@ -141,7 +143,7 @@ pub use sc_module::BUNDLED_IN_CHECKOUT;
 pub use security::IDE_CONTENT_SECURITY_POLICY;
 pub use security::{BUILDER_CONTENT_SECURITY_POLICY, builder_content_security_policy};
 pub use security::{CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
-pub use serve::serve;
+pub use serve::{serve, serve_browser};
 pub use systemd::ServiceManager;
 pub use tls::{
     TlsHandle, TlsSettings, check_certificate, https_addr, install_crypto_provider,

@@ -581,17 +581,29 @@ impl RunObserver for SocketObserver {
     }
 
     fn on_tool_result(&self, outcome: &sc_agent::ToolOutcome) {
-        send(
-            &self.tx,
-            json!({
-                "type": "tool_result",
-                "id": outcome.call.id,
-                "name": outcome.call.name,
-                "content": outcome.content,
-                "is_error": outcome.is_error,
-            }),
-        );
+        send(&self.tx, tool_result_event(outcome));
     }
+}
+
+/// A finished tool call as the socket sends it: its text, and the images it
+/// carried (a `view_app` screenshot, TODO §7b) as base64 for the panel to show
+/// inline.
+fn tool_result_event(outcome: &sc_agent::ToolOutcome) -> Json {
+    let mut event = json!({
+        "type": "tool_result",
+        "id": outcome.call.id,
+        "name": outcome.call.name,
+        "content": outcome.content,
+        "is_error": outcome.is_error,
+    });
+    if !outcome.images.is_empty() {
+        event["images"] = outcome
+            .images
+            .iter()
+            .map(|image| json!({"media_type": image.media_type, "data": image.base64()}))
+            .collect();
+    }
+    event
 }
 
 #[cfg(test)]
@@ -604,6 +616,22 @@ mod tests {
             Some(role) => agent.min_role(role),
             None => agent,
         }
+    }
+
+    #[test]
+    fn a_tool_result_carries_its_images_only_when_it_has_some() {
+        let call = sc_llm::ToolCall {
+            id: "c1".to_owned(),
+            name: "view_app_code".to_owned(),
+            arguments: json!({}),
+        };
+        let plain = sc_agent::ToolOutcome::ok(call.clone(), &json!("snapshot"));
+        assert!(tool_result_event(&plain).get("images").is_none());
+        let shot = plain.with_images(vec![sc_llm::ImagePart::new("image/jpeg", b"hi".to_vec())]);
+        assert_eq!(
+            tool_result_event(&shot)["images"],
+            json!([{"media_type": "image/jpeg", "data": "aGk="}])
+        );
     }
 
     #[test]

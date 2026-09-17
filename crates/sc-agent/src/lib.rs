@@ -31,6 +31,8 @@
 //! - **Delegation** ([`delegate`]): [`Delegator`], the capability a run offers a
 //!   trait that names *another agent* — a child run, under the same authority,
 //!   with a context of its own and a bound on how deep the chain may go.
+//! - **Looking at an application** ([`view`]): the preview-mount and browser
+//!   seams a trait reaches through [`TraitContext`], implemented by the server.
 //! - A **scripted provider** ([`testing`], behind the `testing` feature), because
 //!   no test in this tree may need an API key or spend a token.
 //!
@@ -58,14 +60,15 @@ pub mod run_store;
 pub mod schema;
 pub mod store;
 pub mod validate;
+pub mod view;
 
 #[cfg(feature = "testing")]
 #[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
 pub mod testing;
 
 pub use agent::{
-    ATTR_CHEAP, ATTR_CONTEXT_BUDGET, ATTR_MAX_COST, ATTR_MAX_WALL_SECONDS,
-    ATTR_PARALLEL_TOOL_CALLS, ATTR_STRONG, ModelRef, ModelRole,
+    ATTR_CHEAP, ATTR_CONTEXT_BUDGET, ATTR_MAX_COST, ATTR_MAX_IMAGES, ATTR_MAX_WALL_SECONDS,
+    ATTR_PARALLEL_TOOL_CALLS, ATTR_STRONG, DEFAULT_MAX_IMAGES, ModelRef, ModelRole,
 };
 pub use agent::{
     ATTR_MAX_STEPS, ATTR_MAX_TOKENS, ATTR_TEMPERATURE, Agent, AgentId, DEFAULT_MAX_STEPS,
@@ -90,7 +93,8 @@ pub use delegate::{
 pub use driver::{ProviderConnector, RunObserver, Runner, StoredProviders, connect};
 pub use ledger::{ChildLedger, Ledger, LedgerStep, RoleTotals};
 pub use machine::{
-    AgentLoop, Budget, Budgets, Conclusion, Step, StepMeta, ToolOutcome, trait_state_key,
+    AgentLoop, Budget, Budgets, Conclusion, IMAGE_STUB, Step, StepMeta, ToolOutcome,
+    trait_state_key,
 };
 pub use registry::AgentRegistry;
 pub use run::{ATTR_MODE, ATTR_ROLE, Run, RunId, RunKind, RunMode, RunState};
@@ -103,3 +107,7 @@ pub use store::{
     require_agent, save_agent,
 };
 pub use validate::{AgentIssue, Agents, validate_agent};
+pub use view::{
+    AppPreviewer, BrowserAction, BrowserDriver, BrowserReport, BrowserRequest, HostCapabilities,
+    PreviewInfo, ViewServices,
+};

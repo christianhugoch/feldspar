@@ -124,12 +124,13 @@ pub use admin_copilot::{
 pub use build_application::{BuildApplication, CFG_APPLICATION};
 pub use coding::{
     Baseline, CFG_CHECKS, CFG_DIAGNOSE, CFG_EDIT_FORMAT, CFG_MAX_LINES, CFG_MAX_RESULTS,
-    CFG_MAY_CHECK, CFG_MAY_EDIT, CFG_MAY_RUN_SCRIPTS, CFG_MAY_USE_SHELL, CFG_SHELL_IMAGE,
-    CFG_SHELL_NETWORK, CFG_SHELL_RUNTIME, CFG_SHELL_SANDBOX, CFG_SHELL_TIMEOUT,
-    CFG_SHELL_TIMEOUT_MAX, CFG_TIMEOUT, ChangeStatus, Coding, CodingState, DEFAULT_DIAGNOSE,
-    DEFAULT_MAX_LINES, DEFAULT_SHELL_TIMEOUT, DEFAULT_SHELL_TIMEOUT_MAX, DEFAULT_TIMEOUT_SECONDS,
-    EDIT_FORMAT_AUTO, FileChange, LONGEST_TOOL_PREFIX, Ledger, MAX_OUTPUT_CHARS, PreImage, RunDiff,
-    SHELL_ENV, diff_ledger, edit_format, kill_all_processes, matching, run_diff, running_count,
+    CFG_MAY_CHECK, CFG_MAY_EDIT, CFG_MAY_RUN_SCRIPTS, CFG_MAY_USE_SHELL, CFG_MAY_VIEW_APP,
+    CFG_SHELL_IMAGE, CFG_SHELL_NETWORK, CFG_SHELL_RUNTIME, CFG_SHELL_SANDBOX, CFG_SHELL_TIMEOUT,
+    CFG_SHELL_TIMEOUT_MAX, CFG_TIMEOUT, CFG_VIEW_APP_TIMEOUT, CFG_VIEW_APP_USER, ChangeStatus,
+    Coding, CodingState, DEFAULT_DIAGNOSE, DEFAULT_MAX_LINES, DEFAULT_SHELL_TIMEOUT,
+    DEFAULT_SHELL_TIMEOUT_MAX, DEFAULT_TIMEOUT_SECONDS, DEFAULT_VIEW_APP_TIMEOUT, EDIT_FORMAT_AUTO,
+    FileChange, LONGEST_TOOL_PREFIX, Ledger, MAX_OUTPUT_CHARS, PreImage, RunDiff, SHELL_ENV,
+    diff_ledger, edit_format, kill_all_processes, matching, run_diff, running_count,
 };
 pub use delete_rows::DeleteRows;
 pub use insert_row::InsertRow;
@@ -157,7 +158,8 @@ pub mod tool_names {
         edit_file_tool_name as edit_file, find_files_tool_name as find_files,
         process_tool_name as process, read_file_tool_name as read_file,
         run_script_tool_name as run_project_script, search_files_tool_name as search_files,
-        shell_tool_name as shell, write_file_tool_name as write_file,
+        shell_tool_name as shell, view_app_tool_name as view_app,
+        write_file_tool_name as write_file,
     };
     pub use crate::delete_rows::tool_name as delete_rows;
     pub use crate::insert_row::tool_name as insert_row;
@@ -319,6 +321,10 @@ mod tests {
                 CFG_MAX_LINES,
                 CFG_MAX_RESULTS,
                 CFG_TIMEOUT,
+                // Looking at the application (TODO §7b).
+                CFG_MAY_VIEW_APP,
+                CFG_VIEW_APP_USER,
+                CFG_VIEW_APP_TIMEOUT,
                 // Last: the shell is every grant above at once (TODO §7a).
                 CFG_MAY_USE_SHELL,
                 CFG_SHELL_TIMEOUT,
@@ -380,6 +386,7 @@ mod tests {
             tool_names::search_files(&scope),
             tool_names::run_project_script(&scope),
             tool_names::check(&scope),
+            tool_names::view_app(&scope),
             tool_names::shell(&scope),
             tool_names::process(&scope),
             tool_names::build_application("todo"),
@@ -401,6 +408,7 @@ mod tests {
                 "search_files_app_src_web",
                 "run_script_app_src_web",
                 "check_app_src_web",
+                "view_app_app_src_web",
                 "shell_app_src_web",
                 "process_app_src_web",
                 "build_todo",
@@ -408,7 +416,7 @@ mod tests {
         );
         let unique: std::collections::BTreeSet<&String> = names.iter().collect();
         assert_eq!(unique.len(), names.len());
-        // The ten file names above are `coding`'s whole set, which is what the
+        // The eleven file names above are `coding`'s whole set, which is what the
         // collision check compares when the trait is enabled twice: two
         // instances over one scope produce these same names and are refused.
         assert_eq!(
@@ -422,6 +430,7 @@ mod tests {
                 tool_names::apply_patch(&scope),
                 tool_names::run_project_script(&scope),
                 tool_names::check(&scope),
+                tool_names::view_app(&scope),
                 tool_names::shell(&scope),
                 tool_names::process(&scope),
             ]

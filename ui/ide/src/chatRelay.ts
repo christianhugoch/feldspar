@@ -233,6 +233,10 @@ const VERBS: { prefix: string; label: string; writes?: true }[] = [
  * to know anyone else's.
  */
 export function toolProgress(tool: string, args: unknown): string {
+  // Looking at the application: where, when the call says (TODO §7b).
+  if (tool.startsWith("view_app_")) {
+    return `Looking at ${firstString(args, ["path"]) ?? "the application"}`;
+  }
   const verb = VERBS.find((candidate) => tool.startsWith(candidate.prefix));
   const subject = tool.startsWith("apply_patch_")
     ? patchPaths(args).join(", ") || null

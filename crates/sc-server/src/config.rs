@@ -184,7 +184,25 @@ pub struct ServerConfig {
     /// ([`TlsSettings::from_ssl`](crate::tls::TlsSettings::from_ssl)); the
     /// default is [`Off`](TlsSettings::Off), which is plain HTTP.
     pub tls: TlsSettings,
+    /// The headless Chromium `view_app` drives (`--browser`, TODO §7b). `None`
+    /// searches `PATH`; see [`detect_browser`](crate::browser::detect_browser).
+    pub browser: Option<PathBuf>,
+    /// Whether that browser keeps its sandbox (`--no-browser-sandbox` turns it
+    /// off).
+    pub browser_sandbox: bool,
+    /// How many runs may hold a browser context at once
+    /// (`--browser-contexts`). A call beyond it waits, within its timeout.
+    pub browser_contexts: usize,
+    /// How long a run's preview mount may go unused before the sweep removes it
+    /// (`--preview-idle-minutes`, default an hour).
+    pub preview_idle: std::time::Duration,
 }
+
+/// How many runs may hold a browser context at once, by default.
+pub const DEFAULT_BROWSER_CONTEXTS: usize = 4;
+
+/// How long a preview may go unused before it is swept, by default.
+pub const DEFAULT_PREVIEW_IDLE_MINUTES: u64 = 60;
 
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -211,6 +229,10 @@ impl Default for ServerConfig {
             python_env: sc_python::PythonEnv::default(),
             model_max_rows: sc_model::DEFAULT_MAX_ROWS,
             tls: TlsSettings::Off,
+            browser: None,
+            browser_sandbox: true,
+            browser_contexts: DEFAULT_BROWSER_CONTEXTS,
+            preview_idle: std::time::Duration::from_secs(DEFAULT_PREVIEW_IDLE_MINUTES * 60),
         }
     }
 }
@@ -223,8 +245,9 @@ impl ServerConfig {
     /// `--code-workers <n>`, `--code-max-inflight <n>`, `--module-workers <n>`,
     /// `--modules-dir <path>`, `--python <auto|off>`,
     /// `--python-max-inflight <n>`, `--python-max-stuck <n>`,
-    /// `--python-dir <path>`, `--python-bin <path>` and
-    /// `--model-max-rows <n>`. Unknown flags are an
+    /// `--python-dir <path>`, `--python-bin <path>`, `--model-max-rows <n>`,
+    /// `--browser <path>`, `--no-browser-sandbox`, `--browser-contexts <n>` and
+    /// `--preview-idle-minutes <n>`. Unknown flags are an
     /// [`Error::Config`], so a typo fails loudly rather than being ignored.
     pub fn from_args<I, S>(args: I) -> Result<ServerConfig>
     where
@@ -318,6 +341,23 @@ impl ServerConfig {
                     };
                 }
                 "--secure-cookies" => cfg.secure_cookies = true,
+                "--browser" => {
+                    cfg.browser = Some(PathBuf::from(next_value(&mut it, "--browser")?));
+                }
+                "--no-browser-sandbox" => cfg.browser_sandbox = false,
+                "--browser-contexts" => {
+                    cfg.browser_contexts = positive(
+                        &next_value(&mut it, "--browser-contexts")?,
+                        "--browser-contexts",
+                    )?;
+                }
+                "--preview-idle-minutes" => {
+                    let minutes = positive(
+                        &next_value(&mut it, "--preview-idle-minutes")?,
+                        "--preview-idle-minutes",
+                    )?;
+                    cfg.preview_idle = std::time::Duration::from_secs(minutes as u64 * 60);
+                }
                 "--base-domain" => {
                     cfg.base_domain = Some(next_value(&mut it, "--base-domain")?);
                 }
@@ -504,6 +544,37 @@ mod tests {
     fn the_saltcorn_ui_bundle_is_not_a_flag() {
         assert!(ServerConfig::from_args(["--saltcorn-ui-dir", "/srv/sui"]).is_err());
         assert!(ServerConfig::default().saltcorn_ui_dir.is_none());
+    }
+
+    /// The browser flags (TODO 6b.2): a path, the sandbox switch, and two
+    /// counts that must be at least one.
+    #[test]
+    fn parses_the_browser_and_preview_flags() {
+        let cfg = ServerConfig::default();
+        assert!(cfg.browser.is_none());
+        assert!(cfg.browser_sandbox);
+        assert_eq!(cfg.browser_contexts, DEFAULT_BROWSER_CONTEXTS);
+        assert_eq!(cfg.preview_idle.as_secs(), 3600);
+
+        let cfg = ServerConfig::from_args([
+            "--browser",
+            "/usr/bin/chromium",
+            "--no-browser-sandbox",
+            "--browser-contexts",
+            "2",
+            "--preview-idle-minutes",
+            "5",
+        ])
+        .expect("parse");
+        assert_eq!(
+            cfg.browser.as_deref(),
+            Some(std::path::Path::new("/usr/bin/chromium"))
+        );
+        assert!(!cfg.browser_sandbox);
+        assert_eq!(cfg.browser_contexts, 2);
+        assert_eq!(cfg.preview_idle.as_secs(), 300);
+        assert!(ServerConfig::from_args(["--browser-contexts", "0"]).is_err());
+        assert!(ServerConfig::from_args(["--preview-idle-minutes", "soon"]).is_err());
     }
 
     #[test]

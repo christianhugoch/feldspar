@@ -30,7 +30,15 @@ export type ServerEvent =
   | { type: "text"; delta: string }
   | { type: "reasoning"; delta: string }
   | { type: "tool_call"; id: string; name: string; arguments: unknown }
-  | { type: "tool_result"; id: string; name: string; content: string; is_error: boolean }
+  | {
+      type: "tool_result";
+      id: string;
+      name: string;
+      content: string;
+      is_error: boolean;
+      /** Images the tool returned — a `view_app` screenshot (TODO §7b). */
+      images?: ImagePart[];
+    }
   | {
       type: "done";
       run: string | null;
@@ -53,6 +61,26 @@ export type ServerEvent =
       after_tokens: number;
       summary?: string;
     };
+
+/** An image in a tool result, as the loop stores and streams it. */
+export interface ImagePart {
+  media_type: string;
+  /** Base64. */
+  data: string;
+}
+
+/** An image part as a URL an `<img>` can show. Only image types are kept. */
+export function imageUrl(image: ImagePart): string | null {
+  if (!/^image\/(jpeg|png|gif|webp)$/.test(image.media_type)) return null;
+  if (!/^[A-Za-z0-9+/=]*$/.test(image.data)) return null;
+  return `data:${image.media_type};base64,${image.data}`;
+}
+
+/** The URLs of the images a result carried, or nothing to add to an entry. */
+function imagesOf(images: ImagePart[] | undefined): { images?: string[] } {
+  const urls = (images ?? []).map(imageUrl).filter((u): u is string => u !== null);
+  return urls.length > 0 ? { images: urls } : {};
+}
 
 /** One control a trait puts in the composer, beside the send button.
  *
@@ -102,6 +130,8 @@ export type Entry =
       /** `null` until the result arrives — which is what renders as "running". */
       result: string | null;
       isError: boolean;
+      /** Screenshots the result carried, as `data:` URLs, shown inline. */
+      images?: string[];
     }
   /** A failure, in the transcript where it happened. A chat window that
    * silently stops is unfixable by the person watching it (§11.4). */
@@ -259,7 +289,12 @@ export function applyEvent(state: ChatState, event: ServerEvent): ChatState {
         ...state,
         entries: state.entries.map((entry) =>
           entry.kind === "tool" && entry.id === event.id && entry.result === null
-            ? { ...entry, result: event.content, isError: event.is_error }
+            ? {
+                ...entry,
+                result: event.content,
+                isError: event.is_error,
+                ...imagesOf(event.images),
+              }
             : entry,
         ),
       };
@@ -465,6 +500,7 @@ export function transcriptFromRun(context: unknown): Entry[] {
       tool_calls?: { id: string; name: string; arguments: unknown }[];
       tool_call_id?: string;
       name?: string;
+      images?: ImagePart[];
     };
     if (message.role === "user") {
       entries.push({ kind: "user", text: message.content ?? "" });
@@ -493,6 +529,8 @@ export function transcriptFromRun(context: unknown): Entry[] {
         // The loop writes a failed tool's error as its result, prefixed so the
         // model can tell (§11.2). The same prefix is what tells the panel.
         call.isError = (message.content ?? "").startsWith("error: ");
+        const shown = imagesOf(message.images);
+        if (shown.images) call.images = shown.images;
       }
     }
   }

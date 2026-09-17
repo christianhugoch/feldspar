@@ -52,6 +52,26 @@
 #
 # Run it as root, or as a user who can sudo.
 #
+# A headless browser
+# ------------------
+# The in-server coding agent looks at the application it built through a
+# headless Chromium (`view_app`, TODO §7b), which the server drives over the
+# DevTools protocol and starts itself, as the service account. So the script
+# installs one that works under a systemd service user:
+#
+#   Debian 12/13   apt's `chromium`.
+#   Ubuntu         *not* apt's `chromium-browser`, which is a transitional
+#                  package whose /usr/bin/chromium-browser only execs the snap,
+#                  and a snap does not run under a service account with
+#                  ProtectHome/PrivateTmp. Google Chrome's own apt repository
+#                  instead (amd64 only; elsewhere the step says so and skips).
+#
+# A browser already on PATH (chromium, google-chrome) that is not a snap shim is
+# kept. The last step starts it once as the service account
+# (`--headless --dump-dom about:blank`), so a browser that cannot run there is
+# found now rather than at the agent's first `view_app`. `--no-browser` skips all
+# of it; the server then logs that `view_app` is unavailable, and why.
+#
 # What it does *not* do: open a firewall, point DNS at the host, create the first
 # admin user or ask for a certificate. Those are README §2.7, and three of the four
 # happen in a browser.
@@ -97,6 +117,7 @@ CONFIG_FILE="/etc/feldspar/feldspar.toml"
 UNIT_FILE="/etc/systemd/system/feldspar.service"
 ENVIRONMENT="production"
 START=1
+BROWSER=1               # install and verify a headless Chromium for view_app
 FORCE=0
 DRY_RUN=0
 
@@ -151,6 +172,9 @@ Other
                         The unit names this file outright, so the two agree.
       --unit PATH       Where the systemd unit goes (default
                         ${UNIT_FILE}); for staging it somewhere else.
+      --no-browser      Do not install a headless Chromium. The coding agent's
+                        view_app tool is then unavailable until one is installed
+                        (or named with \`browser\` in the configuration file).
       --no-start        Create and enable the unit, but do not start it.
       --force           Overwrite an existing ${CONFIG_FILE}
                         or ${UNIT_FILE} (both are kept by default).
@@ -187,6 +211,7 @@ while [ $# -gt 0 ]; do
         --config)        need_value "$@"; CONFIG_FILE="$2"; shift 2 ;;
         --unit)          need_value "$@"; UNIT_FILE="$2"; shift 2 ;;
         --no-start)      START=0; shift ;;
+        --no-browser)    BROWSER=0; shift ;;
         --force)         FORCE=1; shift ;;
         -n|--dry-run)    DRY_RUN=1; shift ;;
         -h|--help)       usage; exit 0 ;;
@@ -395,6 +420,71 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 1c. A headless browser, for the coding agent's view_app
+# ---------------------------------------------------------------------------
+#
+# The server finds it by the `browser` setting in the configuration file, or on
+# PATH as chromium, chromium-browser or google-chrome — skipping a snap shim,
+# for the reason in the header. What this installs is found on PATH, so the
+# configuration file needs nothing.
+
+# The first browser on PATH that is a real binary rather than a snap shim, or
+# nothing. Never a dry run: the answer decides what is installed.
+find_browser() {
+    for _name in chromium google-chrome google-chrome-stable chromium-browser; do
+        _path="$(command -v "${_name}" 2>/dev/null)" || continue
+        _real="$(readlink -f "${_path}" 2>/dev/null || echo "${_path}")"
+        # /snap/bin/chromium is a symlink to /usr/bin/snap itself.
+        case "${_path}:${_real}" in /snap/*|*:/snap/*|*/bin/snap) continue ;; esac
+        # Ubuntu's /usr/bin/chromium-browser is a shell script that execs the snap.
+        if head -c 2 "${_real}" 2>/dev/null | grep -q '#!' &&
+            grep -q '/snap/' "${_real}" 2>/dev/null; then
+            continue
+        fi
+        echo "${_path}"
+        return 0
+    done
+    return 1
+}
+
+BROWSER_PATH=""
+if [ "${BROWSER}" -eq 0 ]; then
+    note "--no-browser: view_app will be unavailable"
+elif BROWSER_PATH="$(find_browser)"; then
+    note "a headless-capable browser is already here: ${BROWSER_PATH}"
+else
+    BROWSER_PATH=""
+    . /etc/os-release 2>/dev/null || true
+    case "${ID:-}" in
+        ubuntu)
+            ARCH="$(dpkg --print-architecture 2>/dev/null || echo unknown)"
+            if [ "${ARCH}" = "amd64" ]; then
+                log "installing Google Chrome from Google's apt repository (Ubuntu's chromium-browser is a snap)"
+                CHROME_KEYRING="/etc/apt/keyrings/google-chrome.asc"
+                run_root install -d -m 0755 /etc/apt/keyrings
+                run_root curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
+                    -o "${CHROME_KEYRING}"
+                run_root chmod 0644 "${CHROME_KEYRING}"
+                printf 'deb [arch=amd64 signed-by=%s] https://dl.google.com/linux/chrome/deb/ stable main\n' \
+                    "${CHROME_KEYRING}" | write_root_file /etc/apt/sources.list.d/google-chrome.list 0644
+                run_root apt-get update
+                run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y google-chrome-stable
+                BROWSER_PATH="/usr/bin/google-chrome"
+            else
+                note "no non-snap Chromium is known for Ubuntu on ${ARCH}: view_app will be"
+                note "unavailable until one is installed and named with \`browser\` in ${CONFIG_FILE}"
+            fi
+            ;;
+        *)
+            # Debian 12 and 13, and anything else apt-based that packages it.
+            log "installing chromium"
+            run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y chromium
+            BROWSER_PATH="/usr/bin/chromium"
+            ;;
+    esac
+fi
+
+# ---------------------------------------------------------------------------
 # 2. The service account
 # ---------------------------------------------------------------------------
 
@@ -403,6 +493,44 @@ if id "${SERVICE_USER}" >/dev/null 2>&1; then
 else
     log "creating the ${SERVICE_USER} system account"
     run_root adduser --system --group --home "${PREFIX}" "${SERVICE_USER}"
+fi
+
+# ---------------------------------------------------------------------------
+# 2b. The browser runs as the service account
+# ---------------------------------------------------------------------------
+#
+# Started once, the way the server will start it: headless, as ${SERVICE_USER},
+# with a throwaway profile directory. A browser that cannot start here (a
+# missing library, a sandbox the kernel refuses) is reported now, with its own
+# error, rather than as a failed view_app later.
+
+if [ -n "${BROWSER_PATH}" ]; then
+    log "checking that ${BROWSER_PATH} runs headless as ${SERVICE_USER}"
+    if [ "${DRY_RUN}" -eq 1 ]; then
+        run_root runuser -u "${SERVICE_USER}" -- "${BROWSER_PATH}" --headless \
+            --user-data-dir=/tmp/feldspar-browser-check --dump-dom about:blank
+    else
+        # Reported, never fatal: a browser that does not start leaves view_app
+        # unavailable, and everything else this script sets up still works.
+        _as_service() { ${SUDO} runuser -u "${SERVICE_USER}" -- "$@"; }
+        _log="$(mktemp)"
+        if ! _profile="$(_as_service mktemp -d /tmp/feldspar-browser-XXXXXX 2>"${_log}")"; then
+            note "could not run anything as ${SERVICE_USER} to check it:"
+            sed 's/^/      | /' "${_log}"
+        elif _as_service timeout 60 "${BROWSER_PATH}" --headless --user-data-dir="${_profile}" \
+            --dump-dom about:blank 2>"${_log}" | grep -q '<html'; then
+            note "it does"
+        elif _as_service timeout 60 "${BROWSER_PATH}" --headless --no-sandbox \
+            --user-data-dir="${_profile}" --dump-dom about:blank 2>/dev/null | grep -q '<html'; then
+            note "it runs only without its sandbox on this kernel; to let the server do the"
+            note "same, add  browser_sandbox = false  to the environment in ${CONFIG_FILE}"
+        else
+            note "it does not; view_app will fail until this works:"
+            tail -n 20 "${_log}" | sed 's/^/      | /'
+        fi
+        [ -n "${_profile:-}" ] && ${SUDO} rm -rf "${_profile}"
+        rm -f "${_log}"
+    fi
 fi
 
 # ---------------------------------------------------------------------------

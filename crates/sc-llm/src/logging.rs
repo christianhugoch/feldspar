@@ -85,7 +85,11 @@ impl LlmProvider for LoggedProvider {
 
         sc_log::log_verbose!("llm → {}: {}", self.label, request_summary(&req));
         if sc_log::enabled(Verbosity::Trace) {
-            sc_log::log_trace!("llm request to {}:\n{}", self.label, as_json(&req));
+            sc_log::log_trace!(
+                "llm request to {}:\n{}",
+                self.label,
+                as_json(&without_images(&req))
+            );
         }
 
         let summary = request_summary(&req);
@@ -266,6 +270,28 @@ pub fn response_summary(answer: &AssistantMessage, elapsed: Duration) -> String 
 ///
 /// Never an error and never a panic: a logging path that could fail the call it
 /// is describing would be worse than no log at all.
+/// The request as JSON with every image's bytes replaced by their size: a
+/// screenshot is never logged, even at trace (TODO §7b).
+fn without_images(req: &crate::message::LlmRequest) -> serde_json::Value {
+    let mut value = serde_json::to_value(req).unwrap_or(serde_json::Value::Null);
+    if let Some(messages) = value.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for message in messages {
+            let Some(images) = message.get_mut("images").and_then(|i| i.as_array_mut()) else {
+                continue;
+            };
+            for image in images {
+                if let Some(data) = image.get_mut("data") {
+                    let chars = data.as_str().map_or(0, str::len);
+                    *data = serde_json::Value::String(format!(
+                        "‹{chars} base64 characters not logged›"
+                    ));
+                }
+            }
+        }
+    }
+    value
+}
+
 fn as_json<T: Serialize>(value: &T) -> String {
     serde_json::to_string_pretty(value)
         .unwrap_or_else(|e| format!("‹could not be serialised for the log: {e}›"))
@@ -277,6 +303,31 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_logged_request_carries_no_image_bytes() {
+        let call = ToolCall {
+            id: "c".to_owned(),
+            name: "view_app".to_owned(),
+            arguments: json!({}),
+        };
+        let mut result = LlmMessage::tool_result(&call, "shot");
+        if let LlmMessage::ToolResult { images, .. } = &mut result {
+            images.push(crate::message::ImagePart::new("image/jpeg", vec![7u8; 300]));
+        }
+        let req = crate::message::LlmRequest {
+            messages: vec![LlmMessage::user("look"), result],
+            ..Default::default()
+        };
+        let logged = as_json(&without_images(&req));
+        let encoded = crate::message::ImagePart::new("image/jpeg", vec![7u8; 300]).base64();
+        assert!(!logged.contains(&encoded[..40]), "{logged}");
+        assert!(
+            logged.contains("‹400 base64 characters not logged›"),
+            "{logged}"
+        );
+        assert!(logged.contains("image/jpeg"));
+    }
     use crate::message::{LlmDelta, LlmMessage, StopReason, ToolCall, ToolSpec, Usage};
 
     /// A provider that yields a scripted stream, so the decorator can be tested

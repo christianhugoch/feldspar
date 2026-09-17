@@ -52,7 +52,12 @@ pub async fn serve(
     // because this is the function that owns the process's signal behaviour, and
     // it holds the registry a reload mutates.
     crate::reload::spawn_sighup_reload(apps.clone());
+    // Previews a crashed run left behind go when idle (TODO §7b).
+    spawn_preview_sweep(apps.clone());
 
+    // The coding agent's headless browser, and the loopback listener it reaches
+    // previews through (TODO §7b), where this host has a browser.
+    let browser = serve_browser(&config, &endpoints, &handlers, &sessions, &apps).await?;
     let app = build_router_with_apps(&endpoints, handlers, sessions, &config, apps)?;
 
     // The service manager that started this process, if one did. Read here
@@ -63,6 +68,9 @@ pub async fn serve(
     let TlsSettings::Off = &config.tls else {
         let result = serve_with_tls(config, app, service).await;
         sc_core_traits::kill_all_processes();
+        if let Some(browser) = &browser {
+            browser.shutdown();
+        }
         return result;
     };
 
@@ -89,9 +97,83 @@ pub async fn serve(
     if let Some(watchdog) = watchdog {
         watchdog.abort();
     }
-    // The coding agents' managed processes stop with the server (TODO 6a.4).
+    // The coding agents' managed processes stop with the server (TODO 6a.4),
+    // and so does their browser.
     sc_core_traits::kill_all_processes();
+    if let Some(browser) = &browser {
+        browser.shutdown();
+    }
     result
+}
+
+/// Start the headless browser `view_app` drives, and the listener it reaches
+/// previews through, where this server can: it has a base domain, agents, and a
+/// browser was found at boot. Installs the driver into the agents' view
+/// services and returns it.
+///
+/// **The listener is the browser's own**: bound on the loopback address only,
+/// on a port the system picks, serving the same routes as the public one in
+/// plain HTTP and with non-`Secure` cookies. The browser maps every host under
+/// the base domain onto it and no other name resolves, so no certificate needs
+/// trusting and a page cannot reach anything but this server (TODO §7b).
+pub async fn serve_browser(
+    config: &ServerConfig,
+    endpoints: &EndpointSet,
+    handlers: &HandlerRegistry,
+    sessions: &Arc<SessionStore>,
+    apps: &Arc<AppMounts>,
+) -> Result<Option<Arc<crate::browser::ChromiumDriver>>> {
+    let (Some(base_domain), Some(agents)) = (config.base_domain.clone(), apps.agents()) else {
+        return Ok(None);
+    };
+    let Ok(executable) = agents.registry().host().browser.clone() else {
+        return Ok(None);
+    };
+    let loopback = ServerConfig {
+        secure_cookies: false,
+        ..config.clone()
+    };
+    let router = build_router_with_apps(
+        endpoints,
+        handlers.clone(),
+        sessions.clone(),
+        &loopback,
+        apps.clone(),
+    )?;
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .context("binding the browser's loopback listener")?;
+    let port = listener
+        .local_addr()
+        .context("reading the browser's loopback listener's address")?
+        .port();
+    tokio::spawn(async move {
+        let served = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
+        if let Err(e) = served {
+            sc_log::log_error!("the browser's loopback listener stopped: {e}");
+        }
+    });
+    let driver = Arc::new(crate::browser::ChromiumDriver::new(
+        crate::browser::DriverConfig {
+            executable,
+            sandbox: config.browser_sandbox,
+            contexts: config.browser_contexts,
+            base_domain,
+            port,
+        },
+        sessions.clone(),
+        apps.clone(),
+    ));
+    agents
+        .registry()
+        .view_services()
+        .set_browser(driver.clone());
+    sc_log::log_info!("view_app's browser reaches previews through 127.0.0.1:{port}");
+    Ok(Some(driver))
 }
 
 /// Serve `app` over both listeners: TLS on the configured HTTPS port, and plain
@@ -213,4 +295,17 @@ async fn shutdown_signal(service: ServiceManager) {
     }
 
     service.notify_stopping("draining in-flight requests");
+}
+
+/// Sweep idle previews once a minute, for the life of the process.
+fn spawn_preview_sweep(apps: Arc<AppMounts>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            for label in apps.sweep_previews(std::time::Instant::now()) {
+                sc_log::log_info!("unmounted the idle preview `{label}`");
+            }
+        }
+    });
 }

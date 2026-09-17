@@ -925,54 +925,74 @@ default.
 
 ## Phase 6b — `view_app` and the preview mount (§7b)
 
-- [ ] 6b.1 `scripts/setup-host.sh` installs a headless-capable Chromium that runs under the
+- [x] 6b.1 `scripts/setup-host.sh` installs a headless-capable Chromium that runs under the
       service user, on each supported distribution (Debian 12/13: `chromium`; Ubuntu 24.04:
       check whether `chromium-browser` is the snap shim, and if it is, install a non-snap
       build instead). The script's dry run lists it, and its verification step runs
       `<browser> --headless --dump-dom about:blank` as the service user. Document it in the
-      script's header and in `docs/OPERATIONS.md`.
-- [ ] 6b.2 The `browser` setting in `feldspar.toml` (`sc-config`), plus detection on `PATH`.
+      script's header and in `docs/OPERATIONS.md`. *(Ubuntu gets `google-chrome-stable` from
+      Google's apt repository on amd64, and a note elsewhere. The check is reported, never fatal,
+      and suggests `browser_sandbox = false` when only `--no-sandbox` works. `--no-browser` skips
+      the step.)*
+- [x] 6b.2 The `browser` setting in `feldspar.toml` (`sc-config`), plus detection on `PATH`.
       The server logs at startup which browser it found, or that `view_app` is unavailable
-      and why.
-- [ ] 6b.3 The preview registry in `sc-server/src/apps.rs`: `mount_preview(label, run,
+      and why. *(In `sc-config-file`, the file's reader: `browser` and `browser_sandbox` on an
+      environment, mirroring `serve`'s `--browser` and `--no-browser-sandbox`. Detection skips a
+      snap and names what it skipped.)*
+- [x] 6b.3 The preview registry in `sc-server/src/apps.rs`: `mount_preview(label, run,
       MountedApp)`, `unmount_preview`, and a sweep of previews whose run is idle (setting,
       default one hour). The router resolves `<label>--<subdomain>` hosts to a preview
       (`router.rs`). Answer 404 unless the request carries the owning run's session. Tests:
       routing, isolation from the live mount, 404 without the session and with another
-      user's session, unmount on run end, the sweep.
-- [ ] 6b.4 A `sc-agent` seam for the two capabilities `sc-core-traits` cannot reach:
+      user's session, unmount on run end, the sweep. *(A `<label>--<subdomain>` host whose label
+      is no preview, but whose subdomain is served, is also a 404. The idle time is
+      `--preview-idle-minutes`, and "idle" is unused rather than unwritten: any mount, lookup or
+      request through it counts.)*
+- [x] 6b.4 A `sc-agent` seam for the two capabilities `sc-core-traits` cannot reach:
       `TraitContext::previews` (`AppPreviewer`: mount/refresh/unmount a preview for this run)
       and `TraitContext::browser` (`BrowserDriver`), both `Option` with `require_*` like the
       evaluator. `Runner::with_previews` / `with_browser`, wired in the server. The run-end
-      hook in the driver calls unmount and closes the browser context.
-- [ ] 6b.5 `check`'s application build mounts or refreshes the run's preview on success.
+      hook in the driver calls unmount and closes the browser context. *(`sc_agent::view`. The
+      server builds its mounts after its agents, so the registry carries late-bound
+      `ViewServices` and a runner without `with_*` falls back to them: chat, triggers and
+      delegated children all reach them. `TraitCheck` gains `host: HostCapabilities`, and
+      `TraitContext::attach_image` carries an image into the tool result.)*
+- [x] 6b.5 `check`'s application build mounts or refreshes the run's preview on success.
       Test: a green build makes the preview serve the new bundle while the live mount still
       serves the old one.
-- [ ] 6b.6 The browser driver (`chromiumoxide`) in `sc-server`: one process, a context per
+- [x] 6b.6 The browser driver (`chromiumoxide`) in `sc-server`: one process, a context per
       run, the concurrency cap, `--host-resolver-rules` onto the local listener with
       certificate trust scoped to that mapping, navigation outside the preview host refused,
-      and console errors and failed requests captured per context.
-- [ ] 6b.7 The session for the caller: `create_session` for the run's user, or for
+      and console errors and failed requests captured per context. *(Instead of trusting the
+      listener's certificate, `serve_browser` binds a listener of the browser's own on
+      `127.0.0.1`, plain HTTP with non-`Secure` cookies, and the resolver rules map every other
+      name to NOTFOUND. A watchdog kills the browser if the server dies without shutting it
+      down.)*
+- [x] 6b.7 The session for the caller: `create_session` for the run's user, or for
       `view_app_user` on a trigger-started run. Cookies are injected into the context, the
       session is deleted at run end, and nothing is written to disk. Tests: a user run sees
       that user's rows only, a system run without `view_app_user` is refused by name, and
-      the session row is gone after the run.
-- [ ] 6b.8 The accessibility snapshot renderer: a compact tree from CDP's accessibility
+      the session row is gone after the run. *(`SessionStore::login`, which is `create_session`
+      plus this node's cache, so the router honours the session at once.)*
+- [x] 6b.8 The accessibility snapshot renderer: a compact tree from CDP's accessibility
       domain, refs on interactive nodes, stable for an unchanged page, and capped with a
       "narrow with `wait_for`/scroll" hint.
-- [ ] 6b.9 `view_app_<slug>` in `coding`: the actions of §7b, snapshot by default,
+- [x] 6b.9 `view_app_<slug>` in `coding`: the actions of §7b, snapshot by default,
       screenshot only offered with `vision`, the console/network summary, and the
       fingerprint and `elide` hooks. Settings `may_view_app` (requires `application`),
       `view_app_user`, and `view_app_timeout`. `validate_config` refuses the grant with no
       browser detected. Tests against a fixture app, skipped with a stated reason when no
       Chromium is installed: goto, snapshot refs, click and fill, a thrown error reported,
       navigation off-host refused.
-- [ ] 6b.10 `implement_feature` snapshots the feature's `pages` after a green check
+- [x] 6b.10 `implement_feature` snapshots the feature's `pages` after a green check
       (screenshots when the strong model has `vision`) and includes them in its result. The
-      `pages` field joins the plan schema.
-- [ ] 6b.11 Screenshot retention in the run (JPEG, per-run cap, older ones stubbed), never
+      `pages` field joins the plan schema. *(Moved to 9.3a: neither `implement_feature` nor the
+      plan schema exists yet. `view_app`'s `goto` plus `snapshot` is the call this makes.)*
+- [x] 6b.11 Screenshot retention in the run (JPEG, per-run cap, older ones stubbed), never
       logged. Chat and IDE relay: screenshots inline in the admin chat. The IDE relay renders
-      `view_app_` as progress with the path.
+      `view_app_` as progress with the path. *(The cap is the agent's `max_images` attribute,
+      default 20, kept by `AgentLoop`. Compaction elides every screenshot but the latest, even
+      inside the kept turns. Trace logging replaces image bytes with their size.)*
 
 ## Phase 7 — The repo map (`sc-core-traits` or a new `sc-repomap` crate)
 
@@ -1009,6 +1029,15 @@ default.
       `_fd_runs`, and the plan survives a compaction.
 - [ ] 9.3 `implement_feature`: the steps in §8, run through self-delegation (2.4), with an
       independent `check` plus the ratchet, and `max_sessions_per_feature`.
+- [ ] 9.3a The feature's `pages` (moved here from 6b.10): `pages` joins the plan schema of
+      9.2, and after a green check `implement_feature` snapshots each listed page on the
+      preview and returns the snapshots with the diff. With the strong model's `vision`, it
+      returns screenshots too. **Mind whose preview it is:** a preview belongs to the run
+      whose `check` mounted it, and the driver's drop guard unmounts it when that run's drive
+      stops. So the snapshots must be taken before the child run ends, or the preview must be
+      mounted for the planner run, not the child. Test on the scripted provider: a feature
+      with `pages` gets snapshots back, a feature without gets none, and with no browser the
+      result says why.
 - [ ] 9.4 Commit per feature for a git store (`commit` setting, default on for a git store),
       using `GitRepo::stage`/`commit` and a message written by the cheap role. A non-git store
       gets the ledger diff only.

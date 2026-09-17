@@ -401,6 +401,11 @@ matchit = "0.8"
 # thing under test happens *after* the 101. Same version axum's `ws` feature
 # already builds, so this adds no new code to the tree.
 tokio-tungstenite = "0.29"
+# The headless browser behind the coding agent's `view_app` (TODO §7b): the
+# DevTools protocol from Rust, so the server needs no Node, no Playwright and no
+# shell to look at an application. It drives an external Chromium; it does not
+# download one (no `fetcher` feature).
+chromiumoxide = { version = "0.9", default-features = false }
 
 # --- GraphQL -----------------------------------------------------------------
 #

@@ -177,7 +177,10 @@ impl Env {
             // through — which is what a `subagent` trait tested this way gets
             // told, and why its own test drives a whole run instead.
             delegate: None,
+            previews: None,
+            browser: None,
             signals: Vec::new(),
+            images: Vec::new(),
         };
         trait_.call(config, tool, &args, &mut ctx).await
     }
@@ -210,7 +213,10 @@ impl Env {
             evaluator: self.evaluator.as_ref(),
             triggers: self.dispatcher.as_ref(),
             delegate: None,
+            previews: None,
+            browser: None,
             signals: Vec::new(),
+            images: Vec::new(),
         };
         let result = trait_.call(config, tool, &args, &mut ctx).await;
         (result, ctx.signals)
@@ -289,6 +295,7 @@ impl Env {
                 catalog: &self.catalog,
                 config,
                 agent: "librarian",
+                host: self.registry.host(),
             })
             .await
     }
@@ -317,7 +324,10 @@ impl Env {
             // through — which is what a `subagent` trait tested this way gets
             // told, and why its own test drives a whole run instead.
             delegate: None,
+            previews: None,
+            browser: None,
             signals: Vec::new(),
+            images: Vec::new(),
         };
         trait_.call(config, &tool, &args, &mut ctx).await
     }

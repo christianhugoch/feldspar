@@ -87,7 +87,10 @@ impl<'e> Session<'e> {
             evaluator: None,
             triggers: None,
             delegate: None,
+            previews: None,
+            browser: None,
             signals: Vec::new(),
+            images: Vec::new(),
         };
         coding
             .call(&self.config, &tool, &args, &mut ctx)

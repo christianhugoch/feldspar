@@ -202,7 +202,19 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // rest of the server works and the admin can repair it in the UI. It comes
     // before the triggers because `run_agent` is one of the actions a trigger
     // may name (§11.5), and it needs the assembled trait set.
-    let agents = sc_server::install_agents(&catalog).await?;
+    // The headless browser `view_app` drives (TODO §7b), found once: on a host
+    // without one the grant is refused, so say which it is before the agents
+    // are validated against it.
+    let browser = sc_server::detect_browser(config.browser.as_deref());
+    match &browser {
+        Ok(path) => eprintln!(
+            "feldspar: view_app will use the browser at {}",
+            path.display()
+        ),
+        Err(reason) => eprintln!("feldspar: view_app is unavailable: {reason}"),
+    }
+    let agents =
+        sc_server::install_agents_on(&catalog, sc_agent::HostCapabilities { browser }).await?;
 
     // Models: the two tables a model and its fits live in, and the reap of any
     // fit that was running when this process last stopped (§8). A fit's registry
@@ -264,8 +276,12 @@ async fn serve_command(args: &[String]) -> Result<()> {
     .await?;
 
     service.notify_status("mounting applications");
+    // Held past `with_agents`, for installing the previewer below.
+    let view_services = agents.registry().view_services().clone();
     let apps = Arc::new(
         AppMounts::new(catalog.clone())
+            .with_base_domain(config.base_domain.clone())
+            .with_preview_idle(config.preview_idle)
             .with_evaluator(evaluator)
             .with_triggers(triggers.clone())
             .with_agents(agents)
@@ -276,6 +292,9 @@ async fn serve_command(args: &[String]) -> Result<()> {
     );
     if config.base_domain.is_some() {
         mount_all(&apps).await;
+        // A coding run's `check` mounts its green builds as previews beside the
+        // live mounts (TODO §7b). Without a base domain a preview has no host.
+        view_services.set_previews(apps.clone());
     }
 
     // The certificate's names, now that the mounts are known: the base domain,
@@ -372,6 +391,13 @@ fn serving_defaults(db: &DbConfig) -> Vec<String> {
     }
     if serving.secure_cookies() == Some(true) {
         flags.push("--secure-cookies".to_owned());
+    }
+    if let Some(browser) = serving.browser() {
+        flags.push("--browser".to_owned());
+        flags.push(browser.to_owned());
+    }
+    if serving.browser_sandbox() == Some(false) {
+        flags.push("--no-browser-sandbox".to_owned());
     }
     flags
 }
@@ -1065,6 +1091,13 @@ fn print_usage() {
     eprintln!("    --bind ADDR  --static-dir DIR  --session-ttl-hours N  --secure-cookies");
     eprintln!("    --base-domain DOMAIN     apps are served at <subdomain>.<domain>");
     eprintln!(
+        "    --browser PATH           the headless Chromium view_app drives (default: chromium,
+                             chromium-browser or google-chrome on PATH, not a snap)
+    --no-browser-sandbox     start that browser with --no-sandbox
+    --browser-contexts N     view_app runs that may hold a browser context at once (default 4)
+    --preview-idle-minutes N unmount a run's preview after N idle minutes (default 60)"
+    );
+    eprintln!(
         "    --file-store NAME=PATH   connect a local directory as a named file store (repeatable)"
     );
     eprintln!(
@@ -1090,8 +1123,8 @@ fn print_usage() {
     );
     eprintln!();
     eprintln!(
-        "  a feldspar.toml environment may also carry `base_domain`, `bind` and
-  `secure_cookies`, so `serve --environment NAME` needs none of those flags —
+        "  a feldspar.toml environment may also carry `base_domain`, `bind`,
+  `secure_cookies`, `browser` and `browser_sandbox`, so `serve --environment NAME` needs none of those flags —
   and so a build from the command line writes the same application URL into the
   generated documentation that the server would."
     );

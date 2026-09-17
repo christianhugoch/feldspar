@@ -959,6 +959,10 @@ other users can read it.
 | `--python-dir <dir>` | the virtual environment Python modules install into | the platform's data directory |
 | `--python-bin <path>` | the interpreter `pip` runs under | `python3` |
 | `--model-max-rows <n>` | ceiling on the rows one model dataset may select | `200000` |
+| `--browser <path>` | the headless Chromium the coding agent's `view_app` drives | `chromium`, `chromium-browser` or `google-chrome` on `PATH`, not a snap |
+| `--no-browser-sandbox` | start that browser with `--no-sandbox` (a kernel that refuses its sandbox) | sandboxed |
+| `--browser-contexts <n>` | runs that may hold a browser context at once; a call beyond it waits | `4` |
+| `--preview-idle-minutes <n>` | unmount a coding run's preview after this long unused | `60` |
 
 Unknown flags in either group are rejected with a clear error rather than ignored.
 
@@ -976,6 +980,16 @@ Unknown flags in either group are rejected with a clear error rather than ignore
 > `<subdomain>.<base-domain>`; an app that fails to build is logged and skipped, not
 > fatal, and can be fixed and rebuilt without a restart. Without a base domain the
 > server has no way to address an app, so it serves the admin only.
+
+> **A coding run's previews.** A green `check` in a coding run mounts that build
+> as the run's **preview** at `<label>--<subdomain>.<base-domain>`, beside the
+> live mount and replacing nothing; only the run's own browser session reaches it,
+> and anyone else gets a 404. The agent's `view_app` tool looks at it in a headless
+> Chromium that the server starts itself, over a listener bound to `127.0.0.1` on
+> a port of its own. The browser resolves the base domain to that listener and no
+> other name at all, so it cannot browse anywhere else. The preview goes when the run
+> stops, or after `--preview-idle-minutes`. The server logs at startup which
+> browser it found, or why `view_app` is unavailable.
 
 ### HTTPS
 

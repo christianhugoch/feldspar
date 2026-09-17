@@ -61,6 +61,11 @@ pub const ATTR_MAX_COST: &str = "max_cost";
 pub const ATTR_MAX_WALL_SECONDS: &str = "max_wall_seconds";
 /// The attribute capping the context one request may carry, in tokens.
 pub const ATTR_CONTEXT_BUDGET: &str = "context_budget";
+/// The attribute capping how many images (screenshots) one run keeps in its
+/// transcript. Older ones are replaced by stubs (TODO §7b).
+pub const ATTR_MAX_IMAGES: &str = "max_images";
+/// [`ATTR_MAX_IMAGES`] when the agent sets none.
+pub const DEFAULT_MAX_IMAGES: usize = 20;
 /// The attribute allowing several tool calls in one model turn. Absent is off
 /// (R§12): sequential calls are easier to fingerprint.
 pub const ATTR_PARALLEL_TOOL_CALLS: &str = "parallel_tool_calls";
@@ -417,6 +422,15 @@ impl Agent {
             .get(ATTR_CONTEXT_BUDGET)
             .and_then(Json::as_u64)
             .filter(|t| *t > 0)
+    }
+
+    /// How many images one run keeps in its transcript.
+    pub fn max_images(&self) -> usize {
+        self.attributes
+            .get(ATTR_MAX_IMAGES)
+            .and_then(Json::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(DEFAULT_MAX_IMAGES)
     }
 
     /// Whether the model may make several tool calls in one turn. Off unless the

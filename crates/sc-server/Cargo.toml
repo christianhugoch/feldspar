@@ -118,6 +118,8 @@ base64.workspace = true
 bytes.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
+# The DevTools-protocol client `view_app`'s browser driver is written on.
+chromiumoxide.workspace = true
 chrono.workspace = true
 rust_decimal.workspace = true
 # A Saltcorn 1 backup lists its files in `files.csv` (`backup::v1`), so importing

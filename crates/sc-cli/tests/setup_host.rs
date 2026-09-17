@@ -98,6 +98,14 @@ fn stub_dir(dir: &Path) -> (PathBuf, PathBuf) {
     record("systemctl", "exit 0\n");
     record("chown", "exit 0\n");
     record("ln", "exit 0\n");
+    // The browser `view_app` drives, and the service account it is checked
+    // under — stubs for the reason npm is one: what this machine has installed
+    // must not decide what the script does. `runuser` drops `-u NAME --`.
+    record(
+        "chromium",
+        "case \"$*\" in *--dump-dom*) echo '<html><head></head><body></body></html>' ;; esac\n",
+    );
+    record("runuser", "shift 3\nexec \"$@\"\n");
     write_executable(
         &bin.join("sudo"),
         &format!(
@@ -215,6 +223,23 @@ fn a_static_install_writes_the_config_and_a_unit_pointing_at_the_deployed_binary
     assert!(
         stdout.contains("leaving Node alone"),
         "it should say the npm that is there is kept:\n{stdout}"
+    );
+    // The browser on PATH is kept, and started once as the service account.
+    assert!(
+        stdout.contains("a headless-capable browser is already here:"),
+        "{stdout}"
+    );
+    assert!(
+        commands
+            .lines()
+            .any(|l| l.starts_with("runuser -u feldspar -- ")
+                && l.contains("--headless")
+                && l.contains("--dump-dom about:blank")),
+        "the browser should be checked as the service account:\n{commands}"
+    );
+    assert!(
+        stdout.contains("runs headless as feldspar\n    it does"),
+        "{stdout}"
     );
     assert!(commands.contains("systemctl daemon-reload"), "{commands}");
     assert!(
@@ -622,4 +647,80 @@ fn the_generated_unit_agrees_with_the_readme() {
             "the unit the script writes is missing the README's `{line}`:\n{planned}"
         );
     }
+}
+
+/// TODO 6b.1: with no browser on `PATH` — and Ubuntu's snap shim does not
+/// count — the plan installs one (or says why it cannot), and checks it as the
+/// service account; `--no-browser` does neither.
+#[test]
+fn a_host_without_a_browser_gets_one_and_a_snap_shim_does_not_count() {
+    let dir = scratch("browser");
+    let (bin, _log) = stub_dir(&dir);
+    // No `chromium` stub here: only Ubuntu's shim.
+    fs::remove_file(bin.join("chromium")).unwrap();
+    write_executable(
+        &bin.join("chromium-browser"),
+        "#!/bin/sh\nexec /snap/bin/chromium \"$@\"\n",
+    );
+    // A PATH with the stubs and the few tools the plan needs, and none of this
+    // machine's browsers.
+    let tools = dir.join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    for tool in [
+        "sh", "id", "dirname", "basename", "cat", "sed", "grep", "head", "tail", "readlink",
+        "dpkg", "uname", "tr", "cut",
+    ] {
+        if let Ok(found) = which(tool) {
+            std::os::unix::fs::symlink(found, tools.join(tool)).unwrap();
+        }
+    }
+    let path = format!("{}:{}", bin.display(), tools.display());
+
+    let plan = |extra: &[&str]| {
+        let out = Command::new(tools.join("sh"))
+            .arg(script())
+            .args(["--dry-run", "--static", "--domain", "example.com"])
+            .args(extra)
+            .env("PATH", &path)
+            .output()
+            .expect("run setup-host.sh");
+        assert!(
+            out.status.success(),
+            "{}\n{}",
+            stdout_of(&out),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        stdout_of(&out)
+    };
+
+    let stdout = plan(&[]);
+    assert!(
+        !stdout.contains("already here: "),
+        "the shim is not a browser:\n{stdout}"
+    );
+    let installs = stdout.contains("apt-get install -y chromium")
+        || stdout.contains("apt-get install -y google-chrome-stable");
+    let cannot = stdout.contains("no non-snap Chromium is known");
+    assert!(installs || cannot, "{stdout}");
+    if installs {
+        assert!(stdout.contains("runs headless as feldspar"), "{stdout}");
+    }
+
+    let stdout = plan(&["--no-browser"]);
+    assert!(
+        stdout.contains("--no-browser: view_app will be unavailable"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("apt-get install -y chromium"), "{stdout}");
+    assert!(!stdout.contains("runs headless"), "{stdout}");
+}
+
+/// Where `tool` is on this machine's PATH.
+fn which(tool: &str) -> Result<PathBuf, ()> {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .map(|dir| dir.join(tool))
+        .find(|candidate| candidate.is_file())
+        .ok_or(())
 }

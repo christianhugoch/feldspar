@@ -13,6 +13,7 @@ use std::sync::Arc;
 use sc_error::{Error, Result};
 
 use crate::agent_trait::AgentTrait;
+use crate::view::{HostCapabilities, ViewServices};
 
 /// The traits available to agents, by name.
 ///
@@ -22,6 +23,13 @@ use crate::agent_trait::AgentTrait;
 #[derive(Clone, Default)]
 pub struct AgentRegistry {
     traits: BTreeMap<String, Arc<dyn AgentTrait>>,
+    /// What the server found on its host, for configuration checks that depend
+    /// on it (a browser for `view_app`).
+    host: HostCapabilities,
+    /// The server's preview and browser capabilities, installed once it has
+    /// built them (TODO §7b). Shared by every clone, so a runner made from any
+    /// handle on this registry reaches them.
+    view: Arc<ViewServices>,
 }
 
 impl AgentRegistry {
@@ -34,6 +42,23 @@ impl AgentRegistry {
     /// exactly the placeholder that goes stale.
     pub fn new() -> AgentRegistry {
         AgentRegistry::default()
+    }
+
+    /// The same registry on a host with `host`'s capabilities.
+    pub fn with_host(mut self, host: HostCapabilities) -> AgentRegistry {
+        self.host = host;
+        self
+    }
+
+    /// What the server found on its host.
+    pub fn host(&self) -> &HostCapabilities {
+        &self.host
+    }
+
+    /// The server's preview and browser capabilities, where it has installed
+    /// them.
+    pub fn view_services(&self) -> &Arc<ViewServices> {
+        &self.view
     }
 
     /// Register `trait_` under its own [`name`](AgentTrait::name).

@@ -25,6 +25,11 @@
 //!
 //! A red check raises [`Signal::CheckFailed`], which the loop's escalation
 //! ladder counts.
+//!
+//! **A green build is previewed.** Where the server mounts previews, the bundle
+//! of a successful application build is mounted as the run's preview (TODO
+//! §7b), beside the live mount, for `view_app` to look at. Publishing is still
+//! the admin's Build button.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -244,34 +249,63 @@ pub async fn run_script(project: &Project, script: &str, timeout: u64) -> Result
     })
 }
 
-/// Build the configured application, as a check.
-async fn run_build(subdomain: &str, ctx: &TraitContext<'_>) -> Result<CheckRun> {
+/// Build the configured application, as a check. A green build also says
+/// where its bundle is, for the preview.
+async fn run_build(
+    subdomain: &str,
+    ctx: &TraitContext<'_>,
+) -> Result<(CheckRun, Option<std::path::PathBuf>)> {
     let started = Instant::now();
     let (app, source) = resolve_application(ctx.catalog, subdomain).await?;
     // A failed build is news about the build, so it is an outcome, not an error.
-    let outcome = match sc_app::build_application(ctx.catalog, &app, &source, ctx.triggers).await {
-        Ok(report) => {
-            let output = success_log(&report);
-            Outcome::Ran {
-                passed: true,
-                diagnostics: sc_app::parse_diagnostics(&output),
-                output,
+    let (outcome, bundle) =
+        match sc_app::build_application(ctx.catalog, &app, &source, ctx.triggers).await {
+            Ok(report) => {
+                let output = success_log(&report);
+                let outcome = Outcome::Ran {
+                    passed: true,
+                    diagnostics: sc_app::parse_diagnostics(&output),
+                    output,
+                };
+                (outcome, Some(report.output_dir))
             }
-        }
-        Err(e) => {
-            let output = e.to_string();
-            Outcome::Ran {
-                passed: false,
-                diagnostics: sc_app::parse_diagnostics(&output),
-                output,
+            Err(e) => {
+                let output = e.to_string();
+                let outcome = Outcome::Ran {
+                    passed: false,
+                    diagnostics: sc_app::parse_diagnostics(&output),
+                    output,
+                };
+                (outcome, None)
             }
-        }
-    };
-    Ok(CheckRun {
+        };
+    let run = CheckRun {
         name: build_name(subdomain),
         outcome,
         elapsed: started.elapsed(),
-    })
+    };
+    Ok((run, bundle))
+}
+
+/// Mount or refresh the run's preview of `subdomain` from a green build's
+/// bundle (TODO §7b), and say so. Nothing is said where the server mounts no
+/// previews.
+async fn mount_preview(
+    subdomain: &str,
+    bundle: &std::path::Path,
+    ctx: &TraitContext<'_>,
+) -> Option<String> {
+    let previews = ctx.previews?;
+    Some(
+        match previews.mount_preview(ctx.run, subdomain, bundle).await {
+            Ok(preview) => format!(
+                "preview: this build of `{subdomain}` is mounted for this run at {}; \
+                 the live application is unchanged.",
+                preview.host
+            ),
+            Err(e) => format!("preview: this build could not be mounted: {e}"),
+        },
+    )
 }
 
 /// Record the baseline of every check the configuration names — the post-turn
@@ -312,7 +346,7 @@ pub async fn record_baseline(
         }
     }
     if let Some(subdomain) = application {
-        let run = run_build(&subdomain, ctx).await?;
+        let (run, _) = run_build(&subdomain, ctx).await?;
         if let Some(baseline) = run.outcome.baseline() {
             state.baseline.insert(run.name, baseline);
         }
@@ -477,6 +511,7 @@ pub async fn call(
     if unchanged {
         record_runs(&mut state, &runs);
     }
+    let mut preview = None;
     if let Some(subdomain) = &application {
         // The type check found new errors: the build would fail on them too.
         let blocked = runs.iter().find(|run| {
@@ -488,7 +523,13 @@ pub async fn call(
                 outcome: Outcome::Skipped(format!("because {} has new failures", run.name)),
                 elapsed: Duration::ZERO,
             },
-            None => run_build(subdomain, ctx).await?,
+            None => {
+                let (build, bundle) = run_build(subdomain, ctx).await?;
+                if let Some(bundle) = bundle {
+                    preview = mount_preview(subdomain, &bundle, ctx).await;
+                }
+                build
+            }
         };
         if unchanged {
             record_runs(&mut state, std::slice::from_ref(&build));
@@ -543,6 +584,7 @@ pub async fn call(
     if !red.is_empty() {
         ctx.signal(Signal::CheckFailed);
     }
+    lines.extend(preview);
     head.push('\n');
     head.push_str(&lines.join("\n"));
     Ok(Json::String(head))

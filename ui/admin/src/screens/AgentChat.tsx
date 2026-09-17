@@ -934,6 +934,17 @@ function ToolEntry({ entry }: { entry: Extract<Entry, { kind: "tool" }> }) {
         {running && <RunningDots />}
         <IconChevronDown className="icon-2 chat-tool-caret flex-shrink-0" />
       </button>
+      {/* A screenshot is what the agent saw: shown, not folded away with the
+          snapshot text (TODO §7b). */}
+      {entry.images?.map((src, index) => (
+        <img
+          key={index}
+          src={src}
+          alt={`what ${entry.name} saw`}
+          className="chat-tool-image d-block mt-1 border rounded"
+          style={{ maxWidth: "100%" }}
+        />
+      ))}
       {open && (
         <div className="chat-tool-body">
           <Labelled label="Arguments">

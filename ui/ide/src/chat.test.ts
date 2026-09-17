@@ -350,6 +350,16 @@ describe("one event, relayed", () => {
     );
   });
 
+  it("shows a look at the application as progress with its path", () => {
+    expect(toolProgress("view_app_todoapp_app", { action: "goto", path: "/tasks" })).toBe(
+      "Looking at /tasks",
+    );
+    expect(toolProgress("view_app_todoapp_app", { action: "click", ref: "@e3" })).toBe(
+      "Looking at the application",
+    );
+    expect(changedPaths("view_app_todoapp_app", { path: "/tasks" })).toEqual([]);
+  });
+
   it("names a tool it does not know rather than inventing a verb for it", () => {
     expect(toolProgress("query_rows_books", { table: "books" })).toBe(
       "query_rows_books",

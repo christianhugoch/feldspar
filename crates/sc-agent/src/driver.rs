@@ -38,6 +38,7 @@ use crate::machine::{AgentLoop, Conclusion, Step, StepMeta, ToolOutcome, trait_s
 use crate::registry::AgentRegistry;
 use crate::run::{Run, RunId, RunMode};
 use crate::run_store::{load_run, save_run};
+use crate::view::{AppPreviewer, BrowserDriver};
 
 /// What a caller watching a run wants to see while it happens.
 ///
@@ -89,6 +90,10 @@ pub struct Runner<'a> {
     evaluator: Option<&'a Arc<dyn JsEvaluator>>,
     triggers: Option<&'a Arc<TriggerDispatcher>>,
     connector: Option<&'a Arc<dyn ProviderConnector>>,
+    /// How this run mounts previews and drives the browser (TODO §7b). `None`
+    /// falls back to what the registry's [`ViewServices`](crate::ViewServices) hold.
+    previews: Option<&'a Arc<dyn AppPreviewer>>,
+    browser: Option<&'a Arc<dyn BrowserDriver>>,
     /// The mode and role a run this runner *starts* is given. A run it drives
     /// carries its own on its row.
     mode: RunMode,
@@ -130,6 +135,8 @@ impl<'a> Runner<'a> {
             evaluator: None,
             triggers: None,
             connector: None,
+            previews: None,
+            browser: None,
             mode: RunMode::Act,
             role: ModelRole::Executor,
             chain: Vec::new(),
@@ -181,6 +188,34 @@ impl<'a> Runner<'a> {
     pub fn with_connector(mut self, connector: &'a Arc<dyn ProviderConnector>) -> Runner<'a> {
         self.connector = Some(connector);
         self
+    }
+
+    /// Mount this run's application previews through `previews` (TODO §7b).
+    ///
+    /// Optional, like the evaluator. Without it the runner uses the previewer
+    /// the registry's [`ViewServices`](crate::ViewServices) hold, where the server installed one.
+    pub fn with_previews(mut self, previews: &'a Arc<dyn AppPreviewer>) -> Runner<'a> {
+        self.previews = Some(previews);
+        self
+    }
+
+    /// Drive this run's browser through `browser` (TODO §7b). Optional, with
+    /// the same fallback as [`with_previews`](Runner::with_previews).
+    pub fn with_browser(mut self, browser: &'a Arc<dyn BrowserDriver>) -> Runner<'a> {
+        self.browser = Some(browser);
+        self
+    }
+
+    /// The previewer this run uses, if any.
+    fn previews(&self) -> Option<&Arc<dyn AppPreviewer>> {
+        self.previews
+            .or_else(|| self.registry.view_services().previews())
+    }
+
+    /// The browser driver this run uses, if any.
+    fn browser(&self) -> Option<&Arc<dyn BrowserDriver>> {
+        self.browser
+            .or_else(|| self.registry.view_services().browser())
     }
 
     /// Start runs in `mode`, answered by `role`'s model.
@@ -819,14 +854,18 @@ impl<'a> Runner<'a> {
                             // needs one gets `require_delegate`'s configuration
                             // error rather than a runner that cannot finish.
                             delegate: self.connector.map(|_| &delegation as &dyn Delegator),
+                            previews: self.previews().map(|p| p.as_ref() as &dyn AppPreviewer),
+                            browser: self.browser().map(|b| b.as_ref() as &dyn BrowserDriver),
                             signals: Vec::new(),
+                            images: Vec::new(),
                         };
                         let result = trait_
                             .call(&enabled.config, &call.name, &call.arguments, &mut ctx)
                             .await;
                         let signals = std::mem::take(&mut ctx.signals);
+                        let images = std::mem::take(&mut ctx.images);
                         match result {
-                            Ok(value) => ToolOutcome::ok(call.clone(), &value),
+                            Ok(value) => ToolOutcome::ok(call.clone(), &value).with_images(images),
                             Err(e) => ToolOutcome::failed(call.clone(), e),
                         }
                         .with_fingerprint(fingerprint)
@@ -1062,6 +1101,8 @@ impl<'a> Runner<'a> {
             evaluator: self.evaluator,
             triggers: self.triggers,
             connector: self.connector,
+            previews: self.previews,
+            browser: self.browser,
             mode: child_mode,
             role: child_role,
             chain,
@@ -1149,6 +1190,14 @@ impl Drop for RunEnded<'_, '_> {
             if let Ok(trait_) = self.runner.registry.require(&enabled.trait_) {
                 trait_.run_ended(&enabled.config, self.run);
             }
+        }
+        // What the server holds for the run outside its state: its previews,
+        // and its browser context with the session in it (TODO §7b).
+        if let Some(previews) = self.runner.previews() {
+            previews.unmount_previews(self.run);
+        }
+        if let Some(browser) = self.runner.browser() {
+            browser.close(self.run);
         }
     }
 }

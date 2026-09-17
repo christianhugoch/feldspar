@@ -122,6 +122,7 @@ pub async fn validate_agent(
                 catalog,
                 config: &enabled.config,
                 agent: name,
+                host: registry.host(),
             })
             .await
             .map_err(|e| where_(e.to_string()))?;

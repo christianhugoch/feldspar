@@ -614,9 +614,16 @@ async fn dispatch(
 ) -> Response {
     // An application claims the whole of its subdomain, so this comes first: on
     // `blog.example.com` every path is the blog's, not the admin's.
-    if let Some(app) = resolve_app(&state, &headers) {
-        let csrf = csrf.map(|axum::Extension(token)| token.0);
-        return dispatch_app(&state, &app, method, &uri, &headers, jar, csrf, &body).await;
+    match resolve_app(&state, &headers, &jar) {
+        Resolved::App(app) => {
+            let csrf = csrf.map(|axum::Extension(token)| token.0);
+            return dispatch_app(&state, &app, method, &uri, &headers, jar, csrf, &body).await;
+        }
+        // A run's preview, asked for without that run's session: the answer is
+        // the one a host that serves nothing gets, so a preview shows nobody
+        // else unreviewed code (TODO §7b).
+        Resolved::HiddenPreview => return json_error(StatusCode::NOT_FOUND, "not found"),
+        Resolved::Admin => {}
     }
 
     match state.routes.at(uri.path()) {
@@ -666,11 +673,44 @@ async fn dispatch(
 /// the request is served: a concurrent mount/unmount never blocks on an in-flight
 /// request, and a request in flight against a since-replaced app keeps serving the
 /// version it resolved.
-fn resolve_app(state: &AppState, headers: &axum::http::HeaderMap) -> Option<Arc<MountedApp>> {
-    let base = state.base_domain.as_ref()?;
-    let host = headers.get(header::HOST)?.to_str().ok()?;
-    let subdomain = subdomain_of(host, Some(base.as_str()))?;
-    state.apps.get(subdomain)
+fn resolve_app(state: &AppState, headers: &axum::http::HeaderMap, jar: &CookieJar) -> Resolved {
+    let Some(label) = state.base_domain.as_ref().and_then(|base| {
+        let host = headers.get(header::HOST)?.to_str().ok()?;
+        subdomain_of(host, Some(base.as_str()))
+    }) else {
+        return Resolved::Admin;
+    };
+    // `<label>--<subdomain>` is a preview when the label is one. Anything else
+    // with a `--` in it is an ordinary subdomain.
+    let preview = label.split_once("--");
+    if let Some((preview, subdomain)) = preview {
+        let session = jar.get(SESSION_COOKIE).map(|c| c.value());
+        match state.apps.resolve_preview(preview, subdomain, session) {
+            Ok(Some(app)) => return Resolved::App(app),
+            Err(()) => return Resolved::HiddenPreview,
+            Ok(None) => {}
+        }
+    }
+    match state.apps.get(label) {
+        Some(app) => Resolved::App(app),
+        // The shape of a preview of a served application, and not one (any
+        // more): answered as a hidden one is, so an unmounted preview and a
+        // label that never existed read the same.
+        None if preview.is_some_and(|(_, subdomain)| state.apps.get(subdomain).is_some()) => {
+            Resolved::HiddenPreview
+        }
+        None => Resolved::Admin,
+    }
+}
+
+/// What a request's `Host` resolves to.
+enum Resolved {
+    /// An application, or a run's preview of one.
+    App(Arc<MountedApp>),
+    /// A run's preview, without that run's session.
+    HiddenPreview,
+    /// Not an application: the admin.
+    Admin,
 }
 
 /// Serve one request against an application: its API providers first, then its

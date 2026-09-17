@@ -16,11 +16,11 @@
 use crate::common;
 
 use common::{Env, config};
-use sc_agent::{RunCaller, Signal};
+use sc_agent::{HostCapabilities, RunCaller, Signal};
 use sc_app::{Application, FrameworkRef, save_application};
 use sc_core_traits::{
-    CFG_APPLICATION, CFG_CHECKS, CFG_MAY_CHECK, CFG_MAY_EDIT, CFG_ROOT, CFG_STORE, CodingState,
-    configured_scope, tool_names,
+    CFG_APPLICATION, CFG_CHECKS, CFG_MAY_CHECK, CFG_MAY_EDIT, CFG_MAY_VIEW_APP, CFG_ROOT,
+    CFG_STORE, CFG_VIEW_APP_USER, CodingState, configured_scope, tool_names,
 };
 use sc_error::Result;
 use sc_types::Attrs;
@@ -377,5 +377,81 @@ async fn the_check_settings_are_validated_and_the_tool_needs_its_grant() -> Resu
         .await;
     let err = result.unwrap_err().to_string();
     assert!(err.contains(CFG_MAY_CHECK), "{err}");
+    Ok(())
+}
+
+/// TODO 6b.9: `may_view_app` needs the `application` setting and a browser on
+/// the server, `view_app_user` must name a user, and the tool is offered only
+/// under the grant — with `screenshot` only for a model with `vision`.
+#[tokio::test]
+async fn the_view_app_grant_needs_an_application_a_browser_and_a_real_user() -> Result<()> {
+    let mut env = Env::new().await?;
+    sc_auth::bootstrap(&env.catalog).await?;
+    env.with_file_store("code", None).await?;
+    let framework = FrameworkRef::new("code")
+        .with("store", "code")
+        .with("source", "")
+        .with("output", "dist")
+        .with("command", "true");
+    save_application(&env.catalog, &Application::new("Todo", "todo", framework)).await?;
+    let with = |entries: &[(&str, Json)]| {
+        let mut cfg = config(&[(CFG_STORE, json!("code")), (CFG_ROOT, json!(""))]);
+        for (key, value) in entries {
+            cfg.insert((*key).to_owned(), value.clone());
+        }
+        cfg
+    };
+    let granted = with(&[
+        (CFG_MAY_VIEW_APP, json!(true)),
+        (CFG_APPLICATION, json!("todo")),
+    ]);
+
+    // This registry has looked for no browser: the grant is refused, saying why.
+    let err = env.check("coding", &granted).await.unwrap_err().to_string();
+    assert!(err.contains("needs a headless browser"), "{err}");
+    // Off, the same host is fine.
+    env.check("coding", &with(&[(CFG_APPLICATION, json!("todo"))]))
+        .await?;
+
+    // On a host with one: the application is still required.
+    env.registry = std::mem::take(&mut env.registry)
+        .with_host(HostCapabilities::with_browser("/usr/bin/chromium"));
+    env.check("coding", &granted).await?;
+    let err = env
+        .check("coding", &with(&[(CFG_MAY_VIEW_APP, json!(true))]))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("needs the `application` setting"), "{err}");
+    let mut unknown = granted.clone();
+    unknown.insert(CFG_VIEW_APP_USER.to_owned(), json!("nobody@example.com"));
+    let err = env.check("coding", &unknown).await.unwrap_err().to_string();
+    assert!(err.contains("no user has that email"), "{err}");
+
+    let offered = |cfg: &Attrs| -> Vec<String> {
+        env.tools("coding", cfg)
+            .into_iter()
+            .map(|t| t.name)
+            .collect()
+    };
+    assert!(offered(&granted).contains(&"view_app_code".to_owned()));
+    assert!(
+        !offered(&with(&[(CFG_APPLICATION, json!("todo"))])).contains(&"view_app_code".to_owned())
+    );
+
+    // A stale transcript's call is refused, naming the checkbox.
+    let mut state = Json::Null;
+    let (result, _) = env
+        .call_in_run(
+            &mut state,
+            "coding",
+            &with(&[(CFG_APPLICATION, json!("todo"))]),
+            "view_app_code",
+            json!({"action": "snapshot"}),
+            &RunCaller::system(),
+        )
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains(CFG_MAY_VIEW_APP), "{err}");
     Ok(())
 }

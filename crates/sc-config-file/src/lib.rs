@@ -171,6 +171,18 @@ pub struct Environment {
     /// name says what it does to cookies and which equally decides whether an
     /// application's URL is `https`.
     pub secure_cookies: Option<bool>,
+    /// The headless Chromium the coding agent's `view_app` drives — `--browser`
+    /// (TODO §7b). Unset, the server looks on `PATH` for `chromium`,
+    /// `chromium-browser` and `google-chrome`, skipping a snap shim.
+    ///
+    /// A property of this host rather than of the database, like `bind`, which is
+    /// why it is here and not a stored setting.
+    pub browser: Option<String>,
+    /// Whether that browser runs with its own sandbox — `false` is
+    /// `--no-browser-sandbox`. On by default; off only for a kernel that refuses
+    /// the unprivileged user namespaces the sandbox needs, which
+    /// `scripts/setup-host.sh` detects and names.
+    pub browser_sandbox: Option<bool>,
     /// The database the integration-test harness clones each of its per-test
     /// databases from. Only the test environment has any use for it.
     ///
@@ -560,6 +572,18 @@ test_template = "saltcorn_template"
         let text = format!("{error}");
         assert!(text.contains("SQLite"), "{text}");
         assert!(text.contains("host") && text.contains("database"), "{text}");
+    }
+
+    #[test]
+    fn an_environment_may_name_its_browser() {
+        let file = parse(
+            "[environments.production]\ndatabase = \"a\"\nbrowser = \"/usr/bin/chromium\"\nbrowser_sandbox = false\n",
+        )
+        .expect("parse");
+        let prod = &file.environments["production"];
+        assert_eq!(prod.browser.as_deref(), Some("/usr/bin/chromium"));
+        assert_eq!(prod.browser_sandbox, Some(false));
+        assert!(file.environments["production"].url.is_none());
     }
 
     #[test]

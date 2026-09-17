@@ -72,13 +72,25 @@ impl AgentServices {
 /// those: it is dropped from the live set with its reason reported, stays listed
 /// and stays editable, exactly as a trigger that does not validate is.
 pub async fn install_agents(catalog: &Arc<Catalog>) -> Result<AgentServices> {
+    install_agents_on(catalog, sc_agent::HostCapabilities::default()).await
+}
+
+/// [`install_agents`] on a host with `host`'s capabilities: what the boot path
+/// found (a browser for `view_app`), so an agent whose grant the host cannot
+/// honour is reported and dropped from the live set.
+pub async fn install_agents_on(
+    catalog: &Arc<Catalog>,
+    host: sc_agent::HostCapabilities,
+) -> Result<AgentServices> {
     bootstrap_agents(catalog)
         .await
         .context("ensuring the agents table exists")?;
     bootstrap_runs(catalog)
         .await
         .context("ensuring the runs table exists")?;
-    let registry = sc_core_traits::builtin_traits().context("registering the built-in traits")?;
+    let registry = sc_core_traits::builtin_traits()
+        .context("registering the built-in traits")?
+        .with_host(host);
     let services = AgentServices::new(Arc::new(registry));
     for issue in sc_agent::validate::Agents::load(catalog, services.registry())
         .await?

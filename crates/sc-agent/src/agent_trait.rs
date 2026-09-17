@@ -30,7 +30,7 @@ use sc_auth::User;
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use sc_expr::JsEvaluator;
-use sc_llm::{ModelCapabilities, ToolSpec};
+use sc_llm::{ImagePart, ModelCapabilities, ToolSpec};
 use sc_types::{Attrs, FormField};
 use serde_json::Value as Json;
 
@@ -38,6 +38,7 @@ use crate::context::Elidable;
 use crate::control::Signal;
 use crate::delegate::Delegator;
 use crate::run::{RunId, RunMode};
+use crate::view::{AppPreviewer, BrowserDriver, HostCapabilities};
 
 /// One elementary agent capability: configurable, contributing tools.
 ///
@@ -301,6 +302,9 @@ pub struct TraitCheck<'a> {
     /// The name of the agent this instance is enabled on, for messages that have
     /// to be actionable in a list of agents.
     pub agent: &'a str,
+    /// What the server found on its host: a grant needing a browser is refused
+    /// on a host without one.
+    pub host: &'a HostCapabilities,
 }
 
 /// Who a run's tools execute as (decision 5).
@@ -408,9 +412,19 @@ pub struct TraitContext<'a> {
     /// [`require_delegate`](TraitContext::require_delegate)'s configuration error
     /// is the honest answer rather than a second, weaker way to run an agent.
     pub delegate: Option<&'a dyn Delegator>,
+    /// How this run mounts a preview of an application, where the server can
+    /// (TODO §7b). Carried for the evaluator's reason: a context without one
+    /// says so through [`require_previews`](TraitContext::require_previews).
+    pub previews: Option<&'a dyn AppPreviewer>,
+    /// The headless browser, where the server has one. See
+    /// [`require_browser`](TraitContext::require_browser).
+    pub browser: Option<&'a dyn BrowserDriver>,
     /// The signals this call has raised so far. Reach it through
     /// [`signal`](TraitContext::signal).
     pub signals: Vec<Signal>,
+    /// Images this call's result carries beside its text. Reach it through
+    /// [`attach_image`](TraitContext::attach_image).
+    pub images: Vec<ImagePart>,
 }
 
 impl TraitContext<'_> {
@@ -430,6 +444,37 @@ impl TraitContext<'_> {
     /// signals of one kind climb the escalation ladder.
     pub fn signal(&mut self, signal: Signal) {
         self.signals.push(signal);
+    }
+
+    /// Send `image` with this call's result, such as a screenshot (TODO §7b).
+    /// The model sees it only where its provider takes images in a tool
+    /// result; offering an image tool is the trait's decision.
+    pub fn attach_image(&mut self, image: ImagePart) {
+        self.images.push(image);
+    }
+
+    /// How to mount a preview, or the configuration error that says this
+    /// context cannot.
+    pub fn require_previews(&self) -> Result<&dyn AppPreviewer> {
+        self.previews.ok_or_else(|| {
+            Error::config(format!(
+                "agent `{}`: this needs the server's application previews, \
+                 and this context has none",
+                self.agent
+            ))
+        })
+    }
+
+    /// The headless browser, or the configuration error that says this context
+    /// has none.
+    pub fn require_browser(&self) -> Result<&dyn BrowserDriver> {
+        self.browser.ok_or_else(|| {
+            Error::config(format!(
+                "agent `{}`: this needs the server's headless browser, \
+                 and this context has none",
+                self.agent
+            ))
+        })
     }
 
     /// The engine, or the configuration error that says the server has none.

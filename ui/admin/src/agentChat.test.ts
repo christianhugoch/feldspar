@@ -136,6 +136,41 @@ describe("a turn, as it arrives", () => {
     });
   });
 
+  it("shows a screenshot a tool returned, and nothing that is not an image", () => {
+    let state = applyEvent(emptyChat(), {
+      type: "tool_call",
+      id: "v1",
+      name: "view_app_code",
+      arguments: { action: "screenshot" },
+    });
+    state = applyEvent(state, {
+      type: "tool_result",
+      id: "v1",
+      name: "view_app_code",
+      content: "view_app screenshot\nscreenshot: attached (1 KB JPEG)",
+      is_error: false,
+      images: [
+        { media_type: "image/jpeg", data: "/9j/4A==" },
+        { media_type: "text/html", data: "PGgxPg==" },
+      ],
+    });
+    expect(state.entries[0]).toMatchObject({ images: ["data:image/jpeg;base64,/9j/4A=="] });
+
+    const entries = transcriptFromRun({
+      messages: [
+        { role: "assistant", content: "", tool_calls: [{ id: "v1", name: "view_app_code", arguments: {} }] },
+        {
+          role: "tool_result",
+          tool_call_id: "v1",
+          name: "view_app_code",
+          content: "shot",
+          images: [{ media_type: "image/jpeg", data: "/9j/4A==" }],
+        },
+      ],
+    });
+    expect(entries[0]).toMatchObject({ images: ["data:image/jpeg;base64,/9j/4A=="] });
+  });
+
   it("marks a failed tool as failed without ending the turn", () => {
     let state = applyEvent(emptyChat(), {
       type: "tool_call",

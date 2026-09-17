@@ -2,6 +2,112 @@
 
 Changes in reverse chronological order.
 
+## `view_app` and the preview mount (coding agent milestone, Phase 6b)
+
+The in-server coding agent can now look at the application it built: a green `check` mounts
+the build as the run's **preview**, and a new `view_app_<slug>` tool opens it in a headless
+Chromium the server drives, as the person chatting. Items 6b.1–6b.9 and 6b.11 are done. 6b.10
+(`implement_feature` snapshotting a feature's `pages`) waits for Phase 9, where
+`implement_feature` and the plan schema arrive.
+
+- **The host gets a browser** (`scripts/setup-host.sh`, `docs/OPERATIONS.md` §2.5):
+  - Debian 12/13 get apt's `chromium`.
+  - Ubuntu on amd64 gets `google-chrome-stable` from Google's apt repository, because the apt
+    `chromium-browser` there only execs the snap. Other Ubuntu architectures get a note.
+  - A non-snap browser already on `PATH` is kept. `--no-browser` skips the step.
+  - Setup starts the browser once as the service account (`--headless --dump-dom
+    about:blank`). A failure is reported, not fatal. If only `--no-sandbox` works, setup names
+    `browser_sandbox = false`.
+- **Finding it at boot.** A `feldspar.toml` environment may carry `browser` and
+  `browser_sandbox`, which mirror the new `serve` flags `--browser` and
+  `--no-browser-sandbox`. Otherwise the server looks for `chromium`, `chromium-browser` or
+  `google-chrome` on `PATH`, skipping a snap and naming what it skipped
+  (`sc_server::detect_browser`). The startup log says which browser it found, or why `view_app`
+  is unavailable.
+- **The seam** (`sc_agent::view`):
+  - `AppPreviewer` mounts, looks up and unmounts a run's previews.
+  - `BrowserDriver` performs one `BrowserAction` and returns a `BrowserReport`.
+  - `HostCapabilities` is what boot found. `TraitCheck` now carries it
+    (`AgentRegistry::with_host`; `install_agents_on`).
+  - `ViewServices` holds the previewer and driver once the server has built them. The registry
+    carries it, so chat runs, triggered runs and delegated children all reach them. A runner can
+    also be given them directly with `Runner::with_previews` / `with_browser`.
+  - `TraitContext` gains `previews`, `browser` (with `require_*`) and `attach_image`. The images
+    travel on `ToolOutcome` into the tool result.
+  - When a drive stops, however it stops, the driver's drop guard unmounts the run's previews
+    and closes its browser context.
+- **The preview registry** (`AppMounts`):
+  - `mount_preview` mounts a second registry beside the live one, keyed by a random 12-character
+    label and owned by a run. A later build re-mounts under the same label.
+  - Also new: `unmount_preview`, `unmount_run_previews`, `allow_preview_session` and
+    `sweep_previews`. `serve` sweeps once a minute (`--preview-idle-minutes`, default 60).
+  - The router serves `<label>--<subdomain>.<base-domain>` only to a session the run's browser
+    holds. Any other session, no session, or a label that is not (or is no longer) a preview of
+    that application gets a 404. Other `--` subdomains resolve as before.
+  - `AppPreviewer::mount_preview` builds the same `MountedApp` a real mount would, from the green
+    build's output directory.
+- **`check` previews a green build.** After a successful application build, `check` mounts or
+  refreshes the run's preview and says so on its own line. A failed build leaves the preview as
+  it was.
+- **The driver** (`sc_server::ChromiumDriver`, on `chromiumoxide` 0.9 with no fetcher):
+  - One browser per server, started on first use (and again if it died), with a fresh
+    profile. Each run gets its own browser context.
+  - At most `--browser-contexts` (default 4) runs hold a context at once. Beyond that, a call
+    waits within its timeout.
+  - `serve_browser` binds a listener of the browser's own on `127.0.0.1`. It serves the same
+    routes in plain HTTP with non-`Secure` cookies.
+  - The browser starts with `--host-resolver-rules` mapping the base domain onto that listener
+    and every other name to NOTFOUND. No certificate is trusted, and a page can reach nothing
+    else.
+  - `goto` takes only a path. A page that navigates away is taken back, and the result says so.
+  - Console errors, uncaught exceptions, failed requests and 4xx/5xx responses are collected
+    per page and reported with the next result.
+  - A watchdog process kills the browser if the server dies without `shutdown()`, and removes
+    the profile once the browser has gone.
+- **The session is the caller's.** A run's first call logs in the run's user through the
+  server's `SessionStore` (the `create_session` row plus this node's cache), lets that session
+  reach the run's previews, and sets the cookie directly in the browser context. Nothing is
+  written to disk. Closing the context logs the session out.
+- **The snapshot** (`sc_server::browser::snapshot`): CDP's accessibility tree rendered one line
+  per node. Structural and ignored nodes are dropped, and text that repeats its parent's name is
+  folded in. Interactive roles get `@eN` refs in document order, so an unchanged page renders
+  identically. It is capped at 400 lines and 16 000 characters, and a longer page ends with a
+  line saying to narrow it with `wait_for` or scroll.
+- **`view_app_<slug>`**, in `coding`:
+  - The grant is `may_view_app`, offered in `act` mode. It needs the `application` setting and
+    a detected browser, and without either it is refused on save.
+  - `view_app_user` (checked to exist) is the account a run with no caller looks as. A
+    triggered run without one is refused by name. `view_app_timeout` defaults to 30 s.
+  - The actions are `goto`, `click`, `fill`, `press`, `wait_for` and `snapshot`, plus
+    `screenshot` (a JPEG image part, capped at 1.5 MB) only for a model with `vision`.
+  - Every result gives the URL, the document status and what went wrong since the last call.
+    The description warns that clicks and fills write real rows.
+  - The fingerprint is the action and its target. An old result elides to
+    `[elided snapshot of /tasks: N lines]` or `[elided screenshot of /tasks]`.
+  - Without a preview, the tool says to run the check tool.
+- **Screenshots in the run** (`sc-agent`, `sc-llm`, the admin UI and the IDE):
+  - Compaction elides every screenshot but the latest, even within the kept turns.
+  - A run keeps at most `max_images` images (agent attribute, default 20). Older ones are
+    dropped from the stored transcript, with a stub in their place.
+  - Trace logging of LLM requests replaces image bytes with their length.
+  - The chat socket's `tool_result` carries `images`, and the admin chat shows them inline,
+    image types only.
+  - The IDE relay shows `view_app_` as "Looking at /path".
+- **Tests:**
+  - `sc-agent` `view`: the seam and the registry fallback. Unit tests cover image elision and
+    the image cap.
+  - `sc-server` `app_preview`: routing, isolation from the live mount, 404s, re-mount, run end,
+    the sweep, and `check` mounting a green build.
+  - `sc-server` `view_app`, against a real Chromium: a fixture app under an ownership formula,
+    looked at through the tool. It covers goto, stable refs, fill and click, a thrown error, a
+    404, off-host refusal by path and by link, a stale ref, and a screenshot. A triggered run
+    without `view_app_user` is refused. With one it sees only that user's rows, and its session
+    row is gone after the run. These tests are skipped, with the reason printed, where no
+    Chromium is installed.
+  - Also: `coding_check`'s grant validation, `setup_host`'s browser steps with a stubbed
+    browser, the detection, the snapshot renderer, the config flags, and the chat event and UI
+    reducers.
+
 ## The shell (coding agent milestone, Phase 6a)
 
 Mostly in `sc-core-traits/src/coding/{shell,process,snapshot}.rs`, with two small seams in

@@ -276,7 +276,47 @@ Five decisions in there:
 - **A file that already exists is kept.** Re-running the script does not overwrite
   an edited unit or a config with a password in it; `--force` does.
 
-### 2.5 What setup does not do
+### 2.5 The headless browser
+
+The in-server coding agent looks at the application it has just built with its
+`view_app` tool: a headless Chromium that the **server starts itself, as the
+service account**, and drives over the DevTools protocol (TODO §7b). So setup
+installs one that works there:
+
+| Distribution | What is installed |
+|---|---|
+| Debian 12, 13 | apt's `chromium` |
+| Ubuntu 24.04+ (amd64) | `google-chrome-stable`, from Google's apt repository |
+| Ubuntu on another architecture | nothing: the step says so, and `view_app` is unavailable |
+
+**Not Ubuntu's `chromium-browser`.** That apt package is a transitional one: its
+`/usr/bin/chromium-browser` is a shell script that execs the Chromium *snap*, and
+a snap does not start under a systemd service user with `ProtectHome` and
+`PrivateTmp`. The server skips a snap shim when it searches `PATH` for the same
+reason, so having one installed does no harm, but it does not count.
+
+A browser already on `PATH` that is not a snap shim is kept. Setup then starts it
+once as the service account, the way the server will:
+
+```sh
+runuser -u feldspar -- google-chrome --headless --user-data-dir=/tmp/… --dump-dom about:blank
+```
+
+and reports the browser's own error if that fails. If it only works with
+`--no-sandbox` (a kernel that refuses unprivileged user namespaces), setup says so,
+and `browser_sandbox = false` in the environment (§4.2) lets the server do the
+same. `--no-browser` skips the whole step.
+
+The server finds the browser by the `browser` key in the configuration file, or
+on `PATH` as `chromium`, `chromium-browser` or `google-chrome`, and says at
+startup which one it found — or that `view_app` is unavailable and why:
+
+```
+feldspar: view_app will use the browser at /usr/bin/google-chrome
+feldspar: view_app is unavailable: no browser found (…); install Chromium or set `browser` in feldspar.toml
+```
+
+### 2.6 What setup does not do
 
 Four things, and three of them happen in a browser (README §2.7):
 
@@ -471,10 +511,11 @@ url = "postgres://feldspar:secret@db.internal:5432/feldspar"
 #   password = "secret"
 #   database = "feldspar"
 
-# The serving half — these mirror three `serve` flags exactly.
+# The serving half — these mirror `serve` flags exactly.
 base_domain    = "example.com"        # apps are served at <subdomain>.example.com
 bind           = "0.0.0.0:443"
 secure_cookies = true
+browser        = "/usr/bin/chromium"  # view_app's browser; unset searches PATH
 
 [environments.staging]
 url = "postgres://feldspar:secret@staging.internal:5432/feldspar"
@@ -503,6 +544,8 @@ Every key an environment may hold:
 | `base_domain` | string | applications are served at `<subdomain>.<base_domain>` |
 | `bind` | string | `address:port` to listen on |
 | `secure_cookies` | boolean | set `Secure` on session and CSRF cookies |
+| `browser` | string | the headless Chromium the coding agent's `view_app` drives. Unset: `chromium`, `chromium-browser` or `google-chrome` on `PATH`, skipping a snap (§2.5) |
+| `browser_sandbox` | boolean | `false` starts that browser with `--no-sandbox`, for a kernel that refuses its sandbox. Default `true` |
 | `test_template` | string | the template per-test databases are cloned from. Read by the integration-test harness, **not** by the server |
 
 `environments` is an ordinary TOML table: define as many as you have databases,

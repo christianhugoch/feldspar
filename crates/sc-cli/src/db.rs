@@ -80,6 +80,16 @@ impl Serving<'_> {
         self.section.and_then(|s| s.secure_cookies)
     }
 
+    /// The configured headless browser, if the file named one.
+    pub fn browser(&self) -> Option<&str> {
+        self.section.and_then(|s| s.browser.as_deref())
+    }
+
+    /// Whether the file says the browser runs with its sandbox.
+    pub fn browser_sandbox(&self) -> Option<bool> {
+        self.section.and_then(|s| s.browser_sandbox)
+    }
+
     /// The port applications are reached on: the bind address's, if one was
     /// configured and parses as a socket address.
     ///

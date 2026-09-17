@@ -14,10 +14,12 @@
 //! ignores it, and the app's own code is JavaScript in a browser with no route
 //! to the database at all.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
+use sc_agent::{AppPreviewer, PreviewInfo, RunId};
 use sc_api::ApiProvider;
 use sc_app::{
     Application, CodeFramework, Framework, app_source_from_config, build_application,
@@ -154,6 +156,29 @@ pub struct AppMounts {
     saltcorn_ui_dir: Option<PathBuf>,
     /// Subdomain → the app served there. Behind an `RwLock` for live mutation.
     by_subdomain: RwLock<HashMap<String, Arc<MountedApp>>>,
+    /// The second registry: a coding run's **previews** of the applications it
+    /// built, by label (TODO §7b). See [`mount_preview`](AppMounts::mount_preview).
+    previews: RwLock<Previews>,
+    /// The domain applications are served under, for a preview's host name.
+    base_domain: Option<String>,
+    /// How long a preview may go unused before [`sweep_previews`] removes it.
+    ///
+    /// [`sweep_previews`]: AppMounts::sweep_previews
+    preview_idle: Duration,
+}
+
+/// One run's preview of one application.
+struct Preview {
+    run: RunId,
+    mounted: Arc<MountedApp>,
+    last_used: Instant,
+}
+
+/// The previews, and the sessions that may reach each run's.
+#[derive(Default)]
+struct Previews {
+    by_label: HashMap<String, Preview>,
+    sessions: HashMap<RunId, HashSet<String>>,
 }
 
 impl AppMounts {
@@ -181,7 +206,152 @@ impl AppMounts {
             python: None,
             saltcorn_ui_dir: None,
             by_subdomain: RwLock::new(HashMap::new()),
+            previews: RwLock::new(Previews::default()),
+            base_domain: None,
+            preview_idle: Duration::from_secs(crate::config::DEFAULT_PREVIEW_IDLE_MINUTES * 60),
         }
+    }
+
+    /// Say which domain applications are served under, so a preview has a host
+    /// name (`<label>--<subdomain>.<base-domain>`).
+    pub fn with_base_domain(mut self, base_domain: Option<String>) -> AppMounts {
+        self.base_domain = base_domain;
+        self
+    }
+
+    /// How long a preview may go unused before the sweep removes it.
+    pub fn with_preview_idle(mut self, idle: Duration) -> AppMounts {
+        self.preview_idle = idle;
+        self
+    }
+
+    /// Mount `app` as `run`'s **preview** of its application, beside the live
+    /// mount and replacing nothing (TODO §7b).
+    ///
+    /// A run keeps one label per application: a later green build re-mounts
+    /// under the same label, so the page the agent has open keeps working. The
+    /// label is random, and it is one DNS label with the subdomain
+    /// (`k3j9x2m4pq--todo`), so the wildcard DNS and certificate that cover the
+    /// application cover its previews.
+    pub fn mount_preview(&self, run: RunId, app: MountedApp) -> PreviewInfo {
+        let subdomain = app.app.subdomain.clone();
+        let mut previews = self.previews_mut();
+        let label = previews
+            .by_label
+            .iter()
+            .find(|(_, p)| p.run == run && p.mounted.app.subdomain == subdomain)
+            .map(|(label, _)| label.clone())
+            .unwrap_or_else(new_label);
+        previews.by_label.insert(
+            label.clone(),
+            Preview {
+                run,
+                mounted: Arc::new(app),
+                last_used: Instant::now(),
+            },
+        );
+        self.preview_info(&label, &subdomain)
+    }
+
+    /// Unmount the preview under `label`. Returns whether there was one.
+    pub fn unmount_preview(&self, label: &str) -> bool {
+        let mut previews = self.previews_mut();
+        let Some(removed) = previews.by_label.remove(label) else {
+            return false;
+        };
+        if !previews.by_label.values().any(|p| p.run == removed.run) {
+            previews.sessions.remove(&removed.run);
+        }
+        true
+    }
+
+    /// Unmount every preview `run` owns, and forget its sessions. Returns how
+    /// many went.
+    pub fn unmount_run_previews(&self, run: RunId) -> usize {
+        let mut previews = self.previews_mut();
+        let before = previews.by_label.len();
+        previews.by_label.retain(|_, p| p.run != run);
+        previews.sessions.remove(&run);
+        before - previews.by_label.len()
+    }
+
+    /// Let the session `token` reach `run`'s previews: the session the run's
+    /// browser context carries. No other session does.
+    pub fn allow_preview_session(&self, run: RunId, token: &str) {
+        self.previews_mut()
+            .sessions
+            .entry(run)
+            .or_default()
+            .insert(token.to_owned());
+    }
+
+    /// Remove every preview unused for longer than the idle time, as of `now`,
+    /// returning their labels. What a crashed run leaves behind goes this way.
+    pub fn sweep_previews(&self, now: Instant) -> Vec<String> {
+        let idle = self.preview_idle;
+        let stale: Vec<String> = self
+            .previews()
+            .by_label
+            .iter()
+            .filter(|(_, p)| now.saturating_duration_since(p.last_used) > idle)
+            .map(|(label, _)| label.clone())
+            .collect();
+        for label in &stale {
+            self.unmount_preview(label);
+        }
+        stale
+    }
+
+    /// The preview a request to `<label>--<subdomain>` reaches, if `label` is a
+    /// preview of `subdomain` and `session` is its run's session.
+    ///
+    /// `Err(())` is a label that **is** a preview, reached without its session:
+    /// the router answers 404. `Ok(None)` is no such preview, and the host is
+    /// resolved as an application subdomain as usual.
+    #[allow(clippy::result_unit_err)]
+    pub fn resolve_preview(
+        &self,
+        label: &str,
+        subdomain: &str,
+        session: Option<&str>,
+    ) -> std::result::Result<Option<Arc<MountedApp>>, ()> {
+        let mut previews = self.previews_mut();
+        let Previews { by_label, sessions } = &mut *previews;
+        let Some(preview) = by_label.get_mut(label) else {
+            return Ok(None);
+        };
+        let allowed = session.is_some_and(|token| {
+            sessions
+                .get(&preview.run)
+                .is_some_and(|tokens| tokens.contains(token))
+        });
+        if preview.mounted.app.subdomain != subdomain || !allowed {
+            return Err(());
+        }
+        preview.last_used = Instant::now();
+        Ok(Some(preview.mounted.clone()))
+    }
+
+    /// How many previews are mounted.
+    pub fn preview_count(&self) -> usize {
+        self.previews().by_label.len()
+    }
+
+    fn preview_info(&self, label: &str, subdomain: &str) -> PreviewInfo {
+        let base = self.base_domain.as_deref().unwrap_or("localhost");
+        PreviewInfo {
+            subdomain: subdomain.to_owned(),
+            label: label.to_owned(),
+            host: format!("{label}--{subdomain}.{base}"),
+        }
+    }
+
+    fn previews(&self) -> std::sync::RwLockReadGuard<'_, Previews> {
+        self.previews.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn previews_mut(&self) -> std::sync::RwLockWriteGuard<'_, Previews> {
+        self.previews.write().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Attach the server's JavaScript evaluator; every later mount and
@@ -496,6 +666,60 @@ impl AppMounts {
     /// Write the mounts, recovering from a poisoned lock (see [`read`](Self::read)).
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, Arc<MountedApp>>> {
         self.by_subdomain.write().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// A random preview label: twelve lowercase letters and digits.
+fn new_label() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..12].to_owned()
+}
+
+/// The previews a coding run's `check` mounts and `view_app` looks at (TODO
+/// §7b), through the seam `sc-agent` declares.
+#[async_trait::async_trait]
+impl AppPreviewer for AppMounts {
+    /// Build a [`MountedApp`] from the stored application and the bundle a green
+    /// build just wrote — the same framework and API providers a real mount
+    /// builds — and mount it as the run's preview.
+    async fn mount_preview(
+        &self,
+        run: RunId,
+        subdomain: &str,
+        output_dir: &Path,
+    ) -> Result<PreviewInfo> {
+        let catalog = self.catalog().ok_or_else(|| {
+            Error::config("this server was built with no catalog, so it cannot mount a preview")
+        })?;
+        let app = sc_app::load_application_by_subdomain(catalog, subdomain)
+            .await?
+            .ok_or_else(|| Error::invalid(format!("no application is served at `{subdomain}`")))?;
+        let source = app_source_from_config(&app.framework)?;
+        let dir = output_dir.to_owned();
+        let bundle = tokio::task::spawn_blocking(move || sc_app::AssetBundle::from_dir(&dir))
+            .await
+            .map_err(|e| Error::msg(format!("loading the preview bundle: {e}")))??;
+        let framework = Arc::new(
+            CodeFramework::new(app.framework.name.clone(), bundle).with_build(source.build.clone()),
+        );
+        let mounted =
+            MountedApp::new_with(app, framework, catalog, self.evaluator(), self.triggers())?;
+        Ok(AppMounts::mount_preview(self, run, mounted))
+    }
+
+    fn preview(&self, run: RunId, subdomain: &str) -> Option<PreviewInfo> {
+        let mut previews = self.previews_mut();
+        let (label, preview) = previews
+            .by_label
+            .iter_mut()
+            .find(|(_, p)| p.run == run && p.mounted.app.subdomain == subdomain)?;
+        preview.last_used = Instant::now();
+        let label = label.clone();
+        drop(previews);
+        Some(self.preview_info(&label, subdomain))
+    }
+
+    fn unmount_previews(&self, run: RunId) {
+        self.unmount_run_previews(run);
     }
 }
 

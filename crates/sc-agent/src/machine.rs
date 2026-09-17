@@ -167,6 +167,10 @@ pub struct Budgets {
     /// still over it after compacting (TODO §9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u64>,
+    /// The most images the transcript keeps; older ones become stubs (TODO
+    /// §7b). Unset is [`DEFAULT_MAX_IMAGES`](crate::agent::DEFAULT_MAX_IMAGES).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_images: Option<usize>,
 }
 
 impl Budgets {
@@ -176,9 +180,13 @@ impl Budgets {
             max_cost: agent.max_cost(),
             max_wall_ms: agent.max_wall_seconds().map(|s| s.saturating_mul(1000)),
             context_tokens: agent.context_budget(),
+            max_images: Some(agent.max_images()),
         }
     }
 }
+
+/// What an image dropped from a run's transcript is replaced by.
+pub const IMAGE_STUB: &str = "[screenshot removed: the run keeps only its latest ones]";
 
 /// What the driver knows about a model call that the answer does not carry.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -229,6 +237,8 @@ pub struct ToolOutcome {
     pub fingerprint: Option<String>,
     /// The signals the call's trait raised.
     pub signals: Vec<Signal>,
+    /// Images the result carries beside its text (TODO §7b).
+    pub images: Vec<sc_llm::ImagePart>,
 }
 
 impl ToolOutcome {
@@ -249,6 +259,7 @@ impl ToolOutcome {
             malformed: false,
             fingerprint: None,
             signals: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -266,6 +277,7 @@ impl ToolOutcome {
             malformed: false,
             fingerprint: None,
             signals: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -281,6 +293,12 @@ impl ToolOutcome {
     /// Set the fingerprint, returning `self` for chaining.
     pub fn with_fingerprint(mut self, fingerprint: String) -> ToolOutcome {
         self.fingerprint = Some(fingerprint);
+        self
+    }
+
+    /// Attach the images the trait produced, returning `self` for chaining.
+    pub fn with_images(mut self, images: Vec<sc_llm::ImagePart>) -> ToolOutcome {
+        self.images.extend(images);
         self
     }
 
@@ -596,9 +614,13 @@ impl AgentLoop {
                 outcome.content.push_str("\n\n");
                 outcome.content.push_str(note);
             }
-            self.messages
-                .push(LlmMessage::tool_result(&outcome.call, outcome.content));
+            let mut message = LlmMessage::tool_result(&outcome.call, outcome.content);
+            if let LlmMessage::ToolResult { images, .. } = &mut message {
+                *images = outcome.images;
+            }
+            self.messages.push(message);
         }
+        self.cap_images();
         self.phase = match verdict {
             // Every call has its result first, so a person can continue the
             // conversation from here.
@@ -608,6 +630,40 @@ impl AgentLoop {
             Verdict::Continue { .. } => Phase::Model,
         };
         Ok(())
+    }
+
+    /// Keep at most the budget's number of images in the transcript, dropping
+    /// the oldest and saying so where each was (TODO §7b). The stored
+    /// transcript is what changes: a run is not a screenshot archive.
+    fn cap_images(&mut self) {
+        let cap = self
+            .budgets
+            .max_images
+            .unwrap_or(crate::agent::DEFAULT_MAX_IMAGES);
+        let mut total: usize = self
+            .messages
+            .iter()
+            .map(|m| match m {
+                LlmMessage::ToolResult { images, .. } => images.len(),
+                _ => 0,
+            })
+            .sum();
+        for message in &mut self.messages {
+            if total <= cap {
+                break;
+            }
+            if let LlmMessage::ToolResult {
+                images, content, ..
+            } = message
+                && !images.is_empty()
+            {
+                let drop = images.len().min(total - cap);
+                images.drain(..drop);
+                total -= drop;
+                content.push('\n');
+                content.push_str(IMAGE_STUB);
+            }
+        }
     }
 
     /// Stop the run where it is.
@@ -1036,6 +1092,46 @@ mod tests {
         run.next_step();
         run.tool_results(vec![ToolOutcome::ok(call("c", "read"), &json!("x"))])
             .unwrap();
+    }
+
+    #[test]
+    fn a_run_keeps_only_its_latest_images() {
+        let mut run = AgentLoop::new(20).with_budgets(Budgets {
+            max_images: Some(2),
+            ..Budgets::default()
+        });
+        run.push_user("go").unwrap();
+        for n in 0..3u8 {
+            let Step::CallModel { .. } = run.next_step() else {
+                panic!("expected a model call");
+            };
+            let (answer, meta) = answer_costing(0.0, 10);
+            run.model_answered_with(answer, meta).unwrap();
+            run.next_step();
+            let image = sc_llm::ImagePart::new("image/jpeg", vec![0xff, 0xd8, n]);
+            run.tool_results(vec![
+                ToolOutcome::ok(call("c", "view_app"), &json!("shot")).with_images(vec![image]),
+            ])
+            .unwrap();
+        }
+        let results: Vec<(bool, Vec<u8>)> = run
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                LlmMessage::ToolResult {
+                    content, images, ..
+                } => Some((
+                    content.contains(IMAGE_STUB),
+                    images.iter().map(|i| i.data[2]).collect(),
+                )),
+                _ => None,
+            })
+            .collect();
+        // The oldest image is gone and its result says so; the latest two stay.
+        assert_eq!(
+            results,
+            vec![(true, vec![]), (false, vec![1]), (false, vec![2])]
+        );
     }
 
     #[test]

@@ -344,17 +344,33 @@ impl ContextState {
 
     /// The old tool results pass 1 may clear: those before the kept turns, not
     /// already summarised away and not already cleared, each with its call.
+    ///
+    /// **Images go first** (TODO §7b): a result carrying images is old as soon
+    /// as a later result carries one, kept turns or not, because a screenshot
+    /// is the most expensive thing in the context and the latest one is the
+    /// one that shows the page as it is.
     pub fn elidable<'a>(
         &self,
         transcript: &'a [LlmMessage],
     ) -> Vec<(usize, &'a ToolCall, &'a str, usize)> {
-        let Some(cut) = self.recent_cut(transcript) else {
-            return Vec::new();
+        let last_image = transcript.iter().rposition(
+            |m| matches!(m, LlmMessage::ToolResult { images, .. } if !images.is_empty()),
+        );
+        let cut = match (self.recent_cut(transcript), last_image) {
+            (Some(cut), _) => cut,
+            (None, Some(_)) => 0,
+            (None, None) => return Vec::new(),
         };
         let start = self.start();
         let mut calls: BTreeMap<&str, &ToolCall> = BTreeMap::new();
         let mut out = Vec::new();
-        for (index, message) in transcript.iter().enumerate().take(cut) {
+        for (index, message) in transcript.iter().enumerate() {
+            let old = index < cut
+                || matches!(message, LlmMessage::ToolResult { images, .. }
+                    if !images.is_empty() && last_image.is_some_and(|last| index < last));
+            if !old && !matches!(message, LlmMessage::Assistant { .. }) {
+                continue;
+            }
             match message {
                 LlmMessage::Assistant { tool_calls, .. } => {
                     for call in tool_calls {
@@ -578,6 +594,26 @@ mod tests {
         assert_eq!(cx.recent_cut(&t), Some(5));
         let old: Vec<usize> = cx.elidable(&t).iter().map(|e| e.0).collect();
         assert_eq!(old, vec![2, 4]);
+    }
+
+    #[test]
+    fn an_older_screenshot_is_elidable_even_in_the_kept_turns() {
+        let cx = ContextState::default();
+        let mut t = transcript(1);
+        for n in 0..2 {
+            let c = call(&format!("s{n}"), "view_app");
+            t.push(LlmMessage::assistant_with_calls("", vec![c.clone()]));
+            let mut result = LlmMessage::tool_result(&c, "shot");
+            if let LlmMessage::ToolResult { images, .. } = &mut result {
+                images.push(sc_llm::ImagePart::new("image/jpeg", vec![0xff, 0xd8]));
+            }
+            t.push(result);
+        }
+        // Three turns, all kept; the first screenshot is old, the latest is not,
+        // and the text result is not.
+        assert_eq!(cx.recent_cut(&t), None);
+        let old: Vec<(usize, usize)> = cx.elidable(&t).iter().map(|e| (e.0, e.3)).collect();
+        assert_eq!(old, vec![(4, 1)]);
     }
 
     #[test]

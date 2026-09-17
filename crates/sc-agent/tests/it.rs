@@ -32,3 +32,5 @@ mod loop_control;
 mod roles_modes_budgets;
 #[path = "run_store.rs"]
 mod run_store;
+#[path = "view.rs"]
+mod view;
