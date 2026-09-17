@@ -11,8 +11,10 @@ whose source is in a file store called `apps`, a **Member (40)** role, and the `
 trigger from that tutorial. Any table, app and trigger will do — the names below just assume
 those.
 
-You will need an API key from **Anthropic** or from anything speaking the **OpenAI Responses**
-API. Everything here costs tokens: an agent is a model, and every turn is a request you pay for.
+You will need an API key from **Anthropic**, or from anything speaking the **OpenAI Responses**
+or **Chat Completions** API — a local model server counts, and needs no key. Everything here
+costs tokens: an agent is a model, and every turn is a request you pay for. Step 5b is about
+bounding that.
 
 ## The rule in one line
 
@@ -40,20 +42,32 @@ Two things follow from that shape and are worth holding on to before you start:
 | Field | Value |
 |---|---|
 | Name | `house` |
-| Backend | `anthropic` (or `openai_responses`) |
+| Backend | `anthropic` (or `openai_responses`, or `openai_chat`) |
 | API key | your key |
-| Default model | `claude-sonnet-5` (or `gpt-5.1`) |
 | Base URL | leave alone |
 
-Press **Test connection** before Save. It sends one short prompt and shows you either the
-model's answer or **the provider's own error text** — a rejected key says `401` here, in front of
-you, instead of arriving as a mysterious failure inside a chat transcript later.
+Then **Create provider** — and notice what the form did **not** ask for: a model. A provider is
+a connection; a model is a row under it, because what differs between two models of one vendor
+(its prices, its context window, what it can do) is not a property of the key.
 
-Then **Create provider**.
+So the provider's page now has a **Models** list. Press **Fetch models** to ask the host what it
+serves, or **Add model** and type a name; then **Test** one, which sends a single short prompt
+and shows you either the model's answer or **the vendor's own error text** — a rejected key says
+`401` here, in front of you, instead of arriving as a mysterious failure inside a chat transcript
+later. Add `claude-sonnet-5` (or `gpt-5.1`), press **Make default**, and open it once to see what
+a model row holds:
 
-**Base URL is why there are only two backends.** `openai_responses` speaks the Responses API to
-whatever URL you give it, so a gateway, a local server or another vendor that speaks it is a
-field value rather than a code change.
+| Model setting | Why it is here |
+|---|---|
+| Prices: input, output, cached input, cache write | four numbers per million tokens. Blank is *unknown*, never zero — and **Cost per run** (Step 5b) cannot be set on an agent whose models have no prices |
+| Context window, working budget | how big a request may get before the loop compacts it (Step 5b) |
+| Edit format | how this model is asked to edit code: `auto` picks by model, and Step 5's checkbox explains the choice |
+| Capability overrides | vision, reasoning replay, parallel tool calls. Blank means the built-in rule for this backend and model name — so an improved rule reaches every row that did not override it |
+
+**Base URL is why there are only three backends.** `openai_responses` speaks the Responses API to
+whatever URL you give it, `openai_chat` speaks Chat Completions (what most cheap and
+open-weight hosts serve, and where a local server with no key at all fits), so a gateway, a local
+model or another vendor is a field value rather than a code change.
 
 Re-open the provider you just saved and look at the key: it reads `••••••••`. That is a
 **sentinel**, not a truncation, and saving the form with it unchanged keeps the stored key. See
@@ -154,7 +168,7 @@ than truncating it.
 the to-do app with a provider already connected, there is an agent called `build-todo` in the list,
 scoped to that app's source and able to build it. Which agent an application gets is its
 *framework's* declaration, so a React app's is a coding agent over the project directory the
-framework derived. Open it and look at the two traits below — it is an ordinary agent, and yours to
+framework derived. Open it and look at the trait below — it is an ordinary agent, and yours to
 edit, re-point or delete.
 
 Build it by hand anyway, once, because the settings are worth understanding. Make a second agent,
@@ -174,30 +188,35 @@ there.
 | Sub-directory | `todo` |
 | May create and change files | ✔ |
 | May run the project's `package.json` scripts | ✔ |
+| May run the configured checks, and format and type-check after edits | ✔ |
+| Checks (`package.json` script names, in order) | `["typecheck", "test"]` |
+| Application built by check (subdomain, optional) | `todo` |
 
-Reading, finding and searching come with the trait. The checkboxes are the grants: leave them
-all off and you have an agent that can explain your code and nothing else, which is a thing you
-may deliberately want. Tick the first and it gains `write_file` and an edit tool (`edit_file`, or
-`apply_patch` for OpenAI models); tick the second and it gains `run_script`. A third, **May format
-and type-check after edits**, runs the project's prettier and its `typecheck` script after each
-turn that edited something, and shows the model which errors are new.
+Reading, finding and searching come with the trait, and so does `repo_map` — a ranked outline of
+the project's own definitions, which is how the model finds a file it has never opened without
+reading the whole tree. The checkboxes are the grants: leave them all off and you have an agent
+that can explain your code and nothing else, which is a thing you may deliberately want. Tick the
+first and it gains `write_file` and an edit tool (`edit_file`, or `apply_patch` for OpenAI
+models); tick the second and it gains `run_script`; tick the third and it gains `check`, and the
+project's prettier and type-check run after each turn that edited something.
 
-…and add one more trait, which names the application instead, because which store the source is in
-is the *application's* own configuration:
-
-| Trait | Setting | Value |
-|---|---|---|
-| `build_application` | Application (subdomain) | `todo` |
+**`check` is the loop the agent closes on.** It runs the scripts you listed, in order, and then —
+because you named an application — builds it, all in one result: type errors, failing tests and
+bundler diagnostics together, each marked **new** or **pre-existing**. That last word is why the
+setting exists: an agent that inherits a project with four failing tests is told which four were
+already failing, and is not sent chasing them. This is also why `build_application` is not on this
+agent. It is still a trait, for an agent whose only job is to build something; here the build is
+the last step of `check`, where the model sees it beside everything else.
 
 Save, chat, and ask: *add a "notes" column to the Tasks page*.
 
 Watch the transcript. It will `search_files` for where the row type is used, `read_file` the page,
-`edit_file` it, and `build_todo` — and if it guessed a property that is not on `TasksRow`, the
-build comes back **not** as "build failed" but as the diagnostics themselves, file and line and
-message, which is the most useful thing a model can be told. It reads its own type error and
+`edit_file` it, and `check_apps_todo` — and if it guessed a property that is not on `TasksRow`,
+the check comes back **not** as "build failed" but as the diagnostics themselves, file and line
+and message, which is the most useful thing a model can be told. It reads its own type error and
 fixes it.
 
-Five things about that set:
+Six things about that set:
 
 - **`edit_file` must find exactly one place.** It forgives a lost trailing space, the wrong
   indentation or one mistyped character, in that order, but a match that is absent, or that
@@ -209,18 +228,244 @@ Five things about that set:
 - **A tool it was not granted is a tool it never sees.** With **May create and change files**
   unticked, `write_file` and the edit tool are not declared to the model at all, so it plans around
   reading rather than trying an edit and being refused.
-- **`build_application` builds, it does not publish.** An agent's build answers "does this
-  compile?"; mounting what it built is still your **Build** button, which is also where you get to
-  look at the diff first.
+- **A check builds, it does not publish.** An agent's build answers "does this compile?";
+  mounting what it built for your users is still your **Build** button, which is also where you
+  get to look at the diff first. (What a green build *does* mount is a preview, for the agent's
+  own eyes — Step 5e.)
+- **It cannot pass a check by deleting the test.** A deleted test file, fewer test blocks than
+  the run started with, or a newly added `.skip`/`.only` fails the check on its own, from the
+  record of what the run changed. This is the cheapest shortcut a model under pressure finds, and
+  the only way to close it is to look for it.
 - **The script grant is not a shell.** It runs `npm run <script>` for a script your
   `package.json` already declares, and refuses anything else by listing the scripts that exist.
   The runnable set is the project's own; the model chooses from it rather than composing a
   command line. It is a **separate** checkbox from the edit grant, because running a script
-  executes code the agent did not write. A real shell is the last checkbox on the form, **May use
-  a shell**, off by default and offered only when the person chatting is an admin: it runs as the
-  server's own user, so it can do everything the other grants can and read the server's
-  configuration too. Its **Shell sandbox** setting can run each command in a `docker` or `podman`
-  container instead, with only the sub-directory mounted and no network.
+  executes code the agent did not write. A real shell is the last checkbox on the form, and
+  Step 5f is about it.
+
+## Step 5a — Two models, not one
+
+Open the agent again and look at the top of the form, under the provider. Beside the agent's own
+model there are two more pick-lists: **Strong model** and **Cheap model**. Leave them blank and
+nothing changes — each falls back to the agent's own model, which is the **executor**, the one
+that does the work. Fill them in and the run spends your money in proportion to what each turn
+is worth:
+
+| Role | What it answers | A sensible choice |
+|---|---|---|
+| executor (the agent's own model) | every ordinary turn: reading, editing, checking | a cheap, fast model |
+| **Strong model** | planning, the review after a feature, and one escalation | the best model you have |
+| **Cheap model** | summarising the conversation, `explore`, commit messages | the cheapest model that writes prose |
+
+The point of the whole arrangement is in the **Strong model** row. When the loop
+notices the agent going round in circles — the same call three times, the same paragraph three
+times, three failed edits — it does not just stop. It appends a note to the tool result; if that
+does not help, it sends **the next single call** to the strong model; and only if that does not
+help either does it stop, with `conclusion: stuck` and the reason. A cheap model that is stuck
+gets one expensive turn to get unstuck, which is usually enough and is much cheaper than running
+the expensive model all afternoon.
+
+Two things follow, both worth knowing before you go looking for them:
+
+- **A role names a model row, so you cannot delete the row underneath it.** Deleting a model or a
+  provider is refused while any agent's role names it, with the agents listed.
+- **Blank is not "none", it is "the same as the agent".** An agent with no strong model still
+  escalates; it just escalates to itself, which mostly means one more try. If you want the ladder
+  to mean something, fill the box in.
+
+## Step 5b — Budgets, and what running out looks like
+
+Below the roles are the numbers. Every one of them is a way for a run to **stop by itself**,
+which is the only kind of limit that works on something that runs unattended:
+
+| Box | What it bounds | Blank means |
+|---|---|---|
+| Max steps per run | times round the loop | 20 |
+| Cost per run | what the run may spend, its sessions included | no limit |
+| Working time per run (seconds) | time spent calling models and tools | no limit |
+| Context per request (tokens) | how big a request may get | the model's own working budget |
+| Screenshots kept per run | how many `view_app` screenshots stay in the transcript | 20 |
+
+Two more boxes sit with these and are not budgets: **Temperature** and **Max tokens per answer**,
+both of which mean *the provider's own default* when blank and are worth leaving blank until you
+have a reason.
+
+**Cost per run is refused on save unless every model the agent may call has a price.** Prices
+live on the model row (**LLM providers → your provider → Models → edit**), as four numbers:
+input, output, cached input, cache write. A blank price is *unknown*, never zero, so a run with
+one unpriced model reports its cost as unknown rather than as a number that is wrong — and a
+budget that cannot be measured is one the form will not let you set.
+
+**Working time is working time.** A chat you leave open overnight is not over budget in the
+morning; only time spent calling models and tools is counted, because the alternative punishes
+you for going to lunch.
+
+**Context per request is the one that does something interesting.** At 75% of it, the run
+**compacts** instead of failing: first every old tool result is replaced by a stub — `[elided: 4210
+characters of read_file_apps_todo output]` — and if that is not enough, the cheap model
+writes a structured summary of everything except the last few turns. You see a marker in the
+chat where that happened and can expand the summary. Nothing is lost from the record: the stored
+transcript is whole, and compaction is an overlay on what the *model* is shown. Only a request
+that is still too big after both passes ends the run, as `over_budget`.
+
+So a run has five ways to end, and the chat says which: `answered`, `max_steps`, `stuck`,
+`over_budget` (naming which budget) and `aborted` (you pressed Stop). None of them is an error,
+and all of them leave the transcript intact.
+
+## Step 5c — The `planned` workflow
+
+Everything so far was one conversation doing one thing. Ask a direct agent for four features at
+once and you get four features half-built in one context, with the fourth reasoning over the
+wreckage of the first.
+
+Set the `coding` trait's **Workflow** to `planned` and the shape changes:
+
+| Setting | Value |
+|---|---|
+| Workflow | `planned` |
+| Sessions per planned feature, retries included | `3` |
+| Commit each finished feature (git work trees only) | ✔ |
+
+Now chat: *add a notes column, a filter for unfinished tasks, and a keyboard shortcut to add a
+task.*
+
+The run starts in **plan** mode, where it cannot edit anything at all. Its tools are the
+read-only ones plus `save_plan`, `implement_feature` and `explore`. What it does:
+
+1. Reads around — `repo_map`, `search_files`, maybe an `explore` question answered by the cheap
+   model in a session of its own — and calls `save_plan` with a **list of features**, each with a
+   title, a description, what must be true when it is done, the files it will probably touch and
+   the checks that matter to it.
+2. Calls `implement_feature` for the first one. That starts a **session**: a child run of the
+   same agent in `act` mode, with its own context, told about *this* feature and nothing else.
+3. When the session returns, the planner runs `check` itself — not trusting the session's own
+   verdict — plus the ratchet, and looks at the diff.
+4. Green: the feature is marked done and, for a git work tree, **committed**, with a message the
+   cheap model writes. Red: the feature is tried again, up to your **Sessions per planned feature**.
+5. Two consecutive failures, or a session that ended `stuck`, come back as an instruction to
+   **re-plan** with the failure summary, rather than as another attempt at the same approach.
+
+The reason to care is what *doesn't* accumulate. Each session's reading, its failed edits and its
+check output stay in the session's own context; the planner sees a diff, a check result and a
+sentence. That is what makes a cheap model able to do four features in a row instead of two.
+
+## Step 5d — Reading a plan, and reading a diff
+
+A planned run needs a different thing from a chat window, and the chat gives it to you in two
+places.
+
+**The bar above the composer** carries what the run has spent — `cost 0.1840 · 24 steps · 61k in,
+18k cached, 12k out` — and, for a planner, the **checklist**:
+
+```
+2 of 3 done
+✓ notes-column      done
+✓ unfinished-filter done
+… add-shortcut      in progress
+```
+
+with `○` for to do, `✗` for failed and `–` for blocked. Each session appears as a **child run** in
+the transcript, linked: click it and you are on `#/runs/<id>`, which is the same screen the chat
+is, for a run nobody is chatting with — its plan, its transcript and its diff.
+
+**The diff is the run's own, not git's.** It is built from the record of what the run changed: the
+pre-image of every file the first time the run touched it, against what is there now, as a unified
+diff with a diffstat. Three things follow, each of which surprises somebody the first time:
+
+- **It works on any store**, not only a git one. A run that edited an S3-backed store has a diff.
+- **It includes the children.** A planner's diff is every session's changes rolled up, oldest
+  pre-image first, so you read the whole of what the agent did to your project in one place.
+- **It is not "what is uncommitted".** If the run committed per feature, the commits are *in* the
+  diff, because the diff is about the run and not about the index. `GET /api/runs/{id}/diff` is
+  the same thing for a script.
+
+Read a diff before you press **Build**. The preview the agent looked at (next step) is the
+agent's; the thing your users get is still yours to mount.
+
+## Step 5e — Previews: what `view_app` actually looks at
+
+A build that compiles can still render a blank page. `view_app` is how the agent finds that out:
+it opens the application **in a headless browser on the server** and reads the page back as text.
+
+It needs three things, and it will tell you which one is missing:
+
+1. **The `application` setting** — the one you filled in for `check`, above.
+2. **A headless browser on the server.** `scripts/setup-host.sh` installs one; the server says at
+   startup which it found, or that `view_app` is unavailable and why
+   (`docs/OPERATIONS.md` §2.5, and the `browser` key in `feldspar.toml`). Without one, the
+   checkbox is refused on save — a grant that cannot work is not a grant.
+3. **The checkbox:** *May look at the application's preview in a headless browser, as the person
+   chatting.*
+
+Then ask for something visual — *make the task list show the notes column* — and watch for
+`view_app` calls in the transcript. Each is one action: `goto`, `click`, `fill`, `press`,
+`wait_for` or `snapshot`, and `screenshot` as well when the model has vision. What comes back is
+an **accessibility snapshot**: a compact tree of the page with a ref on everything interactive,
+so the next call can say `click @e12`. It is a few hundred tokens and works on a model with no
+vision at all, which is the point — a screenshot is the expensive version of this, not the
+normal one. Every result also carries the URL, the HTTP status, and any console errors or failed
+requests since the last call, so a white screen caused by a thrown exception is one line of text.
+
+Four things to know about what it is looking at:
+
+- **It is a preview, not your application.** A green `check` mounts the build it just made as
+  *this run's* preview, beside the live mount and replacing nothing. Your users keep getting the
+  old bundle until you press Build. The preview lives at a host of its own —
+  `k3j9x2m4pq--todo.localhost` — which is one DNS label, so the wildcard certificate that covers
+  your app covers it too.
+- **It uses your session.** The browser looks at the page **as the person chatting**, with a
+  session made for them and thrown away at the end of the run, so the agent sees what you would
+  see — your rows, your role — and not an admin's view of everything. A run that nobody started,
+  from a trigger, has no such person: it uses the account named in **User a triggered run looks
+  at the application as**, and is refused by name if you have not set one. Make that a
+  low-privilege account.
+- **The data is live.** The preview talks to your real tables. `fill` and `click` on a form write
+  **real rows** — the tool's own description says so, and it is the honest trade: a preview with
+  a scratch database would be a different product, and one that could not reproduce the bug you
+  asked about.
+- **Nobody else can open it.** A request to a preview host without the owning run's session is a
+  404 — not a 403, because the existence of another run's preview is not a fact to hand out. The
+  preview is unmounted when the run ends, and swept after an hour of going unused.
+
+## Step 5f — Turning on the shell
+
+The last checkbox on the `coding` form is **May use a shell**, and its label says what it is:
+*this is every other permission at once: it can change any file, run anything and read the server
+user's files.* It is off by default and there are exactly two rules about it:
+
+- **It runs as the server's own operating-system user**, not as you. Nothing about §7.3, your
+  role or your ownership formulas applies to `rm`.
+- **It is offered only to a run whose caller is an admin.** Not "an agent exposed to admins" —
+  the person chatting, checked when the tools are built and checked again when a call arrives, so
+  a call replayed from an older transcript is refused too. An agent with a **Minimum role** of 40
+  and this grant on simply has no shell for a Member.
+
+Turn it on and the agent gains `shell_apps_todo` (one stateless `bash -c` in the sub-directory,
+with a timeout) and `process_apps_todo` (`start`/`stop`/`logs`/`list` for a long-running command
+— a dev server, a watcher). A trailing `&` on a shell command is refused with a pointer to
+`process_`, since a backgrounded command the harness cannot see is one nothing will clean up.
+Processes belong to the run and are killed when it ends, when you abort it, and when the server
+stops.
+
+**Then choose the sandbox, plainly:**
+
+| **Shell sandbox** | What runs where | When to choose it |
+|---|---|---|
+| `none` (default) | on the server, as the server's user, with its network and its files | you own the machine, and the agent's project *is* what the machine is for |
+| `container` | in a fresh `docker`/`podman` container per command, with **only the sub-directory mounted** and no network unless you tick **Sandboxed commands may use the network** | anything else |
+
+`container` needs a runtime on `PATH` and an **image with bash in it**, and both are checked when
+you save — while the grant is on — so a sandbox that would not have worked is a refusal on the
+form rather than a surprise on the first command. What the container does *not* give you is a
+registry allowlist: the network is either off or it is the real network.
+
+Two more things the shell touches:
+
+- **What it changes is in the run diff.** The scope is snapshotted around every shell call, so a
+  `sed -i` shows up in the diff like an `edit_file` would, and the model's now-stale reads of
+  those files are invalidated — the next `edit_file` is told to read again first.
+- **A shell call is fingerprinted by its command**, whitespace aside, so the same command three
+  times in a row climbs the same ladder as any other repetition.
 
 ## Step 6 — An agent as a trigger body
 
@@ -385,9 +630,9 @@ Three things to notice:
 
 ## Step 9 — An agent that asks another agent
 
-The `librarian` from Step 2 reads one table. Suppose you now want an agent that talks to people
-about the whole library *and* can go and dig through the code when somebody asks why a page looks
-wrong. You could give one agent both sets of traits. Don't: you would be handing the agent that
+Make one more agent like Step 2's `helper` — call it `librarian`, over a `books` table — so that
+it, too, reads exactly one table. Suppose you now want an agent that talks to people about the
+whole library *and* can go and dig through the code when somebody asks why a page looks wrong. You could give one agent both sets of traits. Don't: you would be handing the agent that
 answers the public a way to edit your source, and every file it reads would sit in the
 conversation for the rest of the afternoon.
 
@@ -439,8 +684,8 @@ And the rule that has held all the way down this page still holds here: `librari
 | `update_rows` | a table, the fields it may change | updates the rows a `where` selects |
 | `delete_rows` | a table, a row bound | deletes the rows a `where` selects |
 | `run_trigger` | one trigger | runs it, with a payload it supplies |
-| `coding` | a store, a sub-directory, two grants and three bounds | browses, reads and greps the code; writes and edits it under **May create and change files**; runs one `package.json` script under **May run the project's scripts** |
-| `build_application` | an application's subdomain | builds it, and gets the diagnostics |
+| `coding` | a store, a sub-directory, five grants, a workflow and the bounds | browses, reads, greps and maps the code; writes and edits it under **May create and change files**; runs one `package.json` script under **May run the project's scripts**; runs the checks and the app's build under **May run the configured checks**; looks at the preview under **May look at the application's preview**; and has a shell under **May use a shell** (admins only). In the `planned` workflow it also plans and delegates a session per feature |
+| `build_application` | an application's subdomain | builds it, and gets the diagnostics — for an agent whose job is only to build one; a `coding` agent builds through its own `check` instead |
 | `admin_copilot` | four grants, two areas, and **no table** | describes and edits the schema itself, the triggers over it, and an application's custom SQL endpoints |
 | `subagent` | one agent, when to use it, two bounds | hands it one task and reads back what it concluded |
 
@@ -466,6 +711,19 @@ Each is a grant. Adding one is a decision you can read off the agent's page late
   agent keeps stopping there, it is usually looping on a tool that keeps failing; open the tool
   results in the transcript and read what it was told. Raise it on the agent's **Max steps per
   run** if the work genuinely needs more turns.
+- **`stuck` is not a crash, it is a diagnosis.** The loop watches for the same call, the same
+  paragraph or the same kind of failure repeating, warns the model in a tool result, sends one
+  turn to the strong model, and only then gives up. So a run that ends `stuck` has already been
+  helped twice: what to read is not the last message but the tool results being repeated. Give it
+  a strong model (Step 5a) before raising any limit.
+- **An unpriced model makes every cost unknown, not zero.** One model row without prices in a run
+  — including a session's — and the chat says *cost unknown (a model has no price)* rather than a
+  number, and **Cost per run** cannot be saved on that agent at all. Prices are four numbers on
+  the model row, and they are yours to keep current: nothing fetches them.
+- **A planned run's real work is in the child runs.** The planner's transcript is deliberately
+  thin — a plan, a diff and a verdict per feature — so "it did not tell me what it did" usually
+  means the detail is one click away, in the session's own run. The **diff** on the planner is
+  the whole thing rolled up, children included.
 - **A tool sees only what its caller may see.** The same `query_tasks` asked by you and by a
   Member returns different rows, because both are ordinary reads under §7.3. An agent is not a
   way around ownership — which also means an agent that "cannot see" a row is often working
@@ -474,8 +732,21 @@ Each is a grant. Adding one is a decision you can read off the agent's page late
   because an error a model can read is one it can recover from. Only a failure of the loop itself
   — the provider refusing, the key being wrong — ends a run, and that lands in the transcript as
   an `error` entry rather than a window that silently stops.
-- **The conversation only grows.** Nothing summarises or truncates it yet, so a very long chat
-  eventually hits the provider's context limit. Start a new conversation rather than fighting it.
+- **The conversation is compacted, not truncated — and what the model sees is not what you
+  see.** Past 75% of the context budget, old tool results become stubs and then a summary written
+  by the cheap model; the chat shows a marker where it happened and the stored transcript keeps
+  every word. So an agent that has "forgotten" a file it read an hour ago is behaving correctly,
+  and telling it again is cheaper than arguing. Screenshots are the aggressive case: only the
+  latest survives a compaction, because one image outweighs pages of text.
+- **The shell grant answers to the *person chatting*, not to the agent.** Ticking **May use a
+  shell** on an agent you have exposed at role 40 does not give a Member a shell — it gives
+  nothing to a Member and a shell to you. If you want it off for everyone, untick it; if you want
+  it sandboxed, set **Shell sandbox** to `container` and give it an image.
+- **A preview is the agent's view, not a deployment.** `view_app` looking at a green build does
+  not change what your users get, and the URL you may see in a transcript
+  (`k3j9x2m4pq--todo.localhost`) answers 404 for anyone but that run. It also goes away when the
+  run ends, so it is not a staging environment — and while it exists it is reading and writing
+  your **real** rows.
 - **A triggered run cannot run a trigger.** Give an agent `run_trigger` and start it from
   `run_agent`, and that one tool answers with "this needs the trigger dispatcher, and none is
   available in this context" — which the model reports rather than dies on. Chat is where an agent runs triggers.

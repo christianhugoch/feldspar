@@ -1200,7 +1200,7 @@ a sparse value goes into `attributes`.**
 | `_fd_fields` | overlay metadata for fields | rich type name, field kind (`Key`/`File`) + parameters, label/description, attributes; later calculated-field defs and fieldview defaults (§9.1) |
 | `_fd_triggers` | triggers, whose body is an action **or a workflow** | **not an overlay** — the row is the trigger's only definition (§10.2): event, channel, `only_if`, `body` (`action` \| `workflow`), the action + configuration an `action` body carries, `min_role`, and in `attributes` the sparse `enabled` flag and periodic timing. `last_run_at` is the scheduler's own column, never written by a save. A workflow body's steps are **not** here: they are versioned in `_fd_workflow_versions`, so a suspended run finishes on its own version (§10.3) |
 | `_fd_workflow_versions` | one row per saved version of a workflow | `(workflow, version)` is unique and the table is **append-only**: saving an edited workflow mints `version + 1`, and a run records the version it started on and loads that one for its whole life (§10.3). `steps` holds the whole workflow document — the same JSON the API answers and the editor round-trips |
-| `_fd_agents` | agents | **not an overlay** — the row is the agent's only definition (§11.2): provider + model, system prompt, enabled traits with their configurations, `min_role`, and in `attributes` the sparse temperature / max tokens / max steps |
+| `_fd_agents` | agents | **not an overlay** — the row is the agent's only definition (§11.2): provider + model, system prompt, enabled traits with their configurations, `min_role`, and in `attributes` the sparse temperature / max tokens / max steps, plus the coding milestone's additions: the `strong` and `cheap` **model roles** (each a `{provider, model}` pair naming an `_fd_llm_models` row), the budgets (`max_cost`, `max_wall_seconds`, `context_budget`, `max_images`), the loop-control thresholds (§11.2) and `keep_turns`. A key that is absent is the default, so a save that knows nothing of a key must keep it — which the admin form does |
 | `_fd_llm_providers` | LLM connections | name + backend (`openai_responses` \| `anthropic` \| `openai_chat`) + config (§11.1); the same shape as `_fd_file_stores`, and the API key is a `secret` field, redacted on read. No model: that is `_fd_llm_models` |
 | `_fd_llm_models` | the models a provider serves | `provider_id` is a **foreign key** to `_fd_llm_providers`, and (`provider_id`, `name`) is unique, so one model name under two providers is two rows. `is_default` (at most one per provider, enforced in the save's transaction) and `config`: prices, context window, working budget, edit format and capability overrides, all optional, blank meaning the built-in default (§11.1). Deleting a provider deletes its models in the same transaction |
 | `_fd_runs` | workflow & agent runs | current context + state, updated after each step; `kind` discriminates `agent` from `workflow`, so a chat session and a durable run are one mechanism (§11.4) |
@@ -1385,7 +1385,7 @@ erDiagram
     text system_prompt
     json traits "enabled traits + their configuration"
     int min_role
-    json attributes
+    json attributes "sparse: the strong/cheap model roles, the budgets, the loop-control limits"
   }
   MODELS["_fd_models"] {
     uuid id PK
@@ -1574,6 +1574,7 @@ erDiagram
   LLM ||--o{ AGENTS : "provider -- by name"
   LLM ||--o{ LLMMODELS : "provider_id"
   LLMMODELS |o--o{ AGENTS : "model -- by name, or the default"
+  LLMMODELS }o--o{ AGENTS : "attributes.strong/cheap -- a role's model, by name"
   AGENTS ||--o{ RUNS : "subject -- by name, when kind = agent"
   TRIGGERS ||--o{ WFVERSIONS : "workflow -- by value, append-only"
   WFVERSIONS ||--o{ RUNS : "version -- a run is pinned to the one it started on"
@@ -2857,6 +2858,14 @@ cache writes apart from its input tokens, and its adapter adds them back, so the
 cache-write counts are parts of the input. That makes the count usable for measuring a context,
 and it is what `TokenEstimator` calibrates its character heuristic against.
 
+**Counting a request before it is sent.** `estimate_tokens(&LlmRequest, backend)` counts
+characters at a fixed ratio and images by that backend's published per-image rule, and `TokenEstimator` carries a
+per-run **calibration factor** taken from the last reported `input_tokens` — so the estimate of
+what has been appended since the last response is scaled by how wrong the previous estimate was
+for this model and this conversation. Tokenising properly per vendor was the alternative and is
+not worth a tokeniser dependency per backend for a number whose only consumer is a threshold
+(§11.2): the measurement that matters is the provider's own, and this only has to cover the tail.
+
 **Secrets.** `FormField` gains `secret: bool`. It is a property of the *declaration*, so it
 travels to every consumer at once: the admin UI renders a password input, the API **redacts**
 the value on read (a fixed sentinel, never a truncation — a prefix is still a leak), and a
@@ -3073,6 +3082,87 @@ its reason kept**, remaining stored, listed and editable, because editing it is 
 - **Parallel tool calls** are sent as `false` unless the agent's `parallel_tool_calls` attribute
   is set.
 
+**Loop control: what a stuck cheap model looks like, and what happens to it** (coding agent
+milestone, Phase 3, `sc_agent::control`):
+
+- **Arguments are checked before dispatch, by an in-crate checker.** `sc_agent::schema` validates
+  a call against the tool's own declared JSON Schema and reports every failing path in one
+  message, as a **failed tool result** rather than a loop error, because the model can fix an
+  argument. It covers the subset tool schemas actually use — types, `required`, `enum`,
+  `properties`/`additionalProperties`, array items, numeric and string bounds — and **ignores
+  keywords it does not know**, so a trait that declares something exotic is not refused for it.
+  A dependency (`jsonschema`) was the alternative and was not worth a compile-time cost for a
+  vocabulary this small.
+- **Everything is measured per *round*, not per call.** `LoopControl::observe_round` is shown
+  each round's fingerprints, which calls were malformed, which `Signal`s their traits raised and
+  what the model said before calling. The three detectors are identical consecutive calls
+  (`max_identical_calls`, 3), the same *set* of fingerprints in consecutive rounds
+  (`max_repeated_rounds`, 2) and the same normalised assistant text (`max_repeated_text`, 3);
+  every threshold is an agent attribute. A fingerprint is canonical JSON of the call by default,
+  and `AgentTrait::fingerprint` lets a trait say what a repeat *means* for it — `coding` reduces
+  a shell call to its whitespace-normalised command, and `view_app` to its action and target.
+- **Signals are how a trait says "this kind of failure is piling up".** `TraitContext::signal`
+  takes `EditFailed` (an edit that failed the whole cascade) or `CheckFailed` (new failures the
+  baseline did not have), and `max_signals` (3) of one climbs the ladder. The tool result has
+  already explained itself; the signal is only the count.
+- **One rung per troubled round: warn → escalate → stop.** The warning is appended to that
+  round's last tool **result**, deliberately not to the system prompt, which would break the
+  cached prefix (Phase 4's whole point). The escalation sends the **next single call** to the
+  `strong` role. The third rung ends the run as `Conclusion::Stuck { reason }`. `calm_rounds`
+  (5) untroubled rounds put the ladder back at the bottom and a new message from the person
+  resets it, so an hour-long run is not stopped by three unrelated hiccups.
+- **The malformed-call cap is separate, and has no warning rung.** An unknown tool, unparseable
+  arguments or a schema failure already came back as a sentence naming the fault, so there is
+  nothing to warn about: `max_malformed_calls` (3) in a row end the run `Stuck`.
+- **`Stuck` is a conclusion, like `MaxSteps`.** The chat's `done` event, the run list and
+  `run_agent` all carry it, and a trigger-started agent that ends `Stuck` fails the action with
+  that reason rather than returning an answer nobody wrote. All of this state lives in
+  `AgentLoop`, so it survives a save and a resume; `LoopControl` also keeps cumulative
+  `firings`/`escalations` tallies that a reset does **not** clear, which is what §13's metrics
+  are read from.
+
+**Context management: the layout is the cache plan** (coding agent milestone, Phase 4,
+`sc_agent::context`):
+
+- **A request runs from most to least stable**: the stable prefix (the agent's prompt, each
+  trait's `prompt` contribution, and the tools **sorted by name**), then the **session header**,
+  then the append-only history. The header is what `AgentTrait::session_header` returns, built
+  **once per session** and stored with the run, so neither step 2 nor a resume rebuilds it. It is
+  a *user* message at index 0 rather than part of the system prompt, because a trait's header is
+  data (a repo map, an `AGENTS.md`, a git log) and the system prompt is the cached prefix.
+  `CachePlan`'s breakpoints are set from exactly this layout, and `prompt_cache_key` is the run
+  id. `on_turn` is documented as cache-breaking and `coding` does not use it.
+- **The stored transcript is never edited.** Clearing and compacting are **overlays** beside the
+  messages: a stub per cleared tool result, keyed by index, and `(up_to_index, summary)` records.
+  The request is built from transcript plus overlays; the chat and the admin read the transcript
+  itself with a marker where each compaction happened, and can expand the summary. So "what the
+  model can still see" and "what happened" are two questions with two answers, and the second one
+  is never lost.
+- **The measurement is the provider's own number plus an estimate of the difference.** The
+  previous response's `input_tokens` is the truth about everything up to it, and
+  `TokenEstimator`'s calibrated character heuristic covers what has been appended since. At
+  `COMPACT_PERCENT` (75%) of the budget the loop compacts *before* the next call. The budget is
+  the agent's `context_budget`, or the executor model's working budget when it is unset.
+- **Two passes, and the second is conditional.** Pass 1 replaces every old tool result with the
+  stub its trait writes through `AgentTrait::elide`, **all in one batch**, so the cache breaks
+  once rather than every step; a tool call and its result are never separated. Pass 2 runs only
+  if pass 1 left the request still at or above `SUMMARY_PERCENT`, and has the **cheap role**
+  write a fixed-section summary of everything before the last `keep_turns` (3) turns. A request
+  still over the whole budget after both ends the run `OverBudget { budget: context }` — there is
+  nothing further to try, and saying so beats sending a request that will be refused.
+- **A stub replaces the result, never the call.** `Elidable::default_stub` is `[elided: N
+  characters of <tool> output]`, and the model still sees the call and its arguments, so it knows
+  what it did and can do it again. `coding` overrides two: an old `view_app_…` result keeps the
+  **path** it was looking at (`[elided snapshot of /tasks]`), and an old `implement_feature_…`
+  result keeps its first line, which is the verdict — the latest checklist arrives later anyway.
+  Images are handled apart from the budget: compaction elides every screenshot but the latest,
+  **even inside the kept turns**, because an image dominates whatever context it is in.
+- **`FakeProvider` grew what these tests need**: role-aware scripts (`FakeModels`), and request
+  assertions for the layout — that two consecutive requests are byte-identical up to the history,
+  that the header is not rebuilt, and how many results are stubs. A request does not carry its
+  mode, so a scripted expectation about a mode is written as `Match::Offers` over the tools the
+  request declares.
+
 ### 11.3 The built-in traits (`sc-core-traits`)
 
 Deliberately few, and split by what they touch. Each names its target in its configuration —
@@ -3248,6 +3338,104 @@ scope, so what it changed enters the change ledger and the model's reads of it g
   into `node_modules`, `.git`, `dist`, `build`, `target` or `.venv`. The endpoint narrows by a
   **single** glob; a query naming several is searched whole and filtered in the client, because
   sending the first of several would silently drop the files the others named.
+
+**What was built, where it deviates** (coding agent milestone, Phases 5–10: the `coding` rework):
+
+- **One trait, one scope, fifteen tools, and the grants decide which are declared.** The set is
+  `read_file`, `find_files`, `search_files`, `repo_map`, `save_plan`, `implement_feature`,
+  `explore`, `write_file`, `edit_file`, `apply_patch`, `run_script`, `check`, `view_app`, `shell`
+  and `process`, each suffixed with the scope's slug. Which of them a run is *offered* is the
+  mode (§11.2) and the five checkboxes — `may_edit`, `may_run_scripts`, `may_check`,
+  `may_view_app`, `may_use_shell` — and a withheld tool is never declared to the model. Since the
+  longest derived name is `implement_feature_<slug>`, `validate_config` checks **that** name
+  against the 64 characters both vendors accept, rather than the shortest one that happens to
+  fit.
+- **`find_files` replaced `list_files`.** A model that can ask for `src/**/*.tsx` does not need
+  to walk a tree one directory at a time, and the walk is `sc_files::walk_store`, which skips
+  what §9 hides and the directories `search_store` skips. Globs gained `{a,b}` alternatives for
+  both tools. The glob is relative to `dir`, because a pattern the model must prefix is one it
+  will eventually forget to prefix.
+- **`check` is the ratchet, not a script runner.** `checks` is an ordered list of `package.json`
+  script names; `diagnose` (default `typecheck`) is the one that also runs after edits through
+  `after_tools`; and when the `application` setting is set, `sc_app::build_application` runs
+  **after** the scripts as one more check, skipped when `diagnose` is among them and has new
+  failures — a bundler's output on top of a type error is noise. Every diagnostic is classified
+  **new or pre-existing** against a baseline recorded per check while the ledger is still empty,
+  so an agent inheriting a broken tree is not blamed for it, and the shared parsers
+  (`sc_app::parse_diagnostics`: tsc, eslint, vitest/jest, generic) turn each tool's output into
+  file/line/message triples. The **ratchet pseudo-check** reads the change ledger rather than any
+  tool's output: a deleted test file, fewer test blocks than before, or an added `skip`/`only` is
+  a failure, because the cheapest way to make a check pass is to delete the test. New failures
+  raise `CheckFailed`.
+- **`build_application` left the builder agent, and stayed a trait.** `coding` now has the
+  `application` setting, so `check` builds the app as its last step and the model gets the
+  diagnostics **with** the type errors and the test failures in one result rather than from a
+  second tool it has to remember to call. The React framework therefore declares `coding` alone
+  (§13.3), and `build_application` remains registered for the agent whose only job is to build
+  one. **Deviation:** on a server with no headless browser, `create_builder_agent` saves the
+  agent with `may_view_app` **off**, because `coding` refuses that grant where there is no
+  browser and an application should not fail to get an agent over it; and `check` now says "no
+  checks are configured" when only the build ran, which is what a `code` application's builder
+  looks like.
+- **The shell reverses "no shell", and the reversal is fenced three ways.** `may_use_shell` is
+  off by default; the tools are offered **only to a run whose caller is an admin**, and that is
+  re-checked inside `call` so a stale transcript cannot carry a call from a run that used to have
+  one; and `shell_sandbox: container` runs each command in `docker`/`podman` with only the scope
+  mounted and no network unless `shell_network` is on. The grant is the last field on the form
+  and its label says what it is — every other permission at once — because it runs as the
+  server's OS user. `process_<slug>` (`start`/`stop`/`logs`/`list`) exists so a long-running
+  command is not a shell call that times out: its processes belong to the run, are killed by the
+  new `AgentTrait::run_ended` hook when the drive ends and again when the server stops, and a
+  trailing `&` on a `shell` command is refused with a pointer to it. **Deviation:** the scope
+  snapshot that puts shell-made changes into the change ledger is taken before **every** shell
+  call rather than once, so nothing is held between calls and a change made by other means
+  between two calls is not attributed to the shell.
+- **The repo map is its own crate.** `sc-repomap` has **no workspace dependencies** — the caller
+  passes paths and bytes — which keeps tree-sitter's C builds out of everything that depends on
+  `sc-core-traits`, and the grammars sit behind a default `grammars` feature. Tags come from the
+  grammars' own `tags.scm` with the references a code agent needs added (JSX components, exported
+  constants, TS type aliases, enums and type references, Python `from` imports); ranking is
+  personalised PageRank on Aider's weights, hand-rolled rather than adding a graph dependency.
+  **Deviation:** a definition nobody refers to gets 1% of its file's rank rather than a
+  self-edge, which was handing the whole rank of a file that links nowhere else to whatever it
+  defined first. Rendering binary-searches to a token budget; the map is in `coding`'s session
+  header at `repo_map_tokens`, focused by the words of the brief, and `repo_map_tokens = 0`
+  leaves it out.
+- **The prompt is a hook, and its size is a test.** `AgentTrait::prompt` is given what `tools`
+  is given, and `sc_agent::stable_prefix` assembles the system prompt and the tool list from
+  every trait's contribution — so the text can name only the tools *this* run is offered, and the
+  shell note appears only where the grant is on. `coding`'s contribution is R§4's
+  `<workflow>`/`<rules>`/`<edit_format>` blocks. The scope is named **once**, in the prompt,
+  rather than in fifteen tool descriptions. The size test (8.3) is the reason several of these
+  texts are as short as they are: the React builder's stable prefix plus tool definitions is
+  ≤ 1 500 estimated tokens in both `act` and `plan`, and it took cutting every tool description
+  and dropping `SHARED_PROMPT`'s workflow to get there (`act` measures 1 496 with `explore`
+  declared).
+- **`planned` is a workflow setting, not a second trait.** `workflow = planned` starts the run in
+  `plan` mode (the new `AgentTrait::starting_mode` hook, read by `Runner::new`), where the tools
+  are the read-only four plus `save_plan`, `implement_feature` and `explore`. The plan — an
+  ordered `features` list (`id`, `title`, `description`, `kind`, `acceptance`, `files`, `pages`,
+  `checks`, `notes`, and the harness's own `status`/`attempts`/`runs`) plus `progress` entries —
+  lives in `coding`'s per-run trait state, so it is one planner run's state and nothing else's, and
+  every plan tool's result ends with the compact checklist. `save_plan` may set only
+  `todo`/`blocked` and may not drop a feature that is in progress. `implement_feature` runs one
+  **session** per feature through self-delegation in `act` mode (§11.2), with
+  `max_sessions_per_feature` retries, an independent `check` plus the ratchet after the child
+  returns, a commit per green feature written by the cheap role, and a re-plan instruction after
+  two consecutive failures or a child that ended `Stuck`. `explore(question)` is a cheap-role
+  session in `explore` mode returning ~300 words, and a depth-1 session may start one.
+  **Deviations:** the independent check compares against a **plan** baseline recorded before the
+  first session, because a failed session's changes stay in the tree; the commit is plain `git`
+  over the session's changed paths rather than `GitRepo`, so any scope whose work tree lies
+  inside the store's directory is committed, which is the same rule the session header's git log
+  uses; and a `bug` feature's `red_before_fix` is recorded by noticing a red check while the run
+  has changed only test files.
+- **`view_app` and the preview are one feature split across three crates.** The tool is
+  `coding`'s, the mount is the server's (§13.2) and the seam between them is `sc_agent::view`:
+  `TraitContext::previews` and `TraitContext::browser`, both `Option` with `require_*` like the
+  evaluator, so a run driven from a context that has neither says so instead of finding another
+  way to open a browser. `TraitCheck` gained `host: HostCapabilities` for the same reason —
+  `validate_config` refuses `may_view_app` where no browser was detected, on save and on load.
 
 **The schema, the triggers, and an application's own SQL endpoints.** `admin_copilot` is the
 first **app-building** trait: it describes and edits the catalog itself, the trigger set over it,
@@ -4085,6 +4273,33 @@ the coding trait's results are file contents and search hits, which would bury t
 failed tool is the exception, because it is the sentence that explains a turn which then went
 sideways.
 
+**What was built, where it deviates** (coding agent milestone, Phase 10.4, the relay against the
+reworked `coding`):
+
+- **`relayEvent` returns what changed, rather than announcing it.** It answers each event with a
+  `StoreChange` — the scope-relative `paths`, an `everything` flag and a `committed` flag —
+  which `chat.ts` merges over the turn and acts on once at the end. Keeping the decision in a
+  pure function is what lets the interesting cases be tested without a workbench, and it is why
+  the three new ones below are three lines rather than three places in an event handler.
+- **`implement_feature_…` is read from its *result*, not its call.** A planned run's sessions
+  write files through a **child run**, whose tool calls this socket never sees: what arrives is
+  one result per feature. So its `diffstat:` block is parsed for the paths (both sides of a
+  rename included) and a `commit: <sha>` line sets `committed`, which triggers the source-control
+  refresh. This is the one place the relay reads a tool's output rather than its arguments, and
+  the reason is that the arguments are a feature id.
+- **`shell_…` refreshes everything, and does it at the call.** A command can write anywhere in
+  the scope and its own text does not say where, so there is nothing to announce but "re-read
+  the tree". It is taken from the **call** rather than the result because a command that timed
+  out or failed may still have written half of what it meant to.
+- **`apply_patch_…` names its paths inside the patch.** The call carries V4A text, not a `path`
+  argument, so the relay reads the `*** Add/Update/Delete/Move File:` headers out of it — the
+  same paths the applier will touch — and both sides of a move.
+- **`view_app_…`, `check_…`, `process_…`, `save_plan_…` and `explore_…` are progress lines and
+  change nothing.** Each reports what it is about (`Looking at /tasks`, `Exploring: …`), because
+  a panel that goes quiet for thirty seconds of browser work reads as a hang. A compaction event
+  gets a line too — an agent that seems to have forgotten something has a reason — but not the
+  summary, which is the agent's notes rather than its answer.
+
 ### 12.2 Code settings: the editor inside a settings form
 
 Some settings are **programs**. A `run_js_code` trigger body reads and writes tables (§10.1's
@@ -4347,6 +4562,43 @@ project directory, belonging to a developer or to a coding agent, with no sessio
 reason to acquire one. It is not a replacement for the Build button — that still builds — but
 its fast half. What it deliberately does not reload, each having its own live-updating admin
 API, is the trigger set, the agents, the LLM providers and the file-store connections.
+
+**The second registry: a coding run's previews** (coding agent milestone, Phase 6b). An agent
+that built an application has answered "does this compile?"; the next question is "does the page
+work?", and answering it must not disturb what the application's users are being served. So
+`AppMounts` carries a **second** registry beside the live one: `mount_preview(run, MountedApp)`
+mounts a build **as a run's preview**, replacing nothing, and `unmount_preview` /
+`unmount_run_previews` take it away. `check` mounts or refreshes the run's preview on a green
+build, the driver's run-end hook unmounts it, and a sweep removes any preview unused for longer
+than `--preview-idle-minutes` (default one hour), where *unused* means no mount, lookup or
+request through it — not "not written to".
+
+- **A preview is one DNS label, not a path or a port.** The host is `<label>--<subdomain>`, with a
+  random label, so the wildcard DNS record and the wildcard certificate that already cover the
+  application cover its previews too, and nothing has to be issued or configured to look at one.
+  The router resolves such a host to the preview registry; a `<label>--<subdomain>` host whose
+  label is no preview is a **404 even when the subdomain is served**, because falling through to
+  the live application would answer a question nobody asked. A run keeps one label per
+  application, so a later green build re-mounts under the same label and the page the agent has
+  open keeps working.
+- **A preview is not public.** Every request through it must carry the owning run's session, and
+  anything else — no session, or another user's — is a 404 rather than a 403: the existence of
+  another run's preview is not a fact to hand out. The session is made by the browser driver on
+  the run's first `view_app` call (`SessionStore::login`, which is `sc_auth::create_session` plus
+  this node's cache, so the router honours it at once) for the run's own user, or for the account
+  `view_app_user` names on a run nobody is present for; it is injected as a cookie into the run's
+  browser context, written nowhere on disk, and logged out when the context closes.
+- **The browser reaches it over a listener of its own.** Rather than teaching Chromium to trust
+  the public listener's certificate, `serve` binds a second loopback-only listener serving the
+  same router in plain HTTP with non-`Secure` cookies, and the browser is started with
+  `--host-resolver-rules` mapping the base domain and everything under it to that address and
+  **every other name to NOTFOUND**. One Chromium for the server, a context per run, a
+  concurrency cap (`--browser-contexts`), and a watchdog that kills the browser if the server
+  dies without shutting it down. `view_app` is a view of this application; it is not a way to
+  browse the internet from inside the server.
+- **Its data is the live data.** A preview serves the new bundle against the application's real
+  tables as the caller, so `click` and `fill` on a form write real rows — the tool's description
+  says so, because the alternative (a scratch database per preview) is a different product.
 
 ### 13.3 Frameworks
 

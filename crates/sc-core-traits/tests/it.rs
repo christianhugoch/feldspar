@@ -46,6 +46,8 @@ mod coding_repo_map;
 mod coding_shell;
 #[path = "coding_traits.rs"]
 mod coding_traits;
+#[path = "docs_agents.rs"]
+mod docs_agents;
 #[path = "query_table.rs"]
 mod query_table;
 #[path = "run_agent.rs"]

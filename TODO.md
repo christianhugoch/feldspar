@@ -1163,20 +1163,33 @@ default.
 
 ## Phase 12 — Documentation and the definition of done
 
-- [ ] 12.1 TECHNICAL_DESIGN §9 (`_fd_llm_models`, and the entity-relationship section), §11.1
+- [x] 12.1 TECHNICAL_DESIGN §9 (`_fd_llm_models`, and the entity-relationship section), §11.1
       (providers and models as two tables and why, capabilities, cache plan, reasoning replay,
       `openai_chat`, prices), §11.2 (roles, modes, state, budgets, loop control, context), §11.3 (the
       `coding` rework, why `build_application` left the builder agent, and the shell
       reversing "No shell" behind an off-by-default, admin-only grant), §12.1 (the relay), and
       §13.2 (preview mounts beside the mount registry).
-      Each gets a "what was built, where it deviates" note.
-- [ ] 12.2 `docs/tutorial-agents.md`: configuring roles and budgets, the `planned` workflow,
+      Each gets a "what was built, where it deviates" note. *(§9's `_fd_llm_models` row, the ER
+      diagram and most of §11.1 were written as Phase 1 built them, so what was added there is
+      what had no note: the agent `attributes` the milestone fills, the roles' edge to
+      `_fd_llm_models`, and `estimate_tokens`/`TokenEstimator`. New notes: §11.2 loop control,
+      §11.2 context management, §11.3 the `coding` rework (Phases 5–10, including why
+      `build_application` left the builder agent), §12.1 the relay, §13.2 the preview registry.)*
+- [x] 12.2 `docs/tutorial-agents.md`: configuring roles and budgets, the `planned` workflow,
       reading a plan and a run diff, previews and `view_app` (what a preview shows, whose
       session it uses, that its data is live, and the browser the host needs), and turning on
       the shell (the admin-only rule and the
-      sandbox choice, stated plainly).
+      sandbox choice, stated plainly). *(Steps 5a–5f. Two existing steps were wrong and are
+      fixed: Step 1 asked for a model on the provider form, which Phase 1 removed, and Step 5
+      configured `build_application` beside `coding`, which 10.1 replaced with `coding`'s own
+      `application` setting. `sc-core-traits/tests/docs_agents.rs` holds both documents to the
+      code's own labels, values and derived tool names.)*
 - [ ] 12.3 Walk the definition of done by hand against a real provider. Record the eval numbers
       and anything that deviated, then write the CHANGELOG entry.
+      *(The CHANGELOG entry for Phase 12 is written. The **walk** is 11.4's situation: it needs
+      an API key and spends money, so it is a human's — the scripted definition of done
+      (`coding_plan`, 9.9) is what `cargo test` can assert. `docs/AGENT_EVAL.md` has the
+      command and the "Results" heading the numbers go under.)*
 
 ---
 

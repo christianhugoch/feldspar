@@ -2,6 +2,83 @@
 
 Changes in reverse chronological order.
 
+## The documentation (coding agent milestone, Phase 12)
+
+The milestone's design record and its tutorial, brought up to what was built. No behaviour
+changed; what changed is what a reader is told, and a test now holds the two documents to the
+names in the code.
+
+- **`docs/TECHNICAL_DESIGN.md` (12.1)** — each section the plan names gets a "what was built,
+  where it deviates" note, in the form the earlier milestones use:
+  - **§9** — `_fd_agents`' `attributes` now says what is sparse in it: the `strong`/`cheap`
+    model roles, the four budgets, the loop-control thresholds and `keep_turns`, with the rule
+    that a save must keep a key it does not show. The ER diagram gains the roles' reference to
+    `_fd_llm_models`. (`_fd_llm_models` itself was recorded in §9 when Phase 1 built it.)
+  - **§11.1** — how a request is counted before it is sent: `estimate_tokens(req, backend)`
+    plus `TokenEstimator`'s per-run calibration factor, and why a tokeniser per backend is not
+    worth the dependency for a number whose only consumer is a threshold.
+  - **§11.2** — two new notes. **Loop control:** the in-crate schema checker, per-*round*
+    measurement, the three detectors and their attributes, what a trait `Signal` is for, the
+    warn → escalate → stop ladder (and why the warning goes in a tool result rather than the
+    system prompt), the separate malformed-call cap, and `Stuck` as a conclusion.
+    **Context management:** the prefix/header/history layout as the cache plan, the overlays
+    that leave the stored transcript whole, the provider's own `input_tokens` plus an estimate
+    of the tail, the two compaction passes, what `coding` elides, and what `FakeProvider` grew
+    to test it.
+  - **§11.3** — the `coding` rework: the fifteen tools and which grants declare them, why
+    `find_files` replaced `list_files`, `check` as the ratchet (baselines, the shared
+    diagnostic parsers, the test-deletion check), **why `build_application` left the builder
+    agent** (the `application` setting puts the build inside `check`, so the model reads it
+    beside the type errors), the shell's three fences, `sc-repomap` as a dependency-free crate,
+    the prompt hook and its size test, `planned` as a workflow setting rather than a second
+    trait, and the `sc_agent::view` seam under `view_app`.
+  - **§12.1** — the IDE relay against the reworked trait: `relayEvent` returning a
+    `StoreChange`, `implement_feature` read from its *result* (its sessions' writes were never
+    calls this socket saw), `shell_` refreshing everything from the *call*, `apply_patch` paths
+    read out of the patch headers, and the tools that are progress lines only.
+  - **§13.2** — the preview registry beside the live mount registry: `<label>--<subdomain>` as
+    one DNS label, 404 without the owning run's session, the loopback listener and
+    `--host-resolver-rules` instead of certificate trust, the idle sweep, and that a preview's
+    data is the live data.
+- **`docs/tutorial-agents.md` (12.2)** — six new steps and two corrected ones:
+  - **Step 1** no longer asks for a model on the provider form (it has not had one since Phase
+    1): it adds the **Models** list, *Fetch models*, *Test*, and what a model row holds —
+    prices as four numbers where blank is unknown, the window, the edit format, the capability
+    overrides. The third backend, `openai_chat`, is named.
+  - **Step 5** is the builder agent as it is now: `coding` alone, with `Checks` and
+    **Application built by check**, so `check` returns type errors, test failures and bundler
+    diagnostics in one result, each marked new or pre-existing — and the test-deletion ratchet
+    is stated where somebody would otherwise discover it by being refused.
+  - **Step 5a, roles:** the executor, `strong` and `cheap`, what each answers, and the point —
+    a cheap model that is stuck gets one expensive turn.
+  - **Step 5b, budgets:** the five boxes, why **Cost per run** needs prices on every model,
+    that working time is working time, and what compaction looks like from the chat.
+  - **Step 5c, the `planned` workflow:** plan mode, `save_plan`, a session per feature, the
+    planner's own `check`, the commit, and the re-plan after two failures.
+  - **Step 5d, reading a plan and a diff:** the cost-and-plan bar, the checklist marks, child
+    runs at `#/runs/{id}`, and the three things about a run diff that surprise people (it works
+    on any store, it includes the children, it is not "what is uncommitted").
+  - **Step 5e, previews and `view_app`:** the three things the grant needs, the accessibility
+    snapshot as the normal case and a screenshot as the expensive one, and the four facts —
+    it is a preview and not a deployment, it uses **your** session (or `view_app_user` for a
+    triggered run), **the data is live**, and nobody else can open it.
+  - **Step 5f, the shell:** off by default, admin-only and re-checked at call time, `process_`
+    for anything long-running, and the sandbox choice as a two-row table with what `container`
+    does *not* give you (no registry allowlist).
+  - The "trips people up" list gains the compaction entry (replacing the stale "nothing
+    summarises it yet"), the shell's caller rule, what a preview is not, `stuck` as a
+    diagnosis, unpriced models making a cost unknown rather than zero, and where a planned
+    run's detail actually is.
+- **The test (`sc-core-traits/tests/docs_agents.rs`):** seven assertions that hold the prose to
+  the code — every `coding` grant's label appears in the tutorial (matched on the label's
+  leading clause, with markdown emphasis folded), the sandbox's two values, the workflow
+  setting and its `planned` value with the three tools it is made of, the tool names this
+  tutorial's scope actually derives (`check_apps_todo`, `shell_apps_todo`,
+  `process_apps_todo`) and that every derived name still fits 64 characters, every label in the
+  agent form's roles/budgets lists, the four things 12.2 requires a preview's description to
+  say, and a milestone note in each of the six design sections. A renamed checkbox or a changed
+  slug rule now fails a test instead of leaving a document confidently wrong.
+
 ## The evaluation harness (coding agent milestone, Phase 11)
 
 `feldspar agent eval <suite>` runs a suite of coding tasks against named models and reports
