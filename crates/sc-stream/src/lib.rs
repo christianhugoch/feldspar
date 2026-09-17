@@ -14,8 +14,8 @@
 //! a `Trigger` whose event comes from outside, and the shape is the one this
 //! tree has built four times: a **provider is code declaring its settings as
 //! [`FormField`]s** ([`StreamProvider`]), an **entity is a row that is its own
-//! definition** (Phase 2), and the admin UI **renders a provider it has never
-//! heard of**.
+//! definition** ([`Stream`] and [`store`]), and the admin UI **renders a
+//! provider it has never heard of**.
 //!
 //! ## The three places a flow is genuinely not a fit or a row
 //!
@@ -69,7 +69,10 @@ pub mod envelope;
 pub mod provider;
 pub mod providers;
 pub mod registry;
+pub mod store;
+pub mod stream;
 pub mod subscription;
+pub mod validate;
 
 #[cfg(feature = "testing")]
 #[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
@@ -80,4 +83,10 @@ pub use envelope::{Element, Envelope};
 pub use provider::{StreamProvider, StreamProviderHost, StreamProviderKind, StreamSink};
 pub use providers::{builtin_providers, builtin_registry};
 pub use registry::StreamRegistry;
+pub use store::{
+    STREAMS_TABLE, bootstrap_streams, delete_stream, list_streams, load_stream,
+    load_stream_by_name, require_stream, save_stream,
+};
+pub use stream::{ATTR_ENABLED, Stream, StreamId};
 pub use subscription::{Stop, Subscription};
+pub use validate::{check_stream, check_stream_name, validate_stream};

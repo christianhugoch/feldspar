@@ -379,12 +379,12 @@ whose `element_type` cannot be read supplies nothing and the issue stays on the 
 
 ## Phase 2 — `_fd_streams`
 
-- [ ] 2.1 `store.rs`: `STREAMS_TABLE`, the §5 columns, `bootstrap_streams(catalog)` (called from
+- [x] 2.1 `store.rs`: `STREAMS_TABLE`, the §5 columns, `bootstrap_streams(catalog)` (called from
       `install_streams` at boot, where `bootstrap_models` is called from — a stream is no use to
       a `feldspar` command that is not serving), `Stream`/`StreamId`, and
       `save_stream` / `load_stream` / `load_stream_by_name` / `list_streams` / `delete_stream`,
       read strictly.
-- [ ] 2.2 `validate.rs`: the provider exists; the configuration validates against its
+- [x] 2.2 `validate.rs`: the provider exists; the configuration validates against its
       `config_spec` (`validate_attrs`); `element_type(config)` succeeds; the name is unique and
       is a legal identifier (it becomes a socket path segment); `min_role` is a known role.
       `save_stream` calls it first.
