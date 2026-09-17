@@ -14,9 +14,7 @@ use std::collections::BTreeSet;
 
 use sc_agent::TraitContext;
 use sc_error::{Error, Result};
-use sc_files::{
-    DEFAULT_EXCLUDED_DIRS, DEFAULT_MAX_RESULTS, MAX_LINE_CHARS, SearchQuery, search_store,
-};
+use sc_files::{DEFAULT_MAX_RESULTS, MAX_LINE_CHARS, SearchQuery, search_store};
 use sc_llm::ToolSpec;
 use sc_types::Attrs;
 use serde_json::{Map, Value as Json, json};
@@ -56,22 +54,20 @@ pub fn spec(scope: &FileScope, config: &Attrs) -> ToolSpec {
     ToolSpec::new(
         tool_name(scope),
         format!(
-            "Search file contents in {} and return matching lines as `path:line: text`, \
-             at most {ceiling}. `{}` are skipped.",
-            scope.label(),
-            DEFAULT_EXCLUDED_DIRS.join("`, `")
+            "Search file contents for lines as `path:line: text`, at most {ceiling}. \
+             Dependency and build directories are skipped."
         ),
         json!({
             "type": "object",
             "properties": {
-                ARG_PATTERN: {"type": "string", "description": "Text to find; literal unless `regex`."},
-                ARG_REGEX: {"type": "boolean", "description": "Pattern is a regular expression."},
-                ARG_CASE: {"type": "boolean", "description": "Match case (default false)."},
-                ARG_GLOB: {"type": "string", "description": "Only files matching, e.g. `*.tsx` or `src/**/*.ts`."},
-                ARG_DIR: {"type": "string", "description": "Only this directory."},
+                ARG_PATTERN: {"type": "string", "description": "Literal unless `regex`"},
+                ARG_REGEX: {"type": "boolean", "description": "Pattern is a regex"},
+                ARG_CASE: {"type": "boolean", "description": "Default false"},
+                ARG_GLOB: {"type": "string", "description": "e.g. `*.tsx`"},
+                ARG_DIR: {"type": "string", "description": "Only this directory"},
                 ARG_CONTEXT: {
                     "type": "integer", "minimum": 0, "maximum": MAX_CONTEXT_LINES,
-                    "description": "Lines of context around each match (default 0).",
+                    "description": "Lines around each match",
                 },
             },
             "required": [ARG_PATTERN],

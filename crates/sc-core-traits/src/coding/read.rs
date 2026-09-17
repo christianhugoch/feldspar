@@ -58,17 +58,13 @@ pub fn spec(scope: &FileScope, config: &Attrs) -> ToolSpec {
     let ceiling = config_count(config, CFG_MAX_LINES, DEFAULT_MAX_LINES).unwrap_or(u64::MAX);
     ToolSpec::new(
         tool_name(scope),
-        format!(
-            "Read a text file in {} as numbered lines, up to {ceiling} lines per call. \
-             Read a file before editing it.",
-            scope.label()
-        ),
+        format!("Read a text file as numbered lines, at most {ceiling} per call."),
         json!({
             "type": "object",
             "properties": {
-                ARG_PATH: {"type": "string", "description": "Relative path, e.g. `src/App.tsx`."},
-                ARG_OFFSET: {"type": "integer", "minimum": 1, "description": "First line (default 1)."},
-                ARG_LIMIT: {"type": "integer", "minimum": 1, "description": "Number of lines."},
+                ARG_PATH: {"type": "string", "description": "e.g. `src/App.tsx`"},
+                ARG_OFFSET: {"type": "integer", "minimum": 1, "description": "First line (default 1)"},
+                ARG_LIMIT: {"type": "integer", "minimum": 1, "description": "Lines to read"},
             },
             "required": [ARG_PATH],
             "additionalProperties": false,

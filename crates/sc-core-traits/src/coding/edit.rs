@@ -48,18 +48,14 @@ pub fn tool_name(scope: &FileScope) -> String {
 pub fn spec(scope: &FileScope) -> ToolSpec {
     ToolSpec::new(
         tool_name(scope),
-        format!(
-            "Replace text in a file in {}. Read the file first. `{ARG_OLD}` must match one \
-             place; quote whole lines with enough context to be unique.",
-            scope.label()
-        ),
+        format!("Replace text in a file you have read. `{ARG_OLD}` must match one place."),
         json!({
             "type": "object",
             "properties": {
-                ARG_PATH: {"type": "string", "description": "Relative path."},
-                ARG_OLD: {"type": "string", "description": "The text to replace, copied from the file."},
-                ARG_NEW: {"type": "string", "description": "The replacement."},
-                ARG_ALL: {"type": "boolean", "description": "Replace every occurrence."},
+                ARG_PATH: {"type": "string"},
+                ARG_OLD: {"type": "string", "description": "Whole lines, copied from the file"},
+                ARG_NEW: {"type": "string"},
+                ARG_ALL: {"type": "boolean", "description": "Every occurrence"},
             },
             "required": [ARG_PATH, ARG_OLD, ARG_NEW],
             "additionalProperties": false,

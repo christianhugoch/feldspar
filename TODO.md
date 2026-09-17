@@ -1022,15 +1022,28 @@ default.
 
 ## Phase 8 — The prompt
 
-- [ ] 8.1 `coding`'s static contribution, per mode and edit format, as R§4's
+- [x] 8.1 `coding`'s static contribution, per mode and edit format, as R§4's
       `<workflow>`/`<rules>`/`<edit_format>` blocks: locate before reading, reproduce bugs,
       smallest change, edit only what you read, `check` until green, never weaken tests, stay
-      in the feature's scope, and a 3–5 line closing summary.
-- [ ] 8.2 `coding`'s `session_header`: `AGENTS.md` (root, plus the nearest one to the
+      in the feature's scope, and a 3–5 line closing summary. *(A new `AgentTrait::prompt`
+      hook, given what `tools` is given, and `sc_agent::stable_prefix` builds the system prompt
+      and tools from it. The text names only tools the run is offered. The shell note moved
+      there from `on_turn`, which `coding` no longer uses. The scope is named once in the
+      prompt, not in every tool description. The plan-mode text names no plan tools yet: 9.x
+      adds them.)*
+- [x] 8.2 `coding`'s `session_header`: `AGENTS.md` (root, plus the nearest one to the
       feature's files for a child run), the repo map, the recent `git log` for a git store,
-      and the feature brief with the last few progress entries.
-- [ ] 8.3 A size test: the React builder agent's stable prefix plus tool definitions in `act`
-      mode is ≤ 1 500 estimated tokens, and in `plan` mode likewise.
+      and the feature brief with the last few progress entries. *(Nested `AGENTS.md` files
+      come from the files any brief names, not only a child's. The git log is shown when the
+      scope's git work tree lies inside the store's own directory, which covers git stores and
+      local stores that are repositories. It lists commits touching the scope. **Deviation:**
+      the brief is not repeated in the header. It is the run's first user message, directly
+      after the header, so 9.3's briefing carries the feature and the progress entries.)*
+- [x] 8.3 A size test: the React builder agent's stable prefix plus tool definitions in `act`
+      mode is ≤ 1 500 estimated tokens, and in `plan` mode likewise. *(Measured both as
+      declared today and in §12's shape, on an Anthropic and an OpenAI model. To fit, the tool
+      descriptions were cut and `SHARED_PROMPT`'s workflow was removed. §12's `act` is 1 485 on
+      `apply_patch`, so 9.x's `explore` tool must come in short.)*
 
 ## Phase 9 — Planning and sessions (`coding`)
 

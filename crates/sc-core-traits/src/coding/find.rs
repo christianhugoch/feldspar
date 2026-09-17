@@ -41,21 +41,16 @@ pub fn spec(scope: &FileScope, config: &Attrs) -> ToolSpec {
         config_count(config, CFG_MAX_RESULTS, DEFAULT_MAX_RESULTS as u64).unwrap_or(u64::MAX);
     ToolSpec::new(
         tool_name(scope),
-        format!(
-            "Find files in {} by glob, newest first, at most {ceiling}. Directories end \
-             in `/`. `{}` are skipped.",
-            scope.label(),
-            DEFAULT_EXCLUDED_DIRS.join("`, `")
-        ),
+        format!("Find files by glob, newest first, at most {ceiling}. Directories end in `/`."),
         json!({
             "type": "object",
             "properties": {
                 ARG_PATTERN: {
                     "type": "string",
-                    "description": "Glob relative to `dir`: `*.tsx` matches names anywhere, \
-                                    `src/**/*.ts` matches paths. Omit to list everything.",
+                    "description": "`*.tsx` matches names anywhere, `src/**/*.ts` paths. \
+                                    Omit to list all.",
                 },
-                ARG_DIR: {"type": "string", "description": "Directory to search in (default: the root)."},
+                ARG_DIR: {"type": "string", "description": "Start here (default: the root)"},
             },
             "additionalProperties": false,
         }),

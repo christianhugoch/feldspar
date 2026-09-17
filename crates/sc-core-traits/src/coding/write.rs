@@ -29,23 +29,17 @@ pub fn tool_name(scope: &FileScope) -> String {
 /// the only way to change a file, and its description says so.
 pub fn spec(scope: &FileScope, format: EditFormat) -> ToolSpec {
     let how = match format {
-        EditFormat::WholeFile => {
-            "This is the only way to change a file: read it, then write it back whole."
-        }
-        _ => "To change part of a file, edit it instead.",
+        EditFormat::WholeFile => "This is the only way to change a file.",
+        _ => "To change part of one, edit it.",
     };
     ToolSpec::new(
         tool_name(scope),
-        format!(
-            "Create a file in {}, or replace an existing file's entire content. An \
-             existing file must be read first. {how}",
-            scope.label()
-        ),
+        format!("Create a file, or replace the whole of one you have read. {how}"),
         json!({
             "type": "object",
             "properties": {
-                ARG_PATH: {"type": "string", "description": "Relative path."},
-                ARG_CONTENT: {"type": "string", "description": "The complete new content."},
+                ARG_PATH: {"type": "string"},
+                ARG_CONTENT: {"type": "string", "description": "The whole file"},
             },
             "required": [ARG_PATH, ARG_CONTENT],
             "additionalProperties": false,

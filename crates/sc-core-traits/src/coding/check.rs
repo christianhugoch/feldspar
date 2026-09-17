@@ -71,12 +71,9 @@ pub fn tool_name(scope: &FileScope) -> String {
 pub fn spec(scope: &FileScope) -> ToolSpec {
     ToolSpec::new(
         tool_name(scope),
-        format!(
-            "Run the configured checks on {} (type check, tests, build) and report each \
-             one's result, with diagnostics marked new or pre-existing. Done means no new \
-             failures.",
-            scope.label()
-        ),
+        "Run the configured checks (type check, tests, build). Diagnostics are marked new or \
+         pre-existing; done means no new failures."
+            .to_owned(),
         json!({
             "type": "object",
             "properties": {},

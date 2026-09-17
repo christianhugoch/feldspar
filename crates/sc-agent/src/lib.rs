@@ -90,7 +90,9 @@ pub use control::{
 pub use delegate::{
     ATTR_DELEGATED_BY, ATTR_PARENT_RUN, DEFAULT_MAX_DEPTH, DelegateRequest, Delegated, Delegator,
 };
-pub use driver::{ProviderConnector, RunObserver, Runner, StoredProviders, connect};
+pub use driver::{
+    ProviderConnector, RunObserver, Runner, StablePrefix, StoredProviders, connect, stable_prefix,
+};
 pub use ledger::{ChildLedger, Ledger, LedgerStep, RoleTotals};
 pub use machine::{
     AgentLoop, Budget, Budgets, Conclusion, IMAGE_STUB, Step, StepMeta, ToolOutcome,

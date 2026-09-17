@@ -111,11 +111,9 @@ pub fn spec(scope: &FileScope, config: &Attrs, vision: bool) -> ToolSpec {
     ToolSpec::new(
         tool_name(scope),
         format!(
-            "Look at this run's preview of the `{application}` application (mounted by a green \
-             check) in a browser, as the user. One action per call; each returns the page as an \
-             accessibility snapshot with @e refs for click and fill, plus console errors and \
-             failed requests. The preview uses the live data: click and fill on a form write \
-             real rows.{}",
+            "Use this run's preview of `{application}` (mounted by a green check) as the user, \
+             one action per call. Returns an accessibility snapshot with @e refs, console errors \
+             and failed requests. Data is live: click and fill on a form write real rows.{}",
             if vision {
                 " screenshot returns an image."
             } else {
@@ -130,16 +128,16 @@ pub fn spec(scope: &FileScope, config: &Attrs, vision: bool) -> ToolSpec {
 fn parameters(actions: Vec<&str>, vision: bool) -> Json {
     let mut properties = json!({
         "action": {"type": "string", "enum": actions},
-        "path": {"type": "string", "description": "goto: a path, such as /tasks"},
-        "ref": {"type": "string", "description": "click, fill, wait_for: an @e ref"},
-        "text": {"type": "string", "description": "fill: the value; wait_for: text to wait for"},
-        "key": {"type": "string", "description": "press: Enter, Tab, Escape, ArrowDown, …"},
+        "path": {"type": "string", "description": "goto: e.g. /tasks"},
+        "ref": {"type": "string", "description": "an @e ref"},
+        "text": {"type": "string", "description": "fill: value; wait_for: text"},
+        "key": {"type": "string", "description": "press: e.g. Enter"},
         "timeout": {"type": "integer", "description": "wait_for: seconds"},
     });
     if vision && let Some(map) = properties.as_object_mut() {
         map.insert(
             "full_page".to_owned(),
-            json!({"type": "boolean", "description": "screenshot: the whole page"}),
+            json!({"type": "boolean", "description": "screenshot: whole page"}),
         );
     }
     json!({

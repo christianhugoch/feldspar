@@ -2,6 +2,73 @@
 
 Changes in reverse chronological order.
 
+## The prompt (coding agent milestone, Phase 8)
+
+`coding` now gives each run R§4's layered prompt: a workflow, rules and edit-format rules that
+fit the mode and the grants. Every session opens with the project's notes, a repo map and the
+recent git history. The React builder agent's system prompt plus tools fit in 1 500 tokens.
+
+- **`AgentTrait::prompt`** (new hook in `sc-agent`): a trait's static contribution to the system
+  prompt. It gets the same `ToolsContext` as `tools` (mode, model capabilities, caller). It
+  must be the same on every step, because it is part of the cached prefix.
+  - **`sc_agent::stable_prefix(registry, agent, cx)`** returns the agent's prompt, then each
+    trait's contribution in trait order, then the tools sorted by name. The driver builds each
+    request from it and appends `on_turn` text after it. It is public so a prefix can be
+    measured without running the agent.
+- **`coding`'s static contribution** (`coding/prompt.rs`):
+  - Every mode opens with one sentence naming the scope the `_<slug>` tools work on. The tool
+    descriptions no longer repeat the scope.
+  - **`act`:**
+    - `<workflow>`: locate with `repo_map`/`search_files`; reproduce a bug first (with a
+      failing test or `check` when `may_check` is on); make the smallest change; edit only
+      files you have read; run `check` until there are no new failures; look at a visible
+      change with `view_app` (when granted); end with a 3–5 line summary.
+    - `<rules>`: never delete, skip or weaken a test; stay within the task; record lasting
+      project facts in `AGENTS.md` and say so.
+    - `<edit_format>`: the rules of the active tool only (`edit_file`, `apply_patch` or
+      whole-file `write_file`).
+    - An `act` run without `may_edit` gets a read-only workflow and no edit rules.
+    - The shell note (admin callers with `may_use_shell`) moved here from `on_turn`, which
+      `coding` no longer implements.
+  - **`plan`:** split the request into features with acceptance criteria and likely files,
+    implement in order, review each diff and check summary, re-plan after two failures or a
+    stuck child. It does not name the plan tools yet; Phase 9 adds them.
+  - **`explore`:** answer in at most 300 words, naming files and lines.
+  - No step names a tool the run is not offered.
+- **`coding`'s session header** (`coding/header.rs`), built once per session. In order:
+  1. **`AGENTS.md`** at the scope root, then the nearest one above each file the brief names.
+     Each is framed as `<project path="…">`, checked against the caller's access, and capped
+     at 8 000 characters.
+  2. **The repo map**, as before. The header now walks the tree once for both the notes and
+     the map.
+  3. **`<git_log>`**: the last 10 non-merge commits touching the scope (`%h %ad %s`, short
+     dates). It is shown only when the scope's git work tree lies inside the store's own
+     directory, so a local store inside some other checkout does not get that checkout's
+     history.
+
+  Each section is left out, and logged, when it cannot be built. **The brief is not
+  repeated:** it is the first user message, right after the header. Phase 9's
+  `implement_feature` briefing will carry the feature and its progress entries.
+- **Shorter tool descriptions and framework prompts**, to fit R§4's 1 500-token budget:
+  - `read_file`, `find_files`, `search_files`, `repo_map`, `edit_file`, `write_file`,
+    `check` and `view_app` descriptions and parameter descriptions were cut. `search_files`
+    no longer lists the excluded directories.
+  - `sc-app`'s `SHARED_PROMPT` is now two sentences (small steps, build clean, ask when
+    ambiguous), because the workflow is `coding`'s.
+  - The React and `code` prompts no longer explain tool scoping.
+- **Tests:**
+  - `sc-core-traits` `coding_prompt`:
+    - the prompt per mode, grant, edit format and caller;
+    - the session header's order (root notes, nested notes, map, git log), with commits
+      outside the scope left out, and the system prompt as the agent's prompt followed by
+      `coding`'s, stable across requests;
+    - no git log for a store inside another repository;
+    - **the 1 500-token size test** for the React builder agent in `act` and `plan`, on an
+      Anthropic and an OpenAI model, both as declared (max 1 237) and in §12's shape (max
+      1 485).
+  - Unit tests for choosing nested `AGENTS.md` files and for clipping long ones.
+  - `coding_shell`'s prompt test now reads the shell note from `prompt`.
+
 ## The repo map (coding agent milestone, Phase 7)
 
 A port of Aider's repo map, in a new crate, offered to coding agents as a tool and at the top

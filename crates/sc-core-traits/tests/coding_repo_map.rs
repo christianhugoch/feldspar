@@ -183,6 +183,7 @@ async fn a_session_opens_with_a_map_focused_on_the_request() -> Result<()> {
         }
     };
 
+    // No `AGENTS.md` and no git here: the map is the whole header.
     let header = run(None).await?.expect("a header");
     assert!(
         header.starts_with(

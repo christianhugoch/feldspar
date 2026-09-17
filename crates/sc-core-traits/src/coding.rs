@@ -68,10 +68,12 @@ mod check;
 mod edit;
 mod feedback;
 mod find;
+mod header;
 mod ledger;
 pub mod matching;
 mod patch;
 mod process;
+mod prompt;
 mod read;
 mod repo_map;
 mod script;
@@ -84,7 +86,7 @@ mod write;
 
 use sc_agent::{
     AfterToolsContext, AgentTrait, Elidable, RunCaller, RunId, RunMode, SessionContext,
-    ToolsContext, TraitCheck, TraitContext, Turn,
+    ToolsContext, TraitCheck, TraitContext,
 };
 use sc_error::{Error, Result};
 use sc_files::DEFAULT_MAX_RESULTS;
@@ -424,24 +426,22 @@ impl AgentTrait for Coding {
         }
     }
 
-    /// In `act` mode, with the shell offered: how to use it (TODO 6a.7). The
-    /// same text on every step, so it does not break the cached prefix.
-    async fn on_turn(&self, config: &Attrs, turn: &mut Turn<'_>) -> Result<()> {
-        if turn.mode == RunMode::Act && may(config, CFG_MAY_USE_SHELL) && is_admin(turn.caller) {
-            turn.append_system(shell::prompt_note(&scope_as_written(config), config));
-        }
-        Ok(())
+    /// The workflow, the rules and the active edit format's rules, for the
+    /// mode and the grants — and in `act`, with the shell offered, how to use it
+    /// (TODO 8.1, 6a.7). The same text on every step, so the prefix caches.
+    fn prompt(&self, cx: &ToolsContext<'_>, config: &Attrs) -> Option<String> {
+        Some(prompt::prompt(cx, config))
     }
 
-    /// The session header: a repo map focused on what the brief mentions (TODO
-    /// 7.5). `AGENTS.md`, the git log and the feature brief join it in 8.2.
+    /// The session header: `AGENTS.md`, a repo map focused on what the brief
+    /// mentions, and the recent git log (TODO 8.2).
     async fn session_header(
         &self,
         config: &Attrs,
         cx: &mut SessionContext<'_>,
     ) -> Result<Option<String>> {
         let scope = configured_scope(config)?;
-        Ok(repo_map::header(&scope, config, cx.catalog, cx.caller.role, cx.brief).await)
+        Ok(header::header(&scope, config, cx).await)
     }
 
     /// A shell command is the same call whatever its whitespace (TODO 6a.7).
@@ -486,7 +486,7 @@ pub(crate) fn may(config: &Attrs, key: &str) -> bool {
 }
 
 /// Whether a caller is an admin: the only caller the shell is offered to.
-fn is_admin(caller: &RunCaller) -> bool {
+pub(crate) fn is_admin(caller: &RunCaller) -> bool {
     caller.role == 1
 }
 

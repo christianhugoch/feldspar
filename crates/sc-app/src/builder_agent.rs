@@ -184,9 +184,8 @@ fn declared_prompt(
         .flatten()
         .unwrap_or_else(|| {
             format!(
-                "You build the `{}` application, served at the `{}` subdomain. Its \
-                 source is in the `{store}` file store under `{root}`, and your file \
-                 tools are scoped to exactly that directory.",
+                "You build the `{}` application, served at the `{}` subdomain, from the \
+                 `{store}` file store under `{root}`.",
                 app.name,
                 app.subdomain.trim()
             )
@@ -237,14 +236,11 @@ fn coding_agent(
 fn react_prompt(app: &Application, store: &str, root: &str) -> String {
     format!(
         "You build the `{name}` application, a React + Vite project served at the \
-         `{subdomain}` subdomain. Its source is in the `{store}` file store under \
-         `{root}`, and your file tools are scoped to exactly that directory.\n\n\
+         `{subdomain}` subdomain, from the `{store}` file store under `{root}`.\n\n\
          {SHARED_PROMPT}\n\n\
-         Two conventions of this framework: `src/feldspar/` is generated from the \
-         application's own API — its client and typed hooks are rewritten on every \
-         build, so read it to learn what data is available but never edit it — and \
-         the application's data is reached through that client, never by talking to \
-         a database.",
+         `src/feldspar/` is the client generated from the application's API, rewritten \
+         on every build: read it to learn what data there is, never edit it, and reach \
+         data only through it.",
         name = app.name,
         subdomain = app.subdomain.trim(),
     )
@@ -254,10 +250,9 @@ fn react_prompt(app: &Application, store: &str, root: &str) -> String {
 /// framework has not got.
 fn code_prompt(app: &Application, store: &str, root: &str) -> String {
     format!(
-        "You build the `{name}` application, served at the `{subdomain}` subdomain. \
-         Its source is in the `{store}` file store under `{root}`, and your file \
-         tools are scoped to exactly that directory. The project is the admin's \
-         own — read it before changing it rather than assuming a layout.\n\n\
+        "You build the `{name}` application, served at the `{subdomain}` subdomain, \
+         from the `{store}` file store under `{root}`. The project is the admin's \
+         own: read it before changing it rather than assuming a layout.\n\n\
          {SHARED_PROMPT}",
         name = app.name,
         subdomain = app.subdomain.trim(),
@@ -265,11 +260,13 @@ fn code_prompt(app: &Application, store: &str, root: &str) -> String {
 }
 
 /// What is true of building any application, whichever framework it is on.
+///
+/// Short, because how to work — locate, change, check, summarise — is the
+/// `coding` trait's own prompt, which can name the tools the agent actually has
+/// (TODO 8.1).
 const SHARED_PROMPT: &str = "\
-Work in small steps: search and read before you edit, make the change, then build \
-the application and read the result. A failed build's diagnostics name the file, \
-the line and the problem — fix those and build again, and do not report a change \
-as done until it builds clean. If a request is ambiguous, ask rather than guess.";
+Work in small steps, and build the application after each change until it builds \
+clean. If a request is ambiguous, ask rather than guess.";
 
 #[cfg(test)]
 mod tests {

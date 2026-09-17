@@ -498,22 +498,23 @@ impl<'a> Runner<'a> {
         model: &ConnectedModel,
         run: RunId,
     ) -> Result<LlmRequest> {
-        let mut turn = Turn::new(&self.caller, &self.agent.name, step);
-        turn.mode = mode;
         let cx =
             ToolsContext::new(self.catalog, mode, &model.capabilities).for_caller(&self.caller);
-        let mut tools: Vec<ToolSpec> = Vec::new();
+        let prefix = stable_prefix(self.registry, self.agent, &cx)?;
+        let mut turn = Turn::new(&self.caller, &self.agent.name, step);
+        turn.mode = mode;
         for enabled in &self.agent.traits {
             let trait_ = self.registry.require(&enabled.trait_)?;
             trait_.on_turn(&enabled.config, &mut turn).await?;
-            tools.extend(trait_.tools(&cx, &enabled.config));
         }
 
-        let system = turn.system_prompt(&self.agent.system_prompt);
-        let mut request = LlmRequest {
+        // After the static prefix, so what a trait adds per turn costs only
+        // what follows it.
+        let system = turn.system_prompt(prefix.system.as_deref().unwrap_or_default());
+        let request = LlmRequest {
             system: (!system.trim().is_empty()).then_some(system),
             messages,
-            tools,
+            tools: prefix.tools,
             max_tokens: self.agent.max_tokens(),
             temperature: self.agent.temperature(),
             // Off unless the agent says otherwise (R§12): one call per turn is
@@ -526,11 +527,6 @@ impl<'a> Runner<'a> {
             // next session's header differs.
             prompt_cache_key: Some(run.to_string()),
         };
-        // An agent with no traits offers no tools, which is a request with an
-        // empty list rather than one with a field the vendors read as "call
-        // something".
-        request.tools.retain(|t| !t.name.is_empty());
-        request.tools.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(request)
     }
 
@@ -1200,6 +1196,52 @@ impl Drop for RunEnded<'_, '_> {
             browser.close(self.run);
         }
     }
+}
+
+/// The part of every request that is the same on every step of a session: the
+/// system prompt and the tools (TODO §9).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StablePrefix {
+    /// The agent's prompt, then each trait's static contribution, in trait
+    /// order and blank-line separated. `None` when all of them are blank.
+    pub system: Option<String>,
+    /// Every enabled trait's tools for the mode, sorted by name.
+    pub tools: Vec<ToolSpec>,
+}
+
+/// The stable prefix `agent` gets in the run `cx` describes.
+///
+/// The driver builds each request from this, and it is public so that what an
+/// agent costs before its first message can be measured without running it.
+pub fn stable_prefix(
+    registry: &AgentRegistry,
+    agent: &Agent,
+    cx: &ToolsContext<'_>,
+) -> Result<StablePrefix> {
+    let mut parts: Vec<String> = Vec::new();
+    if !agent.system_prompt.trim().is_empty() {
+        parts.push(agent.system_prompt.clone());
+    }
+    let mut tools: Vec<ToolSpec> = Vec::new();
+    for enabled in &agent.traits {
+        let trait_ = registry.require(&enabled.trait_)?;
+        if let Some(text) = trait_
+            .prompt(cx, &enabled.config)
+            .filter(|t| !t.trim().is_empty())
+        {
+            parts.push(text);
+        }
+        tools.extend(trait_.tools(cx, &enabled.config));
+    }
+    // An agent with no traits offers no tools, which is a request with an
+    // empty list rather than one with a field the vendors read as "call
+    // something".
+    tools.retain(|t| !t.name.is_empty());
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(StablePrefix {
+        system: (!parts.is_empty()).then(|| parts.join("\n\n")),
+        tools,
+    })
 }
 
 fn conclusion_label(conclusion: &Conclusion) -> String {

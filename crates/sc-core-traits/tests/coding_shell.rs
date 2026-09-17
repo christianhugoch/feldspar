@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use common::{Env, as_user, config};
 use sc_agent::testing::{FakeProvider, Reply};
 use sc_agent::{
-    Agent, EnabledTrait, RunCaller, RunId, RunMode, Runner, TraitContext, Turn, save_agent,
+    Agent, EnabledTrait, RunCaller, RunId, RunMode, Runner, ToolsContext, TraitContext, save_agent,
 };
 use sc_core_traits::{
     CFG_MAY_EDIT, CFG_MAY_USE_SHELL, CFG_ROOT, CFG_SHELL_IMAGE, CFG_SHELL_NETWORK,
@@ -634,13 +634,15 @@ async fn the_fingerprint_normalises_the_command_and_the_prompt_notes_the_shell()
     );
 
     let note = |caller: &RunCaller, mode: RunMode, config: &Attrs| {
-        let coding = coding.clone();
-        let (caller, config) = (caller.clone(), config.clone());
+        let capabilities = sc_llm::ModelCapabilities::built_in("", "");
+        let cx = ToolsContext::new(&env.catalog, mode, &capabilities).for_caller(caller);
+        let text = coding.prompt(&cx, config).unwrap_or_default();
+        // Only the shell's paragraph: the rest of the prompt is the workflow.
         async move {
-            let mut turn = Turn::new(&caller, "coder", 1);
-            turn.mode = mode;
-            coding.on_turn(&config, &mut turn).await.unwrap();
-            turn.extra_system().join("\n")
+            match text.contains("Shell: ") {
+                true => text,
+                false => String::new(),
+            }
         }
     };
     let admin = RunCaller::system();

@@ -59,22 +59,19 @@ pub fn tool_name(scope: &FileScope) -> String {
 pub fn spec(scope: &FileScope) -> ToolSpec {
     ToolSpec::new(
         tool_name(scope),
-        format!(
-            "A map of {}: the definitions that matter most for the focus, as file paths with \
-             `line│ signature` rows, ranked and fitted to a token budget. Use it to find where \
-             things are before reading files.",
-            scope.label()
-        ),
+        "The code's most relevant definitions, ranked for the focus: `line│ signature` rows \
+         under each path."
+            .to_owned(),
         json!({
             "type": "object",
             "properties": {
                 ARG_FOCUS: {
                     "type": "array", "items": {"type": "string"},
-                    "description": "Paths and identifiers to centre the map on (default: the files this run has read or changed)."
+                    "description": "Paths and identifiers (default: files read or changed)"
                 },
                 ARG_TOKENS: {
                     "type": "integer", "minimum": 64, "maximum": MAX_REPO_MAP_TOKENS,
-                    "description": "Size of the map in tokens.",
+                    "description": "Size in tokens"
                 },
             },
             "additionalProperties": false,
@@ -238,28 +235,18 @@ fn capitalised(text: &str) -> String {
 }
 
 /// The session header's map (TODO §9): focused on what the brief mentions, at
-/// the configured budget. `None` when the budget is `0` or the tree cannot be
-/// walked — a header without a map is still a header.
-pub async fn header(
+/// the configured budget, over files the header has already walked. `None`
+/// when the budget is `0`.
+pub fn header(
     scope: &FileScope,
     config: &Attrs,
-    catalog: &Catalog,
-    role: u8,
+    files: &[SourceFile],
+    truncated: bool,
     brief: &str,
 ) -> Option<String> {
-    let tokens = configured_tokens(config).ok()?;
-    if tokens == 0 {
-        return None;
-    }
-    let (files, truncated) = match source_files(scope, catalog, role).await {
-        Ok(found) => found,
-        Err(e) => {
-            sc_log::log_warn!("repo map of {}: {e}", scope.label());
-            return None;
-        }
-    };
-    let focus = focus_of(&files, terms_of(brief));
-    Some(render(scope, &files, &focus, tokens as usize, truncated))
+    let tokens = configured_tokens(config).ok().filter(|t| *t > 0)?;
+    let focus = focus_of(files, terms_of(brief));
+    Some(render(scope, files, &focus, tokens as usize, truncated))
 }
 
 #[cfg(test)]

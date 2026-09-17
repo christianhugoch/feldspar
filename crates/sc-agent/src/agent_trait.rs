@@ -118,6 +118,21 @@ pub trait AgentTrait: Send + Sync {
         ctx: &mut TraitContext<'_>,
     ) -> Result<Json>;
 
+    /// This trait's **static contribution** to the system prompt: text that
+    /// follows the agent's own prompt, in trait order (TODO §9's stable prefix).
+    ///
+    /// Given what [`tools`](AgentTrait::tools) is given, so the text can match
+    /// the tools it describes: `coding` says different things in `plan` and in
+    /// `act`, and names only the edit format it offers. It **must be a function
+    /// of its inputs**, the same on every step of a session, because it is part
+    /// of the cached prefix. What changes from step to step belongs in a tool
+    /// result, and what is known once per session in
+    /// [`session_header`](AgentTrait::session_header).
+    fn prompt(&self, cx: &ToolsContext<'_>, config: &Attrs) -> Option<String> {
+        let _ = (cx, config);
+        None
+    }
+
     /// Change the turn without adding a tool — an extra paragraph of system
     /// prompt, data preloaded into the conversation.
     ///
@@ -130,7 +145,8 @@ pub trait AgentTrait: Send + Sync {
     /// steps makes every request a cache miss from its first token. What a trait
     /// knows once per session belongs in
     /// [`session_header`](AgentTrait::session_header), and what changes belongs
-    /// in a tool result.
+    /// in a tool result, and what is always the same in
+    /// [`prompt`](AgentTrait::prompt).
     async fn on_turn(&self, config: &Attrs, turn: &mut Turn<'_>) -> Result<()> {
         let _ = (config, turn);
         Ok(())
