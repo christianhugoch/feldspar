@@ -3183,12 +3183,17 @@ once, under the `may_check` grant, with each diagnostic marked new or pre-existi
 diagnostics recorded before the run's first edit. Pre-images over 1 MB, or not text, are kept by
 hash only, so the run row does not carry a bundle; such a file shows as changed without lines.
 
-**No shell.** There is no `run_command` trait. Handing a model a shell on the server is the
-same decision the IDE milestone declined to take for a terminal, and it should not arrive by the
-back door. The script grant is the bounded version and the one that ships: it runs
-`npm run <script>` for a script that **already exists** in the project's `package.json`, so the
-set of runnable commands is the project's own and the model chooses from it rather than
-composing one.
+**The shell is an opt-in grant, not a trait.** There is no `run_command` trait. The script
+grant is the bounded version: it runs `npm run <script>` for a script that **already exists** in
+the project's `package.json`, so the model chooses from the project's own commands. The coding
+agent milestone (Phase 6a) reversed "no shell" for an admin who opts in: `coding`'s
+`may_use_shell` checkbox, off by default, offers `shell_<slug>` (a stateless, time-bounded
+`bash -c` in the scope) and `process_<slug>` (named long-running processes, killed when the run's
+drive ends through the `AgentTrait::run_ended` hook, and when the server stops) **only to a run
+whose caller is an admin** (`ToolsContext::caller`), because a shell runs as the server's OS user.
+`shell_sandbox: container` runs each command in `docker`/`podman` with only the scope mounted
+and no network unless `shell_network` is on. Each shell call is bracketed by a snapshot of the
+scope, so what it changed enters the change ledger and the model's reads of it go stale.
 
 **What was built, where it deviates** (Phase 5, the coding traits):
 

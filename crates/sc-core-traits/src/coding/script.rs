@@ -1,9 +1,9 @@
 //! `run_project_script` — `npm run <script>`, for a script the project already
 //! has (§11.3, decision 6).
 //!
-//! **There is no shell tool, and this is why there does not need to be.** The
-//! IDE milestone declined to give an admin a terminal, and handing a model
-//! `run_command` would be that decision arriving through the back door. What a
+//! **This is not a shell, and most agents do not need one.** A shell exists
+//! ([`super::shell`]), but behind its own checkbox and only for admin callers,
+//! because it runs as the server's user. What a
 //! project's `package.json` declares, though, is a set of commands the people who
 //! wrote it intended to be run — `test`, `lint`, `typecheck` — and running one of
 //! *those* is bounded in the way a shell is not: the model **chooses from a list**

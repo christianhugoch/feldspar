@@ -2,6 +2,95 @@
 
 Changes in reverse chronological order.
 
+## The shell (coding agent milestone, Phase 6a)
+
+Mostly in `sc-core-traits/src/coding/{shell,process,snapshot}.rs`, with two small seams in
+`sc-agent` and one line in `sc-server`.
+
+- **Settings** on `coding`, last on the form because the shell is every other grant at once:
+  - **`may_use_shell`** (off by default, and implying no other grant)
+  - **`shell_timeout`** (default 120 s) and **`shell_timeout_max`** (default 600 s; refused on
+    save when below `shell_timeout`)
+  - **`shell_sandbox`**: `none` (the default) or `container`
+  - **`shell_image`**, **`shell_runtime`** (`auto` | `docker` | `podman`; `auto` prefers podman)
+    and **`shell_network`** (off by default)
+
+  Validation on save always checks the values. With the grant on, it also checks that the store
+  has a local path, and for `container` that the runtime is on `PATH` and has the image
+  (`<runtime> image inspect`). A missing image is refused with the `pull` command to run.
+- **Admin callers only.** `sc_agent::ToolsContext` gains `caller: Option<&RunCaller>` (set by the
+  driver through `for_caller`; `None` for validation and listings). `coding` offers `shell_<slug>`
+  and `process_<slug>` only in `act` mode, under the grant, to a role-1 caller. `call` checks
+  again and refuses a non-admin by name, for a stale transcript.
+- **`shell_<slug>`** (`command`, optional `timeout`):
+  - one stateless `bash -c` in the scope's directory
+  - `CI=1`, `PAGER=cat`, `GIT_PAGER=cat`, `GIT_TERMINAL_PROMPT=0`, `TERM=dumb`, stdin closed
+  - a timeout the model may raise up to the maximum. A higher request is capped, and the result
+    says so.
+  - its own process group, killed at the timeout and after the command exits, so nothing the
+    command started in the background outlives the call. On Linux the child also gets
+    `PR_SET_PDEATHSIG`.
+  - stdout and stderr merged through one pipe, and kept as the first 8 KB and the last 12 KB,
+    with the elided byte count
+  - text results: `exit code N in 1.2s` (or `timed out after Ns and was killed`), then the output
+    and the files the command changed. A non-zero exit is a result, not an error.
+  - a line ending in a single `&` is refused, naming `process_<slug>`
+- **`process_<slug>`** (`start` | `stop` | `logs` | `list`):
+  - named processes held in memory by run and scope, at most 8 running
+  - each has its own process group and an output buffer of the first 2 KB and last 16 KB
+  - `start` watches for a second, so a command that fails at once reports its exit code
+  - processes are killed when the run's drive stops, and `kill_all_processes` runs when `serve`
+    returns
+  - the new **`AgentTrait::run_ended(config, run)`** hook is synchronous. The driver calls it from
+    a drop guard in `drive`, so it also runs when the drive future is dropped by an abort or a
+    chat disconnect.
+- **The container sandbox.** Each command runs in `<runtime> run --rm --pull=never`:
+  - only the scope's directory is mounted, at the same path
+  - it runs as the server's uid/gid (`--user` on docker, `--userns=keep-id` on podman)
+  - `HOME=/tmp`, and `--network=none` unless `shell_network` is on
+  - on a timeout the container is removed
+
+  Managed processes share one long-lived container per run and scope (`sleep infinity`), and each
+  is started under `setsid` with its pid written inside, so `stop` can kill its group. The
+  container is removed when the run ends. The image needs `bash` and `setsid`.
+- **The ledger sees shell changes.** Around every shell call, the scope is walked, skipping
+  `sc_files::DEFAULT_EXCLUDED_DIRS`, and hashed. For each added, modified or deleted path:
+  - it enters the ledger with its pre-image (`Ledger::touch_with`)
+  - its stale-read hash is cleared, so the next edit asks for a re-read
+  - the result lists it
+
+  Pre-images are copies (up to 1 MB per file and 64 MB per snapshot; beyond that, kept by hash).
+  In a git work tree, a tracked file that matches `HEAD` is not copied, and its pre-image is read
+  back from that commit only if it changed. The commit is recorded before the command runs, so a
+  command that commits does not change it.
+- **Deviation:** the snapshot is taken before **every** shell call, not once before the first.
+  Nothing is held between calls, so nothing is lost on resume, and a change the file tools or a
+  person made between two shell calls is never attributed to the shell. The ledger keeps a path's
+  first pre-image, so the run's diff is the same.
+- **Fingerprint and prompt.** `coding` now overrides `fingerprint`: a shell call's fingerprint is
+  its command with whitespace folded. Through `on_turn` (static text, so the cached prefix stays
+  stable), an `act` run with the shell offered gets a short usage note: stateless calls, the
+  timeouts, `process_` instead of `&`, and re-reading changed files.
+- Not done here: the IDE relay's `shell_`/`process_` rendering (§12's item).
+- Docs: `docs/tutorial-agents.md` and §11.3 of `docs/TECHNICAL_DESIGN.md` describe the grant.
+- Tests:
+  - unit tests: `&` detection, fingerprints, head+tail capture, timeout capping, container
+    arguments, snapshot changes and pre-images
+  - integration tests (`tests/coding_shell.rs`):
+    - validation of every setting
+    - offered to an admin in `act` mode only, and refused by name to a user and without the grant
+    - exit codes, stderr, the environment and a closed stdin, truncation, and the `&` refusal
+    - a timeout kills a backgrounded child
+    - a process's start, logs, stop, name clash and immediate failure, and cleanup on run end
+    - a process killed when a scripted run answers, and when its drive is dropped mid-shell-call
+      (confirmed to fail without the drop guard)
+    - `sed -i` through the shell shows in `run_diff` and makes `edit_file` ask for a re-read
+    - git pre-images from `HEAD` across a command that commits
+    - the container sandbox (debian:12-slim): only the scope is mounted, no network, files
+      written as the server's user, processes in the shared container removed at run end,
+      and network with `shell_network`. Skipped, with a stated reason, when no runtime or image
+      is present.
+
 ## `check` and the ratchet (coding agent milestone, Phase 6)
 
 In `sc-core-traits/src/coding/check.rs`, with the shared output parsers in `sc-app`.

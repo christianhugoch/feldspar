@@ -61,7 +61,9 @@ pub async fn serve(
     let service = ServiceManager::from_env();
 
     let TlsSettings::Off = &config.tls else {
-        return serve_with_tls(config, app, service).await;
+        let result = serve_with_tls(config, app, service).await;
+        sc_core_traits::kill_all_processes();
+        return result;
     };
 
     let listener = tokio::net::TcpListener::bind(config.addr)
@@ -87,6 +89,8 @@ pub async fn serve(
     if let Some(watchdog) = watchdog {
         watchdog.abort();
     }
+    // The coding agents' managed processes stop with the server (TODO 6a.4).
+    sc_core_traits::kill_all_processes();
     result
 }
 

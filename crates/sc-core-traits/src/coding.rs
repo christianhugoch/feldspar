@@ -25,6 +25,10 @@
 //! reason: the grants share a scope, and a scope filled in twice is a scope that
 //! can disagree with itself.
 //!
+//! **The shell is the last checkbox** ([`CFG_MAY_USE_SHELL`]), because it is all
+//! the others at once: `shell` and `process` ([`shell`], [`process`]), offered
+//! only to a run whose caller is an admin, and implying none of the other grants.
+//!
 //! A tool call whose grant is off is refused **by name, naming the checkbox** —
 //! the model never sees the tool, but a stale transcript can still carry one, and
 //! "you may not do that" is not something a model can act on while "the agent's
@@ -62,13 +66,19 @@ mod find;
 mod ledger;
 pub mod matching;
 mod patch;
+mod process;
 mod read;
 mod script;
 mod search;
+mod shell;
+mod snapshot;
 mod state;
 mod write;
 
-use sc_agent::{AfterToolsContext, AgentTrait, RunMode, ToolsContext, TraitCheck, TraitContext};
+use sc_agent::{
+    AfterToolsContext, AgentTrait, RunCaller, RunId, RunMode, ToolsContext, TraitCheck,
+    TraitContext, Turn,
+};
 use sc_error::{Error, Result};
 use sc_files::DEFAULT_MAX_RESULTS;
 use sc_llm::{EditFormat, ToolSpec};
@@ -86,11 +96,17 @@ pub use edit::tool_name as edit_file_tool_name;
 pub use find::tool_name as find_files_tool_name;
 pub use ledger::{ChangeStatus, FileChange, Ledger, PreImage, RunDiff, diff_ledger, run_diff};
 pub use patch::tool_name as apply_patch_tool_name;
+pub use process::{kill_all_processes, running_count, tool_name as process_tool_name};
 pub use read::{CFG_MAX_LINES, DEFAULT_MAX_LINES, tool_name as read_file_tool_name};
 pub use script::{
     CFG_TIMEOUT, DEFAULT_TIMEOUT_SECONDS, MAX_OUTPUT_CHARS, tool_name as run_script_tool_name,
 };
 pub use search::{CFG_MAX_RESULTS, tool_name as search_files_tool_name};
+pub use shell::{
+    CFG_SHELL_IMAGE, CFG_SHELL_NETWORK, CFG_SHELL_RUNTIME, CFG_SHELL_SANDBOX, CFG_SHELL_TIMEOUT,
+    CFG_SHELL_TIMEOUT_MAX, DEFAULT_SHELL_TIMEOUT, DEFAULT_SHELL_TIMEOUT_MAX, SHELL_ENV,
+    tool_name as shell_tool_name,
+};
 pub use state::CodingState;
 pub use write::tool_name as write_file_tool_name;
 
@@ -108,6 +124,10 @@ pub const CFG_MAY_RUN_SCRIPTS: &str = "may_run_scripts";
 /// [`CFG_DIAGNOSE`] script (TODO §6, §7). Off by default. A smaller grant than
 /// [`CFG_MAY_RUN_SCRIPTS`], because the model does not choose what runs.
 pub const CFG_MAY_CHECK: &str = "may_check";
+
+/// May run shell commands and managed processes (TODO §7a). Off by default,
+/// offered only to an admin caller, and implying no other grant.
+pub const CFG_MAY_USE_SHELL: &str = "may_use_shell";
 
 /// The `package.json` script that type-checks the project after a turn's edits.
 pub const CFG_DIAGNOSE: &str = "diagnose";
@@ -146,6 +166,8 @@ pub fn tool_names(scope: &FileScope) -> Vec<String> {
         patch::tool_name(scope),
         script::tool_name(scope),
         check::tool_name(scope),
+        shell::tool_name(scope),
+        process::tool_name(scope),
     ]
 }
 
@@ -226,6 +248,8 @@ impl AgentTrait for Coding {
                 .label("Script timeout (seconds)")
                 .default_value(DEFAULT_TIMEOUT_SECONDS as i64),
         );
+        // Last, because it is every grant above at once.
+        spec.extend(shell::config_fields());
         spec
     }
 
@@ -241,7 +265,13 @@ impl AgentTrait for Coding {
         config_count(check.config, CFG_MAX_LINES, DEFAULT_MAX_LINES)?;
         config_count(check.config, CFG_MAX_RESULTS, DEFAULT_MAX_RESULTS as u64)?;
         config_count(check.config, CFG_TIMEOUT, DEFAULT_TIMEOUT_SECONDS)?;
-        for key in [CFG_MAY_EDIT, CFG_MAY_RUN_SCRIPTS, CFG_MAY_CHECK] {
+        for key in [
+            CFG_MAY_EDIT,
+            CFG_MAY_RUN_SCRIPTS,
+            CFG_MAY_CHECK,
+            CFG_MAY_USE_SHELL,
+            shell::CFG_SHELL_NETWORK,
+        ] {
             match check.config.get(key) {
                 None | Some(Json::Null) | Some(Json::Bool(_)) => {}
                 Some(other) => {
@@ -261,6 +291,7 @@ impl AgentTrait for Coding {
             }
         }
         check::validate(check.catalog, check.config).await?;
+        shell::validate(check.catalog, &scope, check.config).await?;
         for name in tool_names(&scope) {
             check_tool_name(&name)?;
         }
@@ -298,6 +329,10 @@ impl AgentTrait for Coding {
         if may(config, CFG_MAY_CHECK) {
             tools.push(check::spec(&scope));
         }
+        if may(config, CFG_MAY_USE_SHELL) && cx.caller.is_some_and(is_admin) {
+            tools.push(shell::spec(&scope, config));
+            tools.push(process::spec(&scope));
+        }
         tools
     }
 
@@ -333,11 +368,41 @@ impl AgentTrait for Coding {
                 permit(config, CFG_MAY_CHECK, "run checks", ctx)?;
                 check::call(&scope, config, args, ctx).await
             }
+            _ if tool == shell::tool_name(&scope) => {
+                permit_shell(config, ctx)?;
+                shell::call(&scope, config, args, ctx).await
+            }
+            _ if tool == process::tool_name(&scope) => {
+                permit_shell(config, ctx)?;
+                process::call(&scope, config, args, ctx).await
+            }
             other => Err(Error::invalid(format!(
                 "`{other}` is not one of this trait's tools; it offers {}",
                 tool_names(&scope).join(", ")
             ))),
         }
+    }
+
+    /// In `act` mode, with the shell offered: how to use it (TODO 6a.7). The
+    /// same text on every step, so it does not break the cached prefix.
+    async fn on_turn(&self, config: &Attrs, turn: &mut Turn<'_>) -> Result<()> {
+        if turn.mode == RunMode::Act && may(config, CFG_MAY_USE_SHELL) && is_admin(turn.caller) {
+            turn.append_system(shell::prompt_note(&scope_as_written(config), config));
+        }
+        Ok(())
+    }
+
+    /// A shell command is the same call whatever its whitespace (TODO 6a.7).
+    fn fingerprint(&self, config: &Attrs, tool: &str, args: &Json) -> Json {
+        match tool == shell::tool_name(&scope_as_written(config)) {
+            true => shell::fingerprint(args),
+            false => args.clone(),
+        }
+    }
+
+    /// The run's managed processes go with it (TODO 6a.4).
+    fn run_ended(&self, config: &Attrs, run: RunId) {
+        process::run_ended(run, &scope_as_written(config).slug());
     }
 
     /// After a turn's edits: format the edited files and type-check them, once
@@ -356,6 +421,26 @@ impl AgentTrait for Coding {
 /// that cannot turn a forgotten field into a permission.
 pub(crate) fn may(config: &Attrs, key: &str) -> bool {
     config.get(key).and_then(Json::as_bool).unwrap_or(false)
+}
+
+/// Whether a caller is an admin: the only caller the shell is offered to.
+fn is_admin(caller: &RunCaller) -> bool {
+    caller.role == 1
+}
+
+/// Refuse the shell to a run whose grant is off, whose mode is read-only, or
+/// whose caller is not an admin — the last because a shell runs as the
+/// server's OS user, which can read the server's own credentials (TODO §7a).
+fn permit_shell(config: &Attrs, ctx: &TraitContext<'_>) -> Result<()> {
+    permit(config, CFG_MAY_USE_SHELL, "use the shell", ctx)?;
+    if is_admin(ctx.caller) {
+        return Ok(());
+    }
+    Err(Error::invalid(format!(
+        "agent `{}` may not use the shell for this user: the shell is only for runs whose \
+         caller is an administrator, because it runs as the server's own operating-system user",
+        ctx.agent
+    )))
 }
 
 /// Refuse a tool whose grant is off, or that the run's mode does not offer,
@@ -420,6 +505,8 @@ mod tests {
                 "apply_patch_app_src_web",
                 "run_script_app_src_web",
                 "check_app_src_web",
+                "shell_app_src_web",
+                "process_app_src_web",
             ]
         );
     }

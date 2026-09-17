@@ -893,30 +893,34 @@ default.
 
 ## Phase 6a — The shell (`sc-core-traits/src/coding/shell.rs`)
 
-- [ ] 6a.1 Settings: `may_use_shell` (default off), `shell_timeout` (default 120),
+- [x] 6a.1 Settings: `may_use_shell` (default off), `shell_timeout` (default 120),
       `shell_timeout_max`, `shell_sandbox` (`none` | `container`), `shell_image`,
       `shell_runtime` (`docker` | `podman` | auto), `shell_network`. Validation on save:
       the store has a local path, and for `container`, the runtime is found and the image
-      exists. Update `each_trait_declares_the_settings_its_semantics_need`.
-- [ ] 6a.2 The admin-caller check at call time, refused by name. Tools are only offered to
+      exists. Update `each_trait_declares_the_settings_its_semantics_need`. *(Runtime and image
+      are checked only while `may_use_shell` is on.)*
+- [x] 6a.2 The admin-caller check at call time, refused by name. Tools are only offered to
       a run whose caller is an admin, and that is re-checked in `call` for a stale transcript.
-- [ ] 6a.3 `shell_<slug>`: stateless `bash -c` in the scope directory, non-interactive env,
+- [x] 6a.3 `shell_<slug>`: stateless `bash -c` in the scope directory, non-interactive env,
       timeout (the model may request up to the max), head+tail truncation with the elided
       byte count, and the exit code as a result. Refuse a trailing `&` with a pointer to
       `process_<slug>`. Tests: exit codes, timeout kill, truncation, env, refusal.
-- [ ] 6a.4 `process_<slug>` (`start`/`stop`/`logs`/`list`): named processes owned by the
+- [x] 6a.4 `process_<slug>` (`start`/`stop`/`logs`/`list`): named processes owned by the
       run, capped ring-buffer logs, killed on run end or abort, and killed with the server.
-      Tests: start a sleeper, read its logs, stop it, and check abort cleans it up.
-- [ ] 6a.5 The container sandbox: each command runs in a container with only the scope
+      Tests: start a sleeper, read its logs, stop it, and check abort cleans it up. *(New
+      `AgentTrait::run_ended` hook, called from a drop guard in `Runner::drive`.)*
+- [x] 6a.5 The container sandbox: each command runs in a container with only the scope
       directory mounted, the network off unless `shell_network` is on, and a long-lived
       container per run for managed processes. Tests are skipped when no runtime is
       installed, and say so.
-- [ ] 6a.6 The ledger sees shell changes: the scope snapshot before the first shell call
+- [x] 6a.6 The ledger sees shell changes: the scope snapshot before the first shell call
       (hashes and copies, or `HEAD` and dirty files for git), a comparison after each call,
       changed paths entered with pre-images, stale-read hashes cleared, and changed paths
       listed in the result. Test: `sed -i` through the shell appears in the run diff and
-      makes the next `edit_file` ask for a re-read.
-- [ ] 6a.7 The shell `fingerprint` (whitespace-normalised command), plus the prompt's short
+      makes the next `edit_file` ask for a re-read. *(The snapshot is taken before every shell
+      call rather than once, so nothing is held between calls and changes made by other means
+      between calls are not attributed to the shell.)*
+- [x] 6a.7 The shell `fingerprint` (whitespace-normalised command), plus the prompt's short
       shell usage note in `act` mode, shown only when the grant is on.
 
 ## Phase 6b — `view_app` and the preview mount (§7b)

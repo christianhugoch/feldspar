@@ -199,6 +199,18 @@ pub trait AgentTrait: Send + Sync {
         let _ = (config, tool);
         args.clone()
     }
+
+    /// Called when a drive of `run` stops, however it stops: answered, failed,
+    /// out of budget, or dropped mid-step because the run was aborted or the
+    /// chat disconnected (TODO 6a.4).
+    ///
+    /// For releasing what a trait holds **outside** the run's state on the
+    /// run's behalf — `coding`'s managed processes. Synchronous, because it is
+    /// also called from a destructor, where nothing can be awaited: start the
+    /// release and return.
+    fn run_ended(&self, config: &Attrs, run: RunId) {
+        let _ = (config, run);
+    }
 }
 
 /// What [`AgentTrait::session_header`] is given: the run, and this trait
@@ -251,6 +263,10 @@ pub struct ToolsContext<'a> {
     pub mode: RunMode,
     /// What the model answering the run can do.
     pub capabilities: &'a ModelCapabilities,
+    /// Who the run is for, or `None` when the tools are listed for no run in
+    /// particular (validation, the admin UI). A tool offered only to some
+    /// callers — `coding`'s shell, to admins — is withheld when this is `None`.
+    pub caller: Option<&'a RunCaller>,
 }
 
 impl<'a> ToolsContext<'a> {
@@ -264,7 +280,14 @@ impl<'a> ToolsContext<'a> {
             catalog,
             mode,
             capabilities,
+            caller: None,
         }
+    }
+
+    /// The same context, for a run on behalf of `caller`.
+    pub fn for_caller(mut self, caller: &'a RunCaller) -> ToolsContext<'a> {
+        self.caller = Some(caller);
+        self
     }
 }
 

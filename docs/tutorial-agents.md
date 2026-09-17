@@ -212,11 +212,15 @@ Five things about that set:
 - **`build_application` builds, it does not publish.** An agent's build answers "does this
   compile?"; mounting what it built is still your **Build** button, which is also where you get to
   look at the diff first.
-- **There is no shell.** The script grant runs `npm run <script>` for a script your
+- **The script grant is not a shell.** It runs `npm run <script>` for a script your
   `package.json` already declares, and refuses anything else by listing the scripts that exist.
   The runnable set is the project's own; the model chooses from it rather than composing a
   command line. It is a **separate** checkbox from the edit grant, because running a script
-  executes code the agent did not write.
+  executes code the agent did not write. A real shell is the last checkbox on the form, **May use
+  a shell**, off by default and offered only when the person chatting is an admin: it runs as the
+  server's own user, so it can do everything the other grants can and read the server's
+  configuration too. Its **Shell sandbox** setting can run each command in a `docker` or `podman`
+  container instead, with only the sub-directory mounted and no network.
 
 ## Step 6 — An agent as a trigger body
 

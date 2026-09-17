@@ -64,7 +64,7 @@ pub enum PreImage {
 
 impl PreImage {
     /// The pre-image of `bytes`, or of nothing.
-    fn of(bytes: Option<&[u8]>) -> PreImage {
+    pub(crate) fn of(bytes: Option<&[u8]>) -> PreImage {
         match bytes {
             None => PreImage::Absent,
             Some(bytes) => match std::str::from_utf8(bytes) {
@@ -101,6 +101,12 @@ impl Ledger {
         self.files
             .entry(path.to_owned())
             .or_insert_with(|| PreImage::of(before));
+    }
+
+    /// Record `path`'s pre-image as already worked out, if this is the run's
+    /// first touch of it: how a change the shell made is entered (TODO 6a.6).
+    pub fn touch_with(&mut self, path: &str, before: PreImage) {
+        self.files.entry(path.to_owned()).or_insert(before);
     }
 
     /// Record a move. Both paths must already have been touched.

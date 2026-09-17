@@ -559,11 +559,13 @@ async fn a_trait_configured_against_a_store_that_is_gone_is_invalid_with_a_reaso
     let cfg = at("code", "web");
     env.check("coding", &cfg).await?;
     // Every tool but `apply_patch`, which this model's edit format leaves out,
-    // and `check`, whose grant is off.
+    // and `check`, `shell` and `process`, whose grants are off.
     let mut all = tool_names::coding(&scope("code", "web"));
     all.retain(|name| {
         name != &tool_names::apply_patch(&scope("code", "web"))
             && name != &tool_names::check(&scope("code", "web"))
+            && name != &tool_names::shell(&scope("code", "web"))
+            && name != &tool_names::process(&scope("code", "web"))
     });
     assert_eq!(offered(&env, &cfg), all);
 

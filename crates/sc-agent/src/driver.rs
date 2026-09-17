@@ -277,6 +277,12 @@ impl<'a> Runner<'a> {
         // *running*: a run resumed after a restart is one drive, not one that
         // took a fortnight.
         let started = std::time::Instant::now();
+        // However this drive stops — a conclusion, an error, or the future
+        // dropped by an abort — every trait hears that it did (TODO 6a.4).
+        let _ended = RunEnded {
+            runner: self,
+            run: run.id,
+        };
         sc_log::log_verbose!(
             "agent `{}` run {}: driving from step {} in {mode} mode as {role}",
             self.agent.name,
@@ -401,7 +407,8 @@ impl<'a> Runner<'a> {
                         Ok(model) => model.capabilities,
                         Err(_) => self.executor.capabilities,
                     };
-                    let tools = ToolsContext::new(self.catalog, mode, &capabilities);
+                    let tools = ToolsContext::new(self.catalog, mode, &capabilities)
+                        .for_caller(&self.caller);
                     let mut outcomes = Vec::with_capacity(calls.len());
                     for call in calls {
                         outcomes.push(
@@ -458,7 +465,8 @@ impl<'a> Runner<'a> {
     ) -> Result<LlmRequest> {
         let mut turn = Turn::new(&self.caller, &self.agent.name, step);
         turn.mode = mode;
-        let cx = ToolsContext::new(self.catalog, mode, &model.capabilities);
+        let cx =
+            ToolsContext::new(self.catalog, mode, &model.capabilities).for_caller(&self.caller);
         let mut tools: Vec<ToolSpec> = Vec::new();
         for enabled in &self.agent.traits {
             let trait_ = self.registry.require(&enabled.trait_)?;
@@ -616,7 +624,8 @@ impl<'a> Runner<'a> {
         };
 
         // Pass 1: every old result, stubbed by the trait that owns its tool.
-        let tools = ToolsContext::new(self.catalog, mode, &model.capabilities);
+        let tools =
+            ToolsContext::new(self.catalog, mode, &model.capabilities).for_caller(&self.caller);
         let stubs: Vec<(usize, String)> = state
             .context()
             .elidable(state.messages())
@@ -1128,6 +1137,22 @@ impl<'a> Runner<'a> {
 }
 
 /// How a conclusion reads in a few words on the run's closing line.
+/// Tells every enabled trait that a drive stopped, when dropped.
+struct RunEnded<'r, 'a> {
+    runner: &'r Runner<'a>,
+    run: RunId,
+}
+
+impl Drop for RunEnded<'_, '_> {
+    fn drop(&mut self) {
+        for enabled in &self.runner.agent.traits {
+            if let Ok(trait_) = self.runner.registry.require(&enabled.trait_) {
+                trait_.run_ended(&enabled.config, self.run);
+            }
+        }
+    }
+}
+
 fn conclusion_label(conclusion: &Conclusion) -> String {
     match conclusion {
         Conclusion::Answered { .. } => "answered".to_owned(),
