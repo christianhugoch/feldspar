@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 
 use super::check::Baseline;
 use super::ledger::Ledger;
+use super::matching::Level;
 use super::plan::Plan;
 
 /// The trait's state for one run.
@@ -41,6 +42,39 @@ pub struct CodingState {
     /// A planner run's plan (TODO §8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<Plan>,
+    /// How the run's edits landed (TODO §13): which cascade step each applied
+    /// edit needed, and how many failed after the whole cascade.
+    #[serde(default, skip_serializing_if = "EditStats::is_empty")]
+    pub edits: EditStats,
+}
+
+/// What the edit engine did over one run, for the eval harness's metrics
+/// (TODO §13).
+///
+/// Counted here rather than parsed back out of the tool results: the summary a
+/// model reads is prose, and prose is not a measurement. Levels are keyed by
+/// [`Level::short`], so the JSON reads the same way the patch summaries do.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditStats {
+    /// Applied edits by cascade step (`exact`, `whitespace`, `indentation`,
+    /// `fuzzy`). A patch counts once, at the loosest step any hunk needed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub levels: BTreeMap<String, u32>,
+    /// Edits refused after the whole cascade — not found, or ambiguous.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub failures: u32,
+}
+
+impl EditStats {
+    /// Whether nothing has been counted, so the state can leave it out.
+    pub fn is_empty(&self) -> bool {
+        self.levels.is_empty() && self.failures == 0
+    }
+
+    /// Every applied edit, at whatever step it matched.
+    pub fn applied(&self) -> u32 {
+        self.levels.values().sum()
+    }
 }
 
 impl CodingState {
@@ -73,6 +107,25 @@ impl CodingState {
         if !self.turn_edits.iter().any(|p| p == path) {
             self.turn_edits.push(path.to_owned());
         }
+    }
+
+    /// Count one applied edit at cascade step `level`.
+    ///
+    /// `None` is a patch that only added or deleted files: it applied, but no
+    /// hunk was matched, so there is no step to attribute it to.
+    pub fn edit_applied(&mut self, level: Option<Level>) {
+        if let Some(level) = level {
+            *self
+                .edits
+                .levels
+                .entry(level.short().to_owned())
+                .or_default() += 1;
+        }
+    }
+
+    /// Count one edit that failed after the whole cascade.
+    pub fn edit_failed(&mut self) {
+        self.edits.failures = self.edits.failures.saturating_add(1);
     }
 }
 
@@ -110,6 +163,11 @@ pub fn stale_message(stale: Stale, rel: &str, read_tool: &str) -> String {
     }
 }
 
+/// Whether a count is zero, so a state with no edits leaves the field out.
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 /// A file's content hash: SHA-256, hex.
 pub fn content_hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
@@ -135,6 +193,37 @@ mod tests {
         assert_eq!(back.turn_edits, vec!["web/a.ts"]);
         // The loop's initial `null` is a fresh state.
         assert_eq!(CodingState::load(&Json::Null), CodingState::default());
+    }
+
+    #[test]
+    fn the_edit_counters_key_by_cascade_step_and_survive_the_json() {
+        let mut state = CodingState::default();
+        assert!(
+            state.edits.is_empty(),
+            "a run that has not edited counts nothing"
+        );
+        state.edit_applied(Some(Level::Exact));
+        state.edit_applied(Some(Level::Exact));
+        state.edit_applied(Some(Level::Fuzzy));
+        // A patch that only added or deleted files matched no hunk, so there is
+        // no step to attribute it to.
+        state.edit_applied(None);
+        state.edit_failed();
+        assert_eq!(state.edits.applied(), 3);
+        assert_eq!(state.edits.levels.get("exact").copied(), Some(2));
+        assert_eq!(state.edits.levels.get("fuzzy").copied(), Some(1));
+        assert_eq!(state.edits.failures, 1);
+
+        let mut json = Json::Null;
+        state.store(&mut json);
+        // The keys are the same short names a patch's summary line prints, so
+        // the state reads the way the tool results do.
+        assert_eq!(json["edits"]["levels"]["exact"], Json::from(2));
+        assert_eq!(CodingState::load(&json).edits, state.edits);
+        // A run with no edits leaves the whole field out.
+        let mut empty = Json::Null;
+        CodingState::default().store(&mut empty);
+        assert!(empty.get("edits").is_none(), "{empty}");
     }
 
     #[test]

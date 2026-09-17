@@ -58,9 +58,7 @@ pub struct ScopeDiff {
 /// agent has been deleted: the scope its ledger's paths are in is that agent's
 /// configuration, and without it the paths cannot be placed.
 pub async fn agent_run_diff(catalog: &Catalog, run: &Run) -> Result<(Vec<ScopeDiff>, Vec<RunId>)> {
-    let mut runs: Vec<(Run, AgentLoop)> = Vec::new();
-    collect(catalog, run.clone(), 0, &mut runs).await?;
-    runs.sort_by_key(|(run, _)| run.created_at);
+    let runs = run_tree(catalog, run).await?;
 
     let mut agents: BTreeMap<String, Option<Agent>> = BTreeMap::new();
     let mut ledgers: Vec<(FileScope, Ledger)> = Vec::new();
@@ -102,6 +100,19 @@ pub async fn agent_run_diff(catalog: &Catalog, run: &Run) -> Result<(Vec<ScopeDi
         }
     }
     Ok((out, runs.iter().map(|(run, _)| run.id).collect()))
+}
+
+/// `run` and every run it delegated to, **oldest first**: the ledger's rolled-up
+/// children and the session runs its plan records, each with its loop state.
+///
+/// What "a run" means for anything that has to add a planned run up — the diff
+/// below, and the eval harness's metrics (TODO §13) — since a planner run's own
+/// ledger holds only what the planner itself spent.
+pub async fn run_tree(catalog: &Catalog, run: &Run) -> Result<Vec<(Run, AgentLoop)>> {
+    let mut runs: Vec<(Run, AgentLoop)> = Vec::new();
+    collect(catalog, run.clone(), 0, &mut runs).await?;
+    runs.sort_by_key(|(run, _)| run.created_at);
+    Ok(runs)
 }
 
 /// `run` and its descendants, depth first.

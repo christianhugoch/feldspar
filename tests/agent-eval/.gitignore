@@ -1,0 +1,7 @@
+# `npm install` in the fixture, made by `make-fixture.sh` and shared by every
+# task's copy through a symlink: a gigabyte that is not source.
+fixture/node_modules/
+node_modules/
+# What `feldspar agent eval` writes.
+report.json
+report.md

@@ -1,0 +1,8 @@
+# add-a-list-filter
+prompt = "Add a checkbox above the task list labelled `Hide done`, which hides the tasks that are done. It starts unchecked."
+fixture = "../fixture"
+framework = "code"
+output = "dist"
+command = "npm run build"
+checks = ["typecheck", "test"]
+max_steps = 60

@@ -100,13 +100,16 @@ pub async fn call(scope: &FileScope, args: &Json, ctx: &mut TraitContext<'_>) ->
         )));
     }
 
-    let (edited, summary) = match apply(text, &old, &new, all, &rel) {
+    let (edited, summary, level) = match apply(text, &old, &new, all, &rel) {
         Ok(done) => done,
         Err(message) => {
             ctx.signal(Signal::EditFailed);
+            state.edit_failed();
+            state.store(ctx.state());
             return Err(Error::invalid(message));
         }
     };
+    state.edit_applied(Some(level));
     write_tracked(
         store.as_ref(),
         &mut state,
@@ -128,7 +131,7 @@ fn apply(
     new: &str,
     all: bool,
     rel: &str,
-) -> Result<(String, String), String> {
+) -> Result<(String, String, Level), String> {
     match matching::find(text, old, all) {
         Search::Found(found) => {
             let level = found[0].level;
@@ -152,7 +155,7 @@ fn apply(
                     ranges.len() - MAX_REGIONS_SHOWN
                 ));
             }
-            Ok((edited, summary))
+            Ok((edited, summary, level))
         }
         Search::Ambiguous { level, lines } => Err(format!(
             "`{ARG_OLD}` matches {} places in `{rel}` ({}), starting at lines {}. {}",
@@ -213,7 +216,11 @@ mod tests {
 
     #[test]
     fn a_success_shows_the_edited_lines_and_the_step() {
-        let (text, summary) = apply(FILE, "const b = 2;", "const b = 20;", false, "a.ts").unwrap();
+        let (text, summary, level) =
+            apply(FILE, "const b = 2;", "const b = 20;", false, "a.ts").unwrap();
+        // The step is returned as well as described, because the eval harness
+        // counts it (TODO §13).
+        assert_eq!(level, Level::Exact);
         assert_eq!(text, "const a = 1;\nconst b = 20;\nconst a = 3;\n");
         assert_eq!(
             summary,
@@ -246,14 +253,14 @@ mod tests {
         assert!(err.contains("lines 1 and 3"), "{err}");
         assert!(err.contains("replace_all"), "{err}");
 
-        let (text, summary) = apply(FILE, "const a", "let a", true, "a.ts").unwrap();
+        let (text, summary, _) = apply(FILE, "const a", "let a", true, "a.ts").unwrap();
         assert_eq!(text, "let a = 1;\nconst b = 2;\nlet a = 3;\n");
         assert!(summary.contains("2 places"), "{summary}");
     }
 
     #[test]
     fn an_edit_may_delete_by_replacing_with_nothing() {
-        let (text, _) = apply(FILE, "const b = 2;\n", "", false, "a.ts").unwrap();
+        let (text, ..) = apply(FILE, "const b = 2;\n", "", false, "a.ts").unwrap();
         assert_eq!(text, "const a = 1;\nconst a = 3;\n");
     }
 }

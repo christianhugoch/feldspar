@@ -420,6 +420,9 @@ pub async fn call(scope: &FileScope, args: &Json, ctx: &mut TraitContext<'_>) ->
     let mut lines: Vec<String> = Vec::new();
     let mut regions: Vec<String> = Vec::new();
     let mut moves: Vec<(String, String)> = Vec::new();
+    // The loosest cascade step any hunk in the whole patch needed: a patch
+    // counts as one edit, at the step that took the most licence (TODO §13).
+    let mut loosest: Option<Level> = None;
     let refuse =
         |message: String| Error::invalid(format!("status: failed. No file was changed. {message}"));
 
@@ -463,9 +466,12 @@ pub async fn call(scope: &FileScope, args: &Json, ctx: &mut TraitContext<'_>) ->
                     Ok(updated) => updated,
                     Err(message) => {
                         ctx.signal(Signal::EditFailed);
+                        state.edit_failed();
+                        state.store(ctx.state());
                         return Err(refuse(message));
                     }
                 };
+                loosest = loosest.max(updated.level);
                 let how = updated
                     .level
                     .map(|l| format!(" ({})", l.short()))
@@ -541,6 +547,7 @@ pub async fn call(scope: &FileScope, args: &Json, ctx: &mut TraitContext<'_>) ->
     for (from, to) in moves {
         state.ledger.moved(&from, &to);
     }
+    state.edit_applied(loosest);
     state.store(ctx.state());
 
     let mut out = format!("status: applied\n{}", lines.join("\n"));

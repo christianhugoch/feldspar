@@ -70,8 +70,21 @@ sc-query.workspace = true
 # of database connection parameters. It is its own crate because the
 # integration-test harness reads the same file.
 sc-config-file.workspace = true
+# The eval harness's task files (`task.toml`), read with the same parse-only
+# reader `feldspar.toml` uses.
+toml.workspace = true
+# The harness's task and report shapes are (de)serialised: a task file in, a
+# report out.
+serde.workspace = true
+# The coding traits' per-run state, which is where the edit-cascade counts the
+# eval reports live, and the run tree a planned run's metrics are added over.
+sc-core-traits.workspace = true
 
 [dev-dependencies]
+# The scripted provider (`sc-agent`'s `testing` feature, decision 7): the eval
+# harness's self-test drives two whole runs, and §13 says no test may spend a
+# token — least of all the test of the thing whose job is to spend them.
+sc-agent = { workspace = true, features = ["testing"] }
 # The end-to-end test presents the session this command writes to a real running
 # server, which needs an HTTP client; nothing in the command itself does any more.
 reqwest.workspace = true

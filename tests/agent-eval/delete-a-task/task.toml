@@ -1,0 +1,8 @@
+# delete-a-task
+prompt = "Add a Delete button to each task in the list that removes it through the API client and takes it out of the list."
+fixture = "../fixture"
+framework = "code"
+output = "dist"
+command = "npm run build"
+checks = ["typecheck", "test"]
+max_steps = 60

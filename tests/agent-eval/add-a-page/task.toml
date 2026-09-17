@@ -1,0 +1,8 @@
+# add-a-page
+prompt = "Add an About page at `/about` that says what this application is, and link to it from the navigation."
+fixture = "../fixture"
+framework = "code"
+output = "dist"
+command = "npm run build"
+checks = ["typecheck", "test"]
+max_steps = 60

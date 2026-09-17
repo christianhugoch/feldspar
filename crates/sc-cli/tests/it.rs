@@ -11,6 +11,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "agent_eval.rs"]
+mod agent_eval;
 #[path = "api_queries.rs"]
 mod api_queries;
 #[path = "auth_token.rs"]

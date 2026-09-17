@@ -1,0 +1,8 @@
+# sort-the-list
+prompt = "Show the tasks that are not done first, and sort the tasks within each group by title."
+fixture = "../fixture"
+framework = "code"
+output = "dist"
+command = "npm run build"
+checks = ["typecheck", "test"]
+max_steps = 60

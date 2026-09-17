@@ -1,0 +1,8 @@
+# show-an-empty-state
+prompt = "When there are no tasks, the list is blank. Show `Nothing to do` instead, and only when the list has loaded."
+fixture = "../fixture"
+framework = "code"
+output = "dist"
+command = "npm run build"
+checks = ["typecheck", "test"]
+max_steps = 60

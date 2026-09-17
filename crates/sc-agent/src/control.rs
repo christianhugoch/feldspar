@@ -277,6 +277,20 @@ pub struct LoopControl {
     rung: Rung,
     calm: u32,
     escalate_next: bool,
+    /// How many rounds a detector has fired on over this run's life, and how
+    /// many of those handed a step to the strong role. Cumulative, unlike the
+    /// counters above, which reset as soon as the run calms down — the eval
+    /// harness reports how often the run went wrong, not whether it was going
+    /// wrong when it stopped (TODO §13).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    firings: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    escalations: u32,
+}
+
+/// Whether a count is zero, so a calm run's control state stays small.
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl LoopControl {
@@ -298,6 +312,16 @@ impl LoopControl {
         self.rung
     }
 
+    /// How many rounds a detector fired on, over the whole run.
+    pub fn firings(&self) -> u32 {
+        self.firings
+    }
+
+    /// How many of those firings handed the next step to the strong role.
+    pub fn escalations(&self) -> u32 {
+        self.escalations
+    }
+
     /// Whether the next model call goes to the strong role.
     pub fn escalating(&self) -> bool {
         self.escalate_next
@@ -311,7 +335,12 @@ impl LoopControl {
     /// The person said something: whatever was going wrong, they have now
     /// weighed in, so every counter and the ladder start again.
     pub fn reset(&mut self) {
+        let (firings, escalations) = (self.firings, self.escalations);
         *self = LoopControl::new(self.limits);
+        // The tallies are the run's history, not its current trouble: a person
+        // weighing in clears the detectors, not what already happened.
+        self.firings = firings;
+        self.escalations = escalations;
     }
 
     /// Count one round and decide what happens next.
@@ -424,6 +453,7 @@ impl LoopControl {
             return Verdict::Continue { note: None };
         }
         self.calm = 0;
+        self.firings = self.firings.saturating_add(1);
         let what = troubles.join("; ");
         match self.rung {
             Rung::Calm => {
@@ -440,6 +470,7 @@ impl LoopControl {
             Rung::Warned => {
                 self.rung = Rung::Escalated;
                 self.escalate_next = true;
+                self.escalations = self.escalations.saturating_add(1);
                 Verdict::Continue {
                     note: Some(format!(
                         "[harness] {}, after a warning. The next step is taken by a \
@@ -609,9 +640,60 @@ mod tests {
             "{warned:?}"
         );
 
+        // One round fired, and it was the first, so it warned rather than
+        // escalated.
+        assert_eq!(control.firings(), 1);
+        assert_eq!(control.escalations(), 0);
+
         control.reset();
         assert_eq!(control.rung(), Rung::Calm);
-        assert_eq!(control, LoopControl::default());
+        // Every detector starts again — except the tallies, which are what the
+        // run *did* rather than what it is doing (TODO §13).
+        assert_eq!(control.firings(), 1);
+        assert_eq!(
+            control,
+            LoopControl {
+                firings: 1,
+                ..LoopControl::default()
+            }
+        );
+    }
+
+    #[test]
+    fn the_tallies_count_every_firing_and_every_escalation() {
+        // What the eval harness reports (TODO §13): the ladder's *history*, which
+        // the per-detector counters throw away as soon as a run calms down.
+        let mut control = LoopControl::default();
+        let same = || call("read", json!({"path": "a.ts"}));
+        // Three identical calls: the third trips the detector and warns.
+        for _ in 0..3 {
+            control.observe_round("", &[same()]);
+        }
+        assert_eq!(control.rung(), Rung::Warned);
+        assert_eq!(control.firings(), 1);
+        assert_eq!(control.escalations(), 0);
+
+        // A fourth fires again, and this time hands the step to the strong role.
+        control.observe_round("", &[same()]);
+        assert_eq!(control.rung(), Rung::Escalated);
+        assert!(control.escalating());
+        assert_eq!(control.firings(), 2);
+        assert_eq!(control.escalations(), 1);
+
+        // A fifth stops the run — counted, and not counted twice as an
+        // escalation.
+        assert!(matches!(
+            control.observe_round("", &[same()]),
+            Verdict::Stuck { .. }
+        ));
+        assert_eq!(control.firings(), 3);
+        assert_eq!(control.escalations(), 1);
+
+        // And they survive the JSON the run is saved as.
+        let back: LoopControl =
+            serde_json::from_value(serde_json::to_value(&control).unwrap()).unwrap();
+        assert_eq!(back.firings(), 3);
+        assert_eq!(back.escalations(), 1);
     }
 
     #[test]

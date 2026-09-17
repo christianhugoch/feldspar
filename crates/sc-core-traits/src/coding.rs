@@ -114,7 +114,7 @@ pub use feature::{
     tool_name as implement_feature_tool_name,
 };
 pub use find::tool_name as find_files_tool_name;
-pub use inspect::{ScopeDiff, agent_run_diff, run_plan};
+pub use inspect::{ScopeDiff, agent_run_diff, run_plan, run_tree};
 pub use ledger::{ChangeStatus, FileChange, Ledger, PreImage, RunDiff, diff_ledger, run_diff};
 pub use patch::tool_name as apply_patch_tool_name;
 pub use plan::{
@@ -136,7 +136,7 @@ pub use shell::{
     CFG_SHELL_TIMEOUT_MAX, DEFAULT_SHELL_TIMEOUT, DEFAULT_SHELL_TIMEOUT_MAX, SHELL_ENV,
     tool_name as shell_tool_name,
 };
-pub use state::CodingState;
+pub use state::{CodingState, EditStats};
 pub use view_app::{
     CFG_VIEW_APP_TIMEOUT, CFG_VIEW_APP_USER, DEFAULT_VIEW_APP_TIMEOUT,
     tool_name as view_app_tool_name,

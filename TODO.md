@@ -1129,17 +1129,37 @@ default.
 
 ## Phase 11 — Evaluation
 
-- [ ] 11.1 `feldspar agent eval <suite> --model <provider/model> [--strong <provider/model>]
+- [x] 11.1 `feldspar agent eval <suite> --model <provider/model> [--strong <provider/model>]
       [--cheap <provider/model>]` in `sc-cli`, each naming a model row:
       task format, temporary store per task, verification script, and JSON plus Markdown
-      output of the §13 metrics.
-- [ ] 11.2 A harness self-test on `FakeProvider` (one passing task, one failing task) that
-      runs in `cargo test`.
-- [ ] 11.3 The seed suite under `tests/agent-eval/`: 10 React-scaffold tasks (a new page, a
+      output of the §13 metrics. *(`crates/sc-cli/src/eval.rs`. A task is a directory with a
+      `task.toml`; the temporary store is a **local file store over a copy of the fixture**,
+      while the database is the one the command connected to — that is where the provider and
+      model rows with the keys are. The store, application and agent are removed afterwards
+      and the run rows stay. Two metrics had nowhere to be read from and now have one:
+      `CodingState::edits` counts applied edits by cascade step and edits that failed after
+      the cascade, and `LoopControl` keeps cumulative `firings`/`escalations` tallies that
+      survive a `reset`. `run_tree` was lifted out of `agent_run_diff` so a planned run's
+      numbers roll up over its sessions. Extra flags beyond the plan: `--task`, `--out`,
+      `--keep`; extra task keys: `setup`, `workflow`, `max_cost`.)*
+- [x] 11.2 A harness self-test on `FakeProvider` (one passing task, one failing task) that
+      runs in `cargo test`. *(`crates/sc-cli/tests/agent_eval.rs`: the failing task's model
+      says it has finished and is not believed. It also pins the cascade level in the report
+      and that the temporary rows go while the runs stay.)*
+- [x] 11.3 The seed suite under `tests/agent-eval/`: 10 React-scaffold tasks (a new page, a
       form field, a list filter, a bug with a reproducing test, a refactor, and so on), each
-      with a verification script.
+      with a verification script. *(**Deviation:** the tasks are `code` applications over a
+      React + Vite fixture, not `react` ones. A `react` build regenerates `src/feldspar/`
+      from its own application's endpoints, and the eval's application has no tables, so a
+      `react` build would empty the client and fail every type check for a reason that is
+      not the model's. `make-fixture.sh` installs one `node_modules` beside the fixture and
+      symlinks it in, so ten copies share one install.)*
 - [ ] 11.4 Run it once against a cheap model and a strong model, and record the results and
       R§14's decision triggers in `docs/tutorial-agents.md` (or a new `docs/AGENT_EVAL.md`).
+      *(The triggers are written: `docs/AGENT_EVAL.md`. The **run** needs an API key and
+      spends money, so it is left for a human — the same reason no test in this tree calls a
+      vendor. `docs/AGENT_EVAL.md` has the command; the numbers go under a "Results"
+      heading there.)*
 
 ## Phase 12 — Documentation and the definition of done
 

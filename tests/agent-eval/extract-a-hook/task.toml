@@ -1,0 +1,8 @@
+# extract-a-hook
+prompt = "Both pages fetch the task list with the same `useEffect`. Extract it into a `useTasks` hook in `src/lib/useTasks.ts` and use it from both."
+fixture = "../fixture"
+framework = "code"
+output = "dist"
+command = "npm run build"
+checks = ["typecheck", "test"]
+max_steps = 60

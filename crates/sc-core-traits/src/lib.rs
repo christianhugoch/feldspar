@@ -129,10 +129,10 @@ pub use coding::{
     CFG_SHELL_TIMEOUT, CFG_SHELL_TIMEOUT_MAX, CFG_TIMEOUT, CFG_VIEW_APP_TIMEOUT, CFG_VIEW_APP_USER,
     ChangeStatus, Coding, CodingState, DEFAULT_DIAGNOSE, DEFAULT_MAX_LINES,
     DEFAULT_REPO_MAP_TOKENS, DEFAULT_SHELL_TIMEOUT, DEFAULT_SHELL_TIMEOUT_MAX,
-    DEFAULT_TIMEOUT_SECONDS, DEFAULT_VIEW_APP_TIMEOUT, EDIT_FORMAT_AUTO, FileChange,
+    DEFAULT_TIMEOUT_SECONDS, DEFAULT_VIEW_APP_TIMEOUT, EDIT_FORMAT_AUTO, EditStats, FileChange,
     LONGEST_TOOL_PREFIX, Ledger, MAX_OUTPUT_CHARS, MAX_REPO_MAP_TOKENS, PreImage, RunDiff,
     SHELL_ENV, ScopeDiff, agent_run_diff, diff_ledger, edit_format, kill_all_processes, matching,
-    run_diff, running_count,
+    run_diff, run_tree, running_count,
 };
 pub use coding::{
     CFG_COMMIT, CFG_MAX_SESSIONS, CFG_WORKFLOW, DEFAULT_MAX_SESSIONS, FAILURES_TO_FAIL, Feature,

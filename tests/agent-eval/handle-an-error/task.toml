@@ -1,0 +1,8 @@
+# handle-an-error
+prompt = "If loading the tasks fails the page stays empty and the error is lost. Catch it and show the message above the list."
+fixture = "../fixture"
+framework = "code"
+output = "dist"
+command = "npm run build"
+checks = ["typecheck", "test"]
+max_steps = 60

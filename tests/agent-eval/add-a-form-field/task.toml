@@ -1,0 +1,8 @@
+# add-a-form-field
+prompt = "The new-task form cannot set a due date. Add a date input to it and send the value with the new task."
+fixture = "../fixture"
+framework = "code"
+output = "dist"
+command = "npm run build"
+checks = ["typecheck", "test"]
+max_steps = 60

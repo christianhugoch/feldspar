@@ -1,0 +1,8 @@
+# style-done-tasks
+prompt = "A task that is done should have its title struck through. Add the style to `src/app.css` and use it from the list."
+fixture = "../fixture"
+framework = "code"
+output = "dist"
+command = "npm run build"
+checks = ["typecheck", "test"]
+max_steps = 60

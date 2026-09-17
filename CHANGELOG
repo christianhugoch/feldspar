@@ -2,6 +2,76 @@
 
 Changes in reverse chronological order.
 
+## The evaluation harness (coding agent milestone, Phase 11)
+
+`feldspar agent eval <suite>` runs a suite of coding tasks against named models and reports
+whether they worked and what they cost. It is the only thing in this repository that spends
+money — everything in `cargo test` still runs against `FakeProvider` (§13) — so it is a command
+an operator runs deliberately, and it has a self-test that spends nothing.
+
+- **The harness (`sc-cli/src/eval.rs`, 11.1):** `feldspar agent eval SUITE [--model P/M]
+  [--strong P/M] [--cheap P/M] [--task NAME]… [--out DIR] [--keep]`, plus the usual database
+  flags. A model is `provider/model` naming rows of `_fd_llm_providers` and `_fd_llm_models`;
+  a bare `provider` is that provider's default model, and no `--model` at all is the first
+  provider on its default, which is how the admin UI creates a builder agent.
+  - A **task** is a directory holding a `task.toml`: a `prompt`, a `fixture` to copy, a
+    `verify` script, and optionally `setup`, `framework`/`output`/`command`, `checks`,
+    `workflow`, `max_steps` and `max_cost`. A directory without one is not a task, which is how
+    a shared fixture, a README and the reports sit beside them.
+  - Per task it copies the fixture into a temporary directory, defines a **local file store**
+    over the copy, saves an application and the builder agent the framework declares
+    (`framework_builder_agent` — the configuration §12 ships, so what is measured is what an
+    admin gets), runs it, then runs the verification script in the copy. **Its exit status is
+    the whole score**: what the model says about its own work does not enter into it.
+  - The store, application and agent are removed afterwards, and a task repairs the rows a
+    killed earlier run left behind. The **run rows stay** — they are the transcript behind
+    every number. The names are derived from the task, not a uuid, because the tool names the
+    model is offered are derived from the store's.
+  - It writes `report.json` and `report.md` (a row per task, then the totals) and exits
+    non-zero when any task failed.
+- **Two metrics that had nowhere to be read from:**
+  - `CodingState::edits` (`EditStats`) counts **applied edits by cascade step** (`exact`,
+    `whitespace`, `indentation`, `fuzzy`) and **edits that failed after the whole cascade**.
+    `edit_file` counts the step it matched at; `apply_patch` counts once per patch, at the
+    loosest step any hunk needed. Counted in the trait state rather than parsed back out of
+    the tool results, because the summary a model reads is prose.
+  - `LoopControl` keeps cumulative `firings()` and `escalations()` tallies. They **survive
+    `reset()`**, unlike every per-detector counter: they are what the run did, not what it is
+    doing when it stops.
+- **`run_tree`** is lifted out of `agent_run_diff` (`coding/inspect.rs`) and made public: a
+  planned run's steps, tokens, cost and edits are rolled up over the planner **and its
+  sessions**, since the planner's own ledger holds only what the planner spent.
+- **The self-test (`sc-cli/tests/agent_eval.rs`, 11.2):** a two-task suite on `FakeProvider` —
+  one task the scripted model solves, one it only claims to have solved — through the whole
+  harness: a real temporary store, a real application, the real builder agent, the real loop,
+  the real verification scripts. It pins that the score comes from the script and not the
+  model, that the cascade step reaches the report, and that the temporary rows go while the
+  runs stay.
+- **The seed suite (`tests/agent-eval/`, 11.3):** ten tasks on a React + Vite fixture — a new
+  page, a form field, a list filter, a bug fixed behind a reproducing test, a refactor across
+  two files, a two-key sort, an empty state, an error path, a CSS change and a delete
+  mutation. Each `verify.sh` greps for the change and then runs the project's own checks
+  (`npm run typecheck`, `npm test`), and each is written to fail on the untouched fixture. The
+  fixture's baseline is green, so nothing is scored on a failure it inherited.
+  - **Deviation:** the tasks are `code` applications, not `react` ones. A `react` build
+    regenerates `src/feldspar/` from its own application's endpoints, and the eval's
+    application is created over a copied directory with no tables — so a `react` build would
+    replace the fixture's client with an empty one and fail every type check for a reason that
+    has nothing to do with the model. The fixture's `AGENTS.md` carries the conventions the
+    `react` prompt would have.
+  - `make-fixture.sh` runs `npm install` **beside** the fixture and symlinks it in, so all ten
+    task copies share one `node_modules`; the harness copies a symlink as a symlink for exactly
+    this reason.
+- **`docs/AGENT_EVAL.md` (11.4, part):** the command, the task format, what each metric means,
+  and R§14's decision triggers — edit failures point at the edit format before the model,
+  localisation failures at the repo map, input tokens at clearing and compaction and the cache
+  hit rate, and a cheap executor within ~10 points of a strong one is a cheap executor to keep.
+  The first run against a real provider is still to do: it needs a key and spends money, and
+  the "Results" heading is waiting for it.
+- **Known failure, not from this work:** `repo_hygiene::the_agents_tutorial_teaches_each_step_of_the_loop`
+  asks `docs/tutorial-agents.md` for the phrase "no shell", which Phase 6a reversed. It is
+  Phase 12.2's to fix.
+
 ## The builder agent, the scaffold, the IDE and the admin UI (coding agent milestone, Phase 10)
 
 A new application's builder agent is now the milestone's shape: one `coding` trait that plans,

@@ -1,0 +1,8 @@
+# fix-a-bug-with-a-test
+prompt = "`formatDue` says `in 1 days` for a task due tomorrow; it should say `tomorrow`. Write a test that reproduces it first, then fix it."
+fixture = "../fixture"
+framework = "code"
+output = "dist"
+command = "npm run build"
+checks = ["typecheck", "test"]
+max_steps = 60
