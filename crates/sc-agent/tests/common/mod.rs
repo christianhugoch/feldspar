@@ -297,3 +297,95 @@ pub fn registry(counter: Arc<Counter>) -> Result<AgentRegistry> {
     registry.register(Arc::new(Tally))?;
     Ok(registry)
 }
+
+/// A trait for the context tests (TODO §9): a session header that counts how
+/// often it is built, a tool whose result is as long as asked (`dump`), and one
+/// whose old results it stubs itself (`check`).
+pub struct Notes {
+    pub headers: std::sync::atomic::AtomicUsize,
+}
+
+impl Notes {
+    pub fn new() -> Arc<Notes> {
+        Arc::new(Notes {
+            headers: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    /// How many times the session header was built.
+    pub fn headers_built(&self) -> usize {
+        self.headers.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentTrait for Notes {
+    fn name(&self) -> &str {
+        "notes"
+    }
+
+    fn description(&self) -> &str {
+        "Project notes in the session header"
+    }
+
+    fn config_spec(&self) -> Vec<FormField> {
+        Vec::new()
+    }
+
+    fn tools(&self, _cx: &ToolsContext<'_>, _config: &Attrs) -> Vec<ToolSpec> {
+        let sized = json!({
+            "type": "object",
+            "properties": {"chars": {"type": "integer"}},
+        });
+        // Declared out of order: the request sorts them.
+        vec![
+            ToolSpec::new("dump", "Return `chars` characters", sized.clone()),
+            ToolSpec::new("check", "Run the checks", sized),
+        ]
+    }
+
+    async fn call(
+        &self,
+        _config: &Attrs,
+        tool: &str,
+        args: &Json,
+        _ctx: &mut TraitContext<'_>,
+    ) -> Result<Json> {
+        let chars = args.get("chars").and_then(Json::as_u64).unwrap_or(10);
+        let fill = if tool == "check" { "e" } else { "x" };
+        Ok(Json::String(
+            fill.repeat(usize::try_from(chars).unwrap_or(10)),
+        ))
+    }
+
+    async fn session_header(
+        &self,
+        _config: &Attrs,
+        cx: &mut sc_agent::SessionContext<'_>,
+    ) -> Result<Option<String>> {
+        let n = self
+            .headers
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        *cx.trait_state = json!({"headers": n});
+        Ok(Some(format!(
+            "# Notes for {} in {} mode\nbrief: {}",
+            cx.agent, cx.mode, cx.brief
+        )))
+    }
+
+    fn elide(&self, _config: &Attrs, old: &sc_agent::Elidable<'_>) -> Option<String> {
+        if old.call.name == "check" {
+            Some("[elided check: 1 failing]".to_owned())
+        } else {
+            Some(old.default_stub())
+        }
+    }
+}
+
+/// A registry with the test traits and `notes`.
+pub fn registry_with_notes(notes: Arc<Notes>) -> Result<AgentRegistry> {
+    let mut registry = registry(Counter::new())?;
+    registry.register(notes)?;
+    Ok(registry)
+}

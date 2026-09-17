@@ -2,6 +2,85 @@
 
 Changes in reverse chronological order.
 
+## The loop manages its context (coding agent milestone, Phase 4)
+
+Everything here is in `sc-agent` and true of every agent (TODO §9). The chat socket, the admin
+chat panel and the IDE's chat relay were updated to match.
+
+- **The request layout** (`context.rs`), from most to least stable:
+  1. the stable prefix: the system prompt, then the tools, now **sorted by name**
+  2. the **session header**: a first user message built by the new
+     `AgentTrait::session_header` hook
+  3. the history
+
+  - The header is built once per session, before the first model call. Each trait gets a
+    `SessionContext` with the run, its mode, the first user message (`brief`) and the trait's
+    state.
+  - The header is stored in the run, so the next step, a new turn and a resume all reuse it. A
+    header that fails fails the run.
+  - `Step::CallModel` now carries the request's messages with the layout applied, plus a
+    `CachePlan`: breakpoints after the prefix, after the header (index 0) and at the tail.
+  - The request's `prompt_cache_key` is the run id.
+  - `on_turn`'s docs now say that anything it appends breaks caching.
+- **Budget accounting.** A request is measured as the `input_tokens` reported for the last one,
+  plus a calibrated estimate of what changed since.
+  - `StepMeta::request_tokens` carries the raw estimate for calibration.
+  - The budget is `context_budget`, or the executor model's working budget when it is unset.
+  - At 75% the loop compacts before the call.
+  - If the request is still over the whole budget after compacting, the run ends as
+    `OverBudget { budget: context }`. This applies to the default budget too, now that
+    compaction exists. Before, only an explicit `context_budget` could end a run, and it did so
+    on the last reported size, without trying to compact.
+- **Pass 1, clearing.** Every tool result older than the last `keep_turns` turns (a new agent
+  attribute, default 3) is replaced by a stub, in one batch.
+  - The stub comes from the owning trait's new `AgentTrait::elide` hook. The default is
+    `[elided: N characters of <tool> output]`.
+  - The hook sees the call, the content, the whole transcript and the trait's state, so
+    `coding` can later say more.
+  - Only the result is replaced: the call stays, and images go with the text.
+- **Pass 2, the summary.** If clearing leaves the request at or above 50%, the cheap role
+  summarises everything before the kept turns.
+  - It uses a fixed prompt with fixed sections: goal, decisions, files changed, failing checks
+    and next step.
+  - A second summary folds in the first.
+  - The summary is sent as a user message after the header.
+  - The cut is always at an assistant message, so a tool call is never separated from its
+    result.
+  - A summary that fails is logged, and the budget check that follows decides.
+- **The stored transcript stays whole.** Stubs and summaries are overlays in `AgentLoop`'s new
+  `context` state. Compactions are stored as records: step, position, results cleared, tokens
+  before and after, `up_to_index` and the summary.
+  - The ledger records the summary call under the cheap role (`Ledger::summaries`). It counts in
+    the per-role totals but not as a step.
+  - The next step is flagged `compacted`.
+- **The chat.**
+  - `RunObserver::on_compaction` and a `compaction` socket event.
+  - The admin chat panel draws a quiet divider where the context was compacted, both live and
+    in a reopened run. The divider says what was cleared and expands to show the summary.
+  - The IDE relay reports a compaction as progress.
+- **Testing** (`testing.rs`).
+  - `FakeProvider::when(Match, script)` answers matching requests from their own script. A mode
+    is recognised by the tools offered, and `Match::Summary` recognises a compaction.
+  - `counting_input()` reports each request's estimated size as its input tokens.
+  - New request assertions: `assert_stable_prefix`, `session_header`, `elided_results` and
+    `requests_matching`.
+  - Roles already had their own scripts through `FakeModels`.
+- **Tests.**
+  - `sc-agent/tests/context.rs`, against the scripted provider and a real `_fd_runs`:
+    - the header is built once, across a second step, a second turn and a resume after a
+      provider failure
+    - consecutive requests are byte-identical up to the history, with the tools sorted and the
+      cache plan and key set
+    - clearing in one batch, with a trait's own stub: every result keeps its call, the request
+      is under half the budget, and the stored transcript is whole
+    - a cheap-role summary replacing the older turns, recorded on the ledger
+  - Unit tests for the layout, the cut, clearing, summaries, measuring, the verdict and the
+    round trip.
+  - A matched-script test for the fake.
+  - The context-budget test now ends before any model call.
+  - The chat event test, and admin panel and IDE relay tests.
+  - `coding_agent`'s tool-order assertion now expects name order.
+
 ## The loop learns to notice when it is stuck (coding agent milestone, Phase 3)
 
 Everything here is in `sc-agent` and true of every agent (TODO §10, R§10). `sc-llm`, the

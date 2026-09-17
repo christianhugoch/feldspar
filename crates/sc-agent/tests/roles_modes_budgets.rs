@@ -513,7 +513,8 @@ async fn each_budget_ends_a_run_as_over_budget() -> Result<()> {
     assert_eq!(state.step(), 1);
     assert!(state.ledger().working_ms() >= 1000);
 
-    // Context: the scripted model reports 10 input tokens per request.
+    // Context: a budget smaller than the first request, which compacting
+    // cannot shrink, ends the run before it calls the model.
     let agent = tally_agent().attribute(ATTR_CONTEXT_BUDGET, 10);
     let (conclusion, state) =
         run_until_over_budget(&agent, Reply::calls("tally", json!({})), Prices::default()).await?;
@@ -523,6 +524,7 @@ async fn each_budget_ends_a_run_as_over_budget() -> Result<()> {
             budget: Budget::Context
         }
     );
-    assert_eq!(state.step(), 1);
+    assert_eq!(state.step(), 0);
+    assert_eq!(state.context().compactions().len(), 1);
     Ok(())
 }

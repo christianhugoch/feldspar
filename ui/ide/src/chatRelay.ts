@@ -195,6 +195,16 @@ export function relayEvent(
       // call is read alongside them, not instead of them.
       stream.markdown(`\n\n⚠️ ${event.message}\n\n`);
       return null;
+    case "compaction":
+      // The agent's context was cleared or summarised to fit its budget. Worth
+      // a line — an agent that seems to have forgotten something has a reason
+      // — but not the summary, which is the agent's notes, not its answer.
+      stream.progress(
+        event.summary === undefined
+          ? "Clearing old tool output from the context"
+          : "Summarising the conversation so far to fit the context",
+      );
+      return null;
     case "done":
     case "controls":
       return null;

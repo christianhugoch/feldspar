@@ -798,23 +798,28 @@ default.
 
 ## Phase 4 — Context management (`sc-agent`)
 
-- [ ] 4.1 Request layout: stable prefix → session header → history. Add the
+- [x] 4.1 Request layout: stable prefix → session header → history. Add the
       `AgentTrait::session_header` hook, called once per session and stored in the run.
       Sort tools deterministically. Document that `on_turn` breaks caching. Set `CachePlan`
-      breakpoints from this layout.
-- [ ] 4.2 Test: two consecutive requests in one session are byte-identical up to the history,
+      breakpoints from this layout. *(The header is a user message at index 0; the cache key is
+      the run id.)*
+- [x] 4.2 Test: two consecutive requests in one session are byte-identical up to the history,
       and the header is not rebuilt on step 2 or on resume.
-- [ ] 4.3 Budget accounting from reported `input_tokens` plus estimates. Trigger at 75% of
-      `context_budget`.
-- [ ] 4.4 Pass 1, clearing: the `AgentTrait::elide` hook (default stub), applied in one batch.
+- [x] 4.3 Budget accounting from reported `input_tokens` plus estimates. Trigger at 75% of
+      `context_budget`. *(Unset, the executor's working budget. A request still over the whole
+      budget after compacting ends the run `OverBudget { context }`.)*
+- [x] 4.4 Pass 1, clearing: the `AgentTrait::elide` hook (default stub), applied in one batch.
       Tool calls and results are never separated. Test: the elided request is under budget,
       and every tool result still has its call.
-- [ ] 4.5 Pass 2, the structured summary on the cheap role (fixed sections), replacing all but
+- [x] 4.5 Pass 2, the structured summary on the cheap role (fixed sections), replacing all but
       the last K turns. Compaction records `(up_to_index, summary)` live in the loop state,
-      the request is built from them, and the stored transcript stays whole.
-- [ ] 4.6 The chat and run views show a compaction marker, and the admin can expand the
+      the request is built from them, and the stored transcript stays whole. *(K is the
+      `keep_turns` attribute, default 3. Pass 1's stubs are overlays too.)*
+- [x] 4.6 The chat and run views show a compaction marker, and the admin can expand the
       summary.
-- [ ] 4.7 `FakeProvider` gains role- and mode-aware scripts and request assertions (§13).
+- [x] 4.7 `FakeProvider` gains role- and mode-aware scripts and request assertions (§13).
+      *(Roles through `FakeModels`; modes through `Match::Offers`, since a request does not
+      carry its mode.)*
 
 ## Phase 5 — The coding tools, rebuilt (`sc-core-traits/src/coding`)
 

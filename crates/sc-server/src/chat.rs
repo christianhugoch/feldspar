@@ -30,6 +30,11 @@
 //!   budget an `over_budget` run ran out of, and `reason` says why a `stuck`
 //!   run was stopped.
 //! - `{"type":"error","message":"…"}`
+//! - `{"type":"compaction","step":n,"elided":n,"before_tokens":n,"after_tokens":n,
+//!   "summary":"…"?}` — the loop compacted the context before model call `step`
+//!   (TODO §9): `elided` old tool results were cleared, and `summary`, when
+//!   present, replaced the older turns in what the model is sent. The
+//!   transcript itself is unchanged.
 //!
 //! ## A failure is an event, not a dropped connection
 //!
@@ -509,6 +514,22 @@ fn error_event(message: impl std::fmt::Display) -> Json {
     json!({ "type": "error", "message": message.to_string() })
 }
 
+/// A `compaction` event: what the loop did to the context, for the marker the
+/// panel draws where it happened.
+fn compaction_event(compaction: &sc_agent::Compaction) -> Json {
+    let mut event = json!({
+        "type": "compaction",
+        "step": compaction.step,
+        "elided": compaction.elided,
+        "before_tokens": compaction.before_tokens,
+        "after_tokens": compaction.after_tokens,
+    });
+    if let Some(summary) = &compaction.summary {
+        event["summary"] = json!(summary);
+    }
+    event
+}
+
 /// Queue one event for the writer. A send that fails means the socket has gone,
 /// which the read half will notice; there is nothing useful to do here.
 fn send(tx: &UnboundedSender<Json>, event: Json) {
@@ -555,6 +576,10 @@ impl RunObserver for SocketObserver {
         );
     }
 
+    fn on_compaction(&self, compaction: &sc_agent::Compaction) {
+        send(&self.tx, compaction_event(compaction));
+    }
+
     fn on_tool_result(&self, outcome: &sc_agent::ToolOutcome) {
         send(
             &self.tx,
@@ -579,6 +604,28 @@ mod tests {
             Some(role) => agent.min_role(role),
             None => agent,
         }
+    }
+
+    #[test]
+    fn a_compaction_event_carries_the_summary_only_when_there_is_one() {
+        let mut compaction = sc_agent::Compaction {
+            step: 4,
+            at: 7,
+            elided: 2,
+            before_tokens: 3400,
+            after_tokens: 1200,
+            up_to_index: None,
+            summary: None,
+        };
+        let event = compaction_event(&compaction);
+        assert_eq!(
+            event,
+            json!({"type": "compaction", "step": 4, "elided": 2,
+                   "before_tokens": 3400, "after_tokens": 1200})
+        );
+        compaction.up_to_index = Some(5);
+        compaction.summary = Some("## Goal\nship it".to_owned());
+        assert_eq!(compaction_event(&compaction)["summary"], "## Goal\nship it");
     }
 
     #[test]

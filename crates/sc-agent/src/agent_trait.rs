@@ -34,6 +34,7 @@ use sc_llm::{ModelCapabilities, ToolSpec};
 use sc_types::{Attrs, FormField};
 use serde_json::Value as Json;
 
+use crate::context::Elidable;
 use crate::control::Signal;
 use crate::delegate::Delegator;
 use crate::run::{RunId, RunMode};
@@ -122,9 +123,49 @@ pub trait AgentTrait: Send + Sync {
     /// Called before **every** model call, not once per run, so a trait whose
     /// contribution depends on what has happened so far can say something
     /// different on the second step than on the first.
+    ///
+    /// **Anything appended here breaks prompt caching.** The system prompt is
+    /// the front of the cached prefix (TODO §9), so text that changes between
+    /// steps makes every request a cache miss from its first token. What a trait
+    /// knows once per session belongs in
+    /// [`session_header`](AgentTrait::session_header), and what changes belongs
+    /// in a tool result.
     async fn on_turn(&self, config: &Attrs, turn: &mut Turn<'_>) -> Result<()> {
         let _ = (config, turn);
         Ok(())
+    }
+
+    /// What this trait puts in the **session header**: the first user-side
+    /// message of a run, after the stable prefix and before the history (TODO
+    /// §9). `coding` puts `AGENTS.md`, a small repo map and the recent `git log`
+    /// there.
+    ///
+    /// Called **once per session**, before the first model call. The loop stores
+    /// the result with the run, so it is not rebuilt on the next step, when the
+    /// conversation continues, or on resume — which is what lets it be cached.
+    /// Every trait's header is joined in the agent's trait order.
+    ///
+    /// An `Err` fails the run: a header is context the agent was promised.
+    async fn session_header(
+        &self,
+        config: &Attrs,
+        cx: &mut SessionContext<'_>,
+    ) -> Result<Option<String>> {
+        let _ = (config, cx);
+        Ok(None)
+    }
+
+    /// The stub an old result of one of this trait's tools is replaced by when
+    /// the loop clears the context (TODO §9, pass 1), or `None` to keep it whole.
+    ///
+    /// The default is [`Elidable::default_stub`]:
+    /// `[elided: N characters of <tool> output]`. A trait can say more for less —
+    /// an old check result as one line — or see from the transcript that a read
+    /// was made stale by a later edit. Only the result is replaced: the call and
+    /// its arguments stay, so the model still sees what it did.
+    fn elide(&self, config: &Attrs, old: &Elidable<'_>) -> Option<String> {
+        let _ = config;
+        Some(old.default_stub())
     }
 
     /// What makes two calls of `tool` **the same call**, for the doom-loop
@@ -139,6 +180,27 @@ pub trait AgentTrait: Send + Sync {
         let _ = (config, tool);
         args.clone()
     }
+}
+
+/// What [`AgentTrait::session_header`] is given: the run, and this trait
+/// instance's per-run state.
+pub struct SessionContext<'a> {
+    /// The live catalog.
+    pub catalog: &'a Catalog,
+    /// Who the run is for.
+    pub caller: &'a RunCaller,
+    /// The name of the agent.
+    pub agent: &'a str,
+    /// The run whose session this is.
+    pub run: RunId,
+    /// The run's mode.
+    pub mode: RunMode,
+    /// The first thing the person (or the delegating run) said: the request or
+    /// the feature brief.
+    pub brief: &'a str,
+    /// This trait instance's per-run state, as [`TraitContext::state`] reaches
+    /// it.
+    pub trait_state: &'a mut Json,
 }
 
 /// What [`AgentTrait::tools`] is told about the run it is offering tools to.

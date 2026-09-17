@@ -17,6 +17,7 @@ import {
   emptyChat,
   applyEvent,
   applyUserMessage,
+  compactionLabel,
   conclusionLabel,
   normalizeControls,
   splitCodeBlocks,
@@ -358,6 +359,56 @@ describe("reopening a stored run", () => {
     // A turn that only called a tool said nothing, so there is no empty bubble.
     expect(entries.map((e) => e.kind)).toEqual(["tool"]);
     expect(entries[0]).toMatchObject({ isError: true });
+  });
+
+  it("marks each compaction where it happened, with its summary", () => {
+    const entries = transcriptFromRun({
+      messages: [
+        { role: "user", content: "build it" },
+        { role: "assistant", content: "", tool_calls: [{ id: "c1", name: "dump", arguments: {} }] },
+        { role: "tool_result", tool_call_id: "c1", name: "dump", content: "x" },
+        { role: "assistant", content: "done", tool_calls: [] },
+      ],
+      context: {
+        compactions: [
+          {
+            step: 2,
+            at: 3,
+            elided: 1,
+            before_tokens: 900,
+            after_tokens: 300,
+            up_to_index: 1,
+            summary: "## Goal\nbuild it",
+          },
+        ],
+      },
+    });
+    // The transcript is whole, with the marker before the turn it preceded.
+    expect(entries.map((e) => e.kind)).toEqual(["user", "tool", "compaction", "assistant"]);
+    const marker = entries[2] as Extract<Entry, { kind: "compaction" }>;
+    expect(marker).toEqual({
+      kind: "compaction",
+      elided: 1,
+      beforeTokens: 900,
+      afterTokens: 300,
+      summary: "## Goal\nbuild it",
+    });
+    expect(compactionLabel(marker)).toBe(
+      "Context compacted from 900 to 300 tokens: 1 old tool result cleared, older turns summarised",
+    );
+  });
+
+  it("appends a live compaction as a marker", () => {
+    const state = applyEvent(emptyChat(), {
+      type: "compaction",
+      step: 4,
+      elided: 2,
+      before_tokens: 3400,
+      after_tokens: 1200,
+    });
+    expect(state.entries).toEqual([
+      { kind: "compaction", elided: 2, beforeTokens: 3400, afterTokens: 1200, summary: null },
+    ]);
   });
 
   it("is empty for a run with nothing readable in it", () => {

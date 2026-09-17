@@ -272,6 +272,18 @@ describe("one event, relayed", () => {
     expect(stream.markdownText).toEqual([]);
   });
 
+  it("reports a compaction as progress and keeps its summary out of the answer", () => {
+    const stream = recordingStream();
+    const compaction = { step: 4, elided: 2, before_tokens: 3400, after_tokens: 1200 };
+    relayEvent({ type: "compaction", ...compaction }, stream);
+    relayEvent({ type: "compaction", ...compaction, summary: "## Goal\nship" }, stream);
+    expect(stream.progressText).toEqual([
+      "Clearing old tool output from the context",
+      "Summarising the conversation so far to fit the context",
+    ]);
+    expect(stream.markdownText).toEqual([]);
+  });
+
   it("puts a failed tool, and an error, in the answer where they happened", () => {
     const stream = recordingStream();
     relayEvent(

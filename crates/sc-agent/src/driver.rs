@@ -21,13 +21,17 @@ use sc_action::TriggerDispatcher;
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use sc_expr::JsEvaluator;
-use sc_llm::{AssistantMessage, ConnectedModel, LlmDelta, LlmRequest, ToolCall, ToolSpec};
+use sc_llm::{
+    AssistantMessage, CachePlan, ConnectedModel, LlmDelta, LlmMessage, LlmRequest, ToolCall,
+    ToolSpec, estimate_tokens,
+};
 use serde_json::Value as Json;
 
 use crate::agent::{Agent, ModelRole};
-use crate::agent_trait::{RunCaller, ToolsContext, TraitContext, Turn};
+use crate::agent_trait::{RunCaller, SessionContext, ToolsContext, TraitContext, Turn};
+use crate::context::{Compaction, ContextVerdict, Elidable, SUMMARY_PERCENT, SUMMARY_PROMPT};
 use crate::delegate::{ATTR_DELEGATED_BY, ATTR_PARENT_RUN, DelegateRequest, Delegated, Delegator};
-use crate::ledger::ChildLedger;
+use crate::ledger::{ChildLedger, LedgerStep};
 use crate::machine::{AgentLoop, Conclusion, Step, StepMeta, ToolOutcome, trait_state_key};
 use crate::registry::AgentRegistry;
 use crate::run::{Run, RunId, RunMode};
@@ -57,6 +61,11 @@ pub trait RunObserver: Send + Sync {
     /// A tool has returned — successfully or not.
     fn on_tool_result(&self, outcome: &ToolOutcome) {
         let _ = outcome;
+    }
+
+    /// The context was compacted before the next model call (TODO §9).
+    fn on_compaction(&self, compaction: &Compaction) {
+        let _ = compaction;
     }
 }
 
@@ -296,9 +305,22 @@ impl<'a> Runner<'a> {
                 }
                 Step::CallModel {
                     messages,
+                    cache,
                     step,
                     escalated,
                 } => {
+                    // Once per session, before its first model call, and kept
+                    // with the run: neither the next step nor a resume rebuilds
+                    // it (TODO §9).
+                    if state.needs_session_header() {
+                        match self.session_header(run.id, mode, &mut state).await {
+                            Ok(header) => state.set_session_header(header),
+                            Err(e) => return self.fail(run, &state, step, e).await,
+                        }
+                        run.record(&state);
+                        save_run(self.catalog, run).await?;
+                        continue;
+                    }
                     let began = std::time::Instant::now();
                     // One step on the strong role, when the ladder says so.
                     let role = if escalated {
@@ -311,42 +333,63 @@ impl<'a> Runner<'a> {
                     } else {
                         role
                     };
-                    let answered = match self.model(role).await {
-                        Ok(model) => {
-                            let request = self.request(messages, step, mode, &model).await?;
-                            self.ask(&model, request)
-                                .await
-                                .map(|answer| (model, answer))
-                        }
+                    let prepared = match self.model(role).await {
+                        Ok(model) => self
+                            .request(messages, cache, step, mode, &model, run.id)
+                            .await
+                            .map(|request| (model, request)),
                         Err(e) => Err(e),
                     };
+                    let (model, request) = match prepared {
+                        Ok(prepared) => prepared,
+                        Err(e) => {
+                            state.ledger_mut().add_working(began.elapsed());
+                            return self.fail(run, &state, step, e).await;
+                        }
+                    };
+
+                    // Measure the request against the context budget, and
+                    // compact before sending when it is near.
+                    let raw = estimate_tokens(&request, &model.backend);
+                    let budget = state.context_budget(self.executor.capabilities.working_budget);
+                    let used = state.measure_context(raw);
+                    match state.context_verdict(used, budget) {
+                        ContextVerdict::Fits => {}
+                        ContextVerdict::Compact => {
+                            self.compact(run.id, mode, &mut state, &request, &model, used, budget)
+                                .await;
+                            state.ledger_mut().add_working(began.elapsed());
+                            run.record(&state);
+                            save_run(self.catalog, run).await?;
+                            continue;
+                        }
+                        ContextVerdict::Over => {
+                            sc_log::log_warn!(
+                                "agent `{}` run {}: step {step} would carry {used} tokens \
+                                 against a context budget of {budget}, even compacted",
+                                self.agent.name,
+                                run.id
+                            );
+                            state.context_over_budget();
+                            continue;
+                        }
+                    }
+
+                    let answered = self.ask(&model, request, true).await;
                     let elapsed = began.elapsed();
                     state.ledger_mut().add_working(elapsed);
                     match answered {
-                        Ok((model, answer)) => {
+                        Ok(answer) => {
                             let meta = StepMeta {
                                 role,
                                 model: model.provider.model().to_owned(),
                                 cost: answer.usage.cost(&model.prices),
                                 elapsed,
+                                request_tokens: Some(raw),
                             };
                             state.model_answered_with(answer, meta)?;
                         }
-                        Err(e) => {
-                            // The conversation is intact and the reason is on the
-                            // row; the caller gets the error too, because a chat
-                            // socket has to render it as an event rather than
-                            // simply stopping.
-                            sc_log::log_warn!(
-                                "agent `{}` run {}: failed at step {step} — {e}",
-                                self.agent.name,
-                                run.id
-                            );
-                            run.record(&state);
-                            run.fail(&e);
-                            save_run(self.catalog, run).await?;
-                            return Err(e);
-                        }
+                        Err(e) => return self.fail(run, &state, step, e).await,
                     }
                 }
                 Step::CallTools { calls } => {
@@ -396,12 +439,18 @@ impl<'a> Runner<'a> {
     /// Rebuilt per step rather than kept on the run, because the agent is
     /// editable while its runs exist — a conversation resumed after a trait was
     /// added must get the new tool.
+    ///
+    /// The tools are sorted by name, so that the prefix — system prompt, then
+    /// tools — is byte-identical from one step to the next and can be cached
+    /// (TODO §9).
     async fn request(
         &self,
-        messages: Vec<sc_llm::LlmMessage>,
+        messages: Vec<LlmMessage>,
+        cache: CachePlan,
         step: u32,
         mode: RunMode,
         model: &ConnectedModel,
+        run: RunId,
     ) -> Result<LlmRequest> {
         let mut turn = Turn::new(&self.caller, &self.agent.name, step);
         turn.mode = mode;
@@ -424,31 +473,245 @@ impl<'a> Runner<'a> {
             // what a doom-loop detector can fingerprint. The adapters send it
             // only with tools.
             parallel_tool_calls: Some(self.agent.parallel_tool_calls()),
-            // Cache breakpoints and a cache key are the loop's to decide once
-            // the request layout is (TODO Phase 4); until then the host's
-            // defaults.
-            ..LlmRequest::default()
+            // After the prefix, after the session header, and at the tail.
+            cache,
+            // One key per session: its requests share a prefix, and the
+            // next session's header differs.
+            prompt_cache_key: Some(run.to_string()),
         };
         // An agent with no traits offers no tools, which is a request with an
         // empty list rather than one with a field the vendors read as "call
         // something".
         request.tools.retain(|t| !t.name.is_empty());
+        request.tools.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(request)
     }
 
     /// Send one request to `model` and assemble the answer, forwarding deltas as
     /// they arrive.
-    async fn ask(&self, model: &ConnectedModel, request: LlmRequest) -> Result<AssistantMessage> {
+    ///
+    /// A summary made while compacting is not `observe`d: it is not something
+    /// the agent said.
+    async fn ask(
+        &self,
+        model: &ConnectedModel,
+        request: LlmRequest,
+        observe: bool,
+    ) -> Result<AssistantMessage> {
         let mut stream = model.provider.stream(request).await?;
         let mut answer = AssistantMessage::default();
         while let Some(delta) = stream.next().await {
             let delta = delta?;
-            if let Some(observer) = self.observer {
+            if observe && let Some(observer) = self.observer {
                 observer.on_delta(&delta);
             }
             answer.push(delta);
         }
         Ok(answer)
+    }
+
+    /// Record `e` on the run as its failure at `step`, save it, and return it.
+    ///
+    /// The conversation is intact and the reason is on the row; the caller gets
+    /// the error too, because a chat socket has to render it as an event rather
+    /// than simply stopping.
+    async fn fail(
+        &self,
+        run: &mut Run,
+        state: &AgentLoop,
+        step: u32,
+        e: Error,
+    ) -> Result<Conclusion> {
+        sc_log::log_warn!(
+            "agent `{}` run {}: failed at step {step} — {e}",
+            self.agent.name,
+            run.id
+        );
+        run.record(state);
+        run.fail(&e);
+        save_run(self.catalog, run).await?;
+        Err(e)
+    }
+
+    /// Ask every enabled trait for its part of the session header, and join
+    /// them in trait order.
+    async fn session_header(
+        &self,
+        run: RunId,
+        mode: RunMode,
+        state: &mut AgentLoop,
+    ) -> Result<String> {
+        let brief = state
+            .messages()
+            .iter()
+            .find_map(|m| match m {
+                LlmMessage::User { content } => Some(content.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let mut parts: Vec<String> = Vec::new();
+        for (index, enabled) in self.agent.traits.iter().enumerate() {
+            let trait_ = self.registry.require(&enabled.trait_)?;
+            let key = trait_state_key(index, &enabled.trait_);
+            // A copy, written back only when the trait wrote something, so a
+            // trait with nothing to say leaves no `null` in the run's state.
+            let mut local = state.trait_state(&key).cloned().unwrap_or(Json::Null);
+            let mut cx = SessionContext {
+                catalog: self.catalog,
+                caller: &self.caller,
+                agent: &self.agent.name,
+                run,
+                mode,
+                brief: &brief,
+                trait_state: &mut local,
+            };
+            let part = trait_.session_header(&enabled.config, &mut cx).await?;
+            if !local.is_null() || state.trait_state(&key).is_some() {
+                *state.trait_state_mut(&key) = local;
+            }
+            if let Some(part) = part.filter(|p| !p.trim().is_empty()) {
+                parts.push(part);
+            }
+        }
+        sc_log::log_verbose!(
+            "agent `{}` run {run}: session header built from {} trait(s), {} characters",
+            self.agent.name,
+            parts.len(),
+            parts.iter().map(String::len).sum::<usize>()
+        );
+        Ok(parts.join("\n\n"))
+    }
+
+    /// Compact the context before the next model call (TODO §9): clear old tool
+    /// results in one batch, and when that is not enough, have the cheap role
+    /// summarise everything before the last few turns.
+    ///
+    /// Never fails the run. A summary that could not be made is logged, and the
+    /// budget check that follows ends the run if the request is still too big.
+    #[allow(clippy::too_many_arguments)]
+    async fn compact(
+        &self,
+        run: RunId,
+        mode: RunMode,
+        state: &mut AgentLoop,
+        request: &LlmRequest,
+        model: &ConnectedModel,
+        before: u64,
+        budget: u64,
+    ) {
+        // The estimate reads only the system prompt, the tools and the
+        // messages, so only those are copied.
+        let measure = |state: &AgentLoop, summary: Option<(usize, &str)>| {
+            let sized = LlmRequest {
+                system: request.system.clone(),
+                tools: request.tools.clone(),
+                messages: state.messages_with_summary(summary),
+                ..LlmRequest::default()
+            };
+            state.measure_context(estimate_tokens(&sized, &model.backend))
+        };
+
+        // Pass 1: every old result, stubbed by the trait that owns its tool.
+        let tools = ToolsContext::new(self.catalog, mode, &model.capabilities);
+        let stubs: Vec<(usize, String)> = state
+            .context()
+            .elidable(state.messages())
+            .into_iter()
+            .filter_map(|(index, call, content, images)| {
+                let owner = self.owner(&call.name, &tools);
+                let config_state = owner.as_ref().and_then(|(i, _)| {
+                    state.trait_state(&trait_state_key(*i, &self.agent.traits[*i].trait_))
+                });
+                let old = Elidable {
+                    index,
+                    call,
+                    content,
+                    images,
+                    transcript: state.messages(),
+                    state: config_state,
+                };
+                let stub = match owner.and_then(|(i, _)| {
+                    let enabled = &self.agent.traits[i];
+                    self.registry
+                        .require(&enabled.trait_)
+                        .ok()
+                        .map(|t| (t, enabled))
+                }) {
+                    Some((trait_, enabled)) => trait_.elide(&enabled.config, &old),
+                    // A tool no trait offers any more is still stubbed.
+                    None => Some(old.default_stub()),
+                };
+                stub.map(|stub| (index, stub))
+            })
+            .collect();
+        let elided = state.apply_elisions(stubs);
+        let mut after = measure(state, None);
+
+        // Pass 2: only when clearing did not get below half the budget.
+        let mut summary = None;
+        if after.saturating_mul(100) >= budget.saturating_mul(SUMMARY_PERCENT)
+            && let Some(cut) = state.context().summary_cut(state.messages())
+        {
+            match self.summarise(state, cut).await {
+                Ok(text) => {
+                    after = measure(state, Some((cut, &text)));
+                    summary = Some((cut, text));
+                }
+                Err(e) => sc_log::log_warn!(
+                    "agent `{}` run {run}: the context could not be summarised — {e}",
+                    self.agent.name
+                ),
+            }
+        }
+
+        let compaction = state.record_compaction(elided, before, after, summary);
+        sc_log::log_info!(
+            "agent `{}` run {run}: compacted before step {} from {before} to {after} tokens \
+             of {budget}: {elided} result(s) cleared{}",
+            self.agent.name,
+            compaction.step,
+            if compaction.summary.is_some() {
+                ", the rest summarised"
+            } else {
+                ""
+            }
+        );
+        if let Some(observer) = self.observer {
+            observer.on_compaction(compaction);
+        }
+    }
+
+    /// Have the cheap role summarise the transcript up to `cut`, and record the
+    /// call in the ledger.
+    async fn summarise(&self, state: &mut AgentLoop, cut: usize) -> Result<String> {
+        let began = std::time::Instant::now();
+        let model = self.model(ModelRole::Cheap).await?;
+        let request = LlmRequest {
+            system: Some(SUMMARY_PROMPT.to_owned()),
+            messages: vec![LlmMessage::user(
+                state.context().summary_source(state.messages(), cut),
+            )],
+            ..LlmRequest::default()
+        };
+        // Working time is the caller's to add, for the whole compaction.
+        let answer = self.ask(&model, request, false).await?;
+        let elapsed = began.elapsed();
+        let step = state.step() + 1;
+        state.ledger_mut().record_summary(LedgerStep {
+            step,
+            role: ModelRole::Cheap,
+            model: model.provider.model().to_owned(),
+            usage: answer.usage,
+            cost: answer.usage.cost(&model.prices),
+            elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            signals: Vec::new(),
+            compacted: true,
+        });
+        let text = answer.content.trim();
+        if text.is_empty() {
+            return Err(Error::msg("the summary came back empty"));
+        }
+        Ok(text.to_owned())
     }
 
     /// Run one tool call, as the run's caller.
@@ -763,7 +1026,7 @@ impl<'a> Runner<'a> {
             None => {
                 let mut state = AgentLoop::for_agent(sub);
                 if let Some(steps) = request.max_steps {
-                    state = AgentLoop::new(steps).with_budgets(state.budgets());
+                    state = state.with_max_steps(steps);
                 }
                 state.push_user(request.briefing)?;
                 let mut run = Run::new(&sub.name, &child.caller, &state)

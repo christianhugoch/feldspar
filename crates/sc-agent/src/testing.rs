@@ -17,14 +17,39 @@
 //!     Reply::says("There are five."),
 //! ]);
 //! ```
+//!
+//! ## Scripts that depend on the role and the mode (TODO §13)
+//!
+//! A **role** is answered by its own provider: [`FakeModels`] hands one out per
+//! role. A **mode** shows in what the request offers, so a provider can keep a
+//! script per [`Match`] beside its main one: a request in `plan` mode offers the
+//! planning tools, and a compaction's summary request offers none and carries
+//! the summary prompt.
+//!
+//! ```
+//! # use sc_agent::testing::{FakeProvider, Match, Reply};
+//! let provider = FakeProvider::new([Reply::says("done")])
+//!     .when(Match::Offers("save_plan".into()), [Reply::says("planned")])
+//!     .when(Match::Summary, [Reply::says("## Goal\n…")]);
+//! ```
+//!
+//! ## Asserting what was sent
+//!
+//! [`FakeProvider::requests`] is every request. The assertions below it read
+//! the layout the loop promises: [`assert_stable_prefix`] (system prompt, tools
+//! and session header byte-identical across a session),
+//! [`session_header`](FakeProvider::session_header), and
+//! [`elided_results`](FakeProvider::elided_results).
+//!
+//! [`assert_stable_prefix`]: FakeProvider::assert_stable_prefix
 
 use std::sync::{Arc, Mutex};
 
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use sc_llm::{
-    ConnectedModel, LlmDelta, LlmProvider, LlmRequest, LlmStream, Prices, StopReason, ToolCall,
-    Usage,
+    ConnectedModel, LlmDelta, LlmMessage, LlmProvider, LlmRequest, LlmStream, Prices, StopReason,
+    ToolCall, Usage, estimate_tokens,
 };
 use serde_json::Value as Json;
 
@@ -94,6 +119,50 @@ impl Reply {
     }
 }
 
+/// Which requests a script kept beside the main one answers (see
+/// [`FakeProvider::when`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Match {
+    /// A request offering a tool of this name — how a mode is told apart.
+    Offers(String),
+    /// A request whose system prompt contains this text.
+    SystemContains(String),
+    /// A request with this text in any message.
+    Mentions(String),
+    /// A compaction's summary request.
+    Summary,
+}
+
+impl Match {
+    /// Whether `req` is one this matches.
+    pub fn matches(&self, req: &LlmRequest) -> bool {
+        match self {
+            Match::Offers(tool) => req.tools.iter().any(|t| &t.name == tool),
+            Match::SystemContains(text) => req
+                .system
+                .as_deref()
+                .is_some_and(|s| s.contains(text.as_str())),
+            Match::Mentions(text) => req
+                .messages
+                .iter()
+                .any(|m| content(m).contains(text.as_str())),
+            Match::Summary => {
+                req.tools.is_empty()
+                    && req.system.as_deref() == Some(crate::context::SUMMARY_PROMPT)
+            }
+        }
+    }
+}
+
+/// A message's text.
+fn content(message: &LlmMessage) -> &str {
+    match message {
+        LlmMessage::User { content }
+        | LlmMessage::Assistant { content, .. }
+        | LlmMessage::ToolResult { content, .. } => content,
+    }
+}
+
 /// A provider that replays a script, and records what it was asked.
 ///
 /// Interior-mutable and `Send + Sync`, because [`LlmProvider::stream`] takes
@@ -101,6 +170,11 @@ impl Reply {
 pub struct FakeProvider {
     model: String,
     script: Mutex<std::collections::VecDeque<Reply>>,
+    /// Scripts for particular requests, checked in order before `script`.
+    matched: Mutex<Vec<(Match, std::collections::VecDeque<Reply>)>>,
+    /// Report each request's estimated size as its input tokens, rather than a
+    /// fixed ten.
+    count_input: bool,
     seen: Mutex<Vec<LlmRequest>>,
 }
 
@@ -110,8 +184,26 @@ impl FakeProvider {
         FakeProvider {
             model: "fake-model".to_owned(),
             script: Mutex::new(script.into_iter().collect()),
+            matched: Mutex::new(Vec::new()),
+            count_input: false,
             seen: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Answer requests that `matches` from `script` first, and the rest from
+    /// the main script. A matched script that has run out falls through to the
+    /// main one.
+    pub fn when(self, matches: Match, script: impl IntoIterator<Item = Reply>) -> FakeProvider {
+        lock(&self.matched).push((matches, script.into_iter().collect()));
+        self
+    }
+
+    /// Report each request's size, as [`estimate_tokens`] counts it, as its
+    /// `input_tokens` — so the context budget is measured as it would be
+    /// against a real provider.
+    pub fn counting_input(mut self) -> FakeProvider {
+        self.count_input = true;
+        self
     }
 
     /// A provider that answers **every** call the same way — for testing a loop
@@ -138,12 +230,69 @@ impl FakeProvider {
         self.requests().pop()
     }
 
+    /// The requests that `matches`, in order.
+    pub fn requests_matching(&self, matches: &Match) -> Vec<LlmRequest> {
+        self.requests()
+            .into_iter()
+            .filter(|r| matches.matches(r))
+            .collect()
+    }
+
+    /// Assert that every request of the loop's own — not a summary — carried
+    /// the same prefix: the system prompt, the tools, and the session header,
+    /// byte for byte. What a prompt cache needs (TODO §9).
+    pub fn assert_stable_prefix(&self) {
+        let requests: Vec<LlmRequest> = self
+            .requests()
+            .into_iter()
+            .filter(|r| !Match::Summary.matches(r))
+            .collect();
+        let prefix = |r: &LlmRequest| {
+            serde_json::to_string(&(
+                &r.system,
+                &r.tools,
+                r.cache.session_header.map(|i| &r.messages[..=i]),
+            ))
+            .unwrap_or_default()
+        };
+        for (n, pair) in requests.windows(2).enumerate() {
+            assert_eq!(
+                prefix(&pair[0]),
+                prefix(&pair[1]),
+                "requests {} and {} differ before the history",
+                n + 1,
+                n + 2
+            );
+        }
+    }
+
+    /// The session header request `n` carried, if it had one.
+    pub fn session_header(&self, n: usize) -> Option<String> {
+        let requests = self.requests();
+        let request = requests.get(n)?;
+        let index = request.cache.session_header?;
+        Some(content(request.messages.get(index)?).to_owned())
+    }
+
+    /// How many tool results in `request` were cleared to a stub.
+    pub fn elided_results(request: &LlmRequest) -> usize {
+        request
+            .messages
+            .iter()
+            .filter(|m| matches!(m, LlmMessage::ToolResult { content, .. } if content.starts_with("[elided")))
+            .count()
+    }
+
     /// How many turns of the script are left unused.
     ///
     /// A test that scripted three turns and used two has learned something: the
     /// loop stopped earlier than it meant to.
     pub fn remaining(&self) -> usize {
         lock(&self.script).len()
+            + lock(&self.matched)
+                .iter()
+                .map(|(_, s)| s.len())
+                .sum::<usize>()
     }
 }
 
@@ -154,9 +303,21 @@ impl LlmProvider for FakeProvider {
     }
 
     async fn stream(&self, req: LlmRequest) -> Result<LlmStream> {
+        let usage = if self.count_input {
+            Usage {
+                input_tokens: estimate_tokens(&req, ""),
+                ..usage()
+            }
+        } else {
+            usage()
+        };
+        let matched = lock(&self.matched)
+            .iter_mut()
+            .find(|(m, script)| !script.is_empty() && m.matches(&req))
+            .and_then(|(_, script)| script.pop_front());
         lock(&self.seen).push(req);
-        let reply = lock(&self.script)
-            .pop_front()
+        let reply = matched
+            .or_else(|| lock(&self.script).pop_front())
             // A script that ran out is the test's bug, not the loop's, and saying
             // so beats an empty answer the loop would treat as a real one.
             .ok_or_else(|| Error::msg("the fake provider's script ran out of turns"))?;
@@ -175,7 +336,7 @@ impl LlmProvider for FakeProvider {
                     .collect();
                 deltas.push(LlmDelta::Stop {
                     reason: StopReason::EndTurn,
-                    usage: usage(),
+                    usage,
                 });
                 deltas
             }
@@ -193,7 +354,7 @@ impl LlmProvider for FakeProvider {
                 }
                 deltas.push(LlmDelta::Stop {
                     reason: StopReason::ToolCalls,
-                    usage: usage(),
+                    usage,
                 });
                 deltas
             }
@@ -354,6 +515,49 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("401"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_matched_script_answers_its_requests_first() {
+        use sc_llm::ToolSpec;
+        let provider = FakeProvider::new([Reply::says("main")])
+            .when(Match::Offers("save_plan".into()), [Reply::says("planned")])
+            .counting_input();
+        let plan = LlmRequest::prompt("plan it").tools([ToolSpec::new(
+            "save_plan",
+            "Save the plan",
+            json!({"type": "object"}),
+        )]);
+        let answer = provider
+            .stream(plan)
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(answer.content, "planned");
+        assert!(answer.usage.input_tokens > 10, "{:?}", answer.usage);
+        // Its script used up, a matching request falls through to the main one.
+        let again = LlmRequest::prompt("again").tools([ToolSpec::new(
+            "save_plan",
+            "Save the plan",
+            json!({"type": "object"}),
+        )]);
+        let answer = provider
+            .stream(again)
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(answer.content, "main");
+        assert_eq!(provider.remaining(), 0);
+        assert_eq!(
+            provider
+                .requests_matching(&Match::Offers("save_plan".into()))
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]

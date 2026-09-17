@@ -58,6 +58,7 @@ import type { ListRunsResponse } from "../client";
 import {
   ChatSession,
   agentChatUrl,
+  compactionLabel,
   conclusionLabel,
   conclusionNotice,
   emptyChat,
@@ -826,6 +827,22 @@ function TranscriptEntry({ entry }: { entry: Entry }) {
         )}
         <AgentText text={entry.text} />
       </div>
+    );
+  }
+  if (entry.kind === "compaction") {
+    // A quiet divider rather than an alert: nothing went wrong, and the
+    // transcript above it is whole. The summary is what the model saw instead
+    // of the older turns, so it opens for anyone asking why the agent forgot.
+    return (
+      <details className="chat-compaction">
+        <summary>
+          <IconArrowsDiagonalMinimize className="icon-2" />
+          {compactionLabel(entry)}
+        </summary>
+        <div className="chat-compaction-text">
+          {entry.summary ?? "Only old tool results were cleared; the model still saw every turn."}
+        </div>
+      </details>
     );
   }
   if (entry.kind === "notice") {

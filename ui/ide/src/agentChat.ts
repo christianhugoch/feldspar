@@ -50,7 +50,15 @@ export type ServerEvent =
     }
   | { type: "done"; run: string | null; state: string; answer: string }
   | { type: "error"; message: string }
-  | { type: "controls"; controls: unknown };
+  | { type: "controls"; controls: unknown }
+  | {
+      type: "compaction";
+      step: number;
+      elided: number;
+      before_tokens: number;
+      after_tokens: number;
+      summary?: string;
+    };
 
 /** Parse one frame off the socket, or `null` if it is not an event we know.
  *

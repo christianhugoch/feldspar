@@ -475,6 +475,39 @@ div.navbar-brand > a:hover {
   line-height: 1.6;
 }
 
+/* Where the loop compacted what the model is sent (TODO §9): a divider across
+   the transcript, opening onto the summary the model saw instead. */
+.chat-compaction {
+  border-top: 1px dashed var(--tblr-border-color);
+  padding-top: 0.375rem;
+  margin: 0.25rem 0 0.75rem;
+}
+
+.chat-compaction > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  cursor: pointer;
+  color: var(--tblr-secondary);
+  font-size: 0.8125rem;
+  list-style: none;
+}
+
+.chat-compaction > summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-compaction-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-left: 2px solid var(--tblr-border-color);
+  padding-left: 0.75rem;
+  margin-top: 0.375rem;
+  color: var(--tblr-secondary);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
 /* "Thinking…", between the last thing said and the next one. The three dots
    are the animation every chat has taught people to read as "still going". */
 .chat-thinking {

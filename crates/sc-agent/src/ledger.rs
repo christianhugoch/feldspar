@@ -37,7 +37,8 @@ pub struct LedgerStep {
     /// The signals traits raised during the step (Phase 3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signals: Vec<String>,
-    /// Whether the context was compacted before this call (Phase 4).
+    /// Whether the context was compacted before this call (TODO §9). On a
+    /// summary call, always set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub compacted: bool,
 }
@@ -105,6 +106,11 @@ pub struct Ledger {
     /// Every model call, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     steps: Vec<LedgerStep>,
+    /// Model calls the loop made for itself rather than for a step: the cheap
+    /// role's summaries when compacting (TODO §9). Counted in the totals, not
+    /// in the steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    summaries: Vec<LedgerStep>,
     /// Delegated runs' totals, one entry per child run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     children: Vec<ChildLedger>,
@@ -119,6 +125,17 @@ impl Ledger {
     /// Record one model call.
     pub fn record_step(&mut self, step: LedgerStep) {
         self.steps.push(step);
+    }
+
+    /// Record a summary call made while compacting before model call
+    /// `step.step`.
+    pub fn record_summary(&mut self, step: LedgerStep) {
+        self.summaries.push(step);
+    }
+
+    /// The summary calls, oldest first.
+    pub fn summaries(&self) -> &[LedgerStep] {
+        &self.summaries
     }
 
     /// Record a child run's totals. A child that is driven again (a resumed
@@ -160,7 +177,7 @@ impl Ledger {
     /// Per-role totals, this run's steps plus every child's.
     pub fn totals(&self) -> BTreeMap<ModelRole, RoleTotals> {
         let mut totals: BTreeMap<ModelRole, RoleTotals> = BTreeMap::new();
-        for step in &self.steps {
+        for step in self.steps.iter().chain(&self.summaries) {
             totals.entry(step.role).or_default().add_step(step);
         }
         for child in &self.children {
@@ -253,6 +270,12 @@ mod tests {
         assert_eq!(total.steps, 4);
         assert_eq!(total.cost, Some(2.0));
         assert_eq!(total.cache_hit_ratio(), Some(300.0 / 1400.0));
+        assert_eq!(ledger.last_input_tokens(), Some(200));
+
+        // A summary made while compacting counts for its role, not as a step.
+        ledger.record_summary(step(3, ModelRole::Cheap, 50, 0, Some(0.1)));
+        assert_eq!(ledger.steps().len(), 2);
+        assert_eq!(ledger.totals()[&ModelRole::Cheap].steps, 1);
         assert_eq!(ledger.last_input_tokens(), Some(200));
     }
 

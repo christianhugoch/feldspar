@@ -17,6 +17,9 @@
 //!   [`AgentRegistry`], the twin of `sc-action`'s `ActionRegistry`.
 //! - The **loop** ([`machine`]): [`AgentLoop`], a steppable, serialisable state
 //!   machine that decides and does no IO.
+//! - **The context** ([`context`]): the request layout (stable prefix, session
+//!   header, history), the context budget, and clearing and compacting to keep
+//!   within it — as overlays, so the stored transcript stays whole.
 //! - **Loop control** ([`control`], [`schema`]): fingerprints, the doom-loop
 //!   detectors, the malformed-call cap, trait [`Signal`]s and the escalation
 //!   ladder, plus the check of a call's arguments against its tool's schema.
@@ -43,6 +46,7 @@
 
 pub mod agent;
 pub mod agent_trait;
+pub mod context;
 pub mod control;
 pub mod delegate;
 pub mod driver;
@@ -67,7 +71,13 @@ pub use agent::{
     ATTR_MAX_STEPS, ATTR_MAX_TOKENS, ATTR_TEMPERATURE, Agent, AgentId, DEFAULT_MAX_STEPS,
     EnabledTrait,
 };
-pub use agent_trait::{AgentTrait, RunCaller, ToolsContext, TraitCheck, TraitContext, Turn};
+pub use agent_trait::{
+    AgentTrait, RunCaller, SessionContext, ToolsContext, TraitCheck, TraitContext, Turn,
+};
+pub use context::{
+    ATTR_KEEP_TURNS, COMPACT_PERCENT, Compaction, ContextState, ContextVerdict, DEFAULT_KEEP_TURNS,
+    Elidable, SUMMARY_PERCENT,
+};
 pub use control::{
     ATTR_CALM_ROUNDS, ATTR_MAX_IDENTICAL_CALLS, ATTR_MAX_MALFORMED_CALLS, ATTR_MAX_REPEATED_ROUNDS,
     ATTR_MAX_REPEATED_TEXT, ATTR_MAX_SIGNALS, ControlLimits, LoopControl, Rung, Signal,

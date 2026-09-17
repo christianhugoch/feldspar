@@ -43,7 +43,16 @@ export type ServerEvent =
       reason?: string;
     }
   | { type: "error"; message: string }
-  | { type: "controls"; controls: unknown };
+  | { type: "controls"; controls: unknown }
+  /** The loop compacted the context before its next model call (TODO §9). */
+  | {
+      type: "compaction";
+      step: number;
+      elided: number;
+      before_tokens: number;
+      after_tokens: number;
+      summary?: string;
+    };
 
 /** One control a trait puts in the composer, beside the send button.
  *
@@ -99,7 +108,18 @@ export type Entry =
   | { kind: "error"; message: string }
   /** Why the loop stopped on its own — a budget, or loop control deciding the
    * agent was stuck. Not a failure: the conversation can be continued. */
-  | { kind: "notice"; message: string };
+  | { kind: "notice"; message: string }
+  /** Where the loop compacted what the model is sent. Everything above it is
+   * still here — the transcript is whole — but from this point the model saw
+   * old tool results as stubs and, with a summary, the older turns only as
+   * that summary, which the admin can expand. */
+  | {
+      kind: "compaction";
+      elided: number;
+      beforeTokens: number;
+      afterTokens: number;
+      summary: string | null;
+    };
 
 /** The whole of what the panel draws. */
 export type ChatState = {
@@ -247,6 +267,8 @@ export function applyEvent(state: ChatState, event: ServerEvent): ChatState {
       // Appended, never replacing: a failure after two paragraphs and a tool
       // call is read alongside them, not instead of them.
       return { ...state, entries: [...state.entries, { kind: "error", message: event.message }] };
+    case "compaction":
+      return { ...state, entries: [...state.entries, compactionEntry(event)] };
     case "controls": {
       const controls = normalizeControls(event.controls);
       return {
@@ -266,6 +288,37 @@ export function applyEvent(state: ChatState, event: ServerEvent): ChatState {
       };
     }
   }
+}
+
+/** A compaction as the server spells it: a socket event, or a stored run's
+ * record. */
+type CompactionRecord = {
+  elided?: number;
+  before_tokens?: number;
+  after_tokens?: number;
+  summary?: string | null;
+};
+
+/** A compaction, as a transcript entry. */
+function compactionEntry(raw: CompactionRecord): Entry {
+  return {
+    kind: "compaction",
+    elided: raw.elided ?? 0,
+    beforeTokens: raw.before_tokens ?? 0,
+    afterTokens: raw.after_tokens ?? 0,
+    summary: typeof raw.summary === "string" ? raw.summary : null,
+  };
+}
+
+/** The line a compaction marker reads as. */
+export function compactionLabel(entry: Extract<Entry, { kind: "compaction" }>): string {
+  const what: string[] = [];
+  if (entry.elided > 0) {
+    what.push(`${entry.elided} old tool result${entry.elided === 1 ? "" : "s"} cleared`);
+  }
+  if (entry.summary !== null) what.push("older turns summarised");
+  const detail = what.length > 0 ? `: ${what.join(", ")}` : "";
+  return `Context compacted from ${entry.beforeTokens} to ${entry.afterTokens} tokens${detail}`;
 }
 
 /** A loop conclusion as the server spells it, on a `done` event or in a stored
@@ -391,7 +444,21 @@ export function transcriptFromRun(context: unknown): Entry[] {
   const messages = (context as { messages?: unknown })?.messages;
   if (!Array.isArray(messages)) return [];
   const entries: Entry[] = [];
-  for (const raw of messages) {
+  // Each compaction is marked where the transcript had reached when it
+  // happened (`at`), in the loop's own state beside the messages.
+  const records = (context as { context?: { compactions?: unknown } })?.context?.compactions;
+  const compactions = (Array.isArray(records) ? records : [])
+    .filter((c): c is CompactionRecord & { at: number } => typeof c?.at === "number")
+    .sort((a, b) => a.at - b.at);
+  let marked = 0;
+  const markUpTo = (index: number) => {
+    while (marked < compactions.length && compactions[marked].at <= index) {
+      entries.push(compactionEntry(compactions[marked]));
+      marked += 1;
+    }
+  };
+  for (const [index, raw] of messages.entries()) {
+    markUpTo(index);
     const message = raw as {
       role?: string;
       content?: string;
@@ -429,6 +496,7 @@ export function transcriptFromRun(context: unknown): Entry[] {
       }
     }
   }
+  markUpTo(Number.POSITIVE_INFINITY);
   // How it ended, where the loop stopped on its own.
   const phase = (context as { phase?: { phase?: string; conclusion?: Conclusion } })?.phase;
   const notice = phase?.phase === "done" ? conclusionNotice(phase.conclusion) : null;

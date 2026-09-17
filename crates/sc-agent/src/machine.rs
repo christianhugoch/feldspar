@@ -37,11 +37,12 @@
 use std::collections::BTreeMap;
 
 use sc_error::{Error, Result};
-use sc_llm::{AssistantMessage, LlmMessage, ToolCall, Usage};
+use sc_llm::{AssistantMessage, CachePlan, LlmMessage, ToolCall, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
 use crate::agent::{Agent, DEFAULT_MAX_STEPS, ModelRole};
+use crate::context::{Compaction, ContextState, ContextVerdict, FALLBACK_CONTEXT_BUDGET};
 use crate::control::{ControlLimits, LoopControl, RoundCall, Signal, Verdict, fingerprint};
 use crate::ledger::{Ledger, LedgerStep};
 
@@ -51,9 +52,13 @@ pub enum Step {
     /// Send these messages to the model and feed the answer back through
     /// [`model_answered`](AgentLoop::model_answered).
     CallModel {
-        /// The conversation so far, oldest first. The system prompt and the tools
-        /// are the driver's to add — they come from the agent, not the run.
+        /// What the request carries after the system prompt and the tools: the
+        /// session header, then the history with its clearing and compaction
+        /// applied (TODO §9). The system prompt and the tools are the driver's
+        /// to add — they come from the agent, not the run.
         messages: Vec<LlmMessage>,
+        /// The cache breakpoints for that layout.
+        cache: CachePlan,
         /// Which model call this will be, counting from 1. What a trait's
         /// [`on_turn`](crate::AgentTrait::on_turn) is told, and what the step
         /// budget is spent from.
@@ -155,12 +160,11 @@ pub struct Budgets {
     /// The most time the run may spend working, in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_wall_ms: Option<u64>,
-    /// The most input tokens one request may carry.
+    /// The most input tokens one request may carry. Unset means the executor
+    /// model's working budget, which the driver knows and the run does not.
     ///
-    /// Only an explicit `context_budget` ends a run here. Once compaction exists
-    /// (Phase 4) the executor model's working budget is where it is measured
-    /// from; ending a run at that default before anything can compact would stop
-    /// every long conversation.
+    /// The loop compacts at 75% of it, and ends the run only when a request is
+    /// still over it after compacting (TODO §9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u64>,
 }
@@ -187,6 +191,9 @@ pub struct StepMeta {
     pub cost: Option<f64>,
     /// How long the call took.
     pub elapsed: std::time::Duration,
+    /// The raw token estimate of the request that was sent, which the reported
+    /// `input_tokens` calibrate (TODO §9). `None` when nobody estimated.
+    pub request_tokens: Option<u64>,
 }
 
 impl Conclusion {
@@ -326,6 +333,10 @@ pub struct AgentLoop {
     /// ladder.
     #[serde(default)]
     control: LoopControl,
+    /// The session header, clearing and compaction overlays, and the context
+    /// accounting (TODO §9). The transcript in `messages` stays whole.
+    #[serde(default)]
+    context: ContextState,
     /// Which side is next.
     phase: Phase,
 }
@@ -362,15 +373,25 @@ impl AgentLoop {
             ledger: Ledger::default(),
             trait_state: BTreeMap::new(),
             control: LoopControl::default(),
+            context: ContextState::default(),
             phase: Phase::Model,
         }
     }
 
     /// An empty conversation within `agent`'s budgets and loop-control limits.
     pub fn for_agent(agent: &Agent) -> AgentLoop {
-        AgentLoop::new(agent.max_steps())
+        let mut state = AgentLoop::new(agent.max_steps())
             .with_budgets(Budgets::of(agent))
-            .with_control_limits(ControlLimits::of(agent))
+            .with_control_limits(ControlLimits::of(agent));
+        state.context = ContextState::for_agent(agent);
+        state
+    }
+
+    /// Set the step budget, returning `self` for chaining. Raised to one, as
+    /// [`new`](AgentLoop::new) raises it.
+    pub fn with_max_steps(mut self, max_steps: u32) -> AgentLoop {
+        self.max_steps = max_steps.max(1);
+        self
     }
 
     /// Set the loop-control thresholds, returning `self` for chaining.
@@ -434,8 +455,10 @@ impl AgentLoop {
                     };
                     return Step::Done(conclusion);
                 }
+                let (messages, cache) = self.context.request_messages(&self.messages, None);
                 Step::CallModel {
-                    messages: self.messages.clone(),
+                    messages,
+                    cache,
                     step: self.step + 1,
                     escalated: self.control.escalating(),
                 }
@@ -445,6 +468,11 @@ impl AgentLoop {
 
     /// The first budget that has run out, if any. Checked before every model
     /// call, so a run is never stopped halfway through its tools.
+    ///
+    /// The context budget is not here: it is measured on the request the driver
+    /// builds, and compacting comes before stopping ([`context_verdict`]).
+    ///
+    /// [`context_verdict`]: AgentLoop::context_verdict
     fn spent_budget(&self) -> Option<Budget> {
         if let Some(max) = self.budgets.max_cost
             && let Some(spent) = self.ledger.total().cost
@@ -456,11 +484,6 @@ impl AgentLoop {
             && self.ledger.working_ms() >= max
         {
             return Some(Budget::WallTime);
-        }
-        if let Some(max) = self.budgets.context_tokens
-            && self.ledger.last_input_tokens().is_some_and(|t| t >= max)
-        {
-            return Some(Budget::Context);
         }
         None
     }
@@ -484,6 +507,9 @@ impl AgentLoop {
         self.step += 1;
         self.control.escalation_taken();
         self.usage.add(answer.usage);
+        if let Some(raw) = meta.request_tokens {
+            self.context.calibrate(raw, answer.usage.input_tokens);
+        }
         self.ledger.record_step(LedgerStep {
             step: self.step,
             role: meta.role,
@@ -492,7 +518,7 @@ impl AgentLoop {
             cost: meta.cost,
             elapsed_ms: u64::try_from(meta.elapsed.as_millis()).unwrap_or(u64::MAX),
             signals: Vec::new(),
-            compacted: false,
+            compacted: self.context.take_pending(),
         });
         self.messages.push(answer.message());
         self.phase = if answer.tool_calls.is_empty() {
@@ -593,6 +619,90 @@ impl AgentLoop {
         if !matches!(self.phase, Phase::Done { .. }) {
             self.phase = Phase::Done {
                 conclusion: Conclusion::Aborted,
+            };
+        }
+    }
+
+    /// Whether the session header has yet to be built: the driver asks the
+    /// traits once, before the first model call.
+    pub fn needs_session_header(&self) -> bool {
+        self.context.header().is_none()
+    }
+
+    /// Store the session header the traits built. Empty when none said
+    /// anything, which still counts as built.
+    pub fn set_session_header(&mut self, header: String) {
+        self.context.set_header(header);
+    }
+
+    /// The context overlays and accounting.
+    pub fn context(&self) -> &ContextState {
+        &self.context
+    }
+
+    /// The context budget, in tokens: the agent's own, or `working_budget` —
+    /// the executor model's — when it sets none.
+    pub fn context_budget(&self, working_budget: u64) -> u64 {
+        self.budgets
+            .context_tokens
+            .or((working_budget > 0).then_some(working_budget))
+            .unwrap_or(FALLBACK_CONTEXT_BUDGET)
+    }
+
+    /// The measured size of the next request, from its raw estimate.
+    pub fn measure_context(&self, raw: u64) -> u64 {
+        self.context.measure(raw)
+    }
+
+    /// What to do about a next request measuring `used` tokens, against
+    /// `budget`: send it, compact first, or — when compacting for this call has
+    /// already been tried — end the run.
+    pub fn context_verdict(&self, used: u64, budget: u64) -> ContextVerdict {
+        self.context.verdict(used, budget, self.step + 1)
+    }
+
+    /// The request messages there would be with `summary` standing in for the
+    /// latest summary, so a compaction can be measured before it is recorded.
+    pub fn messages_with_summary(&self, summary: Option<(usize, &str)>) -> Vec<LlmMessage> {
+        self.context.request_messages(&self.messages, summary).0
+    }
+
+    /// Record pass 1's stubs in one batch, returning how many were kept.
+    pub fn apply_elisions(&mut self, stubs: Vec<(usize, String)>) -> usize {
+        self.context.apply_elisions(&self.messages, stubs)
+    }
+
+    /// Record a compaction made before the next model call.
+    pub fn record_compaction(
+        &mut self,
+        elided: usize,
+        before_tokens: u64,
+        after_tokens: u64,
+        summary: Option<(usize, String)>,
+    ) -> &Compaction {
+        let (up_to_index, summary) = match summary {
+            Some((cut, text)) => (Some(cut), Some(text)),
+            None => (None, None),
+        };
+        self.context.record(Compaction {
+            step: self.step + 1,
+            at: self.messages.len(),
+            elided,
+            before_tokens,
+            after_tokens,
+            up_to_index,
+            summary,
+        });
+        &self.context.compactions()[self.context.compactions().len() - 1]
+    }
+
+    /// End the run because its context is over budget even after compacting.
+    pub fn context_over_budget(&mut self) {
+        if matches!(self.phase, Phase::Model) {
+            self.phase = Phase::Done {
+                conclusion: Conclusion::OverBudget {
+                    budget: Budget::Context,
+                },
             };
         }
     }
@@ -964,14 +1074,19 @@ mod tests {
             })
         );
 
+        // The context budget is the driver's to measure: the loop decides.
         let mut run = AgentLoop::new(20).with_budgets(Budgets {
             context_tokens: Some(500),
             ..Budgets::default()
         });
+        assert_eq!(run.context_budget(100_000), 500);
+        assert_eq!(AgentLoop::new(20).context_budget(8_000), 8_000);
         run.push_user("go").unwrap();
         one_tool_round(&mut run, 0.0, 400);
-        assert!(matches!(run.next_step(), Step::CallModel { .. }));
-        one_tool_round(&mut run, 0.0, 600);
+        assert_eq!(run.context_verdict(600, 500), ContextVerdict::Compact);
+        run.record_compaction(0, 600, 600, None);
+        assert_eq!(run.context_verdict(600, 500), ContextVerdict::Over);
+        run.context_over_budget();
         let Step::Done(conclusion) = run.next_step() else {
             panic!("the context budget ends the run");
         };
