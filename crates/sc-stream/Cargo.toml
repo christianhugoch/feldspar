@@ -1,0 +1,65 @@
+[package]
+name = "sc-stream"
+description = "Streams: dataflows as an entity — the provider seam, the element type and the supervisor (layer 6)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# One integration-test binary per crate rather than one per file: every test
+# target in this workspace statically links V8, so ~400 MB of binary and a
+# multi-second link were being paid per *file*.
+autotests = false
+
+[features]
+default = []
+# The scripted provider every test in this milestone rides on. A **feature**,
+# not `#[cfg(test)]`, for the reason `sc-agent`'s `FakeProvider` is one: the
+# supervisor is tested here, the trigger bridge and the observe socket are
+# tested in `sc-server`, and a fake that only exists inside this crate's own
+# test build is one they cannot reach.
+testing = []
+
+[dependencies]
+sc-error.workspace = true
+# `FormField` for a provider's declared configuration, `Attrs` for the values
+# and `BasicType` for a declared element key's type — the one vocabulary every
+# configurable extension point speaks (§6.2).
+sc-types.workspace = true
+# `_fd_streams` is stored metadata, so this crate bootstraps its table through
+# the catalog and speaks the query language to read it back (§9's storage
+# pattern, as `_fd_models` and `_fd_triggers` do). The catalog is also what
+# fixes this crate above layer 4.
+sc-catalog.workspace = true
+sc-db.workspace = true
+sc-query.workspace = true
+# A stream's id, as every other entity's is.
+uuid.workspace = true
+# `received_at` on the envelope: when *this server* saw the element. UTC, no
+# timezone database, as everywhere else.
+chrono.workspace = true
+# A subscription is the one extension point in this tree that is long-lived
+# rather than a call that returns, so this crate owns tasks: `Subscription`
+# spawns one and stops it on drop, and the supervisor's backoff sleeps on
+# `tokio::time`.
+tokio = { workspace = true }
+async-trait.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+# A `Binary` element's bytes reach the envelope as base64, because the envelope
+# is JSON and JSON has no bytes (§4).
+base64.workspace = true
+
+[dev-dependencies]
+# The scripted provider is this crate's own test subject as well as everybody
+# else's, so its feature is turned on for the test build.
+sc-stream = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it.rs"

@@ -361,20 +361,20 @@ whose `element_type` cannot be read supplies nothing and the issue stays on the 
 
 ## Phase 1 — `sc-stream`: the crate, the element, the provider
 
-- [ ] 1.1 New crate `crates/sc-stream` at layer 6 (workspace member, `sc-error`, `sc-types`,
+- [x] 1.1 New crate `crates/sc-stream` at layer 6 (workspace member, `sc-error`, `sc-types`,
       `sc-catalog`, `sc-db`, `sc-query`, `uuid`, `chrono`, `tokio`, `async-trait`), with the
       module-level docs §2 asks for: what a stream is, why an element is not stored, and the
       three seams.
-- [ ] 1.2 `ElementType`, `ElementField`, and their JSON round trip (§4). Validation: a `Json`
+- [x] 1.2 `ElementType`, `ElementField`, and their JSON round trip (§4). Validation: a `Json`
       type with no keys, a duplicate key, or a `Text` encoding that is not `utf8` is refused,
       naming it.
-- [ ] 1.3 `Element`/`Envelope`: construction from a provider's raw payload against an
+- [x] 1.3 `Element`/`Envelope`: construction from a provider's raw payload against an
       `ElementType` (object, string, bytes → base64), `received_at`, and `source`. The envelope
       JSON is asserted field by field in a test — it is a wire contract.
-- [ ] 1.4 `StreamProvider`, `Subscription` (a `Drop`-stops handle), `StreamSink`, and
+- [x] 1.4 `StreamProvider`, `Subscription` (a `Drop`-stops handle), `StreamSink`, and
       `StreamRegistry` (`BTreeMap`, duplicates refused naming both sources, `register_host` for
       module-supplied kinds). `builtin_providers()`.
-- [ ] 1.5 `testing::ScriptedProvider` (§13) and its own tests: elements arrive in order, dropping
+- [x] 1.5 `testing::ScriptedProvider` (§13) and its own tests: elements arrive in order, dropping
       the subscription stops them, the nth subscribe fails on demand.
 
 ## Phase 2 — `_fd_streams`

@@ -2,6 +2,87 @@
 
 Changes in reverse chronological order.
 
+## `sc-stream`: what a dataflow is, before anything runs one
+
+Phase 1 of the streams milestone. A new crate at layer 6 — `sc-model`'s placement for
+`sc-model`'s reason, because a module supplies stream providers and `sc-module` can only
+implement a trait declared below it — holding the vocabulary the other nine phases are written
+against. Nothing subscribes to anything yet: this is the element, the provider seam and the
+registry, plus the fake that lets every later phase be tested without a broker.
+
+- **An element is not stored, so the element *type* does all the work.** `ElementType` is
+  `Json { keys }` | `Text { encoding }` | `Binary`, computed from the configuration rather than
+  stored beside it, and it is checked where it is declared and enforced where a payload is
+  decoded. A `json` type with no keys, a duplicate key, a key of a type with no JSON form
+  (`bytes`) or one this system does not know (`Other`) are all refused naming the key. GOALS asks
+  "(which encoding?)": the declaration carries one, the runtime implements UTF-8, and anything
+  else is refused at save time — guessing is what produces a stream of replacement characters
+  nobody notices for a week.
+
+- **Decoding is where "malformed" is decided, once.** `ElementType::decode` takes a `RawPayload`
+  — `Bytes` from a broker, `Json` from a module's poll, because neither can be converted to the
+  other without either parsing bytes nobody asked to parse or re-encoding a value that was never
+  encoded — and produces the envelope's `value`. Declared keys that are absent come back as
+  `null` and undeclared keys are carried through, so a declared shape is a floor and not a
+  ceiling: a publisher that adds a field cannot break a stream that did not ask for it, and a
+  consumer never has to ask whether a key exists.
+
+- **The envelope is a wire contract and is tested as one.** `{stream, value, received_at,
+  source}`, asserted field by field rather than round-tripped — a round trip passes just as
+  happily when both halves are wrong together. `received_at` is fixed-width RFC 3339
+  milliseconds in UTC (`2026-09-17T09:00:00.000Z`) rather than chrono's own encoding, which
+  prints as many fractional digits as the value happens to need and so hands every parser at the
+  far end a field that is sometimes there and sometimes not. A provider delivers an `Element`
+  (value + its own metadata) and the running stream stamps the stream name and the clock, which
+  is what stops a provider being able to lie about either.
+
+- **`subscribe` returns rather than blocks.** `Subscription` is an owned handle whose `Drop`
+  stops the flow: it closes the `Stop` the provider's task selects on and then aborts the task,
+  because the callers are a reload, a disable and a shutdown and none of them can wait on a
+  provider blocked reading a socket that will never answer. `has_ended()` is how the supervisor
+  will see a broker that hung up. That shape — a handle, not a `&mut self` loop — is what makes
+  Phase 3's restart path a diff over a map rather than a protocol with a provider.
+
+- **Nobody may block the flow, written into a type.** `StreamSink::deliver` is synchronous and
+  infallible. A sink that could fail or await would let one slow consumer push back on a
+  provider, which for a flow means either an unbounded queue or a dropped broker session; a
+  consumer that cannot keep up is the consumer's problem (§7). `malformed` is beside it with a
+  default no-op, so a sink that only cares about elements need not say so.
+
+- **`StreamRegistry` is `ModelRegistry`'s fourth sibling**: a `BTreeMap`, ordered, rebuilt rather
+  than mutated, duplicates refused *naming both sources* ("one from the built-in providers and
+  one from the module `@saltcorn/mqtt`"). `StreamProviderHost` differs from `ModelProviderHost`
+  in one way and the doc says why: a model provider's seam is a call that returns a fit, so the
+  registry can wrap a declaration and route the call back, but a subscription is not a call that
+  returns and there is no channel from a Deno worker into the host — so the host hands back
+  *code*, and Phase 9's `PollingProvider` is what a module host will hand back. A host whose code
+  disagrees with its own declaration is refused rather than left in the picker unstartable.
+
+- **`builtin_providers()` is empty, and that is a state rather than a gap.** MQTT lands in Phase 4
+  behind a default-on feature; a build with it off and no module installed has no stream
+  providers, and the screen will say so in a sentence instead of showing an empty picker.
+
+- **`testing::ScriptedProvider` and `testing::Collector`**, behind a `testing` feature rather than
+  `#[cfg(test)]` for `FakeProvider`'s reason — `sc-server` tests the sockets and the trigger
+  bridge against them, and a fake inside this crate's test build is one it could not reach. A
+  script of payloads, optionally on a timer, optionally repeating, optionally *ending* (the
+  broker-hung-up case), and optionally failing the first *n* subscribes so Phase 3's backoff is a
+  test rather than a hope.
+
+- **`BasicType::from_name`** in `sc-types`, the missing inverse of `name()`. `from_sql_type` is
+  not that inverse — `"int"`, `"float"` and `"bytes"` fall through it into `Other`, which is the
+  quiet wrong answer rather than an error — and an element key's declared type crosses the wire
+  as the stable name, because it is read by the admin UI and by a module in JavaScript and
+  neither speaks Postgres. It accepts both vocabularies and still carries an unknown name rather
+  than rejecting it.
+
+- **Tests.** 34 in the crate: the element type's JSON round trip and its four refusals, the
+  decoder over all three kinds (including base64 both ways, a non-UTF-8 payload and a wrong-typed
+  key), the envelope field by field, the subscription's stop and its ended flag, the registry's
+  ordering and its duplicate and disagreement refusals, and the scripted provider's own five —
+  elements in order, a drop that stops them, the nth subscribe failing, a subscription that ends,
+  and a payload that is counted rather than delivered.
+
 ## The service account owns its state and nothing it runs
 
 A review of what `scripts/setup-host.sh` leaves on a host. The service runs code an admin
