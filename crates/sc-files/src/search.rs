@@ -282,15 +282,35 @@ fn truncate_chars(line: &str, max: usize) -> String {
 /// TypeScript file in the tree — which is what a person typing it into a search
 /// box means. One with a `/` is matched against the whole store-relative path,
 /// where `**` spans directories and `*` does not.
+///
+/// `{a,b}` alternatives are expanded first (`*.{ts,tsx}`), because that is how
+/// a model writes "either extension".
 pub fn glob_matches(glob: &str, path: &str, name: &str) -> bool {
     let glob = glob.trim();
     if glob.is_empty() {
         return true;
     }
-    match glob.contains('/') {
-        true => glob_match_path(glob, path),
-        false => glob_match_segment(glob, name),
-    }
+    expand_braces(glob)
+        .iter()
+        .any(|glob| match glob.contains('/') {
+            true => glob_match_path(glob, path),
+            false => glob_match_segment(glob, name),
+        })
+}
+
+/// Every alternative a glob's `{a,b}` groups spell, innermost choices first.
+/// A `{` with no matching `}` is literal.
+fn expand_braces(glob: &str) -> Vec<String> {
+    let Some(open) = glob.find('{') else {
+        return vec![glob.to_owned()];
+    };
+    let Some(close) = glob[open..].find('}').map(|i| open + i) else {
+        return vec![glob.to_owned()];
+    };
+    let (head, body, tail) = (&glob[..open], &glob[open + 1..close], &glob[close + 1..]);
+    body.split(',')
+        .flat_map(|choice| expand_braces(&format!("{head}{choice}{tail}")))
+        .collect()
 }
 
 /// Match a whole path against a glob whose segments may include `**`.
@@ -350,6 +370,10 @@ mod tests {
     #[test]
     fn a_glob_with_a_slash_matches_the_whole_path() {
         assert!(glob_matches("src/*.ts", "src/app.ts", "app.ts"));
+        // `{a,b}` is either.
+        assert!(glob_matches("*.{ts,tsx}", "src/app.tsx", "app.tsx"));
+        assert!(glob_matches("src/{lib,app}/*.ts", "src/lib/a.ts", "a.ts"));
+        assert!(!glob_matches("*.{ts,tsx}", "src/app.js", "app.js"));
         // `*` does not span a directory separator; `**` does.
         assert!(!glob_matches("src/*.ts", "src/deep/app.ts", "app.ts"));
         assert!(glob_matches("src/**/*.ts", "src/deep/app.ts", "app.ts"));
@@ -531,6 +555,50 @@ pub async fn find_files(
                 let child_floor = crate::effective_min_role(store, floor, &entry.path).await?;
                 directories.push((entry.path, child_floor));
             }
+        }
+        directories.reverse();
+        stack.extend(directories);
+    }
+    Ok(found)
+}
+
+// --- walking the visible tree ------------------------------------------------
+
+/// Every entry under `dir` the caller may see, files and directories, depth
+/// first, without descending into a directory named in `exclude_dirs`.
+///
+/// The walk `search_store` and [`find_files`] each do, for a caller that wants
+/// to choose and order the entries itself (the coding agent's `find_files`,
+/// which sorts by modification time). Access is filtered per directory exactly
+/// as theirs is. At most [`MAX_FILES_SCANNED`] entries are visited, and the
+/// outcome says when that stopped the walk.
+pub async fn walk_store(
+    store: &dyn FileStore,
+    store_min_role: Option<u8>,
+    role: u8,
+    dir: &str,
+    exclude_dirs: &[&str],
+) -> Result<FoundFiles> {
+    let mut found = FoundFiles::default();
+    let root_floor = crate::effective_min_role(store, store_min_role, dir).await?;
+    let mut stack = vec![(dir.to_owned(), root_floor)];
+    while let Some((current, floor)) = stack.pop() {
+        let entries = store.list(&current).await?;
+        let visible = filter_visible(store, floor, entries, role).await?;
+        let mut directories = Vec::new();
+        for entry in visible {
+            if found.entries.len() >= MAX_FILES_SCANNED {
+                found.truncated = true;
+                return Ok(found);
+            }
+            if entry.is_dir {
+                if exclude_dirs.contains(&entry.name.as_str()) {
+                    continue;
+                }
+                let child_floor = crate::effective_min_role(store, floor, &entry.path).await?;
+                directories.push((entry.path.clone(), child_floor));
+            }
+            found.entries.push(entry);
         }
         directories.reverse();
         stack.extend(directories);

@@ -49,7 +49,13 @@ sc-files.workspace = true
 sc-app.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+# The edit engine's fuzzy step and the change ledger's diff (TODO §6).
+similar.workspace = true
+# The content hash a read records, so an edit can refuse a file that changed
+# since (TODO §6).
+sha2.workspace = true
 # `process` spawns `npm run <script>` and `time` bounds it; a script that hangs
 # must not hold a conversation open (§11.3).
 tokio = { workspace = true, features = ["process", "time"] }

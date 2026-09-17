@@ -292,8 +292,7 @@ function registerParticipant(
       );
       const changed: string[] = [];
       const sink = (event: ServerEvent) => {
-        const path = relayEvent(event, response);
-        if (path != null) changed.push(path);
+        changed.push(...relayEvent(event, response));
       };
       try {
         const outcome = await conversation.ask(request.prompt, sink, token);

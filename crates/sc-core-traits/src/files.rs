@@ -1,12 +1,12 @@
 //! What every coding tool shares: the file store it works in, and the paths it
 //! will accept (§11.3, TODO Phase 5).
 //!
-//! `read_file`, `write_file`, `list_files`, `edit_file`, `search_files` and
-//! `run_script` are six tools over one **scope** — a configured file store,
+//! `read_file`, `find_files`, `search_files`, `write_file`, `edit_file`,
+//! `apply_patch` and `run_script` are seven tools over one **scope** — a configured file store,
 //! optionally rooted at a sub-directory — and the scope is here rather than in
 //! any one of them for the reason [`crate::table`] gives: each of them is a
 //! promise to the model, and a path that means one thing to `read_file` and
-//! another to `edit_file` is a model that cannot use either. That the six now
+//! another to `edit_file` is a model that cannot use either. That they now
 //! share a *single configuration* as well ([`crate::Coding`]) is the same
 //! argument taken one step further.
 //!
@@ -315,22 +315,6 @@ pub fn optional_bool_arg(args: &Map<String, Json>, name: &str, default: bool) ->
         Some(Json::Bool(b)) => Ok(*b),
         Some(other) => Err(Error::invalid(format!(
             "`{name}` should be true or false, got {other}"
-        ))),
-    }
-}
-
-/// A whole-number argument that may be absent, clamped to `ceiling`.
-pub fn optional_count_arg(args: &Map<String, Json>, name: &str, ceiling: u64) -> Result<u64> {
-    match args.get(name) {
-        None | Some(Json::Null) => Ok(ceiling),
-        Some(Json::Number(n)) => match n.as_i64() {
-            Some(n) if n >= 1 => Ok((n as u64).min(ceiling)),
-            _ => Err(Error::invalid(format!(
-                "`{name}` should be a whole number of at least 1, got {n}"
-            ))),
-        },
-        Some(other) => Err(Error::invalid(format!(
-            "`{name}` should be a number, got {other}"
         ))),
     }
 }

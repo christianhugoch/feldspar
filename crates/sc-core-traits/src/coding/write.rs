@@ -1,21 +1,19 @@
-//! `write_file` — create or replace one file in the configured scope (§11.3).
+//! `write_file`: create a file in the configured scope, or replace one whole
+//! (TODO 5.4).
 //!
-//! The blunt write, offered only under the [`Coding`](super::Coding) trait's edit
-//! grant for the reason `insert_row` is separate from `query_table`: a read-only
-//! agent is the default shape, and the ability to change something is a
-//! deliberate act with a checkbox attached.
-//!
-//! It **replaces the whole file**, and says so in as many words, because that is
-//! the difference between it and [`edit`](super::edit). A model that reaches for
-//! `write_file` to change one line will write the file it remembers rather than
-//! the file that is there, and the paragraph in the description is what steers it
-//! to the edit that cannot do that.
+//! Offered only under the [`Coding`](super::Coding) trait's edit grant. It
+//! **replaces the whole file**, so it is guarded like an edit: an existing file
+//! the run has not read (or written) is refused, naming the read tool, and so is
+//! one that changed since the run last saw it. A model that has not read a file
+//! writes the file it remembers, not the file that is there.
 
 use sc_agent::TraitContext;
-use sc_error::Result;
-use sc_llm::ToolSpec;
+use sc_error::{Error, Result};
+use sc_llm::{EditFormat, ToolSpec};
 use serde_json::{Value as Json, json};
 
+use super::change::{current, write_tracked};
+use super::state::{CodingState, stale_message};
 use crate::files::{ARG_PATH, FileScope, open_at, string_arg};
 use crate::table::arguments;
 
@@ -27,29 +25,27 @@ pub fn tool_name(scope: &FileScope) -> String {
     format!("write_file_{}", scope.slug())
 }
 
-/// The tool this scope's whole-file write contributes.
-pub fn spec(scope: &FileScope) -> ToolSpec {
+/// The tool this scope's whole-file write contributes. Under `whole_file` it is
+/// the only way to change a file, and its description says so.
+pub fn spec(scope: &FileScope, format: EditFormat) -> ToolSpec {
+    let how = match format {
+        EditFormat::WholeFile => {
+            "This is the only way to change a file: read it, then write it back whole."
+        }
+        _ => "To change part of a file, edit it instead.",
+    };
     ToolSpec::new(
         tool_name(scope),
         format!(
-            "Create a file in {}, or **replace one that exists in its \
-             entirety**. Parent directories are created as needed. \
-             `{ARG_PATH}` is relative to that directory. To change part of an \
-             existing file, read it and edit it rather than rewriting it from \
-             memory.",
+            "Create a file in {}, or replace an existing file's entire content. An \
+             existing file must be read first. {how}",
             scope.label()
         ),
         json!({
             "type": "object",
             "properties": {
-                ARG_PATH: {
-                    "type": "string",
-                    "description": "The file to write, relative to the root of this store.",
-                },
-                ARG_CONTENT: {
-                    "type": "string",
-                    "description": "The file's complete new contents.",
-                },
+                ARG_PATH: {"type": "string", "description": "Relative path."},
+                ARG_CONTENT: {"type": "string", "description": "The complete new content."},
             },
             "required": [ARG_PATH, ARG_CONTENT],
             "additionalProperties": false,
@@ -64,11 +60,35 @@ pub async fn call(scope: &FileScope, args: &Json, ctx: &mut TraitContext<'_>) ->
     let content = string_arg(&args, ARG_CONTENT)?;
 
     let (store, path) = open_at(scope, ctx, &rel).await?;
-    let bytes = content.len();
-    store
-        .write(&path, bytes::Bytes::from(content.into_bytes()))
-        .await?;
-    Ok(json!({ "path": rel, "bytes": bytes, "written": true }))
+    let before = current(store.as_ref(), &path, &rel).await?;
+    let mut state = CodingState::load(ctx.state());
+    if let Some(before) = &before
+        && let Err(stale) = state.check_current(&path, before)
+    {
+        return Err(Error::invalid(stale_message(
+            stale,
+            &rel,
+            &super::read::tool_name(scope),
+        )));
+    }
+
+    let lines = content.lines().count();
+    write_tracked(
+        store.as_ref(),
+        &mut state,
+        &path,
+        before.as_deref(),
+        content.into_bytes(),
+    )
+    .await?;
+    state.store(ctx.state());
+    Ok(Json::String(format!(
+        "{} `{rel}` ({lines} lines).",
+        match before {
+            None => "Created",
+            Some(_) => "Replaced",
+        }
+    )))
 }
 
 #[cfg(test)]
@@ -82,5 +102,23 @@ mod tests {
             root: String::new(),
         };
         assert_eq!(tool_name(&scope), "write_file_src");
+    }
+
+    #[test]
+    fn under_whole_file_the_description_says_it_is_the_only_way() {
+        let scope = FileScope {
+            store: "src".to_owned(),
+            root: String::new(),
+        };
+        assert!(
+            spec(&scope, EditFormat::WholeFile)
+                .description
+                .contains("only way to change a file")
+        );
+        assert!(
+            !spec(&scope, EditFormat::StrReplace)
+                .description
+                .contains("only way")
+        );
     }
 }

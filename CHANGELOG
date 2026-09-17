@@ -2,6 +2,72 @@
 
 Changes in reverse chronological order.
 
+## The coding tools, rebuilt (coding agent milestone, Phase 5)
+
+Mostly in `sc-core-traits/src/coding`, with one new loop hook in `sc-agent`, a tree walk in
+`sc-files`, and the IDE's chat relay updated to match.
+
+- **Text results, not JSON.** The read, find, search, write, edit and patch tools now return
+  plain text a model reads cheaply. `run_script` and `build_application` still return JSON.
+- **`read_file`** returns numbered lines under a header, paged by `offset`/`limit` in lines.
+  - The page is `max_lines` (new setting, default 2000; it replaces `max_chars`), each line is
+    capped at 2000 characters and the page at 100 000.
+  - A page that stops early ends with the exact call that reads on.
+  - A file with a NUL byte or invalid UTF-8 is refused with its size.
+  - The file's SHA-256 is recorded in the run's trait state.
+- **`find_files` replaces `list_files`**: a glob relative to `dir` (`*.tsx` by name, `src/**/*.ts`
+  by path), recursive, newest first, directories ending in `/`, capped at `max_results` with a
+  hint to narrow. It walks with the new `sc_files::walk_store`, which applies §9's access rule and
+  skips `node_modules`, `dist` and the rest. Globs everywhere now accept `{a,b}`.
+- **`search_files`** answers in grep's shape: `path:line: text`, with `context` lines as
+  `path-line- text` and `--` between groups, and a note saying how to narrow when capped.
+  `max_results` is no longer an argument, only the setting.
+- **Read before write.** `write_file`, `edit_file` and `apply_patch` refuse an existing file the
+  run has not read, or one whose content changed since, naming the read tool. The run's own
+  writes count as seen.
+- **The match cascade** (`coding/matching.rs`, public as `sc_core_traits::matching`): exact, then
+  whole lines ignoring trailing whitespace and CRLF, then ignoring indentation with the
+  replacement re-indented, then the unique fuzzy best above 0.9 similarity. Each step must find
+  exactly one place; two is an ambiguity naming the lines. A CRLF file keeps its line endings.
+- **`edit_file`** takes `old_text`/`new_text`/`replace_all` over the cascade.
+  - Success shows the edited lines, numbered, and which step matched.
+  - Not found shows the most similar region, numbered, with one instruction.
+  - Both failures raise `Signal::EditFailed`. The stale-read refusal does not.
+- **`apply_patch`** (V4A): add, update (with `@@` anchors and context hunks found by the cascade),
+  delete and move. Every change is computed before anything is written, a failed hunk changes no
+  file, and a failed write restores what was written. Results start `status: applied` or
+  `status: failed`.
+- **`edit_format`** setting: `auto` (the default, following the model's capabilities:
+  `apply_patch` for OpenAI-family models, `edit_file` otherwise), `str_replace`, `apply_patch` or
+  `whole_file`, which offers neither edit tool and says so in `write_file`'s description. The
+  patch tool is always a function tool: rig 0.41 cannot declare OpenAI's native one (recorded in
+  §11.1).
+- **The change ledger** keeps each touched file's pre-image on first touch, plus moves.
+  `sc_core_traits::run_diff(scope, catalog, state)` returns a `RunDiff` with a unified diff and a
+  diffstat, computed with `similar`, for any store backend. Pre-images over 1 MB, or not text, are
+  kept by hash.
+- **Post-turn feedback.** A new hook, `AgentTrait::after_tools(config, &mut AfterToolsContext)`,
+  runs once after all of a turn's tool calls for each trait that owned one; its text is appended
+  to that trait's last result. `coding` uses it under the new **`may_check`** grant:
+  - it formats the turn's edited files with `node_modules/.bin/prettier` if installed, and marks
+    the formatted content as seen;
+  - it runs the new **`diagnose`** setting's script (default `typecheck`) if `package.json`
+    declares it, and attaches up to 20 diagnostics, edited files first, each marked new or
+    pre-existing;
+  - the baseline for that is recorded just before the run's first edit, keyed by file and
+    message so moved lines still match.
+- **Validation** checks the longest name the trait will derive, `implement_feature_…`, against
+  the 64-character limit, and refuses an unknown `edit_format`.
+- **Shorter tool descriptions** everywhere in `coding`.
+- **The IDE** shows `find_files` and `apply_patch` progress, and announces every path a patch
+  names as changed (`changedPaths` replaces `changedPath`).
+- **Tests.** Unit tables for the cascade at each level (a match and an ambiguity at each), the
+  patch parser and hunk applier, the ledger, the read pager, search context and feedback
+  reports. `coding_edits.rs` covers read-before-write, a re-indented edit on disk, a multi-file
+  patch and its diff, a failing patch that changes nothing, the edit format, and the feedback with
+  a stand-in prettier and type checker, both directly and through a whole scripted run.
+  `loop_control.rs` covers `after_tools` in the driver.
+
 ## The loop manages its context (coding agent milestone, Phase 4)
 
 Everything here is in `sc-agent` and true of every agent (TODO §9). The chat socket, the admin

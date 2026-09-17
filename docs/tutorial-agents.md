@@ -175,10 +175,12 @@ there.
 | May create and change files | ✔ |
 | May run the project's `package.json` scripts | ✔ |
 
-Reading, listing and searching come with the trait. The two checkboxes are the grants: leave them
-both off and you have an agent that can explain your code and nothing else, which is a thing you
-may deliberately want. Tick the first and it gains `write_file` and `edit_file`; tick the second
-and it gains `run_script`.
+Reading, finding and searching come with the trait. The checkboxes are the grants: leave them
+all off and you have an agent that can explain your code and nothing else, which is a thing you
+may deliberately want. Tick the first and it gains `write_file` and an edit tool (`edit_file`, or
+`apply_patch` for OpenAI models); tick the second and it gains `run_script`. A third, **May format
+and type-check after edits**, runs the project's prettier and its `typecheck` script after each
+turn that edited something, and shows the model which errors are new.
 
 …and add one more trait, which names the application instead, because which store the source is in
 is the *application's* own configuration:
@@ -197,13 +199,15 @@ fixes it.
 
 Five things about that set:
 
-- **`edit_file` is exact-string replacement.** A match that is absent, or that appears twice, is
-  an error the model reads and retries — never a fuzzy edit, which is a corrupted file nobody
-  notices. `replace_all` is the explicit opt-in for the rename-through-a-file case.
+- **`edit_file` must find exactly one place.** It forgives a lost trailing space, the wrong
+  indentation or one mistyped character, in that order, but a match that is absent, or that
+  appears twice, is an error the model reads and retries, showing it the closest lines or every
+  place it matched. `replace_all` is the explicit opt-in for the rename-through-a-file case. And a
+  file must be read before it is edited, so the model never edits a file from memory.
 - **The sub-directory is a confinement**, not a convenience. A path that escapes it is refused by
   any spelling, and every path the model is shown is relative to it.
 - **A tool it was not granted is a tool it never sees.** With **May create and change files**
-  unticked, `write_file` and `edit_file` are not declared to the model at all, so it plans around
+  unticked, `write_file` and the edit tool are not declared to the model at all, so it plans around
   reading rather than trying an edit and being refused.
 - **`build_application` builds, it does not publish.** An agent's build answers "does this
   compile?"; mounting what it built is still your **Build** button, which is also where you get to

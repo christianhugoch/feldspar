@@ -72,7 +72,8 @@ pub use agent::{
     EnabledTrait,
 };
 pub use agent_trait::{
-    AgentTrait, RunCaller, SessionContext, ToolsContext, TraitCheck, TraitContext, Turn,
+    AfterToolsContext, AgentTrait, RunCaller, SessionContext, ToolsContext, TraitCheck,
+    TraitContext, Turn,
 };
 pub use context::{
     ATTR_KEEP_TURNS, COMPACT_PERCENT, Compaction, ContextState, ContextVerdict, DEFAULT_KEEP_TURNS,

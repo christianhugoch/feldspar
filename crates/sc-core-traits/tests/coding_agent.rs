@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! Phase 5's "done when", as one run: an agent pointed at a store greps for a
-//! declaration, edits the file, builds, reads the type error it caused, fixes it
-//! and builds clean.
+//! declaration, reads the file, edits it, builds, reads the type error it
+//! caused, fixes it and builds clean.
 //!
 //! The provider is scripted ([`FakeProvider`]) — decision 7 says no test in this
 //! tree may need an API key — but **everything else is the production path**: the
@@ -102,12 +102,14 @@ async fn an_agent_greps_edits_builds_reads_the_error_it_caused_and_fixes_it() ->
             json!({"pattern": "interface Todo"}),
         )
         .with_preamble("Let me find where the type is declared."),
+        // An edit refuses a file this run has not read.
+        Reply::calls("read_file_apps_web", json!({"path": "src/todo.ts"})),
         Reply::calls(
             "edit_file_apps_web",
             json!({
                 "path": "src/todo.ts",
-                "find": "export const empty: Todo[] = [];",
-                "replace": "export const empty: Todo[] = [];\nexport const first = (t: Todo) => t.done;",
+                "old_text": "export const empty: Todo[] = [];",
+                "new_text": "export const empty: Todo[] = [];\nexport const first = (t: Todo) => t.done;",
             }),
         ),
         Reply::calls("build_todo", json!({})),
@@ -115,8 +117,10 @@ async fn an_agent_greps_edits_builds_reads_the_error_it_caused_and_fixes_it() ->
             "edit_file_apps_web",
             json!({
                 "path": "src/todo.ts",
-                "find": "  title: string;",
-                "replace": "  title: string;\n  done: boolean;",
+                // No second read: the run's own edit counts as having seen
+                // the file.
+                "old_text": "  title: string;",
+                "new_text": "  title: string;\n  done: boolean;",
             }),
         )
         .with_preamble("I introduced a type error; the field needs declaring."),
@@ -148,7 +152,7 @@ async fn an_agent_greps_edits_builds_reads_the_error_it_caused_and_fixes_it() ->
         vec![
             "build_todo",
             "edit_file_apps_web",
-            "list_files_apps_web",
+            "find_files_apps_web",
             "read_file_apps_web",
             "search_files_apps_web",
             "write_file_apps_web",
@@ -165,22 +169,24 @@ async fn an_agent_greps_edits_builds_reads_the_error_it_caused_and_fixes_it() ->
         .await?
         .expect("the run row")
         .agent_loop()?;
-    let results: Vec<(String, Json)> = state
+    let results: Vec<(String, String)> = state
         .messages()
         .iter()
         .filter_map(|m| match m {
-            sc_llm::LlmMessage::ToolResult { content, name, .. } => Some((
-                name.clone(),
-                serde_json::from_str(content).unwrap_or(Json::Null),
-            )),
+            sc_llm::LlmMessage::ToolResult { content, name, .. } => {
+                Some((name.clone(), content.clone()))
+            }
             _ => None,
         })
         .collect();
+    // The build still answers in JSON.
+    let json = |i: usize| -> Json { serde_json::from_str(&results[i].1).unwrap_or(Json::Null) };
     let called: Vec<&str> = results.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(
         called,
         vec![
             "search_files_apps_web",
+            "read_file_apps_web",
             "edit_file_apps_web",
             "build_todo",
             "edit_file_apps_web",
@@ -189,12 +195,19 @@ async fn an_agent_greps_edits_builds_reads_the_error_it_caused_and_fixes_it() ->
     );
 
     // The search found the declaration, with its line.
-    assert_eq!(results[0].1["matches"][0]["path"], json!("src/todo.ts"));
-    assert_eq!(results[0].1["matches"][0]["line"], json!(1));
+    assert_eq!(results[0].1, "src/todo.ts:1: export interface Todo {");
+    // The edit showed the lines it changed, numbered.
+    assert!(
+        results[2]
+            .1
+            .contains("7\texport const first = (t: Todo) => t.done;"),
+        "{}",
+        results[2].1
+    );
 
     // The first build failed, and what the model was handed was the diagnostic —
     // file, line and message — not "build failed".
-    let failed = &results[2].1;
+    let failed = &json(3);
     assert_eq!(failed["built"], json!(false), "{failed}");
     assert_eq!(failed["diagnostics"][0]["file"], json!("src/todo.ts"));
     assert!(
@@ -206,7 +219,7 @@ async fn an_agent_greps_edits_builds_reads_the_error_it_caused_and_fixes_it() ->
     );
 
     // The second one succeeded.
-    assert_eq!(results[4].1["built"], json!(true), "{}", results[4].1);
+    assert_eq!(json(5)["built"], json!(true), "{}", results[5].1);
     Ok(())
 }
 

@@ -28,7 +28,9 @@ use sc_llm::{
 use serde_json::Value as Json;
 
 use crate::agent::{Agent, ModelRole};
-use crate::agent_trait::{RunCaller, SessionContext, ToolsContext, TraitContext, Turn};
+use crate::agent_trait::{
+    AfterToolsContext, RunCaller, SessionContext, ToolsContext, TraitContext, Turn,
+};
 use crate::context::{Compaction, ContextVerdict, Elidable, SUMMARY_PERCENT, SUMMARY_PROMPT};
 use crate::delegate::{ATTR_DELEGATED_BY, ATTR_PARENT_RUN, DelegateRequest, Delegated, Delegator};
 use crate::ledger::{ChildLedger, LedgerStep};
@@ -407,6 +409,8 @@ impl<'a> Runner<'a> {
                                 .await,
                         );
                     }
+                    self.after_tools(run.id, mode, &tools, &mut state, &mut outcomes)
+                        .await;
                     let rung = state.control().rung();
                     state.tool_results(outcomes)?;
                     if state.control().rung() != rung && !state.is_done() {
@@ -843,6 +847,58 @@ impl<'a> Runner<'a> {
             observer.on_tool_result(&outcome);
         }
         outcome
+    }
+
+    /// Give each trait that owned a call in this turn its
+    /// [`after_tools`](AgentTrait::after_tools) hook, appending what it says to
+    /// the result of its last call.
+    async fn after_tools(
+        &self,
+        run: RunId,
+        mode: RunMode,
+        tools: &ToolsContext<'_>,
+        state: &mut AgentLoop,
+        outcomes: &mut [ToolOutcome],
+    ) {
+        let owners: Vec<Option<usize>> = outcomes
+            .iter()
+            .map(|o| self.owner(&o.call.name, tools).map(|(i, _)| i))
+            .collect();
+        for (index, enabled) in self.agent.traits.iter().enumerate() {
+            let mine: Vec<usize> = (0..outcomes.len())
+                .filter(|&o| owners[o] == Some(index))
+                .collect();
+            let Some(&last) = mine.last() else {
+                continue;
+            };
+            let Ok(trait_) = self.registry.require(&enabled.trait_) else {
+                continue;
+            };
+            let calls: Vec<ToolCall> = mine.iter().map(|&o| outcomes[o].call.clone()).collect();
+            let key = trait_state_key(index, &enabled.trait_);
+            let mut cx = AfterToolsContext {
+                catalog: self.catalog,
+                caller: &self.caller,
+                agent: &self.agent.name,
+                run,
+                mode,
+                calls: &calls,
+                trait_state: state.trait_state_mut(&key),
+            };
+            match trait_.after_tools(&enabled.config, &mut cx).await {
+                Ok(Some(text)) if !text.trim().is_empty() => {
+                    let outcome = &mut outcomes[last];
+                    outcome.content.push_str("\n\n");
+                    outcome.content.push_str(&text);
+                }
+                Ok(_) => {}
+                Err(e) => sc_log::log_warn!(
+                    "agent `{}` run {run}: trait `{}` after its tools failed — {e}",
+                    self.agent.name,
+                    enabled.trait_
+                ),
+            }
+        }
     }
 
     /// Which enabled trait offers `tool` in this mode, by position, and the

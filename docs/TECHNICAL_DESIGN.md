@@ -2913,6 +2913,10 @@ Phase 1):
   the signature covers it and Anthropic refuses the signature without it.
 - **An image sent to a model without `vision` is replaced by a stub** naming the model, in the
   adapter, so no backend is ever sent one.
+- **No native `apply_patch` tool** (Phase 5). rig 0.41 can declare only function tools, and its
+  Responses output parser knows no `apply_patch_call` item, so a model whose capabilities say
+  `native_apply_patch` is still offered `coding`'s `apply_patch_…` as a **function tool** taking the
+  V4A patch text. The capability is resolved and stored, and nothing reads it yet.
 
 ### 11.2 Agents, traits and the loop (`sc-agent`)
 
@@ -3156,14 +3160,28 @@ once §10.3 lands, becomes callable the same way, because a workflow is a trigge
 
 **Code.** The `coding` trait works inside **one configured file store**, optionally rooted at a
 subdirectory, through the `FileStore` trait and §9's access rules — so it is the same
-capability the file manager and the IDE already have, handed to a model. It contributes six
-tools from that one configuration: `read_file`, `list_files` and `search_files` (a server-side
-search, which is also the endpoint the IDE's find-in-files wanted) always; `write_file` and
-`edit_file` (exact-string replacement, which is the edit that can be verified before it is
-applied) under a **checkbox**; and the script runner under a second one. Beside it,
+capability the file manager and the IDE already have, handed to a model. It contributes its
+tools from that one configuration: `read_file` (numbered lines, paged), `find_files` (a glob over
+the tree, newest first) and `search_files` (a server-side grep, which is also the endpoint the
+IDE's find-in-files wanted) always; `write_file` and **one edit tool** under a **checkbox** —
+`edit_file` (quoted text found by a match cascade) or `apply_patch` (V4A), as the `edit_format`
+setting resolves for the model; and the script runner under a second checkbox. Beside it,
 `build_application` builds the application whose source that store is, returning the build's
 diagnostics as the tool result — a failed build is the most useful thing the model can be told —
 and it stays its own trait because it is configured against an *application*, not a store.
+
+**The edit engine** (coding-agent milestone, Phase 5) keeps per-run state in the loop's trait
+state: the content hash of every file as the model last saw it, so an edit or overwrite of a file
+the run has not read, or that changed since, is refused naming the read tool; and a **change
+ledger** of each touched file's pre-image, from which `run_diff` computes the run's unified diff
+and diffstat in Rust, for any store backend. Edits are found by a cascade — exact, then ignoring
+trailing whitespace and CRLF, then ignoring indentation (re-indenting the replacement), then the
+unique fuzzy best above 0.9 similarity — and every step must find exactly one place. A patch
+applies all or nothing. After a turn's last tool call a new loop hook, `after_tools`, lets
+`coding` format the edited files with the project's own prettier and run its `diagnose` script
+once, under the `may_check` grant, with each diagnostic marked new or pre-existing against the
+diagnostics recorded before the run's first edit. Pre-images over 1 MB, or not text, are kept by
+hash only, so the run row does not carry a bundle; such a file shows as changed without lines.
 
 **No shell.** There is no `run_command` trait. Handing a model a shell on the server is the
 same decision the IDE milestone declined to take for a terminal, and it should not arrive by the
@@ -3181,7 +3199,8 @@ composing one.
   edits, five of which could be forgotten. What was worth keeping from the six is that a
   read-only agent is the default shape, and that survives as two checkboxes on the one form:
   `may_edit` adds `write_file` and `edit_file`, `may_run_scripts` adds the script runner, and
-  both are off by default. A withheld tool is **not declared to the model**, and a call that
+  both are off by default (Phase 5 of the coding-agent milestone added `may_check`, and made the
+  edit tool one of two). A withheld tool is **not declared to the model**, and a call that
   arrives for one anyway (from a stale transcript) is refused naming the checkbox — the
   `admin_copilot` shape, for the `admin_copilot` reason: grants that share a scope
   belong on one trait, not on several that can disagree about where they point. Tool names are
@@ -4047,7 +4066,8 @@ megabytes out of the bundle for stores that hold assets rather than an applicati
 
 **What the workbench must be told afterwards.** The agent's edits reach the store over the
 server, not through an editor, so they are exactly the case `announceChanged` exists for (above):
-a `write_file_…`/`edit_file_…` tool call names the path it is about to change, and when the turn
+a `write_file_…`/`edit_file_…` tool call names the path it is about to change (an `apply_patch_…`
+call names every path in its patch headers), and when the turn
 ends the IDE drops its cached listings, announces those paths — resolved through the agent's own
 `root`, which is not the workspace root when the project sits in a sub-directory — and refreshes
 source control. A tool *call* is reported as progress and a successful tool's *result* is not:

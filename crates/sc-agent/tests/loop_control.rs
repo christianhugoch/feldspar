@@ -10,9 +10,9 @@ use std::sync::Arc;
 use common::catalog;
 use sc_agent::testing::{FakeModels, FakeProvider, Reply};
 use sc_agent::{
-    ATTR_MAX_IDENTICAL_CALLS, Agent, AgentRegistry, AgentTrait, Conclusion, EnabledTrait, ModelRef,
-    ModelRole, ProviderConnector, Run, RunCaller, RunState, Runner, Signal, ToolsContext,
-    TraitContext, load_run, save_agent,
+    ATTR_MAX_IDENTICAL_CALLS, AfterToolsContext, Agent, AgentRegistry, AgentTrait, Conclusion,
+    EnabledTrait, ModelRef, ModelRole, ProviderConnector, Run, RunCaller, RunState, Runner, Signal,
+    ToolsContext, TraitContext, load_run, save_agent,
 };
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
@@ -50,7 +50,8 @@ impl AgentTrait for Editor {
                     "properties": {
                         "path": {"type": "string"},
                         "line": {"type": "integer", "minimum": 1},
-                        "fail": {"type": "boolean"}
+                        "fail": {"type": "boolean"},
+                        "check": {"type": "boolean"}
                     },
                     "required": ["path"],
                     "additionalProperties": false
@@ -92,6 +93,21 @@ impl AgentTrait for Editor {
             "read" => Ok(json!("contents")),
             other => Err(Error::invalid(format!("no tool `{other}`"))),
         }
+    }
+
+    /// Once per turn: how many of the turn's calls were edits asking to be
+    /// checked, said once on the last of this trait's results.
+    async fn after_tools(
+        &self,
+        _config: &Attrs,
+        cx: &mut AfterToolsContext<'_>,
+    ) -> Result<Option<String>> {
+        let checked = cx
+            .calls
+            .iter()
+            .filter(|c| c.name == "edit" && c.arguments["check"] == json!(true))
+            .count();
+        Ok((checked > 0).then(|| format!("checked {checked} edits of {} calls", cx.calls.len())))
     }
 
     fn fingerprint(&self, _config: &Attrs, tool: &str, args: &Json) -> Json {
@@ -420,5 +436,36 @@ async fn detector_state_survives_a_save_and_a_resume_and_thresholds_are_attribut
     .await?;
     let results = stored_results(&stored);
     assert!(results[1].contains("2 times in a row"), "{}", results[1]);
+    Ok(())
+}
+
+/// `after_tools` runs once per turn, after every call of the turn, and what it
+/// says lands on the last result of that trait's calls (TODO 5.10).
+#[tokio::test]
+async fn after_tools_speaks_once_per_turn_on_the_last_result() -> Result<()> {
+    let agent = editor_agent();
+    let world = world(&agent).await?;
+    let executor = Arc::new(FakeProvider::new([
+        Reply::calls_many([
+            ("edit".to_owned(), json!({"path": "a.ts", "check": true})),
+            ("edit".to_owned(), json!({"path": "b.ts", "check": true})),
+            ("read".to_owned(), json!({"path": "c.ts"})),
+        ]),
+        // A turn with nothing to check says nothing extra.
+        Reply::calls("read", json!({"path": "a.ts"})),
+        Reply::says("done"),
+    ]));
+    let strong = Arc::new(FakeProvider::new([]));
+    let (run, conclusion) = run_scripted(&world, &agent, &executor, &strong, "edit").await?;
+    assert_eq!(conclusion.answer(), Some("done"));
+    assert_eq!(
+        stored_results(&run),
+        vec![
+            "edited".to_owned(),
+            "edited".to_owned(),
+            "contents\n\nchecked 2 edits of 3 calls".to_owned(),
+            "contents".to_owned(),
+        ]
+    );
     Ok(())
 }

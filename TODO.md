@@ -823,46 +823,58 @@ default.
 
 ## Phase 5 — The coding tools, rebuilt (`sc-core-traits/src/coding`)
 
-- [ ] 5.1 `read_file`: numbered lines, `offset`/`limit` in lines (default 2000), a per-line
+- [x] 5.1 `read_file`: numbered lines, `offset`/`limit` in lines (default 2000), a per-line
       character cap, paging instructions on truncation, binary detection, and the content hash
       recorded in trait state. Compact text output, not JSON.
-- [ ] 5.2 `find_files` replaces `list_files`: glob patterns plus `dir`, directories marked,
+      *(`max_chars` became `max_lines`; a page is also capped at 100 000 characters.)*
+- [x] 5.2 `find_files` replaces `list_files`: glob patterns plus `dir`, directories marked,
       sorted by modification time, capped with a narrowing hint. Hidden-by-§9 entries and
       excluded directories are skipped, as `search_store` skips them.
-- [ ] 5.3 `search_files`: compact `path:line: text` output, optional context lines, a
+      *(`sc_files::walk_store`; globs gained `{a,b}` alternatives, for `search_files` too. The
+      glob is relative to `dir`.)*
+- [x] 5.3 `search_files`: compact `path:line: text` output, optional context lines, a
       "narrow your query" hint when capped, and a default cap of 100.
-- [ ] 5.4 `write_file`: refuses to overwrite an existing file this run has not read or written,
+- [x] 5.4 `write_file`: refuses to overwrite an existing file this run has not read or written,
       naming the read tool.
-- [ ] 5.5 The match cascade (`coding/matching.rs`): exact → trailing-whitespace/CRLF →
+      *(It also refuses a file changed since it was read, as an edit does.)*
+- [x] 5.5 The match cascade (`coding/matching.rs`): exact → trailing-whitespace/CRLF →
       indentation-normalised with re-indent → fuzzy unique best above a threshold. Report the
       level used. Table tests at each level, and ambiguity at each level.
-- [ ] 5.6 `edit_file` over the cascade: `old_text`/`new_text`/`replace_all`. Stale-read
+- [x] 5.6 `edit_file` over the cascade: `old_text`/`new_text`/`replace_all`. Stale-read
       refusal. On failure, the closest region with line numbers. On success, the edited
       region with line numbers. `EditFailed` signal. Tests for each outcome.
-- [ ] 5.7 `apply_patch` (V4A): parser (add/update/delete/move, context-anchored hunks) and
+- [x] 5.7 `apply_patch` (V4A): parser (add/update/delete/move, context-anchored hunks) and
       applier over the cascade, all-or-nothing across files, a failure `status` with a
       message. Tests from Codex's V4A examples, plus a failing hunk that leaves every file
       untouched.
-- [ ] 5.8 The `edit_format` setting and its `auto` resolution from capabilities. The native
+      *(A hunk's context must match one place after the previous hunk and its `@@` anchors; an
+      anchor is the first matching line. Files updated, moved or deleted must have been read.)*
+- [x] 5.8 The `edit_format` setting and its `auto` resolution from capabilities. The native
       `apply_patch` tool type is used when the backend supports it through rig, and the
       function tool otherwise. `whole_file` withholds both edit tools.
-- [ ] 5.9 The change ledger: pre-images on first touch, deletes and moves, in trait state (or
+      *(rig 0.41 cannot declare the native tool, so it is always the function tool; the gap is in
+      §11.1.)*
+- [x] 5.9 The change ledger: pre-images on first touch, deletes and moves, in trait state (or
       a run-scoped directory for large files). `run_diff()` builds a unified diff and a
       diffstat with `similar`.
-- [ ] 5.10 Post-turn feedback: after the last edit of a model turn, format the edited files
+      *(Pre-images over 1 MB, or not text, are kept by hash; no run-scoped directory.)*
+- [x] 5.10 Post-turn feedback: after the last edit of a model turn, format the edited files
       with the project's `prettier` if installed, then run `diagnose`, and attach capped
       new/pre-existing diagnostics to the last edit result. Needs a driver hook: "tools of
       this turn finished" (`AgentTrait::after_tools`).
-- [ ] 5.11 `validate_config` checks the longest derived tool name (`implement_feature_…`)
+      *(Needs `may_check`, so that setting and `diagnose` landed here, ahead of 6.1. The baseline is
+      recorded just before the run's first edit. Diagnostics parse with `build_diagnostics` until
+      6.2.)*
+- [x] 5.11 `validate_config` checks the longest derived tool name (`implement_feature_…`)
       against the 64-character limit. Update the tool-name tests in `lib.rs`.
-- [ ] 5.12 Tool descriptions rewritten short, since their tokens are paid on every request.
+- [x] 5.12 Tool descriptions rewritten short, since their tokens are paid on every request.
       Measured in 8.3.
 
 ## Phase 6 — `check` and the ratchet (`sc-core-traits`)
 
 - [ ] 6.1 Settings: `checks` (ordered script names), `diagnose` (default `typecheck`),
       `application` (optional subdomain, validated as `build_application` validates it), and
-      the `may_check` grant.
+      the `may_check` grant. *(`diagnose` and `may_check` already exist, from 5.10.)*
 - [ ] 6.2 The shared diagnostic parsers (tsc, eslint, vitest/jest, generic) in `sc-app` beside
       `build_diagnostics`, with fixture-output tests.
 - [ ] 6.3 `check`: runs each check in order (the build included when `application` is set,

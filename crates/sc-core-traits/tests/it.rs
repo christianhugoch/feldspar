@@ -32,6 +32,8 @@ mod build_application;
 mod builder_agent_traits;
 #[path = "coding_agent.rs"]
 mod coding_agent;
+#[path = "coding_edits.rs"]
+mod coding_edits;
 #[path = "coding_traits.rs"]
 mod coding_traits;
 #[path = "query_table.rs"]

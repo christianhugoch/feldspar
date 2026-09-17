@@ -168,6 +168,25 @@ pub trait AgentTrait: Send + Sync {
         Some(old.default_stub())
     }
 
+    /// Called once after **all** of a model turn's tool calls have finished,
+    /// for each trait that owned at least one of them (TODO 5.10).
+    ///
+    /// Work that should happen once per turn rather than once per call goes
+    /// here: `coding` formats the files the turn edited and type-checks them
+    /// once, however many edits the model sent. Text returned is appended to
+    /// the result of this trait's **last** call in the turn, so it arrives in a
+    /// tool result, where it does not break the cached prefix.
+    ///
+    /// An `Err` is logged and otherwise ignored: the turn's own results stand.
+    async fn after_tools(
+        &self,
+        config: &Attrs,
+        cx: &mut AfterToolsContext<'_>,
+    ) -> Result<Option<String>> {
+        let _ = (config, cx);
+        Ok(None)
+    }
+
     /// What makes two calls of `tool` **the same call**, for the doom-loop
     /// detectors (TODO §10).
     ///
@@ -198,6 +217,26 @@ pub struct SessionContext<'a> {
     /// The first thing the person (or the delegating run) said: the request or
     /// the feature brief.
     pub brief: &'a str,
+    /// This trait instance's per-run state, as [`TraitContext::state`] reaches
+    /// it.
+    pub trait_state: &'a mut Json,
+}
+
+/// What [`AgentTrait::after_tools`] is given: the run, this trait instance's
+/// per-run state, and the calls of the turn that were its own.
+pub struct AfterToolsContext<'a> {
+    /// The live catalog.
+    pub catalog: &'a Catalog,
+    /// Who the run is for.
+    pub caller: &'a RunCaller,
+    /// The name of the agent.
+    pub agent: &'a str,
+    /// The run.
+    pub run: RunId,
+    /// The run's mode.
+    pub mode: RunMode,
+    /// This trait's calls in the turn, in the order they ran.
+    pub calls: &'a [sc_llm::ToolCall],
     /// This trait instance's per-run state, as [`TraitContext::state`] reaches
     /// it.
     pub trait_state: &'a mut Json,

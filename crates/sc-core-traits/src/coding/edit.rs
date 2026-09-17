@@ -1,147 +1,202 @@
-//! `edit_file` — exact-string replacement in one file (§11.3).
+//! `edit_file`: replace quoted text in one file, found by the match cascade
+//! (TODO 5.6, R§3.1).
 //!
-//! The edit that can be **verified before it is applied**, and the reason this
-//! milestone ships it rather than a diff or a line-range replacement: the model
-//! sends the text it believes is there and the text it wants instead, and the
-//! server checks the belief. Three outcomes, and each of them is deliberate:
+//! The model sends the text it believes is there (`old_text`) and what it wants
+//! instead (`new_text`), and [`matching`](super::matching) finds the one place
+//! that text is, forgiving whitespace, indentation and a mistyped character, in
+//! that order. What comes back is always something to act on:
 //!
-//! - **Exactly one occurrence** — replaced, and the file is written.
-//! - **None** — an error saying the text was not found, and (when the file is
-//!   readable) how many lines it has, so the model knows whether it is looking
-//!   at the wrong file or has misremembered its contents. A fuzzy match here
-//!   would be a corrupted file nobody noticed until much later.
-//! - **More than one** — an error saying how many, because "replace the first
-//!   one" is a coin flip and "replace them all" is a change the model did not
-//!   ask for. The instruction back is the recoverable one: include more
-//!   surrounding text.
+//! - **Success** returns the edited lines, numbered, and which step matched, so
+//!   the model does not re-read the file to see what it did.
+//! - **Not found** returns the most similar region, numbered, and one
+//!   instruction: copy the text from these lines.
+//! - **Ambiguous** names the lines of every place, and says to quote more.
 //!
-//! `replace_all` exists as an explicit argument for the case where changing every
-//! occurrence *is* the intent (renaming an identifier through a file). It is
-//! opt-in, so ambiguity is never resolved silently.
+//! Both failures raise `EditFailed`, which the loop's escalation ladder counts.
+//! Before any of that, a file the run has not read, or that changed since it was
+//! read, is refused with the read tool's name. That refusal is not an edit
+//! failure: nothing was tried.
 
-use sc_agent::TraitContext;
+use sc_agent::{Signal, TraitContext};
 use sc_error::{Error, Result};
 use sc_llm::ToolSpec;
 use serde_json::{Value as Json, json};
 
+use super::change::{current, edited_region, numbered, write_tracked};
+use super::matching::{self, Level, Search};
+use super::read::as_text;
+use super::state::{CodingState, stale_message};
 use crate::files::{ARG_PATH, FileScope, open_at, optional_bool_arg, string_arg};
 use crate::table::arguments;
 
-/// The text to find, exactly.
-const ARG_FIND: &str = "find";
+/// The text to find.
+const ARG_OLD: &str = "old_text";
 /// What to put in its place.
-const ARG_REPLACE: &str = "replace";
+const ARG_NEW: &str = "new_text";
 /// Whether every occurrence is meant.
 const ARG_ALL: &str = "replace_all";
+
+/// The most edited regions shown after a `replace_all`.
+const MAX_REGIONS_SHOWN: usize = 3;
 
 /// The tool one configured scope offers, derived from it.
 pub fn tool_name(scope: &FileScope) -> String {
     format!("edit_file_{}", scope.slug())
 }
 
-/// The tool this scope's exact-string edit contributes.
+/// The tool this scope's edit contributes.
 pub fn spec(scope: &FileScope) -> ToolSpec {
     ToolSpec::new(
         tool_name(scope),
         format!(
-            "Change part of a file in {} by replacing an exact string. \
-             `{ARG_FIND}` must appear **exactly once** in the file, \
-             character for character including indentation and line breaks; \
-             if it appears more than once the call is refused and you should \
-             include more of the surrounding lines to make it unique, and if \
-             it does not appear at all the file is not what you think it is — \
-             read it again. Set `{ARG_ALL}` only when you mean every \
-             occurrence.",
+            "Replace text in a file in {}. Read the file first. `{ARG_OLD}` must match one \
+             place; quote whole lines with enough context to be unique.",
             scope.label()
         ),
         json!({
             "type": "object",
             "properties": {
-                ARG_PATH: {
-                    "type": "string",
-                    "description": "The file to edit, relative to the root of this store.",
-                },
-                ARG_FIND: {
-                    "type": "string",
-                    "description":
-                        "The exact text to replace, as it appears in the file.",
-                },
-                ARG_REPLACE: {
-                    "type": "string",
-                    "description":
-                        "The text to put in its place. An empty string deletes it.",
-                },
-                ARG_ALL: {
-                    "type": "boolean",
-                    "description":
-                        "Replace every occurrence instead of requiring exactly one.",
-                },
+                ARG_PATH: {"type": "string", "description": "Relative path."},
+                ARG_OLD: {"type": "string", "description": "The text to replace, copied from the file."},
+                ARG_NEW: {"type": "string", "description": "The replacement."},
+                ARG_ALL: {"type": "boolean", "description": "Replace every occurrence."},
             },
-            "required": [ARG_PATH, ARG_FIND, ARG_REPLACE],
+            "required": [ARG_PATH, ARG_OLD, ARG_NEW],
             "additionalProperties": false,
         }),
     )
 }
 
-/// Apply one exact-string edit, as the run's caller.
+/// Apply one edit, as the run's caller.
 pub async fn call(scope: &FileScope, args: &Json, ctx: &mut TraitContext<'_>) -> Result<Json> {
-    let args = arguments(args, &[ARG_PATH, ARG_FIND, ARG_REPLACE, ARG_ALL])?;
+    let args = arguments(args, &[ARG_PATH, ARG_OLD, ARG_NEW, ARG_ALL])?;
     let rel = string_arg(&args, ARG_PATH)?;
-    let find = string_arg(&args, ARG_FIND)?;
-    let replace = string_arg(&args, ARG_REPLACE)?;
+    let old = string_arg(&args, ARG_OLD)?;
+    let new = string_arg(&args, ARG_NEW)?;
     let all = optional_bool_arg(&args, ARG_ALL, false)?;
+    if old.is_empty() {
+        return Err(Error::invalid(format!(
+            "`{ARG_OLD}` is empty. To create a file, use `{}`.",
+            super::write::tool_name(scope)
+        )));
+    }
+    if old == new {
+        return Err(Error::invalid(format!(
+            "`{ARG_OLD}` and `{ARG_NEW}` are the same, so there is nothing to change"
+        )));
+    }
 
     let (store, path) = open_at(scope, ctx, &rel).await?;
-    let bytes = store.read(&path).await?;
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|_| Error::invalid(format!("`{rel}` is not a text file")))?;
-
-    let edited = apply(text, &find, &replace, all, &rel)?;
-    let replacements = edited.replacements;
-    store
-        .write(&path, bytes::Bytes::from(edited.text.into_bytes()))
-        .await?;
-    Ok(json!({
-        "path": rel,
-        "replacements": replacements,
-        "edited": true,
-    }))
-}
-
-/// The result of a successful edit.
-#[derive(Debug)]
-struct Edited {
-    text: String,
-    replacements: usize,
-}
-
-/// Apply the replacement, or say why it cannot be applied.
-///
-/// Separated from the I/O so the three outcomes are unit-testable without a
-/// store — they are the whole of this trait's judgement.
-fn apply(text: &str, find: &str, replace: &str, all: bool, path: &str) -> Result<Edited> {
-    if find.is_empty() {
-        return Err(Error::invalid(
-            "`find` is empty; it must be the exact text to replace",
-        ));
+    let Some(bytes) = current(store.as_ref(), &path, &rel).await? else {
+        return Err(Error::invalid(format!(
+            "`{rel}` does not exist. To create it, use `{}`.",
+            super::write::tool_name(scope)
+        )));
+    };
+    let text = as_text(&bytes)
+        .ok_or_else(|| Error::invalid(format!("`{rel}` is a binary file and cannot be edited")))?;
+    let mut state = CodingState::load(ctx.state());
+    if let Err(stale) = state.check_current(&path, &bytes) {
+        return Err(Error::invalid(stale_message(
+            stale,
+            &rel,
+            &super::read::tool_name(scope),
+        )));
     }
-    let count = text.matches(find).count();
-    match (count, all) {
-        (0, _) => Err(Error::invalid(format!(
-            "that text does not appear in `{path}` (which has {} lines). \
-             Read the file and copy the text to replace from it exactly, \
-             including indentation.",
-            text.lines().count()
-        ))),
-        (1, _) | (_, true) => Ok(Edited {
-            text: text.replace(find, replace),
-            replacements: count,
+
+    let (edited, summary) = match apply(text, &old, &new, all, &rel) {
+        Ok(done) => done,
+        Err(message) => {
+            ctx.signal(Signal::EditFailed);
+            return Err(Error::invalid(message));
+        }
+    };
+    write_tracked(
+        store.as_ref(),
+        &mut state,
+        &path,
+        Some(&bytes),
+        edited.into_bytes(),
+    )
+    .await?;
+    state.store(ctx.state());
+    Ok(Json::String(summary))
+}
+
+/// The edited text and what to tell the model, or the failure message.
+///
+/// Separate from the I/O so every outcome is unit-testable without a store.
+fn apply(
+    text: &str,
+    old: &str,
+    new: &str,
+    all: bool,
+    rel: &str,
+) -> Result<(String, String), String> {
+    match matching::find(text, old, all) {
+        Search::Found(found) => {
+            let level = found[0].level;
+            let (edited, ranges) = matching::replace(text, &found, new);
+            let mut summary = match ranges.len() {
+                1 => format!(
+                    "Edited `{rel}` ({}). The lines now read:\n",
+                    level.describe()
+                ),
+                n => format!("Edited `{rel}`: {n} places ({}). Now:\n", level.describe()),
+            };
+            let shown: Vec<String> = ranges
+                .iter()
+                .take(MAX_REGIONS_SHOWN)
+                .map(|range| edited_region(&edited, range))
+                .collect();
+            summary.push_str(&shown.join("\n…\n"));
+            if ranges.len() > MAX_REGIONS_SHOWN {
+                summary.push_str(&format!(
+                    "\n[{} more places not shown]",
+                    ranges.len() - MAX_REGIONS_SHOWN
+                ));
+            }
+            Ok((edited, summary))
+        }
+        Search::Ambiguous { level, lines } => Err(format!(
+            "`{ARG_OLD}` matches {} places in `{rel}` ({}), starting at lines {}. {}",
+            lines.len(),
+            level.describe(),
+            join_lines(&lines),
+            match level {
+                Level::Fuzzy => "Quote more surrounding lines exactly so it matches one place.",
+                _ =>
+                    "Quote more surrounding lines so it matches one place, or set \
+                      `replace_all` to change them all.",
+            }
+        )),
+        Search::Missing { closest } => Err(match closest {
+            Some(region) => format!(
+                "`{ARG_OLD}` was not found in `{rel}`. The most similar lines ({}-{}, {:.0}% \
+                 similar) are:\n{}\nCopy the text to replace exactly from these lines and \
+                 try again.",
+                region.first,
+                region.last,
+                region.score * 100.0,
+                numbered(text, region.first, region.last)
+            ),
+            None => format!(
+                "`{ARG_OLD}` was not found in `{rel}`. Read the file again and copy the text \
+                 to replace exactly."
+            ),
         }),
-        (many, false) => Err(Error::invalid(format!(
-            "that text appears {many} times in `{path}`, so it is ambiguous. \
-             Include more of the surrounding lines so it identifies one place, \
-             or set `replace_all` if you mean all {many}."
-        ))),
+    }
+}
+
+/// `1, 4 and 9`.
+fn join_lines(lines: &[usize]) -> String {
+    let mut words: Vec<String> = lines.iter().map(usize::to_string).collect();
+    match words.len() {
+        0 | 1 => words.join(""),
+        _ => {
+            let last = words.pop().unwrap_or_default();
+            format!("{} and {last}", words.join(", "))
+        }
     }
 }
 
@@ -161,43 +216,48 @@ mod tests {
     }
 
     #[test]
-    fn a_unique_match_is_replaced() {
-        let edited = apply(FILE, "const b = 2;", "const b = 20;", false, "a.ts").unwrap();
-        assert_eq!(edited.replacements, 1);
-        assert_eq!(edited.text, "const a = 1;\nconst b = 20;\nconst a = 3;\n");
+    fn a_success_shows_the_edited_lines_and_the_step() {
+        let (text, summary) = apply(FILE, "const b = 2;", "const b = 20;", false, "a.ts").unwrap();
+        assert_eq!(text, "const a = 1;\nconst b = 20;\nconst a = 3;\n");
+        assert_eq!(
+            summary,
+            "Edited `a.ts` (exact match). The lines now read:\n\
+             1\tconst a = 1;\n2\tconst b = 20;\n3\tconst a = 3;"
+        );
     }
 
     #[test]
-    fn a_match_that_is_not_there_is_refused_with_the_files_size() {
-        let err = apply(FILE, "const c = 9;", "x", false, "a.ts").unwrap_err();
-        let err = err.to_string();
-        assert!(err.contains("does not appear"), "{err}");
-        assert!(err.contains("a.ts"), "{err}");
-        assert!(err.contains("3 lines"), "{err}");
+    fn a_miss_shows_the_closest_lines_and_one_instruction() {
+        let file = "function add(a, b) {\n  return a + b;\n}\n\nfunction sub(a, b) {\n  return a - b;\n}\n";
+        let err = apply(
+            file,
+            "function sub(first, second) {\n  return first - second;\n}",
+            "",
+            false,
+            "m.js",
+        )
+        .unwrap_err();
+        assert!(err.contains("was not found in `m.js`"), "{err}");
+        assert!(err.contains("(5-7,"), "{err}");
+        assert!(err.contains("5\tfunction sub(a, b) {"), "{err}");
+        assert!(err.contains("Copy the text to replace exactly"), "{err}");
     }
 
     #[test]
-    fn an_ambiguous_match_is_refused_with_the_count_and_the_way_out() {
-        let err = apply(FILE, "const a", "let a", false, "a.ts")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("2 times"), "{err}");
+    fn an_ambiguity_names_every_place() {
+        let err = apply(FILE, "const a", "let a", false, "a.ts").unwrap_err();
+        assert!(err.contains("matches 2 places"), "{err}");
+        assert!(err.contains("lines 1 and 3"), "{err}");
         assert!(err.contains("replace_all"), "{err}");
 
-        // …and `replace_all` is that way out, taken deliberately.
-        let edited = apply(FILE, "const a", "let a", true, "a.ts").unwrap();
-        assert_eq!(edited.replacements, 2);
-        assert_eq!(edited.text, "let a = 1;\nconst b = 2;\nlet a = 3;\n");
-    }
-
-    #[test]
-    fn an_empty_find_is_refused_rather_than_matching_everywhere() {
-        assert!(apply(FILE, "", "x", true, "a.ts").is_err());
+        let (text, summary) = apply(FILE, "const a", "let a", true, "a.ts").unwrap();
+        assert_eq!(text, "let a = 1;\nconst b = 2;\nlet a = 3;\n");
+        assert!(summary.contains("2 places"), "{summary}");
     }
 
     #[test]
     fn an_edit_may_delete_by_replacing_with_nothing() {
-        let edited = apply(FILE, "const b = 2;\n", "", false, "a.ts").unwrap();
-        assert_eq!(edited.text, "const a = 1;\nconst a = 3;\n");
+        let (text, _) = apply(FILE, "const b = 2;\n", "", false, "a.ts").unwrap();
+        assert_eq!(text, "const a = 1;\nconst a = 3;\n");
     }
 }

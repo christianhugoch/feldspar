@@ -72,7 +72,7 @@
 //!   names no table; enabling it twice therefore *collides*, which is the
 //!   intended outcome.
 //! - **A trait may offer several tools, and may withhold some of them.**
-//!   [`Coding`] offers six over one scope and declares only the ones its grants
+//!   [`Coding`] offers seven over one scope and declares only the ones its grants
 //!   allow, which is how "may this agent change the source?" became a checkbox
 //!   rather than a second trait with the same form on it.
 //! - **Its tool is described by what it is configured against**: the table's own
@@ -123,8 +123,10 @@ pub use admin_copilot::{
 };
 pub use build_application::{BuildApplication, CFG_APPLICATION};
 pub use coding::{
-    CFG_MAX_CHARS, CFG_MAX_RESULTS, CFG_MAY_EDIT, CFG_MAY_RUN_SCRIPTS, CFG_TIMEOUT, Coding,
-    DEFAULT_MAX_CHARS, DEFAULT_TIMEOUT_SECONDS, MAX_OUTPUT_CHARS,
+    CFG_DIAGNOSE, CFG_EDIT_FORMAT, CFG_MAX_LINES, CFG_MAX_RESULTS, CFG_MAY_CHECK, CFG_MAY_EDIT,
+    CFG_MAY_RUN_SCRIPTS, CFG_TIMEOUT, ChangeStatus, Coding, CodingState, DEFAULT_DIAGNOSE,
+    DEFAULT_MAX_LINES, DEFAULT_TIMEOUT_SECONDS, EDIT_FORMAT_AUTO, FileChange, LONGEST_TOOL_PREFIX,
+    Ledger, MAX_OUTPUT_CHARS, PreImage, RunDiff, diff_ledger, edit_format, matching, run_diff,
 };
 pub use delete_rows::DeleteRows;
 pub use insert_row::InsertRow;
@@ -148,9 +150,10 @@ pub mod tool_names {
     pub use crate::build_application::tool_name as build_application;
     pub use crate::coding::tool_names as coding;
     pub use crate::coding::{
-        edit_file_tool_name as edit_file, list_files_tool_name as list_files,
-        read_file_tool_name as read_file, run_script_tool_name as run_project_script,
-        search_files_tool_name as search_files, write_file_tool_name as write_file,
+        apply_patch_tool_name as apply_patch, edit_file_tool_name as edit_file,
+        find_files_tool_name as find_files, read_file_tool_name as read_file,
+        run_script_tool_name as run_project_script, search_files_tool_name as search_files,
+        write_file_tool_name as write_file,
     };
     pub use crate::delete_rows::tool_name as delete_rows;
     pub use crate::insert_row::tool_name as insert_row;
@@ -304,7 +307,10 @@ mod tests {
                 CFG_ROOT,
                 CFG_MAY_EDIT,
                 CFG_MAY_RUN_SCRIPTS,
-                CFG_MAX_CHARS,
+                CFG_MAY_CHECK,
+                CFG_DIAGNOSE,
+                CFG_EDIT_FORMAT,
+                CFG_MAX_LINES,
                 CFG_MAX_RESULTS,
                 CFG_TIMEOUT
             ]
@@ -354,8 +360,9 @@ mod tests {
             tool_names::subagent("researcher"),
             tool_names::read_file(&scope),
             tool_names::write_file(&scope),
-            tool_names::list_files(&scope),
+            tool_names::find_files(&scope),
             tool_names::edit_file(&scope),
+            tool_names::apply_patch(&scope),
             tool_names::search_files(&scope),
             tool_names::run_project_script(&scope),
             tool_names::build_application("todo"),
@@ -371,8 +378,9 @@ mod tests {
                 "delegate_to_researcher",
                 "read_file_app_src_web",
                 "write_file_app_src_web",
-                "list_files_app_src_web",
+                "find_files_app_src_web",
                 "edit_file_app_src_web",
+                "apply_patch_app_src_web",
                 "search_files_app_src_web",
                 "run_script_app_src_web",
                 "build_todo",
@@ -380,17 +388,18 @@ mod tests {
         );
         let unique: std::collections::BTreeSet<&String> = names.iter().collect();
         assert_eq!(unique.len(), names.len());
-        // The six file names above are `coding`'s whole set, which is what the
+        // The seven file names above are `coding`'s whole set, which is what the
         // collision check compares when the trait is enabled twice: two
-        // instances over one scope produce these same six and are refused.
+        // instances over one scope produce these same names and are refused.
         assert_eq!(
             tool_names::coding(&scope),
             [
                 tool_names::read_file(&scope),
-                tool_names::list_files(&scope),
+                tool_names::find_files(&scope),
                 tool_names::search_files(&scope),
                 tool_names::write_file(&scope),
                 tool_names::edit_file(&scope),
+                tool_names::apply_patch(&scope),
                 tool_names::run_project_script(&scope),
             ]
         );

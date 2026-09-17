@@ -172,29 +172,29 @@ export interface ResponseStream {
 export function relayEvent(
   event: ServerEvent,
   stream: ResponseStream,
-): string | null {
+): string[] {
   switch (event.type) {
     case "text":
       stream.markdown(event.delta);
-      return null;
+      return [];
     case "reasoning":
       // Rendered as the collapsible "thinking" section where the proposal is
       // live, and dropped where it is not: reasoning shown as the answer reads
       // as the answer.
       stream.thinkingProgress?.({ text: event.delta, id: "agent" });
-      return null;
+      return [];
     case "tool_call":
       stream.progress(toolProgress(event.name, event.arguments));
-      return changedPath(event.name, event.arguments);
+      return changedPaths(event.name, event.arguments);
     case "tool_result":
       if (event.is_error)
         stream.markdown(`\n\n\`${event.name}\` failed: ${event.content}\n\n`);
-      return null;
+      return [];
     case "error":
       // Appended, never replacing: a failure after two paragraphs and a tool
       // call is read alongside them, not instead of them.
       stream.markdown(`\n\n⚠️ ${event.message}\n\n`);
-      return null;
+      return [];
     case "compaction":
       // The agent's context was cleared or summarised to fit its budget. Worth
       // a line — an agent that seems to have forgotten something has a reason
@@ -204,20 +204,21 @@ export function relayEvent(
           ? "Clearing old tool output from the context"
           : "Summarising the conversation so far to fit the context",
       );
-      return null;
+      return [];
     case "done":
     case "controls":
-      return null;
+      return [];
   }
 }
 
 /** The coding trait's tools, by the prefix its scope suffix is added to. */
 const VERBS: { prefix: string; label: string; writes?: true }[] = [
   { prefix: "read_file_", label: "Reading" },
-  { prefix: "list_files_", label: "Listing" },
+  { prefix: "find_files_", label: "Finding" },
   { prefix: "search_files_", label: "Searching for" },
   { prefix: "write_file_", label: "Writing", writes: true },
   { prefix: "edit_file_", label: "Editing", writes: true },
+  { prefix: "apply_patch_", label: "Patching", writes: true },
   { prefix: "run_script_", label: "Running" },
 ];
 
@@ -233,17 +234,40 @@ const VERBS: { prefix: string; label: string; writes?: true }[] = [
  */
 export function toolProgress(tool: string, args: unknown): string {
   const verb = VERBS.find((candidate) => tool.startsWith(candidate.prefix));
-  const subject = firstString(args, ["path", "directory", "query", "script"]);
+  const subject = tool.startsWith("apply_patch_")
+    ? patchPaths(args).join(", ") || null
+    : firstString(args, ["path", "pattern", "dir", "script"]);
   if (verb == null) return subject == null ? tool : `${tool}: ${subject}`;
   return subject == null ? verb.label : `${verb.label} ${subject}`;
 }
 
-/** The scope-relative path a tool call writes, or `null` if it writes nothing. */
-export function changedPath(tool: string, args: unknown): string | null {
+/** The scope-relative paths a tool call writes: none for a read. */
+export function changedPaths(tool: string, args: unknown): string[] {
   const writes = VERBS.some(
     (verb) => verb.writes === true && tool.startsWith(verb.prefix),
   );
-  return writes ? firstString(args, ["path"]) : null;
+  if (!writes) return [];
+  if (tool.startsWith("apply_patch_")) return patchPaths(args);
+  const path = firstString(args, ["path"]);
+  return path == null ? [] : [path];
+}
+
+/** Every path a V4A patch names: added, updated, deleted and moved to. */
+function patchPaths(args: unknown): string[] {
+  const patch = firstString(args, ["patch"]);
+  if (patch == null) return [];
+  const headers = [
+    "*** Add File: ",
+    "*** Update File: ",
+    "*** Delete File: ",
+    "*** Move to: ",
+  ];
+  const paths: string[] = [];
+  for (const line of patch.split("\n")) {
+    const header = headers.find((h) => line.startsWith(h));
+    if (header != null) paths.push(line.slice(header.length).trim());
+  }
+  return [...new Set(paths)];
 }
 
 /**

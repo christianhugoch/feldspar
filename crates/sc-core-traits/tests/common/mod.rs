@@ -184,6 +184,60 @@ impl Env {
 
     /// Give the tools the real JavaScript engine — what a table whose ownership
     /// formula does not translate needs.
+    /// Call a trait's tool as one step of a run whose trait state is `state`,
+    /// so what one call records (a read, the ledger) the next one sees. Returns
+    /// the result and the signals the call raised.
+    pub async fn call_in_run(
+        &self,
+        state: &mut Json,
+        trait_: &str,
+        config: &Attrs,
+        tool: &str,
+        args: Json,
+        caller: &RunCaller,
+    ) -> (Result<Json>, Vec<sc_agent::Signal>) {
+        let trait_ = match self.registry.require(trait_) {
+            Ok(t) => t.clone(),
+            Err(e) => return (Err(e), Vec::new()),
+        };
+        let mut ctx = TraitContext {
+            catalog: &self.catalog,
+            caller,
+            agent: "librarian",
+            run: RunId::new(),
+            mode: sc_agent::RunMode::Act,
+            trait_state: state,
+            evaluator: self.evaluator.as_ref(),
+            triggers: self.dispatcher.as_ref(),
+            delegate: None,
+            signals: Vec::new(),
+        };
+        let result = trait_.call(config, tool, &args, &mut ctx).await;
+        (result, ctx.signals)
+    }
+
+    /// The trait's `after_tools` hook, as the loop calls it at the end of a
+    /// turn, over the same run state.
+    pub async fn after_tools(
+        &self,
+        state: &mut Json,
+        trait_: &str,
+        config: &Attrs,
+        caller: &RunCaller,
+    ) -> Result<Option<String>> {
+        let trait_ = self.registry.require(trait_)?.clone();
+        let mut cx = sc_agent::AfterToolsContext {
+            catalog: &self.catalog,
+            caller,
+            agent: "librarian",
+            run: RunId::new(),
+            mode: sc_agent::RunMode::Act,
+            calls: &[],
+            trait_state: state,
+        };
+        trait_.after_tools(config, &mut cx).await
+    }
+
     pub fn with_engine(mut self) -> Env {
         self.evaluator = Some(Arc::new(DenoEvaluator::new()));
         self

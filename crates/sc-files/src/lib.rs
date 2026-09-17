@@ -50,7 +50,7 @@ pub use reference::{mime_for_path, validate_file_path};
 pub use search::{
     DEFAULT_EXCLUDED_DIRS, DEFAULT_MAX_FOUND, DEFAULT_MAX_RESULTS, FoundFiles, MAX_FILE_BYTES,
     MAX_FILES_SCANNED, MAX_LINE_CHARS, SearchHit, SearchOutcome, SearchQuery, find_files,
-    glob_matches, search_store,
+    glob_matches, search_store, walk_store,
 };
 pub use store::{Entry, FileMeta, FileStat, FileStore};
 

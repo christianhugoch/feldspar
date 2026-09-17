@@ -12,19 +12,29 @@
 //! ## What it offers, and what it takes to unlock
 //!
 //! Three tools are always there, and they are the read-only ones: `read_file`,
-//! `list_files` and `search_files`. **Changing the source is a checkbox**
-//! ([`CFG_MAY_EDIT`]), which adds `write_file` and `edit_file`, and **running a
-//! script is another** ([`CFG_MAY_RUN_SCRIPTS`]), which adds `run_script`. Both
-//! are off by default, so a read-only coding agent stays the default shape —
-//! the property the six separate grants had and the one worth keeping. Their being
-//! configuration rather than separate traits is `admin_copilot`'s move, made
-//! for the same reason: the grants share a scope, and a scope filled in twice is a
-//! scope that can disagree with itself.
+//! `find_files` and `search_files`. **Changing the source is a checkbox**
+//! ([`CFG_MAY_EDIT`]), which adds `write_file` and one edit tool: `edit_file`
+//! (the match cascade) or `apply_patch` (V4A), as [`CFG_EDIT_FORMAT`] resolves
+//! for the model, or neither under `whole_file`. **Running a script is another
+//! checkbox** ([`CFG_MAY_RUN_SCRIPTS`]), and **formatting and type-checking after
+//! a turn's edits a third** ([`CFG_MAY_CHECK`]). All are off by default, so a
+//! read-only coding agent stays the default shape. Their being configuration
+//! rather than separate traits is `admin_copilot`'s move, made for the same
+//! reason: the grants share a scope, and a scope filled in twice is a scope that
+//! can disagree with itself.
 //!
 //! A tool call whose grant is off is refused **by name, naming the checkbox** —
 //! the model never sees the tool, but a stale transcript can still carry one, and
 //! "you may not do that" is not something a model can act on while "the agent's
 //! `may_edit` setting is off" is something its user can.
+//!
+//! ## The edit engine
+//!
+//! Every change goes through the run's [`CodingState`]: a file must have been
+//! read (and be unchanged since) before it is edited or overwritten, the
+//! [`Ledger`] keeps each touched file's pre-image so [`run_diff`] can produce the
+//! run's diff on any store backend, and the files a turn edited are formatted and
+//! type-checked once, after the turn's last tool call (TODO §6).
 //!
 //! ## And what is still its own trait
 //!
@@ -42,17 +52,23 @@
 //! directories and the same directory twice is a collision refused on save
 //! (§11.2).
 
+mod change;
 mod edit;
-mod list;
+mod feedback;
+mod find;
+mod ledger;
+pub mod matching;
+mod patch;
 mod read;
 mod script;
 mod search;
+mod state;
 mod write;
 
-use sc_agent::{AgentTrait, RunMode, ToolsContext, TraitCheck, TraitContext};
+use sc_agent::{AfterToolsContext, AgentTrait, RunMode, ToolsContext, TraitCheck, TraitContext};
 use sc_error::{Error, Result};
 use sc_files::DEFAULT_MAX_RESULTS;
-use sc_llm::ToolSpec;
+use sc_llm::{EditFormat, ToolSpec};
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::Value as Json;
 
@@ -60,17 +76,21 @@ use crate::files::{
     FileScope, check_scope, check_tool_name, config_count, configured_scope, scope_as_written,
     scope_fields,
 };
+use crate::table::config_str;
 
 pub use edit::tool_name as edit_file_tool_name;
-pub use list::tool_name as list_files_tool_name;
-pub use read::{CFG_MAX_CHARS, DEFAULT_MAX_CHARS, tool_name as read_file_tool_name};
+pub use find::tool_name as find_files_tool_name;
+pub use ledger::{ChangeStatus, FileChange, Ledger, PreImage, RunDiff, diff_ledger, run_diff};
+pub use patch::tool_name as apply_patch_tool_name;
+pub use read::{CFG_MAX_LINES, DEFAULT_MAX_LINES, tool_name as read_file_tool_name};
 pub use script::{
     CFG_TIMEOUT, DEFAULT_TIMEOUT_SECONDS, MAX_OUTPUT_CHARS, tool_name as run_script_tool_name,
 };
 pub use search::{CFG_MAX_RESULTS, tool_name as search_files_tool_name};
+pub use state::CodingState;
 pub use write::tool_name as write_file_tool_name;
 
-/// May create and change files: adds `write_file` and `edit_file`. Off by
+/// May create and change files: adds `write_file` and the edit tool. Off by
 /// default, because a read-only agent is the shape that cannot damage anything.
 pub const CFG_MAY_EDIT: &str = "may_edit";
 
@@ -79,24 +99,60 @@ pub const CFG_MAY_EDIT: &str = "may_edit";
 /// agent did not write.
 pub const CFG_MAY_RUN_SCRIPTS: &str = "may_run_scripts";
 
+/// May run the checks someone other than the model chose: for now, the
+/// post-turn formatting and the [`CFG_DIAGNOSE`] script (TODO §6, §7). Off by
+/// default. A smaller grant than [`CFG_MAY_RUN_SCRIPTS`], because the model does
+/// not choose what runs.
+pub const CFG_MAY_CHECK: &str = "may_check";
+
+/// The `package.json` script that type-checks the project after a turn's edits.
+pub const CFG_DIAGNOSE: &str = "diagnose";
+
+/// [`CFG_DIAGNOSE`] when the admin names none.
+pub const DEFAULT_DIAGNOSE: &str = "typecheck";
+
+/// How the model edits: `auto`, `str_replace`, `apply_patch` or `whole_file`.
+pub const CFG_EDIT_FORMAT: &str = "edit_format";
+
+/// The [`CFG_EDIT_FORMAT`] that follows the model's capabilities.
+pub const EDIT_FORMAT_AUTO: &str = "auto";
+
+/// The longest tool-name prefix this trait will derive, including the tools of
+/// later phases (`implement_feature_…`, TODO §8). Validation checks a scope
+/// against it, so a scope that fits today does not stop fitting when that tool
+/// arrives.
+pub const LONGEST_TOOL_PREFIX: &str = "implement_feature_";
+
 /// Work on the code in one file store: read it, search it, and — under its
 /// grants — change it and run its scripts.
 pub struct Coding;
 
 /// Every tool this trait can offer for a scope, in the order it offers them.
 ///
-/// The whole set regardless of the grants, because this is what the admin UI
-/// wants to *show* and what a collision check compares: a tool a grant currently
-/// withholds still names the same thing.
+/// The whole set regardless of the grants and the edit format, because this is
+/// what the admin UI wants to *show*: a tool a grant currently withholds still
+/// names the same thing.
 pub fn tool_names(scope: &FileScope) -> Vec<String> {
     vec![
         read::tool_name(scope),
-        list::tool_name(scope),
+        find::tool_name(scope),
         search::tool_name(scope),
         write::tool_name(scope),
         edit::tool_name(scope),
+        patch::tool_name(scope),
         script::tool_name(scope),
     ]
+}
+
+/// The edit format a configuration resolves to for a model: its own setting,
+/// or under `auto` (and when unset) the model's preferred format.
+pub fn edit_format(config: &Attrs, preferred: EditFormat) -> EditFormat {
+    match config_str(config, CFG_EDIT_FORMAT).as_str() {
+        "str_replace" => EditFormat::StrReplace,
+        "apply_patch" => EditFormat::ApplyPatch,
+        "whole_file" => EditFormat::WholeFile,
+        _ => preferred,
+    }
 }
 
 #[async_trait::async_trait]
@@ -106,8 +162,8 @@ impl AgentTrait for Coding {
     }
 
     fn description(&self) -> &str {
-        "Work on the code in one file store: read, list and search it, and — if permitted — \
-         write, edit and run its scripts"
+        "Work on the code in one file store: read, find and search it, and — if permitted — \
+         edit it, check it and run its scripts"
     }
 
     fn config_spec(&self) -> Vec<FormField> {
@@ -123,9 +179,28 @@ impl AgentTrait for Coding {
                 .default_value(false),
         );
         spec.push(
-            FormField::new(CFG_MAX_CHARS, BasicType::Int)
-                .label("Maximum characters per file read")
-                .default_value(DEFAULT_MAX_CHARS as i64),
+            FormField::new(CFG_MAY_CHECK, BasicType::Bool)
+                .label("May format and type-check after edits")
+                .default_value(false),
+        );
+        spec.push(
+            FormField::new(CFG_DIAGNOSE, BasicType::Text)
+                .label("Type-check script")
+                .default_value(DEFAULT_DIAGNOSE),
+        );
+        spec.push(
+            FormField::new(CFG_EDIT_FORMAT, BasicType::Text)
+                .label("Edit format")
+                .options(
+                    [EDIT_FORMAT_AUTO, "str_replace", "apply_patch", "whole_file"]
+                        .map(str::to_owned),
+                )
+                .default_value(EDIT_FORMAT_AUTO),
+        );
+        spec.push(
+            FormField::new(CFG_MAX_LINES, BasicType::Int)
+                .label("Maximum lines per file read")
+                .default_value(DEFAULT_MAX_LINES as i64),
         );
         spec.push(
             FormField::new(CFG_MAX_RESULTS, BasicType::Int)
@@ -140,19 +215,19 @@ impl AgentTrait for Coding {
         spec
     }
 
-    /// The store exists, the root is inside it, the bounds are whole numbers and
-    /// every name this scope would derive is one a provider accepts.
+    /// The store exists, the root is inside it, the bounds are whole numbers, the
+    /// edit format is one there is, and every name this scope derives is one a
+    /// provider accepts.
     ///
-    /// The longest of the names is what decides the last of those: a scope whose
-    /// `search_files_…` fits but whose `run_script_…` does not would otherwise
-    /// pass here and fail at the vendor, which is the failure this check exists
-    /// to move forward in time.
+    /// The last is checked against the **longest** name the trait will derive
+    /// ([`LONGEST_TOOL_PREFIX`]), so a scope whose `search_files_…` fits but
+    /// whose `implement_feature_…` does not is refused here, not by the vendor.
     async fn validate_config(&self, check: &TraitCheck<'_>) -> Result<()> {
         let scope = check_scope(check).await?;
-        config_count(check.config, CFG_MAX_CHARS, DEFAULT_MAX_CHARS)?;
+        config_count(check.config, CFG_MAX_LINES, DEFAULT_MAX_LINES)?;
         config_count(check.config, CFG_MAX_RESULTS, DEFAULT_MAX_RESULTS as u64)?;
         config_count(check.config, CFG_TIMEOUT, DEFAULT_TIMEOUT_SECONDS)?;
-        for key in [CFG_MAY_EDIT, CFG_MAY_RUN_SCRIPTS] {
+        for key in [CFG_MAY_EDIT, CFG_MAY_RUN_SCRIPTS, CFG_MAY_CHECK] {
             match check.config.get(key) {
                 None | Some(Json::Null) | Some(Json::Bool(_)) => {}
                 Some(other) => {
@@ -162,27 +237,45 @@ impl AgentTrait for Coding {
                 }
             }
         }
+        match config_str(check.config, CFG_EDIT_FORMAT).as_str() {
+            "" | EDIT_FORMAT_AUTO | "str_replace" | "apply_patch" | "whole_file" => {}
+            other => {
+                return Err(Error::invalid(format!(
+                    "`{CFG_EDIT_FORMAT}` must be auto, str_replace, apply_patch or \
+                     whole_file, got `{other}`"
+                )));
+            }
+        }
         for name in tool_names(&scope) {
             check_tool_name(&name)?;
         }
+        check_tool_name(&format!("{LONGEST_TOOL_PREFIX}{}", scope.slug()))?;
         Ok(())
     }
 
-    /// The read-only tools in every mode; the edit and script tools only in
-    /// `act`, because `plan` and `explore` runs are read-only (TODO §5).
+    /// The read-only tools in every mode. In `act`, and under the grants, the
+    /// write tool, the one edit tool the edit format picks, and the script
+    /// runner.
     fn tools(&self, cx: &ToolsContext<'_>, config: &Attrs) -> Vec<ToolSpec> {
         let scope = scope_as_written(config);
         let mut tools = vec![
             read::spec(&scope, config),
-            list::spec(&scope),
+            find::spec(&scope, config),
             search::spec(&scope, config),
         ];
         if cx.mode != RunMode::Act {
             return tools;
         }
         if may(config, CFG_MAY_EDIT) {
-            tools.push(write::spec(&scope));
-            tools.push(edit::spec(&scope));
+            let format = edit_format(config, cx.capabilities.edit_format);
+            tools.push(write::spec(&scope, format));
+            match format {
+                EditFormat::StrReplace => tools.push(edit::spec(&scope)),
+                // Always the function tool: rig 0.41 cannot declare OpenAI's
+                // native `apply_patch` tool type (TODO 5.8).
+                EditFormat::ApplyPatch => tools.push(patch::spec(&scope)),
+                EditFormat::WholeFile => {}
+            }
         }
         if may(config, CFG_MAY_RUN_SCRIPTS) {
             tools.push(script::spec(&scope));
@@ -200,15 +293,26 @@ impl AgentTrait for Coding {
         let scope = configured_scope(config)?;
         match tool {
             _ if tool == read::tool_name(&scope) => read::call(&scope, config, args, ctx).await,
-            _ if tool == list::tool_name(&scope) => list::call(&scope, args, ctx).await,
+            _ if tool == find::tool_name(&scope) => find::call(&scope, config, args, ctx).await,
             _ if tool == search::tool_name(&scope) => search::call(&scope, config, args, ctx).await,
-            _ if tool == write::tool_name(&scope) => {
+            _ if tool == write::tool_name(&scope)
+                || tool == edit::tool_name(&scope)
+                || tool == patch::tool_name(&scope) =>
+            {
                 permit(config, CFG_MAY_EDIT, "change files", ctx)?;
-                write::call(&scope, args, ctx).await
-            }
-            _ if tool == edit::tool_name(&scope) => {
-                permit(config, CFG_MAY_EDIT, "change files", ctx)?;
-                edit::call(&scope, args, ctx).await
+                feedback::record_baseline(
+                    &scope,
+                    config,
+                    ctx.catalog,
+                    ctx.caller.role,
+                    ctx.trait_state,
+                )
+                .await?;
+                match tool {
+                    _ if tool == write::tool_name(&scope) => write::call(&scope, args, ctx).await,
+                    _ if tool == edit::tool_name(&scope) => edit::call(&scope, args, ctx).await,
+                    _ => patch::call(&scope, args, ctx).await,
+                }
             }
             _ if tool == script::tool_name(&scope) => {
                 permit(config, CFG_MAY_RUN_SCRIPTS, "run scripts", ctx)?;
@@ -220,11 +324,22 @@ impl AgentTrait for Coding {
             ))),
         }
     }
+
+    /// After a turn's edits: format the edited files and type-check them, once
+    /// (TODO 5.10).
+    async fn after_tools(
+        &self,
+        config: &Attrs,
+        cx: &mut AfterToolsContext<'_>,
+    ) -> Result<Option<String>> {
+        let scope = configured_scope(config)?;
+        feedback::after_edits(&scope, config, cx.catalog, cx.caller.role, cx.trait_state).await
+    }
 }
 
 /// Whether a grant is on. An absent checkbox reads as off, which is the reading
 /// that cannot turn a forgotten field into a permission.
-fn may(config: &Attrs, key: &str) -> bool {
+pub(crate) fn may(config: &Attrs, key: &str) -> bool {
     config.get(key).and_then(Json::as_bool).unwrap_or(false)
 }
 
@@ -283,12 +398,40 @@ mod tests {
             tool_names(&scope()),
             [
                 "read_file_app_src_web",
-                "list_files_app_src_web",
+                "find_files_app_src_web",
                 "search_files_app_src_web",
                 "write_file_app_src_web",
                 "edit_file_app_src_web",
+                "apply_patch_app_src_web",
                 "run_script_app_src_web",
             ]
+        );
+    }
+
+    /// `auto`, and no setting at all, follow the model; anything else is the
+    /// admin's choice whatever the model prefers.
+    #[test]
+    fn the_edit_format_follows_the_model_unless_the_admin_chose() {
+        let with = |format: &str| -> Attrs {
+            [(CFG_EDIT_FORMAT.to_owned(), json!(format))]
+                .into_iter()
+                .collect()
+        };
+        assert_eq!(
+            edit_format(&Attrs::new(), EditFormat::ApplyPatch),
+            EditFormat::ApplyPatch
+        );
+        assert_eq!(
+            edit_format(&with("auto"), EditFormat::StrReplace),
+            EditFormat::StrReplace
+        );
+        assert_eq!(
+            edit_format(&with("whole_file"), EditFormat::ApplyPatch),
+            EditFormat::WholeFile
+        );
+        assert_eq!(
+            edit_format(&with("apply_patch"), EditFormat::StrReplace),
+            EditFormat::ApplyPatch
         );
     }
 

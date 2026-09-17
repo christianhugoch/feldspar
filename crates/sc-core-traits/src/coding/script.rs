@@ -22,10 +22,12 @@
 //!
 //! [`FileStore`]: sc_files::FileStore
 
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use sc_agent::TraitContext;
+use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use sc_llm::ToolSpec;
 use sc_types::Attrs;
@@ -59,22 +61,14 @@ pub fn spec(scope: &FileScope) -> ToolSpec {
     ToolSpec::new(
         tool_name(scope),
         format!(
-            "Run one of the scripts declared in the `package.json` of {} \
-             (`npm run <script>`) and return its exit status and output. \
-             Only a script that project already declares can be run — there \
-             is no shell and no way to pass arguments — so read its \
-             `package.json` to see what there is. Use this for the checks a \
-             project defines: its tests, its linter, its type check.",
+            "Run a script declared in the `package.json` of {} (`npm run <script>`) and \
+             return its exit status and output. No arguments can be passed.",
             scope.label()
         ),
         json!({
             "type": "object",
             "properties": {
-                ARG_SCRIPT: {
-                    "type": "string",
-                    "description":
-                        "The script's name, exactly as `package.json` declares it.",
-                },
+                ARG_SCRIPT: {"type": "string", "description": "The script name."},
             },
             "required": [ARG_SCRIPT],
             "additionalProperties": false,
@@ -93,30 +87,69 @@ pub async fn call(
     let args = arguments(args, &[ARG_SCRIPT])?;
     let script = string_arg(&args, ARG_SCRIPT)?;
 
-    let (store, floor) = scope.connect(ctx.catalog).await?;
+    let project = project(scope, ctx.catalog, ctx.caller.role).await?;
+    if !project.scripts.iter().any(|s| s == &script) {
+        return Err(Error::invalid(match project.scripts.is_empty() {
+            true => {
+                format!("that `package.json` declares no scripts, so `{script}` cannot be run")
+            }
+            false => format!(
+                "`{script}` is not a script this project declares. It declares: {}.",
+                project.scripts.join(", ")
+            ),
+        }));
+    }
+
+    let output = match npm_run(&project.dir, &script, timeout).await? {
+        Ran::Finished(output) => output,
+        Ran::TimedOut => {
+            return Ok(json!({
+                "script": script,
+                "timed_out": true,
+                "seconds": timeout,
+                "message": format!(
+                    "`npm run {script}` was still running after {timeout} seconds \
+                     and was stopped."
+                ),
+            }));
+        }
+    };
+
+    Ok(json!({
+        "script": script,
+        "exit_code": output.status.code(),
+        "succeeded": output.status.success(),
+        "stdout": tail(&String::from_utf8_lossy(&output.stdout)),
+        "stderr": tail(&String::from_utf8_lossy(&output.stderr)),
+        "timed_out": false,
+    }))
+}
+
+/// The script names a `package.json` declares.
+/// A project that can run: its directory on disk and the scripts its
+/// `package.json` declares.
+pub struct Project {
+    /// The directory `package.json` is in.
+    pub dir: PathBuf,
+    /// The declared script names.
+    pub scripts: Vec<String>,
+}
+
+/// The project at the root of `scope`, read at `role`.
+pub async fn project(scope: &FileScope, catalog: &Catalog, role: u8) -> Result<Project> {
+    let (store, floor) = scope.connect(catalog).await?;
     let manifest_path = scope.resolve("package.json")?;
     // The manifest is a file in the store like any other, so reading it is
     // the caller's read: an agent whose user cannot see the project cannot
     // learn what scripts it declares either.
-    sc_files::check_access(store.as_ref(), floor, &manifest_path, ctx.caller.role).await?;
+    sc_files::check_access(store.as_ref(), floor, &manifest_path, role).await?;
     let manifest = store.read(&manifest_path).await.map_err(|_| {
         Error::invalid(format!(
             "{} has no `package.json`, so it declares no scripts to run",
             scope.label()
         ))
     })?;
-    let declared = declared_scripts(&manifest)?;
-    if !declared.iter().any(|s| s == &script) {
-        return Err(Error::invalid(match declared.is_empty() {
-            true => {
-                format!("that `package.json` declares no scripts, so `{script}` cannot be run")
-            }
-            false => format!(
-                "`{script}` is not a script this project declares. It declares: {}.",
-                declared.join(", ")
-            ),
-        }));
-    }
+    let scripts = declared_scripts(&manifest)?;
 
     // The bundler's requirement, for the bundler's reason (§13.3): `npm` is
     // an external process handed a working directory, so the store must have
@@ -131,51 +164,46 @@ pub async fn call(
                 scope.label()
             ))
         })?;
+    Ok(Project { dir, scripts })
+}
 
-    let child = Command::new("npm")
-        .arg("run")
-        .arg(&script)
-        .current_dir(&dir)
+/// How a bounded process ended.
+pub enum Ran {
+    /// It exited, with this output.
+    Finished(std::process::Output),
+    /// It was still running at the timeout, and was killed.
+    TimedOut,
+}
+
+/// Run `program args…` in `dir`, killed after `timeout` seconds.
+pub async fn run_bounded(dir: &Path, program: &str, args: &[&str], timeout: u64) -> Result<Ran> {
+    let child = Command::new(program)
+        .args(args)
+        .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .output();
-
-    let outcome = tokio::time::timeout(Duration::from_secs(timeout), child).await;
-    let output = match outcome {
+    match tokio::time::timeout(Duration::from_secs(timeout), child).await {
         // Dropping the future killed the process (`kill_on_drop`), so a
-        // script that hangs does not outlive the call that started it.
-        Err(_) => {
-            return Ok(json!({
-                "script": script,
-                "timed_out": true,
-                "seconds": timeout,
-                "message": format!(
-                    "`npm run {script}` was still running after {timeout} seconds \
-                     and was stopped."
-                ),
-            }));
-        }
-        Ok(result) => result.map_err(|e| {
+        // process that hangs does not outlive the call that started it.
+        Err(_) => Ok(Ran::TimedOut),
+        Ok(result) => result.map(Ran::Finished).map_err(|e| {
             Error::config(format!(
-                "could not run `npm run {script}` in {}: {e}",
+                "could not run `{program} {}` in {}: {e}",
+                args.join(" "),
                 dir.display()
             ))
-        })?,
-    };
-
-    Ok(json!({
-        "script": script,
-        "exit_code": output.status.code(),
-        "succeeded": output.status.success(),
-        "stdout": tail(&String::from_utf8_lossy(&output.stdout)),
-        "stderr": tail(&String::from_utf8_lossy(&output.stderr)),
-        "timed_out": false,
-    }))
+        }),
+    }
 }
 
-/// The script names a `package.json` declares.
+/// `npm run <script>` in `dir`, bounded.
+pub async fn npm_run(dir: &Path, script: &str, timeout: u64) -> Result<Ran> {
+    run_bounded(dir, "npm", &["run", script], timeout).await
+}
+
 fn declared_scripts(manifest: &[u8]) -> Result<Vec<String>> {
     let json: Json = serde_json::from_slice(manifest).map_err(|e| {
         Error::invalid(format!(
@@ -192,7 +220,7 @@ fn declared_scripts(manifest: &[u8]) -> Result<Vec<String>> {
 ///
 /// The tail rather than the head: a script that failed says why at the end, and
 /// the first 20,000 characters of a passing test run are the part nobody needs.
-fn tail(text: &str) -> String {
+pub fn tail(text: &str) -> String {
     let count = text.chars().count();
     if count <= MAX_OUTPUT_CHARS {
         return text.to_owned();

@@ -18,7 +18,7 @@ import {
   type SocketLike,
 } from "./agentChat";
 import {
-  changedPath,
+  changedPaths,
   participantContributions,
   storeModel,
   uniqueSlug,
@@ -290,7 +290,7 @@ describe("one event, relayed", () => {
       {
         type: "tool_result",
         id: "1",
-        name: "list_files_todoapp_app",
+        name: "find_files_todoapp_app",
         content: 'not found: "app"',
         is_error: true,
       },
@@ -298,7 +298,7 @@ describe("one event, relayed", () => {
     );
     relayEvent({ type: "error", message: "the provider refused" }, stream);
     expect(stream.markdownText.join("")).toContain(
-      '`list_files_todoapp_app` failed: not found: "app"',
+      '`find_files_todoapp_app` failed: not found: "app"',
     );
     expect(stream.markdownText.join("")).toContain("the provider refused");
   });
@@ -323,8 +323,31 @@ describe("one event, relayed", () => {
       },
       stream,
     );
-    expect(wrote).toBe("src/App.tsx");
-    expect(read).toBeNull();
+    expect(wrote).toEqual(["src/App.tsx"]);
+    expect(read).toEqual([]);
+  });
+
+  it("says every file a patch changes", () => {
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: src/App.tsx",
+      "*** Move to: src/Main.tsx",
+      "-a",
+      "+b",
+      "*** Add File: src/new.ts",
+      "+x",
+      "*** Delete File: src/old.ts",
+      "*** End Patch",
+    ].join("\n");
+    expect(changedPaths("apply_patch_todoapp_app", { patch })).toEqual([
+      "src/App.tsx",
+      "src/Main.tsx",
+      "src/new.ts",
+      "src/old.ts",
+    ]);
+    expect(toolProgress("apply_patch_todoapp_app", { patch })).toBe(
+      "Patching src/App.tsx, src/Main.tsx, src/new.ts, src/old.ts",
+    );
   });
 
   it("names a tool it does not know rather than inventing a verb for it", () => {
@@ -332,9 +355,9 @@ describe("one event, relayed", () => {
       "query_rows_books",
     );
     expect(
-      toolProgress("search_files_todoapp_app", { query: "useState" }),
+      toolProgress("search_files_todoapp_app", { pattern: "useState" }),
     ).toBe("Searching for useState");
-    expect(changedPath("edit_file_todoapp_app", {})).toBeNull();
+    expect(changedPaths("edit_file_todoapp_app", {})).toEqual([]);
   });
 
   it("places a changed file under the agent's own root, not the workspace's", () => {
