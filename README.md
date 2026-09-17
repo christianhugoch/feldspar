@@ -172,7 +172,7 @@ Run the server as its own unprivileged system user, and keep the checkout somewh
 that user can read:
 
 ```bash
-sudo adduser --system --group --home /opt/feldspar feldspar
+sudo adduser --system --group --home /var/lib/feldspar feldspar
 sudo install -d -o "$USER" -g "$USER" /opt/feldspar/src
 ```
 
@@ -180,6 +180,24 @@ The checkout is built and owned by *you* and is only ever read by the service; t
 service's writable state (disk file stores, application source trees and their
 `node_modules`, npm's cache) lives in `/var/lib/feldspar`, which the systemd unit in
 §2.6 creates.
+
+The account's home is that state directory and **not** `/opt/feldspar`, which is the
+program tree: a service account should own what it writes and nothing it executes. Two
+consequences worth knowing —
+
+- The binary stays root's. A server that could rewrite its own binary would turn any
+  bug in the code it runs on an admin's behalf — application JavaScript and Python, the
+  coding agent's shell — into something that survives a restart. This is also why an
+  in-app upgrade button cannot simply overwrite `/opt/feldspar/bin/feldspar`; an
+  upgrade has to go through something privileged that verifies what it installs.
+- Because the home is writable, per-account settings work as they do for any user. The
+  identity the agent's commits are made under is the obvious one, and without it they
+  are attributed to `Saltcorn <saltcorn@localhost>`:
+
+  ```bash
+  sudo -u feldspar git config --global user.name  "Saltcorn"
+  sudo -u feldspar git config --global user.email "feldspar@example.com"
+  ```
 
 > **The built binary keeps a path back into its checkout.** `cargo build` records the
 > absolute paths of `ui/admin/dist` and `ui/ide/dist` in the binary (§6), which is how
@@ -257,8 +275,8 @@ database = "feldspar"
 base_domain = "example.com"    # each application is served at <subdomain>.example.com
 bind = "0.0.0.0:80"
 TOML
-sudo chown feldspar:feldspar /etc/feldspar/feldspar.toml
-sudo chmod 600 /etc/feldspar/feldspar.toml
+sudo chown root:feldspar /etc/feldspar/feldspar.toml
+sudo chmod 640 /etc/feldspar/feldspar.toml
 ```
 
 Notes on that file, all of which §7 covers in full:
@@ -272,8 +290,12 @@ Notes on that file, all of which §7 covers in full:
   `url = "postgres://feldspar:change-me@db.internal:5432/feldspar"`.
 - Add a `[environments.staging]` section when you have a second database, and select
   it with `feldspar serve --environment staging`.
-- `chmod 600` because such a file may hold a password; the server warns on stderr when
-  it is readable by anyone else.
+- `root:feldspar 0640` because such a file may hold a password. The server *reads* its
+  configuration and never writes it, so root keeps ownership: a compromised server can
+  read the password either way, but it cannot rewrite the file that decides what the
+  next restart connects to. Nobody outside the group can read it at all, and the server
+  warns on stderr about anything wider than that — including a group that is not its
+  own.
 - Leave `secure_cookies` unset for now. It is for a deployment behind a
   TLS-terminating proxy — with Saltcorn's own TLS (§2.7) the session cookies become
   `Secure` on their own.
@@ -311,6 +333,20 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/feldspar
+
+# The rest of the kernel surface.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
@@ -356,6 +392,26 @@ Why each of the less obvious lines:
 - **`WorkingDirectory`** is what a relative file-store path resolves against.
 - **`AmbientCapabilities=CAP_NET_BIND_SERVICE`** lets an unprivileged process bind 80
   and 443. Drop both capability lines if you bind a high port behind a reverse proxy.
+- **The `Protect*`/`Restrict*` block** closes off the kernel surface a web server has no
+  use for. It matters more here than for most services, because this one runs code an
+  admin wrote — application JavaScript and Python, the coding agent's shell — so the
+  account should be assumed reachable, and what it can reach from there is the whole
+  question. `UMask=0077` keeps the files it writes to itself.
+
+  Four settings are left out on purpose, and it is worth knowing why before adding
+  them from another hardening guide:
+
+  | Omitted | Because |
+  | --- | --- |
+  | `MemoryDenyWriteExecute` | The module runtime *is* a JIT (V8, and Python's). |
+  | `SystemCallFilter` | Blocks `clone(CLONE_NEWUSER)` — Chromium's sandbox. |
+  | `RestrictNamespaces` | The same. `view_app` would need `--no-sandbox`, and a browser rendering application content is the last place to give that up. |
+  | `ProcSubset=pid` | Hides `/proc/cpuinfo` and `/proc/meminfo`; V8 sizes its heap from them. |
+
+  `AF_NETLINK` is in `RestrictAddressFamilies` for a similar reason: glibc's
+  `getaddrinfo` asks netlink which addresses are configured before it resolves anything.
+
+  `systemd-analyze security feldspar.service` scores the result.
 
 Confirm the process is up (§9):
 
@@ -931,8 +987,10 @@ No file at all is fine — that is the environment-variable deployment. But a fi
 that does not parse, a key that is not recognised, a `--config` path that does not
 exist, or an `--environment` the file does not define are all startup errors, not
 things stepped over: the alternative is connecting to a database you did not mean.
-The file holds passwords, so keep it `chmod 600` — the server warns on stderr if
-other users can read it.
+The file holds passwords, so keep it to the server: `root:feldspar 0640` under the
+systemd unit of §2.6 (the server reads this file and never writes it, so root keeps
+ownership), or `chmod 600` when it is yours. The server warns on stderr if anyone else
+can read it — including a group that is not its own.
 
 > **Naming an environment outranks `DATABASE_URL` and `PG*`.** Normally the
 > environment wins and the file fills in what it leaves unset. But

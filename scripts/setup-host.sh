@@ -107,6 +107,10 @@ case "$0" in
         ;;
 esac
 SERVICE_USER="feldspar"
+# The one writable path: the service account's home, the unit's HOME and
+# WorkingDirectory, systemd's StateDirectory and the only ReadWritePaths. It is
+# a single name because those five have to agree — see §2 and §6.
+STATE_DIR="/var/lib/feldspar"
 DB_NAME="feldspar"
 DB_USER="feldspar"
 DATABASE_URL=""         # set: an existing database elsewhere, and no local postgres
@@ -283,9 +287,12 @@ write_root_file() {
         return 0
     fi
     ${SUDO} install -d -m 0755 "$(dirname "${_path}")"
-    ${SUDO} tee "${_path}" >/dev/null
-    ${SUDO} chmod "${_mode}" "${_path}"
+    # Empty, at its final mode and owner, *before* the content goes in: `tee`
+    # would otherwise create it at the umask's 0644 and leave a database
+    # password world-readable for as long as the chmod takes to follow.
+    ${SUDO} install -m "${_mode}" /dev/null "${_path}"
     [ -n "${_owner}" ] && ${SUDO} chown "${_owner}" "${_path}"
+    ${SUDO} tee "${_path}" >/dev/null
     return 0
 }
 
@@ -492,7 +499,15 @@ if id "${SERVICE_USER}" >/dev/null 2>&1; then
     note "the ${SERVICE_USER} account already exists"
 else
     log "creating the ${SERVICE_USER} system account"
-    run_root adduser --system --group --home "${PREFIX}" "${SERVICE_USER}"
+    # The home is the *state* directory, never the program tree: a service
+    # account owns what it writes and nothing it executes. ${PREFIX} stays
+    # root-owned and read-only to the service, which is what stops a compromised
+    # server from rewriting its own binary and surviving a restart.
+    #
+    # It has to agree with the unit's HOME (§6), or `sudo -u ${SERVICE_USER} ...`
+    # from a shell lands somewhere the account cannot write: that is where git
+    # looks for the identity `feldspar`'s commits are made under.
+    run_root adduser --system --group --home "${STATE_DIR}" "${SERVICE_USER}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -630,9 +645,13 @@ database = \"${DB_NAME}\""
     else
         DOMAIN_SETTING="# base_domain = \"example.com\"   # uncomment to serve applications"
     fi
-    # Mode 600 and owned by the service account: such a file may hold a database
-    # password, and the server warns on stderr when it is readable by anyone else.
-    write_root_file "${CONFIG_FILE}" 0600 "${SERVICE_USER}:${SERVICE_USER}" <<EOF
+    # root:${SERVICE_USER} 0640 — the service *reads* its configuration and never
+    # writes it, so it does not own it. A file like this may hold a database
+    # password, which a compromised server can read either way; what the
+    # ownership buys is that it cannot rewrite the file to point the next restart
+    # somewhere else. Nobody outside the group can read it at all, and the server
+    # warns on stderr about modes wider than this.
+    write_root_file "${CONFIG_FILE}" 0640 "root:${SERVICE_USER}" <<EOF
 # Written by scripts/setup-host.sh. See README §7 for everything that can go here.
 default_environment = "${ENVIRONMENT}"
 
@@ -678,10 +697,10 @@ User=${SERVICE_USER}
 Group=${SERVICE_USER}
 ExecStart=${BINARY} serve --environment ${ENVIRONMENT}
 Environment=FELDSPAR_CONFIG=${CONFIG_FILE}
-Environment=HOME=/var/lib/feldspar
-Environment=SC_DATA_DIR=/var/lib/feldspar
+Environment=HOME=${STATE_DIR}
+Environment=SC_DATA_DIR=${STATE_DIR}
 StateDirectory=feldspar
-WorkingDirectory=/var/lib/feldspar
+WorkingDirectory=${STATE_DIR}
 Restart=on-failure
 RestartSec=5s
 
@@ -689,12 +708,38 @@ RestartSec=5s
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
-# Everything read-only except the state directory.
+# Everything read-only except the state directory. In particular ${PREFIX} and
+# the binary are root's: the server runs user-authored JavaScript and Python and
+# shells out to git, so the account must be assumed reachable, and an account
+# that cannot write the code it executes cannot survive a restart.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/feldspar
+ReadWritePaths=${STATE_DIR}
+
+# The rest of the kernel surface. Deliberately *not* here:
+#   MemoryDenyWriteExecute  breaks the V8 and Python JITs the module runtime is.
+#   SystemCallFilter        blocks clone(CLONE_NEWUSER), which is Chromium's
+#   RestrictNamespaces      sandbox; view_app would need --no-sandbox, and a
+#                           browser rendering application content is the last
+#                           place to give that up.
+#   ProcSubset=pid          hides /proc/cpuinfo and /proc/meminfo, which V8 sizes
+#                           its heap from and Chromium reads at startup.
+# AF_NETLINK is in the address families because glibc's getaddrinfo asks it which
+# addresses are configured before it resolves anything.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

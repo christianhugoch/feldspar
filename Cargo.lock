@@ -8304,6 +8304,7 @@ dependencies = [
 name = "sc-config-file"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "sc-error",
  "serde",
  "toml",

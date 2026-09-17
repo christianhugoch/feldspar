@@ -489,8 +489,11 @@ does not exist, and an `--environment` the file does not define are all startup
 errors rather than things stepped over. A misspelled `databse` that was quietly
 ignored would connect to the wrong database, which is worse than not starting.
 
-Keep it `chmod 600`. It holds passwords, and the server warns on stderr when
-other users can read it.
+Keep it to the server: `root:feldspar 0640` for the systemd deployment — the server
+reads this file and never writes it, so leaving root the owner means a compromised
+server cannot rewrite what the next restart connects to — or `chmod 600` when the file
+is yours. It holds passwords, and the server warns on stderr when other users can read
+it, counting a group that is not its own as other users.
 
 ### 4.2 The format
 

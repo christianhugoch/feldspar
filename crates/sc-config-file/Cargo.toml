@@ -13,5 +13,10 @@ sc-error.workspace = true
 serde.workspace = true
 toml.workspace = true
 
+# One call, `getegid`, for the configuration file's permission check: a
+# group-readable file is only worth warning about when the group is someone else's.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [lints]
 workspace = true

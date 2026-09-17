@@ -471,23 +471,46 @@ fn env_var(name: &str) -> Option<String> {
 ///
 /// Not an error: refusing to start over a file mode would be a bad trade for a
 /// deployment that has decided its own access rules. But a database password in
-/// a world-readable file is worth a sentence, and the operator is the only one
-/// who can see it.
+/// a file other people can read is worth a sentence, and the operator is the
+/// only one who can see it.
+///
+/// "Other people" is the part worth being careful about. `scripts/setup-host.sh`
+/// writes this file `root:feldspar 0640` on purpose: the server reads its
+/// configuration and never writes it, so leaving it to root means a compromised
+/// server cannot rewrite the file that decides what the next restart does. The
+/// group bit is what makes that readable at all, and warning about it would be
+/// telling the operator to undo the hardened layout. So group access counts only
+/// when the group is *not* the one this process is running as — when it really
+/// is somebody else.
 #[cfg(unix)]
 fn warn_if_world_readable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let Ok(meta) = std::fs::metadata(path) else {
         return;
     };
-    let mode = meta.permissions().mode() & 0o077;
-    if mode != 0 {
+    let mode = meta.permissions().mode();
+    // SAFETY: `getegid` reads one field of the calling process and cannot fail.
+    let own_group = unsafe { libc::getegid() };
+    if reachable_by_others(mode, meta.gid(), own_group) {
         eprintln!(
             "feldspar: warning: the configuration file {} is readable by other users \
-             (mode {:o}); it may contain database passwords — consider `chmod 600`",
+             (mode {:o}); it may contain database passwords — consider `chmod 640` \
+             with a group only the server is in, or `chmod 600`",
             path.display(),
-            meta.permissions().mode() & 0o777,
+            mode & 0o777,
         );
     }
+}
+
+/// Whether anyone but the owner and the server's own group can reach the file.
+///
+/// Split out from [`warn_if_world_readable`] because the interesting half is the
+/// decision, not the `eprintln!`, and the decision is three numbers.
+#[cfg(unix)]
+fn reachable_by_others(mode: u32, gid: u32, own_gid: u32) -> bool {
+    let group_reaches = mode & 0o070 != 0 && gid != own_gid;
+    let others_reach = mode & 0o007 != 0;
+    group_reaches || others_reach
 }
 
 /// No file modes to check off Unix.
@@ -687,5 +710,31 @@ port = "5432"
                 "{path:?}"
             );
         }
+    }
+
+    /// Which modes are worth a word on stderr.
+    ///
+    /// `scripts/setup-host.sh` writes the file `root:feldspar 0640` on purpose —
+    /// the server reads its configuration and never writes it, so root keeps
+    /// ownership and a compromised server cannot rewrite what the next restart
+    /// connects to. Warning about that would be telling the operator to undo the
+    /// hardened layout, so the group bit counts only when the group is somebody
+    /// else's.
+    #[cfg(unix)]
+    #[test]
+    fn a_group_readable_config_is_only_a_problem_when_the_group_is_someone_else() {
+        // The setup-host.sh layout: root:feldspar 0640, read as feldspar.
+        assert!(!reachable_by_others(0o640, 42, 42));
+        // The same mode, but the group is not the server's.
+        assert!(reachable_by_others(0o640, 43, 42));
+        // Tight enough either way.
+        assert!(!reachable_by_others(0o600, 43, 42));
+        // Anyone at all, however the groups fall.
+        assert!(reachable_by_others(0o644, 42, 42));
+        assert!(reachable_by_others(0o604, 42, 42));
+        // Write, not just read: a group that can rewrite the file picks the
+        // database the next restart connects to.
+        assert!(reachable_by_others(0o620, 43, 42));
+        assert!(!reachable_by_others(0o660, 42, 42));
     }
 }

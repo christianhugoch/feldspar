@@ -155,7 +155,7 @@ fn a_static_install_writes_the_config_and_a_unit_pointing_at_the_deployed_binary
     );
 
     // The configuration file: the remote database as a url, the base domain, and
-    // 0600 because a file like this may hold a password.
+    // 0640 because a file like this may hold a password.
     let toml = fs::read_to_string(&config).expect("the configuration file should exist");
     assert!(
         toml.contains(r#"url = "postgres://feldspar:pw@db.internal/feldspar""#),
@@ -168,8 +168,8 @@ fn a_static_install_writes_the_config_and_a_unit_pointing_at_the_deployed_binary
     );
     assert_eq!(
         fs::metadata(&config).unwrap().permissions().mode() & 0o777,
-        0o600,
-        "the configuration file must not be world-readable"
+        0o640,
+        "the configuration file must not be readable outside the service's group"
     );
 
     // The unit: the deployed binary, the config file this run wrote, and the
@@ -186,6 +186,8 @@ fn a_static_install_writes_the_config_and_a_unit_pointing_at_the_deployed_binary
         "StateDirectory=feldspar",
         "ProtectSystem=strict",
         "ReadWritePaths=/var/lib/feldspar",
+        "Environment=HOME=/var/lib/feldspar",
+        "WorkingDirectory=/var/lib/feldspar",
         "AmbientCapabilities=CAP_NET_BIND_SERVICE",
     ] {
         assert!(
@@ -723,4 +725,149 @@ fn which(tool: &str) -> Result<PathBuf, ()> {
         .map(|dir| dir.join(tool))
         .find(|candidate| candidate.is_file())
         .ok_or(())
+}
+
+/// The account owns what it writes and nothing it executes.
+///
+/// Three things that have to hold together, and did not before: the service
+/// account's home is the state directory rather than the program prefix, so
+/// `sudo -u feldspar git config --global ...` has somewhere to write and
+/// `/opt/feldspar` stays root's; the configuration file is `root:feldspar`, so a
+/// server that can read its database password still cannot rewrite the file that
+/// decides what the next restart connects to; and the unit closes off the kernel
+/// surface — without the four settings that would break the JIT or Chromium's
+/// sandbox.
+#[test]
+fn the_service_account_owns_its_state_and_nothing_it_runs() {
+    let dir = scratch("ownership");
+    let (bin, log) = stub_dir(&dir);
+    let prefix = dir.join("opt/feldspar");
+    let config = dir.join("etc/feldspar/feldspar.toml");
+    let unit = dir.join("etc/systemd/system/feldspar.service");
+    write_executable(&prefix.join("bin/feldspar"), "#!/bin/sh\nexit 0\n");
+
+    // Not `feldspar`: an account that already exists is left alone, and the
+    // machine running these tests may well be running the service. A name nothing
+    // can have is what takes the branch under test.
+    let account = "feldspar-nonexistent-acct";
+    assert!(
+        std::process::Command::new("id")
+            .arg(account)
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true),
+        "{account} should not exist on this machine"
+    );
+
+    let out = Command::new("sh")
+        .arg(script())
+        .args(["--static", "--domain", "example.com", "--user", account])
+        .arg("--database-url")
+        .arg("postgres://feldspar:pw@db.internal/feldspar")
+        .arg("--prefix")
+        .arg(&prefix)
+        .arg("--config")
+        .arg(&config)
+        .arg("--unit")
+        .arg(&unit)
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .output()
+        .expect("run setup-host.sh");
+    assert!(
+        out.status.success(),
+        "setup failed ({})\n{}\n{}",
+        out.status,
+        stdout_of(&out),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let commands = fs::read_to_string(&log).expect("the stubs should have logged");
+
+    // The home is the state directory, not ${PREFIX}: a service account that owned
+    // the program tree could rewrite the binary it is about to execute.
+    let adduser = commands
+        .lines()
+        .find(|l| l.starts_with("adduser"))
+        .unwrap_or_else(|| panic!("no adduser in:\n{commands}"));
+    assert!(
+        adduser.contains("--home /var/lib/feldspar"),
+        "the account's home should be its state directory: {adduser}"
+    );
+    assert!(
+        !adduser.contains(&prefix.display().to_string()),
+        "the account's home must not be the program prefix: {adduser}"
+    );
+
+    // Owned by root, readable by the service: `chown` is a stub here, so the
+    // assertion is on how it was called.
+    let chown = commands
+        .lines()
+        .rfind(|l| l.starts_with("chown") && l.contains("feldspar.toml"))
+        .unwrap_or_else(|| panic!("the config file should be chowned:\n{commands}"));
+    assert!(
+        chown.contains(&format!("root:{account}")),
+        "the config file should be root's, read by the service's group: {chown}"
+    );
+
+    // The mode is on the file before a password is written into it — `tee` alone
+    // would create it at the umask's 0644 and leave it world-readable until the
+    // chmod caught up.
+    let (created, wrote) = (
+        commands
+            .lines()
+            .position(|l| l.starts_with("sudo install -m 0640") && l.contains("feldspar.toml")),
+        commands
+            .lines()
+            .position(|l| l.starts_with("sudo tee") && l.contains("feldspar.toml")),
+    );
+    let created = created.unwrap_or_else(|| panic!("no mode-first create:\n{commands}"));
+    let wrote = wrote.unwrap_or_else(|| panic!("no tee of the config:\n{commands}"));
+    assert!(
+        created < wrote,
+        "the config file should reach its final mode before the content goes in:\n{commands}"
+    );
+
+    let service = fs::read_to_string(&unit).expect("the unit should exist");
+    for line in [
+        "ProtectKernelTunables=true",
+        "ProtectKernelModules=true",
+        "ProtectKernelLogs=true",
+        "ProtectControlGroups=true",
+        "ProtectClock=true",
+        "ProtectHostname=true",
+        "ProtectProc=invisible",
+        "RestrictSUIDSGID=true",
+        "RestrictRealtime=true",
+        "LockPersonality=true",
+        "UMask=0077",
+    ] {
+        assert!(
+            service.contains(line),
+            "the unit should have {line}:\n{service}"
+        );
+    }
+
+    // glibc's getaddrinfo asks netlink what is configured before resolving.
+    assert!(
+        service.contains("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK"),
+        "netlink is needed by the resolver:\n{service}"
+    );
+
+    // The four that would break the module runtime or view_app. Each is named in
+    // a comment explaining the omission, so the check is on the directive.
+    for forbidden in [
+        "MemoryDenyWriteExecute=",
+        "SystemCallFilter=",
+        "RestrictNamespaces=",
+        "ProcSubset=",
+    ] {
+        assert!(
+            !service
+                .lines()
+                .any(|l| l.trim_start().starts_with(forbidden)),
+            "{forbidden} breaks the JIT or Chromium's sandbox and must stay out:\n{service}"
+        );
+    }
 }

@@ -2,6 +2,62 @@
 
 Changes in reverse chronological order.
 
+## The service account owns its state and nothing it runs
+
+A review of what `scripts/setup-host.sh` leaves on a host. The service runs code an admin
+wrote — application JavaScript and Python, the coding agent's shell — so the account has to be
+assumed reachable, and the question is what it can reach from there.
+
+- **The account's home is `/var/lib/feldspar`, not `/opt/feldspar`.** It was the *program
+  prefix*, which conflated two directories that want opposite permissions: an account should
+  own what it writes and nothing it executes. The unit already overrode `HOME` to the state
+  directory, so the passwd entry disagreed with the running service, and two things fell out of
+  that. A static install left the home root-owned (`install.sh` created `/opt/feldspar` before
+  `adduser` saw it), so `sudo -u feldspar git config --global user.email ...` had nowhere to
+  write — the identity the agent's commits are made under. A source install did the reverse and
+  gave the account the prefix. Now `STATE_DIR` names one directory for all five uses (the home,
+  `HOME`, `WorkingDirectory`, `StateDirectory`, the single `ReadWritePaths`), and `/opt/feldspar`
+  and the binary stay root's.
+
+  This is also the constraint on an in-app upgrade: it cannot overwrite
+  `/opt/feldspar/bin/feldspar` from inside the server, and wants a privileged helper that
+  verifies a signature on what it installs. README §2.2 says so.
+
+- **`/etc/feldspar/feldspar.toml` is `root:feldspar 0640`,** not `feldspar:feldspar 0600`. The
+  server reads its configuration and never writes it, so root keeps ownership: a compromised
+  server can read the database password either way, but it cannot rewrite the file that decides
+  what the next restart connects to. `warn_if_world_readable` would have called that mode a
+  problem, so the check now counts group access only when the group is not the server's own —
+  split out as `reachable_by_others(mode, gid, own_gid)` and tested on the numbers.
+
+- **`write_root_file` puts the mode on before the content.** `tee` created the file at the
+  umask's 0644 and the `chmod` followed, so a file with a database password in it was
+  world-readable for the width of that window. It is now created empty at its final mode and
+  owner, and the content goes in after.
+
+- **The unit closes off the kernel surface** it has no use for: `ProtectKernelTunables`,
+  `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`, `ProtectClock`,
+  `ProtectHostname`, `ProtectProc=invisible`, `RestrictSUIDSGID`, `RestrictRealtime`,
+  `LockPersonality`, `RestrictAddressFamilies` and `UMask=0077`. Four common hardening settings
+  are deliberately left out, and both the unit and README §2.6 say why, because they look like
+  oversights: `MemoryDenyWriteExecute` breaks the V8 and Python JITs the module runtime is;
+  `SystemCallFilter` and `RestrictNamespaces` block `clone(CLONE_NEWUSER)`, which is Chromium's
+  sandbox, and `view_app` would have to fall back to `--no-sandbox`; `ProcSubset=pid` hides
+  `/proc/cpuinfo` and `/proc/meminfo`, which V8 sizes its heap from. `AF_NETLINK` is allowed for
+  the same class of reason — glibc's `getaddrinfo` asks netlink what is configured before it
+  resolves anything.
+
+  An existing unit is still kept on a re-run (`--force` replaces it), so a host set up before
+  this does not get the hardening until it is asked for.
+
+- **Tests.** `the_service_account_owns_its_state_and_nothing_it_runs` covers all four: the
+  `adduser` home, the `chown` argument, the create-before-write ordering, the new directives and
+  the absence of the four that would break the runtime. It runs under a service-user name that
+  cannot exist, because an account that already exists is left alone and the machine running the
+  tests may be running the service. `a_group_readable_config_is_only_a_problem_when_the_group_is_someone_else`
+  covers the permission predicate. README §2.2, §2.5, §2.6 and §7 and `docs/OPERATIONS.md` §4.1
+  follow.
+
 ## The documentation (coding agent milestone, Phase 12)
 
 The milestone's design record and its tutorial, brought up to what was built. No behaviour
