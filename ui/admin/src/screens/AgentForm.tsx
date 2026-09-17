@@ -11,6 +11,11 @@
 // trait with two configurations, so the enabled traits are a *list* the admin
 // adds to, each entry carrying its own settings — and the order is the order the
 // tools are offered to the model in.
+//
+// One exception to "no screen knows a trait", and it is presentation only: the
+// `coding` trait's shell settings are drawn as a group of their own, with a
+// warning when the shell has no sandbox, because that grant is every other
+// grant at once and deserves not to look like one more checkbox (`agentForm.ts`).
 
 import { useEffect, useState, type FormEvent } from "react";
 import Alert from "react-bootstrap/Alert";
@@ -34,7 +39,19 @@ import { PageBody, PageHeader } from "../layout";
 import { OptionalRoleSelect } from "../roleSelect";
 import { useRoles } from "../roles";
 import { modelOptions, type ModelItem } from "../llmModels";
-import { SettingsFields, buildConfig, readConfig } from "../settings";
+import {
+  BUDGETS,
+  NUMBER_ATTRIBUTES,
+  ROLES,
+  agentAttributes,
+  readNumbers,
+  readRoles,
+  shellWarning,
+  splitShellSettings,
+  type RoleChoice,
+  type RoleKey,
+} from "../agentForm";
+import { SettingsFields, buildConfig, readConfig, type FieldSpec } from "../settings";
 
 type TraitInfo = ListAgentTraitsResponse[number];
 type AgentItem = ListAgentsResponse[number];
@@ -43,27 +60,6 @@ type ProviderItem = ListLlmProvidersResponse[number];
 /** One enabled trait as the form holds it: which trait, and its settings as the
  * strings the controls edit. */
 type Enabled = { trait: string; config: Record<string, string> };
-
-/** The sparse per-agent attributes (§9) this form offers. Absent means the
- * provider's own default, which is why each is a box that can be left empty
- * rather than a number with a default already in it. */
-const ATTRIBUTES = [
-  {
-    key: "temperature",
-    label: "Temperature",
-    help: "Blank uses the provider's own default.",
-  },
-  {
-    key: "max_tokens",
-    label: "Max tokens per answer",
-    help: "Blank uses the provider's own default.",
-  },
-  {
-    key: "max_steps",
-    label: "Max steps per run",
-    help: "How many times one run may go round the loop. Blank means 20.",
-  },
-] as const;
 
 export function AgentForm({ agentId }: { agentId?: string }) {
   const roles = useRoles();
@@ -81,7 +77,10 @@ export function AgentForm({ agentId }: { agentId?: string }) {
   const [systemPrompt, setSystemPrompt] = useState("");
   const [minRole, setMinRole] = useState<number | null>(null);
   const [enabled, setEnabled] = useState<Enabled[]>([]);
-  const [attributes, setAttributes] = useState<Record<string, string>>({});
+  // What the agent had, so keys this form does not show survive a save.
+  const [storedAttributes, setStoredAttributes] = useState<unknown>({});
+  const [numbers, setNumbers] = useState<Record<string, string>>({});
+  const [modelRoles, setModelRoles] = useState<Record<RoleKey, RoleChoice>>(readRoles({}));
   const [adding, setAdding] = useState("");
 
   useEffect(() => {
@@ -117,7 +116,9 @@ export function AgentForm({ agentId }: { agentId?: string }) {
               config: readConfig(t.config),
             })),
           );
-          setAttributes(readConfig(existing.attributes));
+          setStoredAttributes(existing.attributes);
+          setNumbers(readNumbers(existing.attributes));
+          setModelRoles(readRoles(existing.attributes));
         } else {
           setProvider(providerList[0]?.name ?? "");
         }
@@ -171,14 +172,9 @@ export function AgentForm({ agentId }: { agentId?: string }) {
           config: buildConfig(specOf(entry.trait), entry.config),
         })),
         min_role: minRole,
-        // The sparse attributes: what was typed, nothing that was not. An empty
-        // box is not a zero.
-        attributes: Object.fromEntries(
-          ATTRIBUTES.filter(({ key }) => (attributes[key] ?? "").trim() !== "").map(({ key }) => [
-            key,
-            Number(attributes[key]),
-          ]),
-        ),
+        // The sparse attributes: what was typed, nothing that was not, and
+        // every stored key this form has no box for.
+        attributes: agentAttributes(storedAttributes, numbers, modelRoles),
       };
       if (agentId) {
         await api.updateAgent(agentId, body);
@@ -329,20 +325,59 @@ export function AgentForm({ agentId }: { agentId?: string }) {
               </Form.Group>
 
               <Row>
-                {ATTRIBUTES.map((attr) => (
+                {NUMBER_ATTRIBUTES.map((attr) => (
                   <Col md={4} key={attr.key}>
-                    <Form.Group className="mb-3" controlId={`agent-${attr.key}`}>
-                      <Form.Label>{attr.label}</Form.Label>
-                      <Form.Control
-                        type="number"
-                        step="any"
-                        value={attributes[attr.key] ?? ""}
-                        onChange={(e) =>
-                          setAttributes((a) => ({ ...a, [attr.key]: e.target.value }))
-                        }
-                      />
-                      <Form.Text muted>{attr.help}</Form.Text>
-                    </Form.Group>
+                    <NumberBox
+                      attr={attr}
+                      value={numbers[attr.key] ?? ""}
+                      onChange={(value) => setNumbers((n) => ({ ...n, [attr.key]: value }))}
+                    />
+                  </Col>
+                ))}
+              </Row>
+            </Card.Body>
+          </Card>
+
+          <Card className="mb-3">
+            <Card.Header>Roles</Card.Header>
+            <Card.Body>
+              <p className="text-muted small">
+                The model above is the <strong>executor</strong>, which does the work. A planned
+                coding agent plans on the strong model and hands small jobs to the cheap one; an
+                agent with neither set uses its own model for everything.
+              </p>
+              <Row>
+                {ROLES.map((role) => (
+                  <Col md={6} key={role.key}>
+                    <RolePicker
+                      id={`agent-role-${role.key}`}
+                      label={role.label}
+                      help={role.help}
+                      providers={providers}
+                      value={modelRoles[role.key]}
+                      onChange={(value) => setModelRoles((r) => ({ ...r, [role.key]: value }))}
+                    />
+                  </Col>
+                ))}
+              </Row>
+            </Card.Body>
+          </Card>
+
+          <Card className="mb-3">
+            <Card.Header>Budgets</Card.Header>
+            <Card.Body>
+              <p className="text-muted small">
+                Per run. A run that reaches one stops and says which; the conversation can be
+                continued. Blank is no limit unless it says otherwise.
+              </p>
+              <Row>
+                {BUDGETS.map((attr) => (
+                  <Col md={6} key={attr.key}>
+                    <NumberBox
+                      attr={attr}
+                      value={numbers[attr.key] ?? ""}
+                      onChange={(value) => setNumbers((n) => ({ ...n, [attr.key]: value }))}
+                    />
                   </Col>
                 ))}
               </Row>
@@ -378,7 +413,8 @@ export function AgentForm({ agentId }: { agentId?: string }) {
                     </Button>
                   </Card.Header>
                   <Card.Body>
-                    <SettingsFields
+                    <TraitSettings
+                      trait={entry.trait}
                       spec={specOf(entry.trait)}
                       values={entry.config}
                       onChange={(key, value) =>
@@ -434,6 +470,150 @@ export function AgentForm({ agentId }: { agentId?: string }) {
           </div>
         </Form>
       </PageBody>
+    </>
+  );
+}
+
+/** One optional number box. */
+function NumberBox({
+  attr,
+  value,
+  onChange,
+}: {
+  attr: { key: string; label: string; help: string };
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Form.Group className="mb-3" controlId={`agent-${attr.key}`}>
+      <Form.Label>{attr.label}</Form.Label>
+      <Form.Control
+        type="number"
+        step="any"
+        min={0}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <Form.Text muted>{attr.help}</Form.Text>
+    </Form.Group>
+  );
+}
+
+/** A role's model: a provider, blank for "the agent's own", and one of its models. */
+function RolePicker({
+  id,
+  label,
+  help,
+  providers,
+  value,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  help: string;
+  providers: ProviderItem[];
+  value: RoleChoice;
+  onChange: (value: RoleChoice) => void;
+}) {
+  const [models, setModels] = useState<ModelItem[]>([]);
+  useEffect(() => {
+    const chosen = providers.find((p) => p.name === value.provider);
+    if (!chosen) {
+      setModels([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .listLlmModels(chosen.id)
+      .then((list) => {
+        if (!cancelled) setModels(list);
+      })
+      .catch(() => {
+        if (!cancelled) setModels([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [providers, value.provider]);
+
+  return (
+    <Form.Group className="mb-3">
+      <Form.Label htmlFor={`${id}-provider`}>{label}</Form.Label>
+      <div className="d-flex gap-2">
+        <Form.Select
+          id={`${id}-provider`}
+          aria-label={`${label}: provider`}
+          value={value.provider}
+          onChange={(e) => onChange({ provider: e.target.value, model: "" })}
+        >
+          <option value="">Same as the agent</option>
+          {providers.every((p) => p.name !== value.provider) && value.provider !== "" && (
+            <option value={value.provider}>{value.provider} (missing)</option>
+          )}
+          {providers.map((p) => (
+            <option key={p.id} value={p.name}>
+              {p.name}
+            </option>
+          ))}
+        </Form.Select>
+        {value.provider !== "" && (
+          <Form.Select
+            aria-label={`${label}: model`}
+            value={value.model}
+            onChange={(e) => onChange({ ...value, model: e.target.value })}
+          >
+            {modelOptions(models, value.model).map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </Form.Select>
+        )}
+      </div>
+      <Form.Text muted>{help}</Form.Text>
+    </Form.Group>
+  );
+}
+
+/** A trait's settings, with `coding`'s shell settings as a group of their own. */
+function TraitSettings({
+  trait,
+  spec,
+  values,
+  onChange,
+  idPrefix,
+}: {
+  trait: string;
+  spec: FieldSpec[];
+  values: Record<string, string>;
+  onChange: (key: string, value: string) => void;
+  idPrefix: string;
+}) {
+  const { own, shell } = splitShellSettings(trait, spec);
+  const warning = shellWarning(trait, values);
+  return (
+    <>
+      <SettingsFields spec={own} values={values} onChange={onChange} idPrefix={idPrefix} />
+      {shell.length > 0 && (
+        <fieldset className="border rounded p-3 mt-2">
+          <legend className="float-none w-auto px-2 mb-0 fs-5">Shell</legend>
+          <p className="text-muted small">
+            A shell is every permission above at once. It is offered only when an admin is
+            chatting, and it is off unless you tick it.
+          </p>
+          <SettingsFields
+            spec={shell}
+            values={values}
+            onChange={onChange}
+            idPrefix={`${idPrefix}-shell`}
+          />
+          {warning && (
+            <Alert variant="danger" className="mb-0 mt-2">
+              {warning}
+            </Alert>
+          )}
+        </fieldset>
+      )}
     </>
   );
 }

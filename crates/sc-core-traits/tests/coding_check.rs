@@ -253,6 +253,43 @@ async fn the_first_edit_records_the_baseline_of_every_check() -> Result<()> {
     Ok(())
 }
 
+/// TODO §12: a `code` application's builder agent lists no checks, so its
+/// `check` is the build alone — and says that is all it is.
+#[tokio::test]
+async fn with_only_the_build_the_report_says_no_checks_are_configured() -> Result<()> {
+    let env = Env::new().await?;
+    let dir = env.with_file_store("code", None).await?;
+    env.put(&dir, "web/build.sh", BUILD_SH)?;
+    env.put(&dir, "web/src/app.ts", "export const app = 1;\n")?;
+    let framework = FrameworkRef::new("code")
+        .with("store", "code")
+        .with("source", "web")
+        .with("output", "web/dist")
+        .with("command", "sh build.sh");
+    save_application(&env.catalog, &Application::new("Todo", "todo", framework)).await?;
+    let cfg = config(&[
+        (CFG_STORE, json!("code")),
+        (CFG_ROOT, json!("web")),
+        (CFG_MAY_EDIT, json!(true)),
+        (CFG_MAY_CHECK, json!(true)),
+        (CFG_CHECKS, json!([])),
+        (CFG_APPLICATION, json!("todo")),
+    ]);
+    env.check("coding", &cfg).await?;
+    let mut run = Session::new(&env, cfg);
+
+    let (report, signals) = run.check().await;
+    assert!(
+        report.starts_with(
+            "check: green, but only the build and the ratchet ran: no checks are configured."
+        ),
+        "{report}"
+    );
+    assert!(report.contains("\nbuild:todo: passed"), "{report}");
+    assert!(signals.is_empty());
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_ratchet_refuses_a_deleted_reduced_or_skipped_test() -> Result<()> {
     let env = Env::new().await?;

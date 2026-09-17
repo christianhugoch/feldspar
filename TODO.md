@@ -1098,25 +1098,34 @@ default.
 
 ## Phase 10 — The builder agent, the scaffold, the IDE, the admin UI
 
-- [ ] 10.1 `sc-app/src/builder_agent.rs`: `coding` alone with the §12 configuration. Remove
+- [x] 10.1 `sc-app/src/builder_agent.rs`: `coding` alone with the §12 configuration. Remove
       `build_application` from the declaration. `FrameworkDecl` may declare `checks`. Shrink
       the prompts to role and platform. Update `TRAIT_CFG_*` constants, `builder_agent.rs`
       tests, `sc-core-traits/tests/builder_agent_traits.rs`,
       `sc-server/tests/app_builder_agent.rs` and `sc-app/tests/declared_framework.rs`.
-- [ ] 10.2 `delete_builder_agent` and the sidebar's *New chat* find the agent by a `coding`
+      *(**Deviation:** on a server with no headless browser, `create_builder_agent` saves the
+      agent with `may_view_app` off, since `coding` refuses the grant there. `check` now says no
+      checks are configured when only the build ran, which is a `code` app's builder.)*
+- [x] 10.2 `delete_builder_agent` and the sidebar's *New chat* find the agent by a `coding`
       trait naming the application (not `build_application`). Update both.
-- [ ] 10.3 React scaffold: add the `typecheck` script, and have `AGENTS.md` name the checks.
+- [x] 10.3 React scaffold: add the `typecheck` script, and have `AGENTS.md` name the checks.
       Update the scaffold tests.
-- [ ] 10.4 `ui/ide/src/chatRelay.ts`: new prefixes, `apply_patch` paths,
+- [x] 10.4 `ui/ide/src/chatRelay.ts`: new prefixes, `apply_patch` paths,
       `implement_feature` diffstat paths, a full refresh after `shell_`, and an SCM refresh
       after a commit. Update
-      `chat.test.ts`.
-- [ ] 10.5 Admin API: `GET /api/runs/{id}/diff` (ledger diff, including children), and the
+      `chat.test.ts`. *(`relayEvent` returns a `StoreChange` of paths, "everything" and
+      "committed", read from `implement_feature`'s result rather than its call.)*
+- [x] 10.5 Admin API: `GET /api/runs/{id}/diff` (ledger diff, including children), and the
       run's plan state in the run read (`getRun`) for a planner run. Add both to the admin
-      client.
-- [ ] 10.6 Admin UI: roles and budgets on the agent form; `Stuck`/`OverBudget`, compaction
+      client. *(Children are the ledger's rolled-up runs plus the session runs the plan
+      records; ledgers fold in creation order, earliest pre-image first.)*
+- [x] 10.6 Admin UI: roles and budgets on the agent form; `Stuck`/`OverBudget`, compaction
       markers, cost, and the plan checklist from run state in the chat, linking to child runs;
       the run diff view; the shell settings grouped with the `none` sandbox warning.
+      *(Screenshots, collapsed results, stuck/over-budget notices and compaction markers were
+      already there. The chat gets a cost-and-plan bar; child runs link to `#/runs/{id}`, which
+      now renders an agent run with its plan, diff and transcript. The form also stopped
+      dropping attributes it has no box for.)*
 
 ## Phase 11 — Evaluation
 

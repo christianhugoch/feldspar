@@ -1017,6 +1017,7 @@ const reservedFrameworks = new Set(["react", "code"]);
  *              runtime: "{{ project }}/src/feldspar", client: "client.ts" },
  *     csp: { "img-src": ["'self'", "data:"] },
  *     builder_prompt: "You maintain {{ app }} …",
+ *     checks: ["typecheck"],
  *     scaffold: async (ctx) => [{ path: "package.json", contents: "…" }],
  *     runtime: async (ctx) => [{ path: `${ctx.runtime}/composables.ts`, contents: "…" }],
  *   },
@@ -1084,6 +1085,7 @@ async function evalFrameworks(plugin, configuration) {
       build: impl.build,
       csp: impl.csp && typeof impl.csp === "object" ? impl.csp : {},
       builder_prompt: typeof impl.builder_prompt === "string" ? impl.builder_prompt : "",
+      checks: Array.isArray(impl.checks) ? impl.checks.filter((c) => typeof c === "string") : [],
       scaffolds: typeof impl.scaffold === "function",
     });
   }

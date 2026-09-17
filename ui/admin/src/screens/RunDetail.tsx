@@ -34,6 +34,7 @@ import {
   type RunPath,
   type Workflow,
 } from "../workflowGraph";
+import { AgentRunDetail } from "./RunPanel";
 import { WorkflowCanvas, type Positions } from "./WorkflowCanvas";
 import { runTone, when } from "./WorkflowRuns";
 
@@ -123,6 +124,12 @@ export function RunDetail({ runId }: { runId: string }) {
         </div>
       </PageBody>
     );
+  }
+
+  // An agent run has no canvas and no form: it has a transcript, and — for a
+  // coding run — a plan and a diff.
+  if (run.kind === "agent") {
+    return <AgentRunDetail run={run} onRefresh={() => void load()} />;
   }
 
   const form = run.pending_form;

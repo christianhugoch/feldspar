@@ -827,6 +827,15 @@ fn agents_md(ctx: &ProjectContext<'_>) -> String {
          It is a React + TypeScript project built by Vite: `npm run build` \
          type-checks it and bundles it, and the Saltcorn server serves the bundle.\n\
          \n\
+         ## Checks\n\
+         \n\
+         A change is done when these pass, in this order, with no new errors:\n\
+         \n\
+         1. `npm run typecheck` — `tsc --noEmit` over the whole project, including \
+         the generated client.\n\
+         2. `npm run build` — the type check again, then the Vite bundle the \
+         server serves.\n\
+         \n\
          {testing}\
          \n\
          ## `{REACT_RUNTIME_SUBDIR}/` is generated — never edit it\n\
@@ -911,6 +920,7 @@ fn package_json(project: &str) -> String {
   "scripts": {{
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
     "preview": "vite preview"
   }},
   "dependencies": {{
@@ -2591,6 +2601,30 @@ mod tests {
         // Type-checking is part of building: a generated client that no longer
         // matches the app's calls must fail the build, not the browser.
         assert!(file(&files, "package.json").contains("tsc --noEmit && vite build"));
+        // And a check of its own, which the builder agent's `check` runs before
+        // the build (TODO §12), so a type error is reported without a bundle.
+        assert!(
+            file(&files, "package.json").contains("\"typecheck\": \"tsc --noEmit\""),
+            "{}",
+            file(&files, "package.json")
+        );
+    }
+
+    /// `AGENTS.md` names the checks, in the order the builder agent runs them.
+    #[test]
+    fn agents_md_names_the_checks_in_order() {
+        let tables = [tasks()];
+        let app = todo();
+        let files = project_files(&ctx(&app, &tables, &endpoints(&tables), None));
+        let agents = file(&files, "AGENTS.md");
+        let typecheck = agents.find("1. `npm run typecheck`").expect(agents);
+        let build = agents.find("2. `npm run build`").expect(agents);
+        assert!(typecheck < build, "{agents}");
+        // The scripts it names are the ones the project has.
+        let package = file(&files, "package.json");
+        for script in ["\"typecheck\":", "\"build\":"] {
+            assert!(package.contains(script), "{package}");
+        }
     }
 
     #[test]

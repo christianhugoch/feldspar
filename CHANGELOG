@@ -2,6 +2,90 @@
 
 Changes in reverse chronological order.
 
+## The builder agent, the scaffold, the IDE and the admin UI (coding agent milestone, Phase 10)
+
+A new application's builder agent is now the milestone's shape: one `coding` trait that plans,
+checks its work by type-checking and building the application, and looks at the result. The
+IDE's chat follows the new tools, and the admin UI shows roles, budgets, a run's cost, its plan
+and its diff.
+
+- **The builder agent (`sc-app/src/builder_agent.rs`, 10.1):**
+  - `framework_builder_agent` declares `coding` alone. `build_application` is gone from the
+    declaration (the trait itself remains, for agents that want it). The configuration:
+    - `may_edit`, `may_check` and `may_view_app` on; `may_run_scripts` and `may_use_shell` off.
+    - `application` set to the subdomain, `workflow: planned`, `edit_format: auto`.
+    - `checks` from the framework: React gets `["typecheck"]` (the build follows, from
+      `application`), `code` gets none, and a declared framework may declare `checks`.
+  - The prompts are now role and platform only. `SHARED_PROMPT` is removed; how to work is
+    `coding`'s own contribution.
+  - New `TRAIT_CFG_*` constants for every setting it writes (`TRAIT_CFG_MAY_CHECK`,
+    `TRAIT_CFG_MAY_VIEW_APP`, `TRAIT_CFG_MAY_USE_SHELL`, `TRAIT_CFG_CHECKS`,
+    `TRAIT_CFG_WORKFLOW`, `TRAIT_CFG_EDIT_FORMAT`), plus `WORKFLOW_PLANNED` and
+    `EDIT_FORMAT_AUTO`. `TRAIT_BUILD_APPLICATION` is removed. `builder_agent_traits.rs`
+    asserts every one equals the trait's own.
+  - **`FrameworkDecl::checks`**, and `checks` in a module's framework manifest (read by
+    `module-host.mjs`, refused on load when a name is empty or listed twice). The bundled Vue
+    module declares `checks: ["typecheck"]` and its scaffold gains a `typecheck` script.
+  - **Deviation:** `create_builder_agent` turns `may_view_app` off on a server with no headless
+    browser, because `coding` refuses that grant there and the agent would otherwise not be
+    created at all. The admin can tick it once a browser is installed.
+  - `check`'s report now says "no checks are configured" when only the build ran, as well as
+    when only the ratchet did, so a `code` application's builder tells the user who can add
+    checks.
+  - The 8.3 size test now measures the declared agent, which is §12's shape: `act` is 1 401
+    tokens on `claude-haiku-4-5` and 1 456 on `gpt-5-mini`; `plan` is 1 212 on both.
+- **Finding the builder (10.2):** `delete_builder_agent` and the admin sidebar's *New chat*
+  (`appNav.ts`) find an application's agent by a `coding` trait whose `application` is the
+  subdomain. A server test asserts `appNav.ts` spells both names.
+- **The React scaffold (10.3):** `package.json` gains `"typecheck": "tsc --noEmit"`, and
+  `AGENTS.md` gains a *Checks* section naming `npm run typecheck` then `npm run build`. The
+  build-reload-screenshot section is unchanged: it is for external agents.
+- **The IDE's chat relay (`ui/ide/src/chatRelay.ts`, 10.4):**
+  - `relayEvent` returns a `StoreChange` (`paths`, `everything`, `committed`) instead of a
+    path list. `mergeChanges` and `hasChanges` fold a turn's changes.
+  - `apply_patch_` announces every path in the patch (as before).
+  - `implement_feature_`'s **result** announces the paths in its diffstat, including both sides
+    of a move, and a `commit: <hash>` line marks a commit.
+  - `shell_` marks everything changed: at the end of the turn every cached listing is dropped,
+    every open unmodified editor is told to re-read, and source control is refreshed.
+  - Progress lines for `check_` ("Running the checks"), `shell_` (the command), `process_`
+    (name, action and command), `save_plan_`, `implement_feature_` (the feature id) and
+    `explore_` (the question).
+- **Admin API (10.5):**
+  - **`GET /api/runs/{id}/diff`** (`getRunDiff`): the run's changes and those of every run it
+    delegated to, one entry per `coding` scope, with files, moves, the diffstat and the unified
+    diff. Computed by `sc_core_traits::agent_run_diff`, which walks the run's rolled-up
+    children and the session runs its plan records (so a session still running is included),
+    and folds the ledgers with the new `Ledger::absorb`, in the order the runs were created.
+    The earliest pre-image of a path wins.
+  - **`getRun` gains `plan`**: a planner run's plan (features with status and session run ids,
+    and progress), null on every other run. Read by `sc_core_traits::run_plan` through the new
+    `AgentLoop::trait_states`.
+  - The three checked-in clients are regenerated.
+- **Admin UI (10.6):**
+  - **The agent form** gains a *Roles* card (a strong and a cheap model, each a provider and a
+    model, blank for the agent's own) and a *Budgets* card (cost, working time, context tokens,
+    screenshots kept). **Fixed:** saving the form used to drop every attribute it had no box
+    for; it now changes only the keys it shows (`agentForm.ts`).
+  - The `coding` trait's shell settings are drawn as a *Shell* group, with a red warning while
+    the shell is on with the `none` sandbox (including the untouched default).
+  - **The chat** shows a one-line bar under the top bar with the current run's cost, steps and
+    tokens (its sessions included; "cost unknown" when a model has no price) and the plan's
+    progress. It opens onto the plan checklist, whose features link to their sessions.
+    Screenshots inline, collapsed tool results (snapshots included), stuck and over-budget
+    notices and compaction markers were already there.
+  - **An agent run's own page** (`#/runs/{id}`, which only showed workflow runs before) shows
+    its totals, its plan, its diff (`RunDiffView`, the diffstat and coloured lines) and its
+    transcript.
+- **Tests:** `builder_agent.rs` and `builder_agent_traits.rs` (the §12 configuration),
+  `declared_framework.rs`, `frameworks.rs` (declared checks), `bundled_vue.rs`,
+  `app_builder_agent.rs` (one trait, no browser and with a browser, deleting by the `coding`
+  trait, the sidebar's names), `coding_check.rs` (only the build ran), the scaffold's
+  `typecheck` and `AGENTS.md` checks, `ledger.rs` (`absorb`), `agent_admin_api.rs` (a planner's
+  plan and its diff across two sessions, one known only from the plan), `appNav.test.ts`,
+  `chat.test.ts` (the new prefixes, diffstat paths, commits, merging), `agentForm.test.ts` and
+  `runInfo.test.ts`.
+
 ## Planning and sessions (coding agent milestone, Phase 9)
 
 A `coding` agent can now plan. Under the new `planned` workflow a chat starts in `plan` mode on

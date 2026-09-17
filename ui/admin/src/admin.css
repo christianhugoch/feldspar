@@ -497,6 +497,86 @@ div.navbar-brand > a:hover {
   display: none;
 }
 
+/* The current run's cost and plan, one quiet line under the top bar that opens
+ * onto the checklist (TODO 10.6). Capped, because a thirty-feature plan must not
+ * push the transcript off the screen. */
+.chat-runbar {
+  border-bottom: var(--tblr-border-width) solid var(--tblr-border-color);
+  font-size: 0.8125rem;
+}
+
+.chat-runbar > summary {
+  display: flex;
+  padding: 0.25rem 0.75rem;
+  cursor: pointer;
+  color: var(--tblr-secondary);
+}
+
+.chat-runbar-body {
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: 0.25rem 0.75rem 0.5rem;
+}
+
+.run-plan-feature {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.125rem 0;
+}
+
+.run-plan-mark {
+  flex: 0 0 1rem;
+  text-align: center;
+  font-weight: 600;
+}
+
+.run-plan-done {
+  color: var(--tblr-green);
+}
+
+.run-plan-failed {
+  color: var(--tblr-red);
+}
+
+.run-plan-in_progress {
+  color: var(--tblr-blue);
+}
+
+/* A run's diff: added and removed lines tinted, the headers set apart. */
+.run-diff-stat {
+  margin-bottom: 0.5rem;
+  white-space: pre-wrap;
+}
+
+.run-diff {
+  max-height: 70vh;
+  overflow: auto;
+  padding: 0;
+  font-size: 0.8125rem;
+}
+
+.run-diff > div {
+  padding: 0 0.5rem;
+  white-space: pre;
+}
+
+.run-diff-file {
+  font-weight: 600;
+  background: var(--tblr-bg-surface-secondary);
+}
+
+.run-diff-hunk {
+  color: var(--tblr-cyan);
+}
+
+.run-diff-add {
+  background: rgba(var(--tblr-green-rgb), 0.12);
+}
+
+.run-diff-remove {
+  background: rgba(var(--tblr-red-rgb), 0.12);
+}
+
 .chat-compaction-text {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

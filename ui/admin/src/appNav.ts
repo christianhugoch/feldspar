@@ -14,9 +14,9 @@ import type { ListAgentsResponse, ListApplicationsResponse } from "./client";
 type AppItem = ListApplicationsResponse[number];
 type AgentItem = ListAgentsResponse[number];
 
-/** The trait a builder agent carries, and the key naming the subdomain it builds
- * (`sc_app::TRAIT_BUILD_APPLICATION` / `TRAIT_CFG_APPLICATION`). */
-const BUILD_TRAIT = "build_application";
+/** The trait a builder agent carries, and its key naming the subdomain it checks
+ * and builds (`sc_app::TRAIT_CODING` / `TRAIT_CFG_APPLICATION`). */
+const BUILD_TRAIT = "coding";
 const BUILD_TRAIT_APPLICATION = "application";
 
 /** One link under the application picker. */
@@ -34,9 +34,10 @@ export type AppNavLink = {
 
 /** The coding agent that builds `app`, by name, if there is one.
  *
- * Found the way the server finds it when it deletes one: by the trait, not the
- * name. An agent an admin made under the conventional name for another job is
- * not this application's builder, and one they renamed still is. */
+ * Found the way the server finds it when it deletes one: by a `coding` trait
+ * naming the application, not by the name. An agent an admin made under the
+ * conventional name for another job is not this application's builder, and one
+ * they renamed still is. */
 export function builderAgentFor(
   app: Pick<AppItem, "subdomain">,
   agents: Pick<AgentItem, "name" | "traits">[],

@@ -134,6 +134,15 @@ impl Client {
 /// provider is connected — the difference between an application that gets a
 /// builder agent and one that is told why it did not.
 async fn setup(tmp: &TempDir, provider: bool) -> sc_error::Result<(Client, Arc<Catalog>, TestDb)> {
+    setup_on(tmp, provider, sc_agent::HostCapabilities::default()).await
+}
+
+/// [`setup`] on a host with `host`'s capabilities.
+async fn setup_on(
+    tmp: &TempDir,
+    provider: bool,
+    host: sc_agent::HostCapabilities,
+) -> sc_error::Result<(Client, Arc<Catalog>, TestDb)> {
     let db = TestDb::new().await?;
     // Neutralise any `users` table inherited from the template database before
     // bootstrap introspects, exactly as the other server tests do.
@@ -155,7 +164,7 @@ async fn setup(tmp: &TempDir, provider: bool) -> sc_error::Result<(Client, Arc<C
     sc_app::bootstrap(&catalog).await?;
     sc_catalog::bootstrap_file_stores(&catalog).await?;
     sc_llm::bootstrap_llm_providers(&catalog).await?;
-    let agents = sc_server::install_agents(&catalog).await?;
+    let agents = sc_server::install_agents_on(&catalog, host).await?;
     catalog.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
 
     if provider {
@@ -282,11 +291,11 @@ async fn creating_an_application_creates_the_agent_that_builds_it() -> sc_error:
         "{stored}"
     );
 
+    // `coding` alone: the build is one of its checks, not a trait of its own.
     let traits = stored["traits"].as_array().unwrap();
-    let coding = traits
-        .iter()
-        .find(|t| t["trait"] == json!("coding"))
-        .expect("a coding trait");
+    assert_eq!(traits.len(), 1, "{stored}");
+    let coding = &traits[0];
+    assert_eq!(coding["trait"], json!("coding"));
     // Scoped to *this* application's project directory, which the framework
     // derived — not the store, which every application in it shares.
     assert_eq!(coding["config"]["store"], json!("apps"));
@@ -295,12 +304,16 @@ async fn creating_an_application_creates_the_agent_that_builds_it() -> sc_error:
     // Running the project's other scripts executes code the agent did not
     // write, and is not something creating an application grants.
     assert_eq!(coding["config"]["may_run_scripts"], json!(false));
-
-    let build = traits
-        .iter()
-        .find(|t| t["trait"] == json!("build_application"))
-        .expect("a build trait");
-    assert_eq!(build["config"]["application"], json!("todo"));
+    assert_eq!(coding["config"]["may_use_shell"], json!(false));
+    // It checks its work by type-checking and building *this* application, and
+    // plans before it edits.
+    assert_eq!(coding["config"]["may_check"], json!(true));
+    assert_eq!(coding["config"]["application"], json!("todo"));
+    assert_eq!(coding["config"]["checks"], json!(["typecheck"]));
+    assert_eq!(coding["config"]["workflow"], json!("planned"));
+    // This host has no browser, so the agent cannot look at the application —
+    // and is saved without that grant rather than not saved at all.
+    assert_eq!(coding["config"]["may_view_app"], json!(false));
 
     // A second application gets its own agent, scoped to its own directory: two
     // apps in one store are two agents, neither able to edit the other's source.
@@ -323,8 +336,37 @@ async fn creating_an_application_creates_the_agent_that_builds_it() -> sc_error:
         .clone();
     // The `code` framework states its source directory rather than deriving it.
     assert_eq!(blog_coding["config"]["root"], json!("web"));
+    // And it names no checks the admin did not choose.
+    assert_eq!(blog_coding["config"]["checks"], json!([]));
     assert_eq!(blog["error"], Value::Null, "{blog}");
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn on_a_host_with_a_browser_the_builder_may_look_at_the_application() -> sc_error::Result<()>
+{
+    let tmp = TempDir::new("browser");
+    // Never launched: saving the agent only asks whether the host has one.
+    let host = sc_agent::HostCapabilities::with_browser("/usr/bin/chromium");
+    let (mut admin, _catalog, _db) = setup_on(&tmp, true, host).await?;
+
+    let (status, created) = admin
+        .send(
+            "POST",
+            "/api/applications",
+            Some(react_body("Todo", "todo", "todo")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["agent"], json!("build-todo"), "{created}");
+    let stored = agent(&mut admin, "build-todo").await;
+    assert_eq!(stored["error"], Value::Null, "{stored}");
+    assert_eq!(
+        stored["traits"][0]["config"]["may_view_app"],
+        json!(true),
+        "{stored}"
+    );
     Ok(())
 }
 
@@ -473,9 +515,7 @@ async fn a_builder_re_pointed_at_another_application_survives() -> sc_error::Res
     let stored = agent(&mut admin, "build-todo").await;
     let agent_id = stored["id"].as_str().unwrap().to_owned();
     let mut edited = stored.clone();
-    edited["traits"] = json!([
-        { "trait": "build_application", "config": { "application": "blog" } }
-    ]);
+    edited["traits"][0]["config"]["application"] = json!("blog");
     edited.as_object_mut().unwrap().remove("error");
     edited.as_object_mut().unwrap().remove("id");
     let (status, saved) = admin
@@ -580,6 +620,23 @@ fn the_ide_looks_for_the_trait_and_settings_this_crate_names() {
         sc_app::TRAIT_CFG_ROOT,
         sc_app::TRAIT_CFG_MAY_EDIT,
     ] {
+        assert!(
+            source.contains(&format!("\"{name}\"")),
+            "{} must look for `{name}`",
+            path.display()
+        );
+    }
+}
+
+/// The sidebar's *New chat* finds an application's builder the way
+/// `delete_builder_agent` does — a `coding` trait whose `application` is the
+/// subdomain — and spells those names a second time, in TypeScript.
+#[test]
+fn the_admin_sidebar_looks_for_the_trait_and_setting_the_server_deletes_by() {
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/admin/src/appNav.ts");
+    let source = std::fs::read_to_string(&path).expect("read appNav.ts");
+    for name in [sc_app::TRAIT_CODING, sc_app::TRAIT_CFG_APPLICATION] {
         assert!(
             source.contains(&format!("\"{name}\"")),
             "{} must look for `{name}`",

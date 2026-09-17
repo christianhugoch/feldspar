@@ -92,6 +92,7 @@ fn vue() -> FrameworkDecl {
         builder_prompt: Some(template(
             "You build the Vue application {{ app }} in {{ root }} of {{ store }}.",
         )),
+        checks: vec!["typecheck".to_owned()],
         scaffolds: true,
     }
 }
@@ -258,8 +259,8 @@ fn a_declared_framework_declares_the_agent_that_builds_its_applications() {
         "{}",
         spec.system_prompt
     );
-    // …followed by what is true of building any application.
-    assert!(spec.system_prompt.contains("Work in small steps"));
+    // …and nothing else: how to work is the `coding` trait's own prompt.
+    assert!(!spec.system_prompt.contains("Work in small steps"));
     // Scoped to this application's own source tree, like a React app's.
     let coding = spec
         .traits
@@ -272,6 +273,15 @@ fn a_declared_framework_declares_the_agent_that_builds_its_applications() {
     );
     assert_eq!(
         coding.config.get(sc_app::TRAIT_CFG_ROOT).unwrap(),
+        &serde_json::json!("todo")
+    );
+    // The checks are the framework's to declare, and the build follows them.
+    assert_eq!(
+        coding.config.get(sc_app::TRAIT_CFG_CHECKS).unwrap(),
+        &serde_json::json!(["typecheck"])
+    );
+    assert_eq!(
+        coding.config.get(sc_app::TRAIT_CFG_APPLICATION).unwrap(),
         &serde_json::json!("todo")
     );
 }

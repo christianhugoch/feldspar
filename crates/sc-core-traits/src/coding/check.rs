@@ -593,11 +593,17 @@ pub async fn run_checks(
         ));
     }
 
-    let mut head = match (checks.is_empty() && application.is_none(), red.is_empty()) {
+    // With no checks listed, say what did run, and who can add the rest — a
+    // `code` application's builder is created that way (TODO §12).
+    let ran = match &application {
+        None => "only the ratchet ran",
+        Some(_) => "only the build and the ratchet ran",
+    };
+    let mut head = match (checks.is_empty(), red.is_empty()) {
         (_, false) => format!("check: red, new failures in {}.", red.join(", ")),
         (false, true) => "check: green, no new failures.".to_owned(),
         (true, true) => format!(
-            "check: green, but only the ratchet ran: no checks are configured. \
+            "check: green, but {ran}: no checks are configured. \
              Tell the user an administrator can list package.json scripts in the \
              `coding` trait's `{CFG_CHECKS}` setting."
         ),

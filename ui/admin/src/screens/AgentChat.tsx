@@ -54,7 +54,7 @@ import {
 import Alert from "react-bootstrap/Alert";
 
 import { api, errorMessage } from "../api";
-import type { ListRunsResponse } from "../client";
+import type { GetRunResponse, ListRunsResponse } from "../client";
 import {
   ChatSession,
   agentChatUrl,
@@ -97,6 +97,7 @@ import {
   IconX,
 } from "../icons";
 import { StatusBadge, type Tone } from "../layout";
+import { RunBar } from "./RunPanel";
 
 type RunItem = ListRunsResponse[number];
 
@@ -294,6 +295,27 @@ export function AgentChat({
 
   const currentRun = viewing?.run.id ?? chat.runId;
 
+  // The current run as the API serves it, for its cost and its plan: read again
+  // whenever a turn ends, which is when both change.
+  const [runRecord, setRunRecord] = useState<GetRunResponse | null>(null);
+  useEffect(() => {
+    if (!currentRun || running) return;
+    let cancelled = false;
+    api
+      .getRun(currentRun)
+      .then((found) => {
+        if (!cancelled) setRunRecord(found);
+      })
+      .catch(() => {
+        // The bar is extra: a run that cannot be read still has its transcript.
+        if (!cancelled) setRunRecord(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentRun, running]);
+  const runBar = runRecord && runRecord.id === currentRun && <RunBar run={runRecord} />;
+
   // The rail is 17rem of navigation between conversations: it belongs beside a
   // transcript that has the page, and not inside a window a third that width.
   const railAvailable = !frame || frame.mode === "full";
@@ -368,6 +390,8 @@ export function AgentChat({
             />
           </div>
         )}
+
+        {runBar}
 
         <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
           <div className="chat-column py-4">
@@ -805,7 +829,7 @@ function ComposerControlView({
 }
 
 /** One entry of the transcript. */
-function TranscriptEntry({ entry }: { entry: Entry }) {
+export function TranscriptEntry({ entry }: { entry: Entry }) {
   if (entry.kind === "user") {
     return (
       <div className="chat-turn chat-turn-user">

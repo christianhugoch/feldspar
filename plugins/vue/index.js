@@ -87,8 +87,8 @@ const csp = {
   "frame-ancestors": ["'none'"],
 };
 
-/** The builder agent's system prompt. Saltcorn appends what is true of building
- * any application; this is what is true of building a *Vue* one. */
+/** The builder agent's system prompt: its role and this platform. How to work is
+ * the `coding` trait's own prompt, which Saltcorn adds. */
 const builder_prompt = `You build the \`{{ app }}\` application, a Vue 3 + Vite project served at \
 the \`{{ subdomain }}\` subdomain. Its source is in the \`{{ store }}\` file store under \
 \`{{ root }}\`, and your file tools are scoped to exactly that directory.
@@ -370,6 +370,7 @@ function packageJson(ctx) {
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "typecheck": "vue-tsc --noEmit",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -997,6 +998,8 @@ module.exports = {
       build,
       csp,
       builder_prompt,
+      // What the builder agent's `check` runs before the application build.
+      checks: ["typecheck"],
       scaffold,
       runtime,
     },

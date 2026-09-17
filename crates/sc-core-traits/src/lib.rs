@@ -131,11 +131,13 @@ pub use coding::{
     DEFAULT_REPO_MAP_TOKENS, DEFAULT_SHELL_TIMEOUT, DEFAULT_SHELL_TIMEOUT_MAX,
     DEFAULT_TIMEOUT_SECONDS, DEFAULT_VIEW_APP_TIMEOUT, EDIT_FORMAT_AUTO, FileChange,
     LONGEST_TOOL_PREFIX, Ledger, MAX_OUTPUT_CHARS, MAX_REPO_MAP_TOKENS, PreImage, RunDiff,
-    SHELL_ENV, diff_ledger, edit_format, kill_all_processes, matching, run_diff, running_count,
+    SHELL_ENV, ScopeDiff, agent_run_diff, diff_ledger, edit_format, kill_all_processes, matching,
+    run_diff, running_count,
 };
 pub use coding::{
     CFG_COMMIT, CFG_MAX_SESSIONS, CFG_WORKFLOW, DEFAULT_MAX_SESSIONS, FAILURES_TO_FAIL, Feature,
     FeatureKind, FeatureStatus, Plan, Progress, WORKFLOW_DIRECT, WORKFLOW_PLANNED, checklist,
+    run_plan,
 };
 pub use delete_rows::DeleteRows;
 pub use insert_row::InsertRow;

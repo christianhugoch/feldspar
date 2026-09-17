@@ -57,10 +57,13 @@ import {
   CHAT_EXTENSION_ID,
   MODEL_VENDOR,
   participantContributions,
+  hasChanges,
+  mergeChanges,
   relayEvent,
   storeModel,
   workspacePath,
   type ParticipantContribution,
+  type StoreChange,
 } from "./chatRelay";
 import type { StoreFiles } from "./storeFiles";
 
@@ -290,13 +293,14 @@ function registerParticipant(
         agent.name,
         context.history.length === 0,
       );
-      const changed: string[] = [];
+      const changes: StoreChange[] = [];
       const sink = (event: ServerEvent) => {
-        changed.push(...relayEvent(event, response));
+        changes.push(relayEvent(event, response));
       };
       try {
         const outcome = await conversation.ask(request.prompt, sink, token);
-        if (changed.length > 0) announce(changed, agent, store, refresh);
+        const changed = mergeChanges(changes);
+        if (hasChanges(changed)) announce(api, changed, agent, store, refresh);
         return { metadata: { run: outcome.run, state: outcome.state } };
       } catch (err) {
         // The socket never opened: a server with no agents installed, or a
@@ -320,18 +324,28 @@ function registerParticipant(
  * make the change, but it knows precisely which paths it was — the tool call said
  * so — and an editor left open on stale contents is how an admin overwrites work
  * by saving.
+ *
+ * After a shell command nothing says which paths it was, so every cached listing
+ * goes and every open, unmodified editor is told to re-read. Source control is
+ * rescanned whenever anything changed, which covers a feature's commit too.
  */
 function announce(
-  paths: string[],
+  api: typeof vscode,
+  change: StoreChange,
   agent: StoreAgent,
   store: string,
   refresh: StoreRefresh,
 ): void {
   refresh.files.forgetEverything();
-  refresh.provider.announceChanged(
-    [...new Set(paths)].map((path) =>
-      monaco.Uri.file(workspacePath(store, agent.root, path)),
-    ),
+  const uris = change.paths.map((path) =>
+    monaco.Uri.file(workspacePath(store, agent.root, path)),
   );
+  if (change.everything) {
+    for (const document of api.workspace.textDocuments) {
+      if (document.uri.scheme === "file" && !document.isDirty)
+        uris.push(monaco.Uri.file(document.uri.path));
+    }
+  }
+  refresh.provider.announceChanged(uris);
   refresh.refreshSourceControl?.();
 }

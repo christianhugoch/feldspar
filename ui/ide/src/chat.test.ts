@@ -19,6 +19,9 @@ import {
 } from "./agentChat";
 import {
   changedPaths,
+  diffstatPaths,
+  hasChanges,
+  mergeChanges,
   participantContributions,
   storeModel,
   uniqueSlug,
@@ -323,8 +326,111 @@ describe("one event, relayed", () => {
       },
       stream,
     );
-    expect(wrote).toEqual(["src/App.tsx"]);
-    expect(read).toEqual([]);
+    expect(wrote).toEqual({ paths: ["src/App.tsx"], everything: false, committed: false });
+    expect(read).toEqual({ paths: [], everything: false, committed: false });
+  });
+
+  it("drops everything after a shell command, and shows the command", () => {
+    const stream = recordingStream();
+    const ran = relayEvent(
+      {
+        type: "tool_call",
+        id: "1",
+        name: "shell_todoapp_app",
+        arguments: { command: "npm install zod" },
+      },
+      stream,
+    );
+    expect(stream.progressText).toEqual(["Running `npm install zod`"]);
+    expect(ran.everything).toBe(true);
+    expect(hasChanges(ran)).toBe(true);
+    expect(
+      toolProgress("process_todoapp_app", { action: "start", name: "dev", command: "npm run dev" }),
+    ).toBe("Process dev: start `npm run dev`");
+    expect(toolProgress("process_todoapp_app", { action: "list" })).toBe("Process: list");
+    // A managed process's output is not a write this relay can see; only the
+    // shell's call is taken to have changed the tree.
+    expect(
+      relayEvent(
+        {
+          type: "tool_call",
+          id: "2",
+          name: "process_todoapp_app",
+          arguments: { action: "stop", name: "dev" },
+        },
+        stream,
+      ).everything,
+    ).toBe(false);
+  });
+
+  it("shows the checks and the planner's tools as progress", () => {
+    expect(toolProgress("check_todoapp_app", {})).toBe("Running the checks");
+    expect(toolProgress("save_plan_todoapp_app", { features: [] })).toBe("Saving the plan");
+    expect(toolProgress("implement_feature_todoapp_app", { id: "filter" })).toBe(
+      "Implementing feature filter",
+    );
+    expect(toolProgress("explore_todoapp_app", { question: "Where are routes?" })).toBe(
+      "Exploring: Where are routes?",
+    );
+    expect(changedPaths("check_todoapp_app", {})).toEqual([]);
+  });
+
+  it("says which files a feature's session changed, and whether it committed", () => {
+    const stream = recordingStream();
+    const content = [
+      "feature `filter`: done",
+      "session: run 1234, completed after 6 steps",
+      "summary:",
+      "M looks like a diffstat | but is the summary",
+      "check: green, no new failures.",
+      "commit: 3f2a9c1 Add a filter to the task list",
+      "diffstat:",
+      "R src/Old.tsx → src/List.tsx",
+      "M src/App.tsx | +3 -1",
+      "A src/filter.ts | +20 -0",
+      "D src/unused.ts | +0 -8",
+      "4 files changed, 23 insertions(+), 9 deletions(-)",
+      "diff:",
+      "M src/not-a-path.ts | +1 -1",
+    ].join("\n");
+    const change = relayEvent(
+      { type: "tool_result", id: "1", name: "implement_feature_todoapp_app", content, is_error: false },
+      stream,
+    );
+    expect(change.paths).toEqual([
+      "src/Old.tsx",
+      "src/List.tsx",
+      "src/App.tsx",
+      "src/filter.ts",
+      "src/unused.ts",
+    ]);
+    expect(change.committed).toBe(true);
+    // Nothing of the result lands in the answer: the planner reads it, and says
+    // what matters in its own words.
+    expect(stream.markdownText).toEqual([]);
+
+    const uncommitted = relayEvent(
+      {
+        type: "tool_result",
+        id: "2",
+        name: "implement_feature_todoapp_app",
+        content: "feature `x`: failed\ncommit: none, nothing changed.\ndiff: nothing changed.",
+        is_error: false,
+      },
+      stream,
+    );
+    expect(uncommitted).toEqual({ paths: [], everything: false, committed: false });
+    expect(diffstatPaths("no diffstat here")).toEqual([]);
+  });
+
+  it("merges a turn's changes into one announcement", () => {
+    const merged = mergeChanges([
+      { paths: ["a.ts"], everything: false, committed: false },
+      { paths: ["a.ts", "b.ts"], everything: false, committed: true },
+      { paths: [], everything: false, committed: false },
+    ]);
+    expect(merged).toEqual({ paths: ["a.ts", "b.ts"], everything: false, committed: true });
+    expect(hasChanges(mergeChanges([]))).toBe(false);
   });
 
   it("says every file a patch changes", () => {

@@ -473,6 +473,149 @@ async fn runs_are_listed_read_and_deleted_and_outlive_their_agent() -> sc_error:
     Ok(())
 }
 
+/// TODO 10.5: a planned run's plan is served with the run, and its diff is the
+/// changes its sessions made — the planner itself edits nothing — including a
+/// session still running, which only the plan knows about yet.
+#[tokio::test]
+async fn a_planner_runs_plan_and_diff_include_its_sessions() -> sc_error::Result<()> {
+    let (mut client, catalog, _db) = setup().await?;
+    let dir = std::env::temp_dir().join(format!(
+        "sc-server-rundiff-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(dir.join("web/src")).unwrap();
+    catalog.connect_file_store(Arc::new(sc_files::LocalFileStore::new("apps", &dir)?))?;
+
+    let mut body = plain_agent("builder");
+    body["traits"] = json!([
+        { "trait": "coding", "config": { "store": "apps", "root": "web", "may_edit": true } }
+    ]);
+    let (status, created) = client.send("POST", "/api/agents", Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let key = sc_agent::trait_state_key(0, "coding");
+
+    // What the store holds now, after both sessions.
+    std::fs::write(dir.join("web/src/App.tsx"), "export const App = 2;\n").unwrap();
+    std::fs::write(dir.join("web/src/filter.ts"), "export const f = 1;\n").unwrap();
+
+    // The planner: a plan naming its first session, and a rolled-up second.
+    let mut first_state = AgentLoop::new(20);
+    first_state.push_user("add a filter")?;
+    let first = Run::new("builder", &RunCaller::system(), &first_state);
+    let mut second_state = AgentLoop::new(20);
+    second_state.push_user("the filter")?;
+    let second = Run::new("builder", &RunCaller::system(), &second_state);
+
+    let mut planner = AgentLoop::new(20);
+    planner.push_user("add a filter to the tasks page")?;
+    let plan_state = sc_core_traits::CodingState {
+        plan: Some(sc_core_traits::Plan {
+            features: vec![sc_core_traits::Feature {
+                id: "filter".to_owned(),
+                title: "Filter tasks".to_owned(),
+                pages: vec!["/tasks".to_owned()],
+                status: sc_core_traits::FeatureStatus::InProgress,
+                runs: vec![first.id.0.to_string()],
+                ..Default::default()
+            }],
+            progress: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    plan_state.store(planner.trait_state_mut(&key));
+    planner.ledger_mut().record_child(sc_agent::ChildLedger {
+        run: second.id.0.to_string(),
+        agent: "builder".to_owned(),
+        totals: Default::default(),
+    });
+    let planner = Run::new("builder", &RunCaller::system(), &planner);
+    save_run(&catalog, &planner).await?;
+
+    // The first session changed `App.tsx`; the second added `filter.ts` and
+    // changed `App.tsx` again, from what the first left.
+    let mut first_state = first.agent_loop()?;
+    let mut ledger = sc_core_traits::Ledger::default();
+    ledger.touch("web/src/App.tsx", Some(b"export const App = 0;\n"));
+    let touched = sc_core_traits::CodingState {
+        ledger,
+        ..Default::default()
+    };
+    touched.store(first_state.trait_state_mut(&key));
+    let mut first = first;
+    first.record(&first_state);
+    save_run(&catalog, &first).await?;
+    let mut second_state = second.agent_loop()?;
+    let mut ledger = sc_core_traits::Ledger::default();
+    ledger.touch("web/src/App.tsx", Some(b"export const App = 1;\n"));
+    ledger.touch("web/src/filter.ts", None);
+    let touched = sc_core_traits::CodingState {
+        ledger,
+        ..Default::default()
+    };
+    touched.store(second_state.trait_state_mut(&key));
+    let mut second = second;
+    second.record(&second_state);
+    save_run(&catalog, &second).await?;
+
+    let (status, whole) = client
+        .send("GET", &format!("/api/runs/{}", planner.id.0), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{whole}");
+    let feature = &whole["plan"]["features"][0];
+    assert_eq!(feature["id"], json!("filter"));
+    assert_eq!(feature["status"], json!("in_progress"));
+    assert_eq!(feature["kind"], json!("feature"));
+    assert_eq!(feature["runs"], json!([first.id.0.to_string()]));
+    assert_eq!(feature["description"], json!(""));
+    assert_eq!(whole["plan"]["progress"], json!([]));
+    // A run with no plan says so with a null, not an absent field.
+    let (_, session) = client
+        .send("GET", &format!("/api/runs/{}", first.id.0), None)
+        .await;
+    assert_eq!(session["plan"], Value::Null, "{session}");
+
+    let (status, diff) = client
+        .send("GET", &format!("/api/runs/{}/diff", planner.id.0), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{diff}");
+    assert_eq!(diff["runs"].as_array().unwrap().len(), 3, "{diff}");
+    let scopes = diff["scopes"].as_array().unwrap();
+    assert_eq!(scopes.len(), 1, "{diff}");
+    assert_eq!(scopes[0]["store"], json!("apps"));
+    assert_eq!(scopes[0]["root"], json!("web"));
+    let files = scopes[0]["files"].as_array().unwrap();
+    let paths: Vec<(&str, &str)> = files
+        .iter()
+        .map(|f| (f["path"].as_str().unwrap(), f["status"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        paths,
+        [("src/App.tsx", "modified"), ("src/filter.ts", "added")],
+        "{diff}"
+    );
+    // Against what was there before the *first* session, not the second.
+    let unified = scopes[0]["unified"].as_str().unwrap();
+    assert!(unified.contains("-export const App = 0;"), "{unified}");
+    assert!(!unified.contains("App = 1"), "{unified}");
+    assert!(
+        scopes[0]["stat"]
+            .as_str()
+            .unwrap()
+            .ends_with("2 files changed, 2 insertions(+), 1 deletion(-)"),
+        "{diff}"
+    );
+
+    // A session's own diff is its own changes only.
+    let (_, own) = client
+        .send("GET", &format!("/api/runs/{}/diff", first.id.0), None)
+        .await;
+    assert_eq!(own["runs"].as_array().unwrap().len(), 1, "{own}");
+    std::fs::remove_dir_all(&dir).ok();
+    Ok(())
+}
+
 /// A provider an agent still calls through cannot be deleted out from under it.
 /// `sc-llm` cannot see `_fd_agents` from a layer below, so the server collects
 /// the references and passes them in — the check exists only if that happens.

@@ -1336,6 +1336,20 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // What a coding run changed, as a diff over the store — the run's own
+    // changes and those of every session it delegated to (a planned run edits
+    // nothing itself). Computed from the runs' change ledgers against what the
+    // store holds now, so it works on every store backend, git or not.
+    set.register(
+        Endpoint::new(
+            "getRunDiff",
+            Method::Get,
+            api().lit("runs").param("id", ValueType::Uuid).lit("diff"),
+        )
+        .output(run_diff_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
     set.register(
         Endpoint::new(
             "deleteRun",
@@ -4040,7 +4054,86 @@ fn run_schema() -> TypeSchema {
         "pending_form",
         TypeSchema::optional(pending_form_schema()),
     ));
+    // A planner run's plan, read out of its `coding` state (TODO §8), so the
+    // chat can show the checklist without knowing where a trait keeps it. Null
+    // on every other run.
+    fields.push(StructField::new(
+        "plan",
+        TypeSchema::optional(run_plan_schema()),
+    ));
     TypeSchema::Struct(fields)
+}
+
+/// A planner run's plan: its features, and one progress entry per session.
+fn run_plan_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new(
+            "features",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("id", TypeSchema::text()),
+                StructField::new("title", TypeSchema::text()),
+                StructField::new("description", TypeSchema::text()),
+                // `feature` | `bug`.
+                StructField::new("kind", TypeSchema::text()),
+                StructField::new("acceptance", TypeSchema::array(TypeSchema::text())),
+                StructField::new("files", TypeSchema::array(TypeSchema::text())),
+                StructField::new("pages", TypeSchema::array(TypeSchema::text())),
+                // `todo` | `in_progress` | `done` | `failed` | `blocked`.
+                StructField::new("status", TypeSchema::text()),
+                StructField::new("attempts", TypeSchema::int()),
+                // Its sessions' run ids, latest last: what the checklist links to.
+                StructField::new("runs", TypeSchema::array(TypeSchema::text())),
+            ])),
+        ),
+        StructField::new(
+            "progress",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("feature", TypeSchema::text()),
+                StructField::new("run", TypeSchema::text()),
+                StructField::new("status", TypeSchema::text()),
+                StructField::new("summary", TypeSchema::text()),
+                StructField::new("check", TypeSchema::text()),
+                StructField::new("diffstat", TypeSchema::text()),
+            ])),
+        ),
+    ])
+}
+
+/// What a run and its sessions changed: one entry per file-store scope.
+fn run_diff_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("run", TypeSchema::uuid()),
+        // Every run the diff was made from: this one and its descendants.
+        StructField::new("runs", TypeSchema::array(TypeSchema::uuid())),
+        StructField::new(
+            "scopes",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("store", TypeSchema::text()),
+                // The directory within the store the paths are relative to.
+                StructField::new("root", TypeSchema::text()),
+                StructField::new(
+                    "files",
+                    TypeSchema::array(TypeSchema::struct_of([
+                        StructField::new("path", TypeSchema::text()),
+                        // `added` | `modified` | `deleted`.
+                        StructField::new("status", TypeSchema::text()),
+                        // Null for a file too large, or not text, to diff.
+                        StructField::new("added", TypeSchema::optional(TypeSchema::int())),
+                        StructField::new("removed", TypeSchema::optional(TypeSchema::int())),
+                    ])),
+                ),
+                StructField::new(
+                    "moves",
+                    TypeSchema::array(TypeSchema::struct_of([
+                        StructField::new("from", TypeSchema::text()),
+                        StructField::new("to", TypeSchema::text()),
+                    ])),
+                ),
+                StructField::new("stat", TypeSchema::text()),
+                StructField::new("unified", TypeSchema::text()),
+            ])),
+        ),
+    ])
 }
 
 /// One `_fd_run_traces` row: one attempt at one step, and the context after it

@@ -2,8 +2,8 @@
  * Which agents can work on the store this page is editing (design §12.1, §11.2).
  *
  * Creating an application creates the agent that builds it: a `coding` trait
- * scoped to the application's source directory, plus `build_application` for the
- * app itself (§13.3). That agent is the one an admin wants in the editor — it
+ * scoped to the application's source directory, whose `application` setting names
+ * the app it checks by building (§13.3). That agent is the one an admin wants in the editor — it
  * already knows which project it is looking at and what it may change — so the
  * IDE does not invent an agent, or a scope, or a prompt. It finds the ones whose
  * `coding` trait is pointed at **this store** and offers those.

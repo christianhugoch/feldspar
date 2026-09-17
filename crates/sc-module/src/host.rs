@@ -270,6 +270,7 @@ pub struct ModelProviderManifest {
 ///     },
 ///     csp: { "img-src": ["'self'", "data:"] },
 ///     builder_prompt: "You maintain {{ app }} …",
+///     checks: ["typecheck"],
 ///     scaffold: async (ctx) => [{ path: "package.json", contents: "…" }],
 ///     runtime: async (ctx) => [{ path: `${ctx.runtime}/composables.ts`, contents: "…" }],
 ///   },
@@ -318,6 +319,10 @@ pub struct FrameworkManifest {
     /// that declares no builder agent.
     #[serde(default)]
     pub builder_prompt: String,
+    /// The `package.json` scripts its builder agent checks with, in order —
+    /// `["typecheck"]`. The application build always follows them.
+    #[serde(default)]
+    pub checks: Vec<String>,
     /// Whether it exported a `scaffold` function — whether an application of it
     /// has a project Saltcorn writes, or one the admin brought.
     #[serde(default)]

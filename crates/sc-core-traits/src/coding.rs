@@ -72,6 +72,7 @@ mod feature;
 mod feedback;
 mod find;
 mod header;
+mod inspect;
 mod ledger;
 pub mod matching;
 mod patch;
@@ -113,6 +114,7 @@ pub use feature::{
     tool_name as implement_feature_tool_name,
 };
 pub use find::tool_name as find_files_tool_name;
+pub use inspect::{ScopeDiff, agent_run_diff, run_plan};
 pub use ledger::{ChangeStatus, FileChange, Ledger, PreImage, RunDiff, diff_ledger, run_diff};
 pub use patch::tool_name as apply_patch_tool_name;
 pub use plan::{

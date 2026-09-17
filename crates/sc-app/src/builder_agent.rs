@@ -14,7 +14,7 @@
 //!
 //! ## Why the traits are named as strings
 //!
-//! The traits themselves (`coding`, `build_application`) live in `sc-core-traits`,
+//! The trait itself (`coding`) lives in `sc-core-traits`,
 //! which is layer 9 and sits *above* this crate — as it must, since a trait's
 //! writes go through the row layer. A framework here can therefore only *name* the
 //! trait it wants and the settings to give it, exactly as an application names its
@@ -24,6 +24,21 @@
 //!
 //! Assembling a spec into an [`Agent`](sc_agent::Agent) and storing it is the
 //! server's, for the same layering reason: this crate does not know agents exist.
+//!
+//! ## One trait, planned
+//!
+//! The agent is `coding` alone (TODO §12). Building the application is one of
+//! `coding`'s checks — its `application` setting — rather than a second trait
+//! with a tool of its own, so the build runs where the ratchet, the baseline and
+//! the preview mount are, and a model is never offered two ways to ask "does
+//! this compile?". It starts in `plan` mode (`workflow: planned`), may check its
+//! work and look at the result, and may not run arbitrary scripts or a shell:
+//! those execute code nobody reviewed, and are grants the admin gives
+//! deliberately rather than ones that arrive with an application.
+//!
+//! The prompt is **role and platform** only. How to work — locate, change,
+//! check, summarise — is `coding`'s own contribution, which depends on the mode
+//! and the edit tool the run is offered and so cannot be written here.
 
 use std::collections::BTreeMap;
 
@@ -36,10 +51,8 @@ use crate::declared::{FrameworkDecl, FrameworkSet, installed_frameworks};
 use crate::framework::CODE_FRAMEWORK;
 use crate::react::REACT_FRAMEWORK;
 
-/// The trait that reads, searches and edits a file store's contents.
+/// The trait that reads, searches, edits and checks a file store's contents.
 pub const TRAIT_CODING: &str = "coding";
-/// The trait that builds one application and reports its diagnostics.
-pub const TRAIT_BUILD_APPLICATION: &str = "build_application";
 
 /// `coding`'s file store setting.
 pub const TRAIT_CFG_STORE: &str = "store";
@@ -49,8 +62,26 @@ pub const TRAIT_CFG_ROOT: &str = "root";
 pub const TRAIT_CFG_MAY_EDIT: &str = "may_edit";
 /// `coding`'s "may run the project's scripts" grant.
 pub const TRAIT_CFG_MAY_RUN_SCRIPTS: &str = "may_run_scripts";
-/// `build_application`'s application setting: a subdomain (§13.2).
+/// `coding`'s "may run the configured checks" grant.
+pub const TRAIT_CFG_MAY_CHECK: &str = "may_check";
+/// `coding`'s "may look at the application's preview" grant.
+pub const TRAIT_CFG_MAY_VIEW_APP: &str = "may_view_app";
+/// `coding`'s "may run shell commands" grant.
+pub const TRAIT_CFG_MAY_USE_SHELL: &str = "may_use_shell";
+/// `coding`'s application setting: the subdomain its `check` builds and its
+/// `view_app` looks at (§13.2). Also what identifies an agent as that
+/// application's builder.
 pub const TRAIT_CFG_APPLICATION: &str = "application";
+/// `coding`'s checks: `package.json` script names, in order.
+pub const TRAIT_CFG_CHECKS: &str = "checks";
+/// `coding`'s workflow: `direct` or `planned`.
+pub const TRAIT_CFG_WORKFLOW: &str = "workflow";
+/// `coding`'s edit format.
+pub const TRAIT_CFG_EDIT_FORMAT: &str = "edit_format";
+/// The [`TRAIT_CFG_WORKFLOW`] a builder agent is created with.
+pub const WORKFLOW_PLANNED: &str = "planned";
+/// The [`TRAIT_CFG_EDIT_FORMAT`] a builder agent is created with.
+pub const EDIT_FORMAT_AUTO: &str = "auto";
 
 /// One trait an application's builder agent is created with: which trait, and how
 /// it is configured.
@@ -144,11 +175,15 @@ pub fn builder_agent_in(
     app: &Application,
 ) -> Option<BuilderAgentSpec> {
     match fw.name.as_str() {
-        REACT_FRAMEWORK => coding_agent(set, fw, app, react_prompt),
-        CODE_FRAMEWORK => coding_agent(set, fw, app, code_prompt),
+        // The type check, then the build that `application` adds.
+        REACT_FRAMEWORK => coding_agent(set, fw, app, vec!["typecheck".to_owned()], react_prompt),
+        // A `code` project is the admin's own: which of its scripts are checks is
+        // theirs to say, and until they do `check` tells the model so.
+        CODE_FRAMEWORK => coding_agent(set, fw, app, Vec::new(), code_prompt),
         other => {
             let decl = set.find(other)?.clone();
-            coding_agent(set, fw, app, move |app, store, root| {
+            let checks = decl.checks.clone();
+            coding_agent(set, fw, app, checks, move |app, store, root| {
                 declared_prompt(&decl, &fw_config(app, store, root), app, store, root)
             })
         }
@@ -168,7 +203,7 @@ fn fw_config(app: &Application, store: &str, root: &str) -> BTreeMap<String, Str
     .collect()
 }
 
-/// A declared framework's prompt, rendered — or the shared one alone when its
+/// A declared framework's prompt, rendered — or a one-sentence stand-in when its
 /// template will not render, which is a declaration problem the module's card
 /// already reports and not a reason for the application to have no builder.
 fn declared_prompt(
@@ -178,8 +213,7 @@ fn declared_prompt(
     store: &str,
     root: &str,
 ) -> String {
-    let declared = decl
-        .prompt(&app.framework.config, extra)
+    decl.prompt(&app.framework.config, extra)
         .ok()
         .flatten()
         .unwrap_or_else(|| {
@@ -189,12 +223,11 @@ fn declared_prompt(
                 app.name,
                 app.subdomain.trim()
             )
-        });
-    format!("{declared}\n\n{SHARED_PROMPT}")
+        })
 }
 
-/// A coding agent over the framework's source tree, plus the build of this one
-/// application: read and edit the code, build it, read the diagnostics, fix them.
+/// A coding agent over the framework's source tree that checks its work by
+/// building this one application (TODO §12).
 ///
 /// `None` when the framework's settings do not resolve to a source tree — which
 /// on a saved application means the config was rejected on save, so there is
@@ -203,6 +236,7 @@ fn coding_agent(
     set: &FrameworkSet,
     fw: &FrameworkRef,
     app: &Application,
+    checks: Vec<String>,
     prompt: impl FnOnce(&Application, &str, &str) -> String,
 ) -> Option<BuilderAgentSpec> {
     let source = app_source_in(set, fw).ok()?;
@@ -217,27 +251,29 @@ fn coding_agent(
                 .with(TRAIT_CFG_STORE, store)
                 .with(TRAIT_CFG_ROOT, root)
                 // The point of this agent: it exists to change the application's
-                // source.
+                // source, check the change, and look at the result.
                 .with(TRAIT_CFG_MAY_EDIT, true)
-                // Off, like the trait's own default. Building is what this agent
-                // needs and it has `build_application` for that; running the
-                // project's other scripts executes code the agent did not write,
-                // which is a grant the admin gives deliberately rather than one
-                // that arrives with an application.
-                .with(TRAIT_CFG_MAY_RUN_SCRIPTS, false),
-            BuilderTrait::new(TRAIT_BUILD_APPLICATION)
-                .with(TRAIT_CFG_APPLICATION, app.subdomain.trim()),
+                .with(TRAIT_CFG_MAY_CHECK, true)
+                .with(TRAIT_CFG_MAY_VIEW_APP, true)
+                // Off, like the trait's own defaults: both execute code the model
+                // chose, which is a grant the admin gives deliberately rather than
+                // one that arrives with an application.
+                .with(TRAIT_CFG_MAY_RUN_SCRIPTS, false)
+                .with(TRAIT_CFG_MAY_USE_SHELL, false)
+                .with(TRAIT_CFG_APPLICATION, app.subdomain.trim())
+                .with(TRAIT_CFG_CHECKS, checks)
+                .with(TRAIT_CFG_WORKFLOW, WORKFLOW_PLANNED)
+                .with(TRAIT_CFG_EDIT_FORMAT, EDIT_FORMAT_AUTO),
         ],
     })
 }
 
-/// The prompt for a scaffolded React project: the conventions it can rely on, and
-/// the generated files it must not hand-edit.
+/// The prompt for a scaffolded React project: the role, and the one platform
+/// convention a model would otherwise break on its first edit.
 fn react_prompt(app: &Application, store: &str, root: &str) -> String {
     format!(
         "You build the `{name}` application, a React + Vite project served at the \
          `{subdomain}` subdomain, from the `{store}` file store under `{root}`.\n\n\
-         {SHARED_PROMPT}\n\n\
          `src/feldspar/` is the client generated from the application's API, rewritten \
          on every build: read it to learn what data there is, never edit it, and reach \
          data only through it.",
@@ -246,27 +282,17 @@ fn react_prompt(app: &Application, store: &str, root: &str) -> String {
     )
 }
 
-/// The prompt for a `code` application: the same job, without conventions this
+/// The prompt for a `code` application: the same role, without conventions this
 /// framework has not got.
 fn code_prompt(app: &Application, store: &str, root: &str) -> String {
     format!(
         "You build the `{name}` application, served at the `{subdomain}` subdomain, \
          from the `{store}` file store under `{root}`. The project is the admin's \
-         own: read it before changing it rather than assuming a layout.\n\n\
-         {SHARED_PROMPT}",
+         own: read it before changing it rather than assuming a layout.",
         name = app.name,
         subdomain = app.subdomain.trim(),
     )
 }
-
-/// What is true of building any application, whichever framework it is on.
-///
-/// Short, because how to work — locate, change, check, summarise — is the
-/// `coding` trait's own prompt, which can name the tools the agent actually has
-/// (TODO 8.1).
-const SHARED_PROMPT: &str = "\
-Work in small steps, and build the application after each change until it builds \
-clean. If a request is ambiguous, ask rather than guess.";
 
 #[cfg(test)]
 mod tests {
@@ -304,6 +330,8 @@ mod tests {
         assert_eq!(spec.name, "build-todo");
         assert!(spec.description.contains("Todo"), "{}", spec.description);
 
+        // `coding` alone: building is one of its checks, not a trait of its own.
+        assert_eq!(spec.traits.len(), 1, "{:?}", spec.traits);
         // The coding trait is scoped to the *derived* project directory, not the
         // store root: an agent that could edit every project in the store would
         // be one grant for every application that shares it.
@@ -320,10 +348,19 @@ mod tests {
             "running arbitrary scripts is not something an application creation grants"
         );
 
-        // And it can build the one application it was created for, by subdomain.
-        let build = &spec.traits[1];
-        assert_eq!(build.trait_, TRAIT_BUILD_APPLICATION);
-        assert_eq!(build.config[TRAIT_CFG_APPLICATION], Json::from("todo"));
+        // It checks its work — the type check, then the build of the one
+        // application it was created for, by subdomain — and looks at the result.
+        assert_eq!(coding.config[TRAIT_CFG_MAY_CHECK], Json::from(true));
+        assert_eq!(coding.config[TRAIT_CFG_MAY_VIEW_APP], Json::from(true));
+        assert_eq!(coding.config[TRAIT_CFG_MAY_USE_SHELL], Json::from(false));
+        assert_eq!(coding.config[TRAIT_CFG_APPLICATION], Json::from("todo"));
+        assert_eq!(
+            coding.config[TRAIT_CFG_CHECKS],
+            serde_json::json!(["typecheck"])
+        );
+        // It plans, and edits in whichever format the model is best at.
+        assert_eq!(coding.config[TRAIT_CFG_WORKFLOW], Json::from("planned"));
+        assert_eq!(coding.config[TRAIT_CFG_EDIT_FORMAT], Json::from("auto"));
 
         // The prompt says which application, where its source is, and the
         // convention a model would otherwise break on its first edit.
@@ -331,7 +368,8 @@ mod tests {
         assert!(prompt.contains("Todo"), "{prompt}");
         assert!(prompt.contains("apps"), "{prompt}");
         assert!(prompt.contains("src/feldspar/"), "{prompt}");
-        assert!(prompt.contains("build"), "{prompt}");
+        // Role and platform only: how to work is `coding`'s own prompt.
+        assert!(!prompt.contains("Work in small steps"), "{prompt}");
     }
 
     #[test]
@@ -345,6 +383,10 @@ mod tests {
         // The `code` framework states its source directory rather than deriving
         // it, and that is the directory the agent gets.
         assert_eq!(coding.config[TRAIT_CFG_ROOT], Json::from("web"));
+        // No checks are assumed for the admin's own project: `check` says so
+        // until they list some. The build still runs, as the application's.
+        assert_eq!(coding.config[TRAIT_CFG_CHECKS], serde_json::json!([]));
+        assert_eq!(coding.config[TRAIT_CFG_APPLICATION], Json::from("blog"));
 
         // No React conventions are claimed for a project this framework knows
         // nothing about.

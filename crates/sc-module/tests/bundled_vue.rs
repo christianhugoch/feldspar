@@ -230,6 +230,8 @@ async fn the_bundled_vue_module_declares_the_framework_an_admin_picks() {
     assert_eq!(vue.info().label, "Vue");
     assert!(vue.info().description.contains("Vue 3"));
     assert!(vue.scaffolds);
+    // Its builder agent checks with the project's own type check.
+    assert_eq!(vue.checks, ["typecheck"]);
 
     // The same two settings `react` asks for, so an admin moving between them is
     // filling in the same form.
@@ -324,6 +326,10 @@ async fn the_scaffold_is_a_vue_project_whose_every_import_resolves() {
     assert!(
         package.contains("vue-tsc --noEmit && vite build"),
         "the build type-checks the project against the generated client: {package}"
+    );
+    assert!(
+        package.contains("\"typecheck\": \"vue-tsc --noEmit\""),
+        "the check the framework declares is a script the project has: {package}"
     );
     assert!(!package.contains("react"), "{package}");
     assert!(file("index.html").contains("/src/main.ts"));

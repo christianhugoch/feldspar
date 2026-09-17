@@ -159,42 +159,91 @@ export interface ResponseStream {
   thinkingProgress?(delta: { text: string; id?: string }): void;
 }
 
+/** What one event says the agent changed in the store. */
+export interface StoreChange {
+  /** The scope-relative paths it wrote. */
+  readonly paths: string[];
+  /** Anything may have changed: a shell command ran, and nothing says what it touched. */
+  readonly everything: boolean;
+  /** A commit was made, so source control's view of the working copy is stale. */
+  readonly committed: boolean;
+}
+
+/** An event that changed nothing. */
+const UNCHANGED: StoreChange = {
+  paths: [],
+  everything: false,
+  committed: false,
+};
+
+/** Several events' changes, as one. */
+export function mergeChanges(changes: StoreChange[]): StoreChange {
+  return {
+    paths: [...new Set(changes.flatMap((change) => change.paths))],
+    everything: changes.some((change) => change.everything),
+    committed: changes.some((change) => change.committed),
+  };
+}
+
+/** Whether the workbench has anything to be told. */
+export function hasChanges(change: StoreChange): boolean {
+  return change.paths.length > 0 || change.everything || change.committed;
+}
+
 /**
- * Fold one server event into the response stream, and say which scope-relative
- * file it changed.
+ * Fold one server event into the response stream, and say what it changed in
+ * the store.
  *
  * A tool call is reported as progress and its *result* is not: the coding
  * trait's results are file contents and search hits, which the model is reading
  * on the admin's behalf, and pasting them into the answer would bury the answer.
  * A failed tool is the exception — that is the sentence explaining a turn which
  * then went sideways.
+ *
+ * What changed is read from the call for the tools that name their paths, and
+ * from the **result** for `implement_feature`, whose session wrote files this
+ * socket never saw a call for: its diffstat names them, and its `commit:` line
+ * says whether source control moved.
  */
 export function relayEvent(
   event: ServerEvent,
   stream: ResponseStream,
-): string[] {
+): StoreChange {
   switch (event.type) {
     case "text":
       stream.markdown(event.delta);
-      return [];
+      return UNCHANGED;
     case "reasoning":
       // Rendered as the collapsible "thinking" section where the proposal is
       // live, and dropped where it is not: reasoning shown as the answer reads
       // as the answer.
       stream.thinkingProgress?.({ text: event.delta, id: "agent" });
-      return [];
+      return UNCHANGED;
     case "tool_call":
       stream.progress(toolProgress(event.name, event.arguments));
-      return changedPaths(event.name, event.arguments);
+      return {
+        paths: changedPaths(event.name, event.arguments),
+        // Checked at the call, not the result: a command that timed out or
+        // failed may still have written half of what it meant to.
+        everything: event.name.startsWith("shell_"),
+        committed: false,
+      };
     case "tool_result":
       if (event.is_error)
         stream.markdown(`\n\n\`${event.name}\` failed: ${event.content}\n\n`);
-      return [];
+      if (event.name.startsWith("implement_feature_")) {
+        return {
+          paths: diffstatPaths(event.content),
+          everything: false,
+          committed: /^commit: [0-9a-f]{7,}/m.test(event.content),
+        };
+      }
+      return UNCHANGED;
     case "error":
       // Appended, never replacing: a failure after two paragraphs and a tool
       // call is read alongside them, not instead of them.
       stream.markdown(`\n\n⚠️ ${event.message}\n\n`);
-      return [];
+      return UNCHANGED;
     case "compaction":
       // The agent's context was cleared or summarised to fit its budget. Worth
       // a line — an agent that seems to have forgotten something has a reason
@@ -204,11 +253,33 @@ export function relayEvent(
           ? "Clearing old tool output from the context"
           : "Summarising the conversation so far to fit the context",
       );
-      return [];
+      return UNCHANGED;
     case "done":
     case "controls":
-      return [];
+      return UNCHANGED;
   }
+}
+
+/**
+ * The scope-relative paths an `implement_feature` result's diffstat names:
+ * `M src/App.tsx | +3 -1`, and both sides of `R src/a.ts → src/b.ts`.
+ */
+export function diffstatPaths(content: string): string[] {
+  const lines = content.split("\n");
+  const start = lines.indexOf("diffstat:");
+  if (start < 0) return [];
+  const paths: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    const moved = line.match(/^R (.+) → (.+)$/);
+    if (moved) {
+      paths.push(moved[1], moved[2]);
+      continue;
+    }
+    const file = line.match(/^[AMD] (.+?) \| /);
+    if (file == null) break;
+    paths.push(file[1]);
+  }
+  return [...new Set(paths)];
 }
 
 /** The coding trait's tools, by the prefix its scope suffix is added to. */
@@ -236,6 +307,30 @@ export function toolProgress(tool: string, args: unknown): string {
   // Looking at the application: where, when the call says (TODO §7b).
   if (tool.startsWith("view_app_")) {
     return `Looking at ${firstString(args, ["path"]) ?? "the application"}`;
+  }
+  if (tool.startsWith("check_")) return "Running the checks";
+  if (tool.startsWith("shell_")) {
+    const command = firstString(args, ["command"]);
+    return command == null
+      ? "Running a shell command"
+      : `Running \`${command}\``;
+  }
+  if (tool.startsWith("process_")) {
+    const action = firstString(args, ["action"]) ?? "process";
+    const name = firstString(args, ["name"]);
+    const command = firstString(args, ["command"]);
+    const head =
+      name == null ? `Process: ${action}` : `Process ${name}: ${action}`;
+    return command == null ? head : `${head} \`${command}\``;
+  }
+  if (tool.startsWith("save_plan_")) return "Saving the plan";
+  if (tool.startsWith("implement_feature_")) {
+    const id = firstString(args, ["id"]);
+    return id == null ? "Implementing a feature" : `Implementing feature ${id}`;
+  }
+  if (tool.startsWith("explore_")) {
+    const question = firstString(args, ["question"]);
+    return question == null ? "Exploring the code" : `Exploring: ${question}`;
   }
   const verb = VERBS.find((candidate) => tool.startsWith(candidate.prefix));
   const subject = tool.startsWith("apply_patch_")

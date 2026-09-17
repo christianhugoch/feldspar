@@ -18,9 +18,10 @@
 
 use sc_app::{
     Application, BuilderAgentSpec, CFG_COMMAND, CFG_OUTPUT, CFG_PROJECT, CFG_SOURCE, CFG_STORE,
-    CODE_FRAMEWORK, FrameworkRef, REACT_FRAMEWORK, TRAIT_BUILD_APPLICATION, TRAIT_CFG_APPLICATION,
-    TRAIT_CFG_MAY_EDIT, TRAIT_CFG_MAY_RUN_SCRIPTS, TRAIT_CFG_ROOT, TRAIT_CFG_STORE, TRAIT_CODING,
-    framework_builder_agent,
+    CODE_FRAMEWORK, EDIT_FORMAT_AUTO, FrameworkRef, REACT_FRAMEWORK, TRAIT_CFG_APPLICATION,
+    TRAIT_CFG_CHECKS, TRAIT_CFG_EDIT_FORMAT, TRAIT_CFG_MAY_CHECK, TRAIT_CFG_MAY_EDIT,
+    TRAIT_CFG_MAY_RUN_SCRIPTS, TRAIT_CFG_MAY_USE_SHELL, TRAIT_CFG_MAY_VIEW_APP, TRAIT_CFG_ROOT,
+    TRAIT_CFG_STORE, TRAIT_CFG_WORKFLOW, TRAIT_CODING, WORKFLOW_PLANNED, framework_builder_agent,
 };
 use sc_types::validate_attrs;
 use serde_json::json;
@@ -84,39 +85,55 @@ fn every_trait_a_framework_declares_is_a_registered_one_configured_as_it_declare
 }
 
 #[test]
-fn the_coding_grant_and_the_build_target_are_the_settings_those_traits_mean() {
+fn the_grants_and_the_build_target_are_the_settings_the_coding_trait_means() {
     // The names are strings on the `sc-app` side, so assert they are the *same*
-    // strings the traits use — a settings rename that only touched the trait
+    // strings the trait uses — a settings rename that only touched the trait
     // would otherwise leave a builder agent that reads its source and cannot
     // change it, which is a silent loss of the capability, not an error.
     let registry = sc_core_traits::builtin_traits().expect("the built-in traits assemble");
     assert!(registry.get(TRAIT_CODING).is_some());
-    assert!(registry.get(TRAIT_BUILD_APPLICATION).is_some());
-    assert_eq!(TRAIT_CFG_STORE, sc_core_traits::CFG_STORE);
-    assert_eq!(TRAIT_CFG_ROOT, sc_core_traits::CFG_ROOT);
-    assert_eq!(TRAIT_CFG_MAY_EDIT, sc_core_traits::CFG_MAY_EDIT);
-    assert_eq!(
-        TRAIT_CFG_MAY_RUN_SCRIPTS,
-        sc_core_traits::CFG_MAY_RUN_SCRIPTS
-    );
-    assert_eq!(TRAIT_CFG_APPLICATION, sc_core_traits::CFG_APPLICATION);
+    for (declared, real) in [
+        (TRAIT_CFG_STORE, sc_core_traits::CFG_STORE),
+        (TRAIT_CFG_ROOT, sc_core_traits::CFG_ROOT),
+        (TRAIT_CFG_MAY_EDIT, sc_core_traits::CFG_MAY_EDIT),
+        (
+            TRAIT_CFG_MAY_RUN_SCRIPTS,
+            sc_core_traits::CFG_MAY_RUN_SCRIPTS,
+        ),
+        (TRAIT_CFG_MAY_CHECK, sc_core_traits::CFG_MAY_CHECK),
+        (TRAIT_CFG_MAY_VIEW_APP, sc_core_traits::CFG_MAY_VIEW_APP),
+        (TRAIT_CFG_MAY_USE_SHELL, sc_core_traits::CFG_MAY_USE_SHELL),
+        (TRAIT_CFG_APPLICATION, sc_core_traits::CFG_APPLICATION),
+        (TRAIT_CFG_CHECKS, sc_core_traits::CFG_CHECKS),
+        (TRAIT_CFG_WORKFLOW, sc_core_traits::CFG_WORKFLOW),
+        (TRAIT_CFG_EDIT_FORMAT, sc_core_traits::CFG_EDIT_FORMAT),
+        (WORKFLOW_PLANNED, sc_core_traits::WORKFLOW_PLANNED),
+        (EDIT_FORMAT_AUTO, sc_core_traits::EDIT_FORMAT_AUTO),
+    ] {
+        assert_eq!(declared, real);
+    }
 
-    // And the values a created application carries: the agent may edit the
-    // source it was created to build, and builds *that* application.
+    // And the values a created application carries (§12): `coding` alone,
+    // which may edit, check and look at the application it was created to
+    // build, starts by planning, and may not run scripts or a shell.
     let app = react_app();
     let spec = spec_for(&app);
-    let coding = spec
-        .traits
-        .iter()
-        .find(|t| t.trait_ == TRAIT_CODING)
-        .expect("the coding trait");
-    assert_eq!(coding.config[TRAIT_CFG_MAY_EDIT], json!(true));
-    let build = spec
-        .traits
-        .iter()
-        .find(|t| t.trait_ == TRAIT_BUILD_APPLICATION)
-        .expect("the build trait");
-    assert_eq!(build.config[TRAIT_CFG_APPLICATION], json!(app.subdomain));
+    assert_eq!(spec.traits.len(), 1, "{:?}", spec.traits);
+    let coding = &spec.traits[0];
+    assert_eq!(coding.trait_, TRAIT_CODING);
+    for (key, value) in [
+        (TRAIT_CFG_MAY_EDIT, json!(true)),
+        (TRAIT_CFG_MAY_CHECK, json!(true)),
+        (TRAIT_CFG_MAY_VIEW_APP, json!(true)),
+        (TRAIT_CFG_MAY_RUN_SCRIPTS, json!(false)),
+        (TRAIT_CFG_MAY_USE_SHELL, json!(false)),
+        (TRAIT_CFG_APPLICATION, json!(app.subdomain)),
+        (TRAIT_CFG_CHECKS, json!(["typecheck"])),
+        (TRAIT_CFG_WORKFLOW, json!("planned")),
+        (TRAIT_CFG_EDIT_FORMAT, json!("auto")),
+    ] {
+        assert_eq!(coding.config[key], value, "`{key}`");
+    }
 }
 
 #[test]

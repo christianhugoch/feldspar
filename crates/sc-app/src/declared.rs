@@ -111,6 +111,9 @@ pub struct FrameworkDecl {
     /// framework, as a template. `None` for a framework that declares no builder
     /// agent.
     pub builder_prompt: Option<Template>,
+    /// The `package.json` scripts its builder agent's `check` runs, in order,
+    /// before the application build. Empty for a framework that names none.
+    pub checks: Vec<String>,
     /// Whether the module answers [`FrameworkHost::framework_files`] for the
     /// scaffold phase — i.e. whether an application of this framework has a
     /// project Saltcorn writes, or one the admin brought.
@@ -504,6 +507,7 @@ pub(crate) mod tests {
             builder_prompt: Some(template(
                 "You maintain {{ app }} in {{ project }} of store {{ store }}.",
             )),
+            checks: vec!["typecheck".to_owned()],
             scaffolds: true,
         }
     }

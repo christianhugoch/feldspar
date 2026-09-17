@@ -19,7 +19,7 @@ const saltcornUi = { id: "a2", subdomain: "crm", builds: false, has_views: true,
 
 const builder = {
   name: "build-todo",
-  traits: [{ trait: "build_application", config: { application: "todo" } }],
+  traits: [{ trait: "coding", config: { store: "code", root: "todo", application: "todo" } }],
 };
 
 describe("the current application's sidebar links", () => {
@@ -77,9 +77,20 @@ describe("the current application's sidebar links", () => {
 });
 
 describe("finding an application's coding agent", () => {
-  it("is the agent whose build trait names the application's subdomain", () => {
+  it("is the agent whose coding trait names the application's subdomain", () => {
     expect(builderAgentFor(react, [builder])).toBe("build-todo");
     expect(builderAgentFor(saltcornUi, [builder])).toBeNull();
+    // A coding agent over the same source that builds nothing is not its builder,
+    // and neither is the trait that used to build applications.
+    const reader = {
+      name: "reader",
+      traits: [{ trait: "coding", config: { store: "code", root: "todo" } }],
+    };
+    const old = {
+      name: "old",
+      traits: [{ trait: "build_application", config: { application: "todo" } }],
+    };
+    expect(builderAgentFor(react, [reader, old])).toBeNull();
   });
 
   it("goes by the trait, not the conventional name", () => {

@@ -809,6 +809,13 @@ impl AgentLoop {
         self.trait_state.get(key)
     }
 
+    /// Every trait instance's state, by [`trait_state_key`], in key order: how
+    /// something reading a run from outside it finds a trait's state without
+    /// the agent it ran.
+    pub fn trait_states(&self) -> impl Iterator<Item = (&str, &Json)> {
+        self.trait_state.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
     /// One trait instance's state, for writing. Created as `null`.
     pub fn trait_state_mut(&mut self, key: &str) -> &mut Json {
         self.trait_state.entry(key.to_owned()).or_insert(Json::Null)

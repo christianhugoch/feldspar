@@ -81,9 +81,11 @@ pub use build::{
     build_code_framework, emit_app_client, emit_client, load_app_bundle, run_build,
 };
 pub use builder_agent::{
-    BuilderAgentSpec, BuilderTrait, TRAIT_BUILD_APPLICATION, TRAIT_CFG_APPLICATION,
-    TRAIT_CFG_MAY_EDIT, TRAIT_CFG_MAY_RUN_SCRIPTS, TRAIT_CFG_ROOT, TRAIT_CFG_STORE, TRAIT_CODING,
-    builder_agent_in, builder_agent_name, framework_builder_agent,
+    BuilderAgentSpec, BuilderTrait, EDIT_FORMAT_AUTO, TRAIT_CFG_APPLICATION, TRAIT_CFG_CHECKS,
+    TRAIT_CFG_EDIT_FORMAT, TRAIT_CFG_MAY_CHECK, TRAIT_CFG_MAY_EDIT, TRAIT_CFG_MAY_RUN_SCRIPTS,
+    TRAIT_CFG_MAY_USE_SHELL, TRAIT_CFG_MAY_VIEW_APP, TRAIT_CFG_ROOT, TRAIT_CFG_STORE,
+    TRAIT_CFG_WORKFLOW, TRAIT_CODING, WORKFLOW_PLANNED, builder_agent_in, builder_agent_name,
+    framework_builder_agent,
 };
 pub use declared::{
     BuildTemplate, DeclaredFile, FilePhase, FrameworkDecl, FrameworkHost, FrameworkSet,

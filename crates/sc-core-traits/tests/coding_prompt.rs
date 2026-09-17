@@ -15,8 +15,8 @@ use sc_agent::{
 use sc_app::{Application, CFG_PROJECT, FrameworkRef, REACT_FRAMEWORK, framework_builder_agent};
 use sc_catalog::{connect_file_store_def, save_file_store};
 use sc_core_traits::{
-    CFG_APPLICATION, CFG_CHECKS, CFG_EDIT_FORMAT, CFG_MAY_CHECK, CFG_MAY_EDIT, CFG_MAY_USE_SHELL,
-    CFG_MAY_VIEW_APP, CFG_ROOT, CFG_STORE,
+    CFG_EDIT_FORMAT, CFG_MAY_CHECK, CFG_MAY_EDIT, CFG_MAY_USE_SHELL, CFG_MAY_VIEW_APP, CFG_ROOT,
+    CFG_STORE,
 };
 use sc_error::{Error, Result};
 use sc_files::FileStoreDef;
@@ -252,9 +252,8 @@ async fn a_store_inside_someone_elses_repository_gets_no_git_log() -> Result<()>
 }
 
 /// TODO 8.3: the React builder agent's system prompt plus its tools stay within
-/// R§4's 1 500 tokens, in `act` and in `plan`, for either edit tool — both as it
-/// is declared today and in §12's shape (`coding` alone, checking and looking
-/// at the application).
+/// R§4's 1 500 tokens, in `act` and in `plan`, for either edit tool — as it is
+/// declared (§12: `coding` alone, checking and looking at the application).
 #[tokio::test]
 async fn the_react_builder_agents_stable_prefix_is_at_most_1500_tokens() -> Result<()> {
     const LIMIT: u64 = 1_500;
@@ -271,24 +270,6 @@ async fn the_react_builder_agents_stable_prefix_is_at_most_1500_tokens() -> Resu
         Agent::new(&spec.name, "main").system_prompt(&spec.system_prompt),
         |agent, t| agent.with_trait(EnabledTrait::new(&t.trait_).configuration(t.config.clone())),
     );
-    let coding = spec
-        .traits
-        .iter()
-        .find(|t| t.trait_ == "coding")
-        .expect("a coding trait");
-    let mut section_12 = coding.config.clone();
-    for (key, value) in [
-        (CFG_MAY_EDIT, json!(true)),
-        (CFG_MAY_CHECK, json!(true)),
-        (CFG_MAY_VIEW_APP, json!(true)),
-        (CFG_APPLICATION, json!("todo")),
-        (CFG_CHECKS, json!(["typecheck"])),
-    ] {
-        section_12.insert(key.to_owned(), value);
-    }
-    let shaped = Agent::new(&spec.name, "main")
-        .system_prompt(&spec.system_prompt)
-        .with_trait(EnabledTrait::new("coding").configuration(section_12));
 
     let system = RunCaller::system();
     let mut over: Vec<String> = Vec::new();
@@ -297,7 +278,7 @@ async fn the_react_builder_agents_stable_prefix_is_at_most_1500_tokens() -> Resu
         (sc_llm::OPENAI_RESPONSES_BACKEND, "gpt-5-mini"),
     ] {
         let caps = ModelCapabilities::built_in(backend, model);
-        for (label, agent) in [("declared", &declared), ("§12", &shaped)] {
+        for (label, agent) in [("declared", &declared)] {
             for mode in [RunMode::Act, RunMode::Plan] {
                 let cx = ToolsContext::new(&env.catalog, mode, &caps).for_caller(&system);
                 let prefix = stable_prefix(&env.registry, agent, &cx)?;

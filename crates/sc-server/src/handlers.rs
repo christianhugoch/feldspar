@@ -2128,6 +2128,23 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    reg.register("getRunDiff", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = sc_agent::RunId(parse_uuid(ctx.path_param("id")?, "run")?);
+                let run = sc_agent::require_run(&catalog, id).await?;
+                let (scopes, runs) = sc_core_traits::agent_run_diff(&catalog, &run).await?;
+                Ok(HandlerResponse::ok(json!({
+                    "run": run.id.0,
+                    "runs": runs.iter().map(|r| r.0).collect::<Vec<_>>(),
+                    "scopes": scopes.iter().map(scope_diff_json).collect::<Vec<_>>(),
+                })))
+            }
+        }
+    });
+
     reg.register("deleteRun", {
         let catalog = catalog.clone();
         move |ctx| {
@@ -5584,10 +5601,20 @@ async fn create_builder_agent(
         )));
     }
 
+    // Looking at the application needs a headless browser, and `coding` refuses
+    // the grant on a host without one. A server with no browser still gets a
+    // builder that edits, checks and commits — it just cannot look, and the
+    // admin can tick the box once a browser is installed.
+    let has_browser = services.registry().host().browser.is_ok();
     let mut agent = sc_agent::Agent::new(&spec.name, &provider.name)
         .description(spec.description)
         .system_prompt(spec.system_prompt);
-    for enabled in spec.traits {
+    for mut enabled in spec.traits {
+        if !has_browser && enabled.config.contains_key(sc_app::TRAIT_CFG_MAY_VIEW_APP) {
+            enabled
+                .config
+                .insert(sc_app::TRAIT_CFG_MAY_VIEW_APP.to_owned(), Json::Bool(false));
+        }
         agent = agent
             .with_trait(sc_agent::EnabledTrait::new(enabled.trait_).configuration(enabled.config));
     }
@@ -5606,8 +5633,8 @@ async fn create_builder_agent(
 ///
 /// **It deletes that application's builder, not every agent that shares its
 /// name.** The name is the derivation ([`builder_agent_name`]), but the check is
-/// the trait: only an agent still carrying `build_application` for *this*
-/// subdomain is one. So an agent an admin created themselves under that name, or
+/// the trait: only an agent still carrying a `coding` trait whose `application`
+/// is *this* subdomain is one. So an agent an admin created themselves under that name, or
 /// re-pointed at something else, survives the deletion — a delete button on one
 /// screen must not silently take an agent that is doing another job. What an
 /// admin's edits to the real builder cannot buy it is survival: an agent that
@@ -5629,7 +5656,7 @@ async fn delete_builder_agent(catalog: &Catalog, app: &Application) -> Result<Op
     };
     let subdomain = app.subdomain.trim();
     let builds_this_app = agent.traits.iter().any(|t| {
-        t.trait_ == sc_app::TRAIT_BUILD_APPLICATION
+        t.trait_ == sc_app::TRAIT_CODING
             && t.config
                 .get(sc_app::TRAIT_CFG_APPLICATION)
                 .and_then(Json::as_str)
@@ -6798,8 +6825,68 @@ fn run_json(run: &sc_agent::Run) -> Json {
         );
         fields.insert("trace".to_owned(), Json::Array(Vec::new()));
         fields.insert("pending_form".to_owned(), Json::Null);
+        let plan = match run.kind {
+            sc_agent::RunKind::Agent => run
+                .agent_loop()
+                .ok()
+                .and_then(|state| sc_core_traits::run_plan(&state)),
+            _ => None,
+        };
+        fields.insert(
+            "plan".to_owned(),
+            plan.as_ref().map_or(Json::Null, run_plan_json),
+        );
     }
     out
+}
+
+/// A planner run's plan (matching `run_plan_schema`), every field present.
+fn run_plan_json(plan: &sc_core_traits::Plan) -> Json {
+    let word = |value: Json| value.as_str().unwrap_or_default().to_owned();
+    json!({
+        "features": plan.features.iter().map(|f| json!({
+            "id": f.id,
+            "title": f.title,
+            "description": f.description,
+            "kind": word(json!(f.kind)),
+            "acceptance": f.acceptance,
+            "files": f.files,
+            "pages": f.pages,
+            "status": word(json!(f.status)),
+            "attempts": f.attempts,
+            "runs": f.runs,
+        })).collect::<Vec<_>>(),
+        "progress": plan.progress.iter().map(|p| json!({
+            "feature": p.feature,
+            "run": p.run,
+            "status": word(json!(p.status)),
+            "summary": p.summary,
+            "check": p.check,
+            "diffstat": p.diffstat,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// One scope's changes (matching `run_diff_schema`).
+fn scope_diff_json(scope: &sc_core_traits::ScopeDiff) -> Json {
+    let diff = &scope.diff;
+    json!({
+        "store": scope.scope.store,
+        "root": scope.scope.root,
+        "files": diff.files.iter().map(|f| json!({
+            "path": f.path,
+            "status": match f.status {
+                sc_core_traits::ChangeStatus::Added => "added",
+                sc_core_traits::ChangeStatus::Modified => "modified",
+                sc_core_traits::ChangeStatus::Deleted => "deleted",
+            },
+            "added": f.added,
+            "removed": f.removed,
+        })).collect::<Vec<_>>(),
+        "moves": diff.moves.iter().map(|(from, to)| json!({ "from": from, "to": to })).collect::<Vec<_>>(),
+        "stat": diff.stat(),
+        "unified": diff.unified,
+    })
 }
 
 /// One whole run, with the workflow half filled in: the `_fd_run_traces` rows a

@@ -131,6 +131,16 @@ impl Ledger {
     pub fn moves(&self) -> &[Move] {
         &self.moves
     }
+
+    /// Take in a later run's ledger over the same scope: its pre-images for
+    /// paths this one has not touched, and its moves after this one's. What a
+    /// planner run's diff is made of, with its sessions' (TODO 10.5).
+    pub fn absorb(&mut self, later: &Ledger) {
+        for (path, before) in &later.files {
+            self.touch_with(path, before.clone());
+        }
+        self.moves.extend(later.moves.iter().cloned());
+    }
 }
 
 /// How one path changed over the run.
@@ -335,6 +345,25 @@ mod tests {
         );
         assert_eq!(ledger.pre_image("b.ts"), Some(&PreImage::Absent));
         assert_eq!(ledger.paths().collect::<Vec<_>>(), ["a.ts", "b.ts"]);
+    }
+
+    #[test]
+    fn absorbing_a_later_ledger_keeps_the_earlier_pre_images() {
+        let mut first = Ledger::default();
+        first.touch("a.ts", Some(b"original\n"));
+        let mut later = Ledger::default();
+        later.touch("a.ts", Some(b"after the first session\n"));
+        later.touch("b.ts", None);
+        later.moved("c.ts", "d.ts");
+        first.absorb(&later);
+        assert_eq!(
+            first.pre_image("a.ts"),
+            Some(&PreImage::Text {
+                text: "original\n".to_owned()
+            })
+        );
+        assert_eq!(first.pre_image("b.ts"), Some(&PreImage::Absent));
+        assert_eq!(first.moves().len(), 1);
     }
 
     #[test]

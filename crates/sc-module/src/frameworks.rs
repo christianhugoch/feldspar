@@ -245,8 +245,28 @@ fn declaration(manifest: &FrameworkManifest, module: &str) -> Result<FrameworkDe
             "" => None,
             prompt => Some(Template::parse(prompt)?),
         },
+        checks: checks(&manifest.checks)?,
         scaffolds: manifest.scaffolds,
     })
+}
+
+/// The declared checks: script names, each once. Refused when the module loads,
+/// for the reason a bad template is — the agent's save would refuse them later,
+/// on an application form that is not the module author's.
+fn checks(declared: &[String]) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for name in declared.iter().map(|n| n.trim()) {
+        if name.is_empty() {
+            return Err(Error::invalid(
+                "its `checks` lists an empty script name".to_owned(),
+            ));
+        }
+        if out.iter().any(|n| n == name) {
+            return Err(Error::invalid(format!("its `checks` lists `{name}` twice")));
+        }
+        out.push(name.to_owned());
+    }
+    Ok(out)
 }
 
 /// The `build` object: five templates, a command and an optional install step.
@@ -396,8 +416,29 @@ mod tests {
             },
             "csp": { "img-src": ["'self'", "data:"] },
             "builder_prompt": "You maintain {{ app }}.",
+            "checks": ["typecheck"],
             "scaffolds": true
         })
+    }
+
+    #[test]
+    fn declared_checks_are_script_names_each_once() {
+        let mut twice = vue();
+        twice["checks"] = json!(["typecheck", " typecheck "]);
+        let err = declaration(&manifest(twice), "@feldspar/vue").unwrap_err();
+        assert!(err.to_string().contains("`typecheck` twice"), "{err}");
+        let mut blank = vue();
+        blank["checks"] = json!([""]);
+        assert!(declaration(&manifest(blank), "@feldspar/vue").is_err());
+        // And a framework that names none has none.
+        let mut none = vue();
+        none.as_object_mut().unwrap().remove("checks");
+        assert!(
+            declaration(&manifest(none), "@feldspar/vue")
+                .unwrap()
+                .checks
+                .is_empty()
+        );
     }
 
     #[test]
@@ -407,6 +448,7 @@ mod tests {
         assert_eq!(decl.module, "@feldspar/vue");
         assert_eq!(decl.label, "Vue");
         assert!(decl.scaffolds);
+        assert_eq!(decl.checks, ["typecheck"]);
         // The settings arrive through the same translation an action's do.
         let names: Vec<&str> = decl.config_spec.iter().map(|f| f.name()).collect();
         assert_eq!(names, ["store", "project"]);
