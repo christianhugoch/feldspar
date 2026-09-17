@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 
 use super::check::Baseline;
 use super::ledger::Ledger;
+use super::plan::Plan;
 
 /// The trait's state for one run.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -33,6 +34,13 @@ pub struct CodingState {
     /// (TODO 6.4).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub baseline: BTreeMap<String, Baseline>,
+    /// Whether a check was red while the run had changed nothing but test
+    /// files: a bug reproduced before it was fixed (TODO 9.7).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub red_before_fix: bool,
+    /// A planner run's plan (TODO §8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Plan>,
 }
 
 impl CodingState {

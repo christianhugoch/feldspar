@@ -21,7 +21,7 @@ use sc_types::Attrs;
 
 use super::{
     CFG_MAY_CHECK, CFG_MAY_EDIT, CFG_MAY_USE_SHELL, CFG_MAY_VIEW_APP, check, edit, edit_format,
-    is_admin, may, patch, repo_map, search, shell, view_app, write,
+    explore, feature, is_admin, may, patch, plan, repo_map, search, shell, view_app, write,
 };
 use crate::files::{FileScope, scope_as_written};
 
@@ -75,16 +75,12 @@ fn act(cx: &ToolsContext<'_>, config: &Attrs, scope: &FileScope) -> String {
     steps.push("Make the smallest change. Edit only files you have read.".to_owned());
     if may_check {
         steps.push(format!(
-            "Run `{check}` and fix until it has no new failures, not until it \"should work\"."
+            "Run `{check}` and fix until it has no new failures."
         ));
     }
     if may(config, CFG_MAY_VIEW_APP) {
-        let after = match may_check {
-            true => " after a green check".to_owned(),
-            false => String::new(),
-        };
         steps.push(format!(
-            "For a visible change,{after} look at the page with `{}`.",
+            "Look at a visible change with `{}`.",
             view_app::tool_name(scope)
         ));
     }
@@ -107,7 +103,7 @@ fn act(cx: &ToolsContext<'_>, config: &Attrs, scope: &FileScope) -> String {
 const RULES: &str = "<rules>\n\
 - Never delete, skip or weaken a test to make it pass.\n\
 - Stay within the task: mention other problems, do not fix them.\n\
-- Record a lasting project fact (a command, a convention) in AGENTS.md, and say so.\n\
+- Record lasting project facts in AGENTS.md, and say so.\n\
 </rules>";
 
 /// Only the active edit tool's rules.
@@ -133,15 +129,23 @@ fn edit_rules(scope: &FileScope, format: EditFormat) -> String {
 }
 
 fn plan(scope: &FileScope) -> String {
+    let save = plan::tool_name(scope);
     let steps = [
-        locate(scope),
-        "Split the request into features, each one session of work, with acceptance criteria \
-         and the files it likely touches. A one-line fix is a one-feature plan."
-            .to_owned(),
-        "Implement the features in order. Review each result's diff and check summary before \
-         the next."
-            .to_owned(),
-        "Re-plan when a feature fails twice or comes back stuck.".to_owned(),
+        format!(
+            "{} For a wide question, ask `{}`.",
+            locate(scope),
+            explore::tool_name(scope)
+        ),
+        format!(
+            "Write the plan with `{save}`: features, each one session of work, with acceptance \
+             criteria and the files it likely touches. A one-line fix is a one-feature plan."
+        ),
+        format!(
+            "Run `{}` on each feature in order. Review each result's check report and diff \
+             before the next.",
+            feature::tool_name(scope)
+        ),
+        format!("When a result says re-plan, change the plan with `{save}` first."),
         "End with a 3–5 line summary of what was done and what was not.".to_owned(),
     ];
     format!(

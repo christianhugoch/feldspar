@@ -111,9 +111,9 @@ pub fn spec(scope: &FileScope, config: &Attrs, vision: bool) -> ToolSpec {
     ToolSpec::new(
         tool_name(scope),
         format!(
-            "Use this run's preview of `{application}` (mounted by a green check) as the user, \
-             one action per call. Returns an accessibility snapshot with @e refs, console errors \
-             and failed requests. Data is live: click and fill on a form write real rows.{}",
+            "Use this run's preview of `{application}` (mounted by a green check) as the user. \
+             Returns a snapshot with @e refs, console errors and failed requests. Data is live: \
+             click and fill write real rows.{}",
             if vision {
                 " screenshot returns an image."
             } else {
@@ -128,9 +128,9 @@ pub fn spec(scope: &FileScope, config: &Attrs, vision: bool) -> ToolSpec {
 fn parameters(actions: Vec<&str>, vision: bool) -> Json {
     let mut properties = json!({
         "action": {"type": "string", "enum": actions},
-        "path": {"type": "string", "description": "goto: e.g. /tasks"},
-        "ref": {"type": "string", "description": "an @e ref"},
-        "text": {"type": "string", "description": "fill: value; wait_for: text"},
+        "path": {"type": "string", "description": "goto"},
+        "ref": {"type": "string", "description": "@e ref"},
+        "text": {"type": "string", "description": "fill, wait_for"},
         "key": {"type": "string", "description": "press: e.g. Enter"},
         "timeout": {"type": "integer", "description": "wait_for: seconds"},
     });

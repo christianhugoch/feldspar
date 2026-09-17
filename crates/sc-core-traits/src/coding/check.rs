@@ -488,6 +488,34 @@ pub async fn call(
     ctx: &mut TraitContext<'_>,
 ) -> Result<Json> {
     arguments(args, &[])?;
+    let report = run_checks(scope, config, ctx).await?;
+    if !report.green {
+        ctx.signal(Signal::CheckFailed);
+    }
+    Ok(Json::String(report.text))
+}
+
+/// What one `check` found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckReport {
+    /// No check has new failures, and the ratchet passed.
+    pub green: bool,
+    /// The report the model reads; its first line is the verdict.
+    pub text: String,
+}
+
+/// Run every check against the run state in `ctx`, and report — what the
+/// `check` tool does, and what `implement_feature` does independently of the
+/// session it checks (TODO §8, step 4). Raises no signal.
+///
+/// A red result before the run has changed anything but test files is
+/// recorded in the state, as the reproduction a bug's session is asked for
+/// (TODO 9.7).
+pub async fn run_checks(
+    scope: &FileScope,
+    config: &Attrs,
+    ctx: &mut TraitContext<'_>,
+) -> Result<CheckReport> {
     let checks = configured_checks(config)?;
     let application = configured_application(config);
     let timeout = config_count(config, super::CFG_TIMEOUT, super::DEFAULT_TIMEOUT_SECONDS)?;
@@ -533,10 +561,6 @@ pub async fn call(
         }
         runs.push(build);
     }
-    if unchanged {
-        state.store(ctx.trait_state);
-    }
-
     let (store, _) = scope.connect(ctx.catalog).await?;
     let weakened = ratchet(scope, store.as_ref(), &state.ledger).await?;
 
@@ -578,13 +602,26 @@ pub async fn call(
              `coding` trait's `{CFG_CHECKS}` setting."
         ),
     };
-    if !red.is_empty() {
-        ctx.signal(Signal::CheckFailed);
+    // Red before anything but tests changed: the failure was shown before
+    // the fix.
+    let only_tests = state
+        .ledger
+        .paths()
+        .all(|path| is_test_file(&scope.relative(path)));
+    let reproduced = !red.is_empty() && !unchanged && only_tests && !state.red_before_fix;
+    if reproduced {
+        state.red_before_fix = true;
+    }
+    if unchanged || reproduced {
+        state.store(ctx.trait_state);
     }
     lines.extend(preview);
     head.push('\n');
     head.push_str(&lines.join("\n"));
-    Ok(Json::String(head))
+    Ok(CheckReport {
+        green: red.is_empty(),
+        text: head,
+    })
 }
 
 /// Whether a path, relative to the scope, is a JavaScript or TypeScript test

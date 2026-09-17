@@ -111,6 +111,11 @@ pub struct Ledger {
     /// in the steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     summaries: Vec<LedgerStep>,
+    /// Model calls a trait's tool made through the run's own machinery rather
+    /// than as a step: a commit message on the cheap role (TODO §8). Counted
+    /// in the totals, not in the steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    asides: Vec<LedgerStep>,
     /// Delegated runs' totals, one entry per child run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     children: Vec<ChildLedger>,
@@ -131,6 +136,16 @@ impl Ledger {
     /// `step.step`.
     pub fn record_summary(&mut self, step: LedgerStep) {
         self.summaries.push(step);
+    }
+
+    /// Record a model call a tool made for itself.
+    pub fn record_aside(&mut self, step: LedgerStep) {
+        self.asides.push(step);
+    }
+
+    /// The calls tools made for themselves, oldest first.
+    pub fn asides(&self) -> &[LedgerStep] {
+        &self.asides
     }
 
     /// The summary calls, oldest first.
@@ -177,7 +192,7 @@ impl Ledger {
     /// Per-role totals, this run's steps plus every child's.
     pub fn totals(&self) -> BTreeMap<ModelRole, RoleTotals> {
         let mut totals: BTreeMap<ModelRole, RoleTotals> = BTreeMap::new();
-        for step in self.steps.iter().chain(&self.summaries) {
+        for step in self.steps.iter().chain(&self.summaries).chain(&self.asides) {
             totals.entry(step.role).or_default().add_step(step);
         }
         for child in &self.children {

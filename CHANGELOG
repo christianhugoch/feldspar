@@ -2,6 +2,138 @@
 
 Changes in reverse chronological order.
 
+## Planning and sessions (coding agent milestone, Phase 9)
+
+A `coding` agent can now plan. Under the new `planned` workflow a chat starts in `plan` mode on
+the strong role. The planner writes a plan with `save_plan` and calls `implement_feature` once
+per feature. Each call runs the feature in a fresh `act` session of the same agent, checks the
+result itself, looks at the feature's pages, commits it with a message from the cheap role, and
+returns a review. `explore` hands a question about the code to a cheap read-only session. The
+milestone's definition of done now passes on the scripted provider.
+
+- **Loop seams (`sc-agent`):**
+  - **`AgentTrait::starting_mode(config)`**: the mode a new run starts in. `Runner::new` asks the
+    agent's traits (the first answer wins), and the run's role follows from the mode through
+    the new **`RunMode::role()`**: `plan` → strong, `act` → executor, `explore` → cheap.
+    `starting_in` still overrides both.
+  - **`Delegator`** gained three default methods, implemented by the driver:
+    - `save_state(state)` writes the calling trait instance's state into the asking run's row
+      mid-step. It changes only `context.trait_state`, so an abort written in the meantime is
+      kept.
+    - `ask(role, system, prompt)` makes one tool-less call to a role's model. It is recorded in
+      the ledger's new **`asides`** list, which counts in the totals but not as steps.
+    - `capabilities(role)` returns a role model's capabilities.
+  - **`Delegated::trait_state`**: when a session of the agent itself ends, its state for the
+    same trait instance is handed back, so the planner can read the session's change ledger.
+  - **Explore sessions below depth 1.** A session of an agent's own (depth 1) may now start
+    one `explore` session. At depth 2 every own-agent session is refused, so this cannot
+    recurse. `roles_modes_budgets`'s self-delegation test now covers both cases.
+- **`coding` settings:** `workflow` (`direct`, the default, or `planned`), `max_sessions_per_feature`
+  (default 3, at least 1), and `commit` (default on; it only matters for a git work tree).
+- **Tools per mode (§5):**
+  - `plan` gets the read-only tools plus `save_plan_<slug>`, `implement_feature_<slug>` and
+    `explore_<slug>`.
+  - `act` gets `explore_<slug>` as well as the tools it had.
+  - `explore` gets only the read-only tools.
+  - A tool called in the wrong mode is refused, naming the mode.
+  - The `plan` prompt now names these tools.
+  - To keep the React builder agent's `act` prefix under 1 500 tokens with `explore` added
+    (it is now 1 496 on `gpt-5-mini`), these were shortened: `view_app`'s description and
+    parameter descriptions, two `act` workflow steps, and the `AGENTS.md` rule.
+- **The plan (`coding/plan.rs`):**
+  - The plan is a typed `Plan` stored in `CodingState::plan` in the planner run's state. It
+    holds `features` and `progress`:
+    - Each feature has an id, title, description, `feature`/`bug` kind, acceptance, files,
+      pages, checks, notes, status, attempts and runs.
+    - Each progress entry has the feature, run, status, the session's summary, the first line
+      of the check result, and the diffstat.
+  - `save_plan` validates the list: at least one and at most 30 features, one-word unique ids,
+    titles, and pages starting with `/`.
+  - It replaces the feature list but keeps `status`, `attempts` and `runs` for ids that stay.
+    The planner may only set `todo` or `blocked`, and may not drop a feature that is in
+    progress.
+  - Every `save_plan` and `implement_feature` result ends with a compact
+    `<plan> n of m done` checklist.
+- **`implement_feature` (`coding/feature.rs`)**, the steps of §8:
+  1. Mark the feature `in_progress`, mint and record the session's run id, and save the
+     planner's state **before** the session starts.
+  2. Brief the session with the feature, the last three progress entries, and for a `bug`,
+     reproduce it first.
+  3. Run the session: `act` mode on the executor role.
+  4. **Run the checks again, independently**, over the session's ledger and the ratchet, as the
+     planner run. A green build is therefore mounted as *the planner's* preview.
+  5. When green, look at the feature's `pages` on that preview.
+  6. When green, commit the feature.
+  7. When red, count the failure. The planner gets the verdict, session, summary, check report,
+     `reproduced:` line for a bug, commit line, diffstat and diff (capped at 8 000 characters),
+     pages, any re-plan instruction, and the checklist.
+  - An old `implement_feature` result is elided to its first line.
+  - **Deviation: the independent check uses the plan's baseline**, recorded in the planner's
+    state before its first session, not the session's own. A failed session's changes stay in
+    the tree, and otherwise the next session would count that breakage as pre-existing and
+    pass without fixing anything.
+  - **Pages (9.3a):** the preview belongs to the planner run, because its check mounted it, so
+    the snapshots are taken after the session has ended. With `vision` on the strong model,
+    each page is also screenshotted. Looking stops at the first page that cannot be looked at,
+    and the result says why (no previews, no browser, or `may_view_app` off).
+  - **Commits (9.4, `coding/commit.rs`):**
+    - A feature is committed when the scope's git work tree lies inside the store's own
+      directory, which is the session header's rule. That covers git stores and the
+      repository the React scaffold creates.
+    - Only the paths the session changed are committed (`git add --all -- <paths>`, then
+      `git commit -- <paths>`), including deletions and both ends of a move.
+    - The cheap role writes the message. Code fences are stripped, and the feature's title is
+      used if no message comes back. A fallback identity is supplied when the repository has
+      none.
+    - Anywhere else, the planner gets the diff only.
+  - **Re-planning (9.6):** `attempts` counts failed sessions in a row. A session that ends
+    `Stuck` counts as a failure even if its check is green. The second failure in a row marks
+    the feature `failed` and returns `re-plan: … failed twice in a row`. A stuck session
+    returns `re-plan: the session got stuck (<reason>)`. A failed feature can be tried again
+    until `max_sessions_per_feature` sessions have run; after that the call is refused, naming
+    the setting.
+  - **Resume and abort (9.5):** a feature still `in_progress` has its recorded session run
+    driven on, not replaced. Aborting the planner aborts that session (`abort_run`).
+  - **Reproduction (9.7):** `check` records `red_before_fix` in the run state when it is red
+    while the run has changed only test files. The review reports it for a bug, but a fix that
+    skipped the reproduction is not refused.
+- **`explore` (9.8, `coding/explore.rs`):** starts an `explore` session on the cheap role with
+  the question, and returns its answer capped at 300 words (`[…]` marks a cut).
+- **`check` refactor:** the report now comes from `run_checks`, which raises no signal, so
+  `implement_feature` can run it without climbing the planner's escalation ladder. The `check`
+  tool raises `CheckFailed` itself.
+- **Fix: a shell command dropped mid-run is killed.** If a run was aborted or its drive stopped
+  while a `shell_` command ran, the command's process group survived (for example a
+  `sleep 60`). `run_command` now kills the group when the call is dropped, as a timeout does.
+- **Tests:**
+  - `sc-core-traits` `coding_plan` (new):
+    - The workflow sets the starting mode and role and is validated, and the plan tools are
+      refused outside `plan`.
+    - **The definition of done:** a planner on the React scaffold, in a git repository with a
+      stand-in type check, implements three features in three fresh sessions. A bug is
+      reproduced with a failing test before it is fixed. The test asserts three commits, each
+      holding only its own files with the cheap role's message; the reviews and briefs; the
+      stored plan; three `act` child runs; and the per-role ledger (5 strong steps, 13
+      executor steps, 3 cheap asides).
+    - Two failed sessions and a stuck one return re-plan instructions, and the session limit
+      holds.
+    - A planner stopped by a timeout while its session sleeps in the shell resumes the same
+      session with no second child run. A second stopped planner is aborted, and its session
+      goes with it.
+    - The plan is stored with the run, survives a compaction that cleared its result, and is
+      read from state on the next chat turn.
+    - `explore` answers from a cheap session that has only the read-only tools, capped at 300
+      words.
+    - A feature's pages with no previews say why; a feature without pages gets none.
+  - `sc-server` `view_app`: with a real Chromium, a planned feature's page is snapshotted on the
+    planner's preview as the chatting user. A feature without pages gets none, nothing is
+    mounted live, and the preview is gone after the run. This test installs the previewer on
+    the registry, as `feldspar serve` does.
+  - `sc-agent` `roles_modes_budgets`: a trait's starting mode; `save_state` read back mid-step;
+    `ask` on the cheap role ledgered as an aside; `capabilities`; and `Delegated::trait_state`.
+  - The unit tests cover plan validation and replacement, the checklist, the bug brief, commit
+    message cleaning and the word cap. The tool-name and settings lists are updated.
+
 ## The prompt (coding agent milestone, Phase 8)
 
 `coding` now gives each run R§4's layered prompt: a workflow, rules and edit-format rules that

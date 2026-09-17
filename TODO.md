@@ -1047,15 +1047,21 @@ default.
 
 ## Phase 9 — Planning and sessions (`coding`)
 
-- [ ] 9.1 The `workflow` setting (`direct` | `planned`), and the tool set per mode (§5).
-- [ ] 9.2 The plan state (`features`, `progress`) in `coding`'s per-run trait state (2.3),
+- [x] 9.1 The `workflow` setting (`direct` | `planned`), and the tool set per mode (§5).
+      *(A new `AgentTrait::starting_mode` hook, read by `Runner::new`, and `RunMode::role()`.
+      `act` offers `explore` too. The prompt was cut again to fit it: §12's `act` is 1 496.)*
+- [x] 9.2 The plan state (`features`, `progress`) in `coding`'s per-run trait state (2.3),
       with a typed Rust struct and a JSON schema. `save_plan` validates the plan and replaces
       the feature list, keeping `status`/`attempts`/`runs` for ids that already exist. Each
       plan tool's result ends with the compact checklist. Tests: round trip through
-      `_fd_runs`, and the plan survives a compaction.
-- [ ] 9.3 `implement_feature`: the steps in §8, run through self-delegation (2.4), with an
-      independent `check` plus the ratchet, and `max_sessions_per_feature`.
-- [ ] 9.3a The feature's `pages` (moved here from 6b.10): `pages` joins the plan schema of
+      `_fd_runs`, and the plan survives a compaction. *(`CodingState::plan`. `save_plan` may
+      set only `todo`/`blocked`, and may not drop a feature in progress.)*
+- [x] 9.3 `implement_feature`: the steps in §8, run through self-delegation (2.4), with an
+      independent `check` plus the ratchet, and `max_sessions_per_feature`. *(`Delegator` gained
+      `save_state`, `ask` and `capabilities`, and `Delegated` the child's trait state.
+      **Deviation:** the independent check compares with the plan's baseline, recorded before
+      the first session, because a failed session's changes stay in the tree.)*
+- [x] 9.3a The feature's `pages` (moved here from 6b.10): `pages` joins the plan schema of
       9.2, and after a green check `implement_feature` snapshots each listed page on the
       preview and returns the snapshots with the diff. With the strong model's `vision`, it
       returns screenshots too. **Mind whose preview it is:** a preview belongs to the run
@@ -1063,24 +1069,32 @@ default.
       stops. So the snapshots must be taken before the child run ends, or the preview must be
       mounted for the planner run, not the child. Test on the scripted provider: a feature
       with `pages` gets snapshots back, a feature without gets none, and with no browser the
-      result says why.
-- [ ] 9.4 Commit per feature for a git store (`commit` setting, default on for a git store),
+      result says why. *(The planner-run option: the independent check mounts the preview for
+      the planner. The browser half is in `sc-server`'s `view_app` tests.)*
+- [x] 9.4 Commit per feature for a git store (`commit` setting, default on for a git store),
       using `GitRepo::stage`/`commit` and a message written by the cheap role. A non-git store
-      gets the ledger diff only.
-- [ ] 9.5 Resume and abort: the child run id is saved into the plan state before the child
+      gets the ledger diff only. *(Plain `git` over the session's changed paths rather than
+      `GitRepo`, which needs a git store's definition: any scope whose work tree lies inside
+      the store's directory is committed, as the session header decides.)*
+- [x] 9.5 Resume and abort: the child run id is saved into the plan state before the child
       starts, and an `in_progress` feature's recorded child run is driven, not replaced. Aborting the planner aborts the child. Test by stopping mid-child and
-      resuming.
-- [ ] 9.6 Re-plan triggers: two consecutive failures, or a child that ended `Stuck`, return a
-      re-plan instruction with the failure summary.
-- [ ] 9.7 The `bug` kind's reproduce-first brief, and recording whether a failing check came
-      before the fix.
-- [ ] 9.8 `explore(question)`: self-delegation in `explore` mode on the cheap role, returning
-      a brief of at most ~300 words.
-- [ ] 9.9 The scripted end-to-end test (the definition of done): a planner script and
+      resuming. *(Stopped by a timeout while the child sleeps in the shell, which showed that
+      a dropped shell call left its process group running; that is fixed.)*
+- [x] 9.6 Re-plan triggers: two consecutive failures, or a child that ended `Stuck`, return a
+      re-plan instruction with the failure summary. *(A stuck session counts as a failure.)*
+- [x] 9.7 The `bug` kind's reproduce-first brief, and recording whether a failing check came
+      before the fix. *(`red_before_fix`: a red check while the run has changed only test
+      files.)*
+- [x] 9.8 `explore(question)`: self-delegation in `explore` mode on the cheap role, returning
+      a brief of at most ~300 words. *(A depth-1 session may start one `explore` session; the
+      driver allows that one case.)*
+- [x] 9.9 The scripted end-to-end test (the definition of done): a planner script and
       executor scripts on `FakeProvider` against a temporary git store with the React
       scaffold. Three features planned, implemented, checked and committed, with the ledger
       totals and roles asserted. Where a Chromium is installed, the features' `pages` are
-      snapshotted from the preview, and the live mount is asserted unchanged.
+      snapshotted from the preview, and the live mount is asserted unchanged. *(The core
+      scenario is `sc-core-traits`' `coding_plan`, with a stand-in type check in place of
+      `tsc`. The pages are `sc-server`'s `view_app` test.)*
 
 ## Phase 10 — The builder agent, the scaffold, the IDE, the admin UI
 

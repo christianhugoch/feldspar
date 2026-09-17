@@ -133,6 +133,19 @@ pub trait AgentTrait: Send + Sync {
         None
     }
 
+    /// The mode a run this configuration's agent **starts** should be in, or
+    /// `None` to leave it to the other traits and then to `act` (TODO §5).
+    ///
+    /// `coding` answers `plan` under its `planned` workflow, so a chat with the
+    /// builder agent begins by planning. Read where a run is created, not on
+    /// every step: a run carries its mode on its row, and a conversation keeps
+    /// the mode it started in. The first trait, in the agent's order, that
+    /// names one wins.
+    fn starting_mode(&self, config: &Attrs) -> Option<RunMode> {
+        let _ = config;
+        None
+    }
+
     /// Change the turn without adding a tool — an extra paragraph of system
     /// prompt, data preloaded into the conversation.
     ///

@@ -269,12 +269,17 @@ async fn a_planner_starts_one_session_of_itself_in_another_mode() -> Result<()> 
     let agent = tally_agent();
     save_agent(&catalog, &registry, &agent).await?;
 
-    // One script, shared by parent and child, in the order they speak:
-    // the planner delegates, the child tries to delegate again (refused),
-    // then answers; the planner tries a same-mode session (refused), answers.
+    // One script, shared by every run, in the order they speak: the planner
+    // delegates; the child asks for a `plan` session (refused) and an
+    // `explore` one (allowed: the read-only leaf), whose run asks for an `act`
+    // session (refused, two deep) and answers; the child answers; the planner
+    // tries a same-mode session (refused) and answers.
     let provider = Arc::new(FakeProvider::new([
         Reply::calls("start_session", json!({"mode": "act"})),
+        Reply::calls("start_session", json!({"mode": "plan"})),
         Reply::calls("start_session", json!({"mode": "explore"})),
+        Reply::calls("start_session", json!({"mode": "act"})),
+        Reply::says("found it"),
         Reply::says("feature done"),
         Reply::calls("start_session", json!({"mode": "plan"})),
         Reply::says("all done"),
@@ -294,17 +299,22 @@ async fn a_planner_starts_one_session_of_itself_in_another_mode() -> Result<()> 
     assert_eq!(conclusion.answer(), Some("all done"));
 
     let requests = provider.requests();
-    // The child's refusal, as its tool result.
+    // The child's refused `plan` session, as its tool result.
     let refusal = last_tool_result(&requests[2]).0;
     assert!(
-        refusal.contains("cannot start a session of its own"),
+        refusal.contains("cannot start a session of its own agent, except one `explore`"),
         "{refusal}"
     );
-    // The parent got the child's answer.
-    let session = last_tool_result(&requests[3]).0;
+    // The explore run, two deep, may start nothing of its own agent.
+    let deep = last_tool_result(&requests[4]).0;
+    assert!(deep.contains("would loop"), "{deep}");
+    // The child got the explore run's answer, and the parent the child's.
+    let explored = last_tool_result(&requests[5]).0;
+    assert!(explored.contains("found it"), "{explored}");
+    let session = last_tool_result(&requests[6]).0;
     assert!(session.contains("feature done"), "{session}");
     // A session in the parent's own mode is refused.
-    let same = last_tool_result(&requests[4]).0;
+    let same = last_tool_result(&requests[7]).0;
     assert!(same.contains("different mode"), "{same}");
 
     let parent = load_run(&catalog, run.id).await?.expect("run");
@@ -324,12 +334,84 @@ async fn a_planner_starts_one_session_of_itself_in_another_mode() -> Result<()> 
         child.attributes[ATTR_PARENT_RUN],
         json!(parent.id.to_string())
     );
-    // The child's two steps roll up into the parent's three. The parent's are
-    // ledgered as the role it was started as — `strong`, answered here by the
-    // executor's model because the agent leaves that role unset — and the
-    // child's as the executor.
+    // The child's three steps and its explore run's two roll up into the
+    // parent's three. The parent's are ledgered as the role it was started as
+    // — `strong`, answered here by the executor's model because the agent
+    // leaves that role unset — and the sessions' as the executor.
     assert_eq!(state.ledger().children().len(), 1);
-    assert_eq!(state.ledger().total().steps, 5);
+    assert_eq!(state.ledger().total().steps, 8);
+    assert_eq!(state.ledger().totals()[&ModelRole::Strong].steps, 3);
+    assert_eq!(state.ledger().totals()[&ModelRole::Executor].steps, 5);
+    Ok(())
+}
+
+/// Phase 9's seams: a trait chooses the mode a new run starts in, and a tool
+/// saves its state before the step ends, asks the cheap role a question that
+/// is ledgered as an aside, reads a role's capabilities, and reads the state a
+/// session of its own agent left.
+#[tokio::test]
+async fn a_trait_starts_the_run_in_its_mode_and_uses_the_runs_own_machinery() -> Result<()> {
+    let db = TestDb::new().await?;
+    let catalog = catalog(&db).await?;
+    let registry = registry(Counter::new())?;
+    let agent = Agent::new("builder", "main")
+        .with_trait(EnabledTrait::new("tally").config("starts", "plan"))
+        .role(
+            ModelRole::Cheap,
+            ModelRef::new("main", Some("claude-opus-5")),
+        );
+    save_agent(&catalog, &registry, &agent).await?;
+
+    let executor = Arc::new(FakeProvider::new([
+        Reply::calls("aside", json!({})),
+        Reply::calls("start_session", json!({"mode": "act"})),
+        Reply::calls("tally", json!({})),
+        Reply::says("counted"),
+        Reply::says("planned"),
+    ]));
+    let cheap = Arc::new(FakeProvider::new([Reply::says("hi there")]).as_model("small"));
+    let models: Arc<dyn ProviderConnector> = Arc::new(
+        FakeModels::new()
+            .role(ModelRole::Executor, executor.clone())
+            .role(ModelRole::Cheap, cheap.clone()),
+    );
+    let runner = Runner::new(
+        &catalog,
+        &registry,
+        &agent,
+        common::model(executor.clone()),
+        RunCaller::system(),
+    )
+    .with_connector(&models);
+    let fresh = runner.new_run("plan it")?;
+    assert_eq!(fresh.mode()?, RunMode::Plan);
+    assert_eq!(fresh.role()?, ModelRole::Strong);
+
+    let (run, conclusion) = runner.start("plan it").await?;
+    assert_eq!(conclusion.answer(), Some("planned"));
+    let requests = executor.requests();
+    let aside: serde_json::Value =
+        serde_json::from_str(&last_tool_result(&requests[1]).0).expect("JSON");
+    assert_eq!(aside["saved"], json!({"saved": true}), "{aside}");
+    assert_eq!(aside["answer"], "hi there");
+    assert_eq!(aside["vision"], false);
+    let session: serde_json::Value =
+        serde_json::from_str(&last_tool_result(&requests[4]).0).expect("JSON");
+    assert_eq!(session["state"], json!({"count": 1}), "{session}");
+    // The question had no tools and was not part of the transcript.
+    assert_eq!(cheap.requests().len(), 1);
+    assert!(cheap.requests()[0].tools.is_empty());
+
+    let stored = load_run(&catalog, run.id).await?.expect("run");
+    assert_eq!(stored.mode()?, RunMode::Plan);
+    let state = stored.agent_loop()?;
+    let asides = state.ledger().asides();
+    assert_eq!(asides.len(), 1);
+    assert_eq!(
+        (asides[0].role, asides[0].model.as_str()),
+        (ModelRole::Cheap, "small")
+    );
+    assert_eq!(state.ledger().totals()[&ModelRole::Cheap].steps, 1);
     assert_eq!(state.ledger().totals()[&ModelRole::Strong].steps, 3);
     assert_eq!(state.ledger().totals()[&ModelRole::Executor].steps, 2);
     Ok(())

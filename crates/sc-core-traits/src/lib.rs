@@ -133,6 +133,10 @@ pub use coding::{
     LONGEST_TOOL_PREFIX, Ledger, MAX_OUTPUT_CHARS, MAX_REPO_MAP_TOKENS, PreImage, RunDiff,
     SHELL_ENV, diff_ledger, edit_format, kill_all_processes, matching, run_diff, running_count,
 };
+pub use coding::{
+    CFG_COMMIT, CFG_MAX_SESSIONS, CFG_WORKFLOW, DEFAULT_MAX_SESSIONS, FAILURES_TO_FAIL, Feature,
+    FeatureKind, FeatureStatus, Plan, Progress, WORKFLOW_DIRECT, WORKFLOW_PLANNED, checklist,
+};
 pub use delete_rows::DeleteRows;
 pub use insert_row::InsertRow;
 pub use query_table::{DEFAULT_MAX_ROWS, QueryTable};
@@ -156,11 +160,13 @@ pub mod tool_names {
     pub use crate::coding::tool_names as coding;
     pub use crate::coding::{
         apply_patch_tool_name as apply_patch, check_checks_tool_name as check,
-        edit_file_tool_name as edit_file, find_files_tool_name as find_files,
+        edit_file_tool_name as edit_file, explore_tool_name as explore,
+        find_files_tool_name as find_files, implement_feature_tool_name as implement_feature,
         process_tool_name as process, read_file_tool_name as read_file,
         repo_map_tool_name as repo_map, run_script_tool_name as run_project_script,
-        search_files_tool_name as search_files, shell_tool_name as shell,
-        view_app_tool_name as view_app, write_file_tool_name as write_file,
+        save_plan_tool_name as save_plan, search_files_tool_name as search_files,
+        shell_tool_name as shell, view_app_tool_name as view_app,
+        write_file_tool_name as write_file,
     };
     pub use crate::delete_rows::tool_name as delete_rows;
     pub use crate::insert_row::tool_name as insert_row;
@@ -318,6 +324,10 @@ mod tests {
                 CFG_CHECKS,
                 CFG_APPLICATION,
                 CFG_DIAGNOSE,
+                // Planning (TODO §5, §8).
+                CFG_WORKFLOW,
+                CFG_MAX_SESSIONS,
+                CFG_COMMIT,
                 CFG_EDIT_FORMAT,
                 CFG_MAX_LINES,
                 CFG_MAX_RESULTS,
@@ -392,6 +402,9 @@ mod tests {
             tool_names::view_app(&scope),
             tool_names::shell(&scope),
             tool_names::process(&scope),
+            tool_names::save_plan(&scope),
+            tool_names::implement_feature(&scope),
+            tool_names::explore(&scope),
             tool_names::build_application("todo"),
         ];
         assert_eq!(
@@ -415,12 +428,15 @@ mod tests {
                 "view_app_app_src_web",
                 "shell_app_src_web",
                 "process_app_src_web",
+                "save_plan_app_src_web",
+                "implement_feature_app_src_web",
+                "explore_app_src_web",
                 "build_todo",
             ]
         );
         let unique: std::collections::BTreeSet<&String> = names.iter().collect();
         assert_eq!(unique.len(), names.len());
-        // The twelve file names above are `coding`'s whole set, which is what the
+        // The fifteen file names above are `coding`'s whole set, which is what the
         // collision check compares when the trait is enabled twice: two
         // instances over one scope produce these same names and are refused.
         assert_eq!(
@@ -430,6 +446,9 @@ mod tests {
                 tool_names::find_files(&scope),
                 tool_names::search_files(&scope),
                 tool_names::repo_map(&scope),
+                tool_names::save_plan(&scope),
+                tool_names::implement_feature(&scope),
+                tool_names::explore(&scope),
                 tool_names::write_file(&scope),
                 tool_names::edit_file(&scope),
                 tool_names::apply_patch(&scope),

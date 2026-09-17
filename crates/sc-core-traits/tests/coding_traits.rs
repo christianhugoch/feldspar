@@ -84,6 +84,9 @@ fn tool(kind: &str, config: &sc_types::Attrs) -> String {
         "write_file" => tool_names::write_file(&scope),
         "edit_file" => tool_names::edit_file(&scope),
         "run_project_script" => tool_names::run_project_script(&scope),
+        "save_plan" => tool_names::save_plan(&scope),
+        "implement_feature" => tool_names::implement_feature(&scope),
+        "explore" => tool_names::explore(&scope),
         other => panic!("no such coding tool: {other}"),
     }
 }
@@ -560,10 +563,13 @@ async fn a_trait_configured_against_a_store_that_is_gone_is_invalid_with_a_reaso
     let cfg = at("code", "web");
     env.check("coding", &cfg).await?;
     // Every tool but `apply_patch`, which this model's edit format leaves out,
-    // and `check`, `view_app`, `shell` and `process`, whose grants are off.
+    // `check`, `view_app`, `shell` and `process`, whose grants are off, and
+    // the plan tools, which only a `plan` run is offered.
     let mut all = tool_names::coding(&scope("code", "web"));
     all.retain(|name| {
         name != &tool_names::apply_patch(&scope("code", "web"))
+            && name != &tool_names::save_plan(&scope("code", "web"))
+            && name != &tool_names::implement_feature(&scope("code", "web"))
             && name != &tool_names::check(&scope("code", "web"))
             && name != &tool_names::view_app(&scope("code", "web"))
             && name != &tool_names::shell(&scope("code", "web"))
@@ -620,6 +626,7 @@ async fn one_configured_scope_names_and_reaches_every_tool() -> Result<()> {
             tool_names::find_files(&web),
             tool_names::search_files(&web),
             tool_names::repo_map(&web),
+            tool_names::explore(&web),
             tool_names::write_file(&web),
             tool_names::edit_file(&web),
             tool_names::run_project_script(&web),
@@ -678,6 +685,7 @@ async fn the_edit_grant_decides_whether_the_source_can_be_changed() -> Result<()
             tool_names::find_files(&web),
             tool_names::search_files(&web),
             tool_names::repo_map(&web),
+            tool_names::explore(&web),
         ]
     );
     // Reading still works — that is what "read-only" means here.
@@ -751,14 +759,14 @@ async fn running_a_script_is_a_grant_of_its_own() -> Result<()> {
         r#"{"name":"todo","scripts":{"greet":"echo hi"}}"#,
     )?;
 
-    // Editing granted, running not: six tools, and the script refused by name.
+    // Editing granted, running not: seven tools, and the script refused by name.
     let editing = config(&[
         (CFG_STORE, json!("code")),
         (CFG_ROOT, json!("")),
         (CFG_MAY_EDIT, json!(true)),
     ]);
     let names = offered(&env, &editing);
-    assert_eq!(names.len(), 6, "{names:?}");
+    assert_eq!(names.len(), 7, "{names:?}");
     assert!(
         !names.contains(&tool_names::run_project_script(&scope("code", ""))),
         "{names:?}"
@@ -775,14 +783,14 @@ async fn running_a_script_is_a_grant_of_its_own() -> Result<()> {
     .to_string();
     assert!(err.contains(CFG_MAY_RUN_SCRIPTS), "{err}");
 
-    // …and granted on its own, without the edit, it is the fifth tool.
+    // …and granted on its own, without the edit, it is the sixth tool.
     let running = config(&[
         (CFG_STORE, json!("code")),
         (CFG_ROOT, json!("")),
         (CFG_MAY_RUN_SCRIPTS, json!(true)),
     ]);
     let names = offered(&env, &running);
-    assert_eq!(names.len(), 5, "{names:?}");
+    assert_eq!(names.len(), 6, "{names:?}");
     assert!(names.contains(&tool_names::run_project_script(&scope("code", ""))));
     let err = call(
         &env,
@@ -842,7 +850,7 @@ fn which_npm() -> bool {
 }
 
 #[tokio::test]
-async fn plan_and_explore_runs_are_offered_only_the_read_only_tools() -> Result<()> {
+async fn plan_and_explore_runs_are_offered_no_tool_that_changes_anything() -> Result<()> {
     let env = Env::new().await?;
     env.with_file_store("code", None).await?;
     let cfg = at("code", "");
@@ -862,17 +870,16 @@ async fn plan_and_explore_runs_are_offered_only_the_read_only_tools() -> Result<
     // `act` offers every granted tool.
     assert_eq!(names(sc_agent::RunMode::Act), offered(&env, &cfg));
     assert!(names(sc_agent::RunMode::Act).contains(&tool("edit_file", &cfg)));
-    for mode in [sc_agent::RunMode::Plan, sc_agent::RunMode::Explore] {
-        assert_eq!(
-            names(mode),
-            vec![
-                tool("read_file", &cfg),
-                tool("find_files", &cfg),
-                tool("search_files", &cfg),
-                tool("repo_map", &cfg)
-            ],
-            "{mode}"
-        );
-    }
+    let read_only = vec![
+        tool("read_file", &cfg),
+        tool("find_files", &cfg),
+        tool("search_files", &cfg),
+        tool("repo_map", &cfg),
+    ];
+    // `plan` adds the plan tools and `explore`; `explore` adds nothing.
+    let mut planning = read_only.clone();
+    planning.extend(["save_plan", "implement_feature", "explore"].map(|k| tool(k, &cfg)));
+    assert_eq!(names(sc_agent::RunMode::Plan), planning);
+    assert_eq!(names(sc_agent::RunMode::Explore), read_only);
     Ok(())
 }

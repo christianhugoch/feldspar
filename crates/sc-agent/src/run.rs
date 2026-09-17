@@ -62,6 +62,17 @@ impl RunMode {
         }
     }
 
+    /// The role whose model answers a run in this mode, unless something says
+    /// otherwise (TODO §5): `plan` is the strong role's, `explore` the cheap
+    /// role's, and `act` the executor's.
+    pub fn role(&self) -> ModelRole {
+        match self {
+            RunMode::Plan => ModelRole::Strong,
+            RunMode::Act => ModelRole::Executor,
+            RunMode::Explore => ModelRole::Cheap,
+        }
+    }
+
     /// Parse a stored spelling, strictly.
     pub fn parse(s: &str) -> Result<RunMode> {
         match s {

@@ -206,7 +206,10 @@ impl AgentTrait for Preamble {
 
 /// A trait that uses the loop's Phase 2 seams: per-run state (`tally`), a
 /// tool offered only in `plan` mode (`note_plan`), a tool that takes wall time
-/// (`nap`), and a session of its own agent in another mode (`start_session`).
+/// (`nap`), and a session of its own agent in another mode (`start_session`);
+/// and Phase 9's: the mode a run starts in (the `starts` setting), and the
+/// run's own machinery offered to a tool (`aside`: saving state mid-step,
+/// asking the cheap role, a role's capabilities).
 pub struct Tally;
 
 #[async_trait::async_trait]
@@ -220,7 +223,14 @@ impl AgentTrait for Tally {
     }
 
     fn config_spec(&self) -> Vec<FormField> {
-        Vec::new()
+        vec![FormField::new("starts", BasicType::Text)]
+    }
+
+    fn starting_mode(&self, config: &Attrs) -> Option<sc_agent::RunMode> {
+        config
+            .get("starts")
+            .and_then(Json::as_str)
+            .and_then(|s| sc_agent::RunMode::parse(s).ok())
     }
 
     fn tools(&self, cx: &ToolsContext<'_>, _config: &Attrs) -> Vec<ToolSpec> {
@@ -233,6 +243,7 @@ impl AgentTrait for Tally {
                 "Start a session of this agent",
                 object.clone(),
             ),
+            ToolSpec::new("aside", "Use the run's own machinery", object.clone()),
         ];
         if cx.mode == sc_agent::RunMode::Plan {
             tools.push(ToolSpec::new("note_plan", "Write down the plan", object));
@@ -255,6 +266,24 @@ impl AgentTrait for Tally {
                 Ok(json!(count))
             }
             "note_plan" => Ok(json!("noted")),
+            "aside" => {
+                *ctx.state() = json!({"saved": true});
+                let delegate = ctx
+                    .delegate
+                    .ok_or_else(|| Error::config("this context cannot delegate"))?;
+                delegate.save_state(ctx.trait_state).await?;
+                // Read back from the row, before the step has ended.
+                let stored = sc_agent::require_run(ctx.catalog, ctx.run).await?;
+                let saved = stored
+                    .agent_loop()?
+                    .trait_state(&sc_agent::trait_state_key(0, "tally"))
+                    .cloned();
+                let answer = delegate
+                    .ask(sc_agent::ModelRole::Cheap, "Greet briefly.", "hello")
+                    .await?;
+                let caps = delegate.capabilities(sc_agent::ModelRole::Strong).await?;
+                Ok(json!({"saved": saved, "answer": answer, "vision": caps.vision}))
+            }
             "nap" => {
                 let ms = args.get("ms").and_then(Json::as_u64).unwrap_or(0);
                 tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
@@ -282,6 +311,7 @@ impl AgentTrait for Tally {
                     "run": delegated.run.to_string(),
                     "answer": delegated.answer(),
                     "steps": delegated.steps,
+                    "state": delegated.trait_state,
                 }))
             }
             other => Err(Error::invalid(format!("no tool `{other}`"))),

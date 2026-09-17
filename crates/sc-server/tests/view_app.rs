@@ -129,6 +129,7 @@ fn notes_app() -> Application {
 
 struct Env {
     catalog: Arc<Catalog>,
+    agents: sc_server::AgentServices,
     apps: Arc<AppMounts>,
     driver: Arc<ChromiumDriver>,
     alice: User,
@@ -187,7 +188,7 @@ async fn setup(tag: &str, executable: PathBuf) -> Result<Env> {
     let apps = Arc::new(
         AppMounts::new(catalog.clone())
             .with_evaluator(default_js_evaluator())
-            .with_agents(agents)
+            .with_agents(agents.clone())
             .with_base_domain(Some(BASE_DOMAIN.to_owned())),
     );
     let sessions = Arc::new(SessionStore::database(catalog.clone()));
@@ -207,6 +208,7 @@ async fn setup(tag: &str, executable: PathBuf) -> Result<Env> {
     .expect("a browser was found, so the driver starts");
     Ok(Env {
         catalog,
+        agents,
         apps,
         driver,
         alice,
@@ -475,6 +477,115 @@ async fn a_triggered_run_needs_its_user_and_its_session_goes_with_the_run() -> R
     }
     assert_eq!(left, 0, "the session row is gone after the run");
     assert_eq!(env.driver.open_contexts(), 0);
+    assert_eq!(env.apps.preview_count(), 0);
+    env.driver.shutdown();
+    Ok(())
+}
+
+/// A planner's feature that lists pages gets them looked at, after its
+/// independent check, on the preview that check mounted **for the planner run**
+/// — which outlives the feature's session — as the person chatting. A feature
+/// without pages gets none, nothing is mounted live, and the preview goes with
+/// the planner run (TODO 9.3a).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_planned_features_pages_are_looked_at_on_the_planners_preview() -> Result<()> {
+    use sc_agent::testing::{FakeModels, FakeProvider, Reply};
+    use sc_agent::{Agent, EnabledTrait, ModelRef, ModelRole, ProviderConnector, Runner};
+
+    let Some(executable) =
+        browser("a_planned_features_pages_are_looked_at_on_the_planners_preview")
+    else {
+        return Ok(());
+    };
+    let env = setup("planned", executable).await?;
+    sc_llm::bootstrap_llm_providers(&env.catalog).await?;
+    sc_llm::save_llm_provider(
+        &env.catalog,
+        &sc_llm::LlmProviderDef::new("main", sc_llm::ANTHROPIC_BACKEND)
+            .with(sc_llm::CFG_API_KEY, "sk-ant-not-a-real-key"),
+    )
+    .await?;
+    let provider = sc_llm::require_llm_provider(&env.catalog, "main").await?;
+    sc_llm::save_llm_model(
+        &env.catalog,
+        &sc_llm::LlmModelDef::new(provider.id, "claude-sonnet-4-5").default_model(),
+    )
+    .await?;
+    let agent = Agent::new("builder", "main")
+        .with_trait(EnabledTrait::new("coding").configuration(config(&[
+            ("workflow", json!("planned")),
+            ("may_edit", json!(true)),
+        ])))
+        .role(ModelRole::Strong, ModelRef::new("main", None))
+        // Alice chats with it, so it is hers to use, and so is its session.
+        .min_role(80);
+    sc_agent::save_agent(&env.catalog, env.agents.registry(), &agent).await?;
+    // What `feldspar serve` installs at startup, so every run reaches them.
+    env.agents
+        .registry()
+        .view_services()
+        .set_previews(env.apps.clone());
+
+    let executor = Arc::new(FakeProvider::new([
+        Reply::says("The notes page already shows the notes."),
+        Reply::says("Nothing to change."),
+    ]));
+    let strong = Arc::new(FakeProvider::new([
+        Reply::calls(
+            "save_plan_apps_web",
+            json!({"features": [
+                {"id": "notes", "title": "Show the notes", "pages": ["/"]},
+                {"id": "inner", "title": "Tidy the internals"},
+            ]}),
+        ),
+        Reply::calls("implement_feature_apps_web", json!({"id": "notes"})),
+        Reply::calls("implement_feature_apps_web", json!({"id": "inner"})),
+        Reply::says("Both done."),
+    ]));
+    let models: Arc<dyn ProviderConnector> = Arc::new(
+        FakeModels::new()
+            .role(ModelRole::Executor, executor.clone())
+            .role(ModelRole::Strong, strong.clone()),
+    );
+    let runner = Runner::new(
+        &env.catalog,
+        env.agents.registry(),
+        &agent,
+        sc_llm::ConnectedModel::unconfigured(executor.clone()),
+        RunCaller::user(env.alice.clone()),
+    )
+    .with_connector(&models);
+    let (_, conclusion) = runner.start("show the notes").await?;
+    assert_eq!(conclusion.answer(), Some("Both done."));
+
+    let review = |n: usize| {
+        strong.requests()[n]
+            .messages
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                sc_llm::LlmMessage::ToolResult { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    let notes = review(2);
+    assert!(notes.starts_with("feature `notes`: done"), "{notes}");
+    assert!(
+        notes.contains("preview: this build of `notes` is mounted"),
+        "{notes}"
+    );
+    assert!(
+        notes.contains("\npages:\nview_app goto /\nurl: http://"),
+        "{notes}"
+    );
+    assert!(notes.contains("heading \"Notes\" [level=1]"), "{notes}");
+    let inner = review(3);
+    assert!(inner.starts_with("feature `inner`: done"), "{inner}");
+    assert!(!inner.contains("pages:"), "{inner}");
+
+    // Nothing was published, and the planner's preview went with its run.
+    assert!(env.apps.get("notes").is_none());
     assert_eq!(env.apps.preview_count(), 0);
     env.driver.shutdown();
     Ok(())

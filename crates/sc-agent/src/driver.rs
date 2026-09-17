@@ -124,6 +124,18 @@ impl<'a> Runner<'a> {
         executor: ConnectedModel,
         caller: RunCaller,
     ) -> Runner<'a> {
+        // What the agent's traits say a new run starts in (`coding`'s
+        // `planned` workflow starts in `plan`), answered by that mode's role.
+        let mode = agent
+            .traits
+            .iter()
+            .find_map(|enabled| {
+                registry
+                    .require(&enabled.trait_)
+                    .ok()?
+                    .starting_mode(&enabled.config)
+            })
+            .unwrap_or_default();
         Runner {
             catalog,
             registry,
@@ -137,8 +149,8 @@ impl<'a> Runner<'a> {
             connector: None,
             previews: None,
             browser: None,
-            mode: RunMode::Act,
-            role: ModelRole::Executor,
+            mode,
+            role: mode.role(),
             chain: Vec::new(),
         }
     }
@@ -218,7 +230,8 @@ impl<'a> Runner<'a> {
             .or_else(|| self.registry.view_services().browser())
     }
 
-    /// Start runs in `mode`, answered by `role`'s model.
+    /// Start runs in `mode`, answered by `role`'s model, whatever the agent's
+    /// traits would start them in.
     pub fn starting_in(mut self, mode: RunMode, role: ModelRole) -> Runner<'a> {
         self.mode = mode;
         self.role = role;
@@ -437,7 +450,7 @@ impl<'a> Runner<'a> {
                 }
                 Step::CallTools { calls } => {
                     let began = std::time::Instant::now();
-                    let children = Mutex::new(Vec::new());
+                    let spent = Mutex::new(Spent::default());
                     let capabilities = match self.model(role).await {
                         Ok(model) => model.capabilities,
                         Err(_) => self.executor.capabilities,
@@ -447,7 +460,7 @@ impl<'a> Runner<'a> {
                     let mut outcomes = Vec::with_capacity(calls.len());
                     for call in calls {
                         outcomes.push(
-                            self.dispatch(call, run.id, mode, &tools, &mut state, &children)
+                            self.dispatch(call, run.id, mode, &tools, &mut state, &spent)
                                 .await,
                         );
                     }
@@ -466,8 +479,12 @@ impl<'a> Runner<'a> {
                     }
                     let ledger = state.ledger_mut();
                     ledger.add_working(began.elapsed());
-                    for child in lock(&children).drain(..) {
+                    let spent = std::mem::take(&mut *lock(&spent));
+                    for child in spent.children {
                         ledger.record_child(child);
+                    }
+                    for aside in spent.asides {
+                        ledger.record_aside(aside);
                     }
                 }
             }
@@ -771,7 +788,7 @@ impl<'a> Runner<'a> {
         mode: RunMode,
         tools: &ToolsContext<'_>,
         state: &mut AgentLoop,
-        children: &Mutex<Vec<ChildLedger>>,
+        spent: &Mutex<Spent>,
     ) -> ToolOutcome {
         if let Some(observer) = self.observer {
             observer.on_tool_call(&call);
@@ -830,12 +847,15 @@ impl<'a> Runner<'a> {
                             &call.name,
                             &trait_.fingerprint(&enabled.config, &call.name, &call.arguments),
                         );
+                        let key = trait_state_key(trait_index, &enabled.trait_);
                         let delegation = RunDelegation {
                             runner: self,
+                            parent_run: run,
                             parent_mode: mode,
-                            children,
+                            step: state.step(),
+                            trait_key: &key,
+                            spent,
                         };
-                        let key = trait_state_key(trait_index, &enabled.trait_);
                         let mut ctx = TraitContext {
                             catalog: self.catalog,
                             caller: &self.caller,
@@ -987,7 +1007,8 @@ impl<'a> Runner<'a> {
     async fn delegate_from(
         &self,
         parent_mode: RunMode,
-        children: &Mutex<Vec<ChildLedger>>,
+        trait_key: &str,
+        spent: &Mutex<Spent>,
         request: DelegateRequest<'_>,
     ) -> Result<Delegated> {
         let parent = self.agent.name.as_str();
@@ -1003,8 +1024,14 @@ impl<'a> Runner<'a> {
 
         // The one cycle allowed: a run nobody delegated starting a session of
         // its own agent in another mode. Its child is at depth 1, where the
-        // chain is no longer empty, so the exception cannot recurse.
-        let own_session = target == parent && self.chain.is_empty() && child_mode != parent_mode;
+        // chain is no longer empty, so the exception cannot recurse — except
+        // into `explore`, the read-only leaf, which a session of the agent's own
+        // may start once more: an `explore` run at depth 2 is refused
+        // everything.
+        let own_session = target == parent
+            && child_mode != parent_mode
+            && (self.chain.is_empty()
+                || (child_mode == RunMode::Explore && self.chain == [parent]));
         if target == parent && !own_session {
             return Err(problem(if self.chain.is_empty() {
                 format!(
@@ -1014,7 +1041,8 @@ impl<'a> Runner<'a> {
             } else {
                 format!(
                     "delegating to `{target}` would loop: {} → `{target}`. A \
-                     delegated run cannot start a session of its own agent.",
+                     delegated run cannot start a session of its own agent, \
+                     except one `explore` session from a session of its own.",
                     chain
                         .iter()
                         .map(|n| format!("`{n}`"))
@@ -1156,19 +1184,29 @@ impl<'a> Runner<'a> {
         };
 
         let driven = child.drive(&mut run).await;
+        let child_loop = run.agent_loop().ok();
         // Rolled up whatever happened: a child that failed halfway still spent.
-        let ledger = run
-            .agent_loop()
+        let ledger = child_loop
+            .as_ref()
             .map(|l| l.ledger().clone())
             .unwrap_or_default();
-        lock(children).push(ledger.as_child(run.id, &sub.name));
+        lock(spent)
+            .children
+            .push(ledger.as_child(run.id, &sub.name));
         let conclusion = driven.map_err(|e| problem(format!("`{target}` could not run: {e}")))?;
+        // Only a session of the agent's own has the delegating trait at the
+        // same position in its list.
+        let trait_state = match (sub.name == parent, &child_loop) {
+            (true, Some(l)) => l.trait_state(trait_key).cloned().unwrap_or(Json::Null),
+            _ => Json::Null,
+        };
         Ok(Delegated {
             agent: sub.name.clone(),
             run: run.id,
             conclusion,
-            steps: run.agent_loop().map(|l| l.step()).unwrap_or_default(),
+            steps: child_loop.as_ref().map(|l| l.step()).unwrap_or_default(),
             totals: ledger.total(),
+            trait_state,
         })
     }
 }
@@ -1266,15 +1304,31 @@ fn excerpt(raw: &str) -> String {
     }
 }
 
+/// What a turn's tool calls spent through the run's own machinery, for the
+/// ledger to record after the turn.
+#[derive(Default)]
+struct Spent {
+    /// Delegated runs' ledgers.
+    children: Vec<ChildLedger>,
+    /// Model calls tools made for themselves.
+    asides: Vec<LedgerStep>,
+}
+
 /// The delegation one tool call is offered: the runner, plus what it needs to
 /// know about the run the call belongs to.
 struct RunDelegation<'r, 'a> {
     runner: &'r Runner<'a>,
+    /// The run doing the asking.
+    parent_run: RunId,
     /// The mode of the run doing the asking, which a session of its own agent
     /// must differ from.
     parent_mode: RunMode,
-    /// Where the child's ledger goes, for the parent's to roll up.
-    children: &'r Mutex<Vec<ChildLedger>>,
+    /// The asking run's step, for the ledger.
+    step: u32,
+    /// The calling trait instance's state key.
+    trait_key: &'r str,
+    /// Where a child's ledger and an aside go, for the parent's to roll up.
+    spent: &'r Mutex<Spent>,
 }
 
 /// A run delegates by starting another one — the sub-agent's own — under the
@@ -1283,8 +1337,56 @@ struct RunDelegation<'r, 'a> {
 impl Delegator for RunDelegation<'_, '_> {
     async fn delegate(&self, request: DelegateRequest<'_>) -> Result<Delegated> {
         self.runner
-            .delegate_from(self.parent_mode, self.children, request)
+            .delegate_from(self.parent_mode, self.trait_key, self.spent, request)
             .await
+    }
+
+    /// Into the stored context's `trait_state`, leaving the rest of the row —
+    /// including an abort written meanwhile — as it is.
+    async fn save_state(&self, state: &Json) -> Result<()> {
+        let catalog = self.runner.catalog;
+        let mut run = crate::run_store::require_run(catalog, self.parent_run).await?;
+        let states = run
+            .context
+            .as_object_mut()
+            .ok_or_else(|| Error::invalid(format!("run {}: its context is not an object", run.id)))?
+            .entry("trait_state")
+            .or_insert_with(|| Json::Object(serde_json::Map::new()));
+        match states {
+            Json::Object(map) => {
+                map.insert(self.trait_key.to_owned(), state.clone());
+            }
+            other => *other = serde_json::json!({ self.trait_key: state }),
+        }
+        run.updated_at = chrono::Utc::now();
+        save_run(catalog, &run).await
+    }
+
+    async fn ask(&self, role: ModelRole, system: &str, prompt: &str) -> Result<String> {
+        let began = std::time::Instant::now();
+        let model = self.runner.model(role).await?;
+        let request = LlmRequest {
+            system: Some(system.to_owned()),
+            messages: vec![LlmMessage::user(prompt)],
+            max_tokens: self.runner.agent.max_tokens(),
+            ..LlmRequest::default()
+        };
+        let answer = self.runner.ask(&model, request, false).await?;
+        lock(self.spent).asides.push(LedgerStep {
+            step: self.step,
+            role,
+            model: model.provider.model().to_owned(),
+            usage: answer.usage,
+            cost: answer.usage.cost(&model.prices),
+            elapsed_ms: u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
+            signals: Vec::new(),
+            compacted: false,
+        });
+        Ok(answer.content.trim().to_owned())
+    }
+
+    async fn capabilities(&self, role: ModelRole) -> Result<sc_llm::ModelCapabilities> {
+        Ok(self.runner.model(role).await?.capabilities)
     }
 }
 

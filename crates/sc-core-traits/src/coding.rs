@@ -65,13 +65,17 @@
 
 mod change;
 mod check;
+mod commit;
 mod edit;
+mod explore;
+mod feature;
 mod feedback;
 mod find;
 mod header;
 mod ledger;
 pub mod matching;
 mod patch;
+mod plan;
 mod process;
 mod prompt;
 mod read;
@@ -101,10 +105,20 @@ use crate::files::{
 use crate::table::config_str;
 
 pub use check::{Baseline, CFG_CHECKS, tool_name as check_checks_tool_name};
+pub use commit::CFG_COMMIT;
 pub use edit::tool_name as edit_file_tool_name;
+pub use explore::tool_name as explore_tool_name;
+pub use feature::{
+    CFG_MAX_SESSIONS, DEFAULT_MAX_SESSIONS, FAILURES_TO_FAIL,
+    tool_name as implement_feature_tool_name,
+};
 pub use find::tool_name as find_files_tool_name;
 pub use ledger::{ChangeStatus, FileChange, Ledger, PreImage, RunDiff, diff_ledger, run_diff};
 pub use patch::tool_name as apply_patch_tool_name;
+pub use plan::{
+    Feature, Kind as FeatureKind, Plan, Progress, Status as FeatureStatus, checklist,
+    tool_name as save_plan_tool_name,
+};
 pub use process::{kill_all_processes, running_count, tool_name as process_tool_name};
 pub use read::{CFG_MAX_LINES, DEFAULT_MAX_LINES, tool_name as read_file_tool_name};
 pub use repo_map::{
@@ -156,6 +170,16 @@ pub const CFG_DIAGNOSE: &str = "diagnose";
 /// [`CFG_DIAGNOSE`] when the admin names none.
 pub const DEFAULT_DIAGNOSE: &str = "typecheck";
 
+/// What a chat run starts in: `direct` (`act`, doing the work) or `planned`
+/// (`plan`, writing a plan and implementing it a feature per session; TODO §5).
+pub const CFG_WORKFLOW: &str = "workflow";
+
+/// The [`CFG_WORKFLOW`] that starts in `act`, and the default.
+pub const WORKFLOW_DIRECT: &str = "direct";
+
+/// The [`CFG_WORKFLOW`] that starts in `plan`.
+pub const WORKFLOW_PLANNED: &str = "planned";
+
 /// How the model edits: `auto`, `str_replace`, `apply_patch` or `whole_file`.
 pub const CFG_EDIT_FORMAT: &str = "edit_format";
 
@@ -183,6 +207,9 @@ pub fn tool_names(scope: &FileScope) -> Vec<String> {
         find::tool_name(scope),
         search::tool_name(scope),
         repo_map::tool_name(scope),
+        plan::tool_name(scope),
+        feature::tool_name(scope),
+        explore::tool_name(scope),
         write::tool_name(scope),
         edit::tool_name(scope),
         patch::tool_name(scope),
@@ -248,6 +275,24 @@ impl AgentTrait for Coding {
                 .default_value(DEFAULT_DIAGNOSE),
         );
         spec.push(
+            FormField::new(CFG_WORKFLOW, BasicType::Text)
+                .label(
+                    "Workflow: direct does the work; planned plans it, then a session per feature",
+                )
+                .options([WORKFLOW_DIRECT, WORKFLOW_PLANNED].map(str::to_owned))
+                .default_value(WORKFLOW_DIRECT),
+        );
+        spec.push(
+            FormField::new(CFG_MAX_SESSIONS, BasicType::Int)
+                .label("Sessions per planned feature, retries included")
+                .default_value(DEFAULT_MAX_SESSIONS as i64),
+        );
+        spec.push(
+            FormField::new(CFG_COMMIT, BasicType::Bool)
+                .label("Commit each finished feature (git work trees only)")
+                .default_value(true),
+        );
+        spec.push(
             FormField::new(CFG_EDIT_FORMAT, BasicType::Text)
                 .label("Edit format")
                 .options(
@@ -294,8 +339,23 @@ impl AgentTrait for Coding {
         config_count(check.config, CFG_MAX_LINES, DEFAULT_MAX_LINES)?;
         config_count(check.config, CFG_MAX_RESULTS, DEFAULT_MAX_RESULTS as u64)?;
         config_count(check.config, CFG_TIMEOUT, DEFAULT_TIMEOUT_SECONDS)?;
+        if config_count(check.config, CFG_MAX_SESSIONS, DEFAULT_MAX_SESSIONS)? == 0 {
+            return Err(Error::invalid(format!(
+                "`{CFG_MAX_SESSIONS}` must be at least 1"
+            )));
+        }
         repo_map::configured_tokens(check.config)?;
+        match config_str(check.config, CFG_WORKFLOW).as_str() {
+            "" | WORKFLOW_DIRECT | WORKFLOW_PLANNED => {}
+            other => {
+                return Err(Error::invalid(format!(
+                    "`{CFG_WORKFLOW}` must be {WORKFLOW_DIRECT} or {WORKFLOW_PLANNED}, got \
+                     `{other}`"
+                )));
+            }
+        }
         for key in [
+            CFG_COMMIT,
             CFG_MAY_EDIT,
             CFG_MAY_RUN_SCRIPTS,
             CFG_MAY_CHECK,
@@ -331,9 +391,10 @@ impl AgentTrait for Coding {
         Ok(())
     }
 
-    /// The read-only tools in every mode. In `act`, and under the grants, the
-    /// write tool, the one edit tool the edit format picks, and the script
-    /// runner.
+    /// The read-only tools in every mode (TODO §5). In `plan`, the plan tools
+    /// and `explore`. In `act`, `explore` and, under the grants, the write
+    /// tool, the one edit tool the edit format picks, the script runner,
+    /// `check`, `view_app` and the shell.
     fn tools(&self, cx: &ToolsContext<'_>, config: &Attrs) -> Vec<ToolSpec> {
         let scope = scope_as_written(config);
         let mut tools = vec![
@@ -342,8 +403,15 @@ impl AgentTrait for Coding {
             search::spec(&scope, config),
             repo_map::spec(&scope),
         ];
-        if cx.mode != RunMode::Act {
-            return tools;
+        match cx.mode {
+            RunMode::Explore => return tools,
+            RunMode::Plan => {
+                tools.push(plan::spec(&scope));
+                tools.push(feature::spec(&scope));
+                tools.push(explore::spec(&scope));
+                return tools;
+            }
+            RunMode::Act => tools.push(explore::spec(&scope)),
         }
         if may(config, CFG_MAY_EDIT) {
             let format = edit_format(config, cx.capabilities.edit_format);
@@ -386,6 +454,22 @@ impl AgentTrait for Coding {
             _ if tool == search::tool_name(&scope) => search::call(&scope, config, args, ctx).await,
             _ if tool == repo_map::tool_name(&scope) => {
                 repo_map::call(&scope, config, args, ctx).await
+            }
+            _ if tool == plan::tool_name(&scope) => {
+                permit_mode(&[RunMode::Plan], "write a plan", ctx)?;
+                plan::call(args, ctx).await
+            }
+            _ if tool == feature::tool_name(&scope) => {
+                permit_mode(&[RunMode::Plan], "implement a feature", ctx)?;
+                feature::call(&scope, config, args, ctx).await
+            }
+            _ if tool == explore::tool_name(&scope) => {
+                permit_mode(
+                    &[RunMode::Plan, RunMode::Act],
+                    "start an explore session",
+                    ctx,
+                )?;
+                explore::call(args, ctx).await
             }
             _ if tool == write::tool_name(&scope)
                 || tool == edit::tool_name(&scope)
@@ -444,6 +528,11 @@ impl AgentTrait for Coding {
         Ok(header::header(&scope, config, cx).await)
     }
 
+    /// `plan` under the `planned` workflow (TODO §5).
+    fn starting_mode(&self, config: &Attrs) -> Option<RunMode> {
+        (config_str(config, CFG_WORKFLOW) == WORKFLOW_PLANNED).then_some(RunMode::Plan)
+    }
+
     /// A shell command is the same call whatever its whitespace (TODO 6a.7).
     fn fingerprint(&self, config: &Attrs, tool: &str, args: &Json) -> Json {
         let scope = scope_as_written(config);
@@ -456,9 +545,15 @@ impl AgentTrait for Coding {
 
     /// An old look at the application is one line (TODO §7b).
     fn elide(&self, config: &Attrs, old: &Elidable<'_>) -> Option<String> {
-        match old.call.name == view_app::tool_name(&scope_as_written(config)) {
-            true => Some(view_app::elide(old)),
-            false => Some(old.default_stub()),
+        let scope = scope_as_written(config);
+        match old.call.name.as_str() {
+            name if name == view_app::tool_name(&scope) => Some(view_app::elide(old)),
+            // An old review keeps its verdict; the latest checklist is later.
+            name if name == feature::tool_name(&scope) => Some(format!(
+                "[elided {}]",
+                old.content.lines().next().unwrap_or_default()
+            )),
+            _ => Some(old.default_stub()),
         }
     }
 
@@ -502,6 +597,17 @@ fn permit_shell(config: &Attrs, ctx: &TraitContext<'_>) -> Result<()> {
         "agent `{}` may not use the shell for this user: the shell is only for runs whose \
          caller is an administrator, because it runs as the server's own operating-system user",
         ctx.agent
+    )))
+}
+
+/// Refuse a tool the run's mode does not offer, naming the mode.
+fn permit_mode(modes: &[RunMode], what: &str, ctx: &TraitContext<'_>) -> Result<()> {
+    if modes.contains(&ctx.mode) {
+        return Ok(());
+    }
+    Err(Error::invalid(format!(
+        "agent `{}` may not {what} in a `{}` run",
+        ctx.agent, ctx.mode
     )))
 }
 
@@ -563,6 +669,9 @@ mod tests {
                 "find_files_app_src_web",
                 "search_files_app_src_web",
                 "repo_map_app_src_web",
+                "save_plan_app_src_web",
+                "implement_feature_app_src_web",
+                "explore_app_src_web",
                 "write_file_app_src_web",
                 "edit_file_app_src_web",
                 "apply_patch_app_src_web",

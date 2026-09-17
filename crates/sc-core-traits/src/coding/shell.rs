@@ -517,9 +517,13 @@ pub async fn run_command(
         dir,
         Capture::new(OUTPUT_HEAD_BYTES, OUTPUT_TAIL_BYTES),
     )?;
+    // A call dropped mid-command — the run aborted, or its drive stopped —
+    // takes the command's group with it, as a timeout does.
+    let mut dropped = KillOnDrop(child.pgid);
     let status = tokio::time::timeout(Duration::from_secs(timeout), child.child.wait()).await;
     // Whatever the command left in its group goes with it.
     child.kill_group();
+    dropped.0 = None;
     let exit = match status {
         Err(_) => {
             if let Sandbox::Container { runtime, .. } = sandbox {
@@ -541,6 +545,17 @@ pub async fn run_command(
         output,
         elapsed: started.elapsed(),
     })
+}
+
+/// Kills a process group when dropped, unless disarmed by clearing it.
+struct KillOnDrop(Option<i32>);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0 {
+            kill_group(pgid);
+        }
+    }
 }
 
 /// `run` arguments for a container over `dir`, up to (not including) the image.

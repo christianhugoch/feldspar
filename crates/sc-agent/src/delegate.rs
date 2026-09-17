@@ -49,6 +49,11 @@
 //! role whose model answers it on its row, and its ledger rolls up into the
 //! parent's.
 //!
+//! A session of the agent's own may itself start **one `explore` session**, the
+//! read-only leaf mode: a feature's `act` session asking a cheap model where
+//! something is. An `explore` run starts nothing of its own agent, since every
+//! mode it could ask for is refused one level further down.
+//!
 //! ## Context is not inherited
 //!
 //! The child sees the **briefing and nothing else** — not the parent's
@@ -60,7 +65,9 @@
 //! channel between them, which is why the trait that writes one asks the model
 //! for a task, its context and the output wanted rather than for a bare sentence.
 
-use sc_error::Result;
+use sc_error::{Error, Result};
+use sc_llm::ModelCapabilities;
+use serde_json::Value as Json;
 
 use crate::agent::ModelRole;
 use crate::ledger::RoleTotals;
@@ -194,6 +201,11 @@ pub struct Delegated {
     pub steps: u32,
     /// What it spent, over every role and its own children.
     pub totals: RoleTotals,
+    /// The child's per-run state for the **same trait instance** that
+    /// delegated, when the child is a session of the delegating agent itself;
+    /// `null` otherwise. How a planner reads what its feature's session
+    /// changed (the change ledger) without a second copy of it (TODO §8).
+    pub trait_state: Json,
 }
 
 impl Delegated {
@@ -230,6 +242,35 @@ pub trait Delegator: Send + Sync {
     /// because those are different things to the agent reading the result: the
     /// first is a configuration to report, the second is a task to reformulate.
     async fn delegate(&self, request: DelegateRequest<'_>) -> Result<Delegated>;
+
+    /// Write `state` as the delegating trait instance's per-run state into the
+    /// asking run's stored row **now**, rather than after the step.
+    ///
+    /// For a trait that records a child run's id before starting it (TODO
+    /// §8's resume): a server that stops while the child runs must find the id
+    /// when the parent is resumed. The loop still saves the state as usual
+    /// after the step.
+    async fn save_state(&self, state: &Json) -> Result<()> {
+        let _ = state;
+        Err(Error::config(
+            "this context cannot save a run's state mid-step",
+        ))
+    }
+
+    /// Ask `role`'s model one question with no tools, and return its answer —
+    /// work the harness does for itself, such as a commit message on the
+    /// cheap role (TODO §8). Recorded in the asking run's ledger.
+    async fn ask(&self, role: ModelRole, system: &str, prompt: &str) -> Result<String> {
+        let _ = (role, system, prompt);
+        Err(Error::config("this context cannot ask a model"))
+    }
+
+    /// What `role`'s model can do: whether a planner's model takes images,
+    /// say.
+    async fn capabilities(&self, role: ModelRole) -> Result<ModelCapabilities> {
+        let _ = role;
+        Err(Error::config("this context has no models to describe"))
+    }
 }
 
 #[cfg(test)]
@@ -254,6 +295,7 @@ mod tests {
             conclusion,
             steps: 3,
             totals: RoleTotals::default(),
+            trait_state: Json::Null,
         };
         assert_eq!(
             delegated(Conclusion::Answered {
