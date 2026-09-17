@@ -123,10 +123,11 @@ pub use admin_copilot::{
 };
 pub use build_application::{BuildApplication, CFG_APPLICATION};
 pub use coding::{
-    CFG_DIAGNOSE, CFG_EDIT_FORMAT, CFG_MAX_LINES, CFG_MAX_RESULTS, CFG_MAY_CHECK, CFG_MAY_EDIT,
-    CFG_MAY_RUN_SCRIPTS, CFG_TIMEOUT, ChangeStatus, Coding, CodingState, DEFAULT_DIAGNOSE,
-    DEFAULT_MAX_LINES, DEFAULT_TIMEOUT_SECONDS, EDIT_FORMAT_AUTO, FileChange, LONGEST_TOOL_PREFIX,
-    Ledger, MAX_OUTPUT_CHARS, PreImage, RunDiff, diff_ledger, edit_format, matching, run_diff,
+    Baseline, CFG_CHECKS, CFG_DIAGNOSE, CFG_EDIT_FORMAT, CFG_MAX_LINES, CFG_MAX_RESULTS,
+    CFG_MAY_CHECK, CFG_MAY_EDIT, CFG_MAY_RUN_SCRIPTS, CFG_TIMEOUT, ChangeStatus, Coding,
+    CodingState, DEFAULT_DIAGNOSE, DEFAULT_MAX_LINES, DEFAULT_TIMEOUT_SECONDS, EDIT_FORMAT_AUTO,
+    FileChange, LONGEST_TOOL_PREFIX, Ledger, MAX_OUTPUT_CHARS, PreImage, RunDiff, diff_ledger,
+    edit_format, matching, run_diff,
 };
 pub use delete_rows::DeleteRows;
 pub use insert_row::InsertRow;
@@ -150,10 +151,10 @@ pub mod tool_names {
     pub use crate::build_application::tool_name as build_application;
     pub use crate::coding::tool_names as coding;
     pub use crate::coding::{
-        apply_patch_tool_name as apply_patch, edit_file_tool_name as edit_file,
-        find_files_tool_name as find_files, read_file_tool_name as read_file,
-        run_script_tool_name as run_project_script, search_files_tool_name as search_files,
-        write_file_tool_name as write_file,
+        apply_patch_tool_name as apply_patch, check_checks_tool_name as check,
+        edit_file_tool_name as edit_file, find_files_tool_name as find_files,
+        read_file_tool_name as read_file, run_script_tool_name as run_project_script,
+        search_files_tool_name as search_files, write_file_tool_name as write_file,
     };
     pub use crate::delete_rows::tool_name as delete_rows;
     pub use crate::insert_row::tool_name as insert_row;
@@ -297,8 +298,8 @@ mod tests {
 
         // The whole coding loop is **one** form: the scope filled in once — one
         // store, optionally one directory in it — then what the agent may do
-        // there, then the bound on each thing that brings something back. Six
-        // tools, one place to say where they work, so the scope cannot disagree
+        // there, what `check` runs, then the bound on each thing that brings something
+        // back. Eight tools, one place to say where they work, so the scope cannot disagree
         // with itself.
         assert_eq!(
             spec("coding"),
@@ -308,6 +309,8 @@ mod tests {
                 CFG_MAY_EDIT,
                 CFG_MAY_RUN_SCRIPTS,
                 CFG_MAY_CHECK,
+                CFG_CHECKS,
+                CFG_APPLICATION,
                 CFG_DIAGNOSE,
                 CFG_EDIT_FORMAT,
                 CFG_MAX_LINES,
@@ -365,6 +368,7 @@ mod tests {
             tool_names::apply_patch(&scope),
             tool_names::search_files(&scope),
             tool_names::run_project_script(&scope),
+            tool_names::check(&scope),
             tool_names::build_application("todo"),
         ];
         assert_eq!(
@@ -383,12 +387,13 @@ mod tests {
                 "apply_patch_app_src_web",
                 "search_files_app_src_web",
                 "run_script_app_src_web",
+                "check_app_src_web",
                 "build_todo",
             ]
         );
         let unique: std::collections::BTreeSet<&String> = names.iter().collect();
         assert_eq!(unique.len(), names.len());
-        // The seven file names above are `coding`'s whole set, which is what the
+        // The eight file names above are `coding`'s whole set, which is what the
         // collision check compares when the trait is enabled twice: two
         // instances over one scope produce these same names and are refused.
         assert_eq!(
@@ -401,6 +406,7 @@ mod tests {
                 tool_names::edit_file(&scope),
                 tool_names::apply_patch(&scope),
                 tool_names::run_project_script(&scope),
+                tool_names::check(&scope),
             ]
         );
         // `admin_copilot`'s names are fixed rather than derived, and say the

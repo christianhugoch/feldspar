@@ -2,6 +2,70 @@
 
 Changes in reverse chronological order.
 
+## `check` and the ratchet (coding agent milestone, Phase 6)
+
+In `sc-core-traits/src/coding/check.rs`, with the shared output parsers in `sc-app`.
+
+- **Settings** on `coding`:
+  - **`checks`**: a list of `package.json` script names, run in order. A blank, repeated or
+    non-string entry is refused on save.
+  - **`application`**: an optional subdomain. When it is set, `check` also builds that
+    application. It is validated as `build_application` validates its own setting, through
+    the same shared `resolve_application`.
+  - **`may_check`** now also grants the new tool.
+- **Parsers** (`sc_app::parse_diagnostics`, returning the now-public `sc_app::Diagnostic`;
+  `build_diagnostics` is a JSON view of it). On top of tsc, esbuild and rolldown it reads:
+  - tsc's pretty `file:line:col - error TSxxxx:` form
+  - eslint's `stylish` output, with the rule name in the message. eslint's `unix` and
+    `compact` formats go through the generic `path:line:col: message` form.
+  - vitest: `FAIL file > test`, the error's first line and `❯ file:line:col`. A file-level
+    failure is placed at line 1.
+  - jest: `● test`, the error's first line, and the first stack frame outside `node_modules`
+
+  Each has a fixture-output test.
+- **`check_<slug>`**, offered in `act` mode under `may_check`, takes no arguments. It runs
+  each configured script, then the application build (not mounted). It returns text:
+  - a first line saying `green` or `red`, naming the checks with new failures
+  - one line per check, with its duration and new and pre-existing counts
+  - up to 20 diagnostics per check, each marked `(new)` or `(pre-existing)`. Paths under the
+    project directory are made relative.
+  - a check whose output names no diagnostic shows the tail of its output instead
+  - a script that `package.json` does not declare is reported as a failure
+
+  The build is skipped, with the reason given, when the `diagnose` script (for example
+  `typecheck`) is among the checks and has new failures. With no checks configured, the result
+  says so and tells the model to ask an administrator.
+- **The baseline** is now one entry per check in `CodingState.baseline` (whether it passed,
+  plus its diagnostic keys), replacing the single diagnose list. It is recorded while the run
+  has changed nothing:
+  - just before the first edit, for the `diagnose` script, every check and the build
+  - or by a `check` that runs before any edit
+
+  A check **has new failures** when it fails where the baseline passed or had no entry, or
+  fails with a diagnostic the baseline did not have. A project that was already broken
+  therefore stays green until the run breaks something else. Post-turn feedback uses the same
+  baseline and the same report code.
+- **The ratchet** is a pseudo-check that always runs, reading the ledger. It covers test files
+  (`*.test.*`, `*.spec.*` and `__tests__/`, as JS or TS) and fails, naming each case, when the
+  run:
+  - deleted a test file, or moved one to a name that is not a test file
+  - reduced the number of `it`/`test`/`describe` blocks. Every variant is counted, so
+    `it(` → `it.skip(` counts once, as a skip.
+  - added `.skip`, `.only`, `xit`, `xtest`, `xdescribe`, `fit` or `fdescribe`
+
+  A test file moved to another test file's name is checked at its new path.
+- **`Signal::CheckFailed`** is raised when any check, or the ratchet, has new failures.
+- Tests:
+  - unit tests for the parsers, classification, the report format, the `checks` setting, test
+    file detection and block counting
+  - integration tests (`tests/coding_check.rs`):
+    - a project broken before the run is green, goes red with the build skipped when the run
+      adds an error, and is green again once the error is fixed
+    - the first edit records the baseline of every check
+    - the ratchet fails on a removed block, an added skip and a deleted file, and passes on an
+      added test and a move
+    - the settings are validated, and the tool is refused without its grant
+
 ## The coding tools, rebuilt (coding agent milestone, Phase 5)
 
 Mostly in `sc-core-traits/src/coding`, with one new loop hook in `sc-agent`, a tree walk in

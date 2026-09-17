@@ -89,7 +89,7 @@ pub use declared::{
     BuildTemplate, DeclaredFile, FilePhase, FrameworkDecl, FrameworkHost, FrameworkSet,
     PathTemplate, clean_path, declared_framework, install_frameworks, installed_frameworks,
 };
-pub use diagnostics::build_diagnostics;
+pub use diagnostics::{Diagnostic, build_diagnostics, parse_diagnostics};
 pub use factory::{
     FrameworkFactory, MountContext, framework_factories, framework_factory,
     install_framework_factory,

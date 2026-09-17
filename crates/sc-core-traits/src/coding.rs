@@ -16,8 +16,10 @@
 //! ([`CFG_MAY_EDIT`]), which adds `write_file` and one edit tool: `edit_file`
 //! (the match cascade) or `apply_patch` (V4A), as [`CFG_EDIT_FORMAT`] resolves
 //! for the model, or neither under `whole_file`. **Running a script is another
-//! checkbox** ([`CFG_MAY_RUN_SCRIPTS`]), and **formatting and type-checking after
-//! a turn's edits a third** ([`CFG_MAY_CHECK`]). All are off by default, so a
+//! checkbox** ([`CFG_MAY_RUN_SCRIPTS`]), and **checking a third**
+//! ([`CFG_MAY_CHECK`]): the `check` tool over the admin's [`CFG_CHECKS`] (and the
+//! application build, when the `application` setting names one), and formatting
+//! and type-checking after a turn's edits. All are off by default, so a
 //! read-only coding agent stays the default shape. Their being configuration
 //! rather than separate traits is `admin_copilot`'s move, made for the same
 //! reason: the grants share a scope, and a scope filled in twice is a scope that
@@ -53,6 +55,7 @@
 //! (§11.2).
 
 mod change;
+mod check;
 mod edit;
 mod feedback;
 mod find;
@@ -78,6 +81,7 @@ use crate::files::{
 };
 use crate::table::config_str;
 
+pub use check::{Baseline, CFG_CHECKS, tool_name as check_checks_tool_name};
 pub use edit::tool_name as edit_file_tool_name;
 pub use find::tool_name as find_files_tool_name;
 pub use ledger::{ChangeStatus, FileChange, Ledger, PreImage, RunDiff, diff_ledger, run_diff};
@@ -99,10 +103,10 @@ pub const CFG_MAY_EDIT: &str = "may_edit";
 /// agent did not write.
 pub const CFG_MAY_RUN_SCRIPTS: &str = "may_run_scripts";
 
-/// May run the checks someone other than the model chose: for now, the
-/// post-turn formatting and the [`CFG_DIAGNOSE`] script (TODO §6, §7). Off by
-/// default. A smaller grant than [`CFG_MAY_RUN_SCRIPTS`], because the model does
-/// not choose what runs.
+/// May run the checks someone other than the model chose: the `check` tool over
+/// [`CFG_CHECKS`] and the application build, and the post-turn formatting and
+/// [`CFG_DIAGNOSE`] script (TODO §6, §7). Off by default. A smaller grant than
+/// [`CFG_MAY_RUN_SCRIPTS`], because the model does not choose what runs.
 pub const CFG_MAY_CHECK: &str = "may_check";
 
 /// The `package.json` script that type-checks the project after a turn's edits.
@@ -141,6 +145,7 @@ pub fn tool_names(scope: &FileScope) -> Vec<String> {
         edit::tool_name(scope),
         patch::tool_name(scope),
         script::tool_name(scope),
+        check::tool_name(scope),
     ]
 }
 
@@ -180,8 +185,17 @@ impl AgentTrait for Coding {
         );
         spec.push(
             FormField::new(CFG_MAY_CHECK, BasicType::Bool)
-                .label("May format and type-check after edits")
+                .label("May run the configured checks, and format and type-check after edits")
                 .default_value(false),
+        );
+        spec.push(
+            FormField::new(CFG_CHECKS, BasicType::Json)
+                .label("Checks (package.json script names, in order)")
+                .default_value(Json::Array(Vec::new())),
+        );
+        spec.push(
+            FormField::new(crate::CFG_APPLICATION, BasicType::Text)
+                .label("Application built by check (subdomain, optional)"),
         );
         spec.push(
             FormField::new(CFG_DIAGNOSE, BasicType::Text)
@@ -246,6 +260,7 @@ impl AgentTrait for Coding {
                 )));
             }
         }
+        check::validate(check.catalog, check.config).await?;
         for name in tool_names(&scope) {
             check_tool_name(&name)?;
         }
@@ -280,6 +295,9 @@ impl AgentTrait for Coding {
         if may(config, CFG_MAY_RUN_SCRIPTS) {
             tools.push(script::spec(&scope));
         }
+        if may(config, CFG_MAY_CHECK) {
+            tools.push(check::spec(&scope));
+        }
         tools
     }
 
@@ -300,14 +318,7 @@ impl AgentTrait for Coding {
                 || tool == patch::tool_name(&scope) =>
             {
                 permit(config, CFG_MAY_EDIT, "change files", ctx)?;
-                feedback::record_baseline(
-                    &scope,
-                    config,
-                    ctx.catalog,
-                    ctx.caller.role,
-                    ctx.trait_state,
-                )
-                .await?;
+                check::record_baseline(&scope, config, ctx).await?;
                 match tool {
                     _ if tool == write::tool_name(&scope) => write::call(&scope, args, ctx).await,
                     _ if tool == edit::tool_name(&scope) => edit::call(&scope, args, ctx).await,
@@ -317,6 +328,10 @@ impl AgentTrait for Coding {
             _ if tool == script::tool_name(&scope) => {
                 permit(config, CFG_MAY_RUN_SCRIPTS, "run scripts", ctx)?;
                 script::call(&scope, config, args, ctx).await
+            }
+            _ if tool == check::tool_name(&scope) => {
+                permit(config, CFG_MAY_CHECK, "run checks", ctx)?;
+                check::call(&scope, config, args, ctx).await
             }
             other => Err(Error::invalid(format!(
                 "`{other}` is not one of this trait's tools; it offers {}",
@@ -404,6 +419,7 @@ mod tests {
                 "edit_file_app_src_web",
                 "apply_patch_app_src_web",
                 "run_script_app_src_web",
+                "check_app_src_web",
             ]
         );
     }

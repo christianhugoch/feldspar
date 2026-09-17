@@ -558,9 +558,13 @@ async fn a_trait_configured_against_a_store_that_is_gone_is_invalid_with_a_reaso
     // The configured store: valid, and every tool is named after it.
     let cfg = at("code", "web");
     env.check("coding", &cfg).await?;
-    // Every tool but `apply_patch`, which this model's edit format leaves out.
+    // Every tool but `apply_patch`, which this model's edit format leaves out,
+    // and `check`, whose grant is off.
     let mut all = tool_names::coding(&scope("code", "web"));
-    all.retain(|name| name != &tool_names::apply_patch(&scope("code", "web")));
+    all.retain(|name| {
+        name != &tool_names::apply_patch(&scope("code", "web"))
+            && name != &tool_names::check(&scope("code", "web"))
+    });
     assert_eq!(offered(&env, &cfg), all);
 
     // One that never existed: refused on save *and* on load, naming it.

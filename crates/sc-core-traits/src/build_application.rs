@@ -26,7 +26,8 @@
 
 use sc_agent::{AgentTrait, ToolsContext, TraitCheck, TraitContext};
 use sc_app::{
-    BuildReport, app_source_from_config, build_diagnostics, load_application_by_subdomain,
+    AppSource, Application, BuildReport, app_source_from_config, build_diagnostics,
+    load_application_by_subdomain,
 };
 use sc_error::{Error, Result};
 use sc_llm::ToolSpec;
@@ -73,13 +74,7 @@ impl AgentTrait for BuildApplication {
     /// the model calls the tool.
     async fn validate_config(&self, check: &TraitCheck<'_>) -> Result<()> {
         let subdomain = configured_application(check.config)?;
-        let app = load_application_by_subdomain(check.catalog, &subdomain)
-            .await?
-            .ok_or_else(|| Error::invalid(format!("no application is served at `{subdomain}`")))?;
-        // Resolving the source is what says "this framework builds from a file
-        // store"; a static app has nothing to build and the admin should hear it
-        // here, not from a tool call.
-        app_source_from_config(&app.framework)?;
+        resolve_application(check.catalog, &subdomain).await?;
         Ok(())
     }
 
@@ -111,10 +106,7 @@ impl AgentTrait for BuildApplication {
     ) -> Result<Json> {
         arguments(args, &[])?;
         let subdomain = configured_application(config)?;
-        let app = load_application_by_subdomain(ctx.catalog, &subdomain)
-            .await?
-            .ok_or_else(|| Error::invalid(format!("no application is served at `{subdomain}`")))?;
-        let source = app_source_from_config(&app.framework)?;
+        let (app, source) = resolve_application(ctx.catalog, &subdomain).await?;
 
         // Everything from here is *news about the build*, including its failure,
         // so it is reported rather than raised.
@@ -138,6 +130,23 @@ impl AgentTrait for BuildApplication {
     }
 }
 
+/// The application served at `subdomain`, and the source it builds from.
+///
+/// Shared with `coding`'s `application` setting (TODO 6.1), which is validated
+/// the same way: resolving the source is what says "this framework builds from a
+/// file store", and a static app has nothing to build — the admin should hear
+/// that on save, not from a tool call.
+pub(crate) async fn resolve_application(
+    catalog: &sc_catalog::Catalog,
+    subdomain: &str,
+) -> Result<(Application, AppSource)> {
+    let app = load_application_by_subdomain(catalog, subdomain)
+        .await?
+        .ok_or_else(|| Error::invalid(format!("no application is served at `{subdomain}`")))?;
+    let source = app_source_from_config(&app.framework)?;
+    Ok((app, source))
+}
+
 /// The configured application's subdomain.
 fn configured_application(config: &Attrs) -> Result<String> {
     let name = config_str(config, CFG_APPLICATION);
@@ -151,7 +160,7 @@ fn configured_application(config: &Attrs) -> Result<String> {
 ///
 /// Kept even on success: bundlers report warnings here, and a model told only
 /// "built" would never see them.
-fn success_log(report: &BuildReport) -> String {
+pub(crate) fn success_log(report: &BuildReport) -> String {
     let mut parts = Vec::new();
     if let Some(install) = &report.install_log {
         parts.push(install.trim().to_owned());

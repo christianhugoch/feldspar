@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use sha2::{Digest, Sha256};
 
+use super::check::Baseline;
 use super::ledger::Ledger;
 
 /// The trait's state for one run.
@@ -28,9 +29,10 @@ pub struct CodingState {
     /// order they were first edited.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turn_edits: Vec<String>,
-    /// The diagnostics that were already there before the run's first edit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub baseline: Option<Vec<String>>,
+    /// Each check's result before the run changed anything, by check name
+    /// (TODO 6.4).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub baseline: BTreeMap<String, Baseline>,
 }
 
 impl CodingState {

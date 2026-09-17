@@ -872,20 +872,24 @@ default.
 
 ## Phase 6 — `check` and the ratchet (`sc-core-traits`)
 
-- [ ] 6.1 Settings: `checks` (ordered script names), `diagnose` (default `typecheck`),
+- [x] 6.1 Settings: `checks` (ordered script names), `diagnose` (default `typecheck`),
       `application` (optional subdomain, validated as `build_application` validates it), and
-      the `may_check` grant. *(`diagnose` and `may_check` already exist, from 5.10.)*
-- [ ] 6.2 The shared diagnostic parsers (tsc, eslint, vitest/jest, generic) in `sc-app` beside
-      `build_diagnostics`, with fixture-output tests.
-- [ ] 6.3 `check`: runs each check in order (the build included when `application` is set,
+      the `may_check` grant. *(`diagnose` and `may_check` already exist, from 5.10. `checks` is a
+      JSON list.)*
+- [x] 6.2 The shared diagnostic parsers (tsc, eslint, vitest/jest, generic) in `sc-app` beside
+      `build_diagnostics`, with fixture-output tests. *(`sc_app::parse_diagnostics`; eslint's
+      `unix`/`compact` formats are the generic one.)*
+- [x] 6.3 `check`: runs each check in order (the build included when `application` is set,
       through `sc_app::build_application`, not mounted). Skips the build after a failed
-      typecheck and says so. Returns the structured summary.
-- [ ] 6.4 The baseline: recorded at the first `check`/`diagnose` of a session. Every
+      typecheck and says so. Returns the structured summary. *(The build runs after the scripts;
+      it is skipped when the `diagnose` script is among the checks and has new failures.)*
+- [x] 6.4 The baseline: recorded at the first `check`/`diagnose` of a session. Every
       diagnostic is classified new or pre-existing. Test with a project that is broken before
-      the run starts.
-- [ ] 6.5 The ratchet pseudo-check from the ledger: deleted test files, fewer test blocks,
+      the run starts. *(Recorded per check while the ledger is empty: before the first edit for
+      every check, or by a `check` that runs before any edit.)*
+- [x] 6.5 The ratchet pseudo-check from the ledger: deleted test files, fewer test blocks,
       added skip/only. Tests for each.
-- [ ] 6.6 The `CheckFailed` signal on new failures.
+- [x] 6.6 The `CheckFailed` signal on new failures.
 
 ## Phase 6a — The shell (`sc-core-traits/src/coding/shell.rs`)
 
