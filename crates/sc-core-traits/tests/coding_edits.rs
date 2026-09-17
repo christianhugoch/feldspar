@@ -374,6 +374,7 @@ async fn the_edit_format_picks_the_edit_tool() -> Result<()> {
             "read_file_code",
             "find_files_code",
             "search_files_code",
+            "repo_map_code",
             "write_file_code"
         ]
     );

@@ -996,16 +996,29 @@ default.
 
 ## Phase 7 — The repo map (`sc-core-traits` or a new `sc-repomap` crate)
 
-- [ ] 7.1 Decide the crate: a new `sc-repomap` crate keeps the tree-sitter C builds out of
+- [x] 7.1 Decide the crate: a new `sc-repomap` crate keeps the tree-sitter C builds out of
       everything that depends on `sc-core-traits`. Grammar crates for TypeScript/TSX,
-      JavaScript and Python. Vendor the `tags.scm` queries with licence headers.
-- [ ] 7.2 Tag extraction plus a per-content-hash in-memory cache. Tests on small fixture files.
-- [ ] 7.3 The graph and personalised PageRank (hand-rolled power iteration, no new graph
-      dependency unless one is already in the tree).
-- [ ] 7.4 Rendering plus the binary search to a token budget. Test: the output is under budget,
-      and the focus files' definitions rank first.
-- [ ] 7.5 The `repo_map` tool (`focus`, `tokens`) in all three modes, and the map in
-      `coding`'s session header at `repo_map_tokens`.
+      JavaScript and Python. Vendor the `tags.scm` queries with licence headers. *(`sc-repomap`,
+      with no workspace dependencies: the caller passes paths and bytes. Tree-sitter 0.27 with
+      `tree-sitter-tags`. The grammars sit behind the default `grammars` feature. The queries
+      are the grammars' own, with JSX component references, exported constants, TS type
+      aliases, enums and type references, and Python `from` imports added.)*
+- [x] 7.2 Tag extraction plus a per-content-hash in-memory cache. Tests on small fixture files.
+      *(Files over 512 KB are not parsed. The cache is bounded at 20 000 files, and `coding`
+      keeps one per store.)*
+- [x] 7.3 The graph and personalised PageRank (hand-rolled power iteration, no new graph
+      dependency unless one is already in the tree). *(Aider's weights. One deviation: a
+      definition nobody refers to gets 1% of its file's rank rather than a self-edge, which
+      handed it the whole rank of a file that links nowhere else.)*
+- [x] 7.4 Rendering plus the binary search to a token budget. Test: the output is under budget,
+      and the focus files' definitions rank first. *(Tokens are estimated at 3.5 characters each,
+      as `sc-llm` estimates text.)*
+- [x] 7.5 The `repo_map` tool (`focus`, `tokens`) in all three modes, and the map in
+      `coding`'s session header at `repo_map_tokens`. *(A focus term is a scope path or an
+      identifier. With no focus, the tool uses the files the run has read or changed. The
+      header's focus is the words of the brief, and `repo_map_tokens = 0` leaves the map out. A
+      tree that cannot be walked is logged and gives no header map. 8.2 adds the rest of the
+      header.)*
 
 ## Phase 8 — The prompt
 

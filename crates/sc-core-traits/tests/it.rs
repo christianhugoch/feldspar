@@ -36,6 +36,8 @@ mod coding_agent;
 mod coding_check;
 #[path = "coding_edits.rs"]
 mod coding_edits;
+#[path = "coding_repo_map.rs"]
+mod coding_repo_map;
 #[path = "coding_shell.rs"]
 mod coding_shell;
 #[path = "coding_traits.rs"]

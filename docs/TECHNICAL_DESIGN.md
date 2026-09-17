@@ -68,6 +68,9 @@ feldspar/
 │  │                              #    linked in front of glibc's, so no NSS module is
 │  │                              #    dlopened into the static binary (§13.5)
 │  ├─ sc-query/                   # 1. universal query language (enum AST) + SQL rendering trait
+│  ├─ sc-repomap/                 # 1. the coding agent's repo map: tree-sitter tags, personalised
+│  │                              #    PageRank, rendering to a token budget. No store, no deps
+│  │                              #    in the tree; its C grammars behind the `grammars` feature
 │  ├─ sc-bus/                     # 1. message bus trait + drivers (pg NOTIFY, in-proc, redis…)
 │  ├─ sc-db/                      # 2. DatabaseDriver trait, connection, migrations, tx
 │  │   ├─ sc-db-postgres/         #    Postgres driver (MVP)
@@ -152,6 +155,7 @@ graph TD
   server --> pg["sc-db-postgres"]
   coretraits --> agent["sc-agent"]
   coretraits --> app["sc-app"]
+  coretraits --> repomap["sc-repomap"]
   coreact --> api["sc-api"]
   server --> module["sc-module"]
   viewpattern["sc-viewpattern"] --> app
@@ -204,6 +208,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-config-file` | `sc-error` |
 | `sc-dns` | `sc-error` |
 | `sc-query` | `sc-error` |
+| `sc-repomap` | — (nothing in the workspace) |
 | `sc-types` | `sc-error` `sc-query` |
 | `sc-db` | `sc-error` `sc-query` |
 | `sc-db-postgres` | `sc-db` `sc-error` `sc-log` `sc-query` |
@@ -225,7 +230,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-viewpattern` | `sc-action` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-module` | `sc-action` `sc-app` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-model` `sc-query` `sc-types` `sc-viewpattern` |
 | `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-model` `sc-module` `sc-types` |
-| `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
+| `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-repomap` `sc-types` |
 | `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-types` `sc-viewpattern` `sc-workflow` |
 | `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-types` `sc-viewpattern` |
 

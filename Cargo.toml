@@ -11,6 +11,10 @@ members = [
     # Layer 1 — query language, expression language
     "crates/sc-query",
     "crates/sc-expr",
+    # The repo map (TODO §11): tree-sitter tags and a ranking over them, pure and
+    # with no store behind it. A crate of its own so its C grammars are built
+    # once, not by everything that depends on the coding trait.
+    "crates/sc-repomap",
     # The Python code adapter (TODO "The Python code adapter"): `sc-expr`'s own
     # `CodeCall` and five host traits, run on an embedded CPython instead of on
     # V8. Here rather than beside `sc-module` because that is what it depends
@@ -108,6 +112,7 @@ sc-types = { path = "crates/sc-types" }
 sc-catalog = { path = "crates/sc-catalog" }
 sc-auth = { path = "crates/sc-auth" }
 sc-files = { path = "crates/sc-files" }
+sc-repomap = { path = "crates/sc-repomap" }
 sc-config = { path = "crates/sc-config" }
 sc-action = { path = "crates/sc-action" }
 sc-model = { path = "crates/sc-model" }
@@ -406,6 +411,13 @@ tokio-tungstenite = "0.29"
 # shell to look at an application. It drives an external Chromium; it does not
 # download one (no `fetcher` feature).
 chromiumoxide = { version = "0.9", default-features = false }
+# The repo map's parsers (TODO §11). `tree-sitter-tags` is the tag extraction
+# GitHub's code navigation uses, over the vendored queries in `sc-repomap`.
+tree-sitter = "0.27"
+tree-sitter-tags = "0.27"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.25"
 
 # --- GraphQL -----------------------------------------------------------------
 #

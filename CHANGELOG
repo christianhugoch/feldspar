@@ -2,6 +2,68 @@
 
 Changes in reverse chronological order.
 
+## The repo map (coding agent milestone, Phase 7)
+
+A port of Aider's repo map, in a new crate, offered to coding agents as a tool and at the top
+of every session.
+
+- **`sc-repomap`** (new, layer 1). It has no workspace dependencies: callers pass paths and
+  bytes. Tree-sitter 0.27 and its grammars sit behind the default `grammars` feature, so a build
+  can leave the C out; every file is then listed by name only.
+  - **Tags** (`tags`): `tree-sitter-tags` runs vendored queries in `queries/`, carrying the
+    grammars' MIT licence headers:
+    - JavaScript/JSX, TypeScript and TSX: the grammars' own queries, plus JSX component
+      references and exported constants. TypeScript also gets type aliases, enums and every
+      type reference.
+    - Python: its own query, plus names imported with `from`.
+
+    A tag records the name, whether it is a definition or a reference, its line, and for a
+    definition the clipped text of that line. Files over 512 KB are not parsed. `TagCache`
+    keys tags by language and content hash, holds at most 20 000 files, and is cleared when
+    full.
+  - **Ranking** (`rank`), with Aider's weights:
+    - Each file that refers to a name gets an edge to each file defining it, weighted
+      √(references).
+    - ×10 for a name in the focus, and ×10 for a structured name of 8 or more characters.
+    - ×0.1 for a `_private` name, and ×0.1 for a name more than five files define.
+    - ×50 when the referring file is in the focus.
+
+    PageRank is hand-rolled power iteration, restarting at the focus files. Each file's rank is
+    shared out along its edges to the definitions they name. A definition nobody refers to gets
+    1% of its file's rank; Aider gives it a self-edge, which can hand it the whole rank of a
+    file that links nowhere else.
+
+    Order: definitions in focus files, then the rest by rank, then files with nothing ranked.
+    Ties break on path and line. `Focus::from_terms` splits free text into known paths and
+    identifiers.
+  - **Rendering** (`render`): each file is a path header followed by `  line│ signature` rows.
+    Files come in the order of their best entry, and rows in line order. `fit` binary-searches
+    for the longest ranked prefix within a token budget, estimated at 3.5 characters per token
+    as `sc-llm` estimates text.
+- **`repo_map_<slug>`** in `coding`, offered in `act`, `plan` and `explore`:
+  - It maps the scope's files as the caller sees them, skipping the excluded directories.
+  - `focus` is a list of paths or identifiers. With none, the focus is the files the run has
+    read or changed.
+  - `tokens` defaults to the new `repo_map_tokens` setting (1024) and is capped at 8192.
+  - A header line gives how many files are shown, the focus, and whether the walk stopped at
+    its limit.
+  - Tags are cached per store for the life of the process.
+- **The session header.** `coding` now implements `session_header`: a map at `repo_map_tokens`,
+  focused on the files and identifiers the brief mentions. `0` leaves it out, and a tree that
+  cannot be walked is logged rather than failing the run. `AGENTS.md`, the git log and the
+  feature brief join it in 8.2.
+- **Docs:** `docs/TECHNICAL_DESIGN.md` §2 lists the crate and its edge, and the dependency
+  table now has `sc-core-traits`' dependency on `sc-log` too.
+- **Tests:**
+  - `sc-repomap`: every vendored query compiles against its grammar; tags from TSX, JS and
+    Python fixtures; the cache; PageRank; focus and name weighting; determinism; rendering;
+    the longest prefix within a budget.
+  - An end-to-end map over a small React project: under budget, starting with the focus file.
+  - `sc-core-traits` `coding_repo_map`: the tool in every mode, `node_modules` left out, focus
+    from arguments and from reads, the budget kept to, and the session header focused on the
+    request (and absent at `0`).
+  - The existing tool-list tests now include `repo_map`.
+
 ## `view_app` and the preview mount (coding agent milestone, Phase 6b)
 
 The in-server coding agent can now look at the application it built: a green `check` mounts

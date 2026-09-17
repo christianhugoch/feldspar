@@ -154,6 +154,7 @@ async fn an_agent_greps_edits_builds_reads_the_error_it_caused_and_fixes_it() ->
             "edit_file_apps_web",
             "find_files_apps_web",
             "read_file_apps_web",
+            "repo_map_apps_web",
             "search_files_apps_web",
             "write_file_apps_web",
         ]

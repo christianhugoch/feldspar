@@ -11,8 +11,9 @@
 //!
 //! ## What it offers, and what it takes to unlock
 //!
-//! Three tools are always there, and they are the read-only ones: `read_file`,
-//! `find_files` and `search_files`. **Changing the source is a checkbox**
+//! Four tools are always there, and they are the read-only ones: `read_file`,
+//! `find_files`, `search_files` and `repo_map` ([`repo_map`], a ranked map of the
+//! project's definitions, which also opens every session). **Changing the source is a checkbox**
 //! ([`CFG_MAY_EDIT`]), which adds `write_file` and one edit tool: `edit_file`
 //! (the match cascade) or `apply_patch` (V4A), as [`CFG_EDIT_FORMAT`] resolves
 //! for the model, or neither under `whole_file`. **Running a script is another
@@ -72,6 +73,7 @@ pub mod matching;
 mod patch;
 mod process;
 mod read;
+mod repo_map;
 mod script;
 mod search;
 mod shell;
@@ -81,8 +83,8 @@ mod view_app;
 mod write;
 
 use sc_agent::{
-    AfterToolsContext, AgentTrait, Elidable, RunCaller, RunId, RunMode, ToolsContext, TraitCheck,
-    TraitContext, Turn,
+    AfterToolsContext, AgentTrait, Elidable, RunCaller, RunId, RunMode, SessionContext,
+    ToolsContext, TraitCheck, TraitContext, Turn,
 };
 use sc_error::{Error, Result};
 use sc_files::DEFAULT_MAX_RESULTS;
@@ -103,6 +105,10 @@ pub use ledger::{ChangeStatus, FileChange, Ledger, PreImage, RunDiff, diff_ledge
 pub use patch::tool_name as apply_patch_tool_name;
 pub use process::{kill_all_processes, running_count, tool_name as process_tool_name};
 pub use read::{CFG_MAX_LINES, DEFAULT_MAX_LINES, tool_name as read_file_tool_name};
+pub use repo_map::{
+    CFG_REPO_MAP_TOKENS, DEFAULT_REPO_MAP_TOKENS, MAX_REPO_MAP_TOKENS,
+    tool_name as repo_map_tool_name,
+};
 pub use script::{
     CFG_TIMEOUT, DEFAULT_TIMEOUT_SECONDS, MAX_OUTPUT_CHARS, tool_name as run_script_tool_name,
 };
@@ -174,6 +180,7 @@ pub fn tool_names(scope: &FileScope) -> Vec<String> {
         read::tool_name(scope),
         find::tool_name(scope),
         search::tool_name(scope),
+        repo_map::tool_name(scope),
         write::tool_name(scope),
         edit::tool_name(scope),
         patch::tool_name(scope),
@@ -258,6 +265,11 @@ impl AgentTrait for Coding {
                 .default_value(DEFAULT_MAX_RESULTS as i64),
         );
         spec.push(
+            FormField::new(CFG_REPO_MAP_TOKENS, BasicType::Int)
+                .label("Repo map size in the session header (tokens; 0 for none)")
+                .default_value(DEFAULT_REPO_MAP_TOKENS as i64),
+        );
+        spec.push(
             FormField::new(CFG_TIMEOUT, BasicType::Int)
                 .label("Script timeout (seconds)")
                 .default_value(DEFAULT_TIMEOUT_SECONDS as i64),
@@ -280,6 +292,7 @@ impl AgentTrait for Coding {
         config_count(check.config, CFG_MAX_LINES, DEFAULT_MAX_LINES)?;
         config_count(check.config, CFG_MAX_RESULTS, DEFAULT_MAX_RESULTS as u64)?;
         config_count(check.config, CFG_TIMEOUT, DEFAULT_TIMEOUT_SECONDS)?;
+        repo_map::configured_tokens(check.config)?;
         for key in [
             CFG_MAY_EDIT,
             CFG_MAY_RUN_SCRIPTS,
@@ -325,6 +338,7 @@ impl AgentTrait for Coding {
             read::spec(&scope, config),
             find::spec(&scope, config),
             search::spec(&scope, config),
+            repo_map::spec(&scope),
         ];
         if cx.mode != RunMode::Act {
             return tools;
@@ -368,6 +382,9 @@ impl AgentTrait for Coding {
             _ if tool == read::tool_name(&scope) => read::call(&scope, config, args, ctx).await,
             _ if tool == find::tool_name(&scope) => find::call(&scope, config, args, ctx).await,
             _ if tool == search::tool_name(&scope) => search::call(&scope, config, args, ctx).await,
+            _ if tool == repo_map::tool_name(&scope) => {
+                repo_map::call(&scope, config, args, ctx).await
+            }
             _ if tool == write::tool_name(&scope)
                 || tool == edit::tool_name(&scope)
                 || tool == patch::tool_name(&scope) =>
@@ -414,6 +431,17 @@ impl AgentTrait for Coding {
             turn.append_system(shell::prompt_note(&scope_as_written(config), config));
         }
         Ok(())
+    }
+
+    /// The session header: a repo map focused on what the brief mentions (TODO
+    /// 7.5). `AGENTS.md`, the git log and the feature brief join it in 8.2.
+    async fn session_header(
+        &self,
+        config: &Attrs,
+        cx: &mut SessionContext<'_>,
+    ) -> Result<Option<String>> {
+        let scope = configured_scope(config)?;
+        Ok(repo_map::header(&scope, config, cx.catalog, cx.caller.role, cx.brief).await)
     }
 
     /// A shell command is the same call whatever its whitespace (TODO 6a.7).
@@ -534,6 +562,7 @@ mod tests {
                 "read_file_app_src_web",
                 "find_files_app_src_web",
                 "search_files_app_src_web",
+                "repo_map_app_src_web",
                 "write_file_app_src_web",
                 "edit_file_app_src_web",
                 "apply_patch_app_src_web",

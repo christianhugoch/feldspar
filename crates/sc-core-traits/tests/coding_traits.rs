@@ -80,6 +80,7 @@ fn tool(kind: &str, config: &sc_types::Attrs) -> String {
         "find_files" => tool_names::find_files(&scope),
         "apply_patch" => tool_names::apply_patch(&scope),
         "search_files" => tool_names::search_files(&scope),
+        "repo_map" => tool_names::repo_map(&scope),
         "write_file" => tool_names::write_file(&scope),
         "edit_file" => tool_names::edit_file(&scope),
         "run_project_script" => tool_names::run_project_script(&scope),
@@ -618,6 +619,7 @@ async fn one_configured_scope_names_and_reaches_every_tool() -> Result<()> {
             tool_names::read_file(&web),
             tool_names::find_files(&web),
             tool_names::search_files(&web),
+            tool_names::repo_map(&web),
             tool_names::write_file(&web),
             tool_names::edit_file(&web),
             tool_names::run_project_script(&web),
@@ -675,6 +677,7 @@ async fn the_edit_grant_decides_whether_the_source_can_be_changed() -> Result<()
             tool_names::read_file(&web),
             tool_names::find_files(&web),
             tool_names::search_files(&web),
+            tool_names::repo_map(&web),
         ]
     );
     // Reading still works — that is what "read-only" means here.
@@ -748,14 +751,14 @@ async fn running_a_script_is_a_grant_of_its_own() -> Result<()> {
         r#"{"name":"todo","scripts":{"greet":"echo hi"}}"#,
     )?;
 
-    // Editing granted, running not: five tools, and the script refused by name.
+    // Editing granted, running not: six tools, and the script refused by name.
     let editing = config(&[
         (CFG_STORE, json!("code")),
         (CFG_ROOT, json!("")),
         (CFG_MAY_EDIT, json!(true)),
     ]);
     let names = offered(&env, &editing);
-    assert_eq!(names.len(), 5, "{names:?}");
+    assert_eq!(names.len(), 6, "{names:?}");
     assert!(
         !names.contains(&tool_names::run_project_script(&scope("code", ""))),
         "{names:?}"
@@ -772,14 +775,14 @@ async fn running_a_script_is_a_grant_of_its_own() -> Result<()> {
     .to_string();
     assert!(err.contains(CFG_MAY_RUN_SCRIPTS), "{err}");
 
-    // …and granted on its own, without the edit, it is the fourth tool.
+    // …and granted on its own, without the edit, it is the fifth tool.
     let running = config(&[
         (CFG_STORE, json!("code")),
         (CFG_ROOT, json!("")),
         (CFG_MAY_RUN_SCRIPTS, json!(true)),
     ]);
     let names = offered(&env, &running);
-    assert_eq!(names.len(), 4, "{names:?}");
+    assert_eq!(names.len(), 5, "{names:?}");
     assert!(names.contains(&tool_names::run_project_script(&scope("code", ""))));
     let err = call(
         &env,
@@ -865,7 +868,8 @@ async fn plan_and_explore_runs_are_offered_only_the_read_only_tools() -> Result<
             vec![
                 tool("read_file", &cfg),
                 tool("find_files", &cfg),
-                tool("search_files", &cfg)
+                tool("search_files", &cfg),
+                tool("repo_map", &cfg)
             ],
             "{mode}"
         );

@@ -43,6 +43,10 @@ sc-llm.workspace = true
 # and the same §9 access rules the file manager and the IDE go through, and the
 # store-side search both they and `search_files` run.
 sc-files.workspace = true
+# The repo map (TODO §11): tags, ranking and rendering, over files this crate reads.
+sc-repomap.workspace = true
+# A repo map that cannot be built is logged, not a failed session.
+sc-log.workspace = true
 # The application `build_application` builds — resolved from its stored row and
 # built by the same `sc_app::build_application` the admin's Build button runs, so
 # there is one build path and one set of diagnostics to explain.
