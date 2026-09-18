@@ -87,7 +87,12 @@ impl StreamProvider for Broker {
         }
         Ok(())
     }
-    async fn subscribe(&self, _config: &Attrs, _sink: Arc<dyn StreamSink>) -> Result<Subscription> {
+    async fn subscribe(
+        &self,
+        _stream: &str,
+        _config: &Attrs,
+        _sink: Arc<dyn StreamSink>,
+    ) -> Result<Subscription> {
         Ok(Subscription::spawn(|mut stop| async move {
             stop.stopped().await;
         }))

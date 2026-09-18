@@ -13,7 +13,14 @@ rust-version.workspace = true
 autotests = false
 
 [features]
-default = []
+# The built-in MQTT provider is **on by default**, so a build that does not want
+# a broker client says so with `--no-default-features` rather than a packager
+# having to remember a flag — `sc-model`'s `smartcore` arrangement, for
+# `smartcore`'s reason (§11). What survives the opt-out is the trait, the
+# registry and the supervisor, so a module-supplied provider still works and the
+# Streams screen says in a sentence why the picker is empty.
+default = ["mqtt"]
+mqtt = ["dep:rumqttc", "dep:rustls", "dep:rustls-native-certs"]
 # The scripted provider every test in this milestone rides on. A **feature**,
 # not `#[cfg(test)]`, for the reason `sc-agent`'s `FakeProvider` is one: the
 # supervisor is tested here, the trigger bridge and the observe socket are
@@ -51,10 +58,33 @@ serde_json.workspace = true
 # is JSON and JSON has no bytes (§4).
 base64.workspace = true
 
+# --- The built-in MQTT provider (§11), behind the `mqtt` feature -------------
+#
+# The broker client. Pinned and explained in the workspace manifest; what
+# matters here is that it is *optional*, so `--no-default-features` builds this
+# crate with no network client in it at all.
+rumqttc = { workspace = true, optional = true }
+# `mqtts://`: the process-wide crypto provider this binary decides on, and the
+# platform root store the broker's certificate is verified against. Direct
+# rather than rumqttc's own default configuration, which panics when the
+# platform certificates cannot be read — see the workspace manifest.
+rustls = { workspace = true, optional = true }
+rustls-native-certs = { workspace = true, optional = true }
+
 [dev-dependencies]
 # The scripted provider is this crate's own test subject as well as everybody
 # else's, so its feature is turned on for the test build.
-sc-stream = { workspace = true, features = ["testing"] }
+# `default-features = false` so that `--no-default-features` really does build
+# this crate's tests without MQTT: a dev-dependency asking for the defaults
+# would unify them straight back on, and the one test that asserts what a build
+# with no built-in provider says would never run.
+# Spelled with a path rather than `workspace = true` for one reason: a
+# workspace dependency cannot have its `default-features` overridden, and
+# `default-features = false` here is what makes `--no-default-features` really
+# build this crate's tests without MQTT. A dev-dependency asking for the
+# defaults would unify them straight back on, and the one test that asserts
+# what a build with no built-in provider says would never run.
+sc-stream = { path = ".", default-features = false, features = ["testing"] }
 # The store is pinned against a real Postgres (principle 4), because what a
 # save writes and a load reads back is the whole of whether a configured
 # dataflow — and the broker password in it — survives a restart. A damaged row

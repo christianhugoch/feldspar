@@ -188,7 +188,21 @@ pub trait StreamProvider: Send + Sync {
     /// An error here means "this could not be started", and the supervisor
     /// retries it with backoff (§6); it is emphatically not where a provider
     /// reports a bad payload, which is [`StreamSink::malformed`]'s job.
-    async fn subscribe(&self, config: &Attrs, sink: Arc<dyn StreamSink>) -> Result<Subscription>;
+    ///
+    /// `stream` is the stream's **current name**, and it is here because a
+    /// provider needs it for two things a configuration cannot supply. It is
+    /// what a log line has to say to be worth reading — "the connection to
+    /// `boiler` ended" rather than "a connection ended" — and, for MQTT, it is
+    /// the default `client_id`: a stable one, because a random id per reconnect
+    /// leaves the broker holding a session per attempt (§11). It is not part of
+    /// the configuration, because a rename must not restart a flow (§6) and a
+    /// setting that changed does.
+    async fn subscribe(
+        &self,
+        stream: &str,
+        config: &Attrs,
+        sink: Arc<dyn StreamSink>,
+    ) -> Result<Subscription>;
 }
 
 /// A source of stream providers that are not compiled in — the second half of

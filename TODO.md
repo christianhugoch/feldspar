@@ -415,17 +415,17 @@ whose `element_type` cannot be read supplies nothing and the issue stays on the 
 
 ## Phase 4 — The MQTT provider
 
-- [ ] 4.1 `rumqttc` as a workspace dependency, rustls-only, with the comment the other pinned
+- [x] 4.1 `rumqttc` as a workspace dependency, rustls-only, with the comment the other pinned
       network crates carry saying why this TLS stack. Feature `mqtt`, default on.
-- [ ] 4.2 `providers::mqtt`: the §11 `config_spec` (password `secret()`, `payload` as a picker,
+- [x] 4.2 `providers::mqtt`: the §11 `config_spec` (password `secret()`, `payload` as a picker,
       the repeating key group for `json`), `element_type` over each `payload` setting, and the
       settings validation (a topic filter's wildcards, a port, a `json` payload with no keys).
-- [ ] 4.3 `subscribe`: connect, subscribe to the filter at the chosen QoS, decode each publish
+- [x] 4.3 `subscribe`: connect, subscribe to the filter at the chosen QoS, decode each publish
       against the element type, build the envelope with `source = {topic, qos, retain}`, and hand
       it to the sink. The event loop runs in a task the `Subscription` owns and stops on drop.
-- [ ] 4.4 A malformed payload is counted and warned at most once a minute per stream, never
+- [x] 4.4 A malformed payload is counted and warned at most once a minute per stream, never
       delivered. Unit test over the decoder for all three payload kinds.
-- [ ] 4.5 `docs/tutorial-streams.md` gains the "check it against a real broker" recipe (mosquitto
+- [x] 4.5 `docs/tutorial-streams.md` gains the "check it against a real broker" recipe (mosquitto
       in one command, `mosquitto_pub`), since the live test is a human's.
 
 ## Phase 5 — Triggers on streams

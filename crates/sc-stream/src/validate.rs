@@ -249,6 +249,7 @@ mod tests {
         }
         async fn subscribe(
             &self,
+            _stream: &str,
             _config: &Attrs,
             _sink: Arc<dyn StreamSink>,
         ) -> Result<Subscription> {

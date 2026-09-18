@@ -524,7 +524,14 @@ impl StreamSupervisor {
             consumer: self.consumer(),
         });
 
-        match provider.subscribe(&configuration, sink).await {
+        // The **name**, not the id: it is what a provider puts in a log line
+        // and what MQTT derives its stable `client_id` from (§11), and a
+        // rename is deliberately allowed to reach a running connection's next
+        // reconnect without restarting it now.
+        match provider
+            .subscribe(&running.name(), &configuration, sink)
+            .await
+        {
             Ok(subscription) => {
                 running.set_subscription(Some(subscription));
                 running.set_status(StreamStatus::Running { since: now }, None);

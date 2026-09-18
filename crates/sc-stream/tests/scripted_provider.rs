@@ -38,7 +38,7 @@ async fn elements_arrive_in_the_order_the_script_wrote_them() {
     let sink = Arc::new(Collector::new());
 
     let subscription = provider
-        .subscribe(&Attrs::new(), Arc::clone(&sink) as Arc<_>)
+        .subscribe("scripted", &Attrs::new(), Arc::clone(&sink) as Arc<_>)
         .await
         .unwrap();
     settle().await;
@@ -68,7 +68,7 @@ async fn dropping_the_subscription_stops_the_elements() {
     let sink = Arc::new(Collector::new());
 
     let subscription = provider
-        .subscribe(&Attrs::new(), Arc::clone(&sink) as Arc<_>)
+        .subscribe("scripted", &Attrs::new(), Arc::clone(&sink) as Arc<_>)
         .await
         .unwrap();
     settle().await;
@@ -94,7 +94,7 @@ async fn the_nth_subscribe_fails_on_demand() {
 
     for attempt in 1..=2 {
         let err = provider
-            .subscribe(&Attrs::new(), Arc::clone(&sink) as Arc<_>)
+            .subscribe("scripted", &Attrs::new(), Arc::clone(&sink) as Arc<_>)
             .await
             .unwrap_err()
             .to_string();
@@ -103,7 +103,7 @@ async fn the_nth_subscribe_fails_on_demand() {
     // The third attempt connects — which is the shape the supervisor's backoff
     // is tested against in Phase 3: fail, wait, fail, wait, succeed.
     let subscription = provider
-        .subscribe(&Attrs::new(), Arc::clone(&sink) as Arc<_>)
+        .subscribe("scripted", &Attrs::new(), Arc::clone(&sink) as Arc<_>)
         .await
         .unwrap();
     settle().await;
@@ -120,7 +120,7 @@ async fn a_subscription_that_ends_says_so() {
     let sink = Arc::new(Collector::new());
 
     let subscription = provider
-        .subscribe(&Attrs::new(), Arc::clone(&sink) as Arc<_>)
+        .subscribe("scripted", &Attrs::new(), Arc::clone(&sink) as Arc<_>)
         .await
         .unwrap();
     settle().await;
@@ -141,7 +141,7 @@ async fn a_payload_that_does_not_match_the_declaration_is_counted_not_delivered(
     let sink = Arc::new(Collector::new());
 
     let subscription = provider
-        .subscribe(&Attrs::new(), Arc::clone(&sink) as Arc<_>)
+        .subscribe("scripted", &Attrs::new(), Arc::clone(&sink) as Arc<_>)
         .await
         .unwrap();
     settle().await;

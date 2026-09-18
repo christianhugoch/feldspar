@@ -22,7 +22,7 @@
 //! let provider = ScriptedProvider::new("scripted", ElementType::text())
 //!     .elements([RawPayload::bytes(b"one".to_vec()), RawPayload::bytes(b"two".to_vec())]);
 //! let sink = Arc::new(Collector::new());
-//! let subscription = provider.subscribe(&Attrs::new(), sink.clone()).await.unwrap();
+//! let subscription = provider.subscribe("scripted", &Attrs::new(), sink.clone()).await.unwrap();
 //! # let _ = subscription;
 //! # }
 //! ```
@@ -234,7 +234,12 @@ impl StreamProvider for ScriptedProvider {
         Ok(self.element_type.clone())
     }
 
-    async fn subscribe(&self, _config: &Attrs, sink: Arc<dyn StreamSink>) -> Result<Subscription> {
+    async fn subscribe(
+        &self,
+        _stream: &str,
+        _config: &Attrs,
+        sink: Arc<dyn StreamSink>,
+    ) -> Result<Subscription> {
         let attempt = self.state.subscribes.fetch_add(1, Ordering::SeqCst) + 1;
         if attempt <= self.fail_first {
             return Err(Error::msg(format!(

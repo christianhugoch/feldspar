@@ -87,7 +87,9 @@ pub use element::{ElementField, ElementType, RawPayload, UTF8};
 pub use envelope::{Element, Envelope};
 pub use observer::StreamObserver;
 pub use provider::{StreamProvider, StreamProviderHost, StreamProviderKind, StreamSink};
-pub use providers::{builtin_providers, builtin_registry};
+#[cfg(feature = "mqtt")]
+pub use providers::mqtt::{MQTT, Mqtt};
+pub use providers::{BUILTINS_COMPILED_OUT, MQTT_COMPILED_IN, builtin_providers, builtin_registry};
 pub use registry::StreamRegistry;
 pub use running::{Counters, ElementFeed, RunningStream, StreamStatus};
 pub use secrets::{redact_configuration, redacted_stream, restore_secrets};

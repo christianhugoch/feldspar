@@ -428,6 +428,37 @@ tree-sitter-javascript = "0.25"
 tree-sitter-typescript = "0.23"
 tree-sitter-python = "0.25"
 
+# --- MQTT (TODO "Streams" §11) -----------------------------------------------
+#
+# The broker client behind `sc-stream`'s built-in MQTT provider, behind that
+# crate's default-on `mqtt` feature. **rumqttc**: pure Rust, tokio, and an
+# event loop that is *polled* rather than one that owns a callback — which is
+# what lets a subscription be a task the `Subscription` handle owns and drops
+# (§3), instead of a client that calls us back from a thread we do not control.
+#
+# `default-features = false` drops `use-rustls`, whose only content is
+# `tokio-rustls/default` — i.e. rustls's **`ring`** provider. Two crypto
+# providers in one binary is what `install_crypto_provider` exists to
+# disambiguate, and adding a third relationship to that decision would be
+# adding a second TLS stack in all but name. `use-rustls-no-provider` brings
+# `tokio-rustls` with no provider of its own, so an MQTT connection is
+# encrypted by the same **aws-lc-rs** rustls the HTTPS listener and `reqwest`
+# already use (§16: one TLS stack in the tree).
+rumqttc = { version = "0.25", default-features = false, features = [
+    "use-rustls-no-provider",
+] }
+# The root store an `mqtts://` connection verifies the broker against.
+#
+# Direct rather than through rumqttc's own `TlsConfiguration::default()`,
+# which loads the platform certificates and **panics** if it cannot
+# (`.expect("could not load platform certs")`). A machine with no
+# `ca-certificates` installed is a configuration error, and a configuration
+# error has to become a stream that is `failed` with a sentence the admin can
+# act on — not a panic in the supervisor's task, which would take every other
+# stream's supervision with it. Same version rumqttc pins, so there is one
+# copy of it in the tree.
+rustls-native-certs = "0.8"
+
 # --- GraphQL -----------------------------------------------------------------
 #
 # GraphQL library decision (TODO "GraphQL API" decision 1): **async-graphql**
