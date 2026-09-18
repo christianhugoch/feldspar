@@ -12,3 +12,6 @@
 
 #[path = "scripted_provider.rs"]
 mod scripted_provider;
+
+#[path = "stream_store.rs"]
+mod stream_store;

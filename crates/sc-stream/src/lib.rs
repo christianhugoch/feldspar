@@ -69,6 +69,7 @@ pub mod envelope;
 pub mod provider;
 pub mod providers;
 pub mod registry;
+pub mod secrets;
 pub mod store;
 pub mod stream;
 pub mod subscription;
@@ -83,9 +84,10 @@ pub use envelope::{Element, Envelope};
 pub use provider::{StreamProvider, StreamProviderHost, StreamProviderKind, StreamSink};
 pub use providers::{builtin_providers, builtin_registry};
 pub use registry::StreamRegistry;
+pub use secrets::{redact_configuration, redacted_stream, restore_secrets};
 pub use store::{
     STREAMS_TABLE, bootstrap_streams, delete_stream, list_streams, load_stream,
-    load_stream_by_name, require_stream, save_stream,
+    load_stream_by_name, require_stream, save_stream, trigger_referent,
 };
 pub use stream::{ATTR_ENABLED, Stream, StreamId};
 pub use subscription::{Stop, Subscription};

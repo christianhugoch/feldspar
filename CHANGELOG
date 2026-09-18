@@ -2,6 +2,62 @@
 
 Changes in reverse chronological order.
 
+## A stream's password, a stream's referents, and the store against a real Postgres
+
+Tasks 2.3, 2.4 and 2.5 of the streams milestone — the rest of `_fd_streams`. The store now keeps
+a broker password across an edit that never saw it, refuses to delete a stream something else
+still names, and is pinned against a real database rather than a constructed `Row`.
+
+- **`sc-stream::secrets`: masked on the way out, restored on the way in.** `redacted_stream`
+  replaces every `secret` setting the provider declared with the sentinel (`redact_attrs`), and
+  `restore_secrets` puts the stored value back wherever the sentinel comes back untouched
+  (`merge_secrets`) — the round trip an LLM provider's API key, a file store's credentials and a
+  module's settings already make. The second half is the load-bearing one: masking a field that a
+  form writes back is the classic way to destroy the thing you were protecting, and the failure
+  is silent — the admin fixes a topic filter, the row now holds `••••••••` where the password was,
+  the broker refuses the connection, and the supervisor retries it forever with nothing anywhere
+  saying that a *save* is what broke it.
+
+- **The merge is inside `save_stream`, not in the handler, and the docs say why.** Every other
+  record in this tree merges where the submitted body arrives. A stream merges in the one door
+  every write goes through, because `save_stream` **validates first** and a provider's own
+  `validate` reads its settings — a token whose prefix it recognises, a password whose shape it
+  checks. Handed the mask it would refuse a configuration that is in fact fine. The live test
+  asserts exactly that ordering with a provider that insists its passwords start with `tok-`.
+
+- **A create with the mask as its password stores no password.** There is nothing behind the mask
+  when there is no row yet, so the key is dropped rather than written; a provider that declared
+  the field `required` then refuses the save with the admin still looking at the form. The
+  alternative is a stream that connects with `••••••••` as its password.
+
+- **Repointing a stream at another provider does not carry the old one's secrets over.** The
+  stored configuration is only a source for the merge when the provider is the *same*: two
+  providers' settings are different vocabularies, and a field that happens to share a name is not
+  the same field.
+
+- **An unresolvable provider passes its configuration through both ways.** A stream whose provider
+  came from an uninstalled module stays listable and editable — editing it *is* the repair — and
+  nothing escapes, because no spec means no field was ever declared secret. `shown_config`'s
+  judgement for file stores, for its reason.
+
+- **`delete_stream` now takes the referents and refuses while there are any**, naming them:
+  "stream `boiler` is still used by trigger `store_temp`; remove those references before deleting
+  it". A trigger holds its stream as a `channel`, which is a *name*, not a foreign key, so nothing
+  in the database stops the row going and what the admin would be left with is a trigger that has
+  silently stopped firing. The caller passes the referents in — `delete_llm_model`'s arrangement,
+  because `sc-stream` must not depend on `sc-action` (§2) — and `trigger_referent` is the one
+  phrasing, so every call site says it the same way. A stream that is not there is still "already
+  gone" rather than a reference to a row nobody can see.
+
+- **`crates/sc-stream/tests/stream_store.rs`: the store against a real Postgres** (principle 4),
+  and each test is there for something a unit test cannot reach. The round trip, because a
+  `Stream` that equals itself in memory proves nothing about a JSON column, a nullable `min_role`
+  and a uuid primary key. The strict read, damaged **with SQL**, because the row this guards
+  against is one the database holds. Uniqueness *twice* — the validator's sentence, which is what
+  an admin sees, and the `UNIQUE` constraint underneath it, which is what stops two admins saving
+  the same name at once. The delete refusal, because the row has to still be there afterwards.
+  And the secret round trip, because "the password survived" is a question about what is stored.
+
 ## Saving a stream: refused in front of the admin, because a wrong stream connects anyway
 
 Task 2.2 of the streams milestone. `sc-stream::validate` is what `save_stream` now calls first,

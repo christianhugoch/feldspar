@@ -31,8 +31,8 @@
 //!   supervisor reads [`Stream::is_enabled`].
 //!
 //! What is *not* here: validation (see [`validate`](crate::validate), which
-//! [`save_stream`] calls), secret redaction (task 2.3), and the referent check
-//! deleting one has to make (task 2.4).
+//! [`save_stream`] calls) and the secret round trip (see
+//! [`secrets`](crate::secrets), whose inward half [`save_stream`] calls too).
 //!
 //! [`Error::invalid`]: sc_error::Error::invalid
 
@@ -44,6 +44,7 @@ use sc_types::{Attrs, BasicType, TypeRef};
 use serde_json::Value as Json;
 
 use crate::registry::StreamRegistry;
+use crate::secrets::restore_secrets;
 use crate::stream::{Stream, StreamId};
 use crate::validate::validate_stream;
 
@@ -110,24 +111,37 @@ pub async fn bootstrap_streams(catalog: &Catalog) -> Result<Table> {
 /// Save a stream: insert its row, or update it in place if a row with its
 /// [`StreamId`] already exists.
 ///
-/// [`validate_stream`] runs **first**, for `save_model`'s reason and then some:
-/// a stream that could never work — an unknown provider, a setting the provider
-/// does not declare, a configuration whose element type cannot be computed — is
-/// refused while the admin is still looking at the form. A model that fails
-/// validation does not fit and a trigger that fails does not fire, but a stream
-/// that is wrong *connects anyway* and throws away every payload a healthy
-/// broker sends it.
+/// Two things happen before the write, in this order, and the order is the
+/// point.
+///
+/// 1. **The secrets are restored** ([`restore_secrets`]): wherever the caller
+///    sent the redaction sentinel back for a `secret` setting, the stored value
+///    takes its place. It is here, in the one door every write goes through,
+///    rather than in the handler, because the sentinel must not reach the
+///    provider's own `validate` either — see [`secrets`](crate::secrets)'s
+///    module docs.
+/// 2. **[`validate_stream`] runs**, for `save_model`'s reason and then some: a
+///    stream that could never work — an unknown provider, a setting the
+///    provider does not declare, a configuration whose element type cannot be
+///    computed — is refused while the admin is still looking at the form. A
+///    model that fails validation does not fit and a trigger that fails does
+///    not fire, but a stream that is wrong *connects anyway* and throws away
+///    every payload a healthy broker sends it.
 pub async fn save_stream(
     catalog: &Catalog,
     registry: &StreamRegistry,
     stream: &Stream,
 ) -> Result<()> {
+    // Read once: the row that is there decides both what the sentinel stands
+    // for and whether this is an insert or an update.
+    let stored = load_stream(catalog, stream.id).await?;
+    let stream = &restore_secrets(registry, stored.as_ref(), stream);
     validate_stream(catalog, registry, stream).await?;
 
     let columns = stream_columns();
     let values = stream_values(stream);
 
-    if load_stream(catalog, stream.id).await?.is_some() {
+    if stored.is_some() {
         let assignments = columns
             .iter()
             .zip(values)
@@ -192,15 +206,50 @@ pub async fn list_streams(catalog: &Catalog) -> Result<Vec<Stream>> {
 /// is a running subscription, which the supervisor's next `reload` stops — the
 /// caller (task 6.2's handler) calls it, for the same reason saving one does.
 ///
-/// Task 2.4 adds the refusal a trigger naming this stream as its channel earns,
-/// with the referents passed in by the caller as `delete_llm_model`'s are.
-pub async fn delete_stream(catalog: &Catalog, id: StreamId) -> Result<bool> {
-    if load_stream(catalog, id).await?.is_none() {
+/// ## The refusal
+///
+/// Refused while `referents` is non-empty, **naming them** — the refusal
+/// `delete_llm_model` already makes, and for its reason. A trigger holds its
+/// stream as a `channel`, which is a *name*, not a foreign key: nothing in the
+/// database stops the row going, and what an admin would be left with is a
+/// trigger that has silently stopped firing and no way to see why. So the
+/// deletion is refused with the referents in the sentence, and the admin can
+/// choose — delete the trigger, or repoint it.
+///
+/// **The caller passes the referents in.** A trigger lives in `sc-action`,
+/// which this crate must not depend on (§2: `sc-stream` knows nothing about
+/// triggers), so the check cannot be made here. Task 6.2's handler, which can
+/// see both, collects the triggers whose channel is this stream's name and
+/// hands them over as strings — exactly the arrangement `delete_llm_model` and
+/// `delete_file_store` use for agents and applications.
+pub async fn delete_stream(catalog: &Catalog, id: StreamId, referents: &[String]) -> Result<bool> {
+    let Some(stream) = load_stream(catalog, id).await? else {
+        // Nothing to delete, so nothing can be referencing it — and reporting
+        // "already gone" beats reporting a reference to a stream that is not
+        // there.
         return Ok(false);
+    };
+    if !referents.is_empty() {
+        return Err(Error::invalid(format!(
+            "stream `{}` is still used by {}; remove those references before deleting it",
+            stream.name,
+            referents.join(", ")
+        )));
     }
     let delete = Delete::from(STREAMS_TABLE).filter(Expr::col(COL_ID).eq(Expr::lit(id.0)));
     exec(catalog, Statement::from(delete)).await?;
     Ok(true)
+}
+
+/// How a trigger names a stream in a deletion refusal, so every caller phrases
+/// it the same way.
+///
+/// The referents [`delete_stream`] lists are prose written by the caller, and
+/// this is the phrasing: ``trigger `store_temp` ``. One function rather than a
+/// `format!` at each call site, because the admin reads these next to each
+/// other.
+pub fn trigger_referent(trigger_name: &str) -> String {
+    format!("trigger `{trigger_name}`")
 }
 
 /// The row's columns, in the order [`stream_values`] produces them.

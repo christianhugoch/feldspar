@@ -388,13 +388,13 @@ whose `element_type` cannot be read supplies nothing and the issue stays on the 
       `config_spec` (`validate_attrs`); `element_type(config)` succeeds; the name is unique and
       is a legal identifier (it becomes a socket path segment); `min_role` is a known role.
       `save_stream` calls it first.
-- [ ] 2.3 Secrets: `redact_attrs` on the way out of the store's read-for-display path and
+- [x] 2.3 Secrets: `redact_attrs` on the way out of the store's read-for-display path and
       `merge_secrets` on save, so a password survives an edit that did not retype it. Test with a
       scripted provider that declares a secret.
-- [ ] 2.4 `delete_stream` refuses while a trigger names the stream as its channel, listing the
+- [x] 2.4 `delete_stream` refuses while a trigger names the stream as its channel, listing the
       triggers — the refusal `delete_llm_model` already makes, for the same reason. The caller
       passes the referents in, as it does there.
-- [ ] 2.5 Live-database tests (`sc-test-harness`): round trip, strict read of a damaged row,
+- [x] 2.5 Live-database tests (`sc-test-harness`): round trip, strict read of a damaged row,
       uniqueness, the delete refusal, secret merge.
 
 ## Phase 3 — The supervisor

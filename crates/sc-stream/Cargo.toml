@@ -55,6 +55,13 @@ base64.workspace = true
 # The scripted provider is this crate's own test subject as well as everybody
 # else's, so its feature is turned on for the test build.
 sc-stream = { workspace = true, features = ["testing"] }
+# The store is pinned against a real Postgres (principle 4), because what a
+# save writes and a load reads back is the whole of whether a configured
+# dataflow — and the broker password in it — survives a restart. A damaged row
+# is damaged *in the database*, with SQL, so the strict read is asserted against
+# the thing that would really produce it.
+sc-db-postgres.workspace = true
+sc-test-harness.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
