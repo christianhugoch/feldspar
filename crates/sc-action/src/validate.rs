@@ -32,8 +32,9 @@ use sc_expr::{Ambient, Formula, SchemaShape};
 use sc_types::validate_attrs;
 
 use crate::action::ConfigCheck;
+use crate::event::EventKind;
 use crate::registry::ActionRegistry;
-use crate::scope::action_shape;
+use crate::scope::{EVENT_SCOPE, action_shape};
 use crate::trigger::Trigger;
 
 /// Check everything about `trigger` that can be checked without firing it.
@@ -86,25 +87,37 @@ pub async fn validate_trigger(
         .as_deref()
         .map(str::trim)
         .filter(|c| !c.is_empty());
-    match (trigger.when.is_table_event(), channel) {
-        (true, None) => {
+    match (trigger.when, channel) {
+        // A **stream** event's channel is the stream's name, and this crate
+        // stops at "present and non-empty" (§8). Resolving it would mean
+        // depending on `sc-stream`, which is the dependency `sc-action` does
+        // not have and should not grow: a stream event reaches the dispatcher
+        // because `sc-server` hands it one, not because this crate knows what
+        // a stream is. `sc-server`'s trigger form and endpoint offer the live
+        // stream list and refuse an unknown name, which is where the admin is
+        // anyway.
+        (EventKind::Stream, None) => {
+            return Err(problem(
+                "a `stream` event must name the stream it listens to".to_owned(),
+            ));
+        }
+        (EventKind::Stream, Some(_)) => {}
+        (when, None) if when.is_table_event() => {
             return Err(problem(format!(
-                "an `{}` event must name the table it listens to",
-                trigger.when
+                "an `{when}` event must name the table it listens to"
             )));
         }
-        (true, Some(table)) => {
+        (when, Some(table)) if when.is_table_event() => {
             if catalog.get(table)?.is_none() {
                 return Err(problem(format!("no table named `{table}`")));
             }
         }
-        (false, Some(channel)) => {
+        (when, Some(channel)) => {
             return Err(problem(format!(
-                "an `{}` event has no table, but `{channel}` was given as one",
-                trigger.when
+                "an `{when}` event has no table, but `{channel}` was given as one"
             )));
         }
-        (false, None) => {}
+        (_, None) => {}
     }
 
     // The timing, for the kinds that have one — and the *absence* of timing for
@@ -114,14 +127,26 @@ pub async fn validate_trigger(
     // computes cannot disagree.
     crate::Schedule::of(trigger).map_err(|e| problem(e.to_string()))?;
 
+    // A **table** channel, which is what everything below means by one: an
+    // action's spec can depend on the table (`send_email`'s attachment
+    // checkboxes are the table's File fields) and its formulas range over the
+    // table's row. A stream event's channel is a stream name, which is not a
+    // table and must not be looked up as one — `trigger_shape` and
+    // `config_spec_for` would both fail on it naming a table that does not
+    // exist, which is a confusing answer to a question nobody asked.
+    let table_channel = channel.filter(|_| trigger.when != EventKind::Stream);
+
     if let (Some(action), Some(configuration)) = (&action, trigger.configuration()) {
         // The settings are of the shapes the action declares **for this
         // channel**, and there are no others: an unknown setting is a typo or a
         // stale config, and one that is stale precisely because the table
         // changed (a File field renamed out from under an `attach_…`) is the
         // case this ordering catches.
-        validate_attrs(&action.config_spec_for(catalog, channel), configuration)
-            .map_err(|e| problem(format!("action `{}`: {e}", action.name())))?;
+        validate_attrs(
+            &action.config_spec_for(catalog, table_channel),
+            configuration,
+        )
+        .map_err(|e| problem(format!("action `{}`: {e}", action.name())))?;
 
         // Everything the spec cannot express: that a named table exists and can
         // be addressed by primary key, that a configured formula parses and
@@ -130,12 +155,12 @@ pub async fn validate_trigger(
         // checked *here*, on save and on load, rather than at fire time.
         // The trigger's own scope: an action body that is not a workflow step
         // has no run to read, so `context` is not in it.
-        let shape = action_shape(catalog, channel).map_err(|e| problem(e.to_string()))?;
+        let shape = action_shape(catalog, table_channel).map_err(|e| problem(e.to_string()))?;
         action
             .validate_config(&ConfigCheck {
                 catalog,
                 config: configuration,
-                channel,
+                channel: table_channel,
                 shape: &shape,
             })
             .await
@@ -148,20 +173,31 @@ pub async fn validate_trigger(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        // Only a table event has a row to test. Elsewhere an "only if" would have
-        // nothing to range over, and accepting one that can never be true is
-        // worse than refusing it. (A caller-only condition on `login` is a real
-        // want; it needs a table-less scope, which is a later phase's.)
-        let Some(table) = channel else {
-            return Err(problem(format!(
-                "an `only if` formula needs a row to test, which an `{}` event does not have",
-                trigger.when
-            )));
-        };
+        // What the formula ranges over depends on what the event carries.
+        //
+        // A **table** event has a row, and the bare scope is its fields
+        // (decision 7). A **stream** event has none — an element is not a row
+        // of anything — so its `only_if` ranges over [`EVENT_SCOPE`], an empty
+        // table, and reads the envelope as `payload.value.temperature > 30`
+        // (§8). Naming `row` there is the unknown identifier it deserves,
+        // because `trigger_shape(catalog, None)` leaves `row`/`old` out of
+        // scope rather than in scope and empty. Every other kind still has
+        // nothing to range over at all, and an "only if" that can never be
+        // true is worse refused than accepted.
+        let (shape, scope) =
+            if let Some(table) = table_channel.filter(|_| trigger.when.is_table_event()) {
+                (trigger_shape(catalog, Some(table))?, table)
+            } else if trigger.when == EventKind::Stream {
+                (action_shape(catalog, None)?, EVENT_SCOPE)
+            } else {
+                return Err(problem(format!(
+                    "an `only if` formula needs a row to test, which an `{}` event does not have",
+                    trigger.when
+                )));
+            };
         let formula = Formula::parse(source).map_err(|e| problem(format!("`only if`: {e}")))?;
-        let shape = trigger_shape(catalog, Some(table))?;
         let analysis = formula
-            .validate(&shape, table)
+            .validate(&shape, scope)
             .map_err(|e| problem(format!("`only if`: {e}")))?;
         if !analysis.flags.is_empty() {
             return Err(problem(

@@ -8717,6 +8717,7 @@ dependencies = [
  "sc-module",
  "sc-python",
  "sc-query",
+ "sc-stream",
  "sc-test-harness",
  "sc-types",
  "sc-viewpattern",

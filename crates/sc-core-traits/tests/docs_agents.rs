@@ -78,11 +78,7 @@ fn label(key: &str) -> String {
 /// that is what is looked for, with the first five words as the fallback when a
 /// label has no punctuation at all.
 fn leading_clause(label: &str) -> String {
-    let clause = label
-        .split([':', '(', ','])
-        .next()
-        .unwrap_or(label)
-        .trim();
+    let clause = label.split([':', '(', ',']).next().unwrap_or(label).trim();
     match clause.is_empty() {
         true => label
             .split_whitespace()

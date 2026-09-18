@@ -430,18 +430,18 @@ whose `element_type` cannot be read supplies nothing and the issue stays on the 
 
 ## Phase 5 — Triggers on streams
 
-- [ ] 5.1 `EventKind::Stream` in `sc-action`: the variant, `as_str`/`parse`, `EVENT_KINDS` (now
+- [x] 5.1 `EventKind::Stream` in `sc-action`: the variant, `as_str`/`parse`, `EVENT_KINDS` (now
       12), and `Event::stream(name, envelope)` writing the payload out at the constructor as
       `Event::error` does.
-- [ ] 5.2 Trigger validation: `channel` required and non-empty for a stream event; no `only_if`
+- [x] 5.2 Trigger validation: `channel` required and non-empty for a stream event; no `only_if`
       row bindings. Existing trigger tests extended.
-- [ ] 5.3 `sc-server/src/streams.rs`: `StreamServices` (the registry, the supervisor, the row cap
+- [x] 5.3 `sc-server/src/streams.rs`: `StreamServices` (the registry, the supervisor, the row cap
       and config) and `install_streams` at boot — bootstrap, load, start, and install the sink
       that (a) broadcasts and (b) fires the trigger dispatcher per element in a spawned task,
       with §7's drop-and-count rule. `StreamServices` rides on `AppMounts` with the other five.
-- [ ] 5.4 A `SIGHUP` reload reloads the stream set, and `reload.rs`'s doc list of what still
+- [x] 5.4 A `SIGHUP` reload reloads the stream set, and `reload.rs`'s doc list of what still
       wants a restart is updated (it currently names the trigger set and the agents).
-- [ ] 5.5 Test: an element fires a trigger that inserts a row; `only_if` over `payload.value`
+- [x] 5.5 Test: an element fires a trigger that inserts a row; `only_if` over `payload.value`
       filters; a trigger slower than its stream drops rather than queues; the cascade bound
       still holds from a stream-originated event.
 

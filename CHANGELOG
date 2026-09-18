@@ -2,6 +2,75 @@
 
 Changes in reverse chronological order.
 
+## Triggers on streams: an element becomes an event
+
+Phase 5 of the streams milestone (tasks 5.1–5.5). Everything so far made a stream *run*; this
+is what makes one **do** something. The whole of it is one new `EventKind` and one `StreamConsumer`
+implementation, which is the point: a stream element reaches the trigger dispatcher through the
+same `Event` a write, a login and a clock already do, so `only_if`, `min_role`, the enabled flag,
+the cascade chain and bound, the admin's Run button and an application's exposed trigger all
+work on it without a line of new code each.
+
+- **`EventKind::Stream`**, twelfth in `EVENT_KINDS`, with `Event::stream(name, envelope)` writing
+  the payload out at the constructor as `Event::error` does — because the envelope is a wire
+  contract (§4) read by an `only_if`, posted whole by a `fetch` action and typed into a generated
+  client, and a contract assembled at three call sites is three contracts. `sc-action` gains the
+  variant and **no dependency**: it never learns what a stream is, and the JSON is what a
+  module-supplied or test-supplied element can hand over too.
+
+- **`has_channel()` beside `is_table_event()`**, because for exactly one kind the two questions
+  have different answers. A stream event's channel is load-bearing — a trigger on `boiler` must
+  never see `market_feed`'s elements — but it carries no row, so `row`/`old` stay out of scope
+  and its `only_if` reads `payload.value.temperature > 30`. Every place that conflated the two
+  would have been a place a stream trigger fired for the wrong stream; `Triggers::matching` was
+  one of them.
+
+- **A row-less `only_if`, in the scope that already existed.** A stream trigger's formula is
+  validated and evaluated against `EVENT_SCOPE` — the empty pseudo-table an action's configured
+  formulas have ranged over since §10.2 — so nothing new had to be invented for "a predicate with
+  no row". `Event::table_channel()` is the small piece that makes it safe: every caller about to
+  resolve a channel in the catalog now asks for it, since looking a stream's name up as a table
+  would fail with "no table named `boiler`", which is a confusing answer to a question nobody
+  asked. It excludes `Stream` and **not** `!is_table_event()`, because a `none` trigger run
+  against a row of its table (the row button, §13.4) carries both a channel and a row.
+
+- **`sc-server::streams`: the second seam filled in.** `StreamServices` is `ModelServices` in
+  role — the registry, the supervisor and the numbers this process was started with — and rides
+  on `AppMounts` with the other five. `install_streams` runs at boot *after* the triggers,
+  because the sink it installs fires the dispatcher and an element that arrived before the
+  triggers were up would have nothing to fire, and only from `serve`, because a `build-app` that
+  happened to open the same database must not connect to somebody's broker.
+
+- **Nobody may block the flow, and the drop is a number you can see** (§7). `TriggerBridge::consume`
+  returns immediately: it spawns the firing and holds one in-flight flag per stream, so an element
+  arriving while the last one's triggers are still running is **dropped and counted** rather than
+  queued. That is `Scheduler`'s rule for a missed occurrence, for `Scheduler`'s reason, and the
+  alternative is an unbounded queue in front of a trigger — a memory leak with a delay built into
+  it. The bridge asks the live trigger set *first*, so a stream nobody triggers on spawns no task
+  and is never recorded as dropping: an element nobody asked for is not a trigger that fell behind.
+
+- **`SIGHUP` reloads the stream set** (5.4), and the streams came off `reload.rs`'s list of what
+  still wants a restart. They could come off it because a supervisor already knows how to diff:
+  it is the one of those sets whose "update the live set in place" is a method rather than a
+  restart, so a stream nobody touched keeps its broker session. That is what makes it safe to
+  reload everything on every signal — an agent running `npm run build && pkill -HUP feldspar` in
+  a loop must not be hanging up on a broker each time.
+
+- **`--stream-buffer` and `--stream-max-rate`**, flags rather than stored settings for
+  `--model-max-rows`' reason: what a buffer of a thousand envelopes costs is a property of *this
+  process's* memory. `--stream-max-rate 0` means no cap, which is allowed here where a dataset cap
+  of zero never would be — a rate limit of nothing is a coherent thing to ask for.
+
+- **Tested against a script, not a broker.** `sc-server/tests/stream_triggers.rs` walks the
+  milestone's definition of done with `ScriptedProvider` in the broker's place: three elements
+  fire a trigger that inserts two rows (the `only_if` declines the cold one, and the inserted
+  value comes from the envelope); a trigger that takes 100 ms against a stream producing every
+  5 ms drops and counts rather than growing; the cascade bound still stops a runaway begun by a
+  stream rather than by a request; and a stream saved after boot starts on a reload while one
+  nobody touched does not move. The first test warms the JavaScript isolate with an element its
+  `only_if` declines, because an assertion about whether a trigger kept up must not be an
+  assertion about how long V8 takes to build.
+
 ## The MQTT provider: the first thing a stream can actually be
 
 Phase 4 of the streams milestone (tasks 4.1–4.5). The trait, the store and the supervisor were

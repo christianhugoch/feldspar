@@ -141,6 +141,14 @@ pub struct AppMounts {
     /// fit was run with. `None` is a process with no models installed, where the
     /// Models tab says so rather than pretending.
     models: Option<crate::models::ModelServices>,
+    /// The stream machinery (TODO "Streams"): the provider registry and the
+    /// supervisor holding one subscription per enabled stream. Here for the
+    /// reason the five above are — the admin handlers already hold this handle,
+    /// the observe sockets subscribe to a running stream through it, and a save
+    /// has to reload the *same* supervisor the trigger bridge is delivering
+    /// from. `None` is a process with no streams installed, where the Streams
+    /// tab says so rather than pretending.
+    streams: Option<crate::streams::StreamServices>,
     /// The Python runtime this process built from its own flags (§15), for the
     /// **one** thing that needs the runtime rather than the adapter: the
     /// diagnostics on Settings → Development, which report which of §7's states
@@ -203,6 +211,7 @@ impl AppMounts {
             agents: None,
             modules: None,
             models: None,
+            streams: None,
             python: None,
             saltcorn_ui_dir: None,
             by_subdomain: RwLock::new(HashMap::new()),
@@ -413,6 +422,18 @@ impl AppMounts {
     /// The model services, if this server has them.
     pub fn models(&self) -> Option<&crate::models::ModelServices> {
         self.models.as_ref()
+    }
+
+    /// Attach the stream services, so the Streams tab can define, observe and
+    /// reload streams on the running server.
+    pub fn with_streams(mut self, streams: crate::streams::StreamServices) -> AppMounts {
+        self.streams = Some(streams);
+        self
+    }
+
+    /// The stream services, if this server has them.
+    pub fn streams(&self) -> Option<&crate::streams::StreamServices> {
+        self.streams.as_ref()
     }
 
     /// Attach the Python runtime, so the diagnostics screen can say which of

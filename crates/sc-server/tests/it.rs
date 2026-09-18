@@ -131,6 +131,8 @@ mod saltcorn_ui_render;
 mod schema_edit_api;
 #[path = "settings_admin_api.rs"]
 mod settings_admin_api;
+#[path = "stream_triggers.rs"]
+mod stream_triggers;
 #[path = "table_access_enforcement.rs"]
 mod table_access_enforcement;
 #[path = "table_csv_api.rs"]

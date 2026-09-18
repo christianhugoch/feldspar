@@ -75,6 +75,12 @@ sc-workflow.workspace = true
 # dataset's rows is `sc_api::rows`' job, and `sc-model` sits below it so a module
 # can supply a model provider.
 sc-model.workspace = true
+# Streams (TODO "Streams"): the `_fd_streams` table, the provider registry and
+# the supervisor that keeps subscriptions running. This crate is where a
+# delivered element becomes a **trigger event** — `sc-stream` sits at layer 6
+# and knows nothing about triggers, applications or sockets, so the bridge is
+# here, where both handles already are (§2's second seam).
+sc-stream.workspace = true
 sc-core-traits.workspace = true
 sc-db.workspace = true
 sc-db-postgres.workspace = true
@@ -151,6 +157,9 @@ reqwest.workspace = true
 # The scripted provider (`sc-agent`'s `testing` feature, decision 7): the chat
 # socket is driven through a whole turn without a vendor and without a token.
 sc-agent = { workspace = true, features = ["testing"] }
+# And `sc-stream`'s, for the same reason: the trigger bridge and the observe
+# sockets are driven through a whole stream without a broker.
+sc-stream = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

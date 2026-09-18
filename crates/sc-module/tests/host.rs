@@ -69,7 +69,9 @@ async fn a_module_loads_and_reports_what_it_supplies() {
     // `viewtemplates` left it with Saltcorn UI (TODO "Saltcorn UI" 11.1): a
     // module's view patterns are loaded now.
     assert!(
-        !census.iter().any(|(key, _)| *key == "viewtemplates" || *key == "headers"),
+        !census
+            .iter()
+            .any(|(key, _)| *key == "viewtemplates" || *key == "headers"),
         "{census:?}"
     );
     // `table_providers` left the census when it started being loaded (§8.3), so

@@ -73,6 +73,14 @@ pub enum EventKind {
     Daily,
     /// Once a week, on a configured day and time.
     Weekly,
+    /// An **element arrived on a stream** (TODO "Streams" §8). The channel is
+    /// the stream's name and the payload is the element's envelope.
+    ///
+    /// The first event kind whose occurrence comes from *outside* this server:
+    /// every other one is raised by something Saltcorn did — a write, a login,
+    /// a clock, an error. That is why it carries no row: a broker's element is
+    /// not a row of anything, and a trigger that wants one writes it.
+    Stream,
 }
 
 /// Every event kind, in the order the admin UI lists them.
@@ -80,7 +88,7 @@ pub enum EventKind {
 /// The single enumeration of the set: [`as_str`](EventKind::as_str),
 /// [`parse`](EventKind::parse) and the admin picker all derive from it, so a new
 /// kind is one line here plus one match arm.
-pub const EVENT_KINDS: [EventKind; 11] = [
+pub const EVENT_KINDS: [EventKind; 12] = [
     EventKind::Insert,
     EventKind::Update,
     EventKind::Delete,
@@ -92,6 +100,7 @@ pub const EVENT_KINDS: [EventKind; 11] = [
     EventKind::Hourly,
     EventKind::Daily,
     EventKind::Weekly,
+    EventKind::Stream,
 ];
 
 impl EventKind {
@@ -109,6 +118,7 @@ impl EventKind {
             EventKind::Hourly => "hourly",
             EventKind::Daily => "daily",
             EventKind::Weekly => "weekly",
+            EventKind::Stream => "stream",
         }
     }
 
@@ -138,6 +148,20 @@ impl EventKind {
             self,
             EventKind::Insert | EventKind::Update | EventKind::Delete
         )
+    }
+
+    /// Whether this event's `channel` names something — a table for a table
+    /// event, a **stream** for a stream one — and so must be present and must
+    /// match for the trigger to fire.
+    ///
+    /// Separate from [`is_table_event`](EventKind::is_table_event) because the
+    /// two questions have different answers for exactly one kind, and every
+    /// place that conflated them would be a place a stream trigger fired for
+    /// the wrong stream: `is_table_event` asks "does this carry a row and can
+    /// its formula range over one", which a stream event cannot, while this
+    /// asks "is the channel load-bearing", which it is.
+    pub fn has_channel(self) -> bool {
+        self.is_table_event() || self == EventKind::Stream
     }
 
     /// Whether this event fires on a schedule (the Phase 8 scheduler's set).
@@ -246,6 +270,29 @@ impl Event {
         }))
     }
 
+    /// The **`stream`** event: an element arrived on the stream named `stream`
+    /// (TODO "Streams" §8).
+    ///
+    /// The payload is written out here rather than assembled at the call site
+    /// for [`error`](Event::error)'s reason, and it is the same kind of
+    /// promise: the envelope is a **wire contract** (§4), read by a trigger's
+    /// `only_if` as `payload.value.temperature`, posted whole by a `fetch`
+    /// action, and typed into an application's generated client. It must not
+    /// change silently.
+    ///
+    /// - `stream` — the stream's name, which is the event's channel: a trigger
+    ///   listens to one stream, never to all of them.
+    /// - `envelope` — `{stream, value, received_at, source?}`, exactly as
+    ///   `sc_stream::Envelope::to_json` writes it. This crate does not depend
+    ///   on `sc-stream` (§2) and takes the JSON, which is what a module-supplied
+    ///   or test-supplied element can hand over too.
+    ///
+    /// There is **no row**: a stream element is not a row of anything, so
+    /// `row` and `old` are out of scope and `only_if` reads `payload`.
+    pub fn stream(stream: impl Into<String>, envelope: Json) -> Event {
+        Event::new(EventKind::Stream).on(stream).payload(envelope)
+    }
+
     /// Set the channel — the table name, for a table event.
     pub fn on(mut self, channel: impl Into<String>) -> Event {
         self.channel = Some(channel.into());
@@ -318,9 +365,32 @@ impl Event {
     /// every table; validation refuses it on save (Phase 2) and this is the
     /// belt for anything that reaches dispatch anyway.
     pub fn require_channel(&self) -> Result<&str> {
+        self.channel.as_deref().ok_or_else(|| {
+            let what = match self.kind {
+                EventKind::Stream => "stream",
+                _ => "table",
+            };
+            Error::config(format!("a `{}` event must name a {what}", self.kind))
+        })
+    }
+
+    /// The channel **when it names a table**, which is every kind but
+    /// [`Stream`](EventKind::Stream) — whose channel names a stream.
+    ///
+    /// What every caller that is about to look a channel up in the catalog
+    /// wants. A stream's name is not a table's, and resolving it as one would
+    /// fail with "no table named `boiler`", which is a confusing answer to a
+    /// question nobody asked: the admin named a stream, and it exists.
+    ///
+    /// Deliberately **not** `is_table_event()`: a `none` trigger run against a
+    /// row of its table (the row button, §13.4) carries both a channel and a
+    /// row, and its templates range over that table exactly as an `update`
+    /// trigger's do. The one kind whose channel is not a table is the one kind
+    /// this excludes.
+    pub fn table_channel(&self) -> Option<&str> {
         self.channel
             .as_deref()
-            .ok_or_else(|| Error::config(format!("a `{}` event must name a table", self.kind)))
+            .filter(|_| self.kind != EventKind::Stream)
     }
 
     /// The row's fields as a JSON object, or an empty one — what a formula's
@@ -361,7 +431,7 @@ mod tests {
         }
         // The set is enumerated once; a kind missing from EVENT_KINDS would make
         // this count wrong and its `parse` fail above.
-        assert_eq!(EVENT_KINDS.len(), 11);
+        assert_eq!(EVENT_KINDS.len(), 12);
     }
 
     #[test]
@@ -381,10 +451,47 @@ mod tests {
         for kind in EVENT_KINDS.iter().filter(|k| !k.is_table_event()) {
             assert!(!kind.is_table_event(), "{kind}");
         }
+        // A stream event's channel is load-bearing but it is not a table
+        // event: it carries no row, so `row`/`old` are out of scope and its
+        // `only_if` reads `payload` (§8).
+        assert!(!EventKind::Stream.is_table_event());
+        assert!(EventKind::Stream.has_channel());
+        assert!(EventKind::Insert.has_channel());
+        assert!(!EventKind::Login.has_channel());
         assert!(EventKind::Often.is_periodic());
         assert!(EventKind::Weekly.is_periodic());
         assert!(!EventKind::None.is_periodic());
         assert!(!EventKind::Insert.is_periodic());
+    }
+
+    #[test]
+    fn a_stream_event_carries_the_envelope_as_its_payload_and_the_stream_as_its_channel() {
+        let envelope = json!({
+            "stream": "boiler",
+            "value": { "temperature": 31.2 },
+            "received_at": "2026-09-17T09:00:00.000Z",
+            "source": { "topic": "house/boiler/temp", "qos": 0, "retain": false },
+        });
+        let ev = Event::stream("boiler", envelope.clone());
+        assert_eq!(ev.kind, EventKind::Stream);
+        assert_eq!(ev.require_channel().unwrap(), "boiler");
+        // The payload is the envelope, field for field — the wire contract.
+        assert_eq!(ev.payload, envelope);
+        assert_eq!(ev.payload["value"]["temperature"], json!(31.2));
+        // No row, and none pretended: `row`/`old` read as empty, which is what
+        // keeps them out of scope in `trigger_shape`.
+        assert!(ev.row.is_none() && ev.old_row.is_none());
+        assert!(ev.row_object().is_empty());
+    }
+
+    #[test]
+    fn a_stream_event_with_no_channel_is_refused_naming_a_stream_not_a_table() {
+        let msg = Event::new(EventKind::Stream)
+            .require_channel()
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("stream"), "{msg}");
+        assert!(!msg.contains("table"), "{msg}");
     }
 
     #[test]

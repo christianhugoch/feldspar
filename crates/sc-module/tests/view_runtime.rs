@@ -427,13 +427,21 @@ async fn a_plugins_view_patterns_render_once_the_server_installs_them() {
         .load(name, &installer.package_dir(name), &json!({}), &closed())
         .await
         .unwrap();
-    let described: Vec<&str> = manifest.view_patterns.iter().map(|p| p.name.as_str()).collect();
+    let described: Vec<&str> = manifest
+        .view_patterns
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
     assert_eq!(described, ["Greeting", "List"]);
     let greeting = &manifest.view_patterns[0];
     assert_eq!(greeting.steps, ["Greeting"]);
     assert_eq!(greeting.routes, ["rename"]);
     assert!(greeting.table_required);
-    assert!(manifest.unsupported.is_empty(), "{:?}", manifest.unsupported);
+    assert!(
+        manifest.unsupported.is_empty(),
+        "{:?}",
+        manifest.unsupported
+    );
     // 11.2: the headers, as data; one this version does not inject says so.
     assert_eq!(manifest.headers.len(), 2, "{:?}", manifest.headers);
     assert_eq!(
@@ -450,11 +458,16 @@ async fn a_plugins_view_patterns_render_once_the_server_installs_them() {
     );
 
     // Not in the registry until the server installs it.
-    assert_eq!(runtime.patterns().await.unwrap().len(), BUILTIN_PATTERNS.len());
+    assert_eq!(
+        runtime.patterns().await.unwrap().len(),
+        BUILTIN_PATTERNS.len()
+    );
     host.install_view_patterns(&[(name.clone(), "Greeting".to_owned())]);
     let patterns = runtime.patterns().await.unwrap();
     assert!(
-        patterns.iter().any(|p| p.name == "Greeting" && p.steps == ["Greeting"]),
+        patterns
+            .iter()
+            .any(|p| p.name == "Greeting" && p.steps == ["Greeting"]),
         "{patterns:?}"
     );
     // A built-in keeps its name even if a list names a module for it.
@@ -482,14 +495,24 @@ async fn a_plugins_view_patterns_render_once_the_server_installs_them() {
     let html = out.body.as_str().unwrap_or_default();
     assert!(html.contains("Good morning, nobody"), "{html}");
     assert!(
-        html.contains(&format!("data-version=\"{}\"", sc_viewpattern::ASSET_VERSION_TAG)),
+        html.contains(&format!(
+            "data-version=\"{}\"",
+            sc_viewpattern::ASSET_VERSION_TAG
+        )),
         "{html}"
     );
     assert_eq!(out.patterns, ["Greeting"]);
 
     // Its configuration is a call per step, like a built-in's.
     let step = runtime
-        .config_step("Greeting", None, Some("Hi"), 0, &json!({}), ViewContext::bare(&views, &request))
+        .config_step(
+            "Greeting",
+            None,
+            Some("Hi"),
+            0,
+            &json!({}),
+            ViewContext::bare(&views, &request),
+        )
         .await
         .unwrap();
     let fields: Vec<&str> = step.fields.iter().map(|f| f.name()).collect();
@@ -497,7 +520,10 @@ async fn a_plugins_view_patterns_render_once_the_server_installs_them() {
 
     // Installed whole: a list without it takes it out of the registry.
     host.install_view_patterns(&[]);
-    assert_eq!(runtime.patterns().await.unwrap().len(), BUILTIN_PATTERNS.len());
+    assert_eq!(
+        runtime.patterns().await.unwrap().len(),
+        BUILTIN_PATTERNS.len()
+    );
     let message = runtime
         .render(&view, &json!({}), ViewContext::bare(&views, &request))
         .await
@@ -513,7 +539,11 @@ async fn a_plugins_view_patterns_render_once_the_server_installs_them() {
         .load(name, &installer.package_dir(name), &json!({}), &granted)
         .await
         .unwrap();
-    assert!(manifest.view_patterns.is_empty(), "{:?}", manifest.view_patterns);
+    assert!(
+        manifest.view_patterns.is_empty(),
+        "{:?}",
+        manifest.view_patterns
+    );
     assert!(
         manifest.issues.iter().any(|i| i.contains("withdraw them")),
         "{:?}",

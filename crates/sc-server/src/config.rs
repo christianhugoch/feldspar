@@ -175,6 +175,19 @@ pub struct ServerConfig {
     /// memory, and a node with more of it should be able to say so without every
     /// other node against the same database hearing it.
     pub model_max_rows: u64,
+    /// How the stream supervisor behaves: the per-stream broadcast buffer, the
+    /// element-rate cap, the replay ring and the reconnection backoff (TODO
+    /// "Streams" §7).
+    ///
+    /// Flags rather than stored settings, for `--model-max-rows`' reason: what
+    /// a buffer of a thousand envelopes costs is a property of *this process's*
+    /// memory, and a node with more of it should be able to say so without
+    /// every other node against the same database hearing it. Only the two §7
+    /// calls configuration are exposed — `--stream-buffer` and
+    /// `--stream-max-rate`; the ring and the backoff are the defaults, because
+    /// nobody has ever wanted a different answer to "how far back does the
+    /// Observe screen go".
+    pub streams: sc_stream::StreamConfig,
     /// How this server obtains the certificate it serves HTTPS with (§13.5).
     ///
     /// **Not a command-line setting**, deliberately: certificates are edited in
@@ -228,6 +241,7 @@ impl Default for ServerConfig {
             python_max_stuck: sc_python::DEFAULT_MAX_STUCK,
             python_env: sc_python::PythonEnv::default(),
             model_max_rows: sc_model::DEFAULT_MAX_ROWS,
+            streams: sc_stream::StreamConfig::default(),
             tls: TlsSettings::Off,
             browser: None,
             browser_sandbox: true,
@@ -339,6 +353,21 @@ impl ServerConfig {
                             )));
                         }
                     };
+                }
+                "--stream-buffer" => {
+                    cfg.streams.channel_capacity =
+                        positive(&next_value(&mut it, "--stream-buffer")?, "--stream-buffer")?;
+                }
+                "--stream-max-rate" => {
+                    // Zero is **allowed** here, unlike `--model-max-rows`, and
+                    // it means "no cap": a rate limit of nothing is a coherent
+                    // thing to ask for on a stream nobody else is paying for,
+                    // where a dataset cap of zero would only ever mean a
+                    // broken server.
+                    let raw = next_value(&mut it, "--stream-max-rate")?;
+                    cfg.streams.max_elements_per_second = raw.parse::<u64>().map_err(|e| {
+                        Error::config(format!("invalid --stream-max-rate `{raw}`: {e}"))
+                    })?;
                 }
                 "--secure-cookies" => cfg.secure_cookies = true,
                 "--browser" => {

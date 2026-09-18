@@ -463,7 +463,9 @@ mod tests {
         let mut manifest = manifest();
         manifest.view_patterns = patterns
             .iter()
-            .map(|name| serde_json::from_value(json!({ "name": name, "table_required": true })).unwrap())
+            .map(|name| {
+                serde_json::from_value(json!({ "name": name, "table_required": true })).unwrap()
+            })
             .collect();
         let mut loaded = loaded_with(Some(manifest), Vec::new());
         loaded.module.name = module.to_owned();
@@ -481,18 +483,31 @@ mod tests {
         resolve_view_patterns(&mut modules);
         let set = ModuleSet { modules };
 
-        assert_eq!(set.modules[0].view_pattern_names(), ["Kanban", "KanbanAllocator"]);
-        assert!(set.modules[0].issues.is_empty(), "{:?}", set.modules[0].issues);
+        assert_eq!(
+            set.modules[0].view_pattern_names(),
+            ["Kanban", "KanbanAllocator"]
+        );
+        assert!(
+            set.modules[0].issues.is_empty(),
+            "{:?}",
+            set.modules[0].issues
+        );
         let boards = &set.modules[1];
         assert_eq!(boards.view_pattern_names(), ["Gantt"]);
-        assert_eq!(boards.action_names(), ["mqtt_publish"], "the rest of the module stays");
+        assert_eq!(
+            boards.action_names(),
+            ["mqtt_publish"],
+            "the rest of the module stays"
+        );
         let issues = boards.issues.join("\n");
         assert!(
             issues.contains("`Kanban` is not available: the module @saltcorn/kanban already"),
             "{issues}"
         );
         assert!(
-            issues.contains("`List` is not available: that is the name of one of Saltcorn 1's built-in"),
+            issues.contains(
+                "`List` is not available: that is the name of one of Saltcorn 1's built-in"
+            ),
             "{issues}"
         );
 
@@ -543,7 +558,12 @@ mod tests {
         assert_eq!(assets.len(), 1, "{assets:?}");
         assert_eq!(assets[0].names, ["kanban"]);
         assert_eq!(assets[0].version, "0.5.5");
-        assert!(assets[0].public_dir.as_ref().is_some_and(|d| d.ends_with("kanban/public")));
+        assert!(
+            assets[0]
+                .public_dir
+                .as_ref()
+                .is_some_and(|d| d.ends_with("kanban/public"))
+        );
         assert_eq!(assets[0].headers.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }

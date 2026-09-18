@@ -37,6 +37,7 @@ mod reload;
 mod router;
 mod security;
 mod serve;
+mod streams;
 mod systemd;
 mod tls;
 mod triggers;
@@ -144,6 +145,7 @@ pub use security::IDE_CONTENT_SECURITY_POLICY;
 pub use security::{BUILDER_CONTENT_SECURITY_POLICY, builder_content_security_policy};
 pub use security::{CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
 pub use serve::{serve, serve_browser};
+pub use streams::{StreamServices, TriggerBridge, install_streams, install_streams_with};
 pub use systemd::ServiceManager;
 pub use tls::{
     TlsHandle, TlsSettings, check_certificate, https_addr, install_crypto_provider,

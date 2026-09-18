@@ -659,10 +659,27 @@ async fn only_if_selects(
     };
     let named = |e: Error| Error::invalid(format!("trigger `{}`: `only if`: {e}", trigger.name));
 
-    let table = catalog.require(event.require_channel()?)?;
+    // A **stream** element is not a row of anything (§8), so its predicate
+    // ranges over `EVENT_SCOPE` — an empty table — and reads the envelope
+    // through `payload`. Nothing to require from the catalog, nothing to
+    // prefetch, and the same two scopes validation accepted on save, so a
+    // formula that saved cannot be unbound here.
+    let table = match event.kind {
+        EventKind::Stream => None,
+        _ => Some(catalog.require(event.require_channel()?)?),
+    };
     let formula = Formula::parse(source).map_err(named)?;
-    let shape = trigger_shape(catalog, Some(&table.name))?;
-    let analysis = formula.validate(&shape, &table.name).map_err(named)?;
+    let (shape, scope) = match &table {
+        Some(table) => (
+            trigger_shape(catalog, Some(&table.name))?,
+            table.name.clone(),
+        ),
+        None => (
+            crate::scope::action_shape(catalog, None)?,
+            crate::scope::EVENT_SCOPE.to_owned(),
+        ),
+    };
+    let analysis = formula.validate(&shape, &scope).map_err(named)?;
 
     // The event's objects, each field typed by its own column, so what the
     // predicate reads and what a prefetch correlates on agree with the database.
@@ -672,7 +689,7 @@ async fn only_if_selects(
             // correlates a prefetch (and the payload has no columns to be typed
             // against at all).
             Ambient::User | Ambient::Payload | Ambient::Context => value_from_json(json),
-            Ambient::Row | Ambient::Old => typed_value(Some(&table), field, json),
+            Ambient::Row | Ambient::Old => typed_value(table.as_ref(), field, json),
         }
     });
     // The bare scope is the **affected row**: `status` is the row this event is
@@ -684,7 +701,12 @@ async fn only_if_selects(
         .cloned()
         .flatten()
         .unwrap_or_default();
-    prefetch_bindings(catalog, &table, &analysis, &shape, &mut values).await?;
+    // A row-less event has no table to correlate a Ⱶ-path against, and the
+    // shape it validated in has no fields for one to start from, so there is
+    // nothing to fetch.
+    if let Some(table) = &table {
+        prefetch_bindings(catalog, table, &analysis, &shape, &mut values).await?;
+    }
 
     let evaluator = evaluator.ok_or_else(|| {
         Error::config(format!(
