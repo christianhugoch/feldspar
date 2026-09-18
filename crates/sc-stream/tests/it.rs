@@ -15,3 +15,9 @@ mod scripted_provider;
 
 #[path = "stream_store.rs"]
 mod stream_store;
+
+#[path = "supervisor.rs"]
+mod supervisor;
+
+#[path = "supervisor_reload.rs"]
+mod supervisor_reload;

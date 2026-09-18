@@ -2,6 +2,91 @@
 
 Changes in reverse chronological order.
 
+## The supervisor: what keeps a stream running
+
+Phase 3 of the streams milestone (tasks 3.1–3.5). `_fd_streams` held configured dataflows that
+did nothing; this is the part that makes one *flow*. `StreamSupervisor` holds one
+`RunningStream` per enabled row — the resolved provider, the cached element type, the live
+`Subscription`, a status and its counters — and is the only thing in the tree that owns a
+subscription, which is what makes "is this stream running?" a question with one answer.
+
+- **A reload is a diff, not a restart.** `reload(catalog)` compares the stored rows against the
+  running set **by id**: a new or newly-enabled row is started, a deleted one is stopped and
+  forgotten, a disabled one is stopped but *kept listed* (so "what is this stream doing?"
+  answers "nothing, you switched it off" rather than going blank), and one whose `provider` or
+  `configuration` changed is stopped and started. Everything else — a name, a description, a
+  `min_role` — swaps the row and **keeps the connection**. That last case is the load-bearing
+  one: an admin fixing a typo in a description must not drop a broker session, and a `SIGHUP`,
+  which reloads everything, must not drop all of them at once. A rename does move the envelopes,
+  because the stream's name is stamped into each one, so the row lives behind a lock rather than
+  being copied into the connection.
+
+- **Reconnection is the supervisor's, not the provider's.** A `subscribe` that returns `Err` and
+  a subscription that *ends* are the same event — the flow stopped — and both are retried with
+  a doubling delay capped at a minute, counting attempts and keeping one `since` across the
+  whole run of failures so "failing since 09:00" survives forty retries. Written once here
+  because "retry properly" is the part every provider gets subtly wrong, and the two ways to get
+  it wrong are opposite and both common: a tight loop turns a broker restart into a DoS on the
+  broker, and giving up after three attempts turns a twenty-minute outage into a stream that is
+  silently dead until somebody notices next week.
+
+- **The clock is a parameter**, `Scheduler::tick`'s rule. `tick(now)`, `start_at(row, now)` and
+  `apply_at(rows, now)` all take the instant rather than reading it, and the task loop is the
+  only place `Utc::now()` is read for a retry decision — so "the third attempt, seven seconds
+  in, is the one that connects" is an assertion three function calls long rather than a sleep.
+  **No jitter**, unlike `sc-workflow`'s retry: that one spreads a hundred runs that failed on
+  one API outage, and a server has a handful of streams, usually against different brokers.
+  Determinism is worth more here than spread.
+
+- **Nobody may block the flow (§7), and the type says so.** The sink handed to a provider counts,
+  caps, stamps and broadcasts, synchronously and infallibly. A new seam, `StreamConsumer`, is
+  where a published element goes next — `sc-server`'s trigger bridge — and it takes an
+  `Envelope` rather than an `Element`, because by then the element has been stamped with the
+  stream's name and the moment this server saw it, and a consumer handed the unstamped element
+  would have to re-derive a wire contract that would then drift. Its answer is `Accepted` or
+  `Dropped`, not a `Result`: a consumer too busy to take an element is the drop rule working,
+  not a failure, and an error there would be a log line per element on a stream behaving exactly
+  as designed.
+
+- **Three ways to lose an element, all counted, none of them silent.** The per-second cap drops
+  and counts (`dropped_for_rate`) and never pauses the provider — the test asserts the provider
+  still delivered all twenty while fifteen were dropped. A busy consumer's drops are
+  `dropped_for_triggers`. A payload the provider could not decode is `malformed` and never
+  reaches anybody. Alongside `elements` and `last_element_at` they are what makes a stream that
+  is dropping a thing you can *see* on the Streams list.
+
+- **One broadcast channel per running stream, and the replay ring beside it.** `subscribe_elements()`
+  hands back the last hundred envelopes *and* a receiver **together, under one lock** — taking
+  the replay and then subscribing would lose everything published in between, and doing it the
+  other way would show some of them twice, and a screen opened on a slow stream must be neither
+  blank nor double. A receiver that falls behind gets `RecvError::Lagged(n)` and is told the
+  number, so the Observe socket can send a `lagged` frame rather than silently showing a gap.
+  (The ring is task 6.3's, brought forward: it is what makes `subscribe_elements` correct, and
+  correct atomically.)
+
+- **A stream whose provider nothing implements is held `failed`, not dropped.** An uninstalled
+  module leaves the stream listed, editable and carrying the sentence — editing it *is* the
+  repair — and `tick` deliberately leaves it alone, because no amount of waiting makes a missing
+  module arrive. Its attempt count is 0: nothing has been tried.
+
+- **`StreamObserver`**, `TriggerObserver`'s sibling and §2's third seam, notified by `reload`
+  after a diff that **changed** something. Not by `apply`, and not by a reload that found what it
+  already had: a `SIGHUP` that changed nothing must not re-project every application that exposes
+  a stream. An observer that fails is reported and the new set is kept, because the streams are
+  demonstrably started and stopped by then and failing the caller would report the opposite of
+  what happened.
+
+- **The tests.** 19 in `crates/sc-stream/tests/supervisor.rs` over the scripted provider, with no
+  broker and no clock — the diff in each of its cases, the backoff's three attempts and its cap,
+  the lagged receiver being told *six*, the cap dropping fifteen of twenty, a busy consumer's
+  three drops, the replay, and a shutdown that actually stops the tasks. Two more in
+  `supervisor_reload.rs` against a real Postgres, because `reload` is the door every writer goes
+  through and the observer's "only when it moved" is a fact about what `list_streams` read back.
+  `StreamId` gained `Ord` so the running set is a `BTreeMap` — a hash order would make "which
+  stream started first" a different answer every run — and `envelope::rfc3339` became
+  `pub(crate)` with an `Option` variant, so a status's `since` and a counter's `last_element_at`
+  carry the same fixed-width instant the envelope does.
+
 ## A stream's password, a stream's referents, and the store against a real Postgres
 
 Tasks 2.3, 2.4 and 2.5 of the streams milestone — the rest of `_fd_streams`. The store now keeps

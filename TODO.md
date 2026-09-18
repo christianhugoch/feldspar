@@ -399,19 +399,19 @@ whose `element_type` cannot be read supplies nothing and the issue stays on the 
 
 ## Phase 3 — The supervisor
 
-- [ ] 3.1 `RunningStream` and `StreamStatus` (§6), with `elements`, `dropped_for_triggers`,
+- [x] 3.1 `RunningStream` and `StreamStatus` (§6), with `elements`, `dropped_for_triggers`,
       `malformed` and `last_element_at` counters.
-- [ ] 3.2 `StreamSupervisor::start`/`stop`/`reload(catalog)`: the id-diff, the
+- [x] 3.2 `StreamSupervisor::start`/`stop`/`reload(catalog)`: the id-diff, the
       stop-and-start-on-changed-configuration rule, and leaving an untouched stream's connection
       alone. Tests over `ScriptedProvider`.
-- [ ] 3.3 Reconnection with capped exponential backoff and an attempt count; a failing subscribe
+- [x] 3.3 Reconnection with capped exponential backoff and an attempt count; a failing subscribe
       leaves `failed` with the error and keeps retrying; a subscription that ends is restarted.
       Test with the nth-failure scripted provider, with the clock injected so it runs in
       milliseconds (`Scheduler::tick`'s rule: the clock is a parameter).
-- [ ] 3.4 The broadcast channel per stream, `subscribe_elements()` for consumers, the element
+- [x] 3.4 The broadcast channel per stream, `subscribe_elements()` for consumers, the element
       rate cap, and the `Lagged` path (§7). Tests: a slow receiver is told how many it lost; a
       stream over its cap drops and counts.
-- [ ] 3.5 `StreamObserver` (§2's third seam) called after a reload that changed the set.
+- [x] 3.5 `StreamObserver` (§2's third seam) called after a reload that changed the set.
 
 ## Phase 4 — The MQTT provider
 

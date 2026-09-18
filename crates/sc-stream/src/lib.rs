@@ -46,8 +46,9 @@
 //! | Seam | Declared here | Implemented in | Installed by |
 //! | --- | --- | --- | --- |
 //! | [`StreamProviderHost`] — a module's providers | `provider` | `sc-module::stream_providers` | `sc-server` at boot and on module change |
-//! | [`StreamSink`] — where a delivered element goes | `provider` | `sc-server::streams` | `sc-server` at boot |
-//! | `StreamObserver` — a stream set that changed | Phase 3 | `sc-server` (mount registry) | `sc-server` at boot |
+//! | [`StreamSink`] — where a provider's element goes | `provider` | [`supervisor`] (the tap) | the supervisor, per connection |
+//! | [`StreamConsumer`] — where a delivered element goes | `supervisor` | `sc-server::streams` | `sc-server` at boot |
+//! | [`StreamObserver`] — a stream set that changed | `observer` | `sc-server` (mount registry) | `sc-server` at boot |
 //!
 //! That is what lets the supervisor be tested with a sink that appends to a
 //! `Vec` and a provider that reads from a script — see [`testing`], behind the
@@ -66,13 +67,16 @@
 
 pub mod element;
 pub mod envelope;
+pub mod observer;
 pub mod provider;
 pub mod providers;
 pub mod registry;
+pub mod running;
 pub mod secrets;
 pub mod store;
 pub mod stream;
 pub mod subscription;
+pub mod supervisor;
 pub mod validate;
 
 #[cfg(feature = "testing")]
@@ -81,9 +85,11 @@ pub mod testing;
 
 pub use element::{ElementField, ElementType, RawPayload, UTF8};
 pub use envelope::{Element, Envelope};
+pub use observer::StreamObserver;
 pub use provider::{StreamProvider, StreamProviderHost, StreamProviderKind, StreamSink};
 pub use providers::{builtin_providers, builtin_registry};
 pub use registry::StreamRegistry;
+pub use running::{Counters, ElementFeed, RunningStream, StreamStatus};
 pub use secrets::{redact_configuration, redacted_stream, restore_secrets};
 pub use store::{
     STREAMS_TABLE, bootstrap_streams, delete_stream, list_streams, load_stream,
@@ -91,4 +97,5 @@ pub use store::{
 };
 pub use stream::{ATTR_ENABLED, Stream, StreamId};
 pub use subscription::{Stop, Subscription};
+pub use supervisor::{Delivery, StreamConfig, StreamConsumer, StreamSupervisor, backoff_delay};
 pub use validate::{check_stream, check_stream_name, validate_stream};

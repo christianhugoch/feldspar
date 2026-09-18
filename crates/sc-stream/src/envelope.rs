@@ -138,7 +138,13 @@ impl Envelope {
 /// digits as the value happens to need, so a consumer would see
 /// `…T09:00:00Z` from one element and `…T09:00:00.123456789Z` from the next —
 /// which every hand-written parser at the far end gets wrong exactly once.
-mod rfc3339 {
+///
+/// `pub(crate)` rather than private because the same fixed width is wanted
+/// wherever else this crate puts an instant on a wire — a running stream's
+/// `since` and `last_element_at` are read by the same consumers, from the same
+/// screen, and two encodings of a timestamp in one payload is exactly the trap
+/// this module exists to close.
+pub(crate) mod rfc3339 {
     use chrono::{DateTime, SecondsFormat, Utc};
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -151,6 +157,37 @@ mod rfc3339 {
         DateTime::parse_from_rfc3339(&text)
             .map(|at| at.with_timezone(&Utc))
             .map_err(serde::de::Error::custom)
+    }
+
+    /// The same encoding for an instant that may not have happened — a stream
+    /// that has never seen an element. `null`, not the epoch, because "never"
+    /// and "1970" are different answers and only one of them is true.
+    pub mod option {
+        use chrono::{DateTime, Utc};
+        use serde::{Deserialize, Deserializer, Serializer};
+
+        pub fn serialize<S: Serializer>(
+            at: &Option<DateTime<Utc>>,
+            s: S,
+        ) -> Result<S::Ok, S::Error> {
+            match at {
+                Some(at) => super::serialize(at, s),
+                None => s.serialize_none(),
+            }
+        }
+
+        #[allow(dead_code)]
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            d: D,
+        ) -> Result<Option<DateTime<Utc>>, D::Error> {
+            let text = Option::<String>::deserialize(d)?;
+            match text {
+                Some(text) => DateTime::parse_from_rfc3339(&text)
+                    .map(|at| Some(at.with_timezone(&Utc)))
+                    .map_err(serde::de::Error::custom),
+                None => Ok(None),
+            }
+        }
     }
 }
 

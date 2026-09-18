@@ -26,7 +26,14 @@ use uuid::Uuid;
 pub const ATTR_ENABLED: &str = "enabled";
 
 /// Identifies a stream: the UUID primary key of its `_fd_streams` row (§5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+///
+/// `Ord` as well as `Eq`, so the supervisor can key a `BTreeMap` on it: the
+/// running set is walked on every reload and printed in every status listing,
+/// and a hash order would make "which stream did it start first" a different
+/// answer on every run.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct StreamId(pub Uuid);
 
 impl StreamId {
