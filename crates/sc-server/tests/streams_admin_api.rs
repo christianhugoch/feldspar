@@ -753,3 +753,30 @@ fn urlencode(value: &str) -> String {
         })
         .collect()
 }
+
+/// The route the admin SPA opens an Observe socket on and the route this crate
+/// mounts are one contract with two spellings, and nothing else in the build
+/// would notice them diverging: a page that connects to the wrong path gets a
+/// 404, which looks exactly like a stream that never publishes.
+///
+/// The chat socket's test, for the chat socket's reason (§9 cites it). The
+/// typed half of the admin API needs no such test — `client.ts` is generated
+/// from the endpoint set and `admin_client_sync.rs` asserts the committed copy
+/// matches — but a socket has no shape in an `EndpointSet`, so this path is
+/// written by hand at both ends.
+#[test]
+fn the_observe_route_is_the_path_the_spa_connects_to() {
+    assert_eq!(
+        sc_server::STREAM_OBSERVE_ROUTE,
+        "/api/streams/{id}/observe"
+    );
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ui/admin/src/streams.ts");
+    let source = std::fs::read_to_string(&path).expect("read streams.ts");
+    assert!(
+        source.contains(sc_server::STREAM_OBSERVE_ROUTE),
+        "{} must connect to {}",
+        path.display(),
+        sc_server::STREAM_OBSERVE_ROUTE
+    );
+}

@@ -51,6 +51,10 @@ const EVENT_KINDS: {
   value: string;
   label: string;
   table: boolean;
+  /** The channel names a **stream** rather than a table (§8). One kind, and it
+   * is the reason `channel` is not simply "the table": a stream event has a
+   * required channel and no row, which is a combination no other kind has. */
+  stream?: boolean;
   /** Which timing inputs this kind takes — exactly the attributes the server's
    * `Schedule::of` reads for it. A kind that does not take one *refuses* it on
    * save, so offering it would be offering a field that cannot be saved. */
@@ -76,6 +80,13 @@ const EVENT_KINDS: {
     label: "Once a week",
     table: false,
     timing: ["day_of_week", "hour", "minute"],
+  },
+  {
+    value: "stream",
+    label: "An element arrives on a stream",
+    table: false,
+    stream: true,
+    timing: [],
   },
 ];
 
@@ -121,6 +132,13 @@ export function actionSpecTable(
   return table === "" ? undefined : table;
 }
 
+/** Whether a kind's channel is a stream — which is what turns the channel box
+ * into the stream picker, and what makes `only_if` read the envelope rather
+ * than a row (§8). */
+export function isStreamEvent(kind: string): boolean {
+  return EVENT_KINDS.find((k) => k.value === kind)?.stream ?? false;
+}
+
 /** The timing inputs a kind takes; empty for everything that is not periodic. */
 function timingFields(kind: string): TimingField[] {
   return EVENT_KINDS.find((k) => k.value === kind)?.timing ?? [];
@@ -137,6 +155,10 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
   const roles = useRoles();
   const [actions, setActions] = useState<ActionInfo[] | null>(null);
   const [tables, setTables] = useState<string[]>([]);
+  /** The streams this server has, for a `stream` event's channel. Empty on a
+   * build with no stream support, which makes the picker empty rather than the
+   * form broken — and the server refuses an unknown name either way (§8). */
+  const [streams, setStreams] = useState<string[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -167,6 +189,10 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
     const run = async () => {
       try {
         const tableList = await api.listTables();
+        // Tolerated separately: a server built without stream support answers
+        // this with a refusal, and that must not stop a table trigger being
+        // edited.
+        const streamList = await api.listStreams().catch(() => []);
         let existing: TriggerItem | undefined;
         if (triggerId) {
           existing = (await api.listTriggers()).find((t) => t.id === triggerId);
@@ -177,6 +203,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
         }
         if (cancelled) return;
         setTables(tableList.map((t) => t.name));
+        setStreams(streamList.map((stream) => stream.name));
         if (existing) {
           setName(existing.name);
           setDescription(existing.description);
@@ -238,6 +265,10 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
   const action = actions?.find((a) => a.name === actionName);
   const spec = action?.config_spec ?? [];
   const tableEvent = isTableEvent(when);
+  const streamEvent = isStreamEvent(when);
+  /** Both kinds that name one, which is what decides the channel box and the
+   * `only_if`: a stream event has no row, but it does have a payload. */
+  const channelEvent = tableEvent || streamEvent;
   const timingUsed = timingFields(when);
 
   /** One timing value for the save: null unless this kind uses it *and* the box
@@ -261,8 +292,8 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
         // The fields a non-table event does not have are sent as null rather
         // than as the strings left over from a kind the admin changed away
         // from: what is not on the screen is not part of the save.
-        channel: tableEvent && channel !== "" ? channel : null,
-        only_if: tableEvent && onlyIf.trim() !== "" ? onlyIf.trim() : null,
+        channel: channelEvent && channel !== "" ? channel : null,
+        only_if: channelEvent && onlyIf.trim() !== "" ? onlyIf.trim() : null,
         body,
         // Both belong to the **action** body, and both are refused on a workflow
         // — whose steps are a version of their own, edited on the canvas.
@@ -366,10 +397,21 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
             <Card.Header>When</Card.Header>
             <Card.Body>
               <Row>
-                <Col md={tableEvent ? 6 : 12}>
+                <Col md={channelEvent ? 6 : 12}>
                   <Form.Group className="mb-3" controlId="triggerWhen">
                     <Form.Label>Event</Form.Label>
-                    <Form.Select value={when} onChange={(e) => setWhen(e.target.value)}>
+                    <Form.Select
+                      value={when}
+                      onChange={(e) => {
+                        const next = e.target.value;
+                        // A table name left in the box of a stream event would
+                        // be submitted as a stream name and refused — and the
+                        // picker would show it as no selection at all, which
+                        // reads like the form lost it.
+                        if (isStreamEvent(next) !== isStreamEvent(when)) setChannel("");
+                        setWhen(next);
+                      }}
+                    >
                       {EVENT_KINDS.map((kind) => (
                         <option key={kind.value} value={kind.value}>
                           {kind.label}
@@ -378,23 +420,30 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                     </Form.Select>
                   </Form.Group>
                 </Col>
-                {tableEvent && (
+                {channelEvent && (
                   <Col md={6}>
                     <Form.Group className="mb-3" controlId="triggerChannel">
                       <Form.Label>
-                        Table<span className="text-danger"> *</span>
+                        {streamEvent ? "Stream" : "Table"}
+                        <span className="text-danger"> *</span>
                       </Form.Label>
                       <Form.Select
                         value={channel}
                         onChange={(e) => setChannel(e.target.value)}
                       >
                         <option value="">—</option>
-                        {tables.map((table) => (
-                          <option key={table} value={table}>
-                            {table}
+                        {(streamEvent ? streams : tables).map((name) => (
+                          <option key={name} value={name}>
+                            {name}
                           </option>
                         ))}
                       </Form.Select>
+                      {streamEvent && streams.length === 0 && (
+                        <Form.Text muted>
+                          No streams yet. A stream is created in Streams, and a trigger
+                          naming one that does not exist is refused on save.
+                        </Form.Text>
+                      )}
                     </Form.Group>
                   </Col>
                 )}
@@ -465,7 +514,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                 </Row>
               )}
 
-              {tableEvent && (
+              {channelEvent && (
                 <Form.Group className="mb-0" controlId="triggerOnlyIf">
                   <Form.Label>Only if</Form.Label>
                   <Form.Control
@@ -473,13 +522,26 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                     rows={2}
                     className="font-monospace"
                     value={onlyIf}
-                    placeholder="Example: pages > 100"
+                    placeholder={
+                      streamEvent ? "Example: payload.value.temperature > 30" : "Example: pages > 100"
+                    }
                     onChange={(e) => setOnlyIf(e.target.value)}
                   />
                   <Form.Text muted>
-                    A JavaScript expression over the affected row&apos;s fields,{" "}
-                    <code>row</code>, <code>old</code> and <code>user</code>. The action runs
-                    only when it is true. Leave blank to always run.
+                    {streamEvent ? (
+                      <>
+                        A JavaScript expression over the element&apos;s envelope. An element is
+                        not a row, so there is no <code>row</code> or <code>old</code> here:
+                        the element is <code>payload.value</code>, and the provider&apos;s own
+                        metadata is <code>payload.source</code>. Leave blank to always run.
+                      </>
+                    ) : (
+                      <>
+                        A JavaScript expression over the affected row&apos;s fields,{" "}
+                        <code>row</code>, <code>old</code> and <code>user</code>. The action runs
+                        only when it is true. Leave blank to always run.
+                      </>
+                    )}
                   </Form.Text>
                 </Form.Group>
               )}

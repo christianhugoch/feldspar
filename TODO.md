@@ -467,17 +467,21 @@ whose `element_type` cannot be read supplies nothing and the issue stays on the 
 
 ## Phase 7 — The admin UI
 
-- [ ] 7.1 `ui/admin/src/client.ts` regenerated for the new endpoints (checked-in artifact +
-      drift test), and the socket's frame types written beside the chat's.
-- [ ] 7.2 `ui/admin/src/streams.ts`: the pure parts — the form's fields from the picked
+- [x] 7.1 `ui/admin/src/client.ts` regenerated for the new endpoints (checked-in artifact +
+      drift test), and the socket's frame types written beside the chat's. (The client was
+      regenerated with the endpoints in 6.1; the frames are in `streams.ts`, and a Rust test pins
+      the route both ends spell.)
+- [x] 7.2 `ui/admin/src/streams.ts`: the pure parts — the form's fields from the picked
       provider's spec, the status label and colour, the counters' formatting, the envelope →
       table/text/hex rendering per element type. Unit tests (`streams.test.ts`).
-- [ ] 7.3 `ui/admin/src/screens/Streams.tsx`: the list (New at the top; Edit, Observe, Delete per
+- [x] 7.3 `ui/admin/src/screens/Streams.tsx`: the list (New at the top; Edit, Observe, Delete per
       row, with status and counters), the form, and the Observe screen (live tail, pause, clear,
-      the lagged notice, the "since this server started" label).
-- [ ] 7.4 The **Streams** entry in `NAV` between Triggers and Files, with an icon in `icons.tsx`
+      the lagged notice, the "since this server started" label). (Three files, as
+      `LlmProviders`/`LlmProviderForm` already split: `Streams.tsx`, `StreamForm.tsx`,
+      `StreamObserve.tsx`.)
+- [x] 7.4 The **Streams** entry in `NAV` between Triggers and Files, with an icon in `icons.tsx`
       and the comment saying why it sits there (§9).
-- [ ] 7.5 The trigger form's event picker offers Stream, and its channel box becomes the stream
+- [x] 7.5 The trigger form's event picker offers Stream, and its channel box becomes the stream
       picker for that event.
 
 ## Phase 8 — Applications

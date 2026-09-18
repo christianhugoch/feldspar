@@ -2,6 +2,86 @@
 
 Changes in reverse chronological order.
 
+## The Streams screens
+
+Phase 7 of the streams milestone (tasks 7.1–7.5). Phase 6 made a stream a thing the API can
+create, watch and take away; this is the part an admin actually uses — the three screens GOALS
+names (Editing, Observing, Deleting), a sidebar entry between Triggers and Files, and a trigger
+form that can point at a stream.
+
+- **`ui/admin/src/streams.ts` is the model, and it is where the socket's frames live.** The typed
+  request/response client is generated from the endpoint set and was already regenerated in Phase
+  6, but a socket has no shape in an `EndpointSet`, so §9's four frames (`ready`, `element`,
+  `lagged`, `status`) are written by hand here beside the chat's in `agentChat.ts`. A Rust test
+  (`streams_admin_api::the_observe_route_is_the_path_the_spa_connects_to`) pins the route this file
+  names against `STREAM_OBSERVE_ROUTE`, the way the chat socket's is pinned: a page connecting to
+  the wrong path gets a 404, which looks exactly like a stream that never publishes.
+
+- **Three endpoint fields arrive as `unknown`, and that is right.** The element type, the status
+  and the counters are declared `json` in the endpoint set, because they are a provider's and the
+  supervisor's vocabulary rather than the endpoint's. So their shapes are written out once here, as
+  the discriminated unions their Rust originals serialise to, and every screen reads them through
+  `readElementType` / `readStatus` / `readCounters` rather than casting — `models.ts`' arrangement,
+  for `models.ts`' reason. An element type that will not read is `null`, which is a real answer: a
+  stream whose provider was uninstalled is still listed, still has a status, and Edit is the repair.
+
+- **`failed` is yellow, not red.** The supervisor is retrying with capped backoff (§6), so a broker
+  that bounced is a stream that will be back — different news from a stream that cannot be started
+  at all, which is the row's `error` and *is* red. "Disabled" and "not running here" are two more
+  distinct answers and are told apart rather than merged, because §6's one-process rule means a
+  stream can be perfectly healthy and simply not be running in the process you are looking at.
+
+- **A stream that is dropping is a thing you can see** (§7) — and a stream that is not says
+  nothing. `counterNotes` is silent while `dropped_for_triggers`, `dropped_for_rate` and
+  `malformed` are all zero, because a row of `0 dropped · 0 malformed` on every healthy stream is
+  how a reader learns to stop reading that column.
+
+- **The list polls `streamStatus` per row, not `listStreams`.** Definitions do not move while an
+  admin looks at them; how a flow is *going* does. Re-reading every provider's configuration twice
+  a second to find out whether a broker is connected would be a lot of database for one badge.
+
+- **The form knows no provider** (§3). It renders whatever `config_spec` the picked provider
+  declares, so there is no mention of a broker, a topic or a QoS in it, and a provider supplied by
+  a module gets a working form with no change to this bundle. What is new beside the model form is
+  the **element type preview**: the form asks the server what *this* configuration would produce,
+  debounced, and shows either "JSON: temperature (float)" or the sentence saying why there is no
+  answer — which is what stops an admin discovering on the Observe screen that they declared
+  nothing. Secrets round-trip through the sentinel untouched, and there is no Start button, because
+  saving an enabled stream connects it.
+
+- **Observe is the one admin screen whose content is not a read.** Pause and Clear are client-side
+  only — pausing the server would mean dropping the elements or queueing them, and §7 says which of
+  those a stream does — so Pause holds the *rendering* and says how many arrived while it was held.
+  The replayed rows are labelled "since this server started", which is the whole truth: there is no
+  element table and there is not going to be one (§4). A `lagged` frame becomes a banner saying how
+  many elements this screen lost and why nothing waited for it.
+
+- **The rendering follows the declared type, which is what declaring one is for.** A table of the
+  declared keys for `json` — a declared key that is absent shown as absent, and the undeclared keys
+  an element carried named beside the first column, because §4 carries them through and adding them
+  to the declaration is what puts them in a column. Text for `text`. A **hex head** for `binary`,
+  never bytes set in a body font. `hexHead` decodes base64 by hand rather than through `atob`, so
+  it is testable in node, and refuses something that is not base64 rather than inventing bytes.
+
+- **Streams sits between Triggers and Files in `NAV`** (§9), under a broadcast icon. That is the
+  argument, not the alphabet: a stream is a *source of events*, so it belongs beside the thing that
+  listens to them rather than beside the models. Everything else in the Data Layer section is at
+  rest — a table has rows, a file has bytes — and this is the one entry that moves on its own.
+
+- **The trigger form offers Stream, and its channel box becomes the stream picker.** Switching the
+  event kind between a table event and a stream event clears the channel, because a table name left
+  in the box of a stream event would be submitted as a stream name and refused while the picker
+  showed no selection at all — which reads like the form lost it. `only_if` is offered for a stream
+  event too, with the hint §8 requires: an element is not a row, so there is no `row` or `old`, and
+  the formula reads `payload.value` and `payload.source`. A build with no stream support answers
+  `listStreams` with a refusal, which is tolerated separately so it cannot stop a table trigger
+  being edited.
+
+- **Tests.** `streams.test.ts` — 31 cases over the frame parsing, the replay boundary as live
+  elements push it along, the per-type rendering, the status colours and the name rule;
+  `triggerForm.test.ts` gains the stream event's two. The Rust side gains the route pin. The full
+  admin suite is 532 passing.
+
 ## The stream admin API, and the Observe socket
 
 Phase 6 of the streams milestone (tasks 6.1–6.5). Phase 5 made an element fire a trigger; this is

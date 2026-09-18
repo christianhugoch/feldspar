@@ -11,13 +11,20 @@
 
 import { describe, expect, it } from "vitest";
 
-import { actionSpecTable } from "./TriggerForm";
+import { actionSpecTable, isStreamEvent } from "./TriggerForm";
 
 describe("the table an action's settings are read for", () => {
   it("is the chosen table on a row event", () => {
     expect(actionSpecTable("insert", "orders")).toBe("orders");
     expect(actionSpecTable("update", "orders")).toBe("orders");
     expect(actionSpecTable("delete", "orders")).toBe("orders");
+  });
+
+  it("is nothing on a stream event, which has a channel but no table", () => {
+    // A stream event's channel names a *stream* (§8), so asking for the
+    // actions declared "for the table `boiler`" would be asking about a table
+    // that does not exist.
+    expect(actionSpecTable("stream", "boiler")).toBeUndefined();
   });
 
   it("is nothing on a kind that has no row", () => {
@@ -32,5 +39,19 @@ describe("the table an action's settings are read for", () => {
   it("is nothing until a table has been chosen", () => {
     expect(actionSpecTable("insert", "")).toBeUndefined();
     expect(actionSpecTable("insert", "   ")).toBeUndefined();
+  });
+});
+
+describe("which kinds name a stream", () => {
+  it("is the stream event and nothing else", () => {
+    // What this decides is the channel box: a table picker for a table event,
+    // the stream picker for this one, and no box at all for the rest.
+    expect(isStreamEvent("stream")).toBe(true);
+    for (const kind of ["insert", "update", "delete", "login", "none", "daily", "error", "startup", "often", "hourly", "weekly"]) {
+      expect(isStreamEvent(kind)).toBe(false);
+    }
+    // A kind this bundle has never heard of names no stream, rather than
+    // throwing on a server that added one.
+    expect(isStreamEvent("something-newer")).toBe(false);
   });
 });

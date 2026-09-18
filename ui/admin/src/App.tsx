@@ -24,6 +24,7 @@ import { showAppOutcome } from "./appActions";
 import { AppOutcomeToast, ApplicationsNav } from "./AppSidebar";
 import {
   IconBolt,
+  IconBroadcast,
   IconChartHistogram,
   IconChevronLeft,
   IconChevronRight,
@@ -61,6 +62,9 @@ import { ModelInstance } from "./screens/ModelInstance";
 import { Models } from "./screens/Models";
 import { Roles } from "./screens/Roles";
 import { Settings } from "./screens/Settings";
+import { StreamForm } from "./screens/StreamForm";
+import { StreamObserve } from "./screens/StreamObserve";
+import { Streams } from "./screens/Streams";
 import { Tables } from "./screens/Tables";
 import { TableData } from "./screens/TableData";
 import { TableDetail } from "./screens/TableDetail";
@@ -178,6 +182,17 @@ export const NAV: NavItem[] = [
     label: "Triggers",
     icon: <IconBolt />,
     matches: ["/triggers"],
+  },
+  {
+    href: "#/streams",
+    label: "Streams",
+    icon: <IconBroadcast />,
+    // Between Triggers and Files, and that is the argument (§9): a stream is a
+    // *source of events*, so it belongs beside the thing that listens to them
+    // rather than beside the models. Everything above it in this section is at
+    // rest — a table has rows, a file has bytes — and a stream is the one entry
+    // that moves on its own.
+    matches: ["/streams"],
   },
   {
     href: "#/file-stores",
@@ -609,6 +624,25 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
   }
   if (path.startsWith("/triggers")) {
     return <Triggers />;
+  }
+  if (path === "/streams/new") {
+    return <StreamForm />;
+  }
+  const streamEditMatch = path.match(/^\/streams\/([^/]+)\/edit$/);
+  if (streamEditMatch) {
+    return <StreamForm streamId={decodeURIComponent(streamEditMatch[1])} />;
+  }
+  // Observe is keyed on the route, so switching between two streams' sockets
+  // builds a new screen rather than feeding one stream's elements into the
+  // other's tail.
+  const streamObserveMatch = path.match(/^\/streams\/([^/]+)\/observe$/);
+  if (streamObserveMatch) {
+    return (
+      <StreamObserve key={path} streamId={decodeURIComponent(streamObserveMatch[1])} />
+    );
+  }
+  if (path.startsWith("/streams")) {
+    return <Streams />;
   }
   if (path === "/file-stores/new") {
     return <FileStoreForm />;
