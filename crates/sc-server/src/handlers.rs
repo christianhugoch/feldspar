@@ -2525,6 +2525,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             async move {
                 let dispatcher = triggers_of(&apps)?;
                 let trigger = trigger_from_body(TriggerId::new(), &ctx.body)?;
+                check_stream_channel(&catalog, &apps, &trigger).await?;
                 save_trigger(&catalog, &dispatcher.registry(), &trigger).await?;
                 // A workflow body gets **version 1** here, not on the editor's
                 // first save (§10.3, phase 5.5): an empty workflow with one
@@ -2562,6 +2563,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // The id is the path's, not the body's — the row's identity is
                 // not something a payload gets to reassign.
                 let trigger = trigger_from_body(id, &ctx.body)?;
+                check_stream_channel(&catalog, &apps, &trigger).await?;
                 save_trigger(&catalog, &dispatcher.registry(), &trigger).await?;
                 // Switching an action body to a workflow one is the other way a
                 // trigger comes to need a version 1 (§10.3, phase 5.5), and it
@@ -3357,6 +3359,246 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     "outcome": serde_json::to_value(instance.outcome()?)
                         .unwrap_or(Json::Null),
                     "predictions": predictions,
+                })))
+            }
+        }
+    });
+
+    // --- streams ------------------------------------------------------------
+    // Dataflows as an entity (TODO "Streams", task 6.2). The row ⇄ live-set
+    // path once more, with one difference from every other record that has it:
+    // the live set here is a set of **connections**, so a save does not just
+    // reload a registry, it drops and remakes broker sessions. That is why
+    // every write below ends in `reload` — the flow follows the row without a
+    // restart (§6) — and why the read path carries the supervisor's status
+    // beside the stored definition.
+    //
+    // Two things happen *here* rather than in `sc-stream`: secrets are redacted
+    // on the way out and merged back on the way in (§2.3, the file-store and
+    // LLM-provider arrangement), and the delete's refusal is handed the
+    // triggers that name the stream, because `sc-stream` sits below `sc-action`
+    // and cannot ask.
+
+    reg.register("listStreamProviders", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let streams = streams_of(&apps)?;
+                let registry = streams.registry();
+                // The configuration so far, because the element type is a
+                // function of it (§3): `payload = json` with four declared keys
+                // is a different element type from `payload = text`, and the
+                // form asks this endpoint again every time one of them changes.
+                let configuration = match query_json(&ctx, "configuration")? {
+                    Some(Json::Object(map)) => Some(map),
+                    Some(Json::Null) | None => None,
+                    Some(_) => {
+                        return Err(Error::invalid("`configuration` must be a JSON object"));
+                    }
+                };
+                // Which provider that configuration belongs to. Without it a
+                // configuration would be resolved against every provider in
+                // turn, and the answer for the ones it was not written for is
+                // noise — `mqtt`'s settings mean nothing to a polled feed.
+                let for_provider = ctx
+                    .query_get("provider")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let mut providers = Vec::with_capacity(registry.len());
+                for provider in registry.all() {
+                    let kind = provider.kind();
+                    // Resolved like every other spec the admin UI renders, so a
+                    // setting whose options come from the catalog arrives as a
+                    // picker rather than a text box.
+                    let spec = resolve_options(&catalog, kind.config_spec.clone()).await?;
+                    let asked_about = for_provider.is_none_or(|name| name == kind.name);
+                    let (element_type, element_type_error) = match &configuration {
+                        Some(config) if asked_about => {
+                            match provider
+                                .element_type(config)
+                                .and_then(|ty| ty.validate().map(|()| ty))
+                            {
+                                Ok(ty) => (serde_json::to_value(&ty).ok(), None),
+                                // Not an error for the request: "`json` with no
+                                // declared keys" is what the form is waiting to
+                                // be told, and every other provider still
+                                // answers.
+                                Err(e) => (None, Some(e.to_string())),
+                            }
+                        }
+                        _ => (None, None),
+                    };
+                    providers.push(json!({
+                        "name": kind.name,
+                        "label": kind.label,
+                        "description": kind.description,
+                        "module": kind.module,
+                        "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                        "element_type": element_type,
+                        "element_type_error": element_type_error,
+                    }));
+                }
+                // An empty picker reads like a bug; the sentence reads like the
+                // decision it is.
+                let empty = providers.is_empty();
+                Ok(HandlerResponse::ok(json!({
+                    "providers": providers,
+                    "builtins_compiled_out": !sc_stream::MQTT_COMPILED_IN,
+                    "notice": if empty && !sc_stream::MQTT_COMPILED_IN {
+                        Json::String(sc_stream::BUILTINS_COMPILED_OUT.to_owned())
+                    } else {
+                        Json::Null
+                    },
+                })))
+            }
+        }
+    });
+
+    reg.register("listStreams", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let streams = streams_of(&apps)?;
+                // The **stored** rows, with the running set consulted only for
+                // its status: a stream that fails validation would otherwise
+                // vanish from the screen that exists to repair it.
+                let stored = sc_stream::list_streams(&catalog).await?;
+                let out: Vec<Json> = stored
+                    .iter()
+                    .map(|stream| stream_json(&streams, stream))
+                    .collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("getStream", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let streams = streams_of(&apps)?;
+                let stream = require_stream_by_id(&catalog, ctx.path_param("id")?).await?;
+                Ok(HandlerResponse::ok(stream_json(&streams, &stream)))
+            }
+        }
+    });
+
+    reg.register("saveStream", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let streams = streams_of(&apps)?;
+                let registry = streams.registry();
+                let body = require_object(&ctx.body)?;
+                let created = body.get("id").is_none_or(Json::is_null);
+                let submitted = stream_from_body(body)?;
+                // The sentinel the form was handed comes back as the sentinel;
+                // what is behind it is whatever the row already holds (§2.3).
+                // Read *before* the save, because the save is what overwrites
+                // it.
+                let stored = if created {
+                    None
+                } else {
+                    sc_stream::load_stream(&catalog, submitted.id).await?
+                };
+                let stream = sc_stream::restore_secrets(&registry, stored.as_ref(), &submitted);
+                sc_stream::save_stream(&catalog, &registry, &stream).await?;
+                // The flow follows the row: a stream saved enabled is connected
+                // by the time this response is written, and one whose broker
+                // moved has dropped the old session. A reload that fails is a
+                // stream that is `failed` with its reason, not a save that did
+                // not happen — so it is reported rather than returned.
+                if let Err(e) = streams.reload(&catalog).await {
+                    eprintln!(
+                        "feldspar: the stream set could not be reloaded after saving `{}`: {}",
+                        stream.name,
+                        sc_error::format_causes(&e)
+                    );
+                }
+                let response = HandlerResponse::ok(stream_json(&streams, &stream));
+                Ok(if created {
+                    response.with_status(201)
+                } else {
+                    response
+                })
+            }
+        }
+    });
+
+    reg.register("deleteStream", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let streams = streams_of(&apps)?;
+                let stream = require_stream_by_id(&catalog, ctx.path_param("id")?).await?;
+                // The referents are passed in, as `delete_llm_model`'s are:
+                // `sc-stream` sits below `sc-action` and cannot ask which
+                // triggers listen to a channel, and a stream deleted out from
+                // under one leaves a trigger waiting for an event nothing will
+                // ever raise.
+                let referents = stream_trigger_referents(&catalog, &stream.name).await?;
+                if !sc_stream::delete_stream(&catalog, stream.id, &referents).await? {
+                    return Err(Error::not_found(format!("no stream with id {}", stream.id)));
+                }
+                if let Err(e) = streams.reload(&catalog).await {
+                    eprintln!(
+                        "feldspar: the stream set could not be reloaded after deleting `{}`: {}",
+                        stream.name,
+                        sc_error::format_causes(&e)
+                    );
+                }
+                Ok(HandlerResponse::ok(json!({ "deleted": true })))
+            }
+        }
+    });
+
+    reg.register("streamStatus", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let streams = streams_of(&apps)?;
+                let stream = require_stream_by_id(&catalog, ctx.path_param("id")?).await?;
+                let running = streams.supervisor().get(stream.id);
+                // A 200 saying `running: false` rather than a 404: "this stream
+                // is not running" is exactly what the screen asked, and a row
+                // that exists is not a missing thing.
+                //
+                // `running` is about the **subscription**, not about whether
+                // the supervisor is holding the stream: a disabled one it has
+                // stopped is still in its map, with `stopped` as its status and
+                // its counters intact, and reporting that as running would make
+                // the switch on the list look like it had not worked.
+                Ok(HandlerResponse::ok(json!({
+                    "id": stream.id.0,
+                    "name": stream.name,
+                    "running": running.as_ref().is_some_and(|r| r.status().is_running()),
+                    "status": running
+                        .as_ref()
+                        .and_then(|r| serde_json::to_value(r.status()).ok()),
+                    "counters": running.as_ref().map(|r| r.counters().to_json()),
+                    "element_type": running
+                        .as_ref()
+                        .and_then(|r| r.element_type())
+                        .and_then(|ty| serde_json::to_value(ty).ok()),
+                    "listeners": running.as_ref().map_or(0, |r| r.listeners()),
                 })))
             }
         }
@@ -7765,6 +8007,192 @@ pub(crate) fn models_of(apps: &AppMounts) -> Result<crate::ModelServices> {
     apps.models().cloned().ok_or_else(|| {
         Error::config("this server has no model support installed, so models cannot be managed")
     })
+}
+
+/// Refuse a `stream` trigger whose channel names no stream (§8).
+///
+/// `sc-action` validates that the channel is **present and non-empty** and
+/// stops there, because it cannot resolve a stream name without a dependency it
+/// should not have. This is the other half, and it lives here because this is
+/// where the admin is: the form offers the live stream list (`listStreams`), so
+/// an unknown name is a stale form or a hand-written request, and either way
+/// the trigger it would save is one waiting for an event nothing will ever
+/// raise.
+///
+/// The error **names the streams there are**, because "no stream named
+/// `boiler`" with a typo in it and "no stream named `boiler` because you have
+/// not created it yet" are different problems and the list tells them apart.
+///
+/// Every other event kind passes straight through, including a server with no
+/// stream support installed — refusing to save a table trigger because this
+/// build has no streams would be the wrong end of the stick entirely.
+async fn check_stream_channel(
+    catalog: &Catalog,
+    apps: &AppMounts,
+    trigger: &sc_action::Trigger,
+) -> Result<()> {
+    if trigger.when != EventKind::Stream {
+        return Ok(());
+    }
+    let Some(channel) = trigger
+        .channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    else {
+        // `save_trigger`'s own validation says this better than a second
+        // message here would.
+        return Ok(());
+    };
+    // A server with no stream support cannot answer the question, and a trigger
+    // on a stream it has no machinery for is refused where it would fire, not
+    // where it is saved.
+    streams_of(apps)?;
+    if sc_stream::load_stream_by_name(catalog, channel)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let known = sc_stream::list_streams(catalog).await?;
+    let names = if known.is_empty() {
+        "there are no streams".to_owned()
+    } else {
+        format!(
+            "the streams are {}",
+            known
+                .iter()
+                .map(|s| format!("`{}`", s.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    Err(Error::invalid(format!(
+        "trigger `{}`: no stream is named `{channel}`; {names}",
+        trigger.name
+    )))
+}
+
+/// The stream services this server was built with, or a configuration error
+/// saying it has none — [`models_of`]'s shape, for [`models_of`]'s reason: a
+/// test or an admin-only server may have booted without them, and the Streams
+/// tab should say so rather than appear to work.
+pub(crate) fn streams_of(apps: &AppMounts) -> Result<crate::StreamServices> {
+    apps.streams().cloned().ok_or_else(|| {
+        Error::config("this server has no stream support installed, so streams cannot be managed")
+    })
+}
+
+/// One stored stream by the id in a path, or a 404 naming it.
+async fn require_stream_by_id(catalog: &Catalog, raw: &str) -> Result<sc_stream::Stream> {
+    let id = sc_stream::StreamId(parse_uuid(raw, "stream")?);
+    sc_stream::load_stream(catalog, id)
+        .await?
+        .ok_or_else(|| Error::not_found(format!("no stream with id {id}")))
+}
+
+/// The triggers that name `stream` as their channel, as the phrases
+/// [`delete_stream`](sc_stream::delete_stream) refuses with.
+///
+/// Passed *in* rather than looked up inside `sc-stream`, because that crate
+/// sits below `sc-action` and has no way to ask — the arrangement
+/// `delete_llm_model` already has with the agents that name a model.
+async fn stream_trigger_referents(catalog: &Catalog, stream: &str) -> Result<Vec<String>> {
+    Ok(list_triggers(catalog)
+        .await?
+        .into_iter()
+        .filter(|t| {
+            t.when == EventKind::Stream && t.channel.as_deref().map(str::trim) == Some(stream)
+        })
+        .map(|t| sc_stream::trigger_referent(&t.name))
+        .collect())
+}
+
+/// One stored stream as JSON (matching `stream_schema`): the row with its
+/// secrets masked, what it would produce, and how it is going.
+///
+/// The **stored** row is what is rendered, with the supervisor consulted only
+/// for status and counters. A stream whose provider was uninstalled has no
+/// element type and carries the reason in `error`, and it is still listed and
+/// still editable — because editing it is the repair.
+fn stream_json(streams: &crate::StreamServices, stream: &sc_stream::Stream) -> Json {
+    let registry = streams.registry();
+    let redacted = sc_stream::redacted_stream(&registry, stream);
+    // Computed, never stored (§5): a copy in the row would be a second answer
+    // that drifts the day a provider's declaration changes.
+    let (element_type, error) = match registry.get(stream.provider.trim()) {
+        Some(provider) => match provider
+            .element_type(&stream.configuration)
+            .and_then(|ty| ty.validate().map(|()| ty))
+        {
+            Ok(ty) => (serde_json::to_value(&ty).ok(), None),
+            Err(e) => (None, Some(e.to_string())),
+        },
+        None => (
+            None,
+            Some(format!(
+                "no stream provider named `{}` is registered",
+                stream.provider.trim()
+            )),
+        ),
+    };
+    let running = streams.supervisor().get(stream.id);
+    json!({
+        "id": stream.id.0,
+        "name": stream.name,
+        "description": stream.description,
+        "provider": stream.provider,
+        "configuration": Json::Object(redacted.configuration),
+        "min_role": stream.min_role,
+        "attributes": Json::Object(stream.attributes.clone()),
+        "enabled": stream.is_enabled(),
+        "element_type": element_type,
+        "error": error,
+        "status": running
+            .as_ref()
+            .and_then(|r| serde_json::to_value(r.status()).ok()),
+        "counters": running.as_ref().map(|r| r.counters().to_json()),
+    })
+}
+
+/// A [`Stream`](sc_stream::Stream) from a `saveStream` body.
+///
+/// The id in the body is what says create or replace, as `saveModel`'s is. A
+/// secret setting may arrive as the sentinel; putting the stored value back
+/// behind it is the caller's job, because only the caller knows which row this
+/// is replacing.
+fn stream_from_body(body: &Map<String, Json>) -> Result<sc_stream::Stream> {
+    let id = match body.get("id") {
+        None | Some(Json::Null) => sc_stream::StreamId::new(),
+        Some(Json::String(raw)) => sc_stream::StreamId(parse_uuid(raw, "stream")?),
+        Some(_) => return Err(Error::invalid("`id` must be a stream id")),
+    };
+    let mut stream = sc_stream::Stream::with_id(
+        id,
+        non_empty_str_field(body, "name")?,
+        non_empty_str_field(body, "provider")?,
+    );
+    stream.description = optional_str(body, "description");
+    stream.configuration = optional_attrs(body, "configuration")?;
+    stream.attributes = optional_attrs(body, "attributes")?;
+    stream.min_role = match body.get("min_role") {
+        None | Some(Json::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|n| u8::try_from(n).ok())
+                .ok_or_else(|| Error::invalid("`min_role` must be a role between 1 and 100"))?,
+        ),
+    };
+    // Absent means enabled: a stream an admin has just filled the broker
+    // details in for is one they want running, and a second switch to press
+    // before finding out whether the details were right is the wrong default.
+    stream.set_enabled(match body.get("enabled") {
+        None | Some(Json::Null) => true,
+        Some(Json::Bool(enabled)) => *enabled,
+        Some(_) => return Err(Error::invalid("`enabled` must be true or false")),
+    });
+    Ok(stream)
 }
 
 /// One query parameter read as JSON.

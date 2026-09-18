@@ -43,6 +43,7 @@ use crate::config::ServerConfig;
 use crate::handler::{HandlerCtx, HandlerRegistry, HandlerResponse};
 use crate::lsp::{LSP_ROUTE, ServerSlots, language_server_upgrade, server_slots};
 use crate::mcp::MCP_ROUTE;
+use crate::observe::{STREAM_OBSERVE_ROUTE, stream_observe_upgrade};
 use crate::security::{
     CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, IDE_CONTENT_SECURITY_POLICY, SESSION_COOKIE,
     build_cookie, csrf_middleware,
@@ -253,6 +254,15 @@ pub fn build_router_with_apps(
         // body, and a chat turn is bidirectional in a way the typed endpoint
         // model has no shape for.
         .route(AGENT_CHAT_ROUTE, axum::routing::get(agent_chat))
+        // A stream's Observe socket (TODO "Streams" §9). The third route that
+        // is an upgrade rather than a typed endpoint, for the reason the other
+        // two are: an `EndpointSet` is a typed request/response model and a
+        // socket has no shape in it. It sits on `/api/streams/{id}/observe`,
+        // beside the stream endpoints rather than under `/admin`, because it is
+        // the same resource the CRUD endpoints address — and axum matches this
+        // literal route ahead of the `dispatch` fallback the rest of `/api`
+        // goes through.
+        .route(STREAM_OBSERVE_ROUTE, axum::routing::get(stream_observe))
         // The administration MCP server (§13.6). A real route rather than a
         // typed endpoint for the reason the upload and backup routes are:
         // JSON-RPC over a raw body is not a shape `TypeSchema` describes.
@@ -577,6 +587,55 @@ async fn agent_chat(
         user,
     )
     .await
+}
+
+/// A stream's Observe socket (TODO "Streams" §9, task 6.3): admin-only, one
+/// subscription per connection.
+///
+/// The auth story is the chat socket's and the language server's, word for
+/// word, and the reason to repeat it rather than share it is that it is the one
+/// refusal that has to be an HTTP **status**: a browser cannot read the body of
+/// a failed WebSocket handshake, so everything decided after the upgrade — no
+/// stream support, no such stream, not running here — is a close frame instead
+/// (see [`crate::observe`]). The session cookie is `SameSite=Strict`, so a
+/// cross-site page's socket carries no session and lands on the rejection
+/// below.
+async fn stream_observe(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    AxumPath(id): AxumPath<String>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    let user = match session_user(&state, &jar).await {
+        Ok(user) => user,
+        Err(response) => return *response,
+    };
+    if let Some(rejection) = enforce_auth(&AuthRequirement::admin(), user.as_ref()) {
+        return rejection;
+    }
+    // A path segment that is not a uuid is answered with a status rather than
+    // an upgrade: there is no stream it could be, and the handshake has not
+    // happened yet, so this is still a request whose body can be read.
+    let Ok(id) = id.parse::<uuid::Uuid>() else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "the stream id in the path is not a uuid",
+        );
+    };
+    stream_observe_upgrade(
+        ws,
+        state.apps.streams().map(sc_server_stream_supervisor),
+        sc_stream::StreamId(id),
+    )
+    .await
+}
+
+/// The supervisor inside a server's stream services — a named function rather
+/// than a closure so the `Option::map` above reads as what it is.
+fn sc_server_stream_supervisor(
+    services: &crate::StreamServices,
+) -> &std::sync::Arc<sc_stream::StreamSupervisor> {
+    services.supervisor()
 }
 
 /// Group endpoints by path pattern and insert them into a `matchit` router.

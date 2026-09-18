@@ -447,21 +447,21 @@ whose `element_type` cannot be read supplies nothing and the issue stays on the 
 
 ## Phase 6 — Admin API and the observe socket
 
-- [ ] 6.1 `sc-api/src/admin.rs`: `listStreamProviders` (each provider's `config_spec`, and
+- [x] 6.1 `sc-api/src/admin.rs`: `listStreamProviders` (each provider's `config_spec`, and
       `element_type` resolved against a `?configuration=` when one is given — `listModelProviders`'
       arrangement, for its reason), `listStreams`, `getStream`, `saveStream`, `deleteStream`,
       `streamStatus`. The empty-provider-list case is an object with a sentence, not a bare
       array.
-- [ ] 6.2 Handlers in `sc-server/src/handlers.rs`, with the `*_json` / `*_from_body` pair every
+- [x] 6.2 Handlers in `sc-server/src/handlers.rs`, with the `*_json` / `*_from_body` pair every
       backup-able record has. Save and delete call the supervisor's `reload` afterwards, so the
       flow follows the row without a restart.
-- [ ] 6.3 `GET /api/streams/{id}/observe` in `router.rs`: admin-only, decided before the upgrade
+- [x] 6.3 `GET /api/streams/{id}/observe` in `router.rs`: admin-only, decided before the upgrade
       and refused with a status (the chat socket's rule, cited); then `ready` (element type +
       status), the ring replay, `element`, `lagged` and `status` frames. The ring buffer (last
       100) lives on the running stream.
-- [ ] 6.4 The trigger endpoints offer the stream list for a `stream` event's channel and refuse
+- [x] 6.4 The trigger endpoints offer the stream list for a `stream` event's channel and refuse
       an unknown name (§8).
-- [ ] 6.5 `sc-server/tests/streams_admin_api.rs`: CRUD, validation refusals, redaction of a
+- [x] 6.5 `sc-server/tests/streams_admin_api.rs`: CRUD, validation refusals, redaction of a
       secret in a read, the delete refusal with a trigger, and the socket (unauthenticated
       refused; authenticated gets `ready`, replay and live elements).
 

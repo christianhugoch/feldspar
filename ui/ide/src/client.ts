@@ -240,6 +240,14 @@ export type DeleteModelInstanceResponse = { deleted: boolean };
 export type ActivateModelInstanceResponse = { id: string; model: string; name: string; description: string; status: string; created: string; active: boolean; error?: string | null; hyperparameters: unknown; outcome?: unknown | null; metrics: unknown; rows?: unknown | null };
 export type PredictRowsRequest = { model?: string | null; instance?: string | null; rows?: Array<unknown> | null; filter?: string | null };
 export type PredictRowsResponse = { instance: string; outcome: unknown; predictions: Array<{ prediction: unknown; value: unknown; key?: string | null }> };
+export type ListStreamProvidersQuery = { provider?: string; configuration?: string };
+export type ListStreamProvidersResponse = { providers: Array<{ name: string; label: string; description: string; module?: string | null; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; element_type?: unknown | null; element_type_error?: string | null }>; builtins_compiled_out: boolean; notice?: string | null };
+export type ListStreamsResponse = Array<{ id: string; name: string; description: string; provider: string; configuration: unknown; min_role?: number | null; attributes: unknown; enabled: boolean; element_type?: unknown | null; error?: string | null; status?: unknown | null; counters?: unknown | null }>;
+export type GetStreamResponse = { id: string; name: string; description: string; provider: string; configuration: unknown; min_role?: number | null; attributes: unknown; enabled: boolean; element_type?: unknown | null; error?: string | null; status?: unknown | null; counters?: unknown | null };
+export type SaveStreamRequest = { id?: string | null; name: string; description?: string | null; provider: string; configuration?: unknown | null; min_role?: number | null; attributes?: unknown | null; enabled?: boolean | null };
+export type SaveStreamResponse = { id: string; name: string; description: string; provider: string; configuration: unknown; min_role?: number | null; attributes: unknown; enabled: boolean; element_type?: unknown | null; error?: string | null; status?: unknown | null; counters?: unknown | null };
+export type DeleteStreamResponse = { deleted: boolean };
+export type StreamStatusResponse = { id: string; name: string; running: boolean; status?: unknown | null; counters?: unknown | null; element_type?: unknown | null; listeners: number };
 export type GetSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; help: string }> }>; values: unknown };
 export type UpdateSettingsRequest = { values: unknown };
 export type UpdateSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; help: string }> }>; values: unknown };
@@ -407,6 +415,12 @@ export interface ApiClient {
   deleteModelInstance(id: string): Promise<DeleteModelInstanceResponse>;
   activateModelInstance(id: string): Promise<ActivateModelInstanceResponse>;
   predictRows(body: PredictRowsRequest): Promise<PredictRowsResponse>;
+  listStreamProviders(query?: ListStreamProvidersQuery): Promise<ListStreamProvidersResponse>;
+  listStreams(): Promise<ListStreamsResponse>;
+  getStream(id: string): Promise<GetStreamResponse>;
+  saveStream(body: SaveStreamRequest): Promise<SaveStreamResponse>;
+  deleteStream(id: string): Promise<DeleteStreamResponse>;
+  streamStatus(id: string): Promise<StreamStatusResponse>;
   getSettings(): Promise<GetSettingsResponse>;
   updateSettings(body: UpdateSettingsRequest): Promise<UpdateSettingsResponse>;
   sendTestEmail(body: SendTestEmailRequest): Promise<SendTestEmailResponse>;
@@ -1769,6 +1783,59 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("predictRows", res);
       return (await res.json()) as PredictRowsResponse;
+    },
+    async listStreamProviders(query) {
+      const search = new URLSearchParams();
+      if (query?.provider !== undefined && query?.provider !== null) search.append("provider", String(query?.provider));
+      if (query?.configuration !== undefined && query?.configuration !== null) search.append("configuration", String(query?.configuration));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/stream-providers${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listStreamProviders", res);
+      return (await res.json()) as ListStreamProvidersResponse;
+    },
+    async listStreams() {
+      const res = await doFetch(`${baseUrl}/api/streams`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listStreams", res);
+      return (await res.json()) as ListStreamsResponse;
+    },
+    async getStream(id) {
+      const res = await doFetch(`${baseUrl}/api/streams/${id}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getStream", res);
+      return (await res.json()) as GetStreamResponse;
+    },
+    async saveStream(body) {
+      const res = await doFetch(`${baseUrl}/api/streams`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("saveStream", res);
+      return (await res.json()) as SaveStreamResponse;
+    },
+    async deleteStream(id) {
+      const res = await doFetch(`${baseUrl}/api/streams/${id}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteStream", res);
+      return (await res.json()) as DeleteStreamResponse;
+    },
+    async streamStatus(id) {
+      const res = await doFetch(`${baseUrl}/api/streams/${id}/status`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("streamStatus", res);
+      return (await res.json()) as StreamStatusResponse;
     },
     async getSettings() {
       const res = await doFetch(`${baseUrl}/api/settings`, {

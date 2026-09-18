@@ -133,6 +133,8 @@ mod schema_edit_api;
 mod settings_admin_api;
 #[path = "stream_triggers.rs"]
 mod stream_triggers;
+#[path = "streams_admin_api.rs"]
+mod streams_admin_api;
 #[path = "table_access_enforcement.rs"]
 mod table_access_enforcement;
 #[path = "table_csv_api.rs"]

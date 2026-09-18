@@ -2,6 +2,91 @@
 
 Changes in reverse chronological order.
 
+## The stream admin API, and the Observe socket
+
+Phase 6 of the streams milestone (tasks 6.1–6.5). Phase 5 made an element fire a trigger; this is
+what makes a stream a thing an **admin** can create, watch and take away — six typed endpoints and
+one WebSocket, which between them are everything the Streams screens (Phase 7) will be drawn on.
+
+- **Six endpoints, not five.** `listStreamProviders`, `listStreams`, `getStream`, `saveStream` and
+  `deleteStream` are the model screens' set word for word — including `saveStream` being one
+  endpoint for create and replace, with the id in the body saying which, because the form always
+  sends the whole definition and two endpoints would be one behaviour under two names. The sixth,
+  `streamStatus`, is the one a flow needs that a row does not: a stream's current state is held in
+  memory by the supervisor and is deliberately not a column (§6), so it cannot be read back from
+  the row at all.
+
+- **`?configuration=` is what turns a declaration into an answer.** `listStreamProviders` resolves
+  `element_type` against the settings filled in so far, exactly as `listModelProviders` resolves
+  `outcome` against a dataset, and for the identical reason: the element type is a **function of
+  the configuration** (§3), so MQTT with `payload = json` and four declared keys answers something
+  different from the same provider with `payload = text`. A configuration that is incoherent comes
+  back as `element_type_error` beside every other provider's answer rather than as a failed
+  request — "`json` with no declared keys" is what the form is waiting to be told, not an outage.
+
+- **Every write ends in a `reload`.** That is the one way these endpoints differ from every other
+  record's: the live set here is a set of *connections*, so a save does not just refresh a
+  registry, it drops and remakes broker sessions. A stream saved enabled is subscribed by the time
+  the response is written, and one whose broker moved has dropped the old session — the flow
+  follows the row without a restart. A reload that fails is reported rather than returned, because
+  the row was stored either way and a stream that will not connect is `failed` with its reason, not
+  a save that did not happen.
+
+- **`element_type` is computed on every read, never stored** (§5). A copy in the row would be a
+  second answer that drifts the day a provider's declaration changes — and the drift would be
+  invisible, because the stored copy is what the Observe screen and the generated client would read
+  while the live decoder used the other one. A stream whose provider was uninstalled has no element
+  type and carries the reason in `error`, and is **still listed and still editable**, because
+  editing it is the repair.
+
+- **A password is masked on the way out and merged back on the way in** (§2.3). `saveStream` reads
+  the stored row before it writes, so a sentinel the form was handed resolves to what is behind it
+  — which is the one thing a redaction scheme can get wrong in a way nobody notices until the
+  broker stops accepting the connection. There is a test that asks the *store* directly, because
+  the API deliberately cannot answer it.
+
+- **The delete's refusal is handed its referents.** `deleteStream` collects the triggers whose
+  channel is this stream and passes them to `delete_stream`, the arrangement `delete_llm_model`
+  already has with the agents that name a model: `sc-stream` sits below `sc-action` and cannot ask.
+
+- **A trigger cannot name a stream that does not exist** (task 6.4). `sc-action` validates that a
+  stream event's channel is present and non-empty and stops there, because it cannot resolve a name
+  without a dependency it should not have; `createTrigger` and `updateTrigger` are the other half,
+  and they refuse an unknown name **listing the streams there are** — "no stream named `boiler`"
+  with a typo in it and "…because you have not created one yet" are different problems, and the
+  list is what tells them apart. Every other event kind passes straight through, including on a
+  server with no stream support installed.
+
+- **`GET /api/streams/{id}/observe`: the Observe socket.** A real axum route beside the endpoint
+  set, not in it, for the reason the language server's and the admin chat's are — an `EndpointSet`
+  is a typed request/response model and a socket has no shape in it, and an upgrade cannot survive
+  the fallback's `Bytes` body. Admin-only, **decided before the upgrade** and refused with a status,
+  because a browser cannot read the body of a failed handshake; everything decided afterwards (no
+  stream support, no such stream, not running here) is a close frame with a reason instead.
+
+- **Nothing comes in, and the replay says how much of it is history.** The client only reads: a
+  Pause button is client-side, because pausing the server would mean either dropping elements or
+  queueing them and §7 says which of those a stream does. The socket sends `ready` (the element
+  type, the status, the counters and `replayed`), then the ring — the last hundred envelopes *this
+  process* saw, so a screen opened on a stream that publishes twice an hour is not blank — then
+  `element` per element, `lagged` when this socket falls behind, and `status` when the supervisor's
+  has moved. The replay and the subscription are taken together under one lock, so the tail is
+  neither gapped nor doubled.
+
+- **A lagging socket is told, never shown a silent gap** (§7). `RecvError::Lagged(n)` becomes
+  `{"type":"lagged","dropped":n}` and the socket carries on from the oldest element still buffered.
+  A stream that *fails* closes nothing: it is a `status` frame on an open socket, because the
+  supervisor is going to reconnect and the screen should be there when it does.
+
+- **Tests** (`crates/sc-server/tests/streams_admin_api.rs`): the lifecycle over HTTP with the save
+  proving the supervisor reloaded, the refusals (a name that is not an identifier, an unregistered
+  provider, a `min_role` off the scale, an undeclared setting, a duplicate name), the secret
+  surviving an edit that did not retype it, the delete refused while a trigger listens, a trigger
+  refused for naming a stream that does not exist, and the socket — unauthenticated refused with a
+  status before the upgrade, an admin getting `ready`, the replay and then live elements, and a
+  stream that is not running closed with a reason. No broker: the provider is
+  `sc_stream::testing::ScriptedProvider` behind the production seam.
+
 ## Triggers on streams: an element becomes an event
 
 Phase 5 of the streams milestone (tasks 5.1–5.5). Everything so far made a stream *run*; this
