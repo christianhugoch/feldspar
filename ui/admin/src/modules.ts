@@ -249,6 +249,7 @@ export function moduleStatus(module: Module): {
   const actions = module.actions.length;
   const providers = module.table_providers.length;
   const models = module.model_providers.length;
+  const streams = module.stream_providers.length;
   const patterns = module.view_patterns.length;
   if (actions > 0) parts.push(actions === 1 ? "1 action" : `${actions} actions`);
   if (providers > 0) {
@@ -256,6 +257,9 @@ export function moduleStatus(module: Module): {
   }
   if (models > 0) {
     parts.push(models === 1 ? "1 model provider" : `${models} model providers`);
+  }
+  if (streams > 0) {
+    parts.push(streams === 1 ? "1 stream provider" : `${streams} stream providers`);
   }
   if (patterns > 0) {
     parts.push(patterns === 1 ? "1 view pattern" : `${patterns} view patterns`);
@@ -278,6 +282,7 @@ export function suppliedSummary(module: Module): string {
     [module.functions.length, "function", "functions"],
     [module.table_providers.length, "table provider", "table providers"],
     [module.model_providers.length, "model provider", "model providers"],
+    [module.stream_providers.length, "stream provider", "stream providers"],
     [module.view_patterns.length, "view pattern", "view patterns"],
   ];
   const parts = counts

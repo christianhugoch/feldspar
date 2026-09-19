@@ -514,16 +514,16 @@ whose `element_type` cannot be read supplies nothing and the issue stays on the 
 
 ## Phase 10 — Documentation
 
-- [ ] 10.1 `docs/TECHNICAL_DESIGN.md`: a new **§14.3 Streams** beside models and files (the
+- [x] 10.1 `docs/TECHNICAL_DESIGN.md`: a new **§14.3 Streams** beside models and files (the
       entity, the provider seam, the element type, the supervisor, delivery and the no-blocking
       rule, MQTT, module providers, and the one-process limitation), the `_fd_streams` row in
       §9's table, the entity in §9.2's relationships, `StreamProvider` in §2.1's extension-point
       table, `sc-stream` in §2's crate tree, `EventKind::Stream` in §10.2, the app socket in
       §13.2, and the crate's layer in §3.
-- [ ] 10.2 `docs/tutorial-streams.md`: create an MQTT stream, observe it, fire a trigger that
+- [x] 10.2 `docs/tutorial-streams.md`: create an MQTT stream, observe it, fire a trigger that
       stores an element, expose it to an application and read it from the client — with the
       mosquitto recipe (4.5) and the honest note about two servers subscribing twice.
-- [ ] 10.3 The CHANGELOG entry for the milestone, and a walk of the definition of done against a
+- [x] 10.3 The CHANGELOG entry for the milestone, and a walk of the definition of done against a
       real broker recorded there (the parts `cargo test` cannot assert).
 
 ---
@@ -551,6 +551,10 @@ whose `element_type` cannot be read supplies nothing and the issue stays on the 
 
 ## Carried past this milestone
 
+- From this milestone: the live-broker half of the definition of done (10.3). It needs a real
+  MQTT broker, which this machine has not got; `docs/tutorial-streams.md` is the script, and what
+  is unwalked is a publish arriving through `rumqttc`, a retained message on connect, and the
+  status moving `running → failed → running` across a broker restart.
 - From TODO-post-mvp-26: the two items `cargo test` cannot do — running the agent eval against a
   real provider (11.4) and walking the agent milestone's definition of done by hand (12.3). Both
   need an API key and spend money; `docs/AGENT_EVAL.md` has the command and the heading the

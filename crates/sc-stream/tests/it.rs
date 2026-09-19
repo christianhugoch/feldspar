@@ -21,3 +21,6 @@ mod supervisor;
 
 #[path = "supervisor_reload.rs"]
 mod supervisor_reload;
+
+#[path = "docs_streams.rs"]
+mod docs_streams;

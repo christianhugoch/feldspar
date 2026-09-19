@@ -88,6 +88,7 @@ function module_(overrides: Partial<Module> = {}): Module {
     functions: [],
     table_providers: [],
     model_providers: [],
+    stream_providers: [],
     view_patterns: [],
     unsupported: [],
     issues: [],
@@ -331,6 +332,17 @@ describe("how an installed module reads", () => {
     expect(
       suppliedSummary(module_({ actions: [], model_providers: ["sklearn_ridge"] })),
     ).toBe("1 model provider");
+  });
+
+  it("counts the stream providers it supplies", () => {
+    // `plugins/rss` is one polled feed and nothing else, and the tab is where
+    // an admin finds out that installing it got them a longer list on the
+    // stream form.
+    const rss = module_({ actions: [], stream_providers: ["rss_feed"] });
+    expect(moduleStatus(rss)).toEqual({ label: "1 stream provider", tone: "green" });
+    expect(
+      suppliedSummary(module_({ actions: [], stream_providers: ["rss_feed", "atom_feed"] })),
+    ).toBe("2 stream providers");
   });
 
   it("counts the view patterns it supplies", () => {

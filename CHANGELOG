@@ -2,6 +2,84 @@
 
 Changes in reverse chronological order.
 
+## Streams, documented — and the milestone walked against its definition of done
+
+Phase 10 of the streams milestone (tasks 10.1–10.3). The entity was built over the nine phases
+below this entry; this is the part that makes it findable by somebody who did not build it, and
+the part that says out loud which of the definition of done a test can assert and which a human
+has to.
+
+- **`docs/TECHNICAL_DESIGN.md` §14.3 Streams**, beside files (§14.1) and models (§14.2), because
+  a stream is the third thing an admin creates that is not a table. It carries the entity and
+  GOALS' two paragraphs it comes from, the provider seam with its three echoes of `ModelProvider`
+  and its one difference (`subscribe` returns a `Drop`-stops handle rather than blocking), the
+  element type and the envelope as a wire contract, `_fd_streams` and the negative that matters
+  (`element_type` is **not** a column, and there is no `_fd_stream_elements`), the supervisor's
+  status/backoff/reload rules, delivery and the no-blocking rule with its numbers, MQTT, module
+  providers and why they poll, the API and the three screens, and the one-process limitation with
+  the `$share/` escape hatch.
+- **The rest of the document moved with it**, which is most of the work: `sc-stream` in §2's crate
+  tree, its arrows in the dependency graph and its row in the direct-dependency table (and the
+  `sc-app`, `sc-module` and `sc-server` rows that gained it), `StreamProvider` in §2.1's
+  extension-point table, the crate in §3's layer picture, `_fd_streams` in §9's table and in
+  §9.2's ER diagram with its three by-name relationships, a new §10.2 subsection for
+  `EventKind::Stream` (including why `sc-action` validates `channel` only as far as "present and
+  non-empty"), and the application socket in §13.2 beside the endpoint set.
+- **`docs/tutorial-streams.md` is now the whole walkthrough** rather than the broker recipe alone:
+  the mosquitto container, the stream on the Streams screen, Observe with a malformed payload and
+  a lagged notice, a trigger whose `only_if` reads `payload.value.temperature` and whose
+  `insert_row` stores `payload.source.topic`, exposing it to an application and reading it from
+  the generated `observeStream_boiler`, and stopping the broker to watch the backoff. The honest
+  notes stayed where they were: one process subscribes once, elements are not stored, TLS verifies
+  and has no switch that does not.
+- **The documents are pinned to the code** (`crates/sc-stream/tests/docs_streams.rs`, seven tests
+  in the crate's one test binary): every MQTT setting the tutorial's table tells a reader to fill
+  in is a label the provider still declares, the three payload kinds and two ports are named in
+  both documents, §14.3 names `_fd_streams` and each of its columns and still refuses the column
+  it must not have, the delivery defaults in the prose are `StreamConfig::default()`'s, both
+  envelopes have all four fields, and the names a reader *types* — `payload.value.temperature`,
+  `observeStream_boiler`, `$share/feldspar/…` — are still there. `docs_agents.rs`'s arrangement,
+  for its reason: prose is not checked, names and numbers are.
+
+### The definition of done, walked
+
+> An admin creates a stream from the built-in MQTT provider, fills in the broker and a topic
+> filter, and the stream's Observe screen shows elements arriving live with their declared shape.
+> A trigger with `when = stream` on that stream fires once per element and inserts a row. An
+> application exposes the stream and its generated client observes it over an authenticated
+> WebSocket, with the element type in its TypeScript. Saving a stream starts it, disabling it
+> stops it, and a broker that goes away is reconnected to without a restart. The same scenario —
+> minus the broker — passes in `cargo test` against a scripted provider.
+
+The last sentence is the one a machine can answer, and it does. Against the scripted provider:
+elements reach a consumer and the Observe socket (`streams_admin_api::the_observe_socket_is_admin_only_and_replays_before_it_tails`,
+`supervisor::a_screen_opened_on_a_slow_stream_replays_what_it_missed_and_then_continues`); a
+stream event fires a trigger that inserts a row (`stream_triggers::an_element_fires_a_trigger_that_inserts_a_row`);
+an exposed stream is observed over the app's own socket and an unexposed one is not
+(`app_streams::*`, including the emitted TypeScript per element type); saving starts and disabling
+stops (`supervisor::disabling_a_stream_hangs_up_and_re_enabling_it_connects_again`,
+`a_changed_configuration_restarts_and_an_unchanged_one_does_not`); and a subscription that goes
+away is retried with a capped backoff (`a_failing_subscribe_backs_off_and_the_third_attempt_is_the_one_that_connects`,
+`a_subscription_that_ends_is_restarted`, `the_backoff_is_capped_at_a_minute_however_long_the_outage_is`).
+`cargo test -p sc-stream` is 86 unit tests and 42 integration tests green; the streams tests in
+`sc-server` are 20 green.
+
+**The broker half has not been walked, and this entry does not pretend otherwise.** It needs a
+real MQTT broker, and this machine has neither `mosquitto` nor a usable Docker socket
+(`permission denied … /var/run/docker.sock`), so what a live broker asserts — that `rumqttc`
+connects, subscribes at the chosen QoS and delivers a publish; that a retained message arrives on
+connect; that killing the broker moves the status to `failed` and restarting it returns to
+`running` without touching the row — is unwalked here. `docs/tutorial-streams.md` is the script
+for it, step by step and with the exact `mosquitto_pub` lines, and it is carried below with the
+other two items `cargo test` cannot do.
+
+**One thing the walk found on the way past.** The admin SPA's `Module` type gained
+`stream_providers` in phase 9 and nothing read it: `ui/admin/src/modules.test.ts` no longer
+compiled (a fixture missing the new key), so the whole `sc-cli` build script failed. The module
+card now counts stream providers beside table, model and view providers — which is where an admin
+finds out that installing `plugins/rss` got them a longer list on the stream form — with a test
+for both summaries.
+
 ## A memory budget for the test run
 
 `cargo test --workspace` had drifted back into taking the machine with it: a full workspace rebuild
