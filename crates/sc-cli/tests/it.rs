@@ -39,3 +39,5 @@ mod serve;
 mod setup_host;
 #[path = "sqlite_primary.rs"]
 mod sqlite_primary;
+#[path = "whale_ci.rs"]
+mod whale_ci;

@@ -1362,6 +1362,25 @@ as CI does, to use Postgres's own `template1`; set it on a machine whose
 See [`docs/TECHNICAL_DESIGN.md`](docs/TECHNICAL_DESIGN.md) §16 for the testing
 approach.
 
+### The same checks in containers
+
+[`whale-ci.yml`](whale-ci.yml) runs the whole thing under
+[whale-ci](https://github.com/saltcorn/whale-ci) — one Rust image
+(`deploy/whale-ci/Dockerfile.build`) with the C-side build requirements of §3 already
+installed and every test binary already linked, one Node image
+(`deploy/whale-ci/Dockerfile.ui`) for the front ends, and a Postgres beside each test
+step:
+
+```bash
+npx whale-ci whale-ci.yml            # everything
+npx whale-ci whale-ci.yml test       # one step, and what it depends on
+```
+
+The steps that need the network are separate ones (`python`, `network_tests`, `ui`),
+because a test here that reaches the npm registry, PyPI or a broker is `#[ignore]`d or
+behind an environment variable — so an outage at a registry cannot change the verdict
+on the commit's own code.
+
 ### Build resource use
 
 A static V8 (`deno_core`, behind `sc-expr`'s `eval` feature) is linked into

@@ -1,0 +1,105 @@
+# syntax=docker/dockerfile:1.7
+#
+# The image every Rust step of `whale-ci.yml` runs in.
+#
+# It is built once per pipeline and then reused — `image: build` in the YAML —
+# so the expensive part of a Feldspar CI run happens here, in a layer, rather
+# than once per test step: the dependency tree is compiled and **every test
+# binary is linked** (`cargo test --no-run`). A step that follows only has its
+# own tests left to run.
+#
+# What is installed, and why it cannot be left out:
+#
+#   clang / libclang-dev   bindgen, reached through `deno_runtime` →
+#                          `rusqlite`'s session feature. Build time only, but
+#                          without it nothing that links `sc-module`'s
+#                          `deno-host` feature compiles at all (README §3).
+#   cmake / ninja / C      `aws-lc-sys` and `rusqlite`'s bundled amalgamation.
+#   zlib1g-dev             `libz-sys`, via `deno_node`.
+#   python3-dev + venv     `sc-python`'s embedded CPython (`--features
+#                          python-host`) and the environment tests, which build
+#                          a real venv and run `pip` in it.
+#   postgresql-client      the `psql` that creates the non-superuser role the
+#                          test harness connects as.
+#   node + npm             the module installer *is* npm: `sc-server`'s modules
+#                          API, the scaffold end-to-end tests and the bundled
+#                          JavaScript modules all skip without it.
+#   typescript             `sc-api`'s generated-client type-check test looks for
+#                          a `tsc` at `SC_TSC` and skips when there is none.
+
+ARG RUST_VERSION=1.97
+ARG DEBIAN_SUITE=bookworm
+
+FROM rust:${RUST_VERSION}-${DEBIAN_SUITE}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        clang \
+        libclang-dev \
+        cmake \
+        ninja-build \
+        pkg-config \
+        zlib1g-dev \
+        python3 \
+        python3-dev \
+        python3-venv \
+        python3-pip \
+        postgresql-client \
+        git \
+        curl \
+        xz-utils \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# The official `rust` image is a `--profile minimal` install, which carries
+# neither of the two components the lint steps are.
+RUN rustup component add rustfmt clippy
+
+# Node from nodejs.org rather than from Debian, for the reason
+# `scripts/static-build.Dockerfile` gives: a Debian stable's Node is whatever
+# that release froze, and both the scaffolded applications (Vite 5) and the
+# module runtime want something current. Pinned so an old commit rebuilds
+# against the toolchain it was written for.
+ARG NODE_VERSION=22.14.0
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) node_arch=x64 ;; \
+        arm64) node_arch=arm64 ;; \
+        *) echo "unsupported build architecture $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" \
+        | tar -xJ -C /usr/local --strip-components=1 --exclude CHANGELOG.md --exclude README.md --exclude LICENSE; \
+    npm install -g "typescript@5.9.3"
+
+# `sc-api`'s type-check test resolves its compiler here first (it otherwise
+# looks for a `node_modules/.bin/tsc` under the crate, which a Rust-only image
+# has no reason to carry).
+ENV SC_TSC=/usr/local/bin/tsc
+
+# Debug info is the bulk of a test binary and CI has no use for it: a failing
+# assertion still prints a backtrace with symbol names, just without line
+# numbers. Incremental output is the same trade and buys nothing for a build
+# that happens exactly once.
+ENV CARGO_TERM_COLOR=always \
+    CARGO_INCREMENTAL=0 \
+    CARGO_PROFILE_DEV_DEBUG=0 \
+    RUST_BACKTRACE=1
+
+# `sc-cli`'s build script builds the four front ends by default. They are built
+# — and type-checked, and unit-tested — in `Dockerfile.ui` instead, by a step
+# that has a Node image and no Rust; building them here would put ~1 GB of npm
+# packages (monaco alone) into the image that the Rust steps run in, for output
+# no Rust test reads.
+ENV SC_BUILD_ADMIN=0
+
+WORKDIR /opt/feldspar
+COPY . /opt/feldspar
+
+# Link every test binary now, so each test step only runs its tests. `--locked`
+# because a CI run that quietly resolves a different dependency graph than the
+# checked-in lockfile is not testing the commit.
+#
+# `-j 4` for the reason `.cargo/config.toml` already caps it at four: every test
+# binary statically links V8, and a dozen of those linking at once is measured
+# in gigabytes. The cap is repeated here because the docker builder is usually
+# the machine's whole core count.
+RUN cargo test --workspace --all-targets --locked --no-run -j 4

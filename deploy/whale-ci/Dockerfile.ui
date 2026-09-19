@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+#
+# The image the front-end step of `whale-ci.yml` runs in: Node, the four front
+# ends' installed dependency trees, and the repository.
+#
+# It is a separate image from `Dockerfile.build` on purpose. These packages are
+# large — `ui/ide` alone is ~1 GB of monaco — and no Rust test reads them, so
+# putting them in the image every Rust step runs in would be gigabytes carried
+# through the pipeline for one step's benefit. The split is the same one
+# `SC_BUILD_ADMIN=0` makes in the Rust image.
+#
+# The dependencies are installed here rather than in the step's `command` for
+# two reasons: a failure to install is then a *build* failure, reported before
+# any test runs; and the manifests are copied in before the source is, so a
+# commit that changes only `.tsx` files reuses the installed trees instead of
+# refetching them.
+
+ARG NODE_VERSION=22.14.0
+
+FROM node:${NODE_VERSION}-bookworm-slim
+
+WORKDIR /opt/feldspar
+
+# The manifests first, one `COPY` + `npm install` per front end, so a change to
+# one front end's dependencies does not reinstall the other three.
+#
+# `npm install` rather than `npm ci`: these lockfiles are the working tree's,
+# and CI must not fail a commit because a lockfile is a revision behind its
+# `package.json` while the code under test is fine. What is checked here is that
+# the front ends type-check and their unit tests pass, not that a lockfile is
+# exact.
+COPY ui/admin/package.json ui/admin/package-lock.json ui/admin/
+RUN npm install --prefix ui/admin
+
+COPY ui/ide/package.json ui/ide/package-lock.json ui/ide/
+RUN npm install --prefix ui/ide
+
+COPY ui/builder/package.json ui/builder/package-lock.json ui/builder/
+RUN npm install --prefix ui/builder
+
+COPY ui/saltcorn-ui/package.json ui/saltcorn-ui/package-lock.json ui/saltcorn-ui/
+RUN npm install --prefix ui/saltcorn-ui
+
+COPY . /opt/feldspar

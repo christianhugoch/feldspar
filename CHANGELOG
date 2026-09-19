@@ -2,6 +2,39 @@
 
 Changes in reverse chronological order.
 
+## A whale-ci pipeline, and the two images it runs in
+
+CI in containers, beside the GitHub workflow rather than in place of it: `whale-ci.yml` at the
+root, and the Dockerfiles it builds under `deploy/whale-ci/`. The shape follows Saltcorn 1's own
+pipeline — one image built, every other step run out of it with a database of its own beside it.
+
+- **`deploy/whale-ci/Dockerfile.build`** is the image every Rust step runs in, and it is where
+  the expensive part of a run happens: the C-side build requirements this workspace has acquired
+  (`libclang-dev` for bindgen through `deno_runtime`, `cmake` for `aws-lc-sys`, `zlib1g-dev` for
+  `libz-sys`, `python3-dev` and `python3-venv` for the embedded interpreter and its environment
+  tests, `psql`, a pinned Node and a global `tsc`), and then `cargo test --workspace --no-run`,
+  so a test step has only its tests left to run. `SC_BUILD_ADMIN=0`, because the front ends are
+  built in the other image; `-j 4` for the reason `.cargo/config.toml` already caps it there.
+- **`deploy/whale-ci/Dockerfile.ui`** is Node and the four front ends' installed trees, with the
+  manifests copied in ahead of the source so a `.tsx`-only commit reuses them. A separate image
+  because `ui/ide` alone is ~1 GB of monaco that no Rust test reads.
+- **The pipeline**: `fmt` and `clippy`; `test` (the whole workspace against a `postgres:16`
+  service, connecting as a **non-superuser** `sc_test` role created with psql — a superuser
+  bypasses row-level security and would make the RLS tests pass for the wrong reason); `python`
+  (`--features python-host`, plus its `#[ignore]`d bundled modules); `network_tests` (everything
+  `#[ignore]`d in the module layer, an `eclipse-mosquitto` broker behind `SC_TEST_MQTT_BROKER`,
+  and the two `SC_TEST_NPM` tests named one by one); and `ui` (type-check, vitest and the
+  bundles). The default suite reaches no network, so a registry outage fails only the steps that
+  opted in and leaves the verdict on the commit's own code intact.
+- **`crates/sc-cli/tests/whale_ci.rs`** guards the definition against drift without running
+  docker: every `dockerfile:` exists, every `depends:`/`image:` names a declared step, a step
+  that connects to a service depends on that service (whale-ci resolves step names as
+  hostnames), the opt-in variables it sets are still read by the files that gate on them, and
+  the two tests it runs by name still exist — a renamed test is a filter matching nothing, and
+  `cargo test` calls a run of zero tests a success.
+- Also: a stray blank line in `crates/sc-cli/tests/repo_hygiene.rs` that `cargo fmt --check` had
+  been failing on, which the new `fmt` step would have reported on the first run.
+
 ## Streams, documented — and the milestone walked against its definition of done
 
 Phase 10 of the streams milestone (tasks 10.1–10.3). The entity was built over the nine phases

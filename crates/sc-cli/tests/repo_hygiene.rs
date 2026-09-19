@@ -302,7 +302,6 @@ fn the_test_runner_sizes_itself_and_runs_guarded() {
     }
 }
 
-
 /// The markdown documents the documentation set consists of: the top-level
 /// entry points plus everything in `docs/`.
 fn documentation_files(root: &Path) -> Vec<PathBuf> {

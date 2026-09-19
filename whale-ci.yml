@@ -1,0 +1,187 @@
+# whale-ci pipeline for Saltcorn Feldspar.
+#
+#   npx whale-ci whale-ci.yml               # everything
+#   npx whale-ci whale-ci.yml test          # one step and what it depends on
+#
+# Shape of the run: one Rust image is built (`build`), every test binary in the
+# workspace linked inside it, and each Rust step then runs its tests out of that
+# image with a Postgres of its own beside it. The front ends are a second image
+# with Node and no Rust (`ui`), for the reason its Dockerfile gives.
+#
+# Which steps need the network, and why that is a decision rather than an
+# accident: the default suite reaches nothing, because this workspace's rule is
+# that a test that needs the npm registry, PyPI or a message broker is
+# `#[ignore]`d or gated behind an environment variable. `network_tests`,
+# `python` and `ui` are where those opt-ins are turned on — so a registry
+# outage fails those steps and leaves the verdict on the commit's own code
+# (`test`, `fmt`, `clippy`) intact.
+
+build:
+  dockerfile: ./deploy/whale-ci/Dockerfile.build
+
+# ---------------------------------------------------------------------------
+# Lints. Both are cheap to *run* and reuse the image the build already made.
+# ---------------------------------------------------------------------------
+
+fmt:
+  image: build
+  command: cargo fmt --all --check
+
+clippy:
+  image: build
+  # A full pass: clippy-driver keeps its own fingerprints, so this re-checks the
+  # tree rather than reading the build step's artifacts. `--all-targets` so the
+  # tests are linted too, and `-D warnings` because the workspace is clean and
+  # the way it stays clean is by failing here.
+  command: cargo clippy --workspace --all-targets -- -D warnings
+  timeout-minutes: 45
+
+# ---------------------------------------------------------------------------
+# The workspace suite, against a real Postgres (TECHNICAL_DESIGN §16).
+# ---------------------------------------------------------------------------
+
+test_db:
+  image: postgres:16
+  service: true
+  quiet: true
+  # The banner to wait for is the one the *second* start prints: the entrypoint
+  # boots once on a private socket to create `POSTGRES_DB`, so "ready to accept
+  # connections" appears before the server is listening on the network.
+  ready-on: CREATE DATABASE
+  environment:
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: feldspar_test
+
+test:
+  image: build
+  depends: test_db
+  delay: 1
+  command:
+    # **Not** `postgres`: that role is a superuser, and a superuser bypasses row
+    # level security even on a table with FORCE ROW LEVEL SECURITY — which would
+    # make the RLS tests pass for the wrong reason. `sc_test` gets the two
+    # things the harness needs and nothing else: log in, and create the
+    # per-test databases.
+    - psql -h test_db -U postgres -d feldspar_test -v ON_ERROR_STOP=1 --command="CREATE ROLE sc_test LOGIN CREATEDB PASSWORD 'sc_test'"
+    - nice -n 15 cargo test --workspace --all-targets --locked
+  environment:
+    PGPASSWORD: postgres
+    # The harness's first choice, ahead of any `feldspar.toml`. The named
+    # database is only the maintenance connection the per-test databases are
+    # created from; no test writes to it.
+    DATABASE_URL: postgres://sc_test:sc_test@test_db:5432/feldspar_test
+    CI: "true"
+  timeout-minutes: 60
+
+# ---------------------------------------------------------------------------
+# The Python adapter. Its own step because it is the one part of the workspace
+# behind a non-default feature: `python-host` embeds CPython through pyo3, and
+# the environment tests build a real venv and run `pip` in it (network).
+# ---------------------------------------------------------------------------
+
+python_db:
+  image: postgres:16
+  service: true
+  quiet: true
+  ready-on: CREATE DATABASE
+  environment:
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: feldspar_test
+
+python:
+  image: build
+  depends: python_db
+  delay: 1
+  command:
+    - psql -h python_db -U postgres -d feldspar_test -v ON_ERROR_STOP=1 --command="CREATE ROLE sc_test LOGIN CREATEDB PASSWORD 'sc_test'"
+    - nice -n 15 cargo test -p sc-python --features python-host --locked
+    # The bundled Python modules, which are `#[ignore]`d because installing them
+    # downloads markdown, and scikit-learn with scipy and numpy behind it.
+    - nice -n 15 cargo test -p sc-python --features python-host --locked -- --ignored
+  environment:
+    PGPASSWORD: postgres
+    DATABASE_URL: postgres://sc_test:sc_test@python_db:5432/feldspar_test
+    CI: "true"
+  timeout-minutes: 45
+
+# ---------------------------------------------------------------------------
+# The tests that reach the network: the npm registry, and a broker.
+# ---------------------------------------------------------------------------
+
+network_db:
+  image: postgres:16
+  service: true
+  quiet: true
+  ready-on: CREATE DATABASE
+  environment:
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: feldspar_test
+
+# A real MQTT broker for the one test that publishes to one through an installed
+# v1 plugin. `mosquitto-no-auth.conf` ships in the image and is what makes it
+# listen on 1883 without a password file.
+mqtt_broker:
+  image: eclipse-mosquitto:2
+  service: true
+  quiet: true
+  ready-on: "mosquitto version 2"
+  command: mosquitto -c /mosquitto-no-auth.conf
+
+network_tests:
+  image: build
+  depends:
+    - network_db
+    - mqtt_broker
+  delay: 1
+  command:
+    - psql -h network_db -U postgres -d feldspar_test -v ON_ERROR_STOP=1 --command="CREATE ROLE sc_test LOGIN CREATEDB PASSWORD 'sc_test'"
+    # Everything `#[ignore]`d in the module layer: installing a module from npm,
+    # the bundled RSS module, the Postgres and RSS table providers, and — with
+    # `SC_TEST_MQTT_BROKER` set — a v1 plugin opening a real socket from inside
+    # a Deno worker.
+    - nice -n 15 cargo test -p sc-module -p sc-server --locked -- --ignored
+    # The two that are gated by `SC_TEST_NPM` rather than by `#[ignore]`, named
+    # so the rest of their crates' suites are not run a second time. Both are
+    # the same class of check and the only one that catches it: a scaffolded
+    # application is **built** by its own toolchain, so a drift between what
+    # `sc-api` emits and what a generator calls fails to compile.
+    - nice -n 15 cargo test -p sc-app --locked a_scaffolded_app_installs_builds_and_serves_end_to_end
+    - nice -n 15 cargo test -p sc-module --locked the_bundled_vue_module_scaffolds_an_application_that_builds
+  environment:
+    PGPASSWORD: postgres
+    DATABASE_URL: postgres://sc_test:sc_test@network_db:5432/feldspar_test
+    SC_TEST_NPM: "1"
+    SC_TEST_MQTT_BROKER: mqtt://mqtt_broker:1883
+    CI: "true"
+  timeout-minutes: 45
+
+# ---------------------------------------------------------------------------
+# The front ends: type-checked against the generated client, and unit-tested.
+# ---------------------------------------------------------------------------
+
+ui:
+  dockerfile: ./deploy/whale-ci/Dockerfile.ui
+  command:
+    # `tsc --noEmit` over each SPA's own strict config. This is the check that
+    # a screen and the generated `client.ts` have not drifted apart — the same
+    # one `sc-server`'s `admin_spa_typecheck` runs when a checkout happens to
+    # have `node_modules`, which in the Rust image it deliberately does not.
+    - npm --prefix ui/admin run typecheck
+    - npm --prefix ui/admin test
+    - npm --prefix ui/ide run typecheck
+    - npm --prefix ui/ide test
+    - npm --prefix ui/builder run typecheck
+    - npm --prefix ui/builder test
+    # No type-check: the view runtime is vendored Saltcorn 1 JavaScript. That it
+    # still bundles is the check.
+    - npm --prefix ui/saltcorn-ui run build
+    # The bundles the shipped binary serves. Left until after the tests because
+    # it is the slowest part and the least likely to fail on its own.
+    - npm --prefix ui/admin run build
+    - npm --prefix ui/ide run build
+  environment:
+    CI: "true"
+  timeout-minutes: 30
