@@ -17,10 +17,17 @@
 //!
 //! It **vacates the serving cache** — every mounted app's bundle is re-read from
 //! its output directory — and reloads the definitions around it: the catalog
-//! (re-introspected, overlays and all) and every stored application row, which
-//! is what rebuilds the API providers, so a table added, a column added or a
-//! custom SQL query saved by another process is being served when the signal
-//! returns.
+//! (re-introspected, overlays and all), every stored application row, which is
+//! what rebuilds the API providers, and the **stream set**, so a table added, a
+//! column added, a custom SQL query saved or a stream defined by another
+//! process is being served when the signal returns.
+//!
+//! The streams are a **diff and not a restart** (`sc_stream`'s §6): a stream
+//! whose row is untouched keeps its broker session, and only one whose provider
+//! or configuration changed is stopped and started. That is what makes it safe
+//! to reload everything on every signal — an agent running `npm run build &&
+//! pkill -HUP feldspar` in a loop must not be hanging up on a broker each
+//! time.
 //!
 //! **It runs no bundler and no installer.** That is the whole point: the caller
 //! has just built, and re-running `npm install && npm run build` would be both
@@ -38,6 +45,11 @@
 //! here). Those are assembled once at boot and shared into the scheduler and the
 //! catalog's write path, so swapping them is a larger change than a reload — and
 //! each already has an admin API that updates the live set in place.
+//!
+//! The **streams** were on that list and are not any more (TODO "Streams" 5.4).
+//! They could come off it because a supervisor already knows how to diff: it is
+//! the one of these sets whose "update the live set in place" is a method rather
+//! than a restart, so reloading it here costs an untouched stream nothing.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -84,12 +96,23 @@ pub struct ReloadReport {
     pub catalog_error: Option<String>,
     /// Why the application rows could not be listed, if they could not.
     pub applications_error: Option<String>,
+    /// How long reloading the stream set took.
+    pub streams: Duration,
+    /// Whether the reload started, stopped or replaced any stream. `false` is
+    /// the ordinary case and the one worth having: it is how the log says "your
+    /// broker sessions were not touched".
+    pub streams_changed: bool,
+    /// Why the stream set could not be reloaded, if it could not.
+    pub streams_error: Option<String>,
 }
 
 impl ReloadReport {
     /// Whether anything went wrong.
     pub fn is_ok(&self) -> bool {
-        self.failed.is_empty() && self.catalog_error.is_none() && self.applications_error.is_none()
+        self.failed.is_empty()
+            && self.catalog_error.is_none()
+            && self.applications_error.is_none()
+            && self.streams_error.is_none()
     }
 
     /// Write the reload to the operator's console — one line per thing that
@@ -119,6 +142,11 @@ impl ReloadReport {
         for subdomain in &self.unmounted {
             eprintln!("feldspar: unmounted application `{subdomain}` — its row is gone");
         }
+        if let Some(e) = &self.streams_error {
+            eprintln!("feldspar: the streams could not be reloaded: {e}");
+        } else if self.streams_changed {
+            eprintln!("feldspar: reloaded the streams — the running set changed");
+        }
         for (subdomain, error) in &self.failed {
             eprintln!(
                 "feldspar: application `{subdomain}` could not be reloaded and is still \
@@ -126,7 +154,8 @@ impl ReloadReport {
             );
         }
         eprintln!(
-            "feldspar: reload complete in {} — catalog {}, {} application{} ({} asset{}) {}",
+            "feldspar: reload complete in {} — catalog {}, {} application{} ({} asset{}) {}, \
+             streams {}",
             ms(self.total),
             ms(self.catalog),
             self.reloaded.len(),
@@ -134,6 +163,7 @@ impl ReloadReport {
             self.assets,
             plural(self.assets),
             ms(self.applications),
+            ms(self.streams),
         );
     }
 }
@@ -180,6 +210,18 @@ pub async fn reload_all(apps: &AppMounts) -> ReloadReport {
         Err(e) => report.applications_error = Some(e.to_string()),
     }
     report.applications = phase.elapsed();
+
+    // The stream set (TODO "Streams" 5.4): a row added, disabled or reconfigured
+    // by another process takes effect here. A **diff**, so a stream nobody
+    // touched keeps its connection — see the module docs.
+    let phase = Instant::now();
+    if let Some(streams) = apps.streams() {
+        match streams.reload(&catalog).await {
+            Ok(changed) => report.streams_changed = changed,
+            Err(e) => report.streams_error = Some(e.to_string()),
+        }
+    }
+    report.streams = phase.elapsed();
 
     report.total = started.elapsed();
     report

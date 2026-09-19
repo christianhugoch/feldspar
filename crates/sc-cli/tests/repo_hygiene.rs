@@ -228,6 +228,81 @@ fn the_guarded_cargo_wrapper_caps_memory_and_falls_back() {
     }
 }
 
+/// The third layer, and the only one that applies without anyone remembering a
+/// flag: cargo's default parallelism is the core count, and this workspace's
+/// per-job memory is high enough that a 12-core desktop spends 6.6 GB on a
+/// workspace rebuild against 3.0 GB at `-j4`. The cap lives in
+/// `.cargo/config.toml` so a plain `cargo test` gets it too.
+#[test]
+fn the_cargo_config_caps_the_default_job_count() {
+    let root = workspace_root();
+    let cfg = read(&root, ".cargo/config.toml");
+
+    let jobs = cfg
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("jobs"))
+        .and_then(|rest| rest.trim_start().strip_prefix('='))
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .expect("`.cargo/config.toml` must set a [build] jobs cap");
+
+    assert!(
+        (1..=8).contains(&jobs),
+        "the job cap is {jobs}: high enough that the memory it exists to bound \
+         is back (a rebuild costs roughly 1.2 GB plus 0.45 GB a job), or low \
+         enough that it is throttling the build for no reason"
+    );
+    assert!(
+        cfg.contains("[build]"),
+        "the cap must be under [build], or cargo ignores it"
+    );
+}
+
+/// The entry point those layers are meant to be reached through: it sizes both
+/// phases from the memory actually free, and runs each of them through the
+/// guarded wrapper rather than calling cargo itself.
+#[test]
+fn the_test_runner_sizes_itself_and_runs_guarded() {
+    let root = workspace_root();
+    let script = read(&root, "scripts/test.sh");
+
+    assert!(
+        script.contains("MemAvailable"),
+        "the runner must size its budget from free memory, not from nproc"
+    );
+    assert!(
+        script.contains("cargo-guarded.sh"),
+        "the runner must go through the guarded wrapper, so an overrun can only \
+         take the test run"
+    );
+    for dial in ["--test-threads", "-j"] {
+        assert!(
+            script.contains(dial),
+            "the runner must cap {dial}, which is the phase it bounds"
+        );
+    }
+    // Both overrides are documented; a runner whose dials cannot be forced is
+    // one that gets abandoned the first time its arithmetic is wrong.
+    for var in ["SC_TEST_MEM", "SC_TEST_JOBS", "SC_TEST_THREADS"] {
+        assert!(script.contains(var), "{var} must remain an override");
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = root.join("scripts/test.sh");
+        let mode = fs::metadata(&path)
+            .unwrap_or_else(|e| panic!("{path:?}: {e}"))
+            .permissions()
+            .mode();
+        assert!(
+            mode & 0o111 != 0,
+            "scripts/test.sh must be executable (mode is {mode:o})"
+        );
+    }
+}
+
+
 /// The markdown documents the documentation set consists of: the top-level
 /// entry points plus everything in `docs/`.
 fn documentation_files(root: &Path) -> Vec<PathBuf> {

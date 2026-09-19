@@ -184,6 +184,23 @@ async fn every_way_a_trigger_can_be_wrong_is_refused_by_name() -> Result<()> {
             "needs a row to test",
         ),
         (
+            // A stream event with no stream. `sc-action` stops at "present and
+            // non-empty": resolving the name would need `sc-stream`, which is
+            // the dependency this crate does not have (§8).
+            Trigger::new("t", EventKind::Stream, "notify").config("message", "x"),
+            "must name the stream",
+        ),
+        (
+            // A stream element is not a row, so a row-shaped `only_if` is the
+            // unknown identifier it deserves rather than a null that reads as
+            // "no".
+            Trigger::new("t", EventKind::Stream, "notify")
+                .on("boiler")
+                .config("message", "x")
+                .only_if("row.pages > 1"),
+            "unknown identifier `row`",
+        ),
+        (
             Trigger::new("", EventKind::Login, "notify").config("message", "x"),
             "needs a name",
         ),
@@ -214,6 +231,16 @@ async fn every_way_a_trigger_can_be_wrong_is_refused_by_name() -> Result<()> {
         .unwrap()
         .to_string();
     assert!(msg.contains("between 1 and 100"), "{msg}");
+
+    // A stream trigger saves with a stream nothing here has heard of — this
+    // crate cannot resolve one — and its `only_if` reads the envelope through
+    // `payload` (§8).
+    let stream_trigger = Trigger::new("boiler_hot", EventKind::Stream, "notify")
+        .on("boiler")
+        .config("message", "hot")
+        .only_if("payload.value.temperature > 30");
+    save_trigger(&cat, &reg, &stream_trigger).await?;
+    sc_action::delete_trigger(&cat, stream_trigger.id).await?;
 
     // Two triggers cannot share a name.
     save_trigger(&cat, &reg, &books_trigger("dup")).await?;

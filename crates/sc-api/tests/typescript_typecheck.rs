@@ -163,6 +163,86 @@ export async function exercise(): Promise<void> {
 }
 "#;
 
+/// A usage module for an application that exposes three streams — one of each
+/// [`ElementType`](sc_stream::ElementType) shape (TODO "Streams" §10, task 8.3).
+///
+/// What it asserts is the whole point of typing a subscription from the element
+/// type: a declared key arrives as the type it was declared with, a text stream
+/// is a `string`, a binary one is base64 in a `string`, and a key nobody
+/// declared is a compile error rather than an `undefined` at three in the
+/// morning.
+const STREAM_USAGE_TS: &str = r#"
+import { createClient, type BoilerEnvelope, type StreamSubscription } from "./client";
+
+export function exercise(): void {
+  const api = createClient({ baseUrl: "https://blog.example.com" });
+
+  // A `json` element: the declared keys, each typed, `value` an object.
+  const boiler: StreamSubscription = api.observeStream_boiler({
+    ready(info) {
+      const replayed: number = info.replayed;
+      void replayed;
+    },
+    element(envelope: BoilerEnvelope) {
+      const temperature: number = envelope.value.temperature;
+      const label: string | null = envelope.value.label;
+      const seen: string = envelope.received_at;
+      void temperature; void label; void seen;
+    },
+    // §7 reaching the client: a consumer that cannot keep up is told.
+    lagged(dropped: number) {
+      void dropped;
+    },
+  });
+  boiler.close();
+
+  // A `text` element is a string, and a `binary` one is base64 in a string.
+  api.observeStream_syslog({ element: (e) => { const line: string = e.value; void line; } });
+  api.observeStream_frames({ element: (e) => { const b64: string = e.value; void b64; } });
+
+  // @ts-expect-error `pressure` is not a declared key of this element type
+  api.observeStream_boiler({ element: (e) => void e.value.pressure });
+  // @ts-expect-error a text element's value is a string, not an object
+  api.observeStream_syslog({ element: (e) => void e.value.line });
+}
+"#;
+
+#[test]
+fn generated_stream_client_type_checks() -> std::io::Result<()> {
+    use sc_api::{StreamExport, StructField, TypeSchema, ValueType};
+
+    let streams = vec![
+        StreamExport {
+            name: "boiler".to_owned(),
+            path: "/api/streams/boiler/observe".to_owned(),
+            value: TypeSchema::struct_of([
+                // Required: the key is always there, so it is not nullable.
+                StructField::new("temperature", TypeSchema::value(ValueType::Float)),
+                // Optional: a declared key that is absent is `null` (§4).
+                StructField::new(
+                    "label",
+                    TypeSchema::optional(TypeSchema::value(ValueType::Text)),
+                ),
+            ]),
+        },
+        StreamExport {
+            name: "syslog".to_owned(),
+            path: "/api/streams/syslog/observe".to_owned(),
+            value: TypeSchema::text(),
+        },
+        StreamExport {
+            name: "frames".to_owned(),
+            path: "/api/streams/frames/observe".to_owned(),
+            // Bytes travel as base64, which is a string on the wire.
+            value: TypeSchema::value(ValueType::Bytes),
+        },
+    ];
+    // An application with no API provider still exposes streams: the client is
+    // sockets and nothing else, and it has to compile.
+    let client_ts = sc_api::generate_client_with_streams(&sc_api::EndpointSet::new(), &streams);
+    type_check("streams", &client_ts, STREAM_USAGE_TS)
+}
+
 #[test]
 fn generated_query_parameter_client_type_checks() -> std::io::Result<()> {
     use sc_api::{Endpoint, EndpointSet, Method, PathSpec, QueryParam, TypeSchema, ValueType};

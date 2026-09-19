@@ -315,7 +315,11 @@ impl<'a> ActionContext<'a> {
     /// the step runs would be the worst of the two, so neither side gets to
     /// decide the scope for itself.
     pub fn shape(&self) -> Result<SchemaShape> {
-        let channel = self.event.channel.as_deref();
+        // The **table** channel: a stream event's channel names a stream, and
+        // a scope built by looking it up as a table would fail naming a table
+        // nobody mentioned. A stream trigger's action reads the envelope
+        // through `payload` in `EVENT_SCOPE`, which is what is left.
+        let channel = self.event.table_channel();
         match self.in_run {
             true => step_shape(self.catalog, channel),
             false => action_shape(self.catalog, channel),

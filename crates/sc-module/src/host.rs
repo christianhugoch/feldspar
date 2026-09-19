@@ -251,6 +251,48 @@ pub struct ModelProviderManifest {
     pub standardise: bool,
 }
 
+/// One **stream provider** a module supplies (TODO "Streams" §12).
+///
+/// A module exports `streamproviders` beside its `actions`, `table_providers`
+/// and `modelproviders`:
+///
+/// ```js
+/// streamproviders: {
+///   poll_feed: {
+///     description: "An RSS feed, polled",
+///     config_fields: [{ name: "url", type: "String", required: true },
+///                     { name: "interval_s", type: "Integer", default: 60 }],
+///     element_type: ({ configuration }) => ({ kind: "json", keys: [ … ] }),
+///     poll: async ({ configuration, cursor }) => ({ elements: [ … ], cursor: "…" }),
+///   },
+/// }
+/// ```
+///
+/// **Poll, not push**, and that is the one place a module provider is shaped
+/// differently from a Rust one: a module call is request/response on a Deno
+/// worker, there is no channel from a worker back into the host, and
+/// `sc_stream::PollingProvider` is what supplies the loop. What crosses here is
+/// only the **declaration** — the name, the description and the settings;
+/// `element_type` and `poll` stay in the worker and are reached again through
+/// [`ModuleHost::stream_element_type`] and [`ModuleHost::stream_poll`].
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct StreamProviderManifest {
+    /// The name it is registered and stored under — `poll_feed`. Shares one
+    /// namespace with the built-in providers and every other module's, so a
+    /// duplicate is refused by the registry naming both sources.
+    pub name: String,
+    /// One line for the provider picker.
+    #[serde(default)]
+    pub description: String,
+    /// What the picker calls it. Defaults to the name on this side.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Its settings, as v1 `configFields` — translated by [`crate::spec`],
+    /// never interpreted here.
+    #[serde(default)]
+    pub config_fields: Vec<Json>,
+}
+
 /// One **application framework** a module supplies (§13.3, §15.1).
 ///
 /// A module exports `frameworks` beside its `actions` and `table_providers`:
@@ -366,6 +408,10 @@ pub struct ModuleManifest {
     /// built-in regressions.
     #[serde(default)]
     pub model_providers: Vec<ModelProviderManifest>,
+    /// The stream providers it supplies (TODO "Streams" §12) — what the
+    /// Streams form offers beside the built-in MQTT one.
+    #[serde(default)]
+    pub stream_providers: Vec<StreamProviderManifest>,
     /// The application frameworks it supplies (§13.3) — what the application
     /// form offers beside `react` and `code`.
     #[serde(default)]
@@ -829,6 +875,61 @@ impl ModuleHost {
         #[cfg(not(feature = "deno-host"))]
         {
             let _ = (module, provider, state, frame);
+            Err(no_runtime())
+        }
+    }
+
+    /// The **element type** one of a module's stream providers declares for a
+    /// configuration (TODO "Streams" §12).
+    ///
+    /// A call rather than a value because GOALS makes the element type a
+    /// function of the configuration, and for a module that function is
+    /// JavaScript. `sc_stream::PollingProvider` is what asks, and what caches
+    /// the answer for the synchronous side of the provider trait.
+    pub async fn stream_element_type(
+        &self,
+        module: &str,
+        provider: &str,
+        configuration: &Json,
+    ) -> Result<Json> {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool
+                .stream_element_type(module, provider, configuration)
+                .await
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = (module, provider, configuration);
+            Err(no_runtime())
+        }
+    }
+
+    /// **Poll** one of a module's stream providers once.
+    ///
+    /// `cursor` is whatever the previous poll answered — opaque here and in
+    /// `sc-stream`; it is the module's own "where I got to". The answer is
+    /// `{ elements, cursor }`, read by `sc_stream::PollAnswer`.
+    ///
+    /// Routed like [`run`](ModuleHost::run), because `poll` is a closure the
+    /// module built at load time and a poll on another isolate would be a poll
+    /// against another copy of whatever the module set up.
+    pub async fn stream_poll(
+        &self,
+        module: &str,
+        provider: &str,
+        configuration: &Json,
+        cursor: &Json,
+    ) -> Result<Json> {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool
+                .stream_poll(module, provider, configuration, cursor)
+                .await
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = (module, provider, configuration, cursor);
             Err(no_runtime())
         }
     }

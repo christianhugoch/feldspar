@@ -200,3 +200,76 @@ export type Selected<S extends TableSchema, Sel extends string> = string extends
     ? S["row"]
     : Flatten<UnionToIntersection<ItemsOf<S, SplitItems<Sel>>>>;
 
+// --- observing a stream -----------------------------------------------------
+
+/** A live subscription to a stream's elements. `close()` stops it. */
+export interface StreamSubscription {
+  close(): void;
+}
+
+/** What the server says when the socket opens: the replay that follows, and the flow's state. */
+export interface StreamReady {
+  stream: string;
+  /** How many of the elements that follow are history, not new arrivals. */
+  replayed: number;
+  status: unknown;
+  counters: unknown;
+}
+
+/** What an observer is told. Only `element` is required. */
+export interface StreamHandlers<E> {
+  ready?(info: StreamReady): void;
+  element(envelope: E): void;
+  /** This client fell behind and lost `dropped` elements (it is never a silent gap). */
+  lagged?(dropped: number): void;
+  status?(status: unknown): void;
+  error?(error: unknown): void;
+  closed?(): void;
+}
+
+/** Open an observe socket on `path`, relative to the client's base URL. */
+export function openStream<E>(
+  baseUrl: string,
+  path: string,
+  handlers: StreamHandlers<E>,
+): StreamSubscription {
+  const origin = baseUrl || (typeof location === "undefined" ? "http://localhost" : location.origin);
+  const url = new URL(path, origin);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  const socket = new WebSocket(url.toString());
+  socket.onmessage = (event: MessageEvent) => {
+    let frame: unknown;
+    try {
+      frame = JSON.parse(String(event.data));
+    } catch {
+      return;
+    }
+    if (!frame || typeof frame !== "object") return;
+    const f = frame as Record<string, unknown>;
+    switch (f["type"]) {
+      case "ready":
+        handlers.ready?.(f as unknown as StreamReady);
+        break;
+      case "element":
+        handlers.element(f["envelope"] as E);
+        break;
+      case "lagged":
+        handlers.lagged?.(Number(f["dropped"] ?? 0));
+        break;
+      case "status":
+        handlers.status?.(f["status"]);
+        break;
+      default:
+        // A frame this client was generated before: ignored, never thrown on.
+        break;
+    }
+  };
+  socket.onerror = (event: Event) => handlers.error?.(event);
+  socket.onclose = () => handlers.closed?.();
+  return {
+    close() {
+      socket.close();
+    },
+  };
+}
+

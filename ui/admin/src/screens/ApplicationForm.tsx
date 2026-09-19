@@ -30,6 +30,7 @@ import type {
   ListApplicationsResponse,
   ListFileStoresResponse,
   ListFrameworksResponse,
+  ListStreamsResponse,
   ListTablesResponse,
   ListTriggersResponse,
 } from "../client";
@@ -54,6 +55,7 @@ import { appTabs, settingsOnOwnTab } from "../views";
 type FrameworkInfo = ListFrameworksResponse[number];
 type AppItem = ListApplicationsResponse[number];
 type TriggerItem = ListTriggersResponse[number];
+type StreamItem = ListStreamsResponse[number];
 type ApiProviderInfo = ListApiProvidersResponse[number];
 type TableItem = ListTablesResponse[number];
 type FileStoreItem = ListFileStoresResponse[number];
@@ -102,6 +104,9 @@ export function ApplicationForm({
   // for the same reason, and were the last two subsets an admin had to type from
   // memory as a comma-separated list.
   const [allTriggers, setAllTriggers] = useState<TriggerItem[]>([]);
+  // …and the server's streams, for the same reason and with the same rule: a
+  // stream is reachable from outside only because an app named it.
+  const [allStreams, setAllStreams] = useState<StreamItem[]>([]);
   const [allTables, setAllTables] = useState<TableItem[]>([]);
   const [allFileStores, setAllFileStores] = useState<FileStoreItem[]>([]);
   // The API providers this server registers, for the same reason: a provider name
@@ -123,6 +128,7 @@ export function ApplicationForm({
   const [tables, setTables] = useState<string[]>([]);
   const [fileStores, setFileStores] = useState<string[]>([]);
   const [triggers, setTriggers] = useState<string[]>([]);
+  const [streams, setStreams] = useState<string[]>([]);
   // A new application starts with REST at `/api`. An app with no API has no
   // endpoints, which for a React app means a generated client with no methods and
   // a project that cannot compile — and for any app means a UI that cannot reach
@@ -145,6 +151,10 @@ export function ApplicationForm({
         // applications: the picker is simply empty, and an app that already
         // names a trigger keeps naming it.
         const trigs = await api.listTriggers().catch(() => [] as TriggerItem[]);
+        // A server built without stream support answers this with an error, and
+        // the picker is simply empty: an app that already names a stream keeps
+        // naming it.
+        const strms = await api.listStreams().catch(() => [] as StreamItem[]);
         // Likewise: a server that cannot list its providers still edits
         // applications, with the provider box falling back to free text.
         const provs = await api
@@ -168,6 +178,7 @@ export function ApplicationForm({
         if (cancelled) return;
         setFrameworks(fws);
         setAllTriggers(trigs);
+        setAllStreams(strms);
         setAllProviders(provs);
         setAllTables(tbls);
         setAllFileStores(stores);
@@ -181,6 +192,7 @@ export function ApplicationForm({
           setTables(existing.tables);
           setFileStores(existing.file_stores);
           setTriggers(existing.triggers);
+          setStreams(existing.streams);
           setApis(apiRowsFromApp(existing.apis));
           setStaticDirs(
             existing.static_dirs.map((d) => ({
@@ -226,6 +238,7 @@ export function ApplicationForm({
         tables,
         file_stores: fileStores,
         triggers,
+        streams,
         apis: apiRowsToRequest(apis, allProviders),
         static_dirs: staticDirs.filter((d) => d.mount.trim() || d.path.trim()),
         // An empty box means "no opinion", and is sent as no field at all so the
@@ -564,6 +577,80 @@ export function ApplicationForm({
                     {"{name}"}
                   </code>{" "}
                   on this app, guarded by the trigger's own minimum role.
+                </Form.Text>
+              </Card.Body>
+            </Card>
+
+            <Card className="mb-3">
+              <Card.Header>Streams</Card.Header>
+              <Card.Body>
+                {allStreams.length === 0 && (
+                  <div className="text-muted">
+                    No streams are configured on this server.
+                  </div>
+                )}
+                {allStreams.map((s) => (
+                  <Form.Check
+                    key={s.id}
+                    type="checkbox"
+                    id={`stream-${s.id}`}
+                    className="mb-2"
+                    checked={streams.includes(s.name)}
+                    onChange={(e) =>
+                      setStreams((current) =>
+                        e.target.checked
+                          ? [...current, s.name]
+                          : current.filter((n) => n !== s.name),
+                      )
+                    }
+                    label={
+                      <>
+                        <span className="fw-semibold">{s.name}</span>
+                        <div className="text-muted small">
+                          {s.provider}
+                          {s.enabled ? "" : " · disabled"} ·{" "}
+                          {/* The stream's own floor, in the vocabulary the rest
+                            of the admin UI uses: no role set means admins. */}
+                          {s.min_role == null
+                            ? "admins only (no minimum role set)"
+                            : `minimum role ${s.min_role}`}
+                        </div>
+                      </>
+                    }
+                  />
+                ))}
+                {/* A named stream that is gone is shown rather than dropped, for
+                  the reason a stale trigger is: the app keeps naming it until
+                  somebody decides otherwise. */}
+                {streams
+                  .filter((name) => !allStreams.some((s) => s.name === name))
+                  .map((name) => (
+                    <div key={name} className="text-danger small mb-2">
+                      <span className="fw-semibold">{name}</span> — no stream of
+                      that name exists here, so this application cannot observe
+                      it until it is removed or the stream is recreated.
+                      <Button
+                        size="sm"
+                        variant="outline-danger"
+                        className="ms-2"
+                        onClick={() =>
+                          setStreams((current) =>
+                            current.filter((n) => n !== name),
+                          )
+                        }
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  ))}
+                <Form.Text muted>
+                  Each ticked stream can be observed at{" "}
+                  <code>
+                    {"{api mount}"}/streams/{"{name}"}/observe
+                  </code>{" "}
+                  over a WebSocket, guarded by the stream's own minimum role, and
+                  appears in this app's generated client as{" "}
+                  <code>observeStream_{"{name}"}()</code>.
                 </Form.Text>
               </Card.Body>
             </Card>

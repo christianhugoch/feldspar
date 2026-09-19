@@ -98,6 +98,12 @@ feldspar/
 │  │                              #    `_fd_model_instances`. Beside sc-action rather than
 │  │                              #    above the row layer it reads through, because a module
 │  │                              #    supplies model providers (TODO "Predictive models" §4)
+│  ├─ sc-stream/                  # 6. Streams: dataflows as an entity (§14.3). The
+│  │                              #    StreamProvider seam and its registry, the element
+│  │                              #    type and the envelope, `_fd_streams`, the supervisor
+│  │                              #    that keeps subscriptions running, and the built-in
+│  │                              #    MQTT provider. Layer 6 for sc-model's reason: a module
+│  │                              #    supplies providers, and its rows go through the Catalog
 │  ├─ sc-fieldview/               # 6. FieldView trait, built-in fieldviews (React components)
 │  ├─ sc-api/                     # 8. Endpoint model (typed Rust values) + API providers
 │  │                              #    (REST/GraphQL/gRPC/tRPC/MCP) + TypeScript consumer gen
@@ -161,6 +167,9 @@ graph TD
   viewpattern["sc-viewpattern"] --> app
   server --> model["sc-model"]
   coreact --> model
+  server --> stream["sc-stream"]
+  app --> stream
+  module --> stream
   server --> python["sc-python"]
   python --> module
   python --> coreact
@@ -222,16 +231,17 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-llm` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
 | `sc-action` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-model` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
+| `sc-stream` | `sc-catalog` `sc-db` `sc-error` `sc-query` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
 | `sc-workflow` | `sc-action` `sc-agent` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
 | `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
-| `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
+| `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-stream` `sc-types` |
 | `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-model` `sc-query` `sc-types` |
 | `sc-viewpattern` | `sc-action` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
-| `sc-module` | `sc-action` `sc-app` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-model` `sc-query` `sc-types` `sc-viewpattern` |
+| `sc-module` | `sc-action` `sc-app` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-model` `sc-query` `sc-stream` `sc-types` `sc-viewpattern` |
 | `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-model` `sc-module` `sc-types` |
 | `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-repomap` `sc-types` |
-| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-types` `sc-viewpattern` `sc-workflow` |
+| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-stream` `sc-types` `sc-viewpattern` `sc-workflow` |
 | `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-types` `sc-viewpattern` |
 
 Four things the graph is worth reading for:
@@ -301,6 +311,7 @@ bundle that registers zero or more implementations of these into the catalog at 
 | `LlmProvider` | `sc-llm` | Rust | One configured chat model, streamed; hides the vendor's API |
 | `Importer` / `Exporter` | `sc-catalog` | any | Move table data to/from a format |
 | `ModelProvider` | `sc-model` | any | Fit/inspect/apply a predictive model over table data |
+| `StreamProvider` | `sc-stream` | any | Observe a dataflow: declare its settings, compute its element type from them, and hand back a subscription (§14.3). A module's is poll-shaped, and the host supplies the loop |
 | `ViewRuntime` | `sc-viewpattern` | JavaScript (v1's) | Render, post to and configure v1 view patterns — the six vendored ones and any a module's `viewtemplates` supplies — render pages and run their action buttons, and answer the builder's options, previews and lookups (§13.3) |
 | `FileStore` | `sc-files` | any | A named directory/object store |
 | `ApiProvider` | `sc-api` | any | Expose tables, actions & custom routes over a protocol; emit a typed TS client |
@@ -331,7 +342,7 @@ through a single Rust shim per adapter.
           ┌──────────────────────▼────────────────────────▼──────────────────────┐
           │                       Core services                                    │
           │  sc-workflow · sc-agent · sc-action · sc-model · sc-viewpattern        │
-          │  sc-fieldview · sc-copilot · sc-files                                  │
+          │  sc-stream · sc-fieldview · sc-copilot · sc-files                       │
           └──────────────────────┬────────────────────────────────────────────────┘
                                  │
                     ┌────────────▼─────────────┐        ┌──────────────────────┐
@@ -1214,6 +1225,7 @@ a sparse value goes into `attributes`.**
 | `_fd_library` | a Saltcorn UI application's library ("shared components" in current v1) | the same rules again: per application, unique by name, deleted with the application. `icon` and a v1-shaped `layout` stored untouched. A layout places an item as `{ type: "library", library_id, slots }`, with `library_id` this table's UUID. Only a `saltcorn-ui` application may write one, and only the admin API writes it; the worker reads it from the view snapshot (§13.3, "The library") |
 | `_fd_models` | model definitions | **not an overlay** — the row is the model's only definition (§14.2): the provider, the `dataset` (which rows and which derived values, as a list of `sc-expr` formulas), the provider's configuration, the hyperparameter *space* (per key a value or a list to search over) and the split's fractions and seed. `table_name` is derived from the dataset on the way out and checked against it on the way in, so the list can be filtered by table without reading every dataset |
 | `_fd_model_instances` | one fit each | the provider's serialised `state`, its `parameters` (structured for display), the **host's** `metrics` per split, and the `encoding` the fit was made with — which is the load-bearing one: a prediction is encoded the way its fit was, or it fails. `status` is a column because every row has one and it is what the list filters on; the failure **sentence** is in `attributes`, because it is present only on the rows that failed. `active` is a column and at most one row per model carries it |
+| `_fd_streams` | streams: dataflows as an entity | **not an overlay** — there is nothing to introspect a stream from, so the row is its only definition (§14.3): the provider, the `configuration` its `config_spec` declares (secrets stored as given, redacted on the way to a form), `min_role` (the floor for **observing** it through an application; `None` is admin-only, the trigger rule for the trigger reason), and in `attributes` the sparse `enabled` flag. The **element type is not a column**: it is a pure function of `provider` + `configuration`, computed on read, because a stored copy would be a second answer that drifts the day a provider's declaration changes. Nor are the elements — a flow is made durable by a trigger that writes a row, and there is no `_fd_stream_elements` |
 | `_fd_roles` | roles | **not an overlay** — a role is a row carrying a name and role-specific settings; `users.role` is a foreign key onto it (§7.4). Two built-ins (admin, public) seeded at bootstrap |
 | `_fd_sessions` | live sessions | **`UNLOGGED`** where the backend allows it (§7.2): the SHA-256 of the token, the user it names, and when it lapses. Shared by every node, cached per node behind an LRU + freshness TTL. `user_id` is deliberately **not** a foreign key — the schema layer renders no `ON DELETE` action, so one would block deleting a signed-in user; a session resolves by reading the user, so a deleted one's session resolves to nobody |
 | `users` | users | UUID PK (not `_fd_`-prefixed; it is user-facing and extensible) |
@@ -1547,6 +1559,15 @@ erDiagram
     json layout "v1-shaped, untouched"
     json attributes
   }
+  STREAMS["_fd_streams"] {
+    uuid id PK
+    text name UK "a trigger's channel, an app's StreamRef, a socket path segment"
+    text description
+    text provider "-> a registered stream provider"
+    json configuration "the provider's settings; secrets redacted on read"
+    int min_role "the floor for observing it; nullable = admin-only"
+    json attributes "sparse: enabled"
+  }
   MODULES["_fd_modules"] {
     uuid id PK
     text name UK "the npm package name"
@@ -1591,6 +1612,9 @@ erDiagram
   PAGES }o--o{ LIBRARY : "library_id -- inside layout JSON"
   VIEWS }o--o| TABLES : "table_name -- by name"
   MODULES |o--o{ TRIGGERS : "action -- by name, an action the module supplies"
+  STREAMS |o--o{ TRIGGERS : "channel -- by name, stream events"
+  APPS }o--o{ STREAMS : "streams[] -- by name"
+  MODULES |o--o{ STREAMS : "provider -- by name, a stream provider the module supplies"
 ```
 
 Exactly **one** relationship above is an enforced `REFERENCES`: `users.role → _fd_roles.role`
@@ -1604,7 +1628,8 @@ line is a reference *by value*, and each one is a decision rather than an omissi
   happened. A session and a token both resolve by *reading* the user, so a row naming somebody
   who is gone resolves to nobody and the sweep collects it; a run is evidence, and evidence
   outlives its subject.
-- **References by name — `_fd_agents.provider`, `_fd_runs.subject`, `_fd_triggers.channel`, and
+- **References by name — `_fd_agents.provider`, `_fd_runs.subject`, `_fd_triggers.channel`
+  (a table for a table event, a **stream** for a stream one), `_fd_streams.provider`, and
   the JSON name arrays in `_fd_applications`** — are by name because the name is the thing an
   admin writes and an action configuration quotes. An id would make the configuration
   unreadable and unportable between installations.
@@ -2273,9 +2298,11 @@ pub struct Trigger {
     pub name: String,                  // unique; the key an app, an API path and Run use
     pub description: String,
     pub when: EventKind,               // insert/update/delete · none · login · startup ·
-                                       // error · often/hourly/daily/weekly
-    pub channel: Option<String>,       // the table, for a table event; nothing else has one
-    pub only_if: Option<String>,       // a predicate over the affected row (table events)
+                                       // error · often/hourly/daily/weekly · stream
+    pub channel: Option<String>,       // the table, for a table event; the stream, for a
+                                       // stream event; nothing else has one
+    pub only_if: Option<String>,       // a predicate over the affected row (table events),
+                                       // or over `payload` (a stream's envelope)
     pub action: String,                // a registered action's name
     pub configuration: Attrs,          // that action's settings
     pub min_role: Option<u8>,          // the floor for running it through an app's API;
@@ -2315,6 +2342,31 @@ registry, the configuration validates against its `config_spec`, `min_role` is o
 scale, a table event names a real table and a non-table event names none (*both* directions),
 the periodic timing is in range and belongs to the kind, and the `only_if` parses and resolves
 against that table's shape.
+
+#### `EventKind::Stream`: an event from outside
+
+Eleven of the twelve events this system knows how to raise, it raises itself — a write, a login,
+a clock. The twelfth is `stream` (§14.3): the element of a dataflow, delivered by a subscription
+to a broker or a feed, `channel` = the stream's name and `payload` = the envelope. Everything
+else about a trigger is untouched, which is the point — `only_if`, `min_role`, the enabled flag,
+the cascade chain and its bound, the admin's Run button and an application's exposure all already
+work on an `Event`, so a stream became a trigger source by adding a variant and nothing else.
+
+Two rules the validation states, and one of them is a deliberate half-measure:
+
+- **`channel` is required and non-empty** for a stream event, as it is for a table event, but
+  `sc-action` stops there: it cannot resolve a *stream* name without a dependency on `sc-stream`
+  that would invert the layering (`sc-stream` is at layer 6 beside it, and neither knows the
+  other). `sc-server`'s trigger form and endpoints offer the live stream list and refuse an
+  unknown name, which is where the admin is anyway — the same split as an action a module
+  supplies.
+- **A stream event has no row.** The row-shaped bindings (`row`, `old`) are absent and `only_if`
+  reads `payload` — `payload.value.temperature > 30`. A formula written against `row` fails the
+  way it already does for a `startup` trigger.
+
+The bridge lives in `sc-server::streams`, not in either crate: the consumer it installs on the
+supervisor calls `TriggerDispatcher::fire` per element in a spawned task, subject to §14.3's
+drop-and-count rule — a trigger slower than its stream loses firings rather than growing a queue.
 
 #### The fire path, and its choke point
 
@@ -4474,6 +4526,8 @@ pub struct Application {
     pub extra_frameworks: Vec<FrameworkRef>, // may bring in others (see Open Questions)
     pub tables: Vec<TableId>,            // the subset of the data layer it can access
     pub file_stores: Vec<FileStoreId>,
+    pub triggers: Vec<TriggerRef>,       // the triggers it exposes, by name
+    pub streams: Vec<StreamRef>,         // the streams it may observe, by name (§14.3)
     pub apis: Vec<ApiConfig>,            // any number, each on a sub-path, each with its own config
     pub static_dirs: Vec<StaticDir>,     // any number, each served at a sub-path
     pub csp: CspPolicy,                  // strict by default
@@ -4599,6 +4653,22 @@ request through it — not "not written to".
 - **Its data is the live data.** A preview serves the new bundle against the application's real
   tables as the caller, so `click` and `fill` on a form write real rows — the tool's description
   says so, because the alternative (a scratch database per preview) is a different product.
+
+**The observe socket, mounted beside the endpoint set.** An application exposes streams the way
+it exposes triggers — `streams: Vec<StreamRef>` and `exposes_stream(name)` — on the same
+principle: a stream is server-side configuration, and it becomes reachable from outside only
+because an app said so. The route is `GET {mount}/streams/{name}/observe`, and it is mounted
+*beside* the app's APIs rather than inside one, because an `EndpointSet` is a typed
+request/response model (§13.1) and a socket has no shape in it — the split the IDE's language
+server and the admin chat socket already made. It authenticates with the application's own
+session cookie, enforces the **stream's** `min_role` (read off the stored row, so a stream this
+process has not started is still authorised by the same number), and answers an unknown *or*
+unexposed name with a **404** rather than a 403: a 403 would confirm the existence of a flow this
+application has no business knowing about. Every refusal is decided before the handshake, because
+a browser cannot read the body of a failed upgrade. After it, the frames are the admin socket's
+(§14.3). The generated client gets an `observeStream_{name}()` per exposed stream, typed from
+the element type — which is where the element type earns its keep, and it costs nothing to keep
+in step because an app's client is emitted at build time (§13.1).
 
 ### 13.3 Frameworks
 
@@ -6182,7 +6252,7 @@ method, an unknown tool, an unsupported revision, a refused credential.
 
 ---
 
-## 14. Files and models (`sc-files`, `sc-model`)
+## 14. Files, models and streams (`sc-files`, `sc-model`, `sc-stream`)
 
 ### 14.1 File stores
 
@@ -6623,6 +6693,296 @@ screen, which renders the three parameter variants, the metrics per split, the s
 the row counts and what was dropped, and a "try a row" box over `predictRows`. An
 application-facing prediction endpoint is deliberately not here: which application, which
 permission and what shape are application-API questions, and this API is the admin's.
+
+---
+
+### 14.3 Streams: dataflows as an entity (`sc-stream`)
+
+*Implemented; this section describes what is built.*
+
+Everything in §14.1 and §14.2 is **at rest**: a file has bytes, a model has a fit, a table has
+rows. The one thing that moves is an event, and every event this system knows how to raise, it
+raises itself — a write, a login, a clock (§10.2). Nothing could tell it about the world from
+outside except by calling in over HTTP. A temperature sensor publishing to an MQTT broker, a
+market feed, a queue of jobs from another system are not rows and they are not requests. They are
+**dataflows**, and GOALS makes them an entity:
+
+> **Stream providers** can provide a stream, when the configuration fields are filled in. The
+> stream provider declares its configuration fields, and then as a function of these configuration
+> fields can declare the stream element type … and some way of observing the elements of the
+> stream. … **Streams** are created from stream providers. Can be observed in the admin UI, by
+> applications through their API …, or can become the triggering event of a trigger.
+
+Read against what was already here, that is a shape this tree has built four times: a **provider
+is code declaring its settings as `FormField`s** (§6.2), an **entity is a row that is its own
+definition** (§9), and the admin UI **renders a provider it has never heard of**. A stream is a
+model whose provider has been replaced by a subscription, or a trigger whose event comes from
+outside, and `sc-stream` reuses those two skeletons wherever it can. What it says out loud is the
+three places a flow is genuinely not a fit and not a row: **an element is not stored**, **nobody
+may block the flow**, and **a subscription is process-local and long-lived** where every other
+extension point in this tree is a call that returns.
+
+#### Layer 6, and the seams that put it there
+
+`sc-stream` sits at layer 6 — `sc-model`'s exact placement, for `sc-model`'s exact reason. A
+module supplies providers (layer 6 is where a module host can reach it) and the rows it stores go
+through the `Catalog` (which fixes it above layer 4). It therefore depends on nothing above layer
+4 and **knows nothing about triggers, applications or sockets**, which is what lets the supervisor
+be tested with a sink that appends to a `Vec` and a provider that reads from a script. What it
+cannot do itself it declares:
+
+| Seam | Declared in | Implemented in | Installed by |
+| --- | --- | --- | --- |
+| `StreamProviderHost` — a module's providers | `sc-stream::provider` | `sc-module::stream_providers` | `sc-server` at boot and on module change |
+| `StreamConsumer` — where a delivered element goes | `sc-stream::supervisor` | `sc-server::streams` | `sc-server` at boot |
+| `StreamObserver` — a stream set that changed | `sc-stream::observer` | `sc-server` (the mount registry) | `sc-server` at boot |
+
+`sc-action` gains **one enum variant and no dependency** (§10.2): a stream event reaches the
+dispatcher because `sc-server` hands it one, not because `sc-action` knows what a stream is. The
+same holds upward — `sc-api`'s client generator emits an element type as a plain value it was
+given, so the TypeScript emitter does not link the stream crate either.
+
+#### The provider trait
+
+```rust
+#[async_trait]
+pub trait StreamProvider: Send + Sync {
+    fn name(&self) -> &str;
+    fn label(&self) -> &str;
+    fn description(&self) -> &str;
+    /// The settings an admin fills in, as data.
+    fn config_spec(&self) -> Vec<FormField>;
+    /// The element type **as a function of the configuration** (GOALS).
+    fn element_type(&self, config: &Attrs) -> Result<ElementType>;
+    /// Start observing. Elements go to `sink` until the handle is dropped.
+    async fn subscribe(&self, config: &Attrs, sink: Arc<dyn StreamSink>) -> Result<Subscription>;
+}
+```
+
+Three deliberate echoes of `ModelProvider` (§14.2), and one deliberate difference.
+
+- **`element_type` takes the configuration**, exactly as `ModelProvider::outcome` does and for the
+  same reason: MQTT with `payload = json` and four declared keys is a different element type from
+  the same provider with `payload = text`, and making those two providers would be making four.
+  It is fallible, because a configuration can be incoherent (`json` with no keys) and the admin
+  should hear that while looking at the form.
+- **`config_spec` is data**, so the stream form is the model form, the trigger form and the agent
+  trait form: one spec-rendered `<Form>` over whatever the picked provider declares, secrets
+  redacted by `redact_attrs` on the way out and restored by `merge_secrets` on save, so a password
+  survives an edit that did not retype it.
+- **The registry is a `BTreeMap`, rebuilt rather than mutated**, refusing a duplicate name and
+  naming both sources — `ModelRegistry`'s text, because the situation is `ModelRegistry`'s
+  situation.
+- **The difference: `subscribe` returns rather than blocks**, handing back a `Subscription` whose
+  `Drop` stops the flow. A provider that needs a task spawns it; a provider that only polls is
+  given a poll loop by the crate. Returning a handle rather than taking a `&mut self` loop is what
+  makes "stop this stream" a `drop`, which is what makes the supervisor's restart path three lines
+  rather than a protocol.
+
+#### The element type, and the envelope
+
+The element type is what a provider computes from its settings, and it is the contract the Observe
+screen's columns, a trigger's `payload.value.x` and an application's generated TypeScript are all
+built from:
+
+```rust
+pub enum ElementType {
+    /// An object with known keys, each of a known basic type (GOALS). Unknown
+    /// keys are carried through rather than dropped; a declared key that is
+    /// absent is `null`.
+    Json { keys: Vec<ElementField> },   // ElementField { name, r#type: BasicType, required }
+    /// Characters, in a named encoding.
+    Text { encoding: String },
+    /// Bytes; base64 in the envelope.
+    Binary,
+}
+```
+
+GOALS asks "(which encoding?)" and the answer is: **the declaration carries one, the runtime
+implements UTF-8, and a non-UTF-8 declaration is refused at save time** rather than mis-decoded at
+3am. Guessing is the failure mode that produces a stream of replacement characters nobody notices
+for a week. A `Json` type with no keys and a duplicate key are refused for the same reason: an
+element with no declared shape has nothing for any of those three readers.
+
+An element that arrives is delivered as an **envelope**, and the envelope is a wire contract in
+the sense `Event::error`'s payload already is — it must not change silently:
+
+```json
+{ "stream": "boiler", "value": { "temperature": 31.2 }, "received_at": "2026-09-17T09:00:00Z",
+  "source": { "topic": "house/boiler/temp", "qos": 0, "retain": false } }
+```
+
+`value` is the element itself, shaped by the element type: an object for `Json`, a string for
+`Text`, base64 for `Binary`. `source` is the provider's own metadata, free JSON, absent when a
+provider has none — MQTT's topic lives there rather than beside `value` because "which topic" is a
+fact about *this provider*, and a formula that reads it has already accepted that it is talking to
+MQTT. `received_at` is when **this server** saw it, not a claim about when it was produced; a
+provider that knows the producer's timestamp puts that in `source`.
+
+**An element is not stored.** There is no `_fd_stream_elements` table and no retention setting. A
+stream is a flow, and what makes it durable is a trigger that writes a row — a thing the admin
+already knows how to build and can see, query, back up and give away. A retention window would be
+a second, worse table with no schema anybody chose. The Observe screen's history is a small
+in-memory ring, explicitly labelled "since this server started".
+
+#### Storage
+
+`_fd_streams` (§9): `id` (uuid pk), `name` (unique), `description`, `provider`, `configuration`
+(JSON), `min_role` (nullable), `attributes` (JSON, sparse — `enabled`). The name is what a
+trigger's channel, an application's `StreamRef` and the socket path segment *are*, so it must be a
+legal identifier, and renaming one breaks those references deliberately, exactly as renaming a
+trigger does. `min_role` is the floor for **observing** it through an application, and `None` is
+admin-only — the trigger rule, for the trigger reason: a flow nobody has thought about the access
+of is not public.
+
+`element_type` is **not** a column. It is a pure function of `provider` + `configuration`, and a
+stored copy would be a second answer that drifts the day a provider's declaration changes. It is
+computed on read and cached on the running stream. Reading is strict, as `load_model` is: a
+missing column or a wrong shape is an error naming the stream and the column. `validate_stream`
+runs on save — the provider exists, the configuration validates against its `config_spec`,
+`element_type(config)` succeeds, the name is unique and legal, `min_role` is a known role — and
+`delete_stream` refuses while a trigger names the stream as its channel, listing the triggers,
+the refusal `delete_llm_model` already makes and with the referents passed in by the caller for
+the same layering reason.
+
+#### The supervisor
+
+`StreamSupervisor` holds one **running stream** per enabled row: the resolved provider, the
+element type, the live `Subscription`, a status and counters. It is `ModelServices` in role and
+`Scheduler` in shape — one supervising task, spawned at boot by `install_streams`.
+
+- **Status** is `starting | running { since } | failed { error, since, attempt } | stopped`, held
+  in memory only. There is no `_fd_errors` yet (§16 plans one), so a failure is a `tracing::warn!`
+  plus the status the admin sees, and the day the error log lands the supervisor is one of its
+  callers. `since` on `failed` is the *first* failure of this run of them, so "failing for three
+  hours" is readable at a glance.
+- **Reconnection is the supervisor's, not the provider's.** A `subscribe` that returns `Err`, and
+  a subscription that reports it has ended, are both restarted with exponential backoff doubling
+  from a second to a cap of a minute, counting attempts, for ever. Written once here rather than
+  once per provider, because "retry properly" is the part every provider gets subtly wrong. There
+  is **no jitter**, unlike `sc-workflow`'s retry, and the difference is the population: a server
+  has a handful of streams, usually against different brokers, and determinism is worth more —
+  a test asserts the third attempt happens at `t + 1 + 2 + 4`. The clock is a parameter, as
+  `Scheduler::tick`'s is, so the backoff path runs in milliseconds under `cargo test`.
+- **A stream set that changed is reloaded, not restarted.** `reload(catalog)` diffs the rows
+  against the running set by id: started for a new or newly-enabled row, stopped for a deleted or
+  disabled one, and **stopped and started** for one whose `provider` or `configuration` changed. A
+  stream whose row is untouched keeps its connection — an admin editing a description must not
+  drop a broker session. `StreamObserver` tells the mount registry the set moved, as
+  `TriggerObserver` already does, and `SIGHUP` reloads the set along with the catalog and the
+  applications (§13.2).
+
+#### Delivery, and the rule that nobody may block
+
+One `tokio::sync::broadcast` channel per running stream. The consumer `sc-server` installs
+publishes onto it and returns; every reader — the admin Observe socket, each application socket,
+the trigger bridge — is a receiver.
+
+**Nothing back-pressures the flow.** A broker does not wait for an admin's browser, and a consumer
+that cannot keep up is *the consumer's* problem. `StreamSink::deliver` is synchronous and
+infallible so that no consumer *can* push back, and the consequences are made visible rather than
+hidden:
+
+- A lagging socket receiver gets `RecvError::Lagged(n)` and is **told**: the socket sends
+  `{"type":"lagged","dropped":n}` rather than silently showing a gap.
+- A trigger that runs slower than its stream produces has its extra firings **dropped, with a
+  counter**, exactly as `Scheduler` drops missed occurrences — five queued copies of a report
+  nobody read is worse than one late one, and an unbounded queue in front of a trigger is a memory
+  leak with a delay built in.
+- Each running stream carries `elements`, `dropped_for_triggers`, `malformed` and
+  `last_element_at`, shown on the Streams list. A stream that is dropping is a thing you can see.
+
+The channel's capacity and the per-stream element-rate cap are configuration, defaulting to
+something survivable (1 024 buffered, 1 000 elements/second, a 100-envelope ring), and the cap is
+enforced by counting and dropping, **never** by pausing the provider.
+
+#### The MQTT provider
+
+Built in, in `sc-stream::providers::mqtt`, on `rumqttc` (pure Rust, tokio, rustls — the
+`reqwest`/`axum-server` rule that this tree links one TLS stack), behind a default-on `mqtt`
+feature as `smartcore` is, so a build can drop it. Its settings are `host`, `port`, `use_tls`,
+`client_id` (defaulting to a stable `feldspar-{stream name}`, because a random one per reconnect
+leaves the broker holding a session per attempt), `username`, `password` (**secret**), `topic` (a
+filter, wildcards allowed), `qos`, `clean_session`, and `payload` — `json | text | binary`, which
+is what `element_type` reads; with `json`, a repeating group of declared keys and their types.
+`source` carries `topic`, `qos` and `retain`.
+
+A payload that will not parse as the declared type is **not delivered**: it is counted
+(`malformed`) and warned at most **once a minute per stream**, because a wildcard filter matching
+one heartbeat string beside four sensors is an ordinary thing to write, and a publisher sending
+the wrong shape at 50 Hz is one configuration mistake rather than fifty log lines a second. The
+tests are offline — the decoder, `element_type` over each `payload` setting, the settings
+validation and the topic-filter check need no broker. The live half is a human's, and
+`docs/tutorial-streams.md` is the recipe.
+
+#### Providers from a module: poll, not push
+
+A module exports `streamproviders` beside its `actions`, `table_providers` and `modelproviders`:
+
+```js
+streamproviders: {
+  poll_feed: {
+    description: "An RSS feed, polled",
+    config_fields: [{ name: "url", type: "String", required: true },
+                    { name: "interval_s", type: "Integer", default: 60 }],
+    element_type: ({ configuration }) => ({ kind: "json", keys: [ … ] }),
+    poll: async ({ configuration, cursor }) => ({ elements: [ … ], cursor: "…" }),
+  },
+}
+```
+
+**Poll, not push**, and this is the one place a module provider is shaped differently from a Rust
+one. A module call is request/response on a Deno worker (`ModuleHost::call`); there is no channel
+from a worker back into the host, and building one is a milestone of its own. So `sc-stream`
+supplies the loop: `PollingProvider` wraps a poll-shaped kind, calls it every `interval_s`, carries
+the opaque `cursor` between calls, validates what comes back against the declared element type, and
+lets a poll that throws leave the supervisor to back off rather than spinning. Everything else is
+`ModuleModelProviders`' arrangement word for word: the provider set is built whole on every module
+change, routed to the worker the module is loaded on, names re-checked on this side, and a provider
+whose `element_type` cannot be read supplies nothing while the issue stays on the module's card. A
+stream whose provider went away with its module becomes `failed` with a sentence naming the module,
+not a panic. `plugins/rss` is the worked example.
+
+#### The API and the screens
+
+`sc-api::admin` carries the lot, admin-only like everything else there: `listStreamProviders` (each
+provider's `config_spec`, with `element_type` resolved against a `?configuration=` when one is
+given — `listModelProviders`' arrangement, for its reason), `listStreams`, `getStream`,
+`saveStream`, `deleteStream` and `streamStatus`. Save and delete call the supervisor's `reload`
+afterwards, so the flow follows the row without a restart.
+
+Observing is a WebSocket rather than an endpoint, and it is mounted beside the endpoint set for
+§13.2's reason. `GET /api/streams/{id}/observe` is the admin's, and it is the admin chat socket's
+sibling in every respect that matters: admin-only, decided **before** the upgrade and refused with
+a status, because a browser cannot read a failed handshake's body; everything after it is JSON text
+frames. It sends `{"type":"ready","element_type":…,"status":…}`, replays the ring (the last 100
+envelopes *this process* saw) so a screen opened on a slow stream is not blank and says that is
+what it is doing, then `element`, `lagged` and `status` frames.
+
+The admin UI is a **Streams** entry in the Data Layer section of the sidebar, between Triggers and
+Files — a stream is a source of events, so it belongs beside the thing that listens to them rather
+than beside the models. Behind it are exactly the three screens GOALS lists: a list (name,
+provider, status, elements, last element; New at the top; Edit, Observe and Delete per row), a form
+(name, description, provider picker, the provider's spec-rendered settings, `min_role`, enabled),
+and Observe — a live tail rendered by element type (a table of declared keys for `Json`, a text
+tail for `Text`, a hex head for `Binary`), with Pause and Clear client-side, the lagged notice, and
+the "since this server started" label on the replay.
+
+#### The one limitation, said out loud
+
+**One process, one subscription.** Two servers against one database both subscribe, so a stream
+trigger fires twice. That is real and it is not a bug to be discovered later: `sc-bus` does not
+exist, and until it does a flow is process-local. MQTT's own shared subscriptions
+(`$share/feldspar/house/+/temp`) are the escape hatch an admin has today, and Saltcorn accepts such
+a filter as it stands.
+
+Four things deliberately left out, each because it is a different feature rather than a missing
+part of this one: **producing** to a stream (a `publish` action belongs with the other outbound
+actions), a stream **as a table provider** ("the last value per topic, as rows" is a
+materialisation policy — the same `None | Snapshot | Synced` question §8.3 defers), **push**
+subscriptions from a module, and **backfill**. A subscription starts where it starts; MQTT's
+retained messages are the only "before you connected" this delivers, and only because the broker
+sends them.
 
 ---
 

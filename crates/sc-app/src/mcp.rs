@@ -274,6 +274,7 @@ fn application_json(app: &Application) -> Result<Json> {
         "framework": app.framework.name,
         "tables": app.tables.iter().map(|t| t.0.clone()).collect::<Vec<_>>(),
         "triggers": app.triggers.iter().map(|t| t.0.clone()).collect::<Vec<_>>(),
+        "streams": app.streams.iter().map(|s| s.0.clone()).collect::<Vec<_>>(),
         "apis": apis?,
     }))
 }

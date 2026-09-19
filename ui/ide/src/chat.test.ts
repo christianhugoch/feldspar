@@ -69,6 +69,7 @@ function application(
     tables: [],
     file_stores: [],
     triggers: [],
+    streams: [],
     apis: [],
     static_dirs: [],
     csp: null,

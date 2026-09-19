@@ -91,11 +91,11 @@ export type ListLlmModelSettingsResponse = Array<{ name: string; label: string; 
 export type FetchLlmModelsResponse = { ok: boolean; message: string; names: Array<string> };
 export type TestLlmModelRequest = { provider_id?: string | null; backend: string; config: unknown; name: string; model_config?: unknown | null };
 export type TestLlmModelResponse = { ok: boolean; message: string; model: string; capabilities: unknown; prices: unknown };
-export type ListModulesResponse = { modules: Array<{ id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; model_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null }>; root: string; npm: boolean; npm_too_old?: { version: string; minimum: string } | null; node: boolean; python: boolean; pip: boolean; python_dir?: string | null; bundled: Array<{ id: string; name: string; language: string; title: string; description: string; supplies: Array<string>; installs: Array<string>; permissions: unknown; installed: boolean }> };
+export type ListModulesResponse = { modules: Array<{ id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null }>; root: string; npm: boolean; npm_too_old?: { version: string; minimum: string } | null; node: boolean; python: boolean; pip: boolean; python_dir?: string | null; bundled: Array<{ id: string; name: string; language: string; title: string; description: string; supplies: Array<string>; installs: Array<string>; permissions: unknown; installed: boolean }> };
 export type InstallModuleRequest = { source: string; location: string; language?: string | null };
-export type InstallModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; model_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
+export type InstallModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
 export type UpdateModuleRequest = { configuration?: unknown | null; permissions?: unknown | null };
-export type UpdateModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; model_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
+export type UpdateModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
 export type DeleteModuleResponse = { deleted: boolean };
 export type ReloadModulesResponse = { modules: number };
 export type ListAgentsResponse = Array<{ id: string; name: string; description: string; provider: string; model?: string | null; system_prompt: string; traits: Array<{ trait: string; config: unknown }>; min_role?: number | null; attributes: unknown; error?: string | null }>;
@@ -129,11 +129,11 @@ export type GetFileMetaRequest = { path: string };
 export type GetFileMetaResponse = { path: string; min_role?: number | null; effective_min_role?: number | null; attributes: unknown };
 export type SetFileMetaRequest = { path: string; min_role?: number | null; attributes: unknown };
 export type SetFileMetaResponse = { path: string; min_role?: number | null; effective_min_role?: number | null; attributes: unknown };
-export type ListApplicationsResponse = Array<{ id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown; source?: { store: string; path: string } | null; builds: boolean; has_views: boolean }>;
-export type CreateApplicationRequest = { name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown };
-export type CreateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown; source?: { store: string; path: string } | null; builds: boolean; has_views: boolean; scaffolded?: string | null; scaffold_error?: string | null; agent?: string | null; agent_error?: string | null };
-export type UpdateApplicationRequest = { name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown };
-export type UpdateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown; source?: { store: string; path: string } | null; builds: boolean; has_views: boolean };
+export type ListApplicationsResponse = Array<{ id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown; source?: { store: string; path: string } | null; builds: boolean; has_views: boolean }>;
+export type CreateApplicationRequest = { name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown };
+export type CreateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown; source?: { store: string; path: string } | null; builds: boolean; has_views: boolean; scaffolded?: string | null; scaffold_error?: string | null; agent?: string | null; agent_error?: string | null };
+export type UpdateApplicationRequest = { name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown };
+export type UpdateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; csp: unknown; attributes: unknown; source?: { store: string; path: string } | null; builds: boolean; has_views: boolean };
 export type DeleteApplicationResponse = { deleted: boolean; agent?: string | null };
 export type BuildApplicationResponse = { built: boolean; git_repo: boolean; log: string };
 export type UpdateApplicationClientResponse = { scaffolded: boolean; files: Array<string>; log: string };
@@ -240,6 +240,14 @@ export type DeleteModelInstanceResponse = { deleted: boolean };
 export type ActivateModelInstanceResponse = { id: string; model: string; name: string; description: string; status: string; created: string; active: boolean; error?: string | null; hyperparameters: unknown; outcome?: unknown | null; metrics: unknown; rows?: unknown | null };
 export type PredictRowsRequest = { model?: string | null; instance?: string | null; rows?: Array<unknown> | null; filter?: string | null };
 export type PredictRowsResponse = { instance: string; outcome: unknown; predictions: Array<{ prediction: unknown; value: unknown; key?: string | null }> };
+export type ListStreamProvidersQuery = { provider?: string; configuration?: string };
+export type ListStreamProvidersResponse = { providers: Array<{ name: string; label: string; description: string; module?: string | null; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; element_type?: unknown | null; element_type_error?: string | null }>; builtins_compiled_out: boolean; notice?: string | null };
+export type ListStreamsResponse = Array<{ id: string; name: string; description: string; provider: string; configuration: unknown; min_role?: number | null; attributes: unknown; enabled: boolean; element_type?: unknown | null; error?: string | null; status?: unknown | null; counters?: unknown | null }>;
+export type GetStreamResponse = { id: string; name: string; description: string; provider: string; configuration: unknown; min_role?: number | null; attributes: unknown; enabled: boolean; element_type?: unknown | null; error?: string | null; status?: unknown | null; counters?: unknown | null };
+export type SaveStreamRequest = { id?: string | null; name: string; description?: string | null; provider: string; configuration?: unknown | null; min_role?: number | null; attributes?: unknown | null; enabled?: boolean | null };
+export type SaveStreamResponse = { id: string; name: string; description: string; provider: string; configuration: unknown; min_role?: number | null; attributes: unknown; enabled: boolean; element_type?: unknown | null; error?: string | null; status?: unknown | null; counters?: unknown | null };
+export type DeleteStreamResponse = { deleted: boolean };
+export type StreamStatusResponse = { id: string; name: string; running: boolean; status?: unknown | null; counters?: unknown | null; element_type?: unknown | null; listeners: number };
 export type GetSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; help: string }> }>; values: unknown };
 export type UpdateSettingsRequest = { values: unknown };
 export type UpdateSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; help: string }> }>; values: unknown };
@@ -407,6 +415,12 @@ export interface ApiClient {
   deleteModelInstance(id: string): Promise<DeleteModelInstanceResponse>;
   activateModelInstance(id: string): Promise<ActivateModelInstanceResponse>;
   predictRows(body: PredictRowsRequest): Promise<PredictRowsResponse>;
+  listStreamProviders(query?: ListStreamProvidersQuery): Promise<ListStreamProvidersResponse>;
+  listStreams(): Promise<ListStreamsResponse>;
+  getStream(id: string): Promise<GetStreamResponse>;
+  saveStream(body: SaveStreamRequest): Promise<SaveStreamResponse>;
+  deleteStream(id: string): Promise<DeleteStreamResponse>;
+  streamStatus(id: string): Promise<StreamStatusResponse>;
   getSettings(): Promise<GetSettingsResponse>;
   updateSettings(body: UpdateSettingsRequest): Promise<UpdateSettingsResponse>;
   sendTestEmail(body: SendTestEmailRequest): Promise<SendTestEmailResponse>;
@@ -1769,6 +1783,59 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("predictRows", res);
       return (await res.json()) as PredictRowsResponse;
+    },
+    async listStreamProviders(query) {
+      const search = new URLSearchParams();
+      if (query?.provider !== undefined && query?.provider !== null) search.append("provider", String(query?.provider));
+      if (query?.configuration !== undefined && query?.configuration !== null) search.append("configuration", String(query?.configuration));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/stream-providers${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listStreamProviders", res);
+      return (await res.json()) as ListStreamProvidersResponse;
+    },
+    async listStreams() {
+      const res = await doFetch(`${baseUrl}/api/streams`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listStreams", res);
+      return (await res.json()) as ListStreamsResponse;
+    },
+    async getStream(id) {
+      const res = await doFetch(`${baseUrl}/api/streams/${id}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getStream", res);
+      return (await res.json()) as GetStreamResponse;
+    },
+    async saveStream(body) {
+      const res = await doFetch(`${baseUrl}/api/streams`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("saveStream", res);
+      return (await res.json()) as SaveStreamResponse;
+    },
+    async deleteStream(id) {
+      const res = await doFetch(`${baseUrl}/api/streams/${id}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteStream", res);
+      return (await res.json()) as DeleteStreamResponse;
+    },
+    async streamStatus(id) {
+      const res = await doFetch(`${baseUrl}/api/streams/${id}/status`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("streamStatus", res);
+      return (await res.json()) as StreamStatusResponse;
     },
     async getSettings() {
       const res = await doFetch(`${baseUrl}/api/settings`, {

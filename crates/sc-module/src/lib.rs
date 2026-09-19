@@ -69,6 +69,7 @@ pub mod paths;
 pub mod permissions;
 pub mod spec;
 pub mod store;
+pub mod stream_providers;
 pub mod table_providers;
 pub mod view_runtime;
 
@@ -101,5 +102,6 @@ pub use store::{
     COL_LANGUAGE, COL_PERMISSIONS, MODULES_TABLE, bootstrap_modules, delete_module, list_modules,
     load_module, load_module_by_name, require_module, save_module,
 };
+pub use stream_providers::ModuleStreamProviders;
 pub use table_providers::ModuleTableProviders;
 pub use view_runtime::{BUILTIN_VIEW_RUNTIME, ModuleViewRuntime};

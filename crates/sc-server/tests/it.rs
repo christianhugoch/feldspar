@@ -37,6 +37,8 @@ mod app_builder_agent;
 mod app_file_access;
 #[path = "app_serving.rs"]
 mod app_serving;
+#[path = "app_streams.rs"]
+mod app_streams;
 #[path = "app_trigger_api.rs"]
 mod app_trigger_api;
 #[path = "backup_api.rs"]
@@ -131,6 +133,10 @@ mod saltcorn_ui_render;
 mod schema_edit_api;
 #[path = "settings_admin_api.rs"]
 mod settings_admin_api;
+#[path = "stream_triggers.rs"]
+mod stream_triggers;
+#[path = "streams_admin_api.rs"]
+mod streams_admin_api;
 #[path = "table_access_enforcement.rs"]
 mod table_access_enforcement;
 #[path = "table_csv_api.rs"]

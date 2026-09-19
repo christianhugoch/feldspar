@@ -2,6 +2,887 @@
 
 Changes in reverse chronological order.
 
+## Streams, documented — and the milestone walked against its definition of done
+
+Phase 10 of the streams milestone (tasks 10.1–10.3). The entity was built over the nine phases
+below this entry; this is the part that makes it findable by somebody who did not build it, and
+the part that says out loud which of the definition of done a test can assert and which a human
+has to.
+
+- **`docs/TECHNICAL_DESIGN.md` §14.3 Streams**, beside files (§14.1) and models (§14.2), because
+  a stream is the third thing an admin creates that is not a table. It carries the entity and
+  GOALS' two paragraphs it comes from, the provider seam with its three echoes of `ModelProvider`
+  and its one difference (`subscribe` returns a `Drop`-stops handle rather than blocking), the
+  element type and the envelope as a wire contract, `_fd_streams` and the negative that matters
+  (`element_type` is **not** a column, and there is no `_fd_stream_elements`), the supervisor's
+  status/backoff/reload rules, delivery and the no-blocking rule with its numbers, MQTT, module
+  providers and why they poll, the API and the three screens, and the one-process limitation with
+  the `$share/` escape hatch.
+- **The rest of the document moved with it**, which is most of the work: `sc-stream` in §2's crate
+  tree, its arrows in the dependency graph and its row in the direct-dependency table (and the
+  `sc-app`, `sc-module` and `sc-server` rows that gained it), `StreamProvider` in §2.1's
+  extension-point table, the crate in §3's layer picture, `_fd_streams` in §9's table and in
+  §9.2's ER diagram with its three by-name relationships, a new §10.2 subsection for
+  `EventKind::Stream` (including why `sc-action` validates `channel` only as far as "present and
+  non-empty"), and the application socket in §13.2 beside the endpoint set.
+- **`docs/tutorial-streams.md` is now the whole walkthrough** rather than the broker recipe alone:
+  the mosquitto container, the stream on the Streams screen, Observe with a malformed payload and
+  a lagged notice, a trigger whose `only_if` reads `payload.value.temperature` and whose
+  `insert_row` stores `payload.source.topic`, exposing it to an application and reading it from
+  the generated `observeStream_boiler`, and stopping the broker to watch the backoff. The honest
+  notes stayed where they were: one process subscribes once, elements are not stored, TLS verifies
+  and has no switch that does not.
+- **The documents are pinned to the code** (`crates/sc-stream/tests/docs_streams.rs`, seven tests
+  in the crate's one test binary): every MQTT setting the tutorial's table tells a reader to fill
+  in is a label the provider still declares, the three payload kinds and two ports are named in
+  both documents, §14.3 names `_fd_streams` and each of its columns and still refuses the column
+  it must not have, the delivery defaults in the prose are `StreamConfig::default()`'s, both
+  envelopes have all four fields, and the names a reader *types* — `payload.value.temperature`,
+  `observeStream_boiler`, `$share/feldspar/…` — are still there. `docs_agents.rs`'s arrangement,
+  for its reason: prose is not checked, names and numbers are.
+
+### The definition of done, walked
+
+> An admin creates a stream from the built-in MQTT provider, fills in the broker and a topic
+> filter, and the stream's Observe screen shows elements arriving live with their declared shape.
+> A trigger with `when = stream` on that stream fires once per element and inserts a row. An
+> application exposes the stream and its generated client observes it over an authenticated
+> WebSocket, with the element type in its TypeScript. Saving a stream starts it, disabling it
+> stops it, and a broker that goes away is reconnected to without a restart. The same scenario —
+> minus the broker — passes in `cargo test` against a scripted provider.
+
+The last sentence is the one a machine can answer, and it does. Against the scripted provider:
+elements reach a consumer and the Observe socket (`streams_admin_api::the_observe_socket_is_admin_only_and_replays_before_it_tails`,
+`supervisor::a_screen_opened_on_a_slow_stream_replays_what_it_missed_and_then_continues`); a
+stream event fires a trigger that inserts a row (`stream_triggers::an_element_fires_a_trigger_that_inserts_a_row`);
+an exposed stream is observed over the app's own socket and an unexposed one is not
+(`app_streams::*`, including the emitted TypeScript per element type); saving starts and disabling
+stops (`supervisor::disabling_a_stream_hangs_up_and_re_enabling_it_connects_again`,
+`a_changed_configuration_restarts_and_an_unchanged_one_does_not`); and a subscription that goes
+away is retried with a capped backoff (`a_failing_subscribe_backs_off_and_the_third_attempt_is_the_one_that_connects`,
+`a_subscription_that_ends_is_restarted`, `the_backoff_is_capped_at_a_minute_however_long_the_outage_is`).
+`cargo test -p sc-stream` is 86 unit tests and 42 integration tests green; the streams tests in
+`sc-server` are 20 green.
+
+**The broker half has not been walked, and this entry does not pretend otherwise.** It needs a
+real MQTT broker, and this machine has neither `mosquitto` nor a usable Docker socket
+(`permission denied … /var/run/docker.sock`), so what a live broker asserts — that `rumqttc`
+connects, subscribes at the chosen QoS and delivers a publish; that a retained message arrives on
+connect; that killing the broker moves the status to `failed` and restarting it returns to
+`running` without touching the row — is unwalked here. `docs/tutorial-streams.md` is the script
+for it, step by step and with the exact `mosquitto_pub` lines, and it is carried below with the
+other two items `cargo test` cannot do.
+
+**One thing the walk found on the way past.** The admin SPA's `Module` type gained
+`stream_providers` in phase 9 and nothing read it: `ui/admin/src/modules.test.ts` no longer
+compiled (a fixture missing the new key), so the whole `sc-cli` build script failed. The module
+card now counts stream providers beside table, model and view providers — which is where an admin
+finds out that installing `plugins/rss` got them a longer list on the stream form — with a test
+for both summaries.
+
+## A memory budget for the test run
+
+`cargo test --workspace` had drifted back into taking the machine with it: a full workspace rebuild
+peaked at **6.6 GB of anonymous memory** at the default `-j12`, on a desktop where `systemd-oomd`
+answers session memory pressure by killing the heaviest cgroup — so what the suite costs is paid by
+whatever else is running, in the currency of an editor or a terminal window disappearing.
+
+- **Measured first, in both phases.** The build is the whole problem and the run is not. A full
+  workspace rebuild of `cargo test --workspace --no-run`: 6.6 GB at `-j12` in 66 s, 3.0 GB at `-j4`
+  in 90 s — half the memory for a third more wall clock. Running the whole suite after that costs
+  ~1.2 GB in-process, because the expensive state a test stands up is a database on the other side
+  of a socket. Two numbers that looked like the answer and were not: the cgroup's own peak is ~12 GB
+  at either job count (the difference is reclaimable page cache under the ~10 GB of artifacts a
+  rebuild writes), and `split-debuginfo = "unpacked"`, tried and reverted, moved the largest test
+  binary 558 MB → 532 MB and the peak not at all.
+
+- **A job cap in `.cargo/config.toml`** (`[build] jobs = 4`). This is the layer that applies without
+  anyone remembering a flag, which is what the previous two layers — the debug-info budget and
+  `cargo-guarded.sh` — did not have. CI's runners have four cores, so it costs CI nothing, and a
+  bigger machine takes it off per invocation with `-j` or `CARGO_BUILD_JOBS`.
+
+- **`scripts/test.sh`**, the entry point to reach the rest through. It sizes both phases from the
+  memory actually free (60% of `MemAvailable`, clamped to [4 GiB, 12 GiB]) rather than from `nproc`,
+  derives `-j` from the fitted cost of a job (~1.2 GB fixed plus ~0.45 GB each) and a
+  `--test-threads` to go with it, and runs each phase through `cargo-guarded.sh` so an overrun can
+  still only take the test run. `SC_TEST_MEM`, `SC_TEST_JOBS` and `SC_TEST_THREADS` override; a `-j`
+  or `--test-threads` already on the command line is left alone.
+
+- **Pinned by `repo_hygiene`**: that the cap exists, is under `[build]` and is in a range where it
+  is still doing its job, and that the runner sizes itself from free memory and goes through the
+  guarded wrapper rather than calling cargo directly. README §10 carries the measurements.
+
+## Stream providers from a module
+
+Phase 9 of the streams milestone (tasks 9.1–9.4). MQTT was the built-in; this is the part where a
+**plugin** can supply a dataflow — an RSS feed, a queue, anything with a URL — with the one
+structural difference §12 called: a module cannot push.
+
+- **Poll, not push, and the loop is `sc-stream`'s.** A module call is request/response on a Deno
+  worker and there is no channel from a worker back into the host, so a module declares a
+  `poll({ configuration, cursor })` and `PollingProvider` supplies everything around it: the
+  interval (`interval_s`, defaulting to a minute, with a 100 ms floor because `interval_s: 0` is a
+  loop with no wait in it), the opaque cursor carried between calls, and each element decoded
+  against the declared type — delivered, or counted as malformed and not delivered. Written once
+  here rather than once per plugin, because "retry properly" and "don't deliver what you couldn't
+  parse" are the parts every author gets subtly wrong.
+
+- **A poll that throws ends the subscription.** It does not sleep and try again: the task returns,
+  the `Subscription` reports it has ended, and the **supervisor's** capped backoff services it —
+  the machinery that already exists for a broker that hung up. A provider retrying in its own loop
+  would be a second, worse backoff that the Streams screen could not see, with the stream reading
+  `running` while every poll failed.
+
+- **The element type is a call, not a value** — and that is the one place the provider trait had to
+  grow. GOALS makes the element type a function of the configuration, and for a module that
+  function is JavaScript on a worker, while `StreamProvider::element_type` is synchronous and is
+  called by the Streams form, the list, the client generator and `stream_json`. So there is now an
+  `async resolve_element_type`, defaulting to exactly the synchronous answer for every compiled-in
+  provider (MQTT, the scripted one — no cost, no second path), and `PollingProvider` answers the
+  synchronous one **from what it last resolved**. The asynchronous door is called where a
+  configuration becomes live: `validate_stream` before it validates, the supervisor before it
+  starts, `listStreamProviders` when the form asks "what would this produce?", `listStreams` and
+  `getStream` before they render, and `sc-app` before it generates a client. Asking about a
+  configuration nobody resolved answers with a sentence saying exactly that, never a guess.
+
+- **`streamproviders` is read the way every other facility key is** — a plain object or a function
+  of the module's own configuration — and a provider with no `poll`, or that declares no element
+  type, is **reported and skipped**: it is an issue on the module's card, not a module that failed
+  to load. The two host calls are `stream_element_type` and `stream_poll`, routed to the worker the
+  module is loaded on, because both are closures the module built at load time. A poll's answer is
+  read leniently in the one shape an author will write by hand: a bare array is its elements with
+  no cursor.
+
+- **A module change reloads the streams, and availability is what decides a restart.** The registry
+  is rebuilt whole (built-ins plus every module's providers) and swapped in, then the supervisor is
+  reloaded. The diff gained one clause: a stream is restarted when the registry's answer for its
+  provider **changed availability** against what the running stream holds. Gone away — the module
+  was uninstalled — turns it into `failed` with the registry's own sentence naming the provider and
+  the alternatives, instead of a stream that says `running` while it polls a module nothing can
+  reach. Just arrived fixes the mirror case, which `tick` deliberately never retries. Comparing the
+  two rather than testing either alone is what keeps a reload quiet: a stream whose provider is
+  still missing is left exactly as it was.
+
+- **`plugins/rss` grew a second key.** The same bundled module that reads a feed as a table now
+  offers it as a stream: `rss_feed`, with a poll interval rather than a cache window (a table is
+  read when somebody looks at it; a stream is polled on a clock, and one field meaning both would
+  need a sublabel explaining which it was doing today). Its cursor is the set of item ids it last
+  *saw*, capped at 500, because a feed is not ordered by anything a module can trust — publishers
+  reorder, backdate and edit — and an item that fell past `max_items` must not be delivered twice
+  when it comes back. The first poll delivers the window as it stands, which is the closest a feed
+  has to MQTT's retained message and not the backfill §OUT rules out.
+
+- **Tests.** The loop is a unit test over a scripted `PollHost` (cursor carried, malformed counted,
+  a throw ending the subscription, the interval floor). The seam is six tests over a fixture module
+  on a real worker — five providers, two broken on purpose — asserting that the element type really
+  is a function of the configuration across the seam, that a module that went away answers with a
+  sentence rather than panicking, and that elements arrive decoded. `plugins/rss`'s stream is
+  asserted end to end against a feed served on `127.0.0.1` (over HTTP and not a `file://` URL,
+  because a module's grant is *net*, not *read*: one that could open a path typed into a stream's
+  settings could open the database's password file). And the supervisor's new clause has its own
+  test: uninstall, `failed` with the sentence, reinstall, running again.
+
+## Streams from an application
+
+Phase 8 of the streams milestone (tasks 8.1–8.4). Phases 6 and 7 made a stream something an admin
+creates and watches; this is the part an *application* gets: the flow an app declares, the socket
+its own users connect to, and the element type in its generated TypeScript.
+
+- **`StreamRef` is `TriggerRef`, word for word** — a name, in a newtype, in a `streams` column on
+  `_fd_applications`. The rule it carries is the one the exposed triggers already carry: a stream
+  is server-side configuration, and it becomes reachable from outside **only because an app said
+  so**. `Application::exposes_stream` is what the socket asks, and a stream the app did not name is
+  a **404 rather than a 403** — the app's declaration is the whole of its surface, and a 403 would
+  confirm the existence of a flow this application has no business knowing about. The application
+  form grows the picker beside the triggers one: the server's streams, ticked, with a stale name
+  shown in red rather than dropped on the floor.
+
+- **The socket is mounted beside the endpoint set, not in it** (§10). `EndpointSet` is a typed
+  request/response model and a subscription has no shape in it — the same split the IDE's language
+  server and the admin chat already made. So `GET {mount}/streams/{name}/observe` is matched in
+  `dispatch_app` through `sc_app::stream_in_path`, which is the *inverse* of the
+  `stream_socket_path` the generated client is emitted from: one shape, spelled once, so a client
+  cannot call a path nothing serves.
+
+- **An application's request is not an axum route, and an upgrade nearly is.** Every app request
+  arrives at the single fallback, because an app's paths are its own and change while the server
+  runs — but `WebSocketUpgrade` has to be extracted before the body is read, and it rejects a
+  request that is not an upgrade rather than answering `None`. Hence `MaybeUpgrade`, a two-line
+  extractor taken from the parts ahead of `Bytes`. It also gave the admin's own observe route a
+  better answer to a plain `GET`: a sentence saying the path is a WebSocket, rather than the
+  extractor's rejection.
+
+- **The admin route had to learn about applications.** `/api/streams/{id}/observe` is a real axum
+  route, so it wins over the fallback — including on `blog.example.com`, where an app with its API
+  at `/api` spells its own socket path exactly the same way. It now asks the host first, as
+  `dispatch` does, and serves an application's socket as the application's. Found by a test that
+  got `403 insufficient privilege` for an editor on an app's own stream.
+
+- **Authorisation is the stream's `min_role`, read off the stored row** — not off the running
+  stream, so a stream this process has not started is still authorised by the same number, and
+  `None` still means admin (§5). It is enforced *before* the upgrade, with a status, because a
+  browser cannot read the body of a failed handshake; everything after it — no stream support, not
+  running here — stays a close frame with a reason, shared with the admin socket frame for frame.
+
+- **The generated client is where the element type earns its keep.** `generate_client_with_streams`
+  emits an `observeStream_{name}(handlers)` per exposed stream, over a written-out envelope type
+  whose `value` is the declared shape: a required key is `number`, one that may be absent is
+  `string | null` (§4 promises the key is *there*, so it is not `?`-optional), a text element is a
+  `string` and a binary one is base64 in a `string`. How a socket is opened, which frames arrive
+  and what a caller does with them is the same in every application, so it lives in `helper.ts` as
+  `openStream` — and `lagged` is a handler, not a swallowed frame, which is §7 reaching the client.
+
+- **The provider registry is installed rather than threaded.** An element type is a function of the
+  provider *and* the configuration, so resolving one needs the running server's `StreamRegistry`,
+  which a module can add to. Threading it beside the trigger dispatcher would have put a second
+  optional service parameter through the whole build path and every test that calls it, so
+  `sc-app` takes it the way it takes a framework factory: `install_stream_registry` at boot, with
+  the compiled-in providers as the fallback for a process that is only generating a client.
+
+- **A stream that is gone is named, not skipped.** `app_streams` refuses an app that exposes a
+  stream which no longer exists, whose provider is not installed, or whose configuration no longer
+  yields an element type — `app_triggers`' refusal, for its reason: quietly emitting a client
+  without the method the app's own code calls would hide the misconfiguration. A **disabled**
+  stream resolves, because enabling it must not mean rebuilding the app.
+
+- **Tests** (`crates/sc-server/tests/app_streams.rs`, six, over the scripted provider and a real
+  port): an exposed stream is observed and the frames are the admin socket's; an unexposed one that
+  is running perfectly well is a 404; anonymous is a 401 and a below-floor user a 403, both before
+  the upgrade; a plain `GET` of the path says it is a socket; the generated client has the method,
+  the path and both key types; and an app naming a stream that is not there is refused by name.
+  `sc-api`'s `typescript_typecheck` gains a `tsc --strict` pass over all three element types,
+  with `@ts-expect-error` on an undeclared key and on treating a text element as an object.
+
+## The Streams screens
+
+Phase 7 of the streams milestone (tasks 7.1–7.5). Phase 6 made a stream a thing the API can
+create, watch and take away; this is the part an admin actually uses — the three screens GOALS
+names (Editing, Observing, Deleting), a sidebar entry between Triggers and Files, and a trigger
+form that can point at a stream.
+
+- **`ui/admin/src/streams.ts` is the model, and it is where the socket's frames live.** The typed
+  request/response client is generated from the endpoint set and was already regenerated in Phase
+  6, but a socket has no shape in an `EndpointSet`, so §9's four frames (`ready`, `element`,
+  `lagged`, `status`) are written by hand here beside the chat's in `agentChat.ts`. A Rust test
+  (`streams_admin_api::the_observe_route_is_the_path_the_spa_connects_to`) pins the route this file
+  names against `STREAM_OBSERVE_ROUTE`, the way the chat socket's is pinned: a page connecting to
+  the wrong path gets a 404, which looks exactly like a stream that never publishes.
+
+- **Three endpoint fields arrive as `unknown`, and that is right.** The element type, the status
+  and the counters are declared `json` in the endpoint set, because they are a provider's and the
+  supervisor's vocabulary rather than the endpoint's. So their shapes are written out once here, as
+  the discriminated unions their Rust originals serialise to, and every screen reads them through
+  `readElementType` / `readStatus` / `readCounters` rather than casting — `models.ts`' arrangement,
+  for `models.ts`' reason. An element type that will not read is `null`, which is a real answer: a
+  stream whose provider was uninstalled is still listed, still has a status, and Edit is the repair.
+
+- **`failed` is yellow, not red.** The supervisor is retrying with capped backoff (§6), so a broker
+  that bounced is a stream that will be back — different news from a stream that cannot be started
+  at all, which is the row's `error` and *is* red. "Disabled" and "not running here" are two more
+  distinct answers and are told apart rather than merged, because §6's one-process rule means a
+  stream can be perfectly healthy and simply not be running in the process you are looking at.
+
+- **A stream that is dropping is a thing you can see** (§7) — and a stream that is not says
+  nothing. `counterNotes` is silent while `dropped_for_triggers`, `dropped_for_rate` and
+  `malformed` are all zero, because a row of `0 dropped · 0 malformed` on every healthy stream is
+  how a reader learns to stop reading that column.
+
+- **The list polls `streamStatus` per row, not `listStreams`.** Definitions do not move while an
+  admin looks at them; how a flow is *going* does. Re-reading every provider's configuration twice
+  a second to find out whether a broker is connected would be a lot of database for one badge.
+
+- **The form knows no provider** (§3). It renders whatever `config_spec` the picked provider
+  declares, so there is no mention of a broker, a topic or a QoS in it, and a provider supplied by
+  a module gets a working form with no change to this bundle. What is new beside the model form is
+  the **element type preview**: the form asks the server what *this* configuration would produce,
+  debounced, and shows either "JSON: temperature (float)" or the sentence saying why there is no
+  answer — which is what stops an admin discovering on the Observe screen that they declared
+  nothing. Secrets round-trip through the sentinel untouched, and there is no Start button, because
+  saving an enabled stream connects it.
+
+- **Observe is the one admin screen whose content is not a read.** Pause and Clear are client-side
+  only — pausing the server would mean dropping the elements or queueing them, and §7 says which of
+  those a stream does — so Pause holds the *rendering* and says how many arrived while it was held.
+  The replayed rows are labelled "since this server started", which is the whole truth: there is no
+  element table and there is not going to be one (§4). A `lagged` frame becomes a banner saying how
+  many elements this screen lost and why nothing waited for it.
+
+- **The rendering follows the declared type, which is what declaring one is for.** A table of the
+  declared keys for `json` — a declared key that is absent shown as absent, and the undeclared keys
+  an element carried named beside the first column, because §4 carries them through and adding them
+  to the declaration is what puts them in a column. Text for `text`. A **hex head** for `binary`,
+  never bytes set in a body font. `hexHead` decodes base64 by hand rather than through `atob`, so
+  it is testable in node, and refuses something that is not base64 rather than inventing bytes.
+
+- **Streams sits between Triggers and Files in `NAV`** (§9), under a broadcast icon. That is the
+  argument, not the alphabet: a stream is a *source of events*, so it belongs beside the thing that
+  listens to them rather than beside the models. Everything else in the Data Layer section is at
+  rest — a table has rows, a file has bytes — and this is the one entry that moves on its own.
+
+- **The trigger form offers Stream, and its channel box becomes the stream picker.** Switching the
+  event kind between a table event and a stream event clears the channel, because a table name left
+  in the box of a stream event would be submitted as a stream name and refused while the picker
+  showed no selection at all — which reads like the form lost it. `only_if` is offered for a stream
+  event too, with the hint §8 requires: an element is not a row, so there is no `row` or `old`, and
+  the formula reads `payload.value` and `payload.source`. A build with no stream support answers
+  `listStreams` with a refusal, which is tolerated separately so it cannot stop a table trigger
+  being edited.
+
+- **Tests.** `streams.test.ts` — 31 cases over the frame parsing, the replay boundary as live
+  elements push it along, the per-type rendering, the status colours and the name rule;
+  `triggerForm.test.ts` gains the stream event's two. The Rust side gains the route pin. The full
+  admin suite is 532 passing.
+
+## The stream admin API, and the Observe socket
+
+Phase 6 of the streams milestone (tasks 6.1–6.5). Phase 5 made an element fire a trigger; this is
+what makes a stream a thing an **admin** can create, watch and take away — six typed endpoints and
+one WebSocket, which between them are everything the Streams screens (Phase 7) will be drawn on.
+
+- **Six endpoints, not five.** `listStreamProviders`, `listStreams`, `getStream`, `saveStream` and
+  `deleteStream` are the model screens' set word for word — including `saveStream` being one
+  endpoint for create and replace, with the id in the body saying which, because the form always
+  sends the whole definition and two endpoints would be one behaviour under two names. The sixth,
+  `streamStatus`, is the one a flow needs that a row does not: a stream's current state is held in
+  memory by the supervisor and is deliberately not a column (§6), so it cannot be read back from
+  the row at all.
+
+- **`?configuration=` is what turns a declaration into an answer.** `listStreamProviders` resolves
+  `element_type` against the settings filled in so far, exactly as `listModelProviders` resolves
+  `outcome` against a dataset, and for the identical reason: the element type is a **function of
+  the configuration** (§3), so MQTT with `payload = json` and four declared keys answers something
+  different from the same provider with `payload = text`. A configuration that is incoherent comes
+  back as `element_type_error` beside every other provider's answer rather than as a failed
+  request — "`json` with no declared keys" is what the form is waiting to be told, not an outage.
+
+- **Every write ends in a `reload`.** That is the one way these endpoints differ from every other
+  record's: the live set here is a set of *connections*, so a save does not just refresh a
+  registry, it drops and remakes broker sessions. A stream saved enabled is subscribed by the time
+  the response is written, and one whose broker moved has dropped the old session — the flow
+  follows the row without a restart. A reload that fails is reported rather than returned, because
+  the row was stored either way and a stream that will not connect is `failed` with its reason, not
+  a save that did not happen.
+
+- **`element_type` is computed on every read, never stored** (§5). A copy in the row would be a
+  second answer that drifts the day a provider's declaration changes — and the drift would be
+  invisible, because the stored copy is what the Observe screen and the generated client would read
+  while the live decoder used the other one. A stream whose provider was uninstalled has no element
+  type and carries the reason in `error`, and is **still listed and still editable**, because
+  editing it is the repair.
+
+- **A password is masked on the way out and merged back on the way in** (§2.3). `saveStream` reads
+  the stored row before it writes, so a sentinel the form was handed resolves to what is behind it
+  — which is the one thing a redaction scheme can get wrong in a way nobody notices until the
+  broker stops accepting the connection. There is a test that asks the *store* directly, because
+  the API deliberately cannot answer it.
+
+- **The delete's refusal is handed its referents.** `deleteStream` collects the triggers whose
+  channel is this stream and passes them to `delete_stream`, the arrangement `delete_llm_model`
+  already has with the agents that name a model: `sc-stream` sits below `sc-action` and cannot ask.
+
+- **A trigger cannot name a stream that does not exist** (task 6.4). `sc-action` validates that a
+  stream event's channel is present and non-empty and stops there, because it cannot resolve a name
+  without a dependency it should not have; `createTrigger` and `updateTrigger` are the other half,
+  and they refuse an unknown name **listing the streams there are** — "no stream named `boiler`"
+  with a typo in it and "…because you have not created one yet" are different problems, and the
+  list is what tells them apart. Every other event kind passes straight through, including on a
+  server with no stream support installed.
+
+- **`GET /api/streams/{id}/observe`: the Observe socket.** A real axum route beside the endpoint
+  set, not in it, for the reason the language server's and the admin chat's are — an `EndpointSet`
+  is a typed request/response model and a socket has no shape in it, and an upgrade cannot survive
+  the fallback's `Bytes` body. Admin-only, **decided before the upgrade** and refused with a status,
+  because a browser cannot read the body of a failed handshake; everything decided afterwards (no
+  stream support, no such stream, not running here) is a close frame with a reason instead.
+
+- **Nothing comes in, and the replay says how much of it is history.** The client only reads: a
+  Pause button is client-side, because pausing the server would mean either dropping elements or
+  queueing them and §7 says which of those a stream does. The socket sends `ready` (the element
+  type, the status, the counters and `replayed`), then the ring — the last hundred envelopes *this
+  process* saw, so a screen opened on a stream that publishes twice an hour is not blank — then
+  `element` per element, `lagged` when this socket falls behind, and `status` when the supervisor's
+  has moved. The replay and the subscription are taken together under one lock, so the tail is
+  neither gapped nor doubled.
+
+- **A lagging socket is told, never shown a silent gap** (§7). `RecvError::Lagged(n)` becomes
+  `{"type":"lagged","dropped":n}` and the socket carries on from the oldest element still buffered.
+  A stream that *fails* closes nothing: it is a `status` frame on an open socket, because the
+  supervisor is going to reconnect and the screen should be there when it does.
+
+- **Tests** (`crates/sc-server/tests/streams_admin_api.rs`): the lifecycle over HTTP with the save
+  proving the supervisor reloaded, the refusals (a name that is not an identifier, an unregistered
+  provider, a `min_role` off the scale, an undeclared setting, a duplicate name), the secret
+  surviving an edit that did not retype it, the delete refused while a trigger listens, a trigger
+  refused for naming a stream that does not exist, and the socket — unauthenticated refused with a
+  status before the upgrade, an admin getting `ready`, the replay and then live elements, and a
+  stream that is not running closed with a reason. No broker: the provider is
+  `sc_stream::testing::ScriptedProvider` behind the production seam.
+
+## Triggers on streams: an element becomes an event
+
+Phase 5 of the streams milestone (tasks 5.1–5.5). Everything so far made a stream *run*; this
+is what makes one **do** something. The whole of it is one new `EventKind` and one `StreamConsumer`
+implementation, which is the point: a stream element reaches the trigger dispatcher through the
+same `Event` a write, a login and a clock already do, so `only_if`, `min_role`, the enabled flag,
+the cascade chain and bound, the admin's Run button and an application's exposed trigger all
+work on it without a line of new code each.
+
+- **`EventKind::Stream`**, twelfth in `EVENT_KINDS`, with `Event::stream(name, envelope)` writing
+  the payload out at the constructor as `Event::error` does — because the envelope is a wire
+  contract (§4) read by an `only_if`, posted whole by a `fetch` action and typed into a generated
+  client, and a contract assembled at three call sites is three contracts. `sc-action` gains the
+  variant and **no dependency**: it never learns what a stream is, and the JSON is what a
+  module-supplied or test-supplied element can hand over too.
+
+- **`has_channel()` beside `is_table_event()`**, because for exactly one kind the two questions
+  have different answers. A stream event's channel is load-bearing — a trigger on `boiler` must
+  never see `market_feed`'s elements — but it carries no row, so `row`/`old` stay out of scope
+  and its `only_if` reads `payload.value.temperature > 30`. Every place that conflated the two
+  would have been a place a stream trigger fired for the wrong stream; `Triggers::matching` was
+  one of them.
+
+- **A row-less `only_if`, in the scope that already existed.** A stream trigger's formula is
+  validated and evaluated against `EVENT_SCOPE` — the empty pseudo-table an action's configured
+  formulas have ranged over since §10.2 — so nothing new had to be invented for "a predicate with
+  no row". `Event::table_channel()` is the small piece that makes it safe: every caller about to
+  resolve a channel in the catalog now asks for it, since looking a stream's name up as a table
+  would fail with "no table named `boiler`", which is a confusing answer to a question nobody
+  asked. It excludes `Stream` and **not** `!is_table_event()`, because a `none` trigger run
+  against a row of its table (the row button, §13.4) carries both a channel and a row.
+
+- **`sc-server::streams`: the second seam filled in.** `StreamServices` is `ModelServices` in
+  role — the registry, the supervisor and the numbers this process was started with — and rides
+  on `AppMounts` with the other five. `install_streams` runs at boot *after* the triggers,
+  because the sink it installs fires the dispatcher and an element that arrived before the
+  triggers were up would have nothing to fire, and only from `serve`, because a `build-app` that
+  happened to open the same database must not connect to somebody's broker.
+
+- **Nobody may block the flow, and the drop is a number you can see** (§7). `TriggerBridge::consume`
+  returns immediately: it spawns the firing and holds one in-flight flag per stream, so an element
+  arriving while the last one's triggers are still running is **dropped and counted** rather than
+  queued. That is `Scheduler`'s rule for a missed occurrence, for `Scheduler`'s reason, and the
+  alternative is an unbounded queue in front of a trigger — a memory leak with a delay built into
+  it. The bridge asks the live trigger set *first*, so a stream nobody triggers on spawns no task
+  and is never recorded as dropping: an element nobody asked for is not a trigger that fell behind.
+
+- **`SIGHUP` reloads the stream set** (5.4), and the streams came off `reload.rs`'s list of what
+  still wants a restart. They could come off it because a supervisor already knows how to diff:
+  it is the one of those sets whose "update the live set in place" is a method rather than a
+  restart, so a stream nobody touched keeps its broker session. That is what makes it safe to
+  reload everything on every signal — an agent running `npm run build && pkill -HUP feldspar` in
+  a loop must not be hanging up on a broker each time.
+
+- **`--stream-buffer` and `--stream-max-rate`**, flags rather than stored settings for
+  `--model-max-rows`' reason: what a buffer of a thousand envelopes costs is a property of *this
+  process's* memory. `--stream-max-rate 0` means no cap, which is allowed here where a dataset cap
+  of zero never would be — a rate limit of nothing is a coherent thing to ask for.
+
+- **Tested against a script, not a broker.** `sc-server/tests/stream_triggers.rs` walks the
+  milestone's definition of done with `ScriptedProvider` in the broker's place: three elements
+  fire a trigger that inserts two rows (the `only_if` declines the cold one, and the inserted
+  value comes from the envelope); a trigger that takes 100 ms against a stream producing every
+  5 ms drops and counts rather than growing; the cascade bound still stops a runaway begun by a
+  stream rather than by a request; and a stream saved after boot starts on a reload while one
+  nobody touched does not move. The first test warms the JavaScript isolate with an element its
+  `only_if` declines, because an assertion about whether a trigger kept up must not be an
+  assertion about how long V8 takes to build.
+
+## The MQTT provider: the first thing a stream can actually be
+
+Phase 4 of the streams milestone (tasks 4.1–4.5). The trait, the store and the supervisor were
+all written against a scripted provider; this is the built-in GOALS names, and it is the first
+stream whose elements come from outside this process. `sc-stream::providers::mqtt` is one
+provider behind a default-on `mqtt` feature — `smartcore`'s arrangement, so a build that wants
+no broker client says `--no-default-features` rather than a packager having to remember a flag.
+
+- **rumqttc, and one TLS stack.** Pure Rust, tokio, and — the property that decided it — an
+  event loop that is **polled** rather than one that owns a callback, which is what lets a
+  subscription be a task the `Subscription` handle owns and drops (§3) instead of a client
+  calling us back from a thread we do not control. `default-features = false` drops its
+  `use-rustls`, whose whole content is rustls's **`ring`** provider: `use-rustls-no-provider`
+  brings `tokio-rustls` with no provider of its own, so an `mqtts://` connection is encrypted by
+  the same **aws-lc-rs** rustls the HTTPS listener and `reqwest` already use (§16). The root
+  store is built here rather than by rumqttc's own `TlsConfiguration::default()`, which
+  **panics** when the platform certificates cannot be read — a panic inside the supervisor's
+  task would take every other stream's supervision with it, to report a configuration error.
+
+- **The element type is a function of one picker.** `payload` is `json | text | binary`, and the
+  same broker with the same filter is three different streams accordingly — which is the whole
+  reason `element_type` takes the configuration (§3) rather than being a property of the
+  provider. `json` carries the declared keys as §11's repeating group, stored as a `Json`
+  setting holding `{name, type, required}` objects: `FormField` has no repeating-group kind, and
+  a JSON field with an array default is what every other list-shaped setting in the tree already
+  is. A `json` payload with no keys, a key of an unknown type and a `text` encoding that is not
+  `utf8` are all refused by `ElementType::validate` rather than by MQTT, so those sentences are
+  written once.
+
+- **Connecting is the provider's; reconnecting is not.** `subscribe` returns only once the broker
+  has acknowledged the subscription, so a wrong host, a refused password and a filter the broker
+  will not serve are all an `Err` in the stream's status rather than a stream that is "running"
+  and silent — and a `SUBACK` failure code gets the sentence the packet field does not ("usually
+  because this user is not authorised for that topic"). The wait is capped at ten seconds,
+  because the supervisor `await`s it and a host that accepts a connection and then says nothing
+  must not hold the supervisor's task. Once running, *anything* that ends the flow ends the
+  task, and the supervisor restarts it with its capped backoff. That is deliberately against
+  rumqttc's own reconnection: retrying properly is written once for every provider, and with
+  `clean_session` a reconnect that did not re-send its `SUBSCRIBE` would be connected, healthy
+  and receiving nothing — the worst available outcome.
+
+- **A stable client id, from the stream's name.** `subscribe` now takes the stream's name
+  alongside its configuration, because a provider needs it for two things a configuration cannot
+  supply: a log line worth reading, and MQTT's default `client_id` of `feldspar-{name}`. A random
+  id per reconnect leaves the broker holding a session per attempt, so a stream that flaps for a
+  day becomes a broker nobody can administer. The name is *not* part of the configuration, since
+  a rename must not restart a flow (§6) and a changed setting does.
+
+- **A payload that does not match the declaration is counted, warned once a minute, and never
+  delivered** (§11). On a wildcard filter this is not even misbehaviour — `house/#` matching four
+  sensors and one heartbeat string is an ordinary thing to write — so the throttle carries the
+  number it suppressed and the next line says "and 40 more" rather than saying it 40 times. The
+  clock is a parameter, `Scheduler::tick`'s rule, so the test asserts a minute of 50 Hz garbage
+  in microseconds instead of sleeping for one.
+
+- **`source = {topic, qos, retain}`**, beside `value` rather than in it: "which topic" is a fact
+  about *this provider*, and a formula reading `payload.source.topic` has already accepted that
+  it is talking to MQTT.
+
+- **The tests are offline, and the live half is written down.** 19 of them, covering the declared
+  settings against `validate_attrs` (so a renamed setting fails a test rather than a broker), the
+  element type over each `payload` value, the port/QoS/topic-filter refusals including
+  `$share/…` being *allowed* (it is §6's escape hatch for two servers), the decoder over all
+  three payload kinds, the throttle, the client-id default, and an unreachable broker being an
+  `Err` rather than a quiet stream. `docs/tutorial-streams.md` is the part `cargo test` cannot
+  do: mosquitto in one command, `mosquitto_pub`, what each setting means, what a malformed
+  payload looks like in the log, and stopping the broker to watch the backoff.
+
+- **The live half was walked** against mosquitto 2.0.22 on the loopback, with a throwaway test
+  that is deliberately not checked in (a test needing a broker is a test that fails on a machine
+  without one). What it confirmed, beyond what the offline tests can: three publishes on
+  `live1/+/temp` arrived in order with `source = {topic, qos, retain}`, the one with no `unit`
+  carried `null`, a publish on `live1/boiler/other` did not arrive (the filter is the broker's,
+  not ours), `ok` on `live1/heartbeat/temp` was counted and logged once and never delivered, and
+  dropping the `Subscription` stopped the flow while the broker kept publishing. A **retained**
+  message arrived the instant the stream started. A `text` stream over the same broker read its
+  payload as a string. Killing the broker ended the subscription's task within 600 ms — which is
+  what the supervisor restarts — and the next `subscribe` returned an error naming
+  `127.0.0.1:18831`. The broker's own log is the other half of the client-id decision, and it
+  agreed: `New client connected from 127.0.0.1:45758 as feldspar-own (p2, c1, k30)`.
+
+## The supervisor: what keeps a stream running
+
+Phase 3 of the streams milestone (tasks 3.1–3.5). `_fd_streams` held configured dataflows that
+did nothing; this is the part that makes one *flow*. `StreamSupervisor` holds one
+`RunningStream` per enabled row — the resolved provider, the cached element type, the live
+`Subscription`, a status and its counters — and is the only thing in the tree that owns a
+subscription, which is what makes "is this stream running?" a question with one answer.
+
+- **A reload is a diff, not a restart.** `reload(catalog)` compares the stored rows against the
+  running set **by id**: a new or newly-enabled row is started, a deleted one is stopped and
+  forgotten, a disabled one is stopped but *kept listed* (so "what is this stream doing?"
+  answers "nothing, you switched it off" rather than going blank), and one whose `provider` or
+  `configuration` changed is stopped and started. Everything else — a name, a description, a
+  `min_role` — swaps the row and **keeps the connection**. That last case is the load-bearing
+  one: an admin fixing a typo in a description must not drop a broker session, and a `SIGHUP`,
+  which reloads everything, must not drop all of them at once. A rename does move the envelopes,
+  because the stream's name is stamped into each one, so the row lives behind a lock rather than
+  being copied into the connection.
+
+- **Reconnection is the supervisor's, not the provider's.** A `subscribe` that returns `Err` and
+  a subscription that *ends* are the same event — the flow stopped — and both are retried with
+  a doubling delay capped at a minute, counting attempts and keeping one `since` across the
+  whole run of failures so "failing since 09:00" survives forty retries. Written once here
+  because "retry properly" is the part every provider gets subtly wrong, and the two ways to get
+  it wrong are opposite and both common: a tight loop turns a broker restart into a DoS on the
+  broker, and giving up after three attempts turns a twenty-minute outage into a stream that is
+  silently dead until somebody notices next week.
+
+- **The clock is a parameter**, `Scheduler::tick`'s rule. `tick(now)`, `start_at(row, now)` and
+  `apply_at(rows, now)` all take the instant rather than reading it, and the task loop is the
+  only place `Utc::now()` is read for a retry decision — so "the third attempt, seven seconds
+  in, is the one that connects" is an assertion three function calls long rather than a sleep.
+  **No jitter**, unlike `sc-workflow`'s retry: that one spreads a hundred runs that failed on
+  one API outage, and a server has a handful of streams, usually against different brokers.
+  Determinism is worth more here than spread.
+
+- **Nobody may block the flow (§7), and the type says so.** The sink handed to a provider counts,
+  caps, stamps and broadcasts, synchronously and infallibly. A new seam, `StreamConsumer`, is
+  where a published element goes next — `sc-server`'s trigger bridge — and it takes an
+  `Envelope` rather than an `Element`, because by then the element has been stamped with the
+  stream's name and the moment this server saw it, and a consumer handed the unstamped element
+  would have to re-derive a wire contract that would then drift. Its answer is `Accepted` or
+  `Dropped`, not a `Result`: a consumer too busy to take an element is the drop rule working,
+  not a failure, and an error there would be a log line per element on a stream behaving exactly
+  as designed.
+
+- **Three ways to lose an element, all counted, none of them silent.** The per-second cap drops
+  and counts (`dropped_for_rate`) and never pauses the provider — the test asserts the provider
+  still delivered all twenty while fifteen were dropped. A busy consumer's drops are
+  `dropped_for_triggers`. A payload the provider could not decode is `malformed` and never
+  reaches anybody. Alongside `elements` and `last_element_at` they are what makes a stream that
+  is dropping a thing you can *see* on the Streams list.
+
+- **One broadcast channel per running stream, and the replay ring beside it.** `subscribe_elements()`
+  hands back the last hundred envelopes *and* a receiver **together, under one lock** — taking
+  the replay and then subscribing would lose everything published in between, and doing it the
+  other way would show some of them twice, and a screen opened on a slow stream must be neither
+  blank nor double. A receiver that falls behind gets `RecvError::Lagged(n)` and is told the
+  number, so the Observe socket can send a `lagged` frame rather than silently showing a gap.
+  (The ring is task 6.3's, brought forward: it is what makes `subscribe_elements` correct, and
+  correct atomically.)
+
+- **A stream whose provider nothing implements is held `failed`, not dropped.** An uninstalled
+  module leaves the stream listed, editable and carrying the sentence — editing it *is* the
+  repair — and `tick` deliberately leaves it alone, because no amount of waiting makes a missing
+  module arrive. Its attempt count is 0: nothing has been tried.
+
+- **`StreamObserver`**, `TriggerObserver`'s sibling and §2's third seam, notified by `reload`
+  after a diff that **changed** something. Not by `apply`, and not by a reload that found what it
+  already had: a `SIGHUP` that changed nothing must not re-project every application that exposes
+  a stream. An observer that fails is reported and the new set is kept, because the streams are
+  demonstrably started and stopped by then and failing the caller would report the opposite of
+  what happened.
+
+- **The tests.** 19 in `crates/sc-stream/tests/supervisor.rs` over the scripted provider, with no
+  broker and no clock — the diff in each of its cases, the backoff's three attempts and its cap,
+  the lagged receiver being told *six*, the cap dropping fifteen of twenty, a busy consumer's
+  three drops, the replay, and a shutdown that actually stops the tasks. Two more in
+  `supervisor_reload.rs` against a real Postgres, because `reload` is the door every writer goes
+  through and the observer's "only when it moved" is a fact about what `list_streams` read back.
+  `StreamId` gained `Ord` so the running set is a `BTreeMap` — a hash order would make "which
+  stream started first" a different answer every run — and `envelope::rfc3339` became
+  `pub(crate)` with an `Option` variant, so a status's `since` and a counter's `last_element_at`
+  carry the same fixed-width instant the envelope does.
+
+## A stream's password, a stream's referents, and the store against a real Postgres
+
+Tasks 2.3, 2.4 and 2.5 of the streams milestone — the rest of `_fd_streams`. The store now keeps
+a broker password across an edit that never saw it, refuses to delete a stream something else
+still names, and is pinned against a real database rather than a constructed `Row`.
+
+- **`sc-stream::secrets`: masked on the way out, restored on the way in.** `redacted_stream`
+  replaces every `secret` setting the provider declared with the sentinel (`redact_attrs`), and
+  `restore_secrets` puts the stored value back wherever the sentinel comes back untouched
+  (`merge_secrets`) — the round trip an LLM provider's API key, a file store's credentials and a
+  module's settings already make. The second half is the load-bearing one: masking a field that a
+  form writes back is the classic way to destroy the thing you were protecting, and the failure
+  is silent — the admin fixes a topic filter, the row now holds `••••••••` where the password was,
+  the broker refuses the connection, and the supervisor retries it forever with nothing anywhere
+  saying that a *save* is what broke it.
+
+- **The merge is inside `save_stream`, not in the handler, and the docs say why.** Every other
+  record in this tree merges where the submitted body arrives. A stream merges in the one door
+  every write goes through, because `save_stream` **validates first** and a provider's own
+  `validate` reads its settings — a token whose prefix it recognises, a password whose shape it
+  checks. Handed the mask it would refuse a configuration that is in fact fine. The live test
+  asserts exactly that ordering with a provider that insists its passwords start with `tok-`.
+
+- **A create with the mask as its password stores no password.** There is nothing behind the mask
+  when there is no row yet, so the key is dropped rather than written; a provider that declared
+  the field `required` then refuses the save with the admin still looking at the form. The
+  alternative is a stream that connects with `••••••••` as its password.
+
+- **Repointing a stream at another provider does not carry the old one's secrets over.** The
+  stored configuration is only a source for the merge when the provider is the *same*: two
+  providers' settings are different vocabularies, and a field that happens to share a name is not
+  the same field.
+
+- **An unresolvable provider passes its configuration through both ways.** A stream whose provider
+  came from an uninstalled module stays listable and editable — editing it *is* the repair — and
+  nothing escapes, because no spec means no field was ever declared secret. `shown_config`'s
+  judgement for file stores, for its reason.
+
+- **`delete_stream` now takes the referents and refuses while there are any**, naming them:
+  "stream `boiler` is still used by trigger `store_temp`; remove those references before deleting
+  it". A trigger holds its stream as a `channel`, which is a *name*, not a foreign key, so nothing
+  in the database stops the row going and what the admin would be left with is a trigger that has
+  silently stopped firing. The caller passes the referents in — `delete_llm_model`'s arrangement,
+  because `sc-stream` must not depend on `sc-action` (§2) — and `trigger_referent` is the one
+  phrasing, so every call site says it the same way. A stream that is not there is still "already
+  gone" rather than a reference to a row nobody can see.
+
+- **`crates/sc-stream/tests/stream_store.rs`: the store against a real Postgres** (principle 4),
+  and each test is there for something a unit test cannot reach. The round trip, because a
+  `Stream` that equals itself in memory proves nothing about a JSON column, a nullable `min_role`
+  and a uuid primary key. The strict read, damaged **with SQL**, because the row this guards
+  against is one the database holds. Uniqueness *twice* — the validator's sentence, which is what
+  an admin sees, and the `UNIQUE` constraint underneath it, which is what stops two admins saving
+  the same name at once. The delete refusal, because the row has to still be there afterwards.
+  And the secret round trip, because "the password survived" is a question about what is stored.
+
+## Saving a stream: refused in front of the admin, because a wrong stream connects anyway
+
+Task 2.2 of the streams milestone. `sc-stream::validate` is what `save_stream` now calls first,
+and it is the one place every way a stream can be wrong is checked.
+
+- **The reason the checks matter more here than for a model or a trigger, said out loud.** A
+  model that fails validation does not fit and a trigger that fails does not fire — both are
+  silences you go looking for. A stream that is wrong **connects anyway**: the supervisor
+  subscribes to whatever the row says, and a mis-declared element type means every payload from a
+  perfectly healthy broker is counted as malformed and thrown away, silently, at the rate the
+  sensor publishes. The form is the last moment anybody can act on that cheaply.
+
+- **Everything but uniqueness is a pure function.** `check_stream(registry, stream)` takes a
+  value and a registry and nothing else, so every refusal an admin will actually meet is a unit
+  test rather than a live-database one — `sc-viewpattern`'s split, for its reason. It checks the
+  name, `min_role`, that the provider is registered, that the configuration is what the
+  provider's `config_spec` declares (`validate_attrs`), that `element_type(configuration)`
+  computes and yields a type the runtime can honour, and then whatever else the provider itself
+  wants to say. `validate_stream` is that plus the one question only the database can answer: is
+  this name already taken by another row?
+
+- **The element type is asked for here whatever the provider overrides.** `StreamProvider::validate`
+  has a default that computes it, but a provider that overrides `validate` could skip it — and
+  the element type is what the Observe screen renders, what a trigger's `only_if` reads and what
+  a generated client is typed from, so a stream whose type cannot be computed is one where all
+  three are undefined. The one cheap overlap is deliberate.
+
+- **A stream's name is an identifier: letters, digits and `_`, not starting with a digit.**
+  Stricter than a view's name, which allows spaces, and the doc says why the two differ. A
+  stream's name appears *unescaped* in four places — the observe socket's path segment, a
+  trigger's `channel`, the generated `observeStream_{name}()` (which has to parse as TypeScript)
+  and MQTT's default `client_id` of `feldspar-{name}`. A view has to accept `List Books` because
+  v1 named one that and a restored backup must load; a stream is new in this milestone and has
+  no backup to accept, so the strict rule costs an admin one underscore and saves every consumer
+  downstream from deciding whether to percent-encode, quote or mangle. The refusal names the
+  character: "stream name `boiler temp` contains a space".
+
+- **`min_role` is checked against the 1–100 scale, not against `_fd_roles`**, and the comment
+  says so rather than leaving it to be discovered: `sc-stream` sits below `sc-auth`, this is the
+  check a `Trigger`'s and a file store's `min_role` already make, and "40 is not one of your
+  roles" is answerable by the admin form, which offers the live list.
+
+- `save_stream` takes the registry now, because validation needs it. The uniqueness check moved
+  out of the store and into the validator, where the rest of the refusals are.
+
+## `_fd_streams`: a stream is a row that is its own definition
+
+Task 2.1 of the streams milestone. `sc-stream` gains `Stream`/`StreamId` and the store that puts
+one in the primary database, so a stream is now a thing that survives a restart rather than a
+value a test constructs. Nothing subscribes yet — the supervisor is Phase 3 — and nothing
+validates yet beyond the name, which is task 2.2.
+
+- **The row *is* the definition**, with nothing to argue about: there is no column in
+  `information_schema` that says "subscribe to `house/boiler/#` on this broker and read each
+  payload as an object with a `temperature` float in it". `_fd_streams` carries `id`, `name`
+  (unique), `description`, `provider`, `configuration`, `min_role` and `attributes` — §5's list,
+  in `_fd_models`' and `_fd_triggers`' shape, bootstrapped by `bootstrap_streams` which
+  `install_streams` will call at boot for the reason `bootstrap_models` is called there: a
+  stream is no use to a `feldspar` command that is not serving.
+
+- **`element_type` is not a column, and the store says why.** It is a pure function of `provider`
+  + `configuration`, so a stored copy would be a second answer that drifts the day a provider's
+  declaration changes — invisibly, because the Observe screen and the generated client would be
+  reading the stale one while the live decoder used the other. A test asserts the schema has no
+  such field, so the temptation cannot be quietly given in to later.
+
+- **Reading is strict, and the failure it prevents is worse here than elsewhere.** A model read
+  with half a dataset is a fit that will not start; a stream read with half a configuration would
+  *connect anyway*, to the wrong broker or the wrong topic, and deliver elements that look
+  exactly like the right ones. So a missing or misshapen column is an `Error::invalid` naming the
+  stream and the column: a `configuration` that is not an object, a provider that is NULL, a row
+  with no `id`. A `min_role` outside 1–100 is refused rather than clamped, for `_fd_triggers`'
+  reason — reading a corrupt role as the nearest valid one would quietly change who may watch the
+  flow.
+
+- **NULL `min_role` is admin-only, not "unset"**, which is the trigger rule applied for the
+  trigger reason: a flow nobody has thought about the access of is not public, and a stream can
+  carry a broker's whole topic tree. `enabled` is a sparse attribute rather than a column (§9),
+  so a stream that has never been switched off carries no key saying so, and enabling one
+  *removes* the key rather than storing `true`.
+
+- **`Stream` is its own module, beside `store`**, following `sc-model`'s `model.rs`/`store.rs`
+  and `sc-action`'s `trigger.rs`/`store.rs` split rather than putting the entity in the store
+  file: the pure record is what a form, a supervisor and an application all handle, and the row
+  mapping is one of its readers.
+
+- `save_stream` / `load_stream` / `load_stream_by_name` / `require_stream` / `list_streams` /
+  `delete_stream`. The name is checked for uniqueness in `save_stream` as well as in the schema,
+  so an admin retyping a taken name gets a sentence naming it rather than a driver's
+  constraint-violation text. `list_streams` returns every *stored* stream including the disabled
+  and the no-longer-valid, because editing one is the repair and switching one off is not
+  deleting it. Deleting leaves nothing behind, and cannot: an element is not stored.
+
+## `sc-stream`: what a dataflow is, before anything runs one
+
+Phase 1 of the streams milestone. A new crate at layer 6 — `sc-model`'s placement for
+`sc-model`'s reason, because a module supplies stream providers and `sc-module` can only
+implement a trait declared below it — holding the vocabulary the other nine phases are written
+against. Nothing subscribes to anything yet: this is the element, the provider seam and the
+registry, plus the fake that lets every later phase be tested without a broker.
+
+- **An element is not stored, so the element *type* does all the work.** `ElementType` is
+  `Json { keys }` | `Text { encoding }` | `Binary`, computed from the configuration rather than
+  stored beside it, and it is checked where it is declared and enforced where a payload is
+  decoded. A `json` type with no keys, a duplicate key, a key of a type with no JSON form
+  (`bytes`) or one this system does not know (`Other`) are all refused naming the key. GOALS asks
+  "(which encoding?)": the declaration carries one, the runtime implements UTF-8, and anything
+  else is refused at save time — guessing is what produces a stream of replacement characters
+  nobody notices for a week.
+
+- **Decoding is where "malformed" is decided, once.** `ElementType::decode` takes a `RawPayload`
+  — `Bytes` from a broker, `Json` from a module's poll, because neither can be converted to the
+  other without either parsing bytes nobody asked to parse or re-encoding a value that was never
+  encoded — and produces the envelope's `value`. Declared keys that are absent come back as
+  `null` and undeclared keys are carried through, so a declared shape is a floor and not a
+  ceiling: a publisher that adds a field cannot break a stream that did not ask for it, and a
+  consumer never has to ask whether a key exists.
+
+- **The envelope is a wire contract and is tested as one.** `{stream, value, received_at,
+  source}`, asserted field by field rather than round-tripped — a round trip passes just as
+  happily when both halves are wrong together. `received_at` is fixed-width RFC 3339
+  milliseconds in UTC (`2026-09-17T09:00:00.000Z`) rather than chrono's own encoding, which
+  prints as many fractional digits as the value happens to need and so hands every parser at the
+  far end a field that is sometimes there and sometimes not. A provider delivers an `Element`
+  (value + its own metadata) and the running stream stamps the stream name and the clock, which
+  is what stops a provider being able to lie about either.
+
+- **`subscribe` returns rather than blocks.** `Subscription` is an owned handle whose `Drop`
+  stops the flow: it closes the `Stop` the provider's task selects on and then aborts the task,
+  because the callers are a reload, a disable and a shutdown and none of them can wait on a
+  provider blocked reading a socket that will never answer. `has_ended()` is how the supervisor
+  will see a broker that hung up. That shape — a handle, not a `&mut self` loop — is what makes
+  Phase 3's restart path a diff over a map rather than a protocol with a provider.
+
+- **Nobody may block the flow, written into a type.** `StreamSink::deliver` is synchronous and
+  infallible. A sink that could fail or await would let one slow consumer push back on a
+  provider, which for a flow means either an unbounded queue or a dropped broker session; a
+  consumer that cannot keep up is the consumer's problem (§7). `malformed` is beside it with a
+  default no-op, so a sink that only cares about elements need not say so.
+
+- **`StreamRegistry` is `ModelRegistry`'s fourth sibling**: a `BTreeMap`, ordered, rebuilt rather
+  than mutated, duplicates refused *naming both sources* ("one from the built-in providers and
+  one from the module `@saltcorn/mqtt`"). `StreamProviderHost` differs from `ModelProviderHost`
+  in one way and the doc says why: a model provider's seam is a call that returns a fit, so the
+  registry can wrap a declaration and route the call back, but a subscription is not a call that
+  returns and there is no channel from a Deno worker into the host — so the host hands back
+  *code*, and Phase 9's `PollingProvider` is what a module host will hand back. A host whose code
+  disagrees with its own declaration is refused rather than left in the picker unstartable.
+
+- **`builtin_providers()` is empty, and that is a state rather than a gap.** MQTT lands in Phase 4
+  behind a default-on feature; a build with it off and no module installed has no stream
+  providers, and the screen will say so in a sentence instead of showing an empty picker.
+
+- **`testing::ScriptedProvider` and `testing::Collector`**, behind a `testing` feature rather than
+  `#[cfg(test)]` for `FakeProvider`'s reason — `sc-server` tests the sockets and the trigger
+  bridge against them, and a fake inside this crate's test build is one it could not reach. A
+  script of payloads, optionally on a timer, optionally repeating, optionally *ending* (the
+  broker-hung-up case), and optionally failing the first *n* subscribes so Phase 3's backoff is a
+  test rather than a hope.
+
+- **`BasicType::from_name`** in `sc-types`, the missing inverse of `name()`. `from_sql_type` is
+  not that inverse — `"int"`, `"float"` and `"bytes"` fall through it into `Other`, which is the
+  quiet wrong answer rather than an error — and an element key's declared type crosses the wire
+  as the stable name, because it is read by the admin UI and by a module in JavaScript and
+  neither speaks Postgres. It accepts both vocabularies and still carries an unknown name rather
+  than rejecting it.
+
+- **Tests.** 34 in the crate: the element type's JSON round trip and its four refusals, the
+  decoder over all three kinds (including base64 both ways, a non-UTF-8 payload and a wrong-typed
+  key), the envelope field by field, the subscription's stop and its ended flag, the registry's
+  ordering and its duplicate and disagreement refusals, and the scripted provider's own five —
+  elements in order, a drop that stops them, the nth subscribe failing, a subscription that ends,
+  and a payload that is counted rather than delivered.
+
 ## The service account owns its state and nothing it runs
 
 A review of what `scripts/setup-host.sh` leaves on a host. The service runs code an admin

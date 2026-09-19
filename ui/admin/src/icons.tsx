@@ -299,6 +299,19 @@ export function IconDots(props: IconProps) {
   );
 }
 
+/** The Streams section: a broadcast, which is what a dataflow is — something
+ * published from somewhere else that this installation happens to be listening
+ * to. Beside Triggers in the sidebar, and the same family of idea. */
+export function IconBroadcast(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M18.364 19.364a9 9 0 1 0 -12.728 0" />
+      <path d="M15.536 16.536a5 5 0 1 0 -7.072 0" />
+      <path d="M12 13m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" />
+    </Svg>
+  );
+}
+
 /** The Models section: a fitted curve over a histogram of the data under it. */
 export function IconChartHistogram(props: IconProps) {
   return (

@@ -35,7 +35,7 @@ use sc_expr::ModuleFnHosts;
 use sc_model::builtin_registry;
 use sc_module::{
     BundledModules, Installer, ModuleFrameworks, ModuleFunctions, ModuleHost, ModuleModelProviders,
-    ModuleSet, ModuleTableProviders, ModuleViewRuntime, bootstrap_modules,
+    ModuleSet, ModuleStreamProviders, ModuleTableProviders, ModuleViewRuntime, bootstrap_modules,
 };
 use sc_python::pymodule::{
     PyModuleFunctions, PyModuleHost, PyModuleModelProviders, PyModuleSet, PyModuleTableProviders,
@@ -54,6 +54,17 @@ pub struct ModuleServices {
     /// registry, and (Phase 7) a module supplying model providers replaces that
     /// registry.
     models: crate::models::ModelServices,
+    /// The stream machinery, for the one thing a module change does to it: a
+    /// module supplying stream providers replaces the registry a stream
+    /// resolves its provider through, and the supervisor is then reloaded so a
+    /// stream whose provider has just arrived starts and one whose provider has
+    /// just gone says so.
+    ///
+    /// Behind a lock and set afterwards rather than taken at `install`, because
+    /// the streams are brought up *after* the modules at boot — a stream over a
+    /// module-supplied provider has to find it — so at this point they do not
+    /// exist yet. `None` is that window, and a server that is not serving.
+    streams: RwLock<Option<crate::streams::StreamServices>>,
     installer: Installer,
     /// The modules this server ships with, read from `plugins/` at boot
     /// (`sc_module::bundled`). Read once: the directory is part of the artifact,
@@ -143,6 +154,7 @@ impl ModuleServices {
             dispatcher: Arc::clone(dispatcher),
             agents: agents.clone(),
             models: models.clone(),
+            streams: RwLock::new(None),
             installer: Installer::new(&root),
             bundled: BundledModules::discover(plugins),
             python_host: Arc::new(PyModuleHost::new(Arc::clone(&python))),
@@ -314,6 +326,21 @@ impl ModuleServices {
                 sc_error::format_chain(&e)
             ),
         }
+        // And the **stream providers** (TODO "Streams" §12), which is the same
+        // two-source composition one entity along: the built-ins (MQTT, unless
+        // it was compiled out) plus whatever the JavaScript modules supply as a
+        // poll. Rebuilt whole and swapped in, so a subscription that is already
+        // running keeps the provider it started with — it holds an `Arc` to the
+        // code and not a name.
+        //
+        // The supervisor is then **reloaded**, which is what makes the swap
+        // visible: a stream whose provider has just been installed starts, and
+        // one whose module has just gone away becomes `failed` with the
+        // sentence naming it rather than disappearing from the Streams screen.
+        // Reloaded below, with the catalog, because the reload reads the rows.
+        if let Some(streams) = self.streams() {
+            streams.supervisor().set_registry(self.stream_registry());
+        }
         // Then reload the catalog, because that is what *applies* the line
         // above: a provided table's columns are the module's answer, so
         // installing, configuring or deleting a module can change them — and a
@@ -331,6 +358,20 @@ impl ModuleServices {
             .reload(&self.catalog)
             .await
             .context("reloading the triggers after a module change")?;
+        // And the stream set against the registry swapped in above. Reported
+        // rather than fatal, for the reason every other step here is: a module
+        // change that could not restart a stream must not be a module change
+        // that failed, and the stream carries its own reason on the Streams
+        // screen.
+        if let Some(streams) = self.streams()
+            && let Err(e) = streams.reload(&self.catalog).await
+        {
+            eprintln!(
+                "feldspar: the streams could not be reloaded after a module change, so they are \
+                 running as they were: {}",
+                sc_error::format_chain(&e)
+            );
+        }
         // One set from here up: the Modules tab, the endpoints and `module_json`
         // are written once and serve both languages (§8).
         match self.loaded.write() {
@@ -338,6 +379,62 @@ impl ModuleServices {
             Err(_) => return Err(Error::msg("module set lock poisoned")),
         }
         Ok(())
+    }
+
+    /// The stream provider registry as the modules now stand: the built-ins
+    /// plus every JavaScript module's polled providers (TODO "Streams" §12).
+    ///
+    /// Built **whole** every time, never mutated, which is the rule the action
+    /// registry and the model providers follow for their reason: the live one
+    /// may be being read by a subscription that is starting.
+    ///
+    /// A module whose provider cannot be registered — the one real case is a
+    /// name a built-in or another module already has — is reported and the rest
+    /// kept, and a failure to build the built-in set at all leaves an empty
+    /// registry rather than no registry: every stream then says "unknown stream
+    /// provider", which is visible, where a server that refused to reload
+    /// modules over it would not be.
+    pub fn stream_registry(&self) -> Arc<sc_stream::StreamRegistry> {
+        let mut registry = match sc_stream::builtin_registry() {
+            Ok(registry) => registry,
+            Err(e) => {
+                eprintln!(
+                    "feldspar: the built-in stream providers could not be registered: {}",
+                    sc_error::format_chain(&e)
+                );
+                sc_stream::StreamRegistry::new()
+            }
+        };
+        let set = self.modules();
+        if let Err(e) =
+            registry.register_host(Arc::new(ModuleStreamProviders::new(&self.host, &set)))
+        {
+            eprintln!(
+                "feldspar: a JavaScript module's stream providers are not all available: {}",
+                sc_error::format_chain(&e)
+            );
+        }
+        Arc::new(registry)
+    }
+
+    /// Tell the modules where the streams are, so a module change can rebuild
+    /// their provider registry and reload them.
+    ///
+    /// Called once, at boot, straight after `install_streams_with` — which is
+    /// after this service exists, because a stream over a module-supplied
+    /// provider has to find it at boot.
+    pub fn set_streams(&self, streams: crate::streams::StreamServices) {
+        if let Ok(mut guard) = self.streams.write() {
+            *guard = Some(streams);
+        }
+    }
+
+    /// The streams, on a server that is serving.
+    fn streams(&self) -> Option<crate::streams::StreamServices> {
+        match self.streams.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 
     /// The loaded set as it stands — what the Modules tab renders.

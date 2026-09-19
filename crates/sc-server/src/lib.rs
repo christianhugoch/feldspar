@@ -33,10 +33,12 @@ mod lsp;
 mod mcp;
 mod models;
 mod modules;
+mod observe;
 mod reload;
 mod router;
 mod security;
 mod serve;
+mod streams;
 mod systemd;
 mod tls;
 mod triggers;
@@ -129,6 +131,7 @@ pub use lsp::{LSP_ROUTE, MAX_LANGUAGE_SERVERS};
 pub use mcp::{MCP_PROTOCOL_VERSION, MCP_ROUTE, MCP_SERVER_NAME};
 pub use models::{CatalogDatasetSource, ModelServices, install_models};
 pub use modules::ModuleServices;
+pub use observe::STREAM_OBSERVE_ROUTE;
 pub use reload::{ReloadReport, reload_all, spawn_sighup_reload};
 pub use router::{
     BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, IDE_PREFIX, build_router, build_router_with_apps,
@@ -144,6 +147,7 @@ pub use security::IDE_CONTENT_SECURITY_POLICY;
 pub use security::{BUILDER_CONTENT_SECURITY_POLICY, builder_content_security_policy};
 pub use security::{CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
 pub use serve::{serve, serve_browser};
+pub use streams::{StreamServices, TriggerBridge, install_streams, install_streams_with};
 pub use systemd::ServiceManager;
 pub use tls::{
     TlsHandle, TlsSettings, check_certificate, https_addr, install_crypto_provider,

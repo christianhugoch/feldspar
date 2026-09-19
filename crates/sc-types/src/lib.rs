@@ -61,6 +61,36 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn a_stable_name_round_trips_back_to_its_type() {
+        // `name()` is the vocabulary a declaration carries as data — a stream's
+        // element key, a module's config spec — so every variant it can produce
+        // has to come back as itself.
+        for ty in [
+            BasicType::Bool,
+            BasicType::Int,
+            BasicType::Float,
+            BasicType::Decimal,
+            BasicType::Text,
+            BasicType::Bytes,
+            BasicType::Json,
+            BasicType::Uuid,
+            BasicType::Date,
+            BasicType::Time,
+            BasicType::Timestamp,
+        ] {
+            assert_eq!(BasicType::from_name(ty.name()), ty, "{}", ty.name());
+        }
+        // The SQL vocabulary still reads, so one function takes either.
+        assert_eq!(BasicType::from_name("float8"), BasicType::Float);
+        assert_eq!(BasicType::from_name(" INT8 "), BasicType::Int);
+        // And an unknown name is carried, not rejected.
+        assert_eq!(
+            BasicType::from_name("geometry"),
+            BasicType::Other("geometry".to_owned())
+        );
+    }
+
+    #[test]
     fn maps_postgres_udt_names_to_basic_types() {
         // The aliases the driver's introspection actually emits (udt_name).
         assert_eq!(BasicType::from_sql_type("int8"), BasicType::Int);

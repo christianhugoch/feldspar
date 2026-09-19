@@ -88,7 +88,8 @@ impl Triggers {
     }
 
     /// The triggers that fire for `event`: the enabled ones whose event matches
-    /// and — for a table event — whose channel is the event's table.
+    /// and — where the kind has a channel — whose channel is the event's table
+    /// or stream.
     ///
     /// A disabled trigger is skipped here rather than at load, so it stays in the
     /// set (and in the admin's list) while not firing.
@@ -106,9 +107,12 @@ impl Triggers {
         self.triggers.iter().filter(move |t| {
             t.is_enabled()
                 && t.when == kind
-                // A table event must agree on the table; nothing else has one, and
-                // validation has already ensured neither side invents one.
-                && (!kind.is_table_event() || t.channel.as_deref() == channel)
+                // A table event must agree on the table and a stream event on
+                // the stream; nothing else has a channel, and validation has
+                // already ensured neither side invents one. `has_channel`
+                // rather than `is_table_event`, because a stream trigger that
+                // fired for every stream would be the loudest possible bug.
+                && (!kind.has_channel() || t.channel.as_deref() == channel)
         })
     }
 
@@ -170,6 +174,23 @@ mod tests {
         assert_eq!(names, vec!["books_insert"]);
         assert_eq!(set.matching(EventKind::Insert, Some("nothing")).count(), 0);
         assert_eq!(set.matching(EventKind::Delete, Some("books")).count(), 0);
+    }
+
+    #[test]
+    fn a_stream_trigger_fires_only_for_its_own_stream() {
+        // A stream event's channel is load-bearing exactly as a table event's
+        // is: a trigger on `boiler` must not see `market_feed`'s elements.
+        let set = triggers(vec![
+            Trigger::new("boiler_log", EventKind::Stream, "a").on("boiler"),
+            Trigger::new("feed_log", EventKind::Stream, "a").on("market_feed"),
+        ]);
+        let fired: Vec<&str> = set
+            .matching(EventKind::Stream, Some("boiler"))
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(fired, vec!["boiler_log"]);
+        assert_eq!(set.matching(EventKind::Stream, Some("nothing")).count(), 0);
+        assert_eq!(set.matching(EventKind::Stream, None).count(), 0);
     }
 
     #[test]

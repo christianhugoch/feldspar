@@ -117,6 +117,30 @@ impl std::fmt::Display for TriggerRef {
     }
 }
 
+/// A reference to a stream the application exposes for observation (TODO
+/// "Streams" §10), by the stream's unique **name**.
+///
+/// [`TriggerRef`]'s shape, word for word, and for its reasons: the name is what
+/// the socket's path is built from (`GET {mount}/streams/{name}/observe`) and
+/// what the generated client's method is called (`observeStream_{name}`), so it
+/// is already the app's contract with its own code. A rename breaks the
+/// reference visibly, which is what a rename *is*.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StreamRef(pub String);
+
+impl StreamRef {
+    /// A reference to the stream named `name`.
+    pub fn new(name: impl Into<String>) -> StreamRef {
+        StreamRef(name.into())
+    }
+}
+
+impl std::fmt::Display for StreamRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// One API provider enabled for an application, mounted on a sub-path (design
 /// §13.4). The MVP ships a REST provider; the model carries the provider `name`
 /// so GraphQL/gRPC/tRPC/MCP slot in later without a shape change.
@@ -289,6 +313,16 @@ pub struct Application {
     /// not name has no endpoint, and a request for it is a 404 rather than a
     /// 403 — there is nothing there.
     pub triggers: Vec<TriggerRef>,
+    /// The streams the app exposes for observation over a WebSocket (TODO
+    /// "Streams" §10).
+    ///
+    /// The same **opt-in subset** the triggers above are, on the same
+    /// principle: a stream is server-side configuration, and it becomes
+    /// reachable from outside only because an app said so. A stream the app does
+    /// not name has no socket, and a request for it is a 404 rather than a 403 —
+    /// there is nothing there. What a named one *is* reachable by is still the
+    /// stream's own `min_role`, which the socket enforces.
+    pub streams: Vec<StreamRef>,
     /// Enabled API providers, each on a sub-path.
     pub apis: Vec<ApiConfig>,
     /// Statically-served store subdirectories, each on a sub-path.
@@ -324,6 +358,7 @@ impl Application {
             tables: Vec::new(),
             file_stores: Vec::new(),
             triggers: Vec::new(),
+            streams: Vec::new(),
             apis: Vec::new(),
             static_dirs: Vec::new(),
             csp: CspPolicy::strict(),
@@ -359,6 +394,12 @@ impl Application {
     /// Expose a trigger through the app's API.
     pub fn with_trigger(mut self, trigger: TriggerRef) -> Application {
         self.triggers.push(trigger);
+        self
+    }
+
+    /// Expose a stream for observation through the app.
+    pub fn with_stream(mut self, stream: StreamRef) -> Application {
+        self.streams.push(stream);
         self
     }
 
@@ -400,6 +441,11 @@ impl Application {
     pub fn exposes_trigger(&self, name: &str) -> bool {
         self.triggers.iter().any(|t| t.0 == name)
     }
+
+    /// Whether the app exposes the stream named `name` for observation.
+    pub fn exposes_stream(&self, name: &str) -> bool {
+        self.streams.iter().any(|s| s.0 == name)
+    }
 }
 
 #[cfg(test)]
@@ -419,6 +465,7 @@ mod tests {
         .with_table(TableId("posts".to_owned()))
         .with_file_store(FileStoreId("uploads".to_owned()))
         .with_trigger(TriggerRef::new("send_digest"))
+        .with_stream(StreamRef::new("boiler"))
         .with_api(ApiConfig::new("rest", "api"))
         .with_static_dir(StaticDir::new(
             "docs",
@@ -440,6 +487,10 @@ mod tests {
         // the server has configured is not.
         assert!(app.exposes_trigger("send_digest"));
         assert!(!app.exposes_trigger("purge_users"));
+        // …and so are streams: one flow is observable from outside, and the
+        // others this server runs are not.
+        assert!(app.exposes_stream("boiler"));
+        assert!(!app.exposes_stream("meter"));
 
         // One REST provider, mount normalised with a leading slash.
         assert_eq!(app.apis.len(), 1);

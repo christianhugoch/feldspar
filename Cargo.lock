@@ -2326,7 +2326,7 @@ dependencies = [
  "hyper-util",
  "ipnet",
  "percent-encoding",
- "rustls-webpki",
+ "rustls-webpki 0.103.13",
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
@@ -2676,7 +2676,7 @@ dependencies = [
  "node_shim",
  "rand 0.8.5",
  "rustls-tokio-stream",
- "rustls-webpki",
+ "rustls-webpki 0.103.13",
  "serde",
  "smallvec",
  "socket2 0.5.10",
@@ -3154,7 +3154,7 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "rustls-tokio-stream",
- "rustls-webpki",
+ "rustls-webpki 0.103.13",
  "serde",
  "thiserror 2.0.19",
  "tokio",
@@ -4069,6 +4069,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fixedbitset"
+version = "0.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
+
+[[package]]
 name = "flate2"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4077,6 +4083,17 @@ dependencies = [
  "crc32fast",
  "miniz_oxide",
  "zlib-rs",
+]
+
+[[package]]
+name = "flume"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "spin",
 ]
 
 [[package]]
@@ -7786,6 +7803,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rumqttc"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0feff8d882bff0b2fddaf99355a10336d43dd3ed44204f85ece28cf9626ab519"
+dependencies = [
+ "bytes",
+ "fixedbitset",
+ "flume",
+ "futures-util",
+ "log",
+ "rustls-native-certs 0.8.4",
+ "rustls-pemfile",
+ "rustls-webpki 0.102.8",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tokio-util",
+]
+
+[[package]]
 name = "rusqlite"
 version = "0.40.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7884,7 +7922,7 @@ dependencies = [
  "log",
  "once_cell",
  "rustls-pki-types",
- "rustls-webpki",
+ "rustls-webpki 0.103.13",
  "subtle",
  "zeroize",
 ]
@@ -7977,7 +8015,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs 0.8.4",
  "rustls-platform-verifier-android",
- "rustls-webpki",
+ "rustls-webpki 0.103.13",
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs 1.0.9",
@@ -8001,6 +8039,17 @@ dependencies = [
  "rustls",
  "socket2 0.5.10",
  "tokio",
+]
+
+[[package]]
+name = "rustls-webpki"
+version = "0.102.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64ca1bc8749bd4cf37b5ce386cc146580777b4e8572c7b97baf22c83f444bee9"
+dependencies = [
+ "ring",
+ "rustls-pki-types",
+ "untrusted 0.9.0",
 ]
 
 [[package]]
@@ -8195,6 +8244,7 @@ dependencies = [
  "sc-expr",
  "sc-files",
  "sc-query",
+ "sc-stream",
  "sc-test-harness",
  "sc-types",
  "serde_json",
@@ -8564,6 +8614,7 @@ dependencies = [
  "sc-log",
  "sc-model",
  "sc-query",
+ "sc-stream",
  "sc-test-harness",
  "sc-types",
  "sc-viewpattern",
@@ -8668,6 +8719,7 @@ dependencies = [
  "sc-module",
  "sc-python",
  "sc-query",
+ "sc-stream",
  "sc-test-harness",
  "sc-types",
  "sc-viewpattern",
@@ -8680,6 +8732,30 @@ dependencies = [
  "tower-http",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "sc-stream"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "rumqttc",
+ "rustls",
+ "rustls-native-certs 0.8.4",
+ "sc-catalog",
+ "sc-db",
+ "sc-db-postgres",
+ "sc-error",
+ "sc-query",
+ "sc-stream",
+ "sc-test-harness",
+ "sc-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -9296,6 +9372,9 @@ name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
+dependencies = [
+ "lock_api",
+]
 
 [[package]]
 name = "spirv"

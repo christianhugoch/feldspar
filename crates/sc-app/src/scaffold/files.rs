@@ -26,8 +26,8 @@
 use std::fmt::Write as _;
 
 use sc_api::{
-    CLIENT_HELPER_FILE, EndpointSet, GRAPHQL_CLIENT_FILE, GRAPHQL_SCHEMA_FILE, client_helper,
-    client_property, generate_client, generate_graphql_client, op_name,
+    CLIENT_HELPER_FILE, EndpointSet, GRAPHQL_CLIENT_FILE, GRAPHQL_SCHEMA_FILE, StreamExport,
+    client_helper, client_property, generate_client_with_streams, generate_graphql_client, op_name,
 };
 use sc_auth::{ROLE_ADMIN, Role};
 use sc_catalog::{PublicOrigin, Table};
@@ -120,6 +120,14 @@ pub struct ProjectContext<'a> {
     pub endpoints: &'a EndpointSet,
     /// Its GraphQL projection, for an app that enables the provider.
     pub graphql: Option<&'a AppGraphql>,
+    /// The streams the app exposes, typed (TODO "Streams" §10).
+    ///
+    /// Beside the endpoints rather than in them — a subscription is not a
+    /// request/response pair — and carried for the reason `schema_sql` is:
+    /// resolving a stream needs the [`Catalog`] this generator does not have.
+    ///
+    /// [`Catalog`]: sc_catalog::Catalog
+    pub streams: &'a [StreamExport],
     /// The `CREATE TABLE` statements for [`tables`](ProjectContext::tables), as
     /// the **driver** renders them
     /// ([`app_schema_sql`](crate::app_schema_sql)).
@@ -321,7 +329,10 @@ pub fn common_runtime_files(
         }
     };
     let mut files = vec![
-        GeneratedFile::new(at(client_file), generate_client(ctx.endpoints)),
+        GeneratedFile::new(
+            at(client_file),
+            generate_client_with_streams(ctx.endpoints, ctx.streams),
+        ),
         GeneratedFile::new(at(CLIENT_HELPER_FILE), client_helper()),
         GeneratedFile::new(
             at(RUNTIME_SCHEMA_FILE),
@@ -2515,6 +2526,7 @@ mod tests {
             tables,
             endpoints,
             graphql,
+            streams: &[],
             // The driver renders this in the real path; its exact text is that
             // renderer's business, and this is enough to assert it is carried.
             schema_sql: "CREATE TABLE \"tasks\" (\"id\" int8 NOT NULL);\n",
@@ -2928,7 +2940,7 @@ mod tests {
     fn hooks_are_typed_per_table_over_the_tables_own_client_object() {
         let tables = [tasks()];
         let eps = endpoints(&tables);
-        let client = generate_client(&eps);
+        let client = generate_client_with_streams(&eps, &[]);
         let hooks = hooks_ts(&tables, &eps);
 
         // The row type is this app's columns, with nullability from the schema —

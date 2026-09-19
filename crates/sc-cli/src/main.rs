@@ -276,6 +276,30 @@ async fn serve_command(args: &[String]) -> Result<()> {
     )
     .await?;
 
+    // Streams: the `_fd_streams` table, the provider registry, and the
+    // supervisor that subscribes to every enabled stream (TODO "Streams").
+    // **After the triggers**, because the sink it installs fires the dispatcher
+    // — an element that arrived before the triggers were up would have nothing
+    // to fire — and after the modules, so a stream over a module-supplied
+    // provider finds it. Started only by `serve`, for the reason the scheduler
+    // is: a `build-app` that opened the same database must not connect to
+    // somebody's broker.
+    service.notify_status("starting streams");
+    // Over the provider registry the modules just built: the built-ins plus
+    // whatever a module supplies as a poll (TODO "Streams" §12). And the
+    // modules are told where the streams are, so the next module change can
+    // rebuild that registry and reload the supervisor against it — which is
+    // what makes installing a stream provider a thing that takes effect without
+    // a restart.
+    let streams = sc_server::install_streams_with(
+        &catalog,
+        &triggers,
+        modules.stream_registry(),
+        config.streams,
+    )
+    .await?;
+    modules.set_streams(streams.clone());
+
     service.notify_status("mounting applications");
     // Held past `with_agents`, for installing the previewer below.
     let view_services = agents.registry().view_services().clone();
@@ -287,6 +311,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
             .with_triggers(triggers.clone())
             .with_agents(agents)
             .with_models(models)
+            .with_streams(streams)
             .with_modules(modules)
             .with_python(python)
             .with_saltcorn_ui_dir(config.saltcorn_ui_dir.clone()),

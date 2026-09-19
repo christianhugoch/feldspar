@@ -43,6 +43,8 @@ mod module_store;
 mod pg_provider;
 #[path = "rss_provider.rs"]
 mod rss_provider;
+#[path = "stream_providers.rs"]
+mod stream_providers;
 #[path = "two_pools.rs"]
 mod two_pools;
 #[path = "v1_table.rs"]

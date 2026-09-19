@@ -27,12 +27,12 @@ use serde_json::{Value as Json, json};
 
 use crate::api::{describe_api_queries, validate_api_config, validate_api_mounts};
 use crate::application::{
-    ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, TriggerRef,
+    ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, StreamRef, TriggerRef,
 };
 use crate::applications::{
     APPLICATIONS_TABLE, COL_APIS, COL_ATTRIBUTES, COL_CSP, COL_DESCRIPTION, COL_EXTRA_FRAMEWORKS,
-    COL_FILE_STORES, COL_FRAMEWORK, COL_ID, COL_NAME, COL_STATIC_DIRS, COL_SUBDOMAIN, COL_TABLES,
-    COL_TRIGGERS,
+    COL_FILE_STORES, COL_FRAMEWORK, COL_ID, COL_NAME, COL_STATIC_DIRS, COL_STREAMS, COL_SUBDOMAIN,
+    COL_TABLES, COL_TRIGGERS,
 };
 use crate::framework::{CFG_STORE, validate_framework_config};
 
@@ -229,6 +229,7 @@ fn app_columns() -> Vec<String> {
         COL_TABLES,
         COL_FILE_STORES,
         COL_TRIGGERS,
+        COL_STREAMS,
         COL_APIS,
         COL_STATIC_DIRS,
         COL_CSP,
@@ -255,6 +256,8 @@ fn app_values(app: &Application) -> Result<Vec<Value>> {
         // Written as `[]` rather than left NULL, so a row this version saves is
         // never one the tolerant read below has to forgive.
         Value::Json(names_to_json(app.triggers.iter().map(|t| &t.0))),
+        // …and the exposed streams beside them, written the same way.
+        Value::Json(names_to_json(app.streams.iter().map(|s| &s.0))),
         Value::Json(Json::Array(
             app.apis
                 .iter()
@@ -339,6 +342,12 @@ pub(crate) fn application_from_row(row: &Row) -> Result<Application> {
         triggers: optional_names_from_json(row, COL_TRIGGERS)?
             .into_iter()
             .map(TriggerRef)
+            .collect(),
+        // Read leniently for `NULL`/absent for the same reason, and only that
+        // reason: the column arrived after the table did.
+        streams: optional_names_from_json(row, COL_STREAMS)?
+            .into_iter()
+            .map(StreamRef)
             .collect(),
         apis: json_array(row, COL_APIS)?
             .iter()

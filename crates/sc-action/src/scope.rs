@@ -457,7 +457,10 @@ pub async fn render_event_template(
     if template.is_literal() {
         return Ok(template.source().to_owned());
     }
-    let channel = ctx.event.channel.as_deref();
+    // The **table** channel (see [`Event::table_channel`]): a stream event's
+    // channel is a stream name, and a template on one ranges over
+    // [`EVENT_SCOPE`] reading the envelope through `payload`.
+    let channel = ctx.event.table_channel();
     let table = match channel {
         Some(name) => Some(ctx.catalog.require(name).map_err(named)?),
         None => None,

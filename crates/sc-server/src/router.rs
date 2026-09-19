@@ -43,10 +43,38 @@ use crate::config::ServerConfig;
 use crate::handler::{HandlerCtx, HandlerRegistry, HandlerResponse};
 use crate::lsp::{LSP_ROUTE, ServerSlots, language_server_upgrade, server_slots};
 use crate::mcp::MCP_ROUTE;
+use crate::observe::{STREAM_OBSERVE_ROUTE, stream_observe_by_name, stream_observe_upgrade};
 use crate::security::{
     CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, IDE_CONTENT_SECURITY_POLICY, SESSION_COOKIE,
     build_cookie, csrf_middleware,
 };
+
+/// A WebSocket upgrade, **if this request is one** — the extractor the fallback
+/// needs and axum does not provide (TODO "Streams" §10, task 8.2).
+///
+/// An application's routes are not axum routes: every one of them arrives at
+/// the single [`dispatch`] fallback, because an app's paths are its own and
+/// change while the server runs. An upgrade therefore has to be taken there,
+/// and `WebSocketUpgrade` rejects a request that is not one rather than
+/// answering `None` (it has no `OptionalFromRequestParts` impl). So this wraps
+/// it: extracted from the parts, *before* the body is read, which is the one
+/// ordering rule an upgrade has.
+struct MaybeUpgrade(Option<axum::extract::ws::WebSocketUpgrade>);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for MaybeUpgrade {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> std::result::Result<MaybeUpgrade, Self::Rejection> {
+        Ok(MaybeUpgrade(
+            axum::extract::ws::WebSocketUpgrade::from_request_parts(parts, state)
+                .await
+                .ok(),
+        ))
+    }
+}
 
 /// The document served for a navigation when there is **no admin bundle to
 /// serve** — no `--static-dir`, or a directory with no `index.html` in it.
@@ -253,6 +281,15 @@ pub fn build_router_with_apps(
         // body, and a chat turn is bidirectional in a way the typed endpoint
         // model has no shape for.
         .route(AGENT_CHAT_ROUTE, axum::routing::get(agent_chat))
+        // A stream's Observe socket (TODO "Streams" §9). The third route that
+        // is an upgrade rather than a typed endpoint, for the reason the other
+        // two are: an `EndpointSet` is a typed request/response model and a
+        // socket has no shape in it. It sits on `/api/streams/{id}/observe`,
+        // beside the stream endpoints rather than under `/admin`, because it is
+        // the same resource the CRUD endpoints address — and axum matches this
+        // literal route ahead of the `dispatch` fallback the rest of `/api`
+        // goes through.
+        .route(STREAM_OBSERVE_ROUTE, axum::routing::get(stream_observe))
         // The administration MCP server (§13.6). A real route rather than a
         // typed endpoint for the reason the upload and backup routes are:
         // JSON-RPC over a raw body is not a shape `TypeSchema` describes.
@@ -579,6 +616,74 @@ async fn agent_chat(
     .await
 }
 
+/// A stream's Observe socket (TODO "Streams" §9, task 6.3): admin-only, one
+/// subscription per connection.
+///
+/// The auth story is the chat socket's and the language server's, word for
+/// word, and the reason to repeat it rather than share it is that it is the one
+/// refusal that has to be an HTTP **status**: a browser cannot read the body of
+/// a failed WebSocket handshake, so everything decided after the upgrade — no
+/// stream support, no such stream, not running here — is a close frame instead
+/// (see [`crate::observe`]). The session cookie is `SameSite=Strict`, so a
+/// cross-site page's socket carries no session and lands on the rejection
+/// below.
+async fn stream_observe(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    jar: CookieJar,
+    AxumPath(id): AxumPath<String>,
+    // Optional, so a plain `GET` of this path is answered by this handler with
+    // a sentence rather than by the extractor's own rejection: the path is one
+    // an admin may well try in a browser tab.
+    MaybeUpgrade(ws): MaybeUpgrade,
+) -> Response {
+    // This is a real axum route, so it wins over the fallback every
+    // application's request goes through — including an app whose API is
+    // mounted at `/api`, whose own socket path is spelled exactly like this
+    // one. So the host is asked first, as `dispatch` asks it, and an
+    // application's socket is served as the application's (TODO "Streams" §10).
+    if let Resolved::App(app) = resolve_app(&state, &headers, &jar) {
+        let csp = app.app.csp.header_value();
+        return with_csp(app_stream_observe(&state, &app, &id, &jar, ws).await, &csp);
+    }
+    let user = match session_user(&state, &jar).await {
+        Ok(user) => user,
+        Err(response) => return *response,
+    };
+    if let Some(rejection) = enforce_auth(&AuthRequirement::admin(), user.as_ref()) {
+        return rejection;
+    }
+    // A path segment that is not a uuid is answered with a status rather than
+    // an upgrade: there is no stream it could be, and the handshake has not
+    // happened yet, so this is still a request whose body can be read.
+    let Ok(id) = id.parse::<uuid::Uuid>() else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "the stream id in the path is not a uuid",
+        );
+    };
+    let Some(ws) = ws else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "this path is a WebSocket: connect to it with `ws:`/`wss:` rather than fetching it",
+        );
+    };
+    stream_observe_upgrade(
+        ws,
+        state.apps.streams().map(sc_server_stream_supervisor),
+        sc_stream::StreamId(id),
+    )
+    .await
+}
+
+/// The supervisor inside a server's stream services — a named function rather
+/// than a closure so the `Option::map` above reads as what it is.
+fn sc_server_stream_supervisor(
+    services: &crate::StreamServices,
+) -> &std::sync::Arc<sc_stream::StreamSupervisor> {
+    services.supervisor()
+}
+
 /// Group endpoints by path pattern and insert them into a `matchit` router.
 fn build_matchit(endpoints: &EndpointSet) -> Result<matchit::Router<Vec<Endpoint>>> {
     // Preserve registration order while grouping same-path endpoints together
@@ -603,6 +708,9 @@ fn build_matchit(endpoints: &EndpointSet) -> Result<matchit::Router<Vec<Endpoint
 
 /// The single fallback that dispatches every request: API routes via `matchit`,
 /// everything else to the static bundle / bootstrap document.
+// One handler for every request there is, so its arguments are the request's:
+// each one is an extractor axum fills in, not a parameter a caller chose.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch(
     State(state): State<AppState>,
     method: axum::http::Method,
@@ -610,6 +718,9 @@ async fn dispatch(
     headers: axum::http::HeaderMap,
     jar: CookieJar,
     csrf: Option<axum::Extension<crate::security::CsrfToken>>,
+    // Before `body`, and it has to be: an upgrade lives in the request's
+    // extensions and must be taken while the parts are still in hand.
+    MaybeUpgrade(ws): MaybeUpgrade,
     body: Bytes,
 ) -> Response {
     // An application claims the whole of its subdomain, so this comes first: on
@@ -617,7 +728,7 @@ async fn dispatch(
     match resolve_app(&state, &headers, &jar) {
         Resolved::App(app) => {
             let csrf = csrf.map(|axum::Extension(token)| token.0);
-            return dispatch_app(&state, &app, method, &uri, &headers, jar, csrf, &body).await;
+            return dispatch_app(&state, &app, method, &uri, &headers, jar, csrf, ws, &body).await;
         }
         // A run's preview, asked for without that run's session: the answer is
         // the one a host that serves nothing gets, so a preview shows nobody
@@ -728,6 +839,7 @@ async fn dispatch_app(
     headers: &axum::http::HeaderMap,
     jar: CookieJar,
     csrf: Option<String>,
+    ws: Option<axum::extract::ws::WebSocketUpgrade>,
     body: &Bytes,
 ) -> Response {
     let csp = app.app.csp.header_value();
@@ -738,6 +850,14 @@ async fn dispatch_app(
         );
     };
     let path = uri.path();
+
+    // An observe socket, before the API providers: the path sits *beside* the
+    // endpoint set (`{mount}/streams/{name}/observe`), so on an app whose API is
+    // at `/api` it is under a provider's mount and would otherwise be answered
+    // by the provider's "no such endpoint" (TODO "Streams" §10).
+    if let Some(name) = sc_app::stream_in_path(&app.app, path) {
+        return with_csp(app_stream_observe(state, app, name, &jar, ws).await, &csp);
+    }
 
     // The app's data: an API provider that claims this path.
     if let Some(provider) = app.provider_for(path) {
@@ -928,6 +1048,88 @@ async fn dispatch_app(
             &csp,
         ),
     }
+}
+
+/// An application's Observe socket: `GET {mount}/streams/{name}/observe` (TODO
+/// "Streams" §10, task 8.2).
+///
+/// The admin socket's sibling, with two refusals the admin's does not have and
+/// one it shares:
+///
+/// - **Not exposed** (or no such stream) is a **404**, not a 403: an app that
+///   did not name the stream has nothing there, which is the same answer its
+///   triggers give and for the same reason — a 403 would confirm the existence
+///   of a flow this application has no business knowing about.
+/// - **`min_role`** is the stream's own, and `None` means admin (§5: a flow
+///   nobody has thought about the access of is not public). It is read off the
+///   **stored row**, not off the running stream, so a stream this process has
+///   not started is still authorised by the same number.
+/// - Both, and the "is this even an upgrade" check, are answered **before** the
+///   handshake, because a browser cannot read the body of a failed one. What is
+///   left — no stream support, not running here — is a close frame with a
+///   reason, in [`crate::observe`].
+async fn app_stream_observe(
+    state: &AppState,
+    app: &MountedApp,
+    name: &str,
+    jar: &CookieJar,
+    ws: Option<axum::extract::ws::WebSocketUpgrade>,
+) -> Response {
+    let Some(ws) = ws else {
+        // The path is a socket's and the request is not one: an ordinary GET
+        // here is a mistake worth naming rather than a 404 that looks like a
+        // routing bug.
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "this path is a WebSocket: connect to it with `ws:`/`wss:` rather than fetching it",
+        );
+    };
+    // Unknown and unexposed are the same answer, deliberately.
+    let not_found = || {
+        json_error(
+            StatusCode::NOT_FOUND,
+            format!("this application does not expose a stream named `{name}`"),
+        )
+    };
+    if !app.app.exposes_stream(name) {
+        return not_found();
+    }
+    let Some(catalog) = state.apps.catalog() else {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "no catalog");
+    };
+    let stream = match sc_stream::load_stream_by_name(catalog, name).await {
+        Ok(Some(stream)) => stream,
+        // Exposed by the app, gone from the server: the app is misconfigured
+        // and the honest answer to the caller is still "there is nothing here".
+        Ok(None) => return not_found(),
+        Err(e) => {
+            log_failure("reading a stream for an application's observe socket", &e);
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not read the stream",
+            );
+        }
+    };
+    let user = match jar.get(SESSION_COOKIE).map(|c| c.value().to_owned()) {
+        Some(token) => match state.sessions.user_for(&token).await {
+            Ok(user) => user,
+            Err(e) => {
+                log_failure("session lookup failed", &e);
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "session lookup failed");
+            }
+        },
+        None => None,
+    };
+    let floor = stream.min_role.unwrap_or(sc_auth::ROLE_ADMIN);
+    if let Some(rejection) = enforce_auth(&AuthRequirement::MinRole(floor), user.as_ref()) {
+        return rejection;
+    }
+    stream_observe_by_name(
+        ws,
+        state.apps.streams().map(sc_server_stream_supervisor),
+        name,
+    )
+    .await
 }
 
 /// The headers an application framework is shown (§8): what v1's patterns read,

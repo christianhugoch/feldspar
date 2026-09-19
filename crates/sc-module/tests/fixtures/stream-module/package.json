@@ -1,0 +1,8 @@
+{
+  "name": "@saltcorn-test/stream",
+  "version": "0.1.0",
+  "description": "A module supplying stream providers, for the stream-provider seam's tests: it counts, it declares its element type as a function of its settings, and it declares two providers that are deliberately broken.",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT"
+}

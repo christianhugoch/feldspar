@@ -120,6 +120,29 @@ impl BasicType {
         }
     }
 
+    /// The inverse of [`name`](BasicType::name): the type a stable name means.
+    ///
+    /// [`name`](BasicType::name) is what a declaration written as *data* carries
+    /// — a stream's element key says `"float"`, not `"float8"` — and until this
+    /// existed there was no way back. [`from_sql_type`](BasicType::from_sql_type)
+    /// is not that inverse: it answers a backend's `udt_name`, so `"int"` and
+    /// `"float"` fall through it into [`Other`](BasicType::Other), which is the
+    /// quiet wrong answer rather than an error.
+    ///
+    /// The SQL aliases are still accepted, so one function reads either
+    /// vocabulary, and an unrecognised name still becomes
+    /// [`Other`](BasicType::Other) carrying it — a name is never rejected here,
+    /// because whoever asked is the one who knows whether an unknown type is a
+    /// problem.
+    pub fn from_name(name: &str) -> BasicType {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "int" => BasicType::Int,
+            "float" => BasicType::Float,
+            "bytes" => BasicType::Bytes,
+            other => BasicType::from_sql_type(other),
+        }
+    }
+
     /// The [`Value::kind`] a non-null value of this type must have, or `None`
     /// for [`Other`](BasicType::Other) (which accepts text only via the
     /// catch-all path but imposes no `Value`-family constraint here).

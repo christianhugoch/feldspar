@@ -139,8 +139,122 @@ function row(item, index) {
   };
 }
 
+/** The settings a **stream** over a feed takes (TODO "Streams" §12).
+ *
+ * Nearly the table provider's, and deliberately not shared with it: a table is
+ * queried when somebody looks at it, so its setting is a *cache window*, while a
+ * stream is polled on a clock, so its setting is an *interval*. Writing one
+ * field that meant both would be a setting whose sublabel had to explain which
+ * of the two it was doing today.
+ */
+const STREAM_CONFIG_FIELDS = [
+  {
+    name: "url",
+    label: "Feed URL",
+    type: "String",
+    required: true,
+    sublabel: "The address of an RSS or Atom feed, including https://.",
+  },
+  {
+    name: "interval_s",
+    label: "Poll every (seconds)",
+    type: "Integer",
+    default: 300,
+    sublabel:
+      "How often the publisher is asked for new items. Five minutes by default: a feed is " +
+      "not a broker, and polling one every second is somebody else's bandwidth.",
+  },
+  {
+    name: "max_items",
+    label: "Maximum items per poll",
+    type: "Integer",
+    sublabel: "Elements to deliver from one poll, newest first. Blank or 0 delivers all of them.",
+  },
+];
+
+/** What an element of a feed stream *is*: one item, with the columns the table
+ * provider declares minus the ones a stream has no use for.
+ *
+ * A function of the configuration, which is the shape the host asks for even
+ * though this feed's answer does not depend on it — every item of every feed has
+ * the same seven fields, and inventing a setting to vary them would be inventing
+ * a setting.
+ *
+ * `guid` is `required`, so an item with no id at all is counted as malformed
+ * rather than delivered: it is the one field a consumer needs to tell two
+ * elements apart, and `rowId` below gives every item one.
+ */
+const STREAM_ELEMENT_TYPE = {
+  kind: "json",
+  keys: [
+    { name: "guid", type: "text", required: true },
+    { name: "title", type: "text" },
+    { name: "link", type: "text" },
+    { name: "published", type: "text" },
+    { name: "author", type: "text" },
+    { name: "summary", type: "text" },
+    { name: "content", type: "text" },
+  ],
+};
+
+/** How many item ids a cursor remembers.
+ *
+ * The cursor is "what I delivered last time", and it has to be a *set* rather
+ * than a high-water mark because a feed is not ordered by anything this module
+ * can trust: publishers reorder, backdate and edit. Capped because it is carried
+ * across the module seam on every poll, and an unbounded one would grow for as
+ * long as the stream runs.
+ */
+const CURSOR_ITEMS = 500;
+
 module.exports = {
   sc_plugin_api_version: 1,
+  /** **A feed as a dataflow** (TODO "Streams" §12): the same feed the table
+   * provider above reads, delivered item by item as it changes.
+   *
+   * Poll, not push, because that is what a module can be: a module call is
+   * request/response on a worker and there is no channel from one back into the
+   * host, so what is declared here is a `poll` and the host supplies the
+   * interval loop, the cursor and the decoding.
+   *
+   * **The first poll delivers the feed as it stands.** Backfill is out of scope
+   * for streams and this is not it: a feed is a window on the last *n* items and
+   * not a log, so "everything in the window when I connected" is the closest a
+   * feed has to MQTT's retained message — and a stream that showed nothing at
+   * all until the publisher next posted would look broken for hours.
+   */
+  streamproviders: {
+    rss_feed: {
+      label: "RSS feed",
+      description: "An RSS or Atom feed, polled: one element per new item.",
+      config_fields: STREAM_CONFIG_FIELDS,
+      element_type: () => STREAM_ELEMENT_TYPE,
+      poll: async ({ configuration, cursor }) => {
+        const config = configuration || {};
+        const url = String(config.url || "").trim();
+        if (!url) throw new Error("this RSS stream has no feed URL configured");
+        // No cache window: the poll interval *is* the cache, and reusing a
+        // fetch here would mean a stream polled every 30 seconds quietly
+        // delivering nothing for the other 30.
+        const feed = await fetchFeed(url, 0);
+        const items = Array.isArray(feed.items) ? feed.items : [];
+        const max = num(config.max_items, 0);
+        const all = items.map(row);
+        const kept = max > 0 ? all.slice(0, max) : all;
+        // The first poll has no cursor and delivers the window; every one after
+        // it delivers what was not in the last.
+        const seen = Array.isArray(cursor) ? new Set(cursor) : null;
+        const fresh = seen ? kept.filter((item) => !seen.has(item.guid)) : kept;
+        return {
+          elements: fresh,
+          // What this poll *saw*, not what it delivered: an item that was in
+          // the window last time and is still there must not be delivered
+          // again because it happened to fall past `max_items`.
+          cursor: all.slice(0, CURSOR_ITEMS).map((item) => item.guid),
+        };
+      },
+    },
+  },
   table_providers: {
     "RSS feed": {
       configuration_workflow,
