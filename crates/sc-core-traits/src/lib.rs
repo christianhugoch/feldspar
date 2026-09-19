@@ -21,7 +21,7 @@
 //!
 //! ## The set
 //!
-//! Nine traits over five things an agent can be given. **Tables**:
+//! Ten traits over six things an agent can be given. **Tables**:
 //! [`QueryTable`] reads one, and [`InsertRow`], [`UpdateRows`] and
 //! [`DeleteRows`] are three separate opt-in grants over one — so a read-only
 //! agent is the default shape and each way of changing data is a deliberate act
@@ -34,6 +34,9 @@
 //! `package.json` declares under another, which is the bounded thing that ships
 //! instead of a shell (decision 6) — and [`BuildApplication`] builds the
 //! application whose source that store is and hands back its diagnostics. And
+//! **the chat's own screen**: [`PreviewPane`] contributes no tool at all — it
+//! says that this agent's work can be looked at, and at which URL, and the chat
+//! puts that page beside the conversation. And
 //! **the application itself**: [`AdminCopilot`] describes and edits the catalog
 //! *and* the trigger set — the first *app-building* trait, and the first that
 //! does not name a table in its configuration, because the tables it makes do
@@ -97,6 +100,7 @@ mod coding;
 mod delete_rows;
 mod files;
 mod insert_row;
+mod preview_pane;
 mod query_table;
 mod run_agent;
 mod run_trigger;
@@ -141,6 +145,10 @@ pub use coding::{
 };
 pub use delete_rows::DeleteRows;
 pub use insert_row::InsertRow;
+pub use preview_pane::{
+    CFG_RELOAD_ON_TURN, CFG_URL, DEFAULT_RELOAD_ON_TURN, PreviewPane, configured_url, is_framable,
+    reloads_on_turn,
+};
 pub use query_table::{DEFAULT_MAX_ROWS, QueryTable};
 pub use run_agent::{CFG_AGENT, CFG_PROMPT, RunAgent};
 pub use run_trigger::{CFG_TRIGGER, RunTrigger};
@@ -216,6 +224,7 @@ pub fn register_builtin_traits(registry: &mut AgentRegistry) -> Result<()> {
     registry.register(Arc::new(AdminCopilot))?;
     registry.register(Arc::new(QueryTable))?;
     registry.register(Arc::new(InsertRow))?;
+    registry.register(Arc::new(PreviewPane))?;
     registry.register(Arc::new(UpdateRows))?;
     registry.register(Arc::new(DeleteRows))?;
     registry.register(Arc::new(RunTrigger))?;
@@ -240,6 +249,7 @@ mod tests {
                 "coding",
                 "delete_rows",
                 "insert_row",
+                "preview_pane",
                 "query_table",
                 "run_trigger",
                 "subagent",

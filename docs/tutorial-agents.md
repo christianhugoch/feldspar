@@ -688,8 +688,25 @@ And the rule that has held all the way down this page still holds here: `librari
 | `build_application` | an application's subdomain | builds it, and gets the diagnostics — for an agent whose job is only to build one; a `coding` agent builds through its own `check` instead |
 | `admin_copilot` | four grants, two areas, and **no table** | describes and edits the schema itself, the triggers over it, and an application's custom SQL endpoints |
 | `subagent` | one agent, when to use it, two bounds | hands it one task and reads back what it concluded |
+| `preview_pane` | a URL, and whether to reload it | **no tool at all**: the chat screen gains a button that puts that page beside the conversation (see below) |
 
-Each is a grant. Adding one is a decision you can read off the agent's page later.
+Each is a grant. Adding one is a decision you can read off the agent's page later — except the
+last, which grants the agent nothing and the *person* something.
+
+### Watching it work: `preview_pane`
+
+An agent created by an application (Step 5's `build-todo`) carries `preview_pane` pointed at the
+application's own address. Open that agent's **Chat** full screen and there is a split-screen
+button in the top bar: the conversation narrows to a column on the left and the application fills
+the rest, with **full**, **tablet** and **phone** widths to look at it in. When the agent finishes
+a turn the pane reloads, so "make the header sticky" is answered by the header, not by a paragraph
+about the header.
+
+Add it to any other agent the same way: the URL is what the pane opens on, and `{host}` in it
+becomes whatever host you reached the admin by — `//shop.{host}` is the `shop` application on this
+deployment, wherever it is running. An application created before this existed refuses to be
+framed; re-save it with its CSP field left empty, or add the admin's own domain to its
+`frame-ancestors`.
 
 ## Things that trip people up
 

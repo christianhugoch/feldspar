@@ -223,7 +223,10 @@ async fn setup(tmp: &TempDir) -> sc_error::Result<(Router, Arc<Catalog>, TestDb)
     sc_app::bootstrap(&catalog).await?;
     catalog.connect_file_store(Arc::new(LocalFileStore::new("apps", tmp.path())?))?;
 
-    let apps = Arc::new(AppMounts::new(catalog.clone()));
+    // With the base domain the real server gives it: it is what a preview host
+    // is derived from, and what an application's default policy lets frame it.
+    let apps =
+        Arc::new(AppMounts::new(catalog.clone()).with_base_domain(Some(BASE_DOMAIN.to_owned())));
     let config = ServerConfig {
         base_domain: Some(BASE_DOMAIN.to_owned()),
         ..ServerConfig::default()
@@ -447,7 +450,13 @@ async fn the_react_framework_is_offered_first_and_brings_its_own_defaults() -> s
     assert_eq!(csp["default-src"], json!(["'self'"]));
     assert_eq!(csp["img-src"], json!(["'self'", "data:"]));
     assert_eq!(csp["connect-src"], json!(["'self'"]));
-    assert_eq!(csp["frame-ancestors"], json!(["'none'"]));
+    // Framable by the admin on the base domain, and by nobody else: that is
+    // the preview pane beside the builder agent's chat (TODO "The preview
+    // pane"), which is an iframe on the admin's own origin.
+    assert_eq!(
+        csp["frame-ancestors"],
+        json!(["'self'", "example.com", "example.com:*"])
+    );
     // Nothing unsafe: the tooling decision (§2.1) is what earns this.
     assert!(!created["csp"].to_string().contains("unsafe-"));
 

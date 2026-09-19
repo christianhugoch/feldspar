@@ -46,7 +46,7 @@ use crate::mcp::MCP_ROUTE;
 use crate::observe::{STREAM_OBSERVE_ROUTE, stream_observe_by_name, stream_observe_upgrade};
 use crate::security::{
     CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, IDE_CONTENT_SECURITY_POLICY, SESSION_COOKIE,
-    build_cookie, csrf_middleware,
+    admin_content_security_policy, build_cookie, csrf_middleware,
 };
 
 /// A WebSocket upgrade, **if this request is one** — the extractor the fallback
@@ -314,7 +314,15 @@ pub fn build_router_with_apps(
         // still gets the strict default.
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+            // Computed rather than static because one directive depends on the
+            // base domain: the applications this admin may frame beside a
+            // builder agent's chat (`admin_content_security_policy`). A header
+            // that will not parse is not a reason to serve none, so the strict
+            // policy is the fallback.
+            HeaderValue::from_str(&admin_content_security_policy(
+                config.base_domain.as_deref(),
+            ))
+            .unwrap_or_else(|_| HeaderValue::from_static(CONTENT_SECURITY_POLICY)),
         ))
         .layer(SetResponseHeaderLayer::overriding(
             header::X_CONTENT_TYPE_OPTIONS,

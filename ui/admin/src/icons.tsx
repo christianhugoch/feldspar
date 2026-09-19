@@ -509,3 +509,33 @@ export function SaltcornLogo({ className }: IconProps) {
     />
   );
 }
+
+export function IconDeviceDesktop(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M3 5m0 1a1 1 0 0 1 1 -1h16a1 1 0 0 1 1 1v10a1 1 0 0 1 -1 1h-16a1 1 0 0 1 -1 -1z" />
+      <path d="M7 20l10 0" />
+      <path d="M9 16l0 4" />
+      <path d="M15 16l0 4" />
+    </Svg>
+  );
+}
+
+export function IconDeviceTablet(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5 4m0 1a1 1 0 0 1 1 -1h12a1 1 0 0 1 1 1v14a1 1 0 0 1 -1 1h-12a1 1 0 0 1 -1 -1z" />
+      <path d="M12 17l0 .01" />
+    </Svg>
+  );
+}
+
+export function IconDeviceMobile(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M6 5a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2z" />
+      <path d="M11 4l2 0" />
+      <path d="M12 17l0 .01" />
+    </Svg>
+  );
+}

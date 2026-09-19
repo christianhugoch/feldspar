@@ -60,7 +60,9 @@ object-src 'none'",
     );
 
     // The relaxations the *IDE's* policy has are the IDE's; none of them may
-    // arrive here on the back of a canvas library.
+    // arrive here on the back of a canvas library. `frame-src` among them: the
+    // preview pane's is added to the *served* policy from the base domain
+    // (`admin_content_security_policy`), and names applications only.
     for forbidden in ["unsafe-eval", "blob:", "worker-src", "frame-src"] {
         assert!(
             !CONTENT_SECURITY_POLICY.contains(forbidden),

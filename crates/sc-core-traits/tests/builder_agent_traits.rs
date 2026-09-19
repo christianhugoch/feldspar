@@ -20,8 +20,10 @@ use sc_app::{
     Application, BuilderAgentSpec, CFG_COMMAND, CFG_OUTPUT, CFG_PROJECT, CFG_SOURCE, CFG_STORE,
     CODE_FRAMEWORK, EDIT_FORMAT_AUTO, FrameworkRef, REACT_FRAMEWORK, TRAIT_CFG_APPLICATION,
     TRAIT_CFG_CHECKS, TRAIT_CFG_EDIT_FORMAT, TRAIT_CFG_MAY_CHECK, TRAIT_CFG_MAY_EDIT,
-    TRAIT_CFG_MAY_RUN_SCRIPTS, TRAIT_CFG_MAY_USE_SHELL, TRAIT_CFG_MAY_VIEW_APP, TRAIT_CFG_ROOT,
-    TRAIT_CFG_STORE, TRAIT_CFG_WORKFLOW, TRAIT_CODING, WORKFLOW_PLANNED, framework_builder_agent,
+    TRAIT_CFG_MAY_RUN_SCRIPTS, TRAIT_CFG_MAY_USE_SHELL, TRAIT_CFG_MAY_VIEW_APP,
+    TRAIT_CFG_PREVIEW_RELOAD, TRAIT_CFG_PREVIEW_URL, TRAIT_CFG_ROOT, TRAIT_CFG_STORE,
+    TRAIT_CFG_WORKFLOW, TRAIT_CODING, TRAIT_PREVIEW_PANE, WORKFLOW_PLANNED,
+    framework_builder_agent,
 };
 use sc_types::validate_attrs;
 use serde_json::json;
@@ -113,12 +115,12 @@ fn the_grants_and_the_build_target_are_the_settings_the_coding_trait_means() {
         assert_eq!(declared, real);
     }
 
-    // And the values a created application carries (§12): `coding` alone,
-    // which may edit, check and look at the application it was created to
-    // build, starts by planning, and may not run scripts or a shell.
+    // And the values a created application carries (§12): `coding`, which may
+    // edit, check and look at the application it was created to build, starts
+    // by planning, and may not run scripts or a shell.
     let app = react_app();
     let spec = spec_for(&app);
-    assert_eq!(spec.traits.len(), 1, "{:?}", spec.traits);
+    assert_eq!(spec.traits.len(), 2, "{:?}", spec.traits);
     let coding = &spec.traits[0];
     assert_eq!(coding.trait_, TRAIT_CODING);
     for (key, value) in [
@@ -134,6 +136,38 @@ fn the_grants_and_the_build_target_are_the_settings_the_coding_trait_means() {
     ] {
         assert_eq!(coding.config[key], value, "`{key}`");
     }
+}
+
+#[test]
+fn the_preview_pane_a_builder_carries_opens_on_the_application_it_builds() {
+    // The other half of the same rename risk: `preview_pane` and its `url` are
+    // strings on the `sc-app` side, and an agent naming a trait that is not
+    // registered does not save at all — so the application would be created
+    // with no builder rather than with one that cannot show its work.
+    for (declared, real) in [
+        (TRAIT_CFG_PREVIEW_URL, sc_core_traits::CFG_URL),
+        (TRAIT_CFG_PREVIEW_RELOAD, sc_core_traits::CFG_RELOAD_ON_TURN),
+    ] {
+        assert_eq!(declared, real);
+    }
+
+    let app = code_app();
+    let spec = spec_for(&app);
+    let pane = spec
+        .traits
+        .iter()
+        .find(|t| t.trait_ == TRAIT_PREVIEW_PANE)
+        .expect("a builder agent carries a preview pane");
+    // The app's own subdomain, on whatever host the admin is open on: the
+    // stored agent must not pin the deployment's domain.
+    assert_eq!(pane.config[TRAIT_CFG_PREVIEW_URL], json!("//blog.{host}"));
+    assert_eq!(pane.config[TRAIT_CFG_PREVIEW_RELOAD], json!(true));
+    // And it is a URL the trait itself accepts, which is what `save_agent`
+    // will run over it.
+    assert_eq!(
+        sc_core_traits::configured_url(&pane.config).expect("the pane's URL validates"),
+        "//blog.{host}"
+    );
 }
 
 #[test]

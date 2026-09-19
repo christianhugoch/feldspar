@@ -57,11 +57,14 @@ import { api, errorMessage } from "../api";
 import type { GetRunResponse, ListRunsResponse } from "../client";
 import {
   ChatSession,
+  PANE_WIDTHS,
   agentChatUrl,
   compactionLabel,
   conclusionLabel,
   conclusionNotice,
   emptyChat,
+  previewPaneOf,
+  resolvePaneUrl,
   splitCodeBlocks,
   transcriptFromRun,
   type ChatState,
@@ -69,6 +72,7 @@ import {
   type Conclusion,
   type ControlValue,
   type Entry,
+  type PreviewPane,
   type SocketLike,
 } from "../agentChat";
 import { navigate } from "../App";
@@ -85,11 +89,16 @@ import {
   IconArrowsDiagonal,
   IconArrowsDiagonalMinimize,
   IconChevronDown,
+  IconDeviceDesktop,
+  IconDeviceMobile,
+  IconDeviceTablet,
+  IconLayoutColumns,
   IconLayoutSidebar,
   IconMessagePlus,
   IconMinus,
   IconPictureInPicture,
   IconPlayerStop,
+  IconRefresh,
   IconRobot,
   IconSparkles,
   IconTool,
@@ -175,6 +184,16 @@ export function AgentChat({
   // shut where it would cover it (below Tabler's `lg`, it is a drawer; in a
   // window there is no room for it at all until it goes full screen).
   const [railOpen, setRailOpen] = useState(() => !frame && window.innerWidth >= 992);
+  // The pane the agent declares (`preview_pane`), whether it is open, and at
+  // which width. Absent for every agent that declares none, which is most.
+  const [pane, setPane] = useState<PreviewPane | null>(null);
+  const [paneOpen, setPaneOpen] = useState(false);
+  const [paneWidth, setPaneWidth] = useState(PANE_WIDTHS[0].name);
+  // Bumped to reload the pane. It is the iframe's `key`, so a bump remounts the
+  // element: a full page load, which is what "the agent changed the app" means
+  // and what a same-origin-only `contentWindow.location.reload()` cannot do
+  // across origins anyway.
+  const [paneNonce, setPaneNonce] = useState(0);
   // Read once, on the mount that opens the socket: a prop rebuilt on every
   // render of the shell would otherwise reconnect the chat under the person.
   const opening = useRef(initial);
@@ -184,6 +203,27 @@ export function AgentChat({
   // for a minute must not yank the view back down while someone is reading what
   // it said two tool calls ago — so it follows only when they were following.
   const following = useRef(true);
+
+  // Which pane this agent carries, read from its stored traits. A failure is
+  // silent: the pane is an extra screen, and an agent whose definition could not
+  // be read still has a conversation.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listAgents()
+      .then((agents) => {
+        if (cancelled) return;
+        setPane(previewPaneOf(agents.find((a) => a.name === agent)?.traits));
+      })
+      .catch(() => {
+        if (!cancelled) setPane(null);
+      });
+    return () => {
+      cancelled = true;
+      setPane(null);
+      setPaneOpen(false);
+    };
+  }, [agent]);
 
   const loadRuns = useCallback(async () => {
     try {
@@ -229,6 +269,16 @@ export function AgentChat({
   useEffect(() => {
     if (!running) void loadRuns();
   }, [running, loadRuns]);
+
+  // ...and what the agent just did is what the pane is showing, so it is stale
+  // too. Only on the *falling* edge, and only while the pane is open: a reload
+  // of a hidden frame is a build's worth of requests nobody is looking at.
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    const ended = wasRunning.current && !running;
+    wasRunning.current = running;
+    if (ended && paneOpen && pane?.reloadOnTurn) setPaneNonce((n) => n + 1);
+  }, [running, paneOpen, pane]);
 
   const entries = viewing ? viewing.entries : chat.entries;
 
@@ -316,9 +366,23 @@ export function AgentChat({
   }, [currentRun, running]);
   const runBar = runRecord && runRecord.id === currentRun && <RunBar run={runRecord} />;
 
+  // The URL the pane opens on, resolved against this admin's own location: a
+  // stored `//todo.{host}` is the application's subdomain on whatever host this
+  // browser reached the admin by. `null` for a pane nobody may frame.
+  const paneUrl = useMemo(
+    () => (pane ? resolvePaneUrl(pane.url, window.location) : null),
+    [pane],
+  );
+  // The pane is the page's screen, not a window's: a 24rem popped-out chat has
+  // no room for a column and a browser beside it.
+  const splitAvailable = !frame && paneUrl !== null;
+  const split = splitAvailable && paneOpen;
+
   // The rail is 17rem of navigation between conversations: it belongs beside a
-  // transcript that has the page, and not inside a window a third that width.
-  const railAvailable = !frame || frame.mode === "full";
+  // transcript that has the page, and not inside a window a third that width —
+  // nor beside a transcript that is itself down to a column, which is the whole
+  // point of the split.
+  const railAvailable = (!frame || frame.mode === "full") && !split;
   const showRail = railOpen && railAvailable;
 
   const railToggle = (
@@ -338,8 +402,18 @@ export function AgentChat({
     <StatusBadge tone={stateTone(chat.lastState)}>{chat.lastState}</StatusBadge>
   );
 
-  const body = (
-    <div className={frame ? "chat-surface" : "chat-page chat-surface"}>
+  // Three renderings of one surface: a popped-out window, the page, and the
+  // page's left-hand column with the application beside it. `chat-page` is the
+  // class that tells the shell this screen has the viewport, so in the split it
+  // moves out to the wrapper — the element the shell's `:has(> .chat-page)`
+  // rules select must be the wrapper's own child.
+  const surfaceClass = frame
+    ? "chat-surface"
+    : split
+      ? "chat-surface chat-split-chat"
+      : "chat-page chat-surface";
+  const surface = (
+    <div className={surfaceClass}>
       {showRail && (
         <ConversationRail
           runs={runs}
@@ -375,6 +449,22 @@ export function AgentChat({
               <IconMessagePlus className="icon-2" />
               New chat
             </button>
+            {splitAvailable && (
+              <button
+                type="button"
+                className={
+                  split
+                    ? "btn btn-icon btn-sm btn-primary"
+                    : "btn btn-icon btn-ghost-secondary btn-sm"
+                }
+                aria-label={split ? "Hide the application" : "Show the application beside the chat"}
+                aria-pressed={split}
+                title={split ? "Hide the application" : "Show the application beside the chat"}
+                onClick={() => setPaneOpen((open) => !open)}
+              >
+                <IconLayoutColumns className="icon-2" />
+              </button>
+            )}
             <PopOutButton
               running={chat.running}
               onPopOut={() =>
@@ -441,7 +531,22 @@ export function AgentChat({
     </div>
   );
 
-  if (!frame) return body;
+  if (!frame) {
+    if (!split || !paneUrl) return surface;
+    return (
+      <div className="chat-page chat-split">
+        {surface}
+        <PreviewPaneView
+          url={paneUrl}
+          nonce={paneNonce}
+          width={paneWidth}
+          onWidth={setPaneWidth}
+          onReload={() => setPaneNonce((n) => n + 1)}
+          onClose={() => setPaneOpen(false)}
+        />
+      </div>
+    );
+  }
 
   // A window's title bar is the page's top bar with different furniture, and it
   // stays visible when the body does not — a minimized chat *is* its title bar.
@@ -506,9 +611,109 @@ export function AgentChat({
           <IconX className="icon-2" />
         </button>
       </div>
-      {body}
+      {surface}
     </>
   );
+}
+
+/** The application beside the conversation: a toolbar, and an iframe.
+ *
+ * The iframe is keyed by `nonce`, so bumping it remounts the element and the
+ * page loads again from the top. That is deliberately the crudest reload there
+ * is: the pane is cross-origin (the application is on its own subdomain), so
+ * there is no `contentWindow` to talk to, and a full load is what "the agent
+ * changed the application" means anyway.
+ *
+ * The width buttons letterbox the frame rather than resizing the pane: what
+ * they answer is "does this layout hold up on a phone?", and a 390px column
+ * with the rest of the pane left empty is the same question a phone asks.
+ */
+function PreviewPaneView({
+  url,
+  nonce,
+  width,
+  onWidth,
+  onReload,
+  onClose,
+}: {
+  url: string;
+  nonce: number;
+  width: string;
+  onWidth: (name: string) => void;
+  onReload: () => void;
+  onClose: () => void;
+}) {
+  const chosen = PANE_WIDTHS.find((w) => w.name === width) ?? PANE_WIDTHS[0];
+  return (
+    <section className="chat-pane" aria-label="The application">
+      <div className="chat-pane-bar">
+        <div className="btn-group btn-group-sm" role="group" aria-label="Screen width">
+          {PANE_WIDTHS.map((option) => (
+            <button
+              key={option.name}
+              type="button"
+              className={
+                option.name === chosen.name
+                  ? "btn btn-icon btn-sm btn-primary"
+                  : "btn btn-icon btn-sm btn-outline-secondary"
+              }
+              aria-label={option.label}
+              aria-pressed={option.name === chosen.name}
+              title={option.label}
+              onClick={() => onWidth(option.name)}
+            >
+              <PaneWidthIcon name={option.name} />
+            </button>
+          ))}
+        </div>
+        <div className="chat-pane-url text-secondary text-truncate">{url}</div>
+        <button
+          type="button"
+          className="btn btn-icon btn-ghost-secondary btn-sm"
+          aria-label="Reload the application"
+          title="Reload"
+          onClick={onReload}
+        >
+          <IconRefresh className="icon-2" />
+        </button>
+        <a
+          className="btn btn-icon btn-ghost-secondary btn-sm"
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          aria-label="Open the application in a new tab"
+          title="Open in a new tab"
+        >
+          <IconArrowsDiagonal className="icon-2" />
+        </a>
+        <button
+          type="button"
+          className="btn btn-icon btn-ghost-secondary btn-sm"
+          aria-label="Hide the application"
+          title="Hide the application"
+          onClick={onClose}
+        >
+          <IconX className="icon-2" />
+        </button>
+      </div>
+      <div className="chat-pane-stage">
+        <iframe
+          key={nonce}
+          className="chat-pane-frame"
+          style={chosen.px === null ? undefined : { width: `${chosen.px}px` }}
+          src={url}
+          title="The application"
+        />
+      </div>
+    </section>
+  );
+}
+
+/** The device a width stands for. */
+function PaneWidthIcon({ name }: { name: string }) {
+  if (name === "phone") return <IconDeviceMobile className="icon-2" />;
+  if (name === "tablet") return <IconDeviceTablet className="icon-2" />;
+  return <IconDeviceDesktop className="icon-2" />;
 }
 
 /** Pop the chat out of the page and into the corner, then leave the page.

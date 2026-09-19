@@ -283,6 +283,41 @@ impl Default for CspPolicy {
     }
 }
 
+/// The name of the directive that says who may frame an application.
+pub const FRAME_ANCESTORS: &str = "frame-ancestors";
+
+/// `csp`, widened so the admin served on `base_domain` may frame the application
+/// (TODO "The preview pane" §2).
+///
+/// The admin frames an application in one place and for one reason: the preview
+/// pane beside a builder agent's chat, where the person watches the thing the
+/// agent is changing. That pane is an `<iframe>` on the admin's own origin — the
+/// **base domain** — and an application's default policy refuses to be framed at
+/// all, so without this the pane is a browser error message and nothing the
+/// admin can see explains it.
+///
+/// What is widened is exactly one directive and exactly one origin: the base
+/// domain, at its default port and at any port (`example.com example.com:*`),
+/// which is the deployment's own admin and, in development, the same host on
+/// `:3000`. Every other framer is still refused, and `'self'` is kept so a page
+/// of the application may frame its own. A deployment with no base domain serves
+/// no applications on subdomains at all, so there is nothing to widen and the
+/// policy is returned untouched.
+///
+/// This is applied where the framework's **default** policy is (on create and
+/// update, when the caller states no `csp` of its own): a policy the admin wrote
+/// out is theirs, and an admin who writes `frame-ancestors 'none'` has said what
+/// they mean.
+pub fn allow_admin_framing(csp: CspPolicy, base_domain: Option<&str>) -> CspPolicy {
+    let Some(base) = base_domain.map(str::trim).filter(|b| !b.is_empty()) else {
+        return csp;
+    };
+    csp.directive(
+        FRAME_ANCESTORS,
+        ["'self'".to_owned(), base.to_owned(), format!("{base}:*")],
+    )
+}
+
 /// An application: a UI framework plus an access subset of the shared data layer,
 /// served on its own subdomain (design §13.2).
 #[derive(Debug, Clone, PartialEq)]

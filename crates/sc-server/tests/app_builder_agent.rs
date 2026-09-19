@@ -291,9 +291,10 @@ async fn creating_an_application_creates_the_agent_that_builds_it() -> sc_error:
         "{stored}"
     );
 
-    // `coding` alone: the build is one of its checks, not a trait of its own.
+    // `coding` and the pane: the build is one of `coding`'s checks, not a trait
+    // of its own, and the pane is what puts the application beside the chat.
     let traits = stored["traits"].as_array().unwrap();
-    assert_eq!(traits.len(), 1, "{stored}");
+    assert_eq!(traits.len(), 2, "{stored}");
     let coding = &traits[0];
     assert_eq!(coding["trait"], json!("coding"));
     // Scoped to *this* application's project directory, which the framework
@@ -314,6 +315,14 @@ async fn creating_an_application_creates_the_agent_that_builds_it() -> sc_error:
     // This host has no browser, so the agent cannot look at the application —
     // and is saved without that grant rather than not saved at all.
     assert_eq!(coding["config"]["may_view_app"], json!(false));
+
+    // ...and the preview pane, pointed at this application's own subdomain on
+    // whatever host the admin is open on (TODO "The preview pane"). The stored
+    // URL is a template: one agent, every deployment.
+    let pane = &traits[1];
+    assert_eq!(pane["trait"], json!("preview_pane"));
+    assert_eq!(pane["config"]["url"], json!("//todo.{host}"));
+    assert_eq!(pane["config"]["reload_on_turn"], json!(true));
 
     // A second application gets its own agent, scoped to its own directory: two
     // apps in one store are two agents, neither able to edit the other's source.

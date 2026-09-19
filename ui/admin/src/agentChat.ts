@@ -25,6 +25,86 @@ export function agentChatUrl(location: { protocol: string; host: string }): stri
   return `${scheme}//${location.host}${AGENT_CHAT_ROUTE}`;
 }
 
+/* --------------------------------------------------------------------------
+ * The preview pane (TODO "The preview pane")
+ *
+ * An agent may carry the `preview_pane` trait, which contributes no tool: it
+ * says that this agent's work can be looked at, and at which URL. The chat
+ * screen reads it off the agent's stored traits and offers the split view — the
+ * conversation in a column, the page beside it.
+ *
+ * The resolution lives here rather than in the component because it is the part
+ * that can be wrong: a stored URL is a template (`//todo.{host}`) so one agent
+ * follows the deployment from `localhost:3000` to the production domain, and it
+ * ends up in an `iframe src`, so a scheme that would execute in the admin's own
+ * origin must not reach the DOM. The trait refuses those on save; this refuses
+ * them again on the way in, because a stored agent is not a trusted input.
+ * ------------------------------------------------------------------------ */
+
+/** The trait that puts a page beside the conversation. */
+export const PREVIEW_PANE_TRAIT = "preview_pane";
+
+/** What that trait was configured with. */
+export type PreviewPane = {
+  /** The URL as stored, `{host}` and all. */
+  url: string;
+  /** Reload the pane when the agent finishes a turn. */
+  reloadOnTurn: boolean;
+};
+
+/** One enabled trait, as `listAgents` serves it. */
+type EnabledTrait = { trait: string; config: unknown };
+
+/** The preview pane `traits` declares, or `null` for an agent that has none.
+ *
+ * The first one wins: a second pane would be a second screen, and the button
+ * that opens it can only open one. */
+export function previewPaneOf(traits: EnabledTrait[] | undefined): PreviewPane | null {
+  for (const enabled of traits ?? []) {
+    if (enabled.trait !== PREVIEW_PANE_TRAIT) continue;
+    const config = (enabled.config ?? {}) as Record<string, unknown>;
+    const url = typeof config.url === "string" ? config.url.trim() : "";
+    if (!url) continue;
+    return { url, reloadOnTurn: config.reload_on_turn !== false };
+  }
+  return null;
+}
+
+/** The stored URL as a browser at `location` should load it, or `null` when it
+ * is not one this pane will open.
+ *
+ * `{host}` becomes the host the admin is being read from, which is what makes
+ * `//todo.{host}` the application's own subdomain on this deployment. What is
+ * accepted is an absolute `http(s)` URL, a protocol-relative `//host/path`, or
+ * a path on the admin's own origin — the same allow-list the trait validates
+ * against, kept here too because this is the side that writes `src`. */
+export function resolvePaneUrl(
+  url: string,
+  location: { protocol: string; host: string },
+): string | null {
+  const resolved = url.trim().split("{host}").join(location.host);
+  if (resolved.startsWith("//")) {
+    return resolved.length > 2 ? `${location.protocol}${resolved}` : null;
+  }
+  if (resolved.startsWith("/")) return resolved;
+  if (resolved.startsWith("http://") || resolved.startsWith("https://")) return resolved;
+  return null;
+}
+
+/** A width the pane can be looked at, in the order the buttons sit in.
+ *
+ * Three, because the question a width answers is "does this layout hold up on a
+ * phone?" and not "what is it at 1180px": `full` is the pane itself, and the
+ * other two are the CSS widths of the two devices whose breakpoints a layout
+ * actually has to survive. */
+export type PaneWidth = { name: string; label: string; px: number | null };
+
+export const PANE_WIDTHS: PaneWidth[] = [
+  { name: "full", label: "Full width", px: null },
+  { name: "tablet", label: "Tablet width", px: 820 },
+  { name: "phone", label: "Phone width", px: 390 },
+];
+
 /** One event the server sends. The six of §11.4, plus `controls` (below). */
 export type ServerEvent =
   | { type: "text"; delta: string }

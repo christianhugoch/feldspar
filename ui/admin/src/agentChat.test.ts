@@ -12,6 +12,8 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_CHAT_ROUTE,
   ChatSession,
+  PANE_WIDTHS,
+  PREVIEW_PANE_TRAIT,
   agentChatUrl,
   defaultControlValues,
   emptyChat,
@@ -20,6 +22,8 @@ import {
   compactionLabel,
   conclusionLabel,
   normalizeControls,
+  previewPaneOf,
+  resolvePaneUrl,
   splitCodeBlocks,
   transcriptFromRun,
   type Entry,
@@ -567,5 +571,49 @@ describe("code in an answer", () => {
       { kind: "prose", text: "There is one: Dune." },
     ]);
     expect(splitCodeBlocks("")).toEqual([]);
+  });
+});
+
+describe("the preview pane an agent declares", () => {
+  const paneTrait = (config: unknown) => [{ trait: PREVIEW_PANE_TRAIT, config }];
+
+  it("is read off the agent's traits, and defaults to reloading when a turn ends", () => {
+    const pane = previewPaneOf(paneTrait({ url: "//todo.{host}" }));
+    expect(pane).toEqual({ url: "//todo.{host}", reloadOnTurn: true });
+    expect(
+      previewPaneOf(paneTrait({ url: "//todo.{host}", reload_on_turn: false }))?.reloadOnTurn,
+    ).toBe(false);
+  });
+
+  it("is absent for an agent that carries no pane, or one with no URL in it", () => {
+    // Most agents: the button that splits the screen must not be offered.
+    expect(previewPaneOf([{ trait: "coding", config: { store: "apps" } }])).toBeNull();
+    expect(previewPaneOf(undefined)).toBeNull();
+    expect(previewPaneOf(paneTrait({ url: "   " }))).toBeNull();
+  });
+
+  it("resolves {host} against the admin's own location, so one agent follows the deployment", () => {
+    const local = { protocol: "http:", host: "localhost:3000" };
+    const live = { protocol: "https:", host: "example.com" };
+    expect(resolvePaneUrl("//todo.{host}", local)).toBe("http://todo.localhost:3000");
+    expect(resolvePaneUrl("//todo.{host}", live)).toBe("https://todo.example.com");
+    // An absolute URL and a path on the admin itself are left alone.
+    expect(resolvePaneUrl("https://shop.example.com/a", local)).toBe("https://shop.example.com/a");
+    expect(resolvePaneUrl("/ide/", local)).toBe("/ide/");
+  });
+
+  it("refuses a URL that would run script in the admin's own origin", () => {
+    // The trait refuses these on save; this is the side that writes `src`, and
+    // a stored agent is not a trusted input.
+    const local = { protocol: "http:", host: "localhost:3000" };
+    for (const url of ["javascript:alert(1)", "data:text/html,<b>", "//", "about:blank"]) {
+      expect(resolvePaneUrl(url, local)).toBeNull();
+    }
+  });
+
+  it("offers a full width first, then the two device widths a layout has to survive", () => {
+    expect(PANE_WIDTHS.map((w) => w.name)).toEqual(["full", "tablet", "phone"]);
+    expect(PANE_WIDTHS[0].px).toBeNull();
+    expect(PANE_WIDTHS[2].px).toBe(390);
   });
 });

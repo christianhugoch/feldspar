@@ -2,6 +2,63 @@
 
 Changes in reverse chronological order.
 
+## The preview pane: the application beside the conversation
+
+An agent's chat screen can now split in two — the conversation in a column on the left, the thing
+the agent is building in an `<iframe>` filling the rest — and an application's builder agent
+arrives configured for it. The shape the hosted builders converged on, and for the same reason:
+"is that what I asked for?" is answered by the running application, not by a paragraph describing
+it.
+
+- **A new built-in trait, `preview_pane`** (`crates/sc-core-traits/src/preview_pane.rs`). The
+  first trait that contributes **no tool and no prompt**: what it declares is a fact about the
+  *chat* — that this agent's work can be looked at, and where. Two settings: the `url` the pane
+  opens on, and whether it reloads when a turn ends (it does). It is a trait rather than a
+  property of the builder agent because nothing in it is about building applications; an agent
+  that edits a documentation site wants the same screen.
+- **`{host}` in the URL.** A stored agent is read from wherever the admin happens to be open, and
+  the base domain is a server setting an agent record does not carry — so `//todo.{host}` is
+  resolved in the browser against its own location, exactly as the applications list already
+  derives an app's link. One agent record follows the deployment from `localhost:3000` to the
+  production domain.
+- **What is refused.** The value ends up in an `iframe src`, so an allow-list — `http:`, `https:`,
+  a protocol-relative `//host/path`, a path on the admin's own origin — is enforced on save by the
+  trait *and* again in the browser before `src` is written: a stored agent is not a trusted input.
+- **The builder agent carries it** (`sc_app::framework_builder_agent`), pointed at the
+  application's own subdomain: `coding` and `preview_pane`, so creating a React application
+  creates an agent that can change it and a screen to watch it change in.
+- **The screen** (`ui/admin/src/screens/AgentChat.tsx`, `agentChat.ts`, `admin.css`). A
+  split-screen button in the page's top bar, then a pane with **full**, **tablet** (820px) and
+  **phone** (390px) widths, a reload, an open-in-a-new-tab and a close. Narrowing letterboxes the
+  frame rather than scaling it, because the question a phone width asks is what the layout does at
+  390px. The reload is a remount of the iframe (a full page load) on the *falling* edge of a turn,
+  and only while the pane is open — the pane is cross-origin, so there is no `contentWindow` to
+  talk to, and a full load is what "the agent changed the application" means anyway. The
+  conversation rail steps aside in the split, and a popped-out chat is not offered it at all: a
+  24rem window has no room for a browser beside a column.
+- **Two Content-Security-Policy changes, without which none of it renders.** An application's
+  default policy is `frame-ancestors 'none'` and the admin's has no `frame-src`, so the pane was
+  a blocked frame and a console message the admin never sees.
+  - `sc_app::allow_admin_framing` widens a *default* policy's `frame-ancestors` to the base domain
+    (`'self' example.com example.com:*` — the port wildcard is the development `:3000`), applied
+    on create and update **only when the caller states no `csp` of its own**: a policy someone
+    wrote out is theirs, and a restore is replaying a decision already made.
+  - `sc_server::admin_content_security_policy` adds `frame-src 'self' *.{base} *.{base}:*` to the
+    admin's own policy, computed from the base domain at router build. A deployment with no base
+    domain serves no applications, so it is served the strict policy unchanged.
+- **Tested**: the trait's allow-list and reload default (unit); the URL resolution, `{host}`
+  substitution and refusals in the browser half (`agentChat.test.ts`, 5 cases); that a framework's
+  declared `preview_pane` is a registered trait configured as it declares
+  (`sc-core-traits/tests/builder_agent_traits.rs`, the only place both layers are visible at
+  once); end to end over HTTP, that creating an application stores a builder agent carrying the
+  pane at `//todo.{host}` (`sc-server/tests/app_builder_agent.rs`) and that the application it
+  created may be framed by the admin and by nobody else
+  (`sc-server/tests/admin_applications_api.rs`); and that the widened admin policy differs from
+  the strict one in exactly that one directive (`security.rs`).
+- Also: `docs/tutorial-agents.md` gains the trait in "The traits you have" and a section on
+  watching an agent work, including what to do with an application created before this existed
+  (re-save it with the CSP field empty).
+
 ## A whale-ci pipeline, and the two images it runs in
 
 CI in containers, beside the GitHub workflow rather than in place of it: `whale-ci.yml` at the

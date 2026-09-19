@@ -63,6 +63,38 @@ form-action 'self'; \
 frame-ancestors 'none'; \
 object-src 'none'";
 
+/// [`CONTENT_SECURITY_POLICY`], with the **applications** the admin may frame.
+///
+/// The admin frames an application in one place: the preview pane beside a
+/// builder agent's chat (TODO "The preview pane"), where the person watches the
+/// application the agent is changing. An application is served on a subdomain of
+/// the base domain, so it is a cross-origin child, and the strict policy above
+/// has no `frame-src` — under `default-src 'self'` that means the pane is a
+/// blocked frame and a console message the admin never sees.
+///
+/// So one directive is added, naming the origins an application can be served
+/// on and nothing else: `*.{base}`, at the default port and at any port, which
+/// covers both `todo.example.com` and a development `todo.localhost:3000` (and
+/// with it a preview mount, `feature--todo.example.com`, which is a subdomain
+/// like any other). `'self'` is there so the admin may frame its own pages —
+/// the IDE already does.
+///
+/// A deployment with no base domain serves no applications at all
+/// ([`build_router_with_apps`](crate::build_router_with_apps) refuses to start
+/// with mounts and no base domain), so there is nothing to allow and the strict
+/// policy is returned unchanged.
+pub fn admin_content_security_policy(base_domain: Option<&str>) -> String {
+    let Some(base) = base_domain.map(str::trim).filter(|b| !b.is_empty()) else {
+        return CONTENT_SECURITY_POLICY.to_owned();
+    };
+    let base = base.trim_start_matches('.');
+    CONTENT_SECURITY_POLICY.replacen(
+        "connect-src 'self'; ",
+        &format!("connect-src 'self'; frame-src 'self' *.{base} *.{base}:*; "),
+        1,
+    )
+}
+
 /// The Content-Security-Policy served with the **file-store IDE** under `/ide/`
 /// (design §12.1), and with nothing else.
 ///
@@ -327,5 +359,41 @@ fn ensure_csrf_cookie(jar: CookieJar, existing: Option<String>, secure: bool) ->
     match existing {
         Some(_) => jar,
         None => jar.add(build_cookie(CSRF_COOKIE, new_csrf_token(), false, secure)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_deployment_with_no_applications_is_served_the_strict_policy_unchanged() {
+        // No base domain is no applications (the router refuses to start with
+        // mounts and no base domain), so there is nothing to frame.
+        assert_eq!(admin_content_security_policy(None), CONTENT_SECURITY_POLICY);
+        assert_eq!(
+            admin_content_security_policy(Some("  ")),
+            CONTENT_SECURITY_POLICY
+        );
+    }
+
+    #[test]
+    fn the_applications_subdomains_are_the_only_thing_the_admin_may_frame() {
+        let policy = admin_content_security_policy(Some("example.com"));
+        assert!(
+            policy.contains("frame-src 'self' *.example.com *.example.com:*;"),
+            "{policy}"
+        );
+        // ...and that is the *whole* of the difference: a directive that gained
+        // a source here would relax the admin UI, which the strict policy is
+        // there to keep from happening by accident.
+        assert_eq!(
+            policy.replace("frame-src 'self' *.example.com *.example.com:*; ", ""),
+            CONTENT_SECURITY_POLICY,
+        );
+        // Nothing the IDE's policy relaxes arrives with it.
+        for forbidden in ["unsafe-eval", "blob:", "worker-src"] {
+            assert!(!policy.contains(forbidden), "{forbidden} in {policy}");
+        }
     }
 }

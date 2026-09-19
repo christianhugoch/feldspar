@@ -228,6 +228,11 @@ impl AppMounts {
         self
     }
 
+    /// The domain applications are served under, if this deployment has one.
+    pub fn base_domain(&self) -> Option<&str> {
+        self.base_domain.as_deref()
+    }
+
     /// How long a preview may go unused before the sweep removes it.
     pub fn with_preview_idle(mut self, idle: Duration) -> AppMounts {
         self.preview_idle = idle;

@@ -3961,9 +3961,9 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // SQL query is described on the way in, so the response carries
                 // the result columns the database reported rather than the empty
                 // list the caller sent.
-                let app =
-                    save_application(&catalog, &application_from_body(AppId::new(), &ctx.body)?)
-                        .await?;
+                let mut created = application_from_body(AppId::new(), &ctx.body)?;
+                framable_by_the_admin(&mut created, &ctx.body, &apps);
+                let app = save_application(&catalog, &created).await?;
                 // A `react` app's project is the server's to create (§2.3): this
                 // is the step that removes the SSH requirement, so it happens on
                 // the first save rather than waiting for an admin to ask. It is
@@ -4021,8 +4021,9 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 }
                 // The id is the path's, not the body's — the row's identity is not
                 // something a payload gets to reassign.
-                let app =
-                    save_application(&catalog, &application_from_body(id, &ctx.body)?).await?;
+                let mut updated = application_from_body(id, &ctx.body)?;
+                framable_by_the_admin(&mut updated, &ctx.body, &apps);
+                let app = save_application(&catalog, &updated).await?;
                 // A save is an API-definition change: a table added to the
                 // subset, an endpoint's role, a custom query. The generated
                 // client has to describe what the app now serves (decision 10),
@@ -5928,6 +5929,28 @@ async fn delete_builder_agent(catalog: &Catalog, app: &Application) -> Result<Op
 /// [`CspPolicy::strict`], so the minimal body is `{ name, subdomain, framework }`.
 /// Save-time validation (framework config against its spec) happens in
 /// `save_application`, not here.
+/// Let the admin frame an application whose CSP the caller left to its
+/// framework (TODO "The preview pane").
+///
+/// The preview pane beside a builder agent's chat is an `<iframe>` on the
+/// admin's origin, and an application's default policy refuses to be framed at
+/// all — so a created application would arrive with a builder agent whose pane
+/// is a browser error message. The widening is the base domain and nothing else
+/// ([`sc_app::allow_admin_framing`]).
+///
+/// **Only when the caller stated no `csp` of its own.** A policy someone wrote
+/// out is theirs: an admin who writes `frame-ancestors 'none'` has said what
+/// they mean, and a restore is replaying a policy that was already decided.
+fn framable_by_the_admin(app: &mut Application, body: &Json, apps: &AppMounts) {
+    let stated = body
+        .get("csp")
+        .is_some_and(|csp| !matches!(csp, Json::Null));
+    if stated {
+        return;
+    }
+    app.csp = sc_app::allow_admin_framing(app.csp.clone(), apps.base_domain());
+}
+
 pub(crate) fn application_from_body(id: AppId, body: &Json) -> Result<Application> {
     let obj = require_object(body)?;
     let name = non_empty_str_field(obj, "name")?.to_owned();
