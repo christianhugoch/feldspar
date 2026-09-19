@@ -4494,6 +4494,9 @@ fn application_fields() -> Vec<StructField> {
         // The triggers this app exposes as endpoints (§10.2), by name — the same
         // opt-in subset shape the tables and stores have.
         StructField::new("triggers", TypeSchema::array(TypeSchema::text())),
+        // …and the streams it exposes for observation (TODO "Streams" §10),
+        // the same subset by the same rule: named, or not reachable.
+        StructField::new("streams", TypeSchema::array(TypeSchema::text())),
         StructField::new("apis", TypeSchema::array(api_config_schema())),
         StructField::new("static_dirs", TypeSchema::array(static_dir_schema())),
         StructField::new("csp", TypeSchema::json()),

@@ -246,6 +246,12 @@ pub async fn install_streams_with(
         .await
         .context("ensuring the streams table exists")?;
     let services = StreamServices::new(registry, config);
+    // An application's generated client types its subscriptions from the
+    // element types its streams' providers declare (TODO "Streams" §10), and
+    // `sc-app` resolves those through an installed registry rather than a
+    // parameter threaded down the whole build path. This is where the running
+    // server's goes in; a module change installs the rebuilt one the same way.
+    sc_app::install_stream_registry(services.registry());
     services
         .supervisor
         .set_consumer(Arc::new(TriggerBridge::new(

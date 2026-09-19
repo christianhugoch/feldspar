@@ -28,6 +28,12 @@ sc-auth.workspace = true
 # resolving those names against the live set — and running one — is the
 # dispatcher's, so the wiring layer holds it.
 sc-action.workspace = true
+# An application exposes a subset of the server's streams (TODO "Streams" §10):
+# resolving those names against the stored rows, and typing the generated
+# client's subscription from the element type, needs the entity itself.
+# `default-features = false` — the MQTT provider is the *server's* to link, and
+# nothing here connects to a broker.
+sc-stream = { path = "../sc-stream", default-features = false }
 # The `JsEvaluator` seam threaded into providers (§7.3); no engine linked here.
 sc-expr.workspace = true
 # The build tools' own output is the only place a type error exists, so parsing

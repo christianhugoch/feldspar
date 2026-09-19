@@ -61,6 +61,7 @@ mod react;
 mod scaffold;
 mod skill;
 mod store;
+mod streams;
 
 pub use api::{
     ApiProviderInfo, AppGraphql, api_provider_config_spec, app_client, app_client_with,
@@ -69,12 +70,12 @@ pub use api::{
     serves_custom_queries, validate_api_config, validate_api_mounts,
 };
 pub use application::{
-    ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, TriggerRef,
+    ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, StreamRef, TriggerRef,
 };
 pub use applications::{
     APPLICATIONS_TABLE, COL_APIS, COL_ATTRIBUTES, COL_CSP, COL_DESCRIPTION, COL_EXTRA_FRAMEWORKS,
-    COL_FILE_STORES, COL_FRAMEWORK, COL_ID, COL_NAME, COL_STATIC_DIRS, COL_SUBDOMAIN, COL_TABLES,
-    COL_TRIGGERS, bootstrap,
+    COL_FILE_STORES, COL_FRAMEWORK, COL_ID, COL_NAME, COL_STATIC_DIRS, COL_STREAMS, COL_SUBDOMAIN,
+    COL_TABLES, COL_TRIGGERS, bootstrap,
 };
 pub use build::{
     AppSource, BuildReport, app_source_from_config, app_source_in, build_app, build_application,
@@ -119,4 +120,8 @@ pub use skill::{SKILL_FILE, generate_skill};
 pub use store::{
     applications_using_file_store, delete_application, list_applications, load_application,
     load_application_by_subdomain, save_application,
+};
+pub use streams::{
+    ExposedStream, app_streams, element_value_schema, install_stream_registry, stream_exports,
+    stream_in_path, stream_registry, stream_socket_path,
 };

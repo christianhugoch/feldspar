@@ -37,6 +37,8 @@ mod app_builder_agent;
 mod app_file_access;
 #[path = "app_serving.rs"]
 mod app_serving;
+#[path = "app_streams.rs"]
+mod app_streams;
 #[path = "app_trigger_api.rs"]
 mod app_trigger_api;
 #[path = "backup_api.rs"]

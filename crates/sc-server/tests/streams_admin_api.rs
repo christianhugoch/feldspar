@@ -766,12 +766,9 @@ fn urlencode(value: &str) -> String {
 /// written by hand at both ends.
 #[test]
 fn the_observe_route_is_the_path_the_spa_connects_to() {
-    assert_eq!(
-        sc_server::STREAM_OBSERVE_ROUTE,
-        "/api/streams/{id}/observe"
-    );
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../ui/admin/src/streams.ts");
+    assert_eq!(sc_server::STREAM_OBSERVE_ROUTE, "/api/streams/{id}/observe");
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/admin/src/streams.ts");
     let source = std::fs::read_to_string(&path).expect("read streams.ts");
     assert!(
         source.contains(sc_server::STREAM_OBSERVE_ROUTE),

@@ -148,6 +148,11 @@ async fn generate(
     let tables = app_tables(app, cat)?;
     let endpoints = app_endpoints_with(app, cat, dispatcher)?;
     let graphql = app_graphql(app, cat)?;
+    // The exposed streams, resolved against the stored rows and the installed
+    // provider registry: a generated runtime's client observes them with the
+    // element type in its TypeScript, exactly as a built client does.
+    let exposed = crate::app_streams(app, cat).await?;
+    let streams = crate::stream_exports(app, &exposed);
     let schema_sql = app_schema_sql(app, cat)?;
     // This installation's roles, for the documentation that says how to get a
     // session: `feldspar auth token --role NAME` takes a name, and nothing inside
@@ -161,6 +166,7 @@ async fn generate(
         tables: &tables,
         endpoints: &endpoints,
         graphql: graphql.as_ref(),
+        streams: &streams,
         schema_sql: &schema_sql,
         // Where this deployment serves its apps, so the generated documentation
         // names the URL to open. `None` when nobody told this process.

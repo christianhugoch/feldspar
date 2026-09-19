@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
-use sc_api::{EndpointSet, generate_client};
+use sc_api::{EndpointSet, generate_client_with_streams};
 use sc_catalog::{Attrs, Catalog, FileStoreId};
 use sc_error::{Context, Error, Result};
 use sc_types::FormField;
@@ -421,7 +421,13 @@ pub async fn emit_client(
         return Ok(Vec::new());
     };
     let store = cat.require_file_store(&source.store.0)?;
-    let client = generate_client(endpoints);
+    // The streams this app exposes ride in the same module as its endpoints
+    // (TODO "Streams" §10): they are not endpoints — a subscription has no
+    // shape in that model — but they are this application's contract with its
+    // own code, and an app's client is emitted at build time, so keeping them
+    // in step costs nothing.
+    let streams = crate::app_streams(app, cat).await?;
+    let client = generate_client_with_streams(endpoints, &crate::stream_exports(app, &streams));
     store.write(path, Bytes::from(client.into_bytes())).await?;
     let helper = sibling(path, sc_api::CLIENT_HELPER_FILE);
     store

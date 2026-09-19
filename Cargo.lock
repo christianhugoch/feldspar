@@ -8244,6 +8244,7 @@ dependencies = [
  "sc-expr",
  "sc-files",
  "sc-query",
+ "sc-stream",
  "sc-test-harness",
  "sc-types",
  "serde_json",

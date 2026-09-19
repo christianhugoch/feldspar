@@ -486,15 +486,15 @@ whose `element_type` cannot be read supplies nothing and the issue stays on the 
 
 ## Phase 8 — Applications
 
-- [ ] 8.1 `StreamRef` and `streams: Vec<StreamRef>` on `Application`, `with_stream`,
+- [x] 8.1 `StreamRef` and `streams: Vec<StreamRef>` on `Application`, `with_stream`,
       `exposes_stream`, and the application form's picker — `TriggerRef`'s shape, word for word.
-- [ ] 8.2 `GET {mount}/streams/{name}/observe` mounted beside the endpoint set: the app session
+- [x] 8.2 `GET {mount}/streams/{name}/observe` mounted beside the endpoint set: the app session
       cookie, the stream's `min_role`, refusals for unknown, unexposed and unauthorised, and the
       same frame protocol as the admin socket.
-- [ ] 8.3 `generate_client`: `observeStream_{name}()` per exposed stream, typed from the
+- [x] 8.3 `generate_client`: `observeStream_{name}()` per exposed stream, typed from the
       element type, emitted into the app's source tree at build time. A test per `ElementType`
       over the emitted TypeScript.
-- [ ] 8.4 `sc-server/tests/app_streams.rs`: an app that exposes one observes it; one that does
+- [x] 8.4 `sc-server/tests/app_streams.rs`: an app that exposes one observes it; one that does
       not gets a refusal; a below-`min_role` user gets a refusal; the generated client compiles
       (the existing client-emission test's harness).
 

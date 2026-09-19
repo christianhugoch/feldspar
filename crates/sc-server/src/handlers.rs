@@ -32,7 +32,7 @@ use sc_api::rows::{self, require_object};
 use sc_api::schema_edit;
 use sc_api::{ApiRequest, GRAPHQL_PROVIDER, Method as ApiMethod};
 use sc_app::{
-    ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, TriggerRef,
+    ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, StreamRef, TriggerRef,
     app_source_from_config, applications_using_file_store, builder_agent_name, delete_application,
     framework_builder_agent, framework_config_spec, framework_default_csp, list_applications,
     load_application, registered_api_provider_info, registered_framework_info,
@@ -5541,6 +5541,7 @@ pub(crate) fn application_json(app: &Application) -> Json {
         "tables": app.tables.iter().map(|t| t.0.clone()).collect::<Vec<_>>(),
         "file_stores": app.file_stores.iter().map(|s| s.0.clone()).collect::<Vec<_>>(),
         "triggers": app.triggers.iter().map(|t| t.0.clone()).collect::<Vec<_>>(),
+        "streams": app.streams.iter().map(|s| s.0.clone()).collect::<Vec<_>>(),
         "apis": app.apis.iter().map(|a| json!({ "provider": a.provider, "mount": a.mount, "config": Json::Object(a.config.clone()) })).collect::<Vec<_>>(),
         "static_dirs": app.static_dirs.iter().map(|d| json!({ "mount": d.mount, "store": d.store.0, "path": d.path })).collect::<Vec<_>>(),
         "csp": csp_json(&app.csp),
@@ -5952,6 +5953,11 @@ pub(crate) fn application_from_body(id: AppId, body: &Json) -> Result<Applicatio
         .into_iter()
         .map(TriggerRef)
         .collect();
+    // Read the same way, for the same reason.
+    let streams = parse_str_array(obj, "streams")?
+        .into_iter()
+        .map(StreamRef)
+        .collect();
     let apis = parse_array(obj, "apis")?
         .iter()
         .map(|v| {
@@ -5998,6 +6004,7 @@ pub(crate) fn application_from_body(id: AppId, body: &Json) -> Result<Applicatio
         tables,
         file_stores,
         triggers,
+        streams,
         apis,
         static_dirs,
         csp,

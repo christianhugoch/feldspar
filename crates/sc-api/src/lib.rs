@@ -85,7 +85,10 @@ pub use rest::{
     rest_config_spec, rest_row_cap,
 };
 pub use schema::{StructField, TypeSchema, ValueType};
-pub use typescript::{CLIENT_HELPER_FILE, client_helper, client_property, generate_client};
+pub use typescript::{
+    CLIENT_HELPER_FILE, StreamExport, client_helper, client_property, generate_client,
+    generate_client_with_streams,
+};
 
 #[cfg(test)]
 mod tests {

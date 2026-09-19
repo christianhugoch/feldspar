@@ -62,6 +62,13 @@ pub const COL_FILE_STORES: &str = "file_stores";
 /// without inventing a value for them. `NULL` reads back as "this app exposes no
 /// triggers", which is exactly what an app written before triggers existed did.
 pub const COL_TRIGGERS: &str = "triggers";
+/// The exposed stream subset (JSON array of stream names).
+///
+/// Nullable for [`COL_TRIGGERS`]' reason and no other: it arrived later still,
+/// so [`bootstrap`] adds it to tables that already have rows, and a `NOT NULL`
+/// column cannot be added to one of those without inventing a value. `NULL`
+/// reads back as "this app exposes no streams".
+pub const COL_STREAMS: &str = "streams";
 /// The enabled API providers (JSON array of `{provider, mount}`).
 pub const COL_APIS: &str = "apis";
 /// The statically-served directories (JSON array of `{mount, store, path}`).
@@ -92,6 +99,8 @@ fn applications_fields() -> Vec<DataField> {
         // Not `required`: see [`COL_TRIGGERS`] — it is reconciled onto existing
         // tables, and those rows have no value for it.
         DataField::plain(COL_TRIGGERS, json()),
+        // Not `required`, for the reason above it: see [`COL_STREAMS`].
+        DataField::plain(COL_STREAMS, json()),
         DataField::plain(COL_APIS, json()).required(),
         DataField::plain(COL_STATIC_DIRS, json()).required(),
         DataField::plain(COL_CSP, json()).required(),
@@ -184,6 +193,14 @@ mod tests {
         // bootstrap: this column is created on tables that already have rows,
         // and NOT NULL would have no value to give them.
         assert!(!triggers.required);
+    }
+
+    #[test]
+    fn the_stream_subset_is_json_but_nullable_for_the_same_reason() {
+        let fields = applications_fields();
+        let streams = fields.iter().find(|f| f.base.name == COL_STREAMS).unwrap();
+        assert_eq!(streams.base.type_, TypeRef::Basic(BasicType::Json));
+        assert!(!streams.required);
     }
 
     #[test]

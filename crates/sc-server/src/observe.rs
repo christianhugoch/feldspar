@@ -47,6 +47,15 @@
 //! The replay and the subscription are taken **together, under one lock**
 //! (`subscribe_elements`), so the tail is neither gapped nor doubled.
 //!
+//! ## The same socket, from an application
+//!
+//! An application observes a stream it exposes on `{mount}/streams/{name}/observe`
+//! (TODO §10), and everything below this line is shared with it: the frames,
+//! the replay, the close reasons. What differs is decided before any of it, in
+//! `router.rs` — the app's own session cookie rather than an admin's, the
+//! stream's `min_role` rather than "admin", and a 404 for a stream the app did
+//! not expose. See [`stream_observe_by_name`].
+//!
 //! ## What closes the socket
 //!
 //! Only things that make observation impossible: this server has no streams
@@ -105,6 +114,40 @@ pub(crate) async fn stream_observe_upgrade(
         // subscription is process-local (§6).
         let reason = format!(
             "stream {id} is not running on this server, so there are no elements to observe"
+        );
+        return ws.on_upgrade(move |socket| refuse(socket, reason));
+    };
+    ws.on_upgrade(move |socket| observe(socket, running))
+}
+
+/// Serve one Observe socket for the stream named `name` — **an application's**
+/// half of [`stream_observe_upgrade`] (TODO "Streams" §10, task 8.2).
+///
+/// Everything an application's socket decides *before* the upgrade — is this
+/// app exposing this stream, does this session meet the stream's `min_role` —
+/// is the router's, because those are the refusals a browser has to be able to
+/// tell apart and only a status can carry. What is left is the same two
+/// questions the admin's socket asks, with the same two answers: no stream
+/// support installed, or nothing running here under that name.
+///
+/// By **name** rather than by id, because a name is what an app declares, what
+/// its generated client calls and what its socket's path spells (§10). An id in
+/// an app's URL would be a second way to name the same thing, and the one the
+/// app's own code does not use.
+pub(crate) async fn stream_observe_by_name(
+    ws: WebSocketUpgrade,
+    supervisor: Option<&Arc<StreamSupervisor>>,
+    name: &str,
+) -> axum::response::Response {
+    let Some(supervisor) = supervisor else {
+        let reason = "this server has no stream support installed, so there is nothing to observe";
+        return ws.on_upgrade(move |socket| refuse(socket, reason.to_owned()));
+    };
+    let Some(running) = supervisor.by_name(name) else {
+        // Disabled, or not reloaded here yet: a subscription is process-local
+        // (§6), and "not running on this server" is the true answer to both.
+        let reason = format!(
+            "stream `{name}` is not running on this server, so there are no elements to observe"
         );
         return ws.on_upgrade(move |socket| refuse(socket, reason));
     };

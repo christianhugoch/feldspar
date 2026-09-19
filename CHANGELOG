@@ -2,6 +2,77 @@
 
 Changes in reverse chronological order.
 
+## Streams from an application
+
+Phase 8 of the streams milestone (tasks 8.1–8.4). Phases 6 and 7 made a stream something an admin
+creates and watches; this is the part an *application* gets: the flow an app declares, the socket
+its own users connect to, and the element type in its generated TypeScript.
+
+- **`StreamRef` is `TriggerRef`, word for word** — a name, in a newtype, in a `streams` column on
+  `_fd_applications`. The rule it carries is the one the exposed triggers already carry: a stream
+  is server-side configuration, and it becomes reachable from outside **only because an app said
+  so**. `Application::exposes_stream` is what the socket asks, and a stream the app did not name is
+  a **404 rather than a 403** — the app's declaration is the whole of its surface, and a 403 would
+  confirm the existence of a flow this application has no business knowing about. The application
+  form grows the picker beside the triggers one: the server's streams, ticked, with a stale name
+  shown in red rather than dropped on the floor.
+
+- **The socket is mounted beside the endpoint set, not in it** (§10). `EndpointSet` is a typed
+  request/response model and a subscription has no shape in it — the same split the IDE's language
+  server and the admin chat already made. So `GET {mount}/streams/{name}/observe` is matched in
+  `dispatch_app` through `sc_app::stream_in_path`, which is the *inverse* of the
+  `stream_socket_path` the generated client is emitted from: one shape, spelled once, so a client
+  cannot call a path nothing serves.
+
+- **An application's request is not an axum route, and an upgrade nearly is.** Every app request
+  arrives at the single fallback, because an app's paths are its own and change while the server
+  runs — but `WebSocketUpgrade` has to be extracted before the body is read, and it rejects a
+  request that is not an upgrade rather than answering `None`. Hence `MaybeUpgrade`, a two-line
+  extractor taken from the parts ahead of `Bytes`. It also gave the admin's own observe route a
+  better answer to a plain `GET`: a sentence saying the path is a WebSocket, rather than the
+  extractor's rejection.
+
+- **The admin route had to learn about applications.** `/api/streams/{id}/observe` is a real axum
+  route, so it wins over the fallback — including on `blog.example.com`, where an app with its API
+  at `/api` spells its own socket path exactly the same way. It now asks the host first, as
+  `dispatch` does, and serves an application's socket as the application's. Found by a test that
+  got `403 insufficient privilege` for an editor on an app's own stream.
+
+- **Authorisation is the stream's `min_role`, read off the stored row** — not off the running
+  stream, so a stream this process has not started is still authorised by the same number, and
+  `None` still means admin (§5). It is enforced *before* the upgrade, with a status, because a
+  browser cannot read the body of a failed handshake; everything after it — no stream support, not
+  running here — stays a close frame with a reason, shared with the admin socket frame for frame.
+
+- **The generated client is where the element type earns its keep.** `generate_client_with_streams`
+  emits an `observeStream_{name}(handlers)` per exposed stream, over a written-out envelope type
+  whose `value` is the declared shape: a required key is `number`, one that may be absent is
+  `string | null` (§4 promises the key is *there*, so it is not `?`-optional), a text element is a
+  `string` and a binary one is base64 in a `string`. How a socket is opened, which frames arrive
+  and what a caller does with them is the same in every application, so it lives in `helper.ts` as
+  `openStream` — and `lagged` is a handler, not a swallowed frame, which is §7 reaching the client.
+
+- **The provider registry is installed rather than threaded.** An element type is a function of the
+  provider *and* the configuration, so resolving one needs the running server's `StreamRegistry`,
+  which a module can add to. Threading it beside the trigger dispatcher would have put a second
+  optional service parameter through the whole build path and every test that calls it, so
+  `sc-app` takes it the way it takes a framework factory: `install_stream_registry` at boot, with
+  the compiled-in providers as the fallback for a process that is only generating a client.
+
+- **A stream that is gone is named, not skipped.** `app_streams` refuses an app that exposes a
+  stream which no longer exists, whose provider is not installed, or whose configuration no longer
+  yields an element type — `app_triggers`' refusal, for its reason: quietly emitting a client
+  without the method the app's own code calls would hide the misconfiguration. A **disabled**
+  stream resolves, because enabling it must not mean rebuilding the app.
+
+- **Tests** (`crates/sc-server/tests/app_streams.rs`, six, over the scripted provider and a real
+  port): an exposed stream is observed and the frames are the admin socket's; an unexposed one that
+  is running perfectly well is a 404; anonymous is a 401 and a below-floor user a 403, both before
+  the upgrade; a plain `GET` of the path says it is a socket; the generated client has the method,
+  the path and both key types; and an app naming a stream that is not there is refused by name.
+  `sc-api`'s `typescript_typecheck` gains a `tsc --strict` pass over all three element types,
+  with `@ts-expect-error` on an undeclared key and on treating a text element as an object.
+
 ## The Streams screens
 
 Phase 7 of the streams milestone (tasks 7.1–7.5). Phase 6 made a stream a thing the API can
