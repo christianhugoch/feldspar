@@ -1,0 +1,31 @@
+# Workspace-wide cargo settings.
+#
+# Why there is a job cap here
+# ---------------------------
+# Cargo's default parallelism is the core count, and this workspace's per-job
+# memory is unusually high: every test binary statically links V8 (`deno_core`),
+# and `sc-server`'s links the whole of `deno_runtime` besides. Measured on a
+# 12-core desktop, a full workspace rebuild of `cargo test --workspace --no-run`
+# costs
+#
+#     -j12    6.6 GB of anonymous memory, 66 s
+#     -j4     3.0 GB,                     90 s
+#
+# — half the memory for a third more wall clock, because the burst is a dozen
+# large rustc processes rather than one long one. That trade is worth taking by
+# default: the machine running the suite is usually also running an editor, a
+# browser and a database, and on desktop Linux `systemd-oomd` answers memory
+# pressure by killing the heaviest cgroup in the session, which is how "the
+# tests needed too much memory" arrives as a terminal window vanishing.
+#
+# Four is also what CI's runners have, so this costs CI nothing.
+#
+# A bigger machine can take the cap off per-invocation, and nothing here is a
+# ceiling on anything else:
+#
+#     cargo test --workspace -j 12        # or CARGO_BUILD_JOBS=12
+#
+# `scripts/test.sh` goes further and sizes the jobs from the memory actually
+# free at the time.
+[build]
+jobs = 4
