@@ -2,6 +2,38 @@
 
 Changes in reverse chronological order.
 
+## A memory budget for the test run
+
+`cargo test --workspace` had drifted back into taking the machine with it: a full workspace rebuild
+peaked at **6.6 GB of anonymous memory** at the default `-j12`, on a desktop where `systemd-oomd`
+answers session memory pressure by killing the heaviest cgroup — so what the suite costs is paid by
+whatever else is running, in the currency of an editor or a terminal window disappearing.
+
+- **Measured first, in both phases.** The build is the whole problem and the run is not. A full
+  workspace rebuild of `cargo test --workspace --no-run`: 6.6 GB at `-j12` in 66 s, 3.0 GB at `-j4`
+  in 90 s — half the memory for a third more wall clock. Running the whole suite after that costs
+  ~1.2 GB in-process, because the expensive state a test stands up is a database on the other side
+  of a socket. Two numbers that looked like the answer and were not: the cgroup's own peak is ~12 GB
+  at either job count (the difference is reclaimable page cache under the ~10 GB of artifacts a
+  rebuild writes), and `split-debuginfo = "unpacked"`, tried and reverted, moved the largest test
+  binary 558 MB → 532 MB and the peak not at all.
+
+- **A job cap in `.cargo/config.toml`** (`[build] jobs = 4`). This is the layer that applies without
+  anyone remembering a flag, which is what the previous two layers — the debug-info budget and
+  `cargo-guarded.sh` — did not have. CI's runners have four cores, so it costs CI nothing, and a
+  bigger machine takes it off per invocation with `-j` or `CARGO_BUILD_JOBS`.
+
+- **`scripts/test.sh`**, the entry point to reach the rest through. It sizes both phases from the
+  memory actually free (60% of `MemAvailable`, clamped to [4 GiB, 12 GiB]) rather than from `nproc`,
+  derives `-j` from the fitted cost of a job (~1.2 GB fixed plus ~0.45 GB each) and a
+  `--test-threads` to go with it, and runs each phase through `cargo-guarded.sh` so an overrun can
+  still only take the test run. `SC_TEST_MEM`, `SC_TEST_JOBS` and `SC_TEST_THREADS` override; a `-j`
+  or `--test-threads` already on the command line is left alone.
+
+- **Pinned by `repo_hygiene`**: that the cap exists, is under `[build]` and is in a range where it
+  is still doing its job, and that the runner sizes itself from free memory and goes through the
+  guarded wrapper rather than calling cargo directly. README §10 carries the measurements.
+
 ## Stream providers from a module
 
 Phase 9 of the streams milestone (tasks 9.1–9.4). MQTT was the built-in; this is the part where a

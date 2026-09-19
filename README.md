@@ -1366,7 +1366,7 @@ approach.
 
 A static V8 (`deno_core`, behind `sc-expr`'s `eval` feature) is linked into
 **every one** of the workspace's test binaries, so `cargo test --workspace` is a
-burst of very large, very parallel links. Three things keep that from taking the
+burst of very large, very parallel links. Five things keep that from taking the
 machine — or CI's disk — with it:
 
 - **One integration-test binary per crate**, not one per file. Cargo makes a
@@ -1417,16 +1417,47 @@ machine — or CI's disk — with it:
   its own cgroup so only the build can be killed. It falls back to plain `cargo`
   where systemd is not available.
 
-- **`-j 4` for the workspace test build.** Since the module runtime landed, each
-  test binary maps a much larger set of rlibs at link time, and the default
-  parallelism under the wrapper's 10 GB `MemoryHigh` puts all of them in
-  continuous reclaim — a build that makes no progress rather than one that fails.
-  Either cap the jobs or raise the ceiling:
+- **A job cap in `.cargo/config.toml`** (`[build] jobs = 4`), which is the layer
+  that applies without anyone remembering a flag. Cargo's default parallelism is
+  the core count, and the cost of a job here is high: a full workspace rebuild of
+  `cargo test --workspace --no-run`, measured on a 12-core desktop, is
+
+  | jobs | anonymous memory | wall clock |
+  | ---- | ---------------- | ---------- |
+  | `-j12` | 6.6 GB | 66 s |
+  | `-j4`  | 3.0 GB | 90 s |
+
+  — half the memory for a third more wall clock, which is the right default for
+  a machine that is also running an editor and a browser. (The cgroup's own peak
+  is ~12 GB either way; the difference is page cache under the ~10 GB of
+  artifacts a rebuild writes, which is reclaimable.) CI's runners have four cores
+  anyway, so this costs CI nothing, and a bigger machine takes the cap off per
+  invocation:
 
   ```bash
-  ./scripts/cargo-guarded.sh test -p sc-server --no-run -j 4
-  SC_BUILD_MEM_HIGH=16G ./scripts/cargo-guarded.sh test -p sc-server --no-run
+  cargo test --workspace -j 12     # or CARGO_BUILD_JOBS=12
   ```
+
+- **`scripts/test.sh`**, the entry point those layers are meant to be reached
+  through. It sizes both phases from the memory actually free — 60% of
+  `MemAvailable`, clamped to [4 GiB, 12 GiB] — rather than from `nproc`, and runs
+  each of them through `cargo-guarded.sh`:
+
+  ```bash
+  ./scripts/test.sh                  # the whole workspace
+  ./scripts/test.sh -p sc-server     # anything `cargo test` takes
+  SC_TEST_MEM=6G ./scripts/test.sh   # or a budget you pick
+  ```
+
+  It prints the budget and the two dials it derived. `SC_TEST_JOBS` and
+  `SC_TEST_THREADS` set them directly, and a `-j` or `--test-threads` already on
+  the command line is left alone.
+
+  The build is the expensive phase; the run is not. Running the whole suite
+  measured ~1.2 GB in this process, because a test binary runs its tests as
+  threads and the heavy state is on the other side of a socket — the database,
+  which gets a connection and a schema per thread. `--test-threads` is capped for
+  that reason rather than for this one.
 
 Note also that `target/` is not garbage-collected by cargo: every rebuild leaves
 the previous hashed test binaries behind, and at a few hundred MB each that
