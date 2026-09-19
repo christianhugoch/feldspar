@@ -68,6 +68,7 @@
 pub mod element;
 pub mod envelope;
 pub mod observer;
+pub mod polling;
 pub mod provider;
 pub mod providers;
 pub mod registry;
@@ -86,6 +87,9 @@ pub mod testing;
 pub use element::{ElementField, ElementType, RawPayload, UTF8};
 pub use envelope::{Element, Envelope};
 pub use observer::StreamObserver;
+pub use polling::{
+    DEFAULT_INTERVAL_S, INTERVAL_FIELD, MIN_INTERVAL, PollAnswer, PollHost, PollingProvider,
+};
 pub use provider::{StreamProvider, StreamProviderHost, StreamProviderKind, StreamSink};
 #[cfg(feature = "mqtt")]
 pub use providers::mqtt::{MQTT, Mqtt};

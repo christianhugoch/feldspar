@@ -8614,6 +8614,7 @@ dependencies = [
  "sc-log",
  "sc-model",
  "sc-query",
+ "sc-stream",
  "sc-test-harness",
  "sc-types",
  "sc-viewpattern",

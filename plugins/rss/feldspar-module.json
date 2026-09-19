@@ -2,12 +2,17 @@
   "name": "@feldspar/rss",
   "language": "javascript",
   "title": "RSS feeds",
-  "description": "Read an RSS or Atom feed as a table: one row per item, refreshed when the table is queried.",
+  "description": "Read an RSS or Atom feed as a table, or observe it as a stream: one row or element per item.",
   "supplies": [
-    "A table provider, \"RSS feed\": pick it in New table, give it a feed URL, and the feed's items are the rows."
+    "A table provider, \"RSS feed\": pick it in New table, give it a feed URL, and the feed's items are the rows.",
+    "A stream provider, \"RSS feed\": create a stream over it and the feed's new items arrive as elements."
   ],
-  "installs": ["rss-parser"],
+  "installs": [
+    "rss-parser"
+  ],
   "permissions": {
-    "net": ["*"]
+    "net": [
+      "*"
+    ]
   }
 }

@@ -637,3 +637,68 @@ async fn a_supervisor_with_no_consumer_still_runs_and_still_broadcasts() {
         "the Observe socket works on a process that has no triggers at all"
     );
 }
+
+#[tokio::test]
+async fn a_stream_whose_provider_was_uninstalled_becomes_failed_with_the_sentence() {
+    // The module-change path (task 9.3): the registry is rebuilt whole and
+    // swapped in, and the reload is what makes the swap visible.
+    let (supervisor, provider) = supervisor(
+        ScriptedProvider::new("scripted", ElementType::text())
+            .elements([RawPayload::bytes(b"tick".to_vec())])
+            .every(Duration::from_millis(5))
+            .repeating(),
+        plain(),
+    );
+    let stored = row("boiler");
+    supervisor.start_at(stored.clone(), at(0)).await.unwrap();
+    settle().await;
+    assert!(provider.subscribes() >= 1);
+    let running = supervisor.by_name("boiler").expect("held");
+    assert!(matches!(running.status(), StreamStatus::Running { .. }));
+
+    // The module goes away: a registry with nothing in it, swapped in whole,
+    // and the same rows reloaded.
+    supervisor.set_registry(Arc::new(StreamRegistry::new()));
+    assert!(supervisor.apply_at(vec![stored.clone()], at(1)).await);
+
+    // Listed, editable, and saying why — a sentence naming the provider, not a
+    // panic and not a stream that vanished from the screen that repairs it.
+    let running = supervisor.by_name("boiler").expect("still held");
+    let error = running.status().error().unwrap_or_default().to_owned();
+    assert!(
+        error.contains("unknown stream provider `scripted`"),
+        "{error}"
+    );
+    // And it is not retried: waiting does not make an uninstalled module come
+    // back, so the retry loop leaves it alone (attempt 0).
+    assert!(matches!(
+        running.status(),
+        StreamStatus::Failed { attempt: 0, .. }
+    ));
+    assert_eq!(supervisor.tick(at(3_600)).await, Vec::<String>::new());
+
+    // The subscription really stopped: nothing is still delivering behind the
+    // failed status.
+    let elements = running.counters().elements;
+    settle().await;
+    assert_eq!(
+        supervisor.by_name("boiler").unwrap().counters().elements,
+        elements
+    );
+
+    // And when the module comes back, a reload starts it again.
+    let mut registry = StreamRegistry::new();
+    registry
+        .register(Arc::new(
+            ScriptedProvider::new("scripted", ElementType::text())
+                .elements([RawPayload::bytes(b"tick".to_vec())]),
+        ))
+        .unwrap();
+    supervisor.set_registry(Arc::new(registry));
+    assert!(supervisor.apply_at(vec![stored], at(2)).await);
+    settle().await;
+    assert!(matches!(
+        supervisor.by_name("boiler").unwrap().status(),
+        StreamStatus::Running { .. }
+    ));
+}

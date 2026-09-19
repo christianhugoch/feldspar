@@ -3937,6 +3937,10 @@ fn module_schema() -> TypeSchema {
         // what a provider *asks for* belongs to the model being fitted and is
         // on `listModelProviders`.
         StructField::new("model_providers", TypeSchema::array(TypeSchema::text())),
+        // The stream providers it supplies (TODO "Streams" §12) — names only,
+        // for the same reason again: what one *asks for* belongs to the stream
+        // being created and is on `listStreamProviders`.
+        StructField::new("stream_providers", TypeSchema::array(TypeSchema::text())),
         // The view patterns it supplies (TODO "Saltcorn UI" 11.1) — names only:
         // what one *asks for* is its configuration wizard, a call per step on
         // `viewConfigStep`.

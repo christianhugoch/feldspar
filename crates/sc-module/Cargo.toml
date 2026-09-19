@@ -70,6 +70,13 @@ sc-core-actions.workspace = true
 # the reason `TableProviderHost` is declared in `sc-catalog` below it: a trait a
 # module implements has to be declared somewhere a module can see.
 sc-model.workspace = true
+# And a module supplies **stream providers** (TODO "Streams" §12), whose
+# `StreamProviderHost` seam is declared in `sc-stream` beside this crate at
+# layer 6 — the `sc-model` edge again, for the `sc-model` reason. What a module
+# supplies is a *poll*, so what is registered is `sc_stream::PollingProvider`
+# wrapping the calls below: there is no channel from a Deno worker back into the
+# host, and the loop belongs where it is written once.
+sc-stream.workspace = true
 # And a module supplies **application frameworks** (§13.3), whose `FrameworkHost`
 # seam is declared in `sc-app` for the same reason again: a trait a module
 # implements has to be declared somewhere a module can see. `sc-app` depends on
@@ -131,6 +138,10 @@ sc-db-postgres.workspace = true
 # bundled Vue module's end-to-end test.
 sc-files.workspace = true
 sc-test-harness.workspace = true
+# `sc-stream::testing`'s `Collector` — the `Vec` a stream's elements are
+# asserted against, which is exactly what a seam test wants and what the
+# feature exists to let another crate reach.
+sc-stream = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

@@ -159,6 +159,29 @@ pub trait StreamProvider: Send + Sync {
     /// and the admin hears about it on save rather than on the first element.
     fn element_type(&self, config: &Attrs) -> Result<ElementType>;
 
+    /// The element type for `config`, **asked for** rather than answered from
+    /// what is already known.
+    ///
+    /// The asynchronous door in front of
+    /// [`element_type`](StreamProvider::element_type), and it exists for one
+    /// kind of provider: a module's, whose declaration is a JavaScript function
+    /// on a Deno worker and therefore a call across a seam, where
+    /// `element_type` is a synchronous method the Streams form, the client
+    /// generator and the Streams list all call. Such a provider answers the
+    /// synchronous one from what it last resolved and fills that in here; see
+    /// `PollingProvider`.
+    ///
+    /// Everything compiled in — MQTT, a scripted provider — computes its type
+    /// from the configuration and nothing else, so the default is exactly the
+    /// synchronous answer and costs nothing.
+    ///
+    /// Called by `validate_stream` before it validates and by the supervisor
+    /// before it starts, which between them are every path on which a
+    /// configuration becomes live.
+    async fn resolve_element_type(&self, config: &Attrs) -> Result<ElementType> {
+        self.element_type(config)
+    }
+
     /// Check a configuration beyond what [`config_spec`](StreamProvider::config_spec)
     /// can express — the part only this provider knows: that a topic filter's
     /// wildcards are where MQTT allows them, that a port is a port.

@@ -3417,8 +3417,14 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     let asked_about = for_provider.is_none_or(|name| name == kind.name);
                     let (element_type, element_type_error) = match &configuration {
                         Some(config) if asked_about => {
+                            // `resolve_element_type`: a module's provider
+                            // declares its type as a function on a worker, and
+                            // this is the form's own "what would this
+                            // configuration produce?" — the question that has
+                            // to cross the seam rather than read a cache.
                             match provider
-                                .element_type(config)
+                                .resolve_element_type(config)
+                                .await
                                 .and_then(|ty| ty.validate().map(|()| ty))
                             {
                                 Ok(ty) => (serde_json::to_value(&ty).ok(), None),
@@ -3469,6 +3475,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // its status: a stream that fails validation would otherwise
                 // vanish from the screen that exists to repair it.
                 let stored = sc_stream::list_streams(&catalog).await?;
+                resolve_element_types(&streams, &stored).await;
                 let out: Vec<Json> = stored
                     .iter()
                     .map(|stream| stream_json(&streams, stream))
@@ -3487,6 +3494,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             async move {
                 let streams = streams_of(&apps)?;
                 let stream = require_stream_by_id(&catalog, ctx.path_param("id")?).await?;
+                resolve_element_types(&streams, std::slice::from_ref(&stream)).await;
                 Ok(HandlerResponse::ok(stream_json(&streams, &stream)))
             }
         }
@@ -6887,6 +6895,9 @@ fn module_json(loaded: &sc_module::LoadedModule) -> Json {
         // `feldspar-sklearn` gets an admin five estimators on the model form,
         // and the tab is where they find that out.
         "model_providers": loaded.model_provider_names(),
+        // And the stream providers (TODO "Streams" §12): what the Streams form
+        // offers beside the built-in MQTT one.
+        "stream_providers": loaded.stream_provider_names(),
         // And the view patterns (TODO "Saltcorn UI" 11.1): what a Saltcorn UI
         // application's New view offers beside v1's six. One whose name was
         // taken is not here; its issue says so.
@@ -8113,6 +8124,28 @@ async fn stream_trigger_referents(catalog: &Catalog, stream: &str) -> Result<Vec
         })
         .map(|t| sc_stream::trigger_referent(&t.name))
         .collect())
+}
+
+/// Ask each stream's provider for its element type, so the synchronous
+/// [`stream_json`] below can answer with it (TODO "Streams" §12).
+///
+/// A no-op for every compiled-in provider, whose element type is a pure
+/// function of the configuration. It matters for a **module's**, whose
+/// declaration is JavaScript on a worker: `PollingProvider` answers the
+/// synchronous side from what it last resolved, and this is what resolves it
+/// for a row that is stored but not running — a disabled stream, or one on a
+/// server that has just started.
+///
+/// A failure is not reported here: `stream_json` makes the same call a moment
+/// later and puts the sentence in the row's `error`, which is where the admin
+/// reads it.
+async fn resolve_element_types(streams: &crate::StreamServices, stored: &[sc_stream::Stream]) {
+    let registry = streams.registry();
+    for stream in stored {
+        if let Some(provider) = registry.get(stream.provider.trim()) {
+            let _ = provider.resolve_element_type(&stream.configuration).await;
+        }
+    }
 }
 
 /// One stored stream as JSON (matching `stream_schema`): the row with its

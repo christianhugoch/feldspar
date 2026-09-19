@@ -291,3 +291,127 @@ async fn a_table_with_no_feed_url_says_so_rather_than_serving_nothing() {
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The same module's **stream** provider: the feed as a dataflow (TODO
+/// "Streams" §12, task 9.4).
+///
+/// The offline half of the milestone's module-provider story, and "offline"
+/// means what it means in the two tests above: the feed is [`FEED`] — a file's
+/// worth of RSS — served by this test on `127.0.0.1`, so nothing here depends on
+/// somebody's website. It is served over HTTP rather than handed over as a
+/// `file://` URL because the module's grant is *net*, not *read*: a module that
+/// could open a path typed into a stream's settings could open the database's
+/// password file, which is exactly the grant `ModulePermissions` refuses to
+/// wildcard.
+///
+/// What is asserted is the whole seam in one line of flow: `streamproviders`
+/// crossing into the manifest, `sc-stream`'s [`PollingProvider`] supplying the
+/// loop, `element_type` and `poll` answering from the worker, and the elements
+/// arriving decoded against the declaration — plus the part a feed provider has
+/// to get right, which is that polling the same unchanged feed twice delivers
+/// its items **once**.
+#[tokio::test]
+#[ignore = "installs the bundled module, which downloads rss-parser from npm"]
+async fn the_bundled_rss_module_serves_a_stream_from_a_feed() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use sc_module::{LoadedModule, Module, ModuleSet, ModuleStreamProviders};
+    use sc_stream::testing::Collector;
+    use sc_stream::{StreamRegistry, StreamSink};
+
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let (port, server) = common::http_server("application/rss+xml", FEED);
+    let (root, installer, name) = install_bundled_rss("bundled-rss-stream").await;
+    let host = Arc::new(ModuleHost::new(&root));
+    let manifest = host
+        .load(
+            &name,
+            &installer.package_dir(&name),
+            &json!({}),
+            &ModulePermissions {
+                net: vec![ANY_HOST.to_owned()],
+                ..ModulePermissions::closed()
+            },
+        )
+        .await
+        .unwrap();
+
+    // One stream provider beside the table provider, and no issues: the two
+    // keys live in one module and neither costs the other.
+    assert_eq!(manifest.stream_providers.len(), 1, "{manifest:?}");
+    assert_eq!(manifest.stream_providers[0].name, "rss_feed");
+    assert!(manifest.issues.is_empty(), "{:?}", manifest.issues);
+
+    let set = ModuleSet::empty().merged(vec![LoadedModule {
+        module: Module::new(&name, ModuleSource::Local, root.display().to_string()),
+        manifest: Some(manifest),
+        config_spec: Vec::new(),
+        issues: Vec::new(),
+    }]);
+    let mut registry = StreamRegistry::new();
+    registry
+        .register_host(Arc::new(ModuleStreamProviders::new(&host, &set)))
+        .expect("the feed provider registers");
+    let provider = registry.require("rss_feed").expect("registered");
+
+    // The element type: what the Observe screen's columns and a generated
+    // client's type are both built from.
+    let config = json!({ "url": format!("http://127.0.0.1:{port}/feed.xml"), "interval_s": 0.2 })
+        .as_object()
+        .unwrap()
+        .clone();
+    let element_type = provider
+        .resolve_element_type(&config)
+        .await
+        .expect("the declaration crosses");
+    let keys: Vec<&str> = element_type
+        .keys()
+        .iter()
+        .map(|k| k.name.as_str())
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "guid",
+            "title",
+            "link",
+            "published",
+            "author",
+            "summary",
+            "content"
+        ]
+    );
+
+    let sink = Arc::new(Collector::new());
+    let subscription = provider
+        .subscribe(
+            "headlines",
+            &config,
+            Arc::clone(&sink) as Arc<dyn StreamSink>,
+        )
+        .await
+        .expect("it subscribes");
+
+    // The first poll delivers the window — three items, as they stand.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let values = sink.values();
+    assert_eq!(values.len(), 3, "{values:?}");
+    assert_eq!(values[0]["guid"], json!("urn:feldspar:1"));
+    assert_eq!(values[0]["title"], json!("Bundled modules land"));
+    assert_eq!(values[0]["author"], json!("A Writer"));
+    // A key the feed said nothing about is null rather than missing, so a
+    // consumer never has to ask whether it exists.
+    assert_eq!(values[2]["link"], json!(null));
+    assert!(sink.malformed().is_empty(), "{:?}", sink.malformed());
+
+    // And the polls after it deliver nothing, because nothing changed: the
+    // cursor is what makes a poll a stream rather than a repeated table.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(sink.len(), 3, "an unchanged feed is delivered once");
+
+    drop(subscription);
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(&root);
+    drop(server);
+}

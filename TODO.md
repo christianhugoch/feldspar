@@ -500,16 +500,16 @@ whose `element_type` cannot be read supplies nothing and the issue stays on the 
 
 ## Phase 9 — Module stream providers
 
-- [ ] 9.1 `StreamProviderKind` / `StreamProviderHost` in `sc-stream`, and `PollingProvider`: the
+- [x] 9.1 `StreamProviderKind` / `StreamProviderHost` in `sc-stream`, and `PollingProvider`: the
       interval loop, the opaque cursor, elements validated against the declared element type, and
       a poll that throws leaving the supervisor to back off rather than spinning.
-- [ ] 9.2 `ModuleHost::stream_poll` and `stream_element_type`, and
+- [x] 9.2 `ModuleHost::stream_poll` and `stream_element_type`, and
       `sc-module/src/stream_providers.rs` (`ModuleStreamProviders`), built whole on every module
       change and routed to the module's worker — `ModuleModelProviders`' shape.
-- [ ] 9.3 `sc-server` registers module providers into the registry at boot and on module change,
+- [x] 9.3 `sc-server` registers module providers into the registry at boot and on module change,
       and a module change reloads the supervisor (a stream whose provider went away becomes
       `failed` with a sentence naming the module, not a panic).
-- [ ] 9.4 An example provider in `plugins/rss` (a polled feed) and a test that a stream over it
+- [x] 9.4 An example provider in `plugins/rss` (a polled feed) and a test that a stream over it
       delivers elements — the offline half, with a local file as the feed.
 
 ## Phase 10 — Documentation

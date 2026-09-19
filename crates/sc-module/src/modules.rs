@@ -77,6 +77,16 @@ impl LoadedModule {
             .unwrap_or_default()
     }
 
+    /// The stream providers this module supplies (TODO "Streams" §12) — what
+    /// the Modules tab lists beside its model providers, and what the Streams
+    /// form offers beside the built-in MQTT one.
+    pub fn stream_provider_names(&self) -> Vec<String> {
+        self.manifest
+            .as_ref()
+            .map(|m| m.stream_providers.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// The view patterns this module supplies that are available (TODO
     /// "Saltcorn UI" 11.1) — what the Modules tab lists, and what a view may be
     /// saved with. A pattern whose name was taken is not here; it is an issue.
@@ -417,6 +427,7 @@ mod tests {
             functions: Vec::new(),
             table_providers: Vec::new(),
             model_providers: Vec::new(),
+            stream_providers: Vec::new(),
             frameworks: Vec::new(),
             view_patterns: Vec::new(),
             headers: Vec::new(),

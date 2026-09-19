@@ -280,7 +280,12 @@ impl StreamSupervisor {
     pub async fn start_at(&self, row: Stream, now: DateTime<Utc>) -> Result<Arc<RunningStream>> {
         let registry = self.registry();
         let (provider, element_type, failure) = match registry.require(&row.provider) {
-            Ok(provider) => match provider.element_type(&row.configuration) {
+            // `resolve_element_type`, not `element_type`: a module's provider
+            // answers the synchronous one from what it last resolved, and this
+            // — a start, a restart, a module change — is where that gets
+            // filled in. Every compiled-in provider's default is the same pure
+            // call.
+            Ok(provider) => match provider.resolve_element_type(&row.configuration).await {
                 Ok(element_type) => (Some(Arc::clone(provider)), Some(element_type), None),
                 Err(e) => (None, None, Some(sc_error::format_chain(&e))),
             },
@@ -424,9 +429,32 @@ impl StreamSupervisor {
                 continue;
             }
 
+            // Whether the registry now answers for this stream's provider,
+            // against whether the running stream is holding one — which is the
+            // whole of what a **module change** does to a stream (task 9.3).
+            //
+            // It went away: a stream still holding the old code would go on
+            // polling a module nothing can reach, failing once an interval,
+            // while the screen said `running`. Restarting turns that into
+            // `failed` with the registry's own sentence, which names the
+            // provider and the alternatives — the one case where a row nobody
+            // edited loses its connection on purpose.
+            //
+            // It arrived: a stream that is `failed` because its provider was
+            // missing when it started is fixed here and nowhere else, since
+            // `tick` deliberately never retries one (waiting does not make an
+            // uninstalled module come back; installing it does).
+            //
+            // Comparing the two rather than testing either alone is what keeps
+            // a reload quiet: a stream whose provider is still missing is held
+            // exactly as it was, so the observer is not told the set moved on
+            // every save.
+            let availability_changed =
+                self.registry().get(row.provider.trim()).is_some() != existing.provider().is_some();
             let restart = existing.provider_name() != row.provider
                 || existing.configuration() != row.configuration
-                || existing.status() == StreamStatus::Stopped;
+                || existing.status() == StreamStatus::Stopped
+                || availability_changed;
             if restart {
                 // Stop first: two subscriptions to one broker with one
                 // `client_id` is a session the broker closes, and which one it

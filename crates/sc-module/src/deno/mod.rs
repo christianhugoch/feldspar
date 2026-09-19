@@ -791,6 +791,57 @@ impl DenoModuleHost {
         .map_err(|e| denial(module, e))
     }
 
+    /// The **element type** one of a module's stream providers declares for a
+    /// configuration (TODO "Streams" §12).
+    pub async fn stream_element_type(
+        &self,
+        module: &str,
+        provider: &str,
+        configuration: &Json,
+    ) -> Result<Json> {
+        let index = self.worker_for(module).await;
+        self.send(
+            index,
+            json!({
+                "op": "stream_element_type",
+                "module": module,
+                "provider": provider,
+                "configuration": configuration,
+            }),
+            None,
+        )
+        .await
+        .map_err(|e| denial(module, e))
+    }
+
+    /// **Poll** one of a module's stream providers once, carrying the opaque
+    /// cursor the last poll answered.
+    ///
+    /// Routed like [`run`](DenoModuleHost::run): `poll` is a closure the module
+    /// built at load time.
+    pub async fn stream_poll(
+        &self,
+        module: &str,
+        provider: &str,
+        configuration: &Json,
+        cursor: &Json,
+    ) -> Result<Json> {
+        let index = self.worker_for(module).await;
+        self.send(
+            index,
+            json!({
+                "op": "stream_poll",
+                "module": module,
+                "provider": provider,
+                "configuration": configuration,
+                "cursor": cursor,
+            }),
+            None,
+        )
+        .await
+        .map_err(|e| denial(module, e))
+    }
+
     /// One provider request, on the worker its module is loaded on, with a
     /// denial translated into the sentence an admin can act on.
     async fn provider_op(&self, module: &str, provider: &str, request: Json) -> Result<Json> {

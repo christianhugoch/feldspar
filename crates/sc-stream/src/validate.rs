@@ -56,6 +56,18 @@ pub async fn validate_stream(
     registry: &StreamRegistry,
     stream: &Stream,
 ) -> Result<()> {
+    // Ask the provider for the element type **before** checking anything, so
+    // that a provider whose declaration lives on the far side of a seam — a
+    // module's, over `PollingProvider` — has answered by the time the
+    // synchronous checks below read it. For every compiled-in provider this is
+    // the same pure call `check_stream` is about to make.
+    //
+    // A failure here is not reported from this line: `check_stream` makes the
+    // same call a moment later and names the stream and the problem the way the
+    // form wants to hear it.
+    if let Ok(provider) = registry.require(stream.provider.trim()) {
+        let _ = provider.resolve_element_type(&stream.configuration).await;
+    }
     check_stream(registry, stream)?;
 
     // Unique, because the name *is* the reference: a trigger's channel, an

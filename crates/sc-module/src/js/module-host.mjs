@@ -744,6 +744,7 @@ const supportedKeys = new Set([
   "functions",
   "table_providers",
   "modelproviders",
+  "streamproviders",
   "frameworks",
   // Saltcorn UI (TODO "Saltcorn UI" §6): view patterns, and the scripts and
   // stylesheets a document rendering them wants.
@@ -992,6 +993,124 @@ async function evalModelProviders(plugin, configuration) {
     });
   }
   return { providers, set, issues };
+}
+
+/** v1 has no `streamproviders`; this is **this** system's key (TODO "Streams" §12).
+ *
+ * ```js
+ * streamproviders: {
+ *   poll_feed: {
+ *     description: "An RSS feed, polled",
+ *     config_fields: [{ name: "url", type: "String", required: true },
+ *                     { name: "interval_s", type: "Integer", default: 60 }],
+ *     element_type: ({ configuration }) => ({ kind: "json", keys: [ … ] }),
+ *     poll: async ({ configuration, cursor }) => ({ elements: [ … ], cursor: "…" }),
+ *   },
+ * }
+ * ```
+ *
+ * **Poll, not push.** A module call is request/response on this worker and
+ * there is no channel from here back into the host, so a module declares a
+ * `poll` and the host supplies the interval loop, the cursor and the decoding
+ * (`sc_stream::PollingProvider`).
+ *
+ * A provider missing `poll` or missing `element_type` is **reported and
+ * skipped**, exactly as a model provider that cannot be fitted is: a provider
+ * the supervisor could only ever fail to start is not one to put on the Streams
+ * form, and an admin who can see why can fix it.
+ */
+async function evalStreamProviders(plugin, configuration) {
+  const exported = plugin.streamproviders;
+  let raw = {};
+  const issues = [];
+  if (typeof exported === "function") {
+    try {
+      raw = (await exported(configuration || {})) || {};
+    } catch (e) {
+      issues.push(`its stream providers could not be built: ${e.message}`);
+      raw = {};
+    }
+  } else if (exported && typeof exported === "object") {
+    raw = exported;
+  }
+
+  const providers = [];
+  const set = {};
+  for (const [providerName, value] of Object.entries(raw)) {
+    const impl = value || {};
+    let broken = null;
+    if (typeof impl.poll !== "function") broken = "it has no poll function";
+    else if (!impl.element_type) broken = "it declares no element type";
+    if (broken) {
+      issues.push(`the stream provider "${providerName}" is not available: ${broken}`);
+      continue;
+    }
+    const { fields, issues: workflowIssues } = await workflowFields(
+      impl.configuration_workflow,
+      `the stream provider "${providerName}"'s`,
+    );
+    issues.push(...workflowIssues);
+    set[providerName] = impl;
+    providers.push({
+      name: providerName,
+      description: impl.description || "",
+      label: impl.label || null,
+      config_fields: [...fields, ...(Array.isArray(impl.config_fields) ? impl.config_fields : [])],
+    });
+  }
+  return { providers, set, issues };
+}
+
+/** The loaded stream provider, or a sentence naming what is missing. */
+function requireStreamProvider(name, providerName) {
+  const entry = loaded.get(name);
+  if (!entry) throw new Error(`the module ${name} is not loaded in this host`);
+  const impl = entry.streamProviders && entry.streamProviders[providerName];
+  if (!impl) throw new Error(`the module ${name} has no stream provider ${providerName}`);
+  return impl;
+}
+
+/** The element type one stream provider declares for one configuration.
+ *
+ * Read the two ways every other declaration is read — a value, and a function
+ * of the configuration (possibly async) — because a provider whose elements are
+ * the same shape whatever the settings should not have to write a function to
+ * say so. */
+async function streamElementType({ module: name, provider: providerName, configuration }) {
+  const impl = requireStreamProvider(name, providerName);
+  const declared =
+    typeof impl.element_type === "function"
+      ? await impl.element_type({ configuration: configuration || {} })
+      : impl.element_type;
+  if (!declared || typeof declared !== "object")
+    throw new Error(
+      `the stream provider ${providerName} of module ${name} declared an element type that is ` +
+        `not an object: ${JSON.stringify(declared)}`,
+    );
+  return declared;
+}
+
+/** Poll one stream provider once, carrying the opaque cursor.
+ *
+ * A bare list is read as the elements with no cursor, which is what a provider
+ * that reads its whole source every time will write. */
+async function streamPoll({ module: name, provider: providerName, configuration, cursor }) {
+  const impl = requireStreamProvider(name, providerName);
+  const answer = await impl.poll({
+    configuration: configuration || {},
+    cursor: cursor === undefined ? null : cursor,
+  });
+  if (answer === undefined || answer === null) return { elements: [], cursor: cursor ?? null };
+  if (Array.isArray(answer)) return { elements: answer, cursor: cursor ?? null };
+  if (typeof answer !== "object")
+    throw new Error(
+      `the stream provider ${providerName} of module ${name} answered its poll with ` +
+        `${JSON.stringify(answer)}, which is not { elements, cursor }`,
+    );
+  return {
+    elements: Array.isArray(answer.elements) ? answer.elements : [],
+    cursor: answer.cursor === undefined ? null : answer.cursor,
+  };
 }
 
 /** The names this version will not let a module claim for a framework.
@@ -1607,6 +1726,13 @@ async function loadModule({ module: name, dir, configuration }) {
   issues.push(...modelProviderIssues);
 
   const {
+    providers: streamProviders,
+    set: streamProviderSet,
+    issues: streamProviderIssues,
+  } = await evalStreamProviders(plugin, configuration);
+  issues.push(...streamProviderIssues);
+
+  const {
     frameworks,
     set: frameworkSet,
     issues: frameworkIssues,
@@ -1634,6 +1760,7 @@ async function loadModule({ module: name, dir, configuration }) {
     functions: functionSet,
     providers: providerSet,
     modelProviders: modelProviderSet,
+    streamProviders: streamProviderSet,
     frameworks: frameworkSet,
     viewtemplates: viewPatternSet,
     configuration: configuration || {},
@@ -1650,6 +1777,7 @@ async function loadModule({ module: name, dir, configuration }) {
     functions,
     table_providers: providers,
     model_providers: modelProviders,
+    stream_providers: streamProviders,
     frameworks,
     view_patterns: viewPatterns,
     headers,
@@ -3627,6 +3755,16 @@ async function handle(request) {
       const pending = loading.get(request.module);
       if (pending) await pending;
       return await modelPredict(request);
+    }
+    case "stream_element_type": {
+      const pending = loading.get(request.module);
+      if (pending) await pending;
+      return await streamElementType(request);
+    }
+    case "stream_poll": {
+      const pending = loading.get(request.module);
+      if (pending) await pending;
+      return await streamPoll(request);
     }
     case "framework_files": {
       const pending = loading.get(request.module);

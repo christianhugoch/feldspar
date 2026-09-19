@@ -2,6 +2,76 @@
 
 Changes in reverse chronological order.
 
+## Stream providers from a module
+
+Phase 9 of the streams milestone (tasks 9.1–9.4). MQTT was the built-in; this is the part where a
+**plugin** can supply a dataflow — an RSS feed, a queue, anything with a URL — with the one
+structural difference §12 called: a module cannot push.
+
+- **Poll, not push, and the loop is `sc-stream`'s.** A module call is request/response on a Deno
+  worker and there is no channel from a worker back into the host, so a module declares a
+  `poll({ configuration, cursor })` and `PollingProvider` supplies everything around it: the
+  interval (`interval_s`, defaulting to a minute, with a 100 ms floor because `interval_s: 0` is a
+  loop with no wait in it), the opaque cursor carried between calls, and each element decoded
+  against the declared type — delivered, or counted as malformed and not delivered. Written once
+  here rather than once per plugin, because "retry properly" and "don't deliver what you couldn't
+  parse" are the parts every author gets subtly wrong.
+
+- **A poll that throws ends the subscription.** It does not sleep and try again: the task returns,
+  the `Subscription` reports it has ended, and the **supervisor's** capped backoff services it —
+  the machinery that already exists for a broker that hung up. A provider retrying in its own loop
+  would be a second, worse backoff that the Streams screen could not see, with the stream reading
+  `running` while every poll failed.
+
+- **The element type is a call, not a value** — and that is the one place the provider trait had to
+  grow. GOALS makes the element type a function of the configuration, and for a module that
+  function is JavaScript on a worker, while `StreamProvider::element_type` is synchronous and is
+  called by the Streams form, the list, the client generator and `stream_json`. So there is now an
+  `async resolve_element_type`, defaulting to exactly the synchronous answer for every compiled-in
+  provider (MQTT, the scripted one — no cost, no second path), and `PollingProvider` answers the
+  synchronous one **from what it last resolved**. The asynchronous door is called where a
+  configuration becomes live: `validate_stream` before it validates, the supervisor before it
+  starts, `listStreamProviders` when the form asks "what would this produce?", `listStreams` and
+  `getStream` before they render, and `sc-app` before it generates a client. Asking about a
+  configuration nobody resolved answers with a sentence saying exactly that, never a guess.
+
+- **`streamproviders` is read the way every other facility key is** — a plain object or a function
+  of the module's own configuration — and a provider with no `poll`, or that declares no element
+  type, is **reported and skipped**: it is an issue on the module's card, not a module that failed
+  to load. The two host calls are `stream_element_type` and `stream_poll`, routed to the worker the
+  module is loaded on, because both are closures the module built at load time. A poll's answer is
+  read leniently in the one shape an author will write by hand: a bare array is its elements with
+  no cursor.
+
+- **A module change reloads the streams, and availability is what decides a restart.** The registry
+  is rebuilt whole (built-ins plus every module's providers) and swapped in, then the supervisor is
+  reloaded. The diff gained one clause: a stream is restarted when the registry's answer for its
+  provider **changed availability** against what the running stream holds. Gone away — the module
+  was uninstalled — turns it into `failed` with the registry's own sentence naming the provider and
+  the alternatives, instead of a stream that says `running` while it polls a module nothing can
+  reach. Just arrived fixes the mirror case, which `tick` deliberately never retries. Comparing the
+  two rather than testing either alone is what keeps a reload quiet: a stream whose provider is
+  still missing is left exactly as it was.
+
+- **`plugins/rss` grew a second key.** The same bundled module that reads a feed as a table now
+  offers it as a stream: `rss_feed`, with a poll interval rather than a cache window (a table is
+  read when somebody looks at it; a stream is polled on a clock, and one field meaning both would
+  need a sublabel explaining which it was doing today). Its cursor is the set of item ids it last
+  *saw*, capped at 500, because a feed is not ordered by anything a module can trust — publishers
+  reorder, backdate and edit — and an item that fell past `max_items` must not be delivered twice
+  when it comes back. The first poll delivers the window as it stands, which is the closest a feed
+  has to MQTT's retained message and not the backfill §OUT rules out.
+
+- **Tests.** The loop is a unit test over a scripted `PollHost` (cursor carried, malformed counted,
+  a throw ending the subscription, the interval floor). The seam is six tests over a fixture module
+  on a real worker — five providers, two broken on purpose — asserting that the element type really
+  is a function of the configuration across the seam, that a module that went away answers with a
+  sentence rather than panicking, and that elements arrive decoded. `plugins/rss`'s stream is
+  asserted end to end against a feed served on `127.0.0.1` (over HTTP and not a `file://` URL,
+  because a module's grant is *net*, not *read*: one that could open a path typed into a stream's
+  settings could open the database's password file). And the supervisor's new clause has its own
+  test: uninstall, `failed` with the sentence, reinstall, running again.
+
 ## Streams from an application
 
 Phase 8 of the streams milestone (tasks 8.1–8.4). Phases 6 and 7 made a stream something an admin
