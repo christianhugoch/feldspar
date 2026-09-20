@@ -34,6 +34,7 @@ import type { ListFieldsResponse, ListUsersResponse } from "../client";
 import { navigate } from "../App";
 import { IconDots, IconPlus } from "../icons";
 import { PageBody, PageHeader, StatusBadge } from "../layout";
+import { isMultilingual, localeLabel, localeOptions, useLocales, type Locales } from "../locales";
 import { RoleSelect } from "../roleSelect";
 import { roleLabel, useRoles } from "../roles";
 import {
@@ -60,6 +61,7 @@ export function Users() {
   const [credentials, setCredentials] = useState<Credentials | null>(null);
   const [busy, setBusy] = useState(false);
   const roles = useRoles();
+  const locales = useLocales();
 
   const load = async () => {
     try {
@@ -252,6 +254,7 @@ export function Users() {
           editing={editing}
           fields={fields}
           roles={roles}
+          locales={locales}
           onClose={() => setEditing(null)}
           onSaved={(created) => {
             setEditing(null);
@@ -269,17 +272,26 @@ export function Users() {
   );
 }
 
-/** The add/edit dialog: email, password, role, and one input per admin field. */
+/**
+ * The add/edit dialog: email, password, role, language, and one input per admin
+ * field.
+ *
+ * The language select is only rendered on an installation that serves more than
+ * one (§16.x, D11) — a control with one option is a control that asks a question
+ * with one answer.
+ */
 function UserDialog({
   editing,
   fields,
   roles,
+  locales,
   onClose,
   onSaved,
 }: {
   editing: Editing | null;
   fields: ListFieldsResponse | null;
   roles: ReturnType<typeof useRoles>;
+  locales: Locales;
   onClose: () => void;
   onSaved: (credentials: Credentials | null) => void;
 }) {
@@ -384,6 +396,26 @@ function UserDialog({
           >
             Lower is more privileged. Add roles on the <a href="#/roles">Roles</a> screen.
           </RoleSelect>
+
+          {isMultilingual(locales) && (
+            <Form.Group className="mb-3" controlId="userLanguage">
+              <Form.Label>Language</Form.Label>
+              <Form.Select
+                value={form.language}
+                onChange={(e) => setForm({ ...form, language: e.target.value })}
+              >
+                <option value="">Site default ({localeLabel(locales.default)})</option>
+                {localeOptions(form.language || null, locales).map((tag) => (
+                  <option key={tag} value={tag}>
+                    {localeLabel(tag)}
+                  </option>
+                ))}
+              </Form.Select>
+              <Form.Text muted>
+                What this account reads the product in. They can change it themselves.
+              </Form.Text>
+            </Form.Group>
+          )}
 
           {columns.map((f) => (
             <Form.Group className="mb-3" controlId={`user-${f.name}`} key={f.name}>

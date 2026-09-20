@@ -9,7 +9,8 @@
 //!
 //! Handlers stay free of HTTP plumbing: they receive a [`HandlerCtx`] (path/query
 //! params, parsed JSON body, and the authenticated [`User`], already checked
-//! against the endpoint's auth requirement) and return a [`HandlerResponse`]. A
+//! against the endpoint's auth requirement, and the request's negotiated
+//! locale) and return a [`HandlerResponse`]. A
 //! handler never touches cookies directly — instead it asks the dispatcher to
 //! start or end the session via [`SessionAction`], so login/logout stay pure.
 //! That type is [`sc_api::SessionAction`], shared with the API providers: an
@@ -48,6 +49,18 @@ pub struct HandlerCtx {
     /// The authenticated user, if any. Presence/role already satisfy the
     /// endpoint's [`AuthRequirement`](sc_api::AuthRequirement).
     pub user: Option<User>,
+    /// The locale this request is served in (§16.x, D8).
+    ///
+    /// Negotiated **once**, in the router, from `?lang=`, the user's `language`
+    /// column, the `lang` cookie and `Accept-Language`, against the enabled set.
+    /// A handler that produces human-readable text — a refusal an admin reads, a
+    /// declared spec's labels — translates against *this*, and never against an
+    /// ambient locale, because the one it is handed is the one the response's
+    /// `Content-Language` promises.
+    ///
+    /// On a monolingual installation it is the installation default and nothing
+    /// was parsed to arrive at it (D11).
+    pub locale: sc_i18n::Locale,
     /// The unparsed request body, set only for the routes that carry one.
     ///
     /// A typed endpoint never has this: its body is JSON, described by a

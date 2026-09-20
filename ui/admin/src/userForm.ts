@@ -23,9 +23,18 @@ export type UserRow = ListUsersResponse[number];
  * None of them is a text box on the user form: `id` is generated, `role` has its
  * own select, `email` its own input, `password_hash` is never shown at all, and
  * `disabled` is an action in the row menu rather than a field — disabling
- * somebody is a thing you do, not a checkbox you forget to tick.
+ * somebody is a thing you do, not a checkbox you forget to tick — and `language`
+ * is a select over the enabled locales rather than a text box somebody types
+ * `french` into.
  */
-export const SYSTEM_USER_COLUMNS = ["id", "role", "email", "password_hash", "disabled"];
+export const SYSTEM_USER_COLUMNS = [
+  "id",
+  "role",
+  "email",
+  "password_hash",
+  "disabled",
+  "language",
+];
 
 /** The role a new user gets when the admin does not choose: see [defaultUserRole]. */
 export const DEFAULT_NEW_USER_ROLE = 80;
@@ -70,18 +79,24 @@ export function defaultUserRole(roles: Roles): number {
   }, listed[0].role);
 }
 
-/** The form's state: the three system inputs plus one string per admin field. */
+/** The form's state: the four system inputs plus one string per admin field. */
 export type UserForm = {
   email: string;
   /** Blank means "generate one" when creating and "leave it alone" when editing. */
   password: string;
   role: number;
+  /**
+   * The BCP-47 tag this account reads the product in; **blank is "site
+   * default"**, which is a real choice rather than an unfilled box — it is what
+   * clears a language somebody set earlier.
+   */
+  language: string;
   extra: Record<string, string>;
 };
 
-/** A blank form for a new user, on the default role. */
+/** A blank form for a new user, on the default role and no stated language. */
 export function newUserForm(roles: Roles): UserForm {
-  return { email: "", password: "", role: defaultUserRole(roles), extra: {} };
+  return { email: "", password: "", role: defaultUserRole(roles), language: "", extra: {} };
 }
 
 /** The form for editing an existing user — never carrying a password. */
@@ -91,7 +106,13 @@ export function editUserForm(user: UserRow, fields: ListFieldsResponse | null): 
   for (const field of adminUserFields(fields)) {
     extra[field.name] = displayValue(bag[field.name]);
   }
-  return { email: user.email, password: "", role: user.role, extra };
+  return {
+    email: user.email,
+    password: "",
+    role: user.role,
+    language: user.language ?? "",
+    extra,
+  };
 }
 
 /** A stored value as the text box shows it: JSON for anything that is not a scalar. */
@@ -116,18 +137,31 @@ export function parseValue(raw: string): unknown {
   }
 }
 
-/** The create/update body for a form. Both endpoints take the same shape. */
+/**
+ * The create/update body for a form. Both endpoints take the same shape.
+ *
+ * `language` is sent as `null` when the select is on "Site default", never
+ * omitted: an absent `language` tells the server to leave the stored one alone,
+ * and this form always knows what it means.
+ */
 export function userBody(form: UserForm): {
   email: string;
   password: string;
   role: number;
+  language: string | null;
   extra: Record<string, unknown>;
 } {
   const extra: Record<string, unknown> = {};
   for (const [name, raw] of Object.entries(form.extra)) {
     extra[name] = parseValue(raw);
   }
-  return { email: form.email.trim(), password: form.password, role: form.role, extra };
+  return {
+    email: form.email.trim(),
+    password: form.password,
+    role: form.role,
+    language: form.language.trim() === "" ? null : form.language.trim(),
+    extra,
+  };
 }
 
 /** Credentials to hand over out of band, and where they are used. */

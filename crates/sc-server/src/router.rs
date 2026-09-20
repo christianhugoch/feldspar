@@ -421,6 +421,10 @@ async fn upload(
         query: Vec::new(),
         body: serde_json::Value::Null,
         user,
+        // A route outside the endpoint set that serves bytes, not prose: the
+        // installation default is the honest answer, and nothing here renders a
+        // message for a person to read.
+        locale: sc_i18n::active().default_locale().clone(),
     };
     match handler(ctx).await {
         Ok(resp) => apply_response(&state, jar, session_token, resp).await,
@@ -472,6 +476,8 @@ async fn create_backup(State(state): State<AppState>, jar: CookieJar, body: Byte
         query: Vec::new(),
         body: selection,
         user,
+        // As `upload_file`: this route's response is an archive.
+        locale: sc_i18n::active().default_locale().clone(),
     };
     match handler(ctx).await {
         Ok(resp) => apply_response(&state, jar, session_token, resp).await,
@@ -523,6 +529,8 @@ async fn upload_backup(State(state): State<AppState>, jar: CookieJar, body: Body
         query: Vec::new(),
         body: Value::Null,
         user,
+        // As `upload_file`: this route takes an archive and answers a manifest.
+        locale: sc_i18n::active().default_locale().clone(),
     };
     match handler(ctx).await {
         Ok(resp) => apply_response(&state, jar, session_token, resp).await,
@@ -758,7 +766,7 @@ async fn dispatch(
                 return json_error(StatusCode::METHOD_NOT_ALLOWED, "unsupported method");
             };
             match endpoints.iter().find(|e| e.method == api_method) {
-                Some(ep) => handle_api(&state, ep, params, &uri, jar, &body).await,
+                Some(ep) => handle_api(&state, ep, params, &uri, &headers, jar, &body).await,
                 None => json_error(
                     StatusCode::METHOD_NOT_ALLOWED,
                     "method not allowed for this route",
@@ -1011,10 +1019,16 @@ async fn dispatch_app(
         },
         None => None,
     };
+    // The locale, negotiated once for this request (§16.x, D8): an application's
+    // own pages, its view runtime and anything it fires are served in one
+    // language, and it is the one this response's `Content-Language` names.
+    let settings = sc_i18n::active();
+    let negotiated = crate::i18n::negotiate(&settings, uri, headers, &jar, user.as_ref());
     let mut req = match app_request(state, api_method, uri, headers, body, user.clone()) {
         Ok(req) => req,
         Err(rejection) => return with_csp(*rejection, &csp),
     };
+    req.locale = crate::i18n::locale_or_default(&settings, negotiated.as_ref());
     // The token the CSRF middleware checked this request against, or minted for
     // it: what a rendered form carries, and what `req.csrfToken()` answers.
     req.csrf_token = csrf
@@ -1041,18 +1055,21 @@ async fn dispatch_app(
                     out.headers_mut().append(name, value);
                 }
             }
-            with_csp(out, &csp)
+            with_csp(crate::i18n::with_language(out, negotiated.as_ref()), &csp)
         }
         Err(e) => with_csp(
-            error_out(
-                state,
-                &e,
-                Audience::App,
-                api_method.as_str(),
-                path,
-                user.as_ref(),
-            )
-            .await,
+            crate::i18n::with_language(
+                error_out(
+                    state,
+                    &e,
+                    Audience::App,
+                    api_method.as_str(),
+                    path,
+                    user.as_ref(),
+                )
+                .await,
+                negotiated.as_ref(),
+            ),
             &csp,
         ),
     }
@@ -1222,6 +1239,7 @@ async fn handle_api(
     ep: &Endpoint,
     path_params: HashMap<String, String>,
     uri: &Uri,
+    headers: &axum::http::HeaderMap,
     jar: CookieJar,
     body: &Bytes,
 ) -> Response {
@@ -1269,6 +1287,13 @@ async fn handle_api(
         }
     };
 
+    // The locale, negotiated once for this request now that the user is known
+    // (§16.x, D8), and `None` on a monolingual installation — which is what makes
+    // this cost nothing there (D11).
+    let settings = sc_i18n::active();
+    let negotiated = crate::i18n::negotiate(&settings, uri, headers, &jar, user.as_ref());
+    let locale = crate::i18n::locale_or_default(&settings, negotiated.as_ref());
+
     // As above: the event reports the route and the caller, and both move into
     // the handler's context.
     let caller = user.clone();
@@ -1278,9 +1303,13 @@ async fn handle_api(
         query: parse_query(uri),
         body: parsed_body,
         user,
+        locale,
     };
 
-    match handler(ctx).await {
+    // Both arms carry the language headers: a refusal an admin reads is text in
+    // a language too, and a cache in front of this must vary on the same things
+    // whether the answer was a 200 or a 403.
+    let out = match handler(ctx).await {
         Ok(resp) => apply_response(state, jar, session_token, resp).await,
         Err(e) => {
             error_out(
@@ -1293,7 +1322,8 @@ async fn handle_api(
             )
             .await
         }
-    }
+    };
+    crate::i18n::with_language(out, negotiated.as_ref())
 }
 
 /// Check a user against an [`AuthRequirement`]. Returns `Some(rejection)` when

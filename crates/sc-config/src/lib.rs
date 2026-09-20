@@ -19,6 +19,9 @@
 //!   renewal survives a restart and a second node does not order its own.
 //! - [`email`] is the second section: the SMTP transport every message this
 //!   installation sends goes out through (§18.2).
+//! - [`localisation`] is the fourth: which languages this installation serves
+//!   (§16.x). Two keys, and a server that has never opened the section runs
+//!   exactly as it did before there was one.
 //! - [`development`] is the third: what this server prints while it runs — the
 //!   SQL echo and the log verbosity, both of which are switches on the
 //!   process-wide atomics in `sc-log` rather than values anybody reads from
@@ -32,6 +35,7 @@ pub mod acme;
 pub mod defs;
 pub mod development;
 pub mod email;
+pub mod localisation;
 pub mod ssl;
 pub mod store;
 
@@ -49,6 +53,10 @@ pub use email::{
     DEFAULT_SMTP_PORT, EMAIL_FROM, EmailSettings, Mailbox, SECURITY_NONE, SECURITY_STARTTLS,
     SECURITY_TLS, SMTP_HOST, SMTP_PASSWORD, SMTP_PORT, SMTP_SECURITY, SMTP_USERNAME, SmtpSecurity,
     email_section, parse_mailbox,
+};
+pub use localisation::{
+    DEFAULT_LOCALE, ENABLED_LOCALES, apply_localisation_settings, localisation_section,
+    localisation_settings, localisation_settings_from,
 };
 pub use ssl::{
     ACME_CONTACT_EMAIL, ACME_DIRECTORY_URL, HTTPS_PORT, LETSENCRYPT_PRODUCTION,

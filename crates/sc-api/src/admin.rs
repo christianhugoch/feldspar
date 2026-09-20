@@ -58,6 +58,14 @@ pub fn admin_endpoints() -> EndpointSet {
             .output(TypeSchema::struct_of([
                 StructField::new("any_user_exists", TypeSchema::bool()),
                 StructField::new("current_user", TypeSchema::optional(user_summary_schema())),
+                // Which languages this installation serves (§16.x). Here rather
+                // than on the settings payload because this is the call the SPA
+                // makes before it renders anything, and three screens need the
+                // list: the user menu's locale picker, the user form's language
+                // select, and whatever chooses the SPA's own catalogue. It is
+                // public for the same reason the rest of this response is — the
+                // sign-in page is a page too, and it has a language.
+                StructField::new("locales", locales_schema()),
             ]))
             .auth(AuthRequirement::Public),
     );
@@ -3549,11 +3557,26 @@ fn role_schema() -> TypeSchema {
 /// `extra` carries the columns the admin has added to the users table (§7.1),
 /// keyed by column name; the system's own columns are refused there, since each
 /// has its own way in.
+/// What languages this installation serves: the default, and the enabled set
+/// (§16.x). `enabled` always contains `default`, and a one-element `enabled` is
+/// an installation that negotiates nothing.
+fn locales_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("default", TypeSchema::text()),
+        StructField::new("enabled", TypeSchema::array(TypeSchema::text())),
+    ])
+}
+
 fn user_input_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("email", TypeSchema::text()),
         StructField::new("password", TypeSchema::optional(TypeSchema::text())),
         StructField::new("role", TypeSchema::int()),
+        // A BCP-47 tag, or null/absent for "whatever the request negotiates".
+        // On an **update** the two are not the same: an absent `language` leaves
+        // the stored one alone, and an explicit `null` clears it, which is what
+        // the form's "Site default" option sends (§16.x).
+        StructField::new("language", TypeSchema::optional(TypeSchema::text())),
         StructField::new("extra", TypeSchema::optional(TypeSchema::json())),
     ])
 }

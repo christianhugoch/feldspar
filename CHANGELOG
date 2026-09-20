@@ -2,6 +2,88 @@
 
 Changes in reverse chronological order.
 
+## Internationalisation, phase 1: the kernel
+
+The first of five phases of the i18n milestone (`docs/I18N.md`, `TODO.md`): a new layer-0 crate
+that knows what a locale is, what a catalogue is, how a message is formatted and how a request's
+language is decided — plus the two settings and the one user column that turn it on. Nothing is
+translated yet, and that is the point of the phase: everything above it can now be wired to
+something that exists.
+
+- **`crates/sc-i18n`, at layer 0** — `sc-error`, `icu_locale_core`, `icu_plurals` and
+  `serde_json`, and nothing else. It is that low because `sc-types` and `sc-auth` have to be able
+  to translate a sentence they are about to hand to a person, and the dependency cannot point the
+  other way. Everything needing a database, a file store or an LLM sits *above* it behind a trait
+  declared *in* it, which is the arrangement `StreamProvider`, `Mailer` and `JsEvaluator` already
+  have.
+  - **`Locale`** over `icu_locale_core`: BCP-47 parse (case and subtag order normalised,
+    extensions dropped — `-u-ca-gregory` chooses a calendar, not a catalogue), the fallback chain
+    (`zh-Hans-CN` → `zh-Hans` → `zh`, region before script), and `direction()` from a
+    six-entry script table rather than ICU's likely-subtags data set.
+  - **`I18nSettings` and the negotiation.** `?lang=` → the user's `language` → the `lang` cookie
+    → `Accept-Language` (quality values honoured, `q=0` a refusal, `*` the default) → the
+    default. Each source is checked against the enabled set, so a `?lang=` naming a locale this
+    installation does not serve falls through rather than being honoured, and an unknown tag
+    never escapes the enabled set. **The default is the last resort, not an error.**
+  - **`Catalog` / `Catalogs`.** One locale's messages, and a domain's set of them; a lookup walks
+    the fallback chain, so a partially translated `pt-BR` reads `pt`'s answer rather than falling
+    all the way back to English. A value is a string or an object of CLDR plural categories, and
+    a value that is neither is an error **naming the key** — the only thing that identifies a
+    line in a flat JSON object. `\u0004` separates a context from the source text, gettext's
+    `msgctxt`, so the file stays flat.
+  - **`format`**, ~60 lines and the whole of decision D2: `{identifier}` substitutes, `{{` is a
+    literal brace, anything else between braces is copied out as written, and **a placeholder
+    with no argument renders as written** — a visible `{name}` is a bug report, an empty string
+    is a mystery. A closing brace is never ambiguous and therefore never escaped. The corpus is
+    `crates/sc-i18n/fixtures/format.json` (28 cases), which a Rust test runs today and the
+    generated `messages.ts` will run in phase 3: two implementations of one thing disagree by the
+    third bug fixed in one of them, and a shared fixture is what makes this instance affordable.
+  - **Plurals** through `icu_plurals` with `compiled_data` — the same CLDR data the browser's
+    `Intl.PluralRules` reads, so the two halves agree by construction rather than by a table
+    somebody maintains. A plain string where plurals were expected is used as written, because a
+    locale with one form is a locale with one form.
+  - **`t!` / `tc!`**, taking the locale as their first argument and a string *literal* as the
+    message, because the literal is the key and because the extractor that will build the shipped
+    catalogue is a scan over these call sites. The locale may be owned or borrowed.
+  - **The `core` domain**: `crates/sc-i18n/locales/*.json`, embedded by a `build.rs` that scans
+    the directory, so adding a locale is adding a file and never a list to forget. The directory
+    ships with a `README.md` saying what the files are, who writes them (`feldspar i18n
+    translate`, phase 2) and what is deliberately *not* in them.
+  - **The `Translator` seam and `translate_missing`** — batches of 50, and **the check nobody's
+    prompt is a substitute for**: a returned message whose placeholder set differs from the
+    source's is rejected and left untranslated with the key in the warning, as is one whose plural
+    categories are not exactly the ones the target locale uses. An LLM that renames `{count}` to
+    `{nombre}` produces a literal `{nombre}` in front of a user. Tested against a scripted
+    translator that mangles one of each.
+- **`sc_types::translate_spec`** (decision D5 — the server translates everything the server
+  says). **Not in `sc-i18n`**, as the plan had it: a function that walks a `FormField` cannot live
+  in the crate `sc-types` depends on. It lives with the type it walks, translates the **label**
+  and nothing else — a name is an identifier, and an option is a *value* whose translation would
+  fail its own validation — and a spec with no catalogue entry comes back untouched.
+- **Two settings and a column.** `Settings → Localisation` declares `default_locale` and
+  `enabled_locales` (comma-separated, parsed on save, so one typo is one error naming the typo);
+  `users.language` is a nullable BCP-47 tag with its own select on the user form, offered only
+  when there is more than one language to pick. Both take effect on **save**: the boot path and
+  `updateSettings` swap the process-wide enabled set, the way the Development section's switches
+  move and for the same reason.
+- **Negotiated once, in the router, and carried.** `HandlerCtx.locale` and `AppRequest.locale`
+  are values a handler is *given*; there is no ambient locale to reach for, because this server
+  does work for a person on a task no request owns and an ambient locale is the mechanism that
+  would send that person's mail in the admin's language. Responses answer `Content-Language` and
+  `Vary: Accept-Language, Cookie`.
+- **Decision D11 is asserted, not hoped.** With one enabled locale the router parses no header,
+  reads no cookie and sets no response header; the SPA is told the enabled set on `authStatus` and
+  renders no picker. `crates/sc-server/tests/locale_negotiation.rs` walks it end to end over real
+  HTTP: monolingual and silent, then French enabled *by a save*, then the four sources in D8's
+  order, then a bad tag refused where it was typed, then back to silent.
+- **Tested**: 53 unit tests in `sc-i18n` (the fallback chain, that an unknown tag never escapes
+  the enabled set, that the default is the last resort rather than an error, the catalogue's
+  errors naming their key, plural selection against French's zero and Russian's `few`, and each
+  of D9's three rejections); the 28-case format corpus; `translate_spec` leaving an untranslated
+  spec alone; the Localisation section's parsing; the `language` column through create and update
+  (including that `None` leaves it alone and `Some(None)` clears it); `locales.test.ts` and
+  `userForm.test.ts` in the SPA; and the end-to-end negotiation test above.
+
 ## The preview pane: the application beside the conversation
 
 An agent's chat screen can now split in two — the conversation in a column on the left, the thing

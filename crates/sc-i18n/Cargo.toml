@@ -1,0 +1,38 @@
+[package]
+name = "sc-i18n"
+description = "Locale negotiation, message catalogues, the message format and the `t!` macros (layer 0)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# One integration-test binary per crate rather than one per file: every test
+# target in this workspace statically links V8, so ~400 MB of binary and a
+# multi-second link were being paid per *file*. `tests/it.rs` aggregates them.
+autotests = false
+
+[dependencies]
+sc-error.workspace = true
+# BCP-47 and CLDR plural categories; see the workspace manifest for why these
+# two and nothing else of ICU4X.
+icu_locale_core.workspace = true
+icu_plurals.workspace = true
+# A catalogue *is* JSON (a flat object of English source → translation), so this
+# crate parses and serialises one rather than handing bytes to a caller that
+# would have to know the format anyway.
+serde_json.workspace = true
+# The `Translator` seam: filling a catalogue is a network call, so the trait
+# that declares it is async — the arrangement `Mailer` and `StreamProvider`
+# already have.
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it.rs"

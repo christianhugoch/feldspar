@@ -92,6 +92,30 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
     sc_config::bootstrap(&catalog)
         .await
         .context("ensuring the configuration tables exist")?;
+    // The stored Localisation settings, on the same footing and here for the
+    // same reason: what a `feldspar` command prints to an admin — and what a
+    // server negotiates a request into — is a stored setting, so it has to be
+    // read as soon as there is a database to read it from (§16.x).
+    //
+    // **Before** the Development settings, and that order is load-bearing: the
+    // switch below turns SQL echoing on for this process, and a read performed
+    // after it would print its own `SELECT` to stdout — which is exactly what
+    // `get-cfg KEY` promises not to do.
+    let localisation = sc_config::apply_localisation_settings(&catalog)
+        .await
+        .context("reading the localisation settings")?;
+    if localisation.is_multilingual() {
+        eprintln!(
+            "feldspar: serving {} (default {}) \u{2014} Settings \u{2192} Localisation",
+            localisation
+                .enabled()
+                .iter()
+                .map(sc_i18n::Locale::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+            localisation.default_locale().as_str(),
+        );
+    }
     // The stored Development settings become this process's logging switches as
     // soon as there is a database to read them from — here rather than in
     // `serve_command`, so a `feldspar` *command* run against an installation

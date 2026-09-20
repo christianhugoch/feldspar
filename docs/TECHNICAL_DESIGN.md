@@ -203,6 +203,8 @@ graph TD
   python --> expr
   files --> types["sc-types"]
   types --> query
+  types --> i18n["sc-i18n"]
+  i18n --> error
   query --> error["sc-error"]
   log["sc-log"] --> error
   cfgfile --> error
@@ -218,14 +220,15 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-dns` | `sc-error` |
 | `sc-query` | `sc-error` |
 | `sc-repomap` | — (nothing in the workspace) |
-| `sc-types` | `sc-error` `sc-query` |
+| `sc-i18n` | `sc-error` |
+| `sc-types` | `sc-error` `sc-i18n` `sc-query` |
 | `sc-db` | `sc-error` `sc-query` |
 | `sc-db-postgres` | `sc-db` `sc-error` `sc-log` `sc-query` |
 | `sc-db-sqlite` | `sc-db` `sc-error` `sc-log` `sc-query` |
 | `sc-expr` | `sc-error` `sc-query` |
 | `sc-files` | `sc-error` `sc-types` |
 | `sc-catalog` | `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
-| `sc-config` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
+| `sc-config` | `sc-catalog` `sc-db` `sc-error` `sc-i18n` `sc-log` `sc-query` `sc-types` |
 | `sc-email` | `sc-catalog` `sc-config` `sc-error` |
 | `sc-auth` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-llm` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
@@ -234,15 +237,15 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-stream` | `sc-catalog` `sc-db` `sc-error` `sc-query` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
 | `sc-workflow` | `sc-action` `sc-agent` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
-| `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
-| `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-stream` `sc-types` |
+| `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-llm` `sc-query` `sc-types` |
+| `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-query` `sc-stream` `sc-types` |
 | `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-model` `sc-query` `sc-types` |
 | `sc-viewpattern` | `sc-action` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-module` | `sc-action` `sc-app` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-model` `sc-query` `sc-stream` `sc-types` `sc-viewpattern` |
 | `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-model` `sc-module` `sc-types` |
 | `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-repomap` `sc-types` |
-| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-stream` `sc-types` `sc-viewpattern` `sc-workflow` |
-| `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-types` `sc-viewpattern` |
+| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-stream` `sc-types` `sc-viewpattern` `sc-workflow` |
+| `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-types` `sc-viewpattern` |
 
 Four things the graph is worth reading for:
 

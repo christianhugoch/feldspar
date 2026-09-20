@@ -20,6 +20,9 @@ sc-log.workspace = true
 # admin UI renders settings with the same code it renders a file store's config
 # with, and `validate_attrs` is the type check on write.
 sc-types.workspace = true
+# The Localisation section declares two keys whose values are language tags, and
+# a tag is parsed rather than trusted (§16.x).
+sc-i18n.workspace = true
 # `_fd_config` is a table like every other piece of stored metadata (§9), so
 # this crate speaks the query language and reads rows back out of the driver.
 sc-catalog.workspace = true

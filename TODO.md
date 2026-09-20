@@ -119,29 +119,36 @@ translates against *that customer's* `language`, which is a bug class v1 had.
 
 ## Phase 1 — `sc-i18n`: the kernel
 
-- [ ] 1.1 The crate at layer 0: `Locale` (BCP-47 parse over `icu_locale_core`, the fallback
+- [x] 1.1 The crate at layer 0: `Locale` (BCP-47 parse over `icu_locale_core`, the fallback
       chain, `direction()`), `negotiate(accept_language, enabled, default)` with quality values,
       and the tests that `pt-BR` falls back to `pt`, that an unknown tag never escapes the
       enabled set, and that the default is the last resort rather than an error.
-- [ ] 1.2 `Catalog`: parse a domain's JSON (a value that is neither a string nor an object of
+- [x] 1.2 `Catalog`: parse a domain's JSON (a value that is neither a string nor an object of
       known plural categories is an error naming the key), lookup with the fallback chain, and
       plural selection with `icu_plurals` (`compiled_data`). A plain string where plurals were
       expected is used as written.
-- [ ] 1.3 `format(message, args) -> String` per §2, and `crates/sc-i18n/fixtures/format.json` —
+- [x] 1.3 `format(message, args) -> String` per §2, and `crates/sc-i18n/fixtures/format.json` —
       the corpus, with the literal-brace, missing-argument, unknown-identifier and
       `{{`-escape cases in it.
-- [ ] 1.4 `t!(loc, "…")` / `t!(loc, "…", name = v)` / `tc!(loc, "ctx", "…")`, and
+- [x] 1.4 `t!(loc, "…")` / `t!(loc, "…", name = v)` / `tc!(loc, "ctx", "…")`, and
       `translate_spec(&mut Vec<FormField>, loc)` — labels, `sublabel`s and option labels, with a
       test that a spec with no catalogue entry comes back untouched (D5, D11).
-- [ ] 1.5 The `Translator` seam and `translate_missing(catalog, locale, &dyn Translator)`:
+      **Deviation:** `translate_spec` lives in `sc-types`, not `sc-i18n` — a function that walks a
+      `FormField` cannot live in the crate `sc-types` depends on. It translates the **label** and
+      nothing else: `FormField` has no `sublabel` (the settings screen's help text hangs off
+      `sc_config::ConfigDef`, translated at the API edge in 3.2), and an option is a *value*
+      whose translation would fail its own validation.
+- [x] 1.5 The `Translator` seam and `translate_missing(catalog, source, translator, keys)` — the
+      target locale is the catalogue's own, and the keys to fill are passed alongside, since a
+      catalogue holds translations and not the set of messages that want one:
       batching, and the **validation** — a returned message whose placeholder set or plural
       categories differ from the source's is rejected and left untranslated, with the key in the
       warning. Tested against a scripted translator that mangles one of each (D9).
-- [ ] 1.6 The two config keys (`default_locale`, `enabled_locales`) in a new `sc-config`
+- [x] 1.6 The two config keys (`default_locale`, `enabled_locales`) in a new `sc-config`
       section, the nullable `language` column on `users` with its place on the user form, and
       negotiation wired into `sc-server`'s router with the response headers. A server with one
       enabled locale does no work (D11) — asserted, not hoped.
-- [ ] 1.7 `crates/sc-i18n/locales/` exists with `README.md` saying what these files are, who
+- [x] 1.7 `crates/sc-i18n/locales/` exists with `README.md` saying what these files are, who
       writes them and what `feldspar i18n translate` does to them.
 
 ## Phase 2 — Extraction, the lint, and the CLI

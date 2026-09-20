@@ -72,6 +72,7 @@ async fn a_user_carries_the_columns_the_admin_added() -> Result<()> {
             email: "staff@example.com".into(),
             password: "correct-horse".into(),
             role: 40,
+            language: None,
             extra: BTreeMap::from([("nickname".to_owned(), Value::Text("Sam".into()))]),
         },
     )
@@ -139,6 +140,7 @@ async fn a_blank_password_is_generated_and_handed_back_once() -> Result<()> {
             email: "new@example.com".into(),
             password: String::new(),
             role: 40,
+            language: None,
             extra: BTreeMap::new(),
         },
     )
@@ -185,6 +187,7 @@ async fn disabling_stops_sign_in_without_losing_the_account() -> Result<()> {
             email: "leaver@example.com".into(),
             password: "still-my-password".into(),
             role: 40,
+            language: None,
             extra: BTreeMap::new(),
         },
     )
@@ -236,11 +239,20 @@ async fn a_user_can_be_edited_and_deleted() -> Result<()> {
             email: "before@example.com".into(),
             password: "first-password".into(),
             role: 100,
+            // §16.x: an account created for somebody who reads French.
+            language: Some("fr".to_owned()),
             extra: BTreeMap::new(),
         },
     )
     .await?;
     let id = created.user.id;
+    // §16.x: the chosen language is on the row and on the user read back from
+    // it, so the router can negotiate from it without a second read.
+    assert_eq!(created.user.language(), Some("fr"));
+    assert_eq!(
+        load_user(&cat, id).await?.expect("user").language(),
+        Some("fr")
+    );
 
     let updated = update_user(
         &cat,
@@ -249,11 +261,19 @@ async fn a_user_can_be_edited_and_deleted() -> Result<()> {
             email: Some("after@example.com".into()),
             role: Some(40),
             password: Some("second-password".into()),
+            // `None` is "leave it alone", and the assertion below is what makes
+            // that different from `Some(None)`.
+            language: None,
             extra: BTreeMap::new(),
         },
     )
     .await?;
     assert_eq!(updated.role, 40);
+    assert_eq!(
+        updated.language(),
+        Some("fr"),
+        "an update that said nothing about the language changed nothing"
+    );
     assert_eq!(
         updated.get(COL_EMAIL),
         Some(&Value::Text("after@example.com".into()))
@@ -269,6 +289,19 @@ async fn a_user_can_be_edited_and_deleted() -> Result<()> {
             .is_none(),
         "the old identifier is nobody's"
     );
+
+    // `Some(None)` is the form's "Site default": it clears the column, which is
+    // a change rather than an omission.
+    let cleared = update_user(
+        &cat,
+        id,
+        UserUpdate {
+            language: Some(None),
+            ..UserUpdate::default()
+        },
+    )
+    .await?;
+    assert_eq!(cleared.language(), None);
 
     // A role nobody defined is refused with a sentence rather than a constraint
     // violation, and changes nothing.

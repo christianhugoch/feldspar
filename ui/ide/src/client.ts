@@ -5,7 +5,7 @@ import { clientError, requestHeaders, type ClientOptions } from "./helper";
 
 export type { ClientOptions } from "./helper";
 
-export type AuthStatusResponse = { any_user_exists: boolean; current_user?: { id: string; email: string; role: number } | null };
+export type AuthStatusResponse = { any_user_exists: boolean; current_user?: { id: string; email: string; role: number } | null; locales: { default: string; enabled: Array<string> } };
 export type CreateFirstUserRequest = { email: string; password: string };
 export type CreateFirstUserResponse = { id: string; email: string; role: number };
 export type LoginRequest = { email: string; password: string };
@@ -184,14 +184,14 @@ export type ListFrameworksResponse = Array<{ name: string; label: string; descri
 export type ListApiProvidersResponse = Array<{ name: string; label: string; description: string; default_mount: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; supports_custom_queries: boolean }>;
 export type DescribeCustomQueryRequest = { name: string; description?: string | null; method: string; path: string; sql: string; params: Array<{ name: string; type: string; required?: boolean | null }>; min_role?: number | null; tables?: Array<string> | null };
 export type DescribeCustomQueryResponse = { columns: Array<{ name: string; type: string }> };
-export type ListUsersResponse = Array<{ id: string; email: string; role: number; disabled: boolean; extra: unknown }>;
-export type CreateUserRequest = { email: string; password?: string | null; role: number; extra?: unknown | null };
-export type CreateUserResponse = { user: { id: string; email: string; role: number; disabled: boolean; extra: unknown }; generated_password?: string | null };
-export type UpdateUserRequest = { email: string; password?: string | null; role: number; extra?: unknown | null };
-export type UpdateUserResponse = { id: string; email: string; role: number; disabled: boolean; extra: unknown };
+export type ListUsersResponse = Array<{ id: string; email: string; role: number; disabled: boolean; language?: string | null; extra: unknown }>;
+export type CreateUserRequest = { email: string; password?: string | null; role: number; language?: string | null; extra?: unknown | null };
+export type CreateUserResponse = { user: { id: string; email: string; role: number; disabled: boolean; language?: string | null; extra: unknown }; generated_password?: string | null };
+export type UpdateUserRequest = { email: string; password?: string | null; role: number; language?: string | null; extra?: unknown | null };
+export type UpdateUserResponse = { id: string; email: string; role: number; disabled: boolean; language?: string | null; extra: unknown };
 export type DeleteUserResponse = { deleted: boolean };
 export type SetUserDisabledRequest = { disabled: boolean };
-export type SetUserDisabledResponse = { id: string; email: string; role: number; disabled: boolean; extra: unknown };
+export type SetUserDisabledResponse = { id: string; email: string; role: number; disabled: boolean; language?: string | null; extra: unknown };
 export type ForceLogoutUserResponse = { ok: boolean };
 export type BecomeUserResponse = { id: string; email: string; role: number };
 export type SetRandomPasswordResponse = { email: string; password: string };

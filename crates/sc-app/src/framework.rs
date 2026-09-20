@@ -18,6 +18,7 @@ use sc_api::SessionAction;
 use sc_auth::User;
 use sc_catalog::Catalog;
 use sc_error::{Error, Repr, Result};
+use sc_i18n::Locale;
 use sc_types::{BasicType, FormField, validate_attrs};
 use serde_json::Value as Json;
 
@@ -61,6 +62,17 @@ pub struct AppRequest {
     /// on first contact) — what a server-rendered form carries as `_csrf` and
     /// v1's `req.csrfToken()` answers. Empty when there is none.
     pub csrf_token: String,
+    /// The locale this request is served in (§16.x, D8) — v1's `req.getLocale()`.
+    ///
+    /// Negotiated once by the router and **carried**, never reached for: a
+    /// framework that renders a page, a view runtime that looks a label up and a
+    /// trigger fired from here all need the same answer, and the only way to
+    /// guarantee they get it is to hand it over.
+    ///
+    /// Defaults to [`Locale::source`] — English, which is what every key already
+    /// is — so a framework, a test or a tool that builds a request without
+    /// caring about language gets the behaviour it had before there was one.
+    pub locale: Locale,
 }
 
 impl AppRequest {
@@ -80,7 +92,14 @@ impl AppRequest {
             user: None,
             base_url: String::new(),
             csrf_token: String::new(),
+            locale: Locale::source(),
         }
+    }
+
+    /// The same request, served in `locale`.
+    pub fn with_locale(mut self, locale: Locale) -> AppRequest {
+        self.locale = locale;
+        self
     }
 
     /// The header `name` (lower-case), if the request carried it.

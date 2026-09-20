@@ -22,7 +22,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use uuid::Uuid;
 
-use crate::users::{COL_DISABLED, COL_ID, COL_PASSWORD_HASH, COL_ROLE, ROLE_ADMIN, role_in_range};
+use crate::users::{
+    COL_DISABLED, COL_ID, COL_LANGUAGE, COL_PASSWORD_HASH, COL_ROLE, ROLE_ADMIN, role_in_range,
+};
 
 /// A user of the system: the two guaranteed fields plus an opaque bag of the
 /// admin-defined columns (technical design §7.1).
@@ -168,6 +170,21 @@ impl User {
     /// user passes when `role <= min_role`.
     pub fn meets_role(&self, min_role: u8) -> bool {
         self.role <= min_role
+    }
+
+    /// The language this user has chosen to read the product in, if they have
+    /// chosen one (§16.x, D8).
+    ///
+    /// A tag, not a [`Locale`](sc_i18n::Locale): it is stored text that an older
+    /// configuration may no longer enable, and the negotiation is the one place
+    /// that decides whether a stated preference is servable. Carried on the
+    /// `User` for [`is_disabled`](User::is_disabled)'s reason — the router holds
+    /// a user, not a row, at the moment it has to ask.
+    pub fn language(&self) -> Option<&str> {
+        match self.get(COL_LANGUAGE) {
+            Some(Value::Text(tag)) if !tag.trim().is_empty() => Some(tag.as_str()),
+            _ => None,
+        }
     }
 
     /// The value of an extra (admin-defined) field, if present.

@@ -35,7 +35,7 @@ use crate::password::hash_password;
 use crate::roles::load_role;
 use crate::user::User;
 use crate::users::{
-    COL_DISABLED, COL_EMAIL, COL_ID, COL_PASSWORD_HASH, COL_ROLE, USERS_TABLE,
+    COL_DISABLED, COL_EMAIL, COL_ID, COL_LANGUAGE, COL_PASSWORD_HASH, COL_ROLE, USERS_TABLE,
     is_system_user_column, role_in_range,
 };
 
@@ -53,6 +53,13 @@ pub struct UserUpdate {
     /// "no password" and "do not change the password" are different intentions
     /// and only one of them can be a blank box on a form.
     pub password: Option<String>,
+    /// The language this account reads the product in. **Two levels of
+    /// optional, and both mean something**: `None` leaves it as it was, and
+    /// `Some(None)` clears it back to "whatever the request negotiates". A form
+    /// with a "Site default" option in its select has to be able to say the
+    /// second, and a form that only sends what changed has to be able to say the
+    /// first.
+    pub language: Option<Option<String>>,
     /// Admin-added columns to write, already coerced to each column's type.
     pub extra: BTreeMap<String, Value>,
 }
@@ -87,6 +94,16 @@ pub async fn update_user(catalog: &Catalog, id: Uuid, update: UserUpdate) -> Res
         assignments.push(Assignment::new(
             COL_PASSWORD_HASH,
             Expr::lit(hash_password(password)?),
+        ));
+    }
+    if let Some(language) = &update.language {
+        let language = language.as_deref().map(str::trim).filter(|l| !l.is_empty());
+        assignments.push(Assignment::new(
+            COL_LANGUAGE,
+            match language {
+                Some(tag) => Expr::lit(tag),
+                None => Expr::lit(Value::Null),
+            },
         ));
     }
     for (column, value) in update.extra {

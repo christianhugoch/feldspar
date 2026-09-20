@@ -28,6 +28,7 @@ mod chat;
 mod config;
 mod handler;
 mod handlers;
+mod i18n;
 mod logging;
 mod lsp;
 mod mcp;
@@ -126,6 +127,7 @@ pub use handler::{
     BoxFuture, HandlerCtx, HandlerFn, HandlerRegistry, HandlerResponse, SessionAction,
 };
 pub use handlers::admin_handlers;
+pub use i18n::{LANG_COOKIE, LANG_QUERY};
 pub use logging::log_requests;
 pub use lsp::{LSP_ROUTE, MAX_LANGUAGE_SERVERS};
 pub use mcp::{MCP_PROTOCOL_VERSION, MCP_ROUTE, MCP_SERVER_NAME};

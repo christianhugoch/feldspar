@@ -137,9 +137,18 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             async move {
                 let exists = any_user_exists(&catalog).await?;
                 let current = ctx.user.as_ref().map_or(Json::Null, user_summary_json);
+                let locales = sc_i18n::active();
                 Ok(HandlerResponse::ok(json!({
                     "any_user_exists": exists,
                     "current_user": current,
+                    "locales": {
+                        "default": locales.default_locale().as_str(),
+                        "enabled": locales
+                            .enabled()
+                            .iter()
+                            .map(|l| l.as_str())
+                            .collect::<Vec<_>>(),
+                    },
                 })))
             }
         }
@@ -3676,6 +3685,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // verbosity that is not a level is refused here rather than
                 // stored and discovered at the next boot.
                 let development = sc_config::development_settings_from(&merged)?;
+                // The Localisation section's own reading, on the same footing: a
+                // tag that is not a language tag is refused here, where the
+                // admin can see which box they typed it into (§16.x).
+                let localisation = sc_config::localisation_settings_from(&merged)?;
 
                 sc_config::set_config_many(&catalog, &values).await?;
                 // The two switches this process runs under move **now**, not at
@@ -3683,6 +3696,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // something is happening in the server they are looking at, and
                 // a switch that needed a restart would have thrown that away.
                 development.apply();
+                // And the enabled locales move now too, for the same reason:
+                // an admin who has just turned French on reloads the page to
+                // see it, not the server.
+                sc_i18n::set_active(localisation);
                 Ok(HandlerResponse::ok(settings_json(&catalog).await?))
             }
         }
@@ -5031,6 +5048,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         // comes back in this response and nowhere else.
                         password: optional_str(obj, "password"),
                         role: user_role_field(obj)?,
+                        language: user_language_field(obj)?,
                         extra: user_extra_values(&users, obj)?,
                     },
                 )
@@ -5062,6 +5080,12 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         // box is empty because the admin is not changing it, not
                         // because they want the account to have no password.
                         password: Some(optional_str(obj, "password")).filter(|p| !p.is_empty()),
+                        // Absent leaves it alone; present-and-empty is the
+                        // form's "Site default" option, which is a change.
+                        language: match obj.contains_key("language") {
+                            true => Some(user_language_field(obj)?),
+                            false => None,
+                        },
                         extra: user_extra_values(&users, obj)?,
                     },
                 )
@@ -7821,6 +7845,31 @@ fn parse_user_id(raw: &str) -> Result<uuid::Uuid> {
 fn user_role_field(obj: &Map<String, Json>) -> Result<u8> {
     let role = int_field(obj, "role")?;
     u8::try_from(role).map_err(|_| Error::invalid(format!("role {role} is not in 1..=100")))
+}
+
+/// The `language` of a user body: a BCP-47 tag, canonicalised, or `None` for
+/// "whatever the request negotiates" (§16.x).
+///
+/// Parsed rather than trusted, so `pt-br` is stored as `pt-BR` and a value that
+/// is not a language tag is refused where the admin can fix it. It is **not**
+/// checked against the enabled set: an admin setting up an account for somebody
+/// who reads French before enabling French is doing the two halves of one job in
+/// the order they thought of them, and a stored tag nothing enables simply falls
+/// through the negotiation.
+fn user_language_field(obj: &Map<String, Json>) -> Result<Option<String>> {
+    let tag = match obj.get("language") {
+        None | Some(Json::Null) => return Ok(None),
+        Some(Json::String(tag)) => tag.trim(),
+        Some(other) => {
+            return Err(Error::invalid(format!(
+                "`language` should be a language tag, got {other}"
+            )));
+        }
+    };
+    if tag.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(sc_i18n::Locale::parse(tag)?.as_str().to_owned()))
 }
 
 /// The `extra` bag of a user body: the columns the admin has added to the users
