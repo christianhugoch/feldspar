@@ -46,8 +46,10 @@ sc-agent.workspace = true
 # (§13.5).
 sc-config.workspace = true
 # The stored Localisation settings become this process's negotiation set at boot
-# (§16.x), and `feldspar i18n` is this binary's command.
-sc-i18n.workspace = true
+# (§16.x), and `feldspar i18n` is this binary's command — which is the one
+# caller of the `extract` feature, because extraction is a Rust pass run from a
+# terminal and not a step in anybody's build (D6).
+sc-i18n = { workspace = true, features = ["extract"] }
 # The `FormField` vocabulary a configuration key is declared in: `get-cfg` and
 # `set-cfg` read the declaration to know what type a value typed at a terminal
 # has, and which keys are secrets to redact in a listing.
@@ -82,6 +84,10 @@ serde.workspace = true
 # The coding traits' per-run state, which is where the edit-cascade counts the
 # eval reports live, and the run tree a planned run's metrics are added over.
 sc-core-traits.workspace = true
+# The `Translator` seam `feldspar i18n translate` implements over a configured
+# LLM provider. The trait is async, so implementing it needs the same attribute
+# every other seam in this workspace is declared with.
+async-trait.workspace = true
 
 [dev-dependencies]
 # The scripted provider (`sc-agent`'s `testing` feature, decision 7): the eval

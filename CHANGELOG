@@ -2,6 +2,82 @@
 
 Changes in reverse chronological order.
 
+## Internationalisation, phase 2: extraction, the lint, and the CLI
+
+The second of five phases (`docs/I18N.md`, `TODO.md` §2). Phase 1 built a kernel that knew what
+a catalogue is; this phase is what **fills** one and what **checks** it. Extraction is a Rust
+pass over the source tree (decision D6) — no babel plugin, no webpack loader, no
+`i18next-parser` in anybody's `package.json` — and it is run from a terminal, from CI, and
+(phase 4) from the Translations screen.
+
+- **`sc_i18n::extract`, behind a new `extract` feature.** Tree-sitter and its two grammars are
+  optional and off by default, for `sc-repomap`'s reason: every layer above this crate depends
+  on it, and a server *serving* a translated page has no use for a parser. `sc-cli` is the one
+  caller that turns it on.
+  - **The TypeScript side** (`extract::js`): two vendored queries (`queries/i18n-calls.scm`,
+    `queries/i18n-jsx.scm`) and one parse per file, answering both questions at once — what this
+    file says, and what it says that nobody wrapped. `t("…")`, `tc("context", "…")` and
+    `<T text="…" [context="…"]>` each yield a key, a file and a line. `.ts` is parsed with the
+    TypeScript grammar and `.tsx` with the TSX one, because `<T>` is a type assertion in the
+    first and an element in the second. A substitution-free template literal counts: refusing
+    `` t(`Add a task`) `` would be a rule about quotation marks rather than about translation.
+  - **A call whose first argument is not a string literal is an error**, naming file and line —
+    never a silent skip. Silently skipping it is how an application ends up half-translated with
+    nobody knowing: the key never reaches the catalogue, the screen shows English, the coverage
+    figure says 100%, and the only way to find out is for somebody who speaks the language to
+    read every page.
+  - **The Rust side** (`extract::rust`): a lexer, not a parser. What has to be recognised is a
+    macro name and one or two string literals; everything that makes Rust hard to parse is the
+    part this never has to understand. What it *does* understand is which bytes are code — line
+    and nested block comments, every spelling of a string literal (`r#"…"#`, `b"…"`, a
+    backslash-continued line), character literals and lifetimes — because this crate's own
+    documentation is full of `t!(loc, "…")` examples and a scanner that read them would file the
+    documentation's sentences in the shipped catalogue. `#[cfg(test)] mod tests { … }` is skipped
+    whole, for the same reason: every crate here keeps its unit tests at the foot of the file,
+    they are full of `t!(loc, "Save changes")`, and a translator handed that sentence has no way
+    to know it is a fixture nobody reads.
+  - **The lint** (task 2.2): JSX text nodes and the four attributes a person actually reads —
+    `label`, `title`, `placeholder`, `aria-label` — holding a bare literal that no `t` wraps.
+    Four and not "every string attribute", because `className`, `id`, `type` and `href` are
+    strings nobody sees and a lint that cries about them is a lint that gets turned off. The
+    prose heuristic errs towards reporting and excludes only what is unambiguously not a
+    sentence: punctuation, a URL, a path, and a single token carrying a separator
+    (`form-control`, `text/plain`, `index.tsx`).
+- **`feldspar i18n extract | lint | check | translate`** (`crates/sc-cli/src/i18n.rs`), with
+  `--domain`, `--locale`, `--root` and a bare path. Three domains, and `DOMAINS` is the whole of
+  the mapping from a name to a source tree and a catalogue directory — `core` (`crates/**/*.rs`
+  → `crates/sc-i18n/locales`), `admin` (`ui/admin/src`) and `builder` (`ui/builder/src`). No
+  configuration file behind it, on purpose: these are our three, they are in this repository,
+  and an application's catalogue is not reached from here at all.
+  - `extract` prints `file:line: key`, greppable, because this is the command somebody runs to
+    find out where a sentence they saw on a screen is written.
+  - `check` prints coverage per locale and **fails on exactly two things**: a translation whose
+    placeholders or plural forms no longer match its key, and a call site that could not be read.
+    **Coverage is a number, not a gate** — a new English string is a normal thing to add and must
+    not break the build of everyone who adds one. Orphans (a key in the catalogue the source no
+    longer uses) are counted and shown, never deleted: a message removed on a branch is one
+    somebody will want back, and a translation is work.
+  - `translate` fills one catalogue through the configured LLM provider and writes it back
+    sorted, indented and newline-terminated, so a diff of two runs is the messages that changed.
+    The prompt states the format and the target's required CLDR plural categories, and **the
+    machine checks the answer anyway** (D9): a prompt is a request and a check is a guarantee.
+    It is the only one of the four that needs a database, because which provider to call is a
+    stored row; the other three run in a checkout with nothing else standing up.
+  - Test files (`*.test.ts`, `*.spec.ts`) and `tests/` trees are not scanned: `t("Add a task")`
+    in `appNav.test.ts` is a fixture, and putting it in front of a translator who has to decide
+    what it means is a waste of somebody's afternoon.
+- **`whale-ci.yml` runs `feldspar i18n check`** beside `fmt` and `clippy` (task 2.5). It reads
+  the checkout and nothing else — no database, no network — so a registry outage leaves its
+  verdict on the commit's own code intact.
+- **Tests.** 11 in `sc-i18n` (the vendored queries compile against each grammar — a query that
+  does not makes every file in that language silently empty, which a test of the *output* would
+  not notice on a grammar upgrade; the two fixture screens, one with one of each finding and one
+  clean; the Rust scanner against comments, raw strings, lifetimes and a `#[cfg(test)]` module)
+  and 8 in `sc-cli`, including task 2.3's: every `t!`/`tc!` call site in `crates/**/*.rs` is
+  readable, and every entry of every shipped `core` catalogue passes the placeholder and plural
+  check. The `translate` path is driven end to end by a scripted `Translator` that renames a
+  placeholder on purpose — no test here spends a token.
+
 ## Internationalisation, phase 1: the kernel
 
 The first of five phases of the i18n milestone (`docs/I18N.md`, `TODO.md`): a new layer-0 crate

@@ -153,22 +153,22 @@ translates against *that customer's* `language`, which is a bug class v1 had.
 
 ## Phase 2 — Extraction, the lint, and the CLI
 
-- [ ] 2.1 `sc_i18n::extract` (feature `extract`): tree-sitter queries over `.ts`/`.tsx`/`.js`/
+- [x] 2.1 `sc_i18n::extract` (feature `extract`): tree-sitter queries over `.ts`/`.tsx`/`.js`/
       `.jsx` finding `t(…)`, `tc(…)` and `<T text="…">`, each yielding key, file and line. A
       call whose first argument is not a string literal (or a substitution-free template
       literal) is an **error** naming file and line — silently skipping it is how an app ends up
       half-translated with nobody knowing.
-- [ ] 2.2 The lint: the same parse, reporting JSX **text nodes** and `label` / `title` /
+- [x] 2.2 The lint: the same parse, reporting JSX **text nodes** and `label` / `title` /
       `placeholder` / `aria-label` attributes holding a bare English literal that no `t` wraps.
       Tested on a fixture file with one of each and on one that is clean.
-- [ ] 2.3 The Rust side: a scanner over `t!(`/`tc!(` call sites in `crates/**/*.rs`, and the
+- [x] 2.3 The Rust side: a scanner over `t!(`/`tc!(` call sites in `crates/**/*.rs`, and the
       test that every key it finds is one the shipped `core` catalogues can be checked against.
-- [ ] 2.4 `feldspar i18n extract|lint|check|translate` in `sc-cli`, with `--domain` and
+- [x] 2.4 `feldspar i18n extract|lint|check|translate` in `sc-cli`, with `--domain` and
       `--locale`, and `Translator` implemented over `sc-llm`'s configured provider. `check`
       reports coverage per locale and **fails** on exactly one thing: a placeholder or plural
       mismatch between a translation and its key. Coverage is a number, not a gate — a new
       English string must not break the build.
-- [ ] 2.5 `whale-ci.yml` runs `feldspar i18n check` beside `fmt` and `clippy`.
+- [x] 2.5 `whale-ci.yml` runs `feldspar i18n check` beside `fmt` and `clippy`.
 
 ## Phase 3 — Type A: the product's own strings
 

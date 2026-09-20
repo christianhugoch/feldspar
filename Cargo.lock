@@ -8331,6 +8331,7 @@ dependencies = [
 name = "sc-cli"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "chrono",
  "reqwest",
@@ -8579,8 +8580,12 @@ dependencies = [
  "icu_locale_core",
  "icu_plurals",
  "sc-error",
+ "sc-i18n",
  "serde_json",
  "tokio",
+ "tree-sitter",
+ "tree-sitter-javascript",
+ "tree-sitter-typescript",
 ]
 
 [[package]]

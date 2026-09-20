@@ -13,3 +13,6 @@
 
 #[path = "format_fixture.rs"]
 mod format_fixture;
+
+#[path = "extract.rs"]
+mod extract;

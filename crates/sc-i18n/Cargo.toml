@@ -26,9 +26,28 @@ serde_json.workspace = true
 # that declares it is async — the arrangement `Mailer` and `StreamProvider`
 # already have.
 async-trait.workspace = true
+# Extraction only (`feldspar i18n extract|lint|check`): the `.ts`/`.tsx` parse
+# behind the `extract` feature. Off by default and for `sc-repomap`'s reason —
+# every layer above this crate depends on it, and a server *serving* a
+# translated page has no use for a parser. `sc-cli` turns it on.
+tree-sitter = { workspace = true, optional = true }
+tree-sitter-javascript = { workspace = true, optional = true }
+tree-sitter-typescript = { workspace = true, optional = true }
+
+[features]
+extract = [
+    "dep:tree-sitter",
+    "dep:tree-sitter-javascript",
+    "dep:tree-sitter-typescript",
+]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# This crate's own integration tests exercise the extractor, so the test
+# binary needs the feature even when the crate under test is built without it
+# (`cargo test -p sc-i18n`). A workspace-wide run gets it through `sc-cli`
+# anyway; this is what makes the crate testable on its own.
+sc-i18n = { workspace = true, features = ["extract"] }
 
 [lints]
 workspace = true

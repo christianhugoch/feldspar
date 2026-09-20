@@ -52,6 +52,8 @@
 
 pub mod catalog;
 pub mod core;
+#[cfg(feature = "extract")]
+pub mod extract;
 pub mod format;
 pub mod locale;
 mod macros;
@@ -61,6 +63,10 @@ pub mod translate;
 
 pub use catalog::{
     CONTEXT_SEPARATOR, Catalog, Catalogs, Message, context_key, key_context, source_text,
+};
+#[cfg(feature = "extract")]
+pub use extract::{
+    Extracted, Extraction, Finding, Problem, Unwrapped, extract_js, extract_rust, lint_js,
 };
 pub use format::{Arg, Args, format, placeholders};
 pub use locale::{Direction, Locale, parse_locale_list};
