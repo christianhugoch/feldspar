@@ -169,6 +169,12 @@ export type SaveLibraryUpdatesRequest = { libraryUpdates: Array<{ library_id: st
 export type SaveLibraryUpdatesResponse = { updated: number };
 export type DeleteLibraryItemQuery = { confirm?: boolean };
 export type DeleteLibraryItemResponse = { deleted: boolean; references: { views: Array<string>; pages: Array<string>; library: Array<string> } };
+export type GetTranslationsResponse = unknown;
+export type SetApplicationLocalesRequest = { locales: Array<string>; default_locale?: string | null };
+export type SetApplicationLocalesResponse = unknown;
+export type SaveTranslationsRequest = { messages: unknown };
+export type SaveTranslationsResponse = unknown;
+export type TranslateMissingResponse = unknown;
 export type BuilderFieldPreviewRequest = { table: string; field: string; fieldview: string; configuration?: unknown | null; row_id?: unknown | null };
 export type BuilderFieldPreviewResponse = { html: string };
 export type BuilderFieldviewConfigFormRequest = { table: string; field_name?: string | null; fieldview?: string | null; type?: string | null; join_field?: string | null; join_fieldview?: string | null; agg_outcome_type?: string | null; agg_fieldview?: string | null; agg_field?: string | null; mode?: string | null; _columndef?: string | null };
@@ -369,6 +375,10 @@ export interface ApiClient {
   saveLibraryItem(id: string, item: string, body: SaveLibraryItemRequest): Promise<SaveLibraryItemResponse>;
   saveLibraryUpdates(id: string, body: SaveLibraryUpdatesRequest): Promise<SaveLibraryUpdatesResponse>;
   deleteLibraryItem(id: string, item: string, query?: DeleteLibraryItemQuery): Promise<DeleteLibraryItemResponse>;
+  getTranslations(id: string): Promise<GetTranslationsResponse>;
+  setApplicationLocales(id: string, body: SetApplicationLocalesRequest): Promise<SetApplicationLocalesResponse>;
+  saveTranslations(id: string, locale: string, body: SaveTranslationsRequest): Promise<SaveTranslationsResponse>;
+  translateMissing(id: string, locale: string): Promise<TranslateMissingResponse>;
   builderFieldPreview(id: string, body: BuilderFieldPreviewRequest): Promise<BuilderFieldPreviewResponse>;
   builderFieldviewConfigForm(id: string, body: BuilderFieldviewConfigFormRequest): Promise<BuilderFieldviewConfigFormResponse>;
   builderViewPreview(id: string, body: BuilderViewPreviewRequest): Promise<BuilderViewPreviewResponse>;
@@ -1377,6 +1387,40 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("deleteLibraryItem", res);
       return (await res.json()) as DeleteLibraryItemResponse;
+    },
+    async getTranslations(id) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/translations`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getTranslations", res);
+      return (await res.json()) as GetTranslationsResponse;
+    },
+    async setApplicationLocales(id, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/locales`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("setApplicationLocales", res);
+      return (await res.json()) as SetApplicationLocalesResponse;
+    },
+    async saveTranslations(id, locale, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/translations/${locale}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("saveTranslations", res);
+      return (await res.json()) as SaveTranslationsResponse;
+    },
+    async translateMissing(id, locale) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/translations/${locale}/fill`, {
+        method: "POST",
+        headers: requestHeaders("POST", false),
+      });
+      if (!res.ok) throw await clientError("translateMissing", res);
+      return (await res.json()) as TranslateMissingResponse;
     },
     async builderFieldPreview(id, body) {
       const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/field-preview`, {

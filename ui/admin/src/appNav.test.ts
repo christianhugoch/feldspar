@@ -25,7 +25,13 @@ const builder = {
 describe("the current application's sidebar links", () => {
   it("gives a built application edit code, update client and build, then settings", () => {
     const links = appNavLinks(react, null);
-    expect(links.map((l) => l.label)).toEqual(["Edit code", "Update client", "Build", "Settings"]);
+    expect(links.map((l) => l.label)).toEqual([
+      "Edit code",
+      "Update client",
+      "Build",
+      "Translations",
+      "Settings",
+    ]);
     const edit = links[0];
     expect(edit.href).toBe("/ide/?store=code");
     expect(edit.external).toBe(true);
@@ -36,7 +42,14 @@ describe("the current application's sidebar links", () => {
 
   it("adds a new chat when the application has a coding agent", () => {
     const labels = appNavLinks(react, "build-todo").map((l) => l.label);
-    expect(labels).toEqual(["Edit code", "Update client", "Build", "New chat", "Settings"]);
+    expect(labels).toEqual([
+      "Edit code",
+      "Update client",
+      "Build",
+      "New chat",
+      "Translations",
+      "Settings",
+    ]);
     expect(appNavLinks(react, "build-todo")[3].href).toBe("#/agents/build-todo/chat");
   });
 
@@ -45,8 +58,17 @@ describe("the current application's sidebar links", () => {
       "Views",
       "Pages",
       "Library",
+      "Translations",
       "Settings",
     ]);
+  });
+
+  it("offers Translations whatever the framework, because every application has strings", () => {
+    for (const app of [react, saltcornUi]) {
+      const link = appNavLinks(app, null).find((l) => l.id === "translations")!;
+      expect(link.href).toBe(`#/applications/${app.id}/translations`);
+      expect(linkActive(link, `/applications/${app.id}/translations`)).toBe(true);
+    }
   });
 
   it("always ends with settings, and never offers a delete", () => {

@@ -2635,3 +2635,166 @@ fn normalise(html: &str) -> String {
     out.push('\n');
     out
 }
+
+/// The milestone's Saltcorn UI half (§16.x, task 4.6): the **same screen, the
+/// same button, rows instead of files**.
+///
+/// A Saltcorn UI application's definition is rows, so its strings are values in
+/// its views' configurations — a column's header, a link's text — and its
+/// catalogue is an `_fd_translations` row rather than a file in a repository.
+/// Everything above that is the code application's: the same
+/// `getTranslations`, the same coverage, the same save.
+///
+/// What this asserts is the end of it: a header translated on that screen comes
+/// back translated **in the rendered HTML**, on a request that asked for
+/// French, with nothing rebuilt and nothing restarted.
+#[tokio::test]
+async fn a_saltcorn_ui_applications_strings_are_translated_from_the_same_screen()
+-> sc_error::Result<()> {
+    let Some(bundle) = bundle_dir() else {
+        eprintln!(
+            "skipping: the Saltcorn UI bundle is not built (npm ci && npm run build in ui/saltcorn-ui)"
+        );
+        return Ok(());
+    };
+    let mut server = setup("i18n", bundle).await?;
+
+    let app_id = {
+        let (status, apps) = server.client.send("GET", "/api/applications", None).await;
+        assert_eq!(status, StatusCode::OK, "{apps}");
+        apps.as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["subdomain"] == "booksdb")
+            .expect("BooksDB")["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    // --- What does this application say? The patterns' own `getStringsForI18n`,
+    // over every view — the rows-side equivalent of the tree-sitter pass a code
+    // application gets.
+    let (status, screen) = server
+        .client
+        .send(
+            "GET",
+            &format!("/api/applications/{app_id}/translations"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{screen}");
+    let keys: Vec<String> = screen["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["key"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(!keys.is_empty(), "{screen}");
+    // A label an admin typed when they configured *List Books*: the text of
+    // its link to *Show Authors*. The pattern's own `getStringsForI18n` found
+    // it, which is the rows-side equivalent of a `t()` call site.
+    let header = keys
+        .iter()
+        .find(|k| k.as_str() == "Author")
+        .unwrap_or_else(|| panic!("the `Author` link label among {keys:?}"));
+    // The "file" a message is attributed to is the view it was configured on,
+    // which is where an admin would go to change it.
+    let sites = screen["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["key"] == header.as_str())
+        .unwrap()["sites"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(sites.iter().any(|s| s["file"] == "List Books"), "{sites:?}");
+    // Nothing to lint: there is no source to parse, because an admin typed
+    // these into a form.
+    assert_eq!(screen["unwrapped"], serde_json::json!([]));
+    assert_eq!(screen["problems"], serde_json::json!([]));
+    // And the catalogue's home says which half of the split this application is
+    // on.
+    assert!(
+        screen["store"]
+            .as_str()
+            .unwrap()
+            .contains("_fd_translations"),
+        "{screen}"
+    );
+
+    // --- Turn French on, and translate the header. Same screen, same calls.
+    let (status, body) = server
+        .client
+        .send(
+            "PUT",
+            &format!("/api/applications/{app_id}/locales"),
+            // English *and* French, English the fallback: which is what an
+            // admin adding a second language does, and what makes the two
+            // requests below differ by the language they ask for rather than by
+            // when they were made.
+            Some(json!({ "locales": ["en", "fr"], "default_locale": "en" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = server
+        .client
+        .send(
+            "PUT",
+            &format!("/api/applications/{app_id}/translations/fr"),
+            Some(json!({ "messages": { header.as_str(): "Auteur" } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["messages"], 1);
+
+    // The coverage figure moved, and it is the same figure a code application's
+    // screen shows.
+    let (_, screen) = server
+        .client
+        .send(
+            "GET",
+            &format!("/api/applications/{app_id}/translations"),
+            None,
+        )
+        .await;
+    let french_row = screen["locales"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["locale"] == "fr")
+        .expect("the fr row");
+    assert_eq!(french_row["translated"], 1);
+
+    // --- The rendered HTML. English first, so the change below is the only
+    // thing that could have produced the difference.
+    let english = server.client.app_get("/view/List%20Books", &[]).await;
+    assert_eq!(english.status, StatusCode::OK, "{}", english.body);
+    assert!(english.body.contains(">Author</a>"), "{}", english.body);
+    assert!(!english.body.contains("Auteur"));
+
+    // …and French, negotiated on the request. No rebuild, no restart: the row
+    // was saved a moment ago and the framework re-read it.
+    let french = server
+        .client
+        .app_get("/view/List%20Books?lang=fr", &[])
+        .await;
+    assert_eq!(french.status, StatusCode::OK, "{}", french.body);
+    assert!(french.body.contains("Auteur"), "{}", french.body);
+    assert_eq!(french.headers[header::CONTENT_LANGUAGE], "fr");
+
+    // `Accept-Language` gets there too, which is the header a browser actually
+    // sends.
+    let negotiated = server
+        .client
+        .app_get(
+            "/view/List%20Books",
+            &[("accept-language", "fr-CA,fr;q=0.9")],
+        )
+        .await;
+    assert!(negotiated.body.contains("Auteur"), "{}", negotiated.body);
+
+    Ok(())
+}

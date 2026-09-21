@@ -63,6 +63,32 @@ pub fn negotiate(
     }))
 }
 
+/// The settings a request **to an application** is negotiated against
+/// (§16.x, D8).
+///
+/// An application's locales are its own: they are a property of the thing the
+/// admin built, not of the installation that serves it, and an admin who
+/// translates their application into French should not also have to enable
+/// French for the *admin UI* before a visitor can read it. So an application
+/// that declares locales is negotiated against those, with its own default as
+/// the last resort.
+///
+/// An application that declares none is negotiated against the installation's
+/// settings, unchanged — which for the ordinary monolingual installation means
+/// nothing is negotiated at all (D11).
+pub fn app_settings(app: &sc_app::Application, installation: &I18nSettings) -> I18nSettings {
+    let locales = sc_app::app_locales(app).unwrap_or_default();
+    if locales.is_empty() {
+        return installation.clone();
+    }
+    let default = sc_app::app_default_locale(app)
+        .ok()
+        .flatten()
+        .or_else(|| locales.first().cloned())
+        .unwrap_or_else(|| installation.default_locale().clone());
+    I18nSettings::new(default, locales)
+}
+
 /// The locale a request is served in: what [`negotiate`] found, or the
 /// installation's default.
 pub fn locale_or_default(settings: &I18nSettings, negotiated: Option<&Locale>) -> Locale {

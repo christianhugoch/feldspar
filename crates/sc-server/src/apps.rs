@@ -38,6 +38,39 @@ pub struct MountedApp {
     pub framework: Arc<dyn Framework>,
     /// The API providers it enables, each on its own sub-path.
     pub providers: Vec<Box<dyn ApiProvider>>,
+    /// The app's catalogues, as they are served (§16.x, D7): locale tag → the
+    /// bytes and the ETag of `{mount}/i18n/{tag}.json`.
+    ///
+    /// **A cache, not the truth.** The truth is the `CatalogStore` — a file in
+    /// the admin's repository or an `_fd_translations` row — and this is what
+    /// keeps a page load from reading it. It is emptied when a translation is
+    /// saved ([`invalidate_catalogs`](MountedApp::invalidate_catalogs)) and it
+    /// is born empty on every remount, which is what makes a `SIGHUP` and a
+    /// rebuild re-read without either knowing this field exists.
+    catalogs: RwLock<HashMap<String, ServedCatalog>>,
+}
+
+/// One application catalogue, as bytes on the wire.
+#[derive(Debug, Clone)]
+pub struct ServedCatalog {
+    /// The JSON body, ready to send.
+    pub body: bytes::Bytes,
+    /// Its entity tag, quoted, for `If-None-Match`.
+    pub etag: String,
+}
+
+impl ServedCatalog {
+    /// The bytes, tagged. The tag is a hash of the body, so an edit that
+    /// happens to restore a previous catalogue is correctly not a change.
+    pub fn new(body: bytes::Bytes) -> ServedCatalog {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        body.hash(&mut hasher);
+        ServedCatalog {
+            etag: format!("\"{:016x}\"", hasher.finish()),
+            body,
+        }
+    }
 }
 
 impl MountedApp {
@@ -72,7 +105,33 @@ impl MountedApp {
             app,
             framework,
             providers,
+            catalogs: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// The served catalogue for `tag`, if this mount has already read it.
+    pub fn cached_catalog(&self, tag: &str) -> Option<ServedCatalog> {
+        self.catalogs.read().ok()?.get(tag).cloned()
+    }
+
+    /// Remember `catalog` as the answer for `tag`.
+    pub fn cache_catalog(&self, tag: &str, catalog: ServedCatalog) {
+        if let Ok(mut cache) = self.catalogs.write() {
+            cache.insert(tag.to_owned(), catalog);
+        }
+    }
+
+    /// Forget every cached catalogue — what saving a translation calls, so the
+    /// next request re-reads the store (D7: a translation is live without a
+    /// bundler).
+    pub fn invalidate_catalogs(&self) {
+        if let Ok(mut cache) = self.catalogs.write() {
+            cache.clear();
+        }
+        // And whatever the framework holds: a server-side framework looks the
+        // phrases up as it renders, so its copy is the one a visitor would
+        // otherwise keep seeing.
+        self.framework.forget_catalogues();
     }
 
     /// The provider whose mount claims `path`, if any.
@@ -663,6 +722,59 @@ impl AppMounts {
     /// read lock is released.
     pub fn get(&self, subdomain: &str) -> Option<Arc<MountedApp>> {
         self.read().get(subdomain).cloned()
+    }
+
+    /// Put a changed application **record** in front of the running mount,
+    /// without rebuilding anything (§16.x, task 4.4).
+    ///
+    /// The case this exists for is the locale set: which languages an
+    /// application serves is a property of its record, the router negotiates
+    /// against it, and a server-rendered framework reads it as it renders — so
+    /// a mount still holding yesterday's record would go on serving English
+    /// after the admin turned French on.
+    ///
+    /// **Not a build.** An application served from a bundle keeps its bundle
+    /// and its framework; only the record and the providers are rebuilt. One
+    /// that is *constructed* rather than built — Saltcorn UI — is re-mounted
+    /// through its factory, because its framework holds the record itself, and
+    /// for such a framework that costs no bundler.
+    ///
+    /// An application that is not mounted is not an error: saving a locale set
+    /// on an application nobody has built yet is an ordinary thing to do.
+    pub async fn refresh_mount(&self, app: Application) -> Result<()> {
+        let Some(catalog) = self.catalog() else {
+            return Ok(());
+        };
+        let Some(mounted) = self.get(&app.subdomain) else {
+            return Ok(());
+        };
+        if mounted.framework.build().is_some() {
+            let refreshed = MountedApp::new_with(
+                app,
+                mounted.framework.clone(),
+                catalog,
+                self.evaluator(),
+                self.triggers(),
+            )?;
+            self.remount(refreshed);
+            return Ok(());
+        }
+        build_and_mount(self, app).await.map(|_| ())
+    }
+
+    /// Drop every mounted app's cached catalogues, so the next request for one
+    /// re-reads its store (§16.x, D7).
+    ///
+    /// Called when a translation is saved. It is a sweep over the mounts rather
+    /// than a lookup by id because the admin API holds the application, not the
+    /// mount, and a handful of applications is what a server has; the
+    /// alternative is a second index that exists for one caller.
+    pub fn invalidate_catalogs(&self, id: sc_app::AppId) {
+        for mounted in self.read().values() {
+            if mounted.app.id == id {
+                mounted.invalidate_catalogs();
+            }
+        }
     }
 
     /// The catalog the apps' providers run against.

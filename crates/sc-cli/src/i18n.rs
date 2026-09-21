@@ -27,15 +27,12 @@
 //! that application's definition lives, and the Translations screen is its
 //! surface (task 4.4).
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use async_trait::async_trait;
 use sc_error::{Context, Error, Result};
 use sc_i18n::extract::js::Language;
 use sc_i18n::extract::{Extraction, Finding};
-use sc_i18n::{Catalog, Locale, Message, Translator, categories_for, source_text};
-use serde_json::Value as Json;
+use sc_i18n::{Catalog, Locale, Message, source_text};
 
 /// How a domain's sources are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -479,111 +476,12 @@ pub fn coverage(catalog: &Catalog, keys: &[String]) -> Coverage {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The translator over a configured LLM provider (decision D9).
-// ---------------------------------------------------------------------------
-
-/// [`Translator`] over one configured model.
-///
-/// The prompt states the format and the required plural categories, and then
-/// **the machine checks the answer anyway** — `translate_missing` rejects a
-/// message whose placeholders drifted, whatever the prompt said. That is the
-/// whole of D9: a prompt is a request and a check is a guarantee.
-pub struct LlmTranslator {
-    model: sc_llm::ConnectedModel,
-}
-
-impl LlmTranslator {
-    pub fn new(model: sc_llm::ConnectedModel) -> LlmTranslator {
-        LlmTranslator { model }
-    }
-
-    /// What the model is called, for the line the command prints.
-    pub fn describes(&self) -> String {
-        format!(
-            "{}/{}",
-            self.model.provider_name,
-            self.model.provider.model()
-        )
-    }
-}
-
-#[async_trait]
-impl Translator for LlmTranslator {
-    async fn translate_batch(
-        &self,
-        source: &Locale,
-        target: &Locale,
-        keys: &[String],
-    ) -> Result<BTreeMap<String, Json>> {
-        let categories: Vec<&str> = categories_for(target).iter().map(|c| c.as_str()).collect();
-        let system = format!(
-            "You are translating a software product's user interface from {} into {}.\n\
-             \n\
-             You are given a JSON array of source strings. Answer with a JSON object and \
-             nothing else: every key is one of the given strings, copied **exactly**, and \
-             its value is the translation.\n\
-             \n\
-             Rules:\n\
-             - `{{name}}` is a placeholder the program fills in. Keep every placeholder, \
-               spelled exactly as in the source. Never translate, rename, add or drop one. \
-               `{{{{` is a literal opening brace.\n\
-             - A key containing the character U+0004 is `context\\u0004text`: the part \
-               before it is a disambiguating hint for you (`verb`, `noun`, a screen name), \
-               and only the part after it is to be translated. Answer under the whole key, \
-               separator included.\n\
-             - If the source contains `{{count}}`, answer with an object of plural forms \
-               instead of a string, with exactly these keys: {}. Otherwise answer with a \
-               string.\n\
-             - Keep the register and the capitalisation conventions of {}. These are button \
-               labels, field labels and short sentences in an application, not prose.\n\
-             - The text is never HTML and must not be escaped as if it were.\n\
-             - If you cannot translate a string, leave it out of the object rather than \
-               guessing.",
-            source.as_str(),
-            target.as_str(),
-            categories.join(", "),
-            target.as_str(),
-        );
-        let prompt = serde_json::to_string_pretty(&keys)
-            .map_err(|e| Error::invalid(format!("building the translation request: {e}")))?;
-        let request = sc_llm::LlmRequest::prompt(prompt)
-            .system(system)
-            .temperature(0.0);
-        let answer = self.model.provider.stream(request).await?.collect().await?;
-        parse_answer(&answer.content)
-    }
-}
-
-/// The model's reply, as an object of key to translation.
-///
-/// Tolerant of a fenced code block and of prose either side of the object,
-/// because every provider does one of those occasionally and failing the whole
-/// batch over a pair of backticks would throw away fifty good translations.
-pub fn parse_answer(text: &str) -> Result<BTreeMap<String, Json>> {
-    let trimmed = text.trim();
-    let body = match (trimmed.find('{'), trimmed.rfind('}')) {
-        (Some(start), Some(end)) if end > start => &trimmed[start..=end],
-        _ => {
-            return Err(Error::invalid(format!(
-                "the translator answered with no JSON object: {}",
-                trimmed.chars().take(200).collect::<String>()
-            )));
-        }
-    };
-    let parsed: Json = serde_json::from_str(body)
-        .map_err(|e| Error::invalid(format!("the translator's answer is not JSON: {e}")))?;
-    match parsed {
-        Json::Object(map) => Ok(map.into_iter().collect()),
-        other => Err(Error::invalid(format!(
-            "the translator answered with {} rather than an object",
-            match other {
-                Json::Array(_) => "an array",
-                _ => "a scalar",
-            }
-        ))),
-    }
-}
+// The translator over a configured LLM provider (decision D9) lives in
+// `sc-server`, because both callers of it are above that crate: this command and
+// the Translations screen's **Translate missing** button must fill a catalogue
+// the same way, and two implementations of one prompt would drift on the first
+// fix to either.
+pub use sc_server::{LlmTranslator, parse_answer};
 
 /// A one-line summary of what a catalogue holds for a key, for `extract --domain`
 /// output and for the Translations screen's future use.

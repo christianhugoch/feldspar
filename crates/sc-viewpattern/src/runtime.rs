@@ -100,6 +100,25 @@ pub struct ViewRequest {
     /// an ajax reload of a view asks for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap: Option<Wrap>,
+    /// The locale this request is served in (§16.x, D8), which is what v1's
+    /// `req.getLocale()` answers. `None` is English.
+    ///
+    /// Carried on the request rather than reached for, like every other locale
+    /// in this system: a trigger emailing a customer translates against *that
+    /// customer's* language, and an ambient locale is the mechanism that gets
+    /// that wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    /// The application's catalogue for that locale, flat — what v1's `req.__`
+    /// and `translateLayout` look a phrase up in.
+    ///
+    /// Sent with the request because a worker call is one round trip and the
+    /// catalogue is small: the alternative is the worker asking back for every
+    /// phrase of a page. **Strings only**: v1's `__` has no plural forms, only
+    /// positional `%s`, so a plural entry in the catalogue is left out and its
+    /// English renders.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub messages: BTreeMap<String, String>,
 }
 
 /// How a rendered view or page is wrapped in the layout (§9): v1's
@@ -314,6 +333,22 @@ pub trait ViewRuntime: Send + Sync {
     /// What in the snapshot's application refers to the view named `view`, by
     /// the patterns' own `connectedObjects` (TODO "Saltcorn UI" 10.4).
     async fn references(&self, view: &str, ctx: ViewContext<'_>) -> Result<ViewReferences>;
+
+    /// v1's `getStringsForI18n`: the strings a view's own configuration puts in
+    /// front of a person — a column's header, a link's text, an action's label
+    /// (§16.x, task 4.5).
+    ///
+    /// These are **type B** strings, the admin's: they were written when the
+    /// view was configured, so they cannot ship in any catalogue of ours, and
+    /// they are not in a repository either because a Saltcorn UI application's
+    /// definition is rows. This is the Translations screen's equivalent of the
+    /// tree-sitter extraction a code application gets, and it is a method on
+    /// the runtime because only the pattern knows which of its configuration's
+    /// values are sentences and which are column names.
+    ///
+    /// A pattern that declares no `getStringsForI18n` contributes nothing,
+    /// exactly as in v1.
+    async fn strings_for_i18n(&self, view: &View, ctx: ViewContext<'_>) -> Result<Vec<String>>;
 
     /// The options v1's builder is opened with for `page`: v1's
     /// `pageBuilderData`, ported into the worker and computed over the snapshot

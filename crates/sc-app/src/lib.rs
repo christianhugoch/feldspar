@@ -54,6 +54,9 @@ mod diagnostics;
 // Frameworks written in Rust above this crate (Saltcorn UI): named constructors.
 mod factory;
 mod framework;
+// An application's own catalogue: the `CatalogStore` seam and `_fd_translations`
+// (§16.x, D4).
+pub mod i18n;
 // The application third of the administrative tool surface (§13.6), and the one
 // constructor of the whole nine-tool set.
 pub mod mcp;
@@ -106,6 +109,12 @@ pub use framework::{
     framework_config_spec, framework_default_csp, framework_info_in, framework_serves_ui,
     registered_framework_info, registered_frameworks, serves_ui_in, validate_config_in,
     validate_config_structure_in, validate_framework_config, validate_framework_config_structure,
+};
+pub use i18n::{
+    ATTR_DEFAULT_LOCALE, ATTR_LOCALES, CatalogStore, FileCatalogStore, I18N_SEGMENT, LOCALES_DIR,
+    RowCatalogStore, TRANSLATIONS_TABLE, app_catalog_store, app_default_locale, app_is_translated,
+    app_locales, bootstrap_translations, delete_application_translations, i18n_catalog_path,
+    i18n_catalog_path_template, i18n_locale_in_path, set_app_locales,
 };
 pub use react::{
     CFG_PROJECT, REACT_BUILD_ARGS, REACT_BUILD_COMMAND, REACT_CLIENT_FILE, REACT_FRAMEWORK,

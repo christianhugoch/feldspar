@@ -277,6 +277,17 @@ pub trait Framework: Send + Sync {
     /// providers).
     async fn handle(&self, req: AppRequest, cat: &Catalog) -> Result<AppResponse>;
 
+    /// Drop whatever this framework has cached of the application's catalogue
+    /// (§16.x, D7).
+    ///
+    /// Called when a translation is saved. The default does nothing, which is
+    /// right for every framework that serves a static bundle: a code
+    /// application's browser fetches `{mount}/i18n/{locale}.json` itself, and
+    /// the cache that matters there is the mount's. A framework that renders
+    /// **server-side** — Saltcorn UI — looks the phrases up as it renders, so
+    /// it holds its own copy and this is how it is told to let go of it.
+    fn forget_catalogues(&self) {}
+
     /// The build step for a code framework, or `None` for a build-less framework.
     fn build(&self) -> Option<BuildSpec>;
 

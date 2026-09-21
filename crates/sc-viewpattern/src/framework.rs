@@ -41,6 +41,7 @@
 //! surfaces a call carries are built from the request's user, exactly as a code
 //! body's are built from its event's caller (§11).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -284,6 +285,7 @@ impl FrameworkFactory for SaltcornUiFactory {
             public_dir: bundle.join("public"),
             runtime,
             snapshot: RwLock::new(None),
+            catalogues: RwLock::new(std::collections::HashMap::new()),
         }))
     }
 }
@@ -298,6 +300,52 @@ pub struct SaltcornUiFramework {
     runtime: Arc<dyn ViewRuntime>,
     /// The snapshot of the view set's current generation, built once for it.
     snapshot: RwLock<Option<Arc<ViewSnapshot>>>,
+    /// The application's catalogue per locale, flat (§16.x, task 4.5).
+    ///
+    /// This framework renders **server-side**, so the phrases are looked up as
+    /// the HTML is built and the catalogue has to be here rather than in the
+    /// browser. It is read once per locale and dropped by
+    /// [`forget_catalogues`](Framework::forget_catalogues) when a translation
+    /// is saved, which is what makes a fix live without a remount (D7).
+    ///
+    /// An application with no locales never populates it: the load is behind
+    /// the same `app_is_translated` guard every other path uses (D11).
+    catalogues: RwLock<std::collections::HashMap<String, Arc<BTreeMap<String, String>>>>,
+}
+
+impl SaltcornUiFramework {
+    /// The catalogue for this request's locale, read once and remembered.
+    ///
+    /// Flat strings only: v1's `__` has no plural forms, only positional `%s`,
+    /// so a plural entry is left out and its English renders — which is right,
+    /// because a message with plural forms was not one of v1's to begin with.
+    async fn catalogue(&self, cat: &Catalog, locale: &str) -> Arc<BTreeMap<String, String>> {
+        // The zero-cost case, first and without a lock on the slow path (D11).
+        if !sc_app::app_is_translated(&self.app) {
+            return Arc::new(BTreeMap::new());
+        }
+        if let Ok(held) = self.catalogues.read()
+            && let Some(found) = held.get(locale)
+        {
+            return found.clone();
+        }
+        let mut flat = BTreeMap::new();
+        if let Ok(parsed) = sc_i18n::Locale::parse(locale)
+            && let Ok(store) = sc_app::app_catalog_store(&self.app)
+            && let Ok(Some(catalogue)) = store.load(cat, &parsed).await
+        {
+            for (key, message) in catalogue.messages() {
+                if let sc_i18n::Message::Simple(text) = message {
+                    flat.insert(key.clone(), text.clone());
+                }
+            }
+        }
+        let held = Arc::new(flat);
+        if let Ok(mut cache) = self.catalogues.write() {
+            cache.insert(locale.to_owned(), held.clone());
+        }
+        held
+    }
 }
 
 #[async_trait]
@@ -310,7 +358,16 @@ impl Framework for SaltcornUiFramework {
         saltcorn_ui_config_spec()
     }
 
+    fn forget_catalogues(&self) {
+        if let Ok(mut cache) = self.catalogues.write() {
+            cache.clear();
+        }
+    }
+
     async fn handle(&self, req: AppRequest, cat: &Catalog) -> Result<AppResponse> {
+        // The request's catalogue, read once here so the six places that build
+        // a `ViewRequest` can pick it up synchronously (§16.x, task 4.5).
+        let _ = self.catalogue(cat, req.locale.as_str()).await;
         let path = req.path.clone();
         let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
         if let ["auth", action] = segments.as_slice() {
@@ -1071,6 +1128,16 @@ impl SaltcornUiFramework {
 
     /// v1's `req`, for this request.
     fn view_request(&self, req: &AppRequest, wrap: Option<Wrap>) -> ViewRequest {
+        let locale = req.locale.as_str().to_owned();
+        // Already in the cache: `handle` reads it once, before dispatching, so
+        // every call site below gets the catalogue without being async.
+        let messages = self
+            .catalogues
+            .read()
+            .ok()
+            .and_then(|held| held.get(&locale).cloned())
+            .map(|held| held.as_ref().clone())
+            .unwrap_or_default();
         ViewRequest {
             method: req.method.as_str().to_owned(),
             path: req.path.clone(),
@@ -1081,6 +1148,8 @@ impl SaltcornUiFramework {
             base_url: req.base_url.clone(),
             csrf_token: req.csrf_token.clone(),
             wrap,
+            locale: Some(locale),
+            messages,
         }
     }
 

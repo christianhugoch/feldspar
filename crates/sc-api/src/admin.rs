@@ -2118,6 +2118,88 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- Translations (§16.x, task 4.4) -----------------------------------------
+    // An application's own strings — type B, the admin's, written while they
+    // built the application. One read and three writes, because the screen is
+    // one table: what the source says, what each locale has, what nobody
+    // wrapped, and what is left over.
+
+    // The whole screen in one call. Untyped `messages` and `locales` because a
+    // catalogue is a *map* whose keys are English sentences: there is no struct
+    // to declare, and an endpoint schema that pretended otherwise would be
+    // describing a shape that does not exist.
+    set.register(
+        Endpoint::new(
+            "getTranslations",
+            Method::Get,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("translations"),
+        )
+        .output(TypeSchema::json())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Which locales the application serves, and which one it falls back to.
+    // Turning one off does **not** delete its catalogue.
+    set.register(
+        Endpoint::new(
+            "setApplicationLocales",
+            Method::Put,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("locales"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("locales", TypeSchema::array(TypeSchema::text())),
+            StructField::new("default_locale", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .output(TypeSchema::json())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Save one locale's catalogue, whole. Refused — naming the key — for a
+    // translation whose placeholders or plural categories differ from its
+    // key's, which is the same check the LLM's answers get: the admin typing
+    // one by hand is owed the same guarantee.
+    set.register(
+        Endpoint::new(
+            "saveTranslations",
+            Method::Put,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("translations")
+                .param("locale", ValueType::Text),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "messages",
+            TypeSchema::json(),
+        )]))
+        .output(TypeSchema::json())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // **Translate missing**: fill everything this locale has not got through
+    // the configured LLM, and save it. The answer names every message the
+    // placeholder check rejected (D9).
+    set.register(
+        Endpoint::new(
+            "translateMissing",
+            Method::Post,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("translations")
+                .param("locale", ValueType::Text)
+                .lit("fill"),
+        )
+        .output(TypeSchema::json())
+        .auth(AuthRequirement::admin()),
+    );
+
     // v1's `/field/preview/:table/:field/:fieldview`: a fieldview rendered over
     // the first row the admin can read, as HTML for the canvas.
     set.register(

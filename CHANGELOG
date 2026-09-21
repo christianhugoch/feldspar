@@ -2,6 +2,137 @@
 
 Changes in reverse chronological order.
 
+## Internationalisation, phase 4: applications
+
+The fourth of five phases (`docs/I18N.md`, `TODO.md` §4). Phase 3 covered population **A** — our
+strings, written at release. This phase covers **B**: the admin's own, written while they build
+an application, which nothing of ours can ship a catalogue for because they did not exist when we
+shipped.
+
+### One seam, two homes (task 4.1)
+
+An application's catalogue goes **wherever that application's definition already is**, and the
+split is not a preference:
+
+- A **code** application's definition is its git repository, so its catalogues are files in it —
+  `<project>/locales/{locale}.json`, through the app's own file store. A clone carries them, the
+  coding agent reads them with the file tools it already has, and the backup story is the
+  repository's.
+- A **Saltcorn UI** application's definition is rows, so its catalogues are rows:
+  `_fd_translations`, one per (application, locale), `name` the locale tag, deleted with the
+  application exactly as `_fd_library` is.
+
+Both are behind `sc_app::i18n::CatalogStore`, chosen by asking whether the framework builds from
+a source tree — the same question `app_source_from_config` already answers for the build — so the
+admin API, the Translations screen and the LLM fill are written once. Which locales an
+application serves, and which it falls back to, are sparse values in `Application.attributes`
+(§9's column-vs-attributes rule): an application that has none answers an empty vector without
+touching a file store or the database, which is D11 asserted rather than hoped.
+
+### Served, not bundled (task 4.2)
+
+`GET {mount}/i18n/{locale}.json`, mounted **beside** the endpoint sets as the stream observe
+socket is, with an ETag, a per-mount cache and a 404 for a locale the application does not serve.
+Bundling the catalogue into the app's build would be simpler and wrong: an admin who fixes a
+mistranslation would wait for a bundler, and "translate this application into Spanish" would be a
+deploy. The cache is emptied when a translation is saved and is born empty on every remount, so
+`SIGHUP` and a rebuild re-read it without knowing the cache exists. An enabled locale with
+nothing translated yet answers an **empty catalogue** rather than a 404: it is a locale the
+application serves, and the runtime that asked has a well-formed answer to cache.
+
+**An application's locales are its own.** A request to an application is negotiated against the
+locales *it* declares, falling back to the installation's settings when it declares none — an
+admin who translates their application into French should not also have to enable French for the
+admin UI before a visitor can read it.
+
+### The generated runtime (task 4.3)
+
+No new npm dependency (D10): the runtime is **generated**. `messages.ts` goes in
+`common_runtime_files` — the message format, the locale negotiation and the catalogue fetch, all
+framework-neutral, so a framework a module declares gets it unchanged and writes its own provider
+over it. `i18n.tsx` goes in React's `runtime_files`: `I18nProvider` (wired into `main.tsx` with
+no props, because it negotiates itself), `useT()`, a module-level `t()` for code that is not a
+component, `<T>` with element values, and a `LocalePicker` that renders nothing when there is one
+locale. Three constants are generated into `messages.ts` — the application's locales, its
+default, and the catalogue path, which comes from the same function the router reads a request's
+path back against.
+
+The scaffold now uses `t()` in everything it writes: the pages, the shell, the login form, the
+create-form labels and the column headers. A nav label is a **function** (`label: () => t("Tasks")`)
+rather than a string, because a message resolved when `routes.tsx` is imported would be resolved
+before the catalogue had loaded and would stay English for the life of the page. `AGENTS.md`,
+`SKILL.md` and the runtime `README.md` all say that user-visible text goes through `t()`, with
+the call shapes and the two rules that follow from D1 — a string **literal** first argument, and
+one message per sentence rather than three fragments.
+
+### The Translations screen (task 4.4)
+
+`getTranslations` answers the whole screen in one call, because every column of it is a function
+of the same scan: the keys the source actually uses, what each enabled locale has for them, the
+coverage, the orphans, the unwrapped literals the lint found and the call sites that cannot be
+extracted. The keys come from the **source**, not from a record of it — the server runs the same
+tree-sitter pass `feldspar i18n extract` runs, over the application's own file store, so it works
+on a project that has never been built, without npm, and while an agent is halfway through
+editing it.
+
+- **Translate missing** fills a column through the configured LLM and the machine checks the
+  placeholders (D9). `LlmTranslator` moved from `sc-cli` into `sc-server`, because both callers of
+  it — this button and `feldspar i18n translate` — are above that crate, and two implementations
+  of one prompt drift on the first fix to either.
+- **A hand-typed translation gets the same check**, named by its key. The cell goes red as it is
+  typed, in the browser, using the renderer's own scanner rather than a second one.
+- **Orphans are shown and never deleted**, and the *server* is what puts them back: a key the
+  source no longer uses never appears in the grid, so a save from the grid cannot have been asked
+  to delete one, and a body that merely omitted it would throw away a human's translation the
+  first time somebody renamed a string.
+- Coverage moves as cells are typed, because a figure that is one save behind is a figure nobody
+  trusts.
+
+### Saltcorn UI (task 4.5)
+
+The same screen and the same button, rows instead of files. `ViewRuntime::strings_for_i18n` is
+the rows-side equivalent of the tree-sitter pass: v1's `getStringsForI18n`, asked of each
+pattern, because only the pattern knows which of a configuration's values are sentences and which
+are column names. The "file" a message is attributed to is the view it was configured on, which
+is where an admin goes to change it.
+
+In the worker, `translate` stops being the identity and becomes a **catalogue lookup that keeps
+v1's positional `%s`**: the lookup is the change and the substitution is not, because v1's `__`
+has no placeholders and no plural forms. The catalogue rides on the view request and lives on the
+call's own async-local context, **not** on `getState()` — that state is built once per snapshot
+and read by every visitor, so a locale cached there would serve the second visitor the first
+visitor's language. `req.getLocale()` answers the request's locale instead of `"en"`, and
+`getState().i18n.__`, which is what `translateLayout` calls for every string in a layout, answers
+out of the request's catalogue.
+
+### Deviations worth knowing
+
+- **`translate_spec` aside, the catalogue is flat strings for Saltcorn UI.** v1's `__` has no
+  plural forms, so a plural entry is left out of what the worker is sent and its English renders.
+- **`Framework::forget_catalogues`** is a new default-no-op on the trait. A framework serving a
+  static bundle needs nothing — the browser fetches the catalogue itself — but one that renders
+  **server-side** looks the phrases up as it renders and holds its own copy, and this is how it
+  is told to let go.
+- **`AppMounts::refresh_mount`** puts a changed application *record* in front of the running
+  mount without rebuilding anything. Turning a locale on changes the record, the router
+  negotiates against it and a server-rendered framework reads it as it renders, so a mount
+  holding yesterday's record would go on serving English. An application served from a bundle
+  keeps its bundle; one that is *constructed* is re-mounted through its factory, which costs no
+  bundler.
+
+### The end to end (task 4.6)
+
+Two tests, both in `cargo test` and neither needing an API key:
+
+- A code application: a project written into a file store, extracted, filled from a **scripted**
+  translator that renames a placeholder on one of the three answers, and read back at
+  `{mount}/i18n/fr.json` with `Content-Language: fr`. The sabotaged message is rejected, named,
+  and left in English rather than rendering `{nom}` to a customer.
+- A Saltcorn UI application: BooksDB restored from a v1 backup, its strings read out of its
+  views' configurations, French turned on and one label translated through the admin API — and
+  the **rendered HTML** comes back translated for `?lang=fr` and for `Accept-Language: fr-CA`,
+  with nothing rebuilt and nothing restarted.
+
 ## Internationalisation, phase 3: the product's own strings
 
 The third of five phases (`docs/I18N.md`, `TODO.md` §3). Phase 1 built a kernel that knew what a

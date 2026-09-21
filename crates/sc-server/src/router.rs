@@ -876,6 +876,17 @@ async fn dispatch_app(
         return with_csp(app_stream_observe(state, app, name, &jar, ws).await, &csp);
     }
 
+    // The app's catalogue, in the same place and for the same reason
+    // (`{mount}/i18n/{locale}.json`, §16.x D7). An application with no locales
+    // never reaches the store: the guard is the first thing
+    // [`app_i18n_catalog`] does, which is what D11 costs.
+    if let Some(tag) = sc_app::i18n_locale_in_path(&app.app, path) {
+        return with_csp(
+            app_i18n_catalog(state, app, tag, &method, headers).await,
+            &csp,
+        );
+    }
+
     // The app's data: an API provider that claims this path.
     if let Some(provider) = app.provider_for(path) {
         // An app is mounted only with a catalog (checked at build time), so this
@@ -1023,7 +1034,9 @@ async fn dispatch_app(
     // The locale, negotiated once for this request (§16.x, D8): an application's
     // own pages, its view runtime and anything it fires are served in one
     // language, and it is the one this response's `Content-Language` names.
-    let settings = sc_i18n::active();
+    // Against the *application's* locales when it declares any: they belong to
+    // the thing the admin built, not to the installation serving it.
+    let settings = crate::i18n::app_settings(&app.app, &sc_i18n::active());
     let negotiated = crate::i18n::negotiate(&settings, uri, headers, &jar, user.as_ref());
     let mut req = match app_request(state, api_method, uri, headers, body, user.clone()) {
         Ok(req) => req,
@@ -1074,6 +1087,153 @@ async fn dispatch_app(
             &csp,
         ),
     }
+}
+
+/// An application's catalogue: `GET {mount}/i18n/{locale}.json` (§16.x, D7).
+///
+/// Served rather than bundled, which is the decision this route exists to keep:
+/// an admin who fixes a mistranslation must not have to wait for a bundler, and
+/// "translate this application into Spanish" must not be a deploy. The file
+/// still lives in the admin's repository (or, for a Saltcorn UI app, in
+/// `_fd_translations`) — it is just read at request time instead of compiled in.
+///
+/// Three things make that affordable:
+///
+/// - **The per-mount cache.** The store is read once per locale per mount, and
+///   the mount's cache is dropped when a translation is saved and is born empty
+///   on a remount, so a `SIGHUP` re-reads without knowing this cache exists.
+/// - **The ETag.** The catalogue is a static file to the browser, so the second
+///   page load is a 304 with no body.
+/// - **The locale guard.** An application with no locales answers 404 without
+///   touching a file store or the database, which is what D11 promises. There is
+///   no loading state to design around either: the key is the English source
+///   text (D1), so the application renders correct English before the fetch
+///   lands.
+async fn app_i18n_catalog(
+    state: &AppState,
+    app: &MountedApp,
+    tag: &str,
+    method: &axum::http::Method,
+    headers: &axum::http::HeaderMap,
+) -> Response {
+    if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
+        return json_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "a catalogue is read, not written; save a translation through the admin API",
+        );
+    }
+    // Every refusal below is the same 404, deliberately: a locale this
+    // application does not serve and a locale that is not a locale are both
+    // "there is nothing here", and neither is worth a sentence that tells a
+    // stranger which locales an application has.
+    let missing = || {
+        json_error(
+            StatusCode::NOT_FOUND,
+            format!("this application has no `{tag}` catalogue"),
+        )
+    };
+    // The zero-cost check, first (D11).
+    if !sc_app::app_is_translated(&app.app) {
+        return missing();
+    }
+    let Ok(locale) = sc_i18n::Locale::parse(tag) else {
+        return missing();
+    };
+    let enabled = match sc_app::app_locales(&app.app) {
+        Ok(locales) => locales,
+        Err(e) => {
+            log_failure("reading an application's locales", &e);
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "this application's locales are misconfigured",
+            );
+        }
+    };
+    if !enabled.iter().any(|l| l.as_str() == locale.as_str()) {
+        return missing();
+    }
+
+    let served = match app.cached_catalog(locale.as_str()) {
+        Some(served) => served,
+        None => {
+            let Some(catalog) = state.apps.catalog() else {
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "no catalog");
+            };
+            let store = match sc_app::app_catalog_store(&app.app) {
+                Ok(store) => store,
+                Err(e) => {
+                    log_failure("resolving an application's catalogue store", &e);
+                    return json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "this application's catalogue store is misconfigured",
+                    );
+                }
+            };
+            let messages = match store.load(catalog, &locale).await {
+                Ok(Some(messages)) => messages,
+                // Enabled but not yet translated is an *empty* catalogue rather
+                // than a 404: the locale is one the application serves, and the
+                // runtime that asked has a well-formed answer to cache. English
+                // renders either way.
+                Ok(None) => sc_i18n::Catalog::new(locale.clone()),
+                Err(e) => {
+                    log_failure("reading an application's catalogue", &e);
+                    return json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "this application's catalogue could not be read",
+                    );
+                }
+            };
+            let body = match serde_json::to_vec(&messages.to_json()) {
+                Ok(body) => Bytes::from(body),
+                Err(e) => {
+                    log_failure(
+                        "serialising an application's catalogue",
+                        &sc_error::Error::msg(e.to_string()),
+                    );
+                    return json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "this application's catalogue could not be read",
+                    );
+                }
+            };
+            let served = crate::apps::ServedCatalog::new(body);
+            app.cache_catalog(locale.as_str(), served.clone());
+            served
+        }
+    };
+
+    let matched = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == served.etag));
+
+    let mut response = if matched {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else if method == axum::http::Method::HEAD {
+        StatusCode::OK.into_response()
+    } else {
+        (StatusCode::OK, served.body.clone()).into_response()
+    };
+    let out = response.headers_mut();
+    if let Ok(etag) = HeaderValue::from_str(&served.etag) {
+        out.insert(header::ETAG, etag);
+    }
+    out.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    if let Ok(lang) = HeaderValue::from_str(locale.as_str()) {
+        out.insert(header::CONTENT_LANGUAGE, lang);
+    }
+    // A catalogue changes when an admin saves one, and the ETag is what
+    // notices. Caching it without revalidation would be the bundling this route
+    // exists to avoid, one layer out.
+    out.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, must-revalidate"),
+    );
+    response
 }
 
 /// An application's Observe socket: `GET {mount}/streams/{name}/observe` (TODO

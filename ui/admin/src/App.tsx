@@ -47,6 +47,7 @@ import { Agents } from "./screens/Agents";
 import { Applications } from "./screens/Applications";
 import { ApplicationForm } from "./screens/ApplicationForm";
 import { ApplicationLibrary } from "./screens/ApplicationLibrary";
+import { ApplicationTranslations } from "./screens/Translations";
 import { ApplicationViews } from "./screens/ApplicationViews";
 import { PageProperties } from "./screens/PageProperties";
 import { ViewEditor } from "./screens/ViewEditor";
@@ -586,6 +587,12 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
         appId={decodeURIComponent(pagePropertiesMatch[1])}
         name={decodeURIComponent(pagePropertiesMatch[2])}
       />
+    );
+  }
+  const translationsMatch = path.match(/^\/applications\/([^/]+)\/translations$/);
+  if (translationsMatch) {
+    return (
+      <ApplicationTranslations appId={decodeURIComponent(translationsMatch[1])} />
     );
   }
   const libraryMatch = path.match(/^\/applications\/([^/]+)\/library$/);

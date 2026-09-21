@@ -370,6 +370,9 @@ async fn a_rebuild_rewrites_both_generated_halves_and_nothing_else() -> Result<(
             "todo/src/feldspar/client.ts",
             "todo/src/feldspar/composables.ts",
             "todo/src/feldspar/helper.ts",
+            // Framework-neutral, so a declared framework gets it unchanged and
+            // writes its own provider over it (§16.x, 4.3).
+            "todo/src/feldspar/messages.ts",
             "todo/src/feldspar/schema.sql",
         ]
     );

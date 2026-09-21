@@ -15,6 +15,8 @@
 mod api_provider_config;
 #[path = "app_client.rs"]
 mod app_client;
+#[path = "app_i18n.rs"]
+mod app_i18n;
 #[path = "app_skill.rs"]
 mod app_skill;
 #[path = "app_store.rs"]

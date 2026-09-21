@@ -4665,6 +4665,100 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    // --- Translations (§16.x, task 4.4) -----------------------------------------
+    //
+    // The screen is one table, so the read is one call: the keys the source
+    // actually uses, what each enabled locale has for them, what the lint found
+    // that nobody wrapped, and the orphans. Every write goes through the
+    // `CatalogStore` — files for an application with a project tree, rows for
+    // one without — and then drops the mount's cached catalogues, so the
+    // running application serves the change on the next reload with no build
+    // (D7).
+
+    reg.register("getTranslations", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_app(&catalog, ctx.path_param("id")?).await?;
+                Ok(HandlerResponse::ok(
+                    crate::translations::translations_json(&catalog, &app).await?,
+                ))
+            }
+        }
+    });
+
+    reg.register("setApplicationLocales", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let id = parse_app_id(ctx.path_param("id")?)?;
+                let obj = require_object(&ctx.body)?;
+                let tags: Vec<String> = match obj.get("locales") {
+                    Some(Json::Array(items)) => items
+                        .iter()
+                        .map(|v| {
+                            v.as_str().map(str::to_owned).ok_or_else(|| {
+                                Error::invalid("`locales` should be a list of locale tags")
+                            })
+                        })
+                        .collect::<Result<_>>()?,
+                    _ => {
+                        return Err(Error::invalid("`locales` should be a list of locale tags"));
+                    }
+                };
+                let default = obj.get("default_locale").and_then(Json::as_str);
+                Ok(HandlerResponse::ok(
+                    crate::translations::set_locales(&catalog, &apps, id, &tags, default).await?,
+                ))
+            }
+        }
+    });
+
+    reg.register("saveTranslations", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let app = require_app(&catalog, ctx.path_param("id")?).await?;
+                let locale =
+                    sc_i18n::Locale::parse(&crate::router::path_decode(ctx.path_param("locale")?))?;
+                let obj = require_object(&ctx.body)?;
+                let messages = obj
+                    .get("messages")
+                    .ok_or_else(|| Error::invalid("`messages` is required"))?;
+                Ok(HandlerResponse::ok(
+                    crate::translations::save_catalogue(&catalog, &apps, &app, &locale, messages)
+                        .await?,
+                ))
+            }
+        }
+    });
+
+    reg.register("translateMissing", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let app = require_app(&catalog, ctx.path_param("id")?).await?;
+                let locale =
+                    sc_i18n::Locale::parse(&crate::router::path_decode(ctx.path_param("locale")?))?;
+                let translator = crate::translations::configured_translator(&catalog, None).await?;
+                Ok(HandlerResponse::ok(
+                    crate::translations::fill_missing(&catalog, &apps, &app, &locale, &translator)
+                        .await?,
+                ))
+            }
+        }
+    });
+
     // The canvas's calls: v1's server routes, run in the worker as the admin by
     // the configuration calls' `Configurer`. What they may name — a table in the
     // subset, a view or page of the application — is checked here first, so a

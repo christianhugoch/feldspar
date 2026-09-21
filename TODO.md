@@ -228,31 +228,59 @@ translates against *that customer's* `language`, which is a bug class v1 had.
 
 ## Phase 4 — Type B: applications
 
-- [ ] 4.1 `sc-app::i18n`: the `CatalogStore` trait with both implementations — `<project>/locales/
+- [x] 4.1 `sc-app::i18n`: the `CatalogStore` trait with both implementations — `<project>/locales/
       {locale}.json` through the app's file store, and `_fd_translations` (§4) with its
       bootstrap, save, list and delete-with-the-application. The app's `locales` and
       `default_locale` go in `Application.attributes` (§9's sparse rule: most apps have none).
-- [ ] 4.2 `GET {mount}/i18n/{locale}.json`, mounted **beside** the endpoint sets as the observe
+      **Deviation:** every `CatalogStore` method takes the `&Catalog`, because the row
+      implementation needs the database and `sc_catalog::Catalog` is not `Clone`; the file
+      implementation ignores it. `_fd_translations` bootstraps with `_fd_applications` rather
+      than from a second call site, and `delete_application` performs the cascade itself.
+- [x] 4.2 `GET {mount}/i18n/{locale}.json`, mounted **beside** the endpoint sets as the observe
       socket is (§13.2), with an ETag, a per-mount cache, and re-read on save and on `SIGHUP` —
       so a translation is live without a bundler (D7).
-- [ ] 4.3 The generated runtime: `messages.ts` in `common_runtime_files` (the format, the
+      **Additions:** an enabled locale with nothing translated yet answers an **empty**
+      catalogue rather than a 404 — it is a locale the application serves, and the runtime that
+      asked has a well-formed answer to cache. And a request to an application is negotiated
+      against the locales *that application* declares (`crate::i18n::app_settings`), falling
+      back to the installation's when it declares none: an admin who translates their
+      application into French should not also have to enable French for the admin UI.
+- [x] 4.3 The generated runtime: `messages.ts` in `common_runtime_files` (the format, the
       catalogue fetch, the negotiation — framework-neutral, so a module's framework gets it
       unchanged) and `i18n.tsx` in React's `runtime_files` (`I18nProvider`, `useT`, `t`, `<T>`
       with element values). The scaffold wires the provider into `main.tsx`, uses `t()` in the
       pages it writes, and `AGENTS.md`, `SKILL.md` and the runtime `README.md` say that
       user-visible text goes through `t()`.
-- [ ] 4.4 The admin API and the Translations screen for an application: the extracted keys with
+- [x] 4.4 The admin API and the Translations screen for an application: the extracted keys with
       their coverage per locale, the grid, **Translate missing**, the unwrapped literals the
       lint found, and the orphans (a key in the catalogue that the source no longer uses —
       shown, never deleted). Saving writes through the `CatalogStore` and re-reads the mount.
-- [ ] 4.5 Saltcorn UI: `ViewRuntime::strings_for_i18n` over the vendored `getStringsForI18n` (it
+      **Deviations:** (a) `LlmTranslator` and `parse_answer` moved from `sc-cli` into
+      `sc-server`, which `sc-cli` now re-exports: both callers of the prompt are above that
+      crate, and two implementations of one prompt drift on the first fix to either.
+      (b) **The server puts the orphans back**, not the screen. A key the source no longer uses
+      never appears in the grid, so a save from the grid cannot have been asked to delete one.
+      (c) A locale set changing calls `AppMounts::refresh_mount`, which puts the new record in
+      front of the running mount without rebuilding anything.
+- [x] 4.5 Saltcorn UI: `ViewRuntime::strings_for_i18n` over the vendored `getStringsForI18n` (it
       is intact on every pattern), `translate` in `module-host.mjs` becoming a catalogue lookup
       that keeps v1's positional `%s`, and `getLocale()` answering the request's locale instead
       of `"en"`. Same screen, same button, rows instead of files.
-- [ ] 4.6 The end-to-end test, against a scripted translator: scaffold an app, extract its
+      **Where the catalogue lives in the worker:** on the *call's* async-local context, not on
+      `getState()` — that state is built once per snapshot and read by every visitor, so a
+      locale cached there would serve the second visitor the first visitor's language.
+      `getState().i18n.__`, which is what `translateLayout` calls, reads through to it. The
+      catalogue sent to the worker is **strings only**: v1's `__` has no plural forms, so a
+      plural entry is left out and its English renders.
+- [x] 4.6 The end-to-end test, against a scripted translator: scaffold an app, extract its
       strings, fill French, read `{mount}/i18n/fr.json` back, and assert a request with
       `Accept-Language: fr` gets `Content-Language: fr` — plus the Saltcorn UI half, where a
       list view's header comes back translated.
+      **Deviation:** the Saltcorn UI half translates a *list view's link label* rather than a
+      column header. Both are type B strings the pattern reports through `getStringsForI18n`,
+      but BooksDB's columns carry no `header_label`, and v1 renders a JoinField's header from
+      the field's own label — so the label is the string that actually crosses the seam in this
+      fixture. It needs the built bundle and skips without it, like every Saltcorn UI test.
 
 ## Phase 5 — Documentation
 
@@ -262,6 +290,9 @@ translates against *that customer's* `language`, which is a bug class v1 had.
       `CatalogStore` in §2.1's extension-point table, `_fd_translations` in §9's table
       catalogue and §9.2's relationships, the catalogue route in §13.2, and the `language`
       column in §7.1.
+      **Partly done by 4.1:** `_fd_translations` is already in §9's table catalogue and §9.2's
+      ER diagram and relationships — `repo_hygiene`'s "the ER diagram names every metadata
+      table" enforces that the moment the table exists. The rest of 5.1 is still to write.
 - [ ] 5.2 `docs/tutorial-i18n.md`: turn on two locales, see the admin UI in French, translate a
       React application end to end (including what the coding agent should be told), then the
       same for a Saltcorn UI application.

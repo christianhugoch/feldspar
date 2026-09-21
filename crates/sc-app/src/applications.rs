@@ -124,9 +124,15 @@ fn applications_fields() -> Vec<DataField> {
 /// table's absence covers: a legacy database bootstraps into one holding
 /// applications without any migration step.
 pub async fn bootstrap(catalog: &Catalog) -> Result<Table> {
-    catalog
+    let table = catalog
         .bootstrap_table(APPLICATIONS_TABLE, &applications_fields())
-        .await
+        .await?;
+    // An application's translations are part of what an application is (§16.x,
+    // D4): they are created with it, deleted with it, and a deployment that can
+    // hold an app can hold its catalogue. So they bootstrap together, rather
+    // than leaving every call site to remember a second one.
+    crate::i18n::bootstrap_translations(catalog).await?;
+    Ok(table)
 }
 
 #[cfg(test)]

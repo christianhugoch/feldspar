@@ -1226,6 +1226,7 @@ a sparse value goes into `attributes`.**
 | `_fd_views` | a Saltcorn UI application's views | **not an overlay**, and **per application** (§13.3): `(application, name)` is unique, so two applications may each have a `List Books` over one table. The pattern name, the table (which must be in the application's subset), `min_role`, `slug`, and a `configuration` that is **v1's shape, stored untouched** — it is what v1's own `list.ts` reads. `application` is by value, so deleting an application deletes its views itself |
 | `_fd_pages` | a Saltcorn UI application's pages | the same rules as `_fd_views`: per application, unique by name, a v1-shaped `layout` stored untouched, `min_role`, and `root_page_for_roles`, `no_menu` and `request_fluid_layout` in `attributes` |
 | `_fd_library` | a Saltcorn UI application's library ("shared components" in current v1) | the same rules again: per application, unique by name, deleted with the application. `icon` and a v1-shaped `layout` stored untouched. A layout places an item as `{ type: "library", library_id, slots }`, with `library_id` this table's UUID. Only a `saltcorn-ui` application may write one, and only the admin API writes it; the worker reads it from the view snapshot (§13.3, "The library") |
+| `_fd_translations` | an application's catalogue, for an application with no project tree (§16.x) | the same rules as `_fd_library`: per application, unique by `name` — which is the **locale tag** — and deleted with the application. `messages` is the flat catalogue of §16.x, keyed by the **English source text**. It is the home of a *Saltcorn UI* application's translations, because a Saltcorn UI application's definition is rows; a code application's are files in its repository (`<project>/locales/{locale}.json`), because that is where *its* definition is. Both are behind one `CatalogStore`, so the admin API, the Translations screen and the LLM fill are written once |
 | `_fd_models` | model definitions | **not an overlay** — the row is the model's only definition (§14.2): the provider, the `dataset` (which rows and which derived values, as a list of `sc-expr` formulas), the provider's configuration, the hyperparameter *space* (per key a value or a list to search over) and the split's fractions and seed. `table_name` is derived from the dataset on the way out and checked against it on the way in, so the list can be filtered by table without reading every dataset |
 | `_fd_model_instances` | one fit each | the provider's serialised `state`, its `parameters` (structured for display), the **host's** `metrics` per split, and the `encoding` the fit was made with — which is the load-bearing one: a prediction is encoded the way its fit was, or it fails. `status` is a column because every row has one and it is what the list filters on; the failure **sentence** is in `attributes`, because it is present only on the rows that failed. `active` is a column and at most one row per model carries it |
 | `_fd_streams` | streams: dataflows as an entity | **not an overlay** — there is nothing to introspect a stream from, so the row is its only definition (§14.3): the provider, the `configuration` its `config_spec` declares (secrets stored as given, redacted on the way to a form), `min_role` (the floor for **observing** it through an application; `None` is admin-only, the trigger rule for the trigger reason), and in `attributes` the sparse `enabled` flag. The **element type is not a column**: it is a pure function of `provider` + `configuration`, computed on read, because a stored copy would be a second answer that drifts the day a provider's declaration changes. Nor are the elements — a flow is made durable by a trigger that writes a row, and there is no `_fd_stream_elements` |
@@ -1562,6 +1563,14 @@ erDiagram
     json layout "v1-shaped, untouched"
     json attributes
   }
+  TRANSLATIONS["_fd_translations"] {
+    uuid id PK
+    uuid application "the app, by value; UNIQUE (application, name)"
+    text name "the locale tag -- fr, pt-BR"
+    text description
+    json messages "the flat catalogue: English source text -> translation"
+    json attributes
+  }
   STREAMS["_fd_streams"] {
     uuid id PK
     text name UK "a trigger's channel, an app's StreamRef, a socket path segment"
@@ -1611,6 +1620,7 @@ erDiagram
   APPS ||--o{ VIEWS : "application -- by value, deleted with the app"
   APPS ||--o{ PAGES : "application -- by value, deleted with the app"
   APPS ||--o{ LIBRARY : "application -- by value, deleted with the app"
+  APPS ||--o{ TRANSLATIONS : "application -- by value, deleted with the app"
   VIEWS }o--o{ LIBRARY : "library_id -- inside configuration JSON"
   PAGES }o--o{ LIBRARY : "library_id -- inside layout JSON"
   VIEWS }o--o| TABLES : "table_name -- by name"

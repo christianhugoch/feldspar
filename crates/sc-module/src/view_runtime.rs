@@ -278,6 +278,25 @@ impl ViewRuntime for ModuleViewRuntime {
         })
     }
 
+    async fn strings_for_i18n(&self, view: &View, ctx: ViewContext<'_>) -> Result<Vec<String>> {
+        let (call, request) = call_of(ctx);
+        let answer = self
+            .host
+            .view_call(
+                "view_strings_for_i18n",
+                json!({ "view": view.name, "request": request }),
+                call,
+            )
+            .await
+            .map_err(|e| failed(&view_named(view), "read for translation", e))?;
+        serde_json::from_value(answer).map_err(|e| {
+            Error::msg(format!(
+                "the view runtime answered the strings of `{}` unreadably: {e}",
+                view.name
+            ))
+        })
+    }
+
     async fn page_builder_options(&self, page: &Page, ctx: ViewContext<'_>) -> Result<Json> {
         let (call, request) = call_of(ctx);
         self.host

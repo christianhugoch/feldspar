@@ -300,10 +300,12 @@ async fn the_schema_is_rewritten_on_every_build() -> sc_error::Result<()> {
         [
             "staff/src/feldspar/hooks.ts",
             "staff/src/feldspar/store.ts",
+            "staff/src/feldspar/i18n.tsx",
             "staff/src/feldspar/README.md",
             "staff/src/feldspar/client.ts",
             "staff/src/feldspar/helper.ts",
             "staff/src/feldspar/schema.sql",
+            "staff/src/feldspar/messages.ts",
             "staff/src/feldspar/SKILL.md",
             "staff/src/feldspar/graphql.ts",
             "staff/src/feldspar/schema.graphql",

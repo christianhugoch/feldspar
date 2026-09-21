@@ -29,6 +29,8 @@ mod config;
 mod handler;
 mod handlers;
 mod i18n;
+// An application's own strings: the Translations screen's server half
+// (§16.x, 4.4).
 mod logging;
 mod lsp;
 mod mcp;
@@ -42,6 +44,7 @@ mod serve;
 mod streams;
 mod systemd;
 mod tls;
+pub mod translations;
 mod triggers;
 
 pub use agents::{AgentServices, install_agents, install_agents_on};
@@ -155,6 +158,7 @@ pub use tls::{
     TlsHandle, TlsSettings, check_certificate, https_addr, install_crypto_provider,
     redirect_router, serve_https, tls_domains,
 };
+pub use translations::{LlmTranslator, parse_answer};
 pub use triggers::{
     base_action_registry, fire_startup, install_triggers, install_triggers_with_adapters,
     start_scheduler, start_workflow_engine,
