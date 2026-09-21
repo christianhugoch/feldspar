@@ -226,6 +226,54 @@ translates against *that customer's* `language`, which is a bug class v1 had.
       translate` run, which needs an API key and spends money — the same reason 11.4 and 12.3
       are carried. The command per file is in `crates/sc-i18n/locales/README.md`.
 
+      **How to run it with an API key.** The key is *not* an environment variable and
+      `feldspar i18n translate` does not take one: it resolves an `_fd_llm_providers` row and
+      one of its `_fd_llm_models` rows (`crates/sc-cli/src/main.rs`, `i18n_translate`), because
+      which model translates the product is an installation's decision and a stored one. So the
+      run is three steps, and only the first is unusual:
+
+      1. **Put the key in a provider row, once.** Start a server against the database the run
+         will use (`feldspar serve --environment NAME`), sign in as admin, and
+         **Agents → LLM providers → New LLM provider**: name `house`, backend `anthropic` (or
+         `openai_responses`, or `openai_chat` for a gateway or a local host), the key in
+         **API key**, **Base URL** left alone. Save; then on the provider's page **Add model**
+         `claude-sonnet-5` (or **Fetch models**), **Test** it, and **Make default** — a provider
+         with no default model is an error from `require_llm_model`, not a guess. This is
+         Step 1 of [docs/tutorial-agents.md](./docs/tutorial-agents.md) verbatim; the same two
+         rows can be made over the admin API (`POST /api/llm-providers` with
+         `{name, description, backend, config: {api_key, base_url}}`, then
+         `POST /api/llm-providers/{id}/models` with `{name, description, is_default, config}`)
+         for a machine with no browser in front of it. The key is a `secret` field: reading the
+         row back gives `••••••••`, and saving the form with the sentinel unchanged keeps it.
+      2. **One run per file**, from the repository root, with the same database flags `serve`
+         took (`--environment NAME`, or `--database-url`, or `--sqlite PATH`):
+
+         ```
+         for domain in core admin builder; do
+           for locale in fr de es zh-Hans ar; do
+             feldspar i18n translate --domain $domain --locale $locale \
+               --environment NAME [--provider house] [--model claude-sonnet-5]
+           done
+         done
+         ```
+
+         `--provider` and `--model` are optional: the first configured provider and its default
+         model are what a bare run uses. Each run prints how many messages it is about to send
+         *before* it sends them (`core → de: 256 messages to translate with …`), which is the
+         number to look at if the bill matters; a locale that is already complete costs nothing
+         and is skipped. Entries already in the file are never re-sent and never overwritten, so
+         a hand correction survives, an interrupted run resumes by being run again, and the 15
+         files can be done one at a time over as many days as the budget wants.
+      3. **Check, then build.** `feldspar i18n check` prints coverage per locale and fails only
+         on a placeholder or plural mismatch. Anything the validator refused is named in a
+         `warning:` line and left untranslated (correct English beats a French sentence with a
+         literal `{nombre}` in it) — those keys are the ones to fix by hand in the JSON. Then:
+         `core` catalogues are `include_str!`ed by `crates/sc-i18n/build.rs`, so a `cargo build`
+         picks a new file up; `admin` and `builder` are `import.meta.glob`ed by
+         `ui/admin/src/i18n.tsx` and `ui/builder/src/i18n.ts`, so those two need their bundle
+         rebuilt. (An *application's* catalogue is served rather than bundled — that is D7, and
+         it is the Translations screen's job, not this command's.)
+
 ## Phase 4 — Type B: applications
 
 - [x] 4.1 `sc-app::i18n`: the `CatalogStore` trait with both implementations — `<project>/locales/
@@ -326,7 +374,9 @@ translates against *that customer's* `language`, which is a bug class v1 had.
 
 - From this milestone: the rest of 3.6 — `de`, `es`, `zh-Hans` and `ar` for all three domains,
   and `fr` for `admin` (833 messages) and `builder` (339). One `feldspar i18n translate
-  --domain D --locale L` per file, against a configured provider.
+  --domain D --locale L` per file, against a configured provider. **3.6 itself has the recipe**:
+  the provider row the key goes in, the loop over the fifteen files, and what to do with what
+  the validator refuses.
 - From this milestone: the non-JSX half of 3.4's sweep (see its deviations) — the `setError`
   fallback sentences, and `deleteConfirmation`/`libraryDeleteConfirmation`, which are pure
   functions in `.ts` modules whose unit tests assert the English they build.

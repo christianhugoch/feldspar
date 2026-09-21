@@ -37,7 +37,7 @@ the key *is* the English, so a missing entry renders correct English rather than
 Nobody, by hand, as a first move. They are generated:
 
 ```
-feldspar i18n translate --domain core --locale fr
+feldspar i18n translate --domain core --locale fr --environment NAME
 ```
 
 which extracts every `t!` / `tc!` call site in `crates/**/*.rs`, asks the configured LLM provider
@@ -45,6 +45,13 @@ for the keys this locale has no entry for, **checks each answer's placeholders a
 categories**, keeps what passes, and writes the file back sorted. What it refuses it leaves
 untranslated and names in a warning, because correct English beats a French sentence with a
 literal `{nombre}` in it.
+
+The **API key** is not a flag and not an environment variable: this command reads an LLM
+provider row (and one of its model rows) out of the database named by its database flags, so the
+key is configured once in **Agents → LLM providers** and every run uses it. `--provider NAME`
+and `--model NAME` pick one; a bare run takes the first provider and its default model.
+[TODO.md](../../../TODO.md)'s item 3.6 has the whole recipe — making that row, the loop over
+every locale and domain, and what to do with a translation the validator refuses.
 
 Already-translated entries are never re-translated and never overwritten, so a correction made by
 hand survives the next run. Editing a file directly is fine and expected — that is why the format
