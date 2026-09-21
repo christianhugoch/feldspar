@@ -1,4 +1,4 @@
-//! Internationalisation: one catalogue, two runtimes (design §16.x, proposal
+//! Internationalisation: one catalogue, two runtimes (design §16.1, proposal
 //! [`docs/I18N.md`]).
 //!
 //! Every string this product puts in front of a person is English, and there are

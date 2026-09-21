@@ -1,5 +1,5 @@
 //! An application's own catalogue: where it lives, and the one trait that hides
-//! which of the two places that is (§16.x, D4/D7).
+//! which of the two places that is (§16.1, D4/D7).
 //!
 //! Type **B** strings are the admin's — the labels in the application they
 //! built. Unlike ours (type A, in `crates/sc-i18n/locales` and the SPA bundles)
@@ -65,7 +65,7 @@ pub const COL_APPLICATION: &str = "application";
 pub const COL_NAME: &str = "name";
 /// The description (§9). Nullable; `NULL` reads back as the empty string.
 pub const COL_DESCRIPTION: &str = "description";
-/// The catalogue itself: the flat JSON object of §16.x.
+/// The catalogue itself: the flat JSON object of §16.1.
 pub const COL_MESSAGES: &str = "messages";
 /// The sparse per-row values column (§9).
 pub const COL_ATTRIBUTES: &str = "attributes";

@@ -1,5 +1,5 @@
 //! An application's catalogue over HTTP: `GET {mount}/i18n/{locale}.json`
-//! (§16.x, D7), through the assembled router against a real database and a real
+//! (§16.1, D7), through the assembled router against a real database and a real
 //! file store.
 //!
 //! D7's claim is that an application's translations are **served, not bundled**

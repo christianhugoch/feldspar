@@ -1,4 +1,4 @@
-// The admin SPA's half of internationalisation (design §16.x, `docs/I18N.md`).
+// The admin SPA's half of internationalisation (design §16.1, `docs/I18N.md`).
 //
 // Two runtimes, one catalogue. The server translates everything the server says
 // — a `config_spec`'s labels, a settings section's heading, a refusal (decision

@@ -34,7 +34,7 @@ pub struct NewUser {
     /// The role, `1..=100`, which must already exist in `_fd_roles`.
     pub role: u8,
     /// The language this account reads the product in — a BCP-47 tag, or `None`
-    /// for "whatever the request negotiates" (§16.x). A system column with its
+    /// for "whatever the request negotiates" (§16.1). A system column with its
     /// own field for [`role`](NewUser::role)'s reason: it has a select of its
     /// own, not a text box.
     pub language: Option<String>,

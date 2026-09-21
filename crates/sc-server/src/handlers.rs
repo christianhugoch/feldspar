@@ -3712,7 +3712,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let development = sc_config::development_settings_from(&merged)?;
                 // The Localisation section's own reading, on the same footing: a
                 // tag that is not a language tag is refused here, where the
-                // admin can see which box they typed it into (§16.x).
+                // admin can see which box they typed it into (§16.1).
                 let localisation = sc_config::localisation_settings_from(&merged)?;
 
                 sc_config::set_config_many(&catalog, &values).await?;
@@ -4665,7 +4665,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
-    // --- Translations (§16.x, task 4.4) -----------------------------------------
+    // --- Translations (§16.1, task 4.4) -----------------------------------------
     //
     // The screen is one table, so the read is one call: the keys the source
     // actually uses, what each enabled locale has for them, what the lint found
@@ -7978,7 +7978,7 @@ fn user_role_field(obj: &Map<String, Json>) -> Result<u8> {
 }
 
 /// The `language` of a user body: a BCP-47 tag, canonicalised, or `None` for
-/// "whatever the request negotiates" (§16.x).
+/// "whatever the request negotiates" (§16.1).
 ///
 /// Parsed rather than trusted, so `pt-br` is stored as `pt-BR` and a value that
 /// is not a language tag is refused where the admin can fix it. It is **not**
@@ -8076,7 +8076,7 @@ fn build_log(report: &sc_app::BuildReport) -> String {
 /// key an admin pastes into the TLS section.
 async fn settings_json(catalog: &Catalog, locale: &Locale) -> Result<Json> {
     // Three kinds of English on this screen and all three are the server's, so
-    // all three are translated here (§16.x, D5): the section's heading, its one
+    // all three are translated here (§16.1, D5): the section's heading, its one
     // sentence, and each setting's label and help text. The help is the one
     // `translate_spec` cannot reach — it hangs off `ConfigDef` rather than off
     // `FormField` — so it is translated where it is serialised, which is here.
@@ -8662,7 +8662,7 @@ async fn prediction_target(
     Ok((model, instance))
 }
 
-/// A declared spec as the admin API returns it — **translated** (§16.x, D5).
+/// A declared spec as the admin API returns it — **translated** (§16.1, D5).
 ///
 /// The one place a `config_spec` becomes JSON, and therefore the one place the
 /// rule lives: the server translates everything the server says, so a stream
@@ -8674,7 +8674,7 @@ async fn prediction_target(
 /// On a monolingual installation this is one failed lookup per field and the
 /// labels come back unchanged (D11).
 /// A declared sentence — a framework's one-line pitch, a provider's label, an
-/// action's description — in the request's locale (§16.x, D5).
+/// action's description — in the request's locale (§16.1, D5).
 ///
 /// [`spec_json`]'s companion, and the same rule with the same key: the declared
 /// English. The extractor reads a `label:`/`description:` where it is written,

@@ -173,7 +173,7 @@ impl User {
     }
 
     /// The language this user has chosen to read the product in, if they have
-    /// chosen one (§16.x, D8).
+    /// chosen one (§16.1, D8).
     ///
     /// A tag, not a [`Locale`](sc_i18n::Locale): it is stored text that an older
     /// configuration may no longer enable, and the negotiation is the one place

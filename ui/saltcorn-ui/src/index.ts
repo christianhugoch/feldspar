@@ -438,7 +438,7 @@ export async function initialConfig(pattern: string, context: Obj): Promise<Obj>
 
 /** v1's `getStringsForI18n`: the strings a view's own configuration puts in
  * front of a person — a column's header, a link's text, an action's label
- * (§16.x, task 4.5).
+ * (§16.1, task 4.5).
  *
  * The pattern's own method, untouched: only the pattern knows which of its
  * configuration's values are sentences and which are column names. A pattern

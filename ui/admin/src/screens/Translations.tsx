@@ -1,4 +1,4 @@
-// An application's Translations tab (design §16.x, task 4.4).
+// An application's Translations tab (design §16.1, task 4.4).
 //
 // Type **B** strings: the admin's own, written while they built the
 // application. The screen is one table — a row per message the application's

@@ -147,7 +147,7 @@ export function App() {
     );
   }
 
-  // The locale the *server* negotiated for this request (§16.x, D8), which is
+  // The locale the *server* negotiated for this request (§16.1, D8), which is
   // the one it has already promised in `Content-Language`. The provider is
   // outside the three top-level states on purpose: the sign-in page is a page
   // too, and it has a language.

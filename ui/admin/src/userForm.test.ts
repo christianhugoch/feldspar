@@ -67,7 +67,7 @@ describe("adminUserFields", () => {
     expect(adminUserFields(fields).map((f) => f.name)).toEqual(["nickname"]);
   });
 
-  // `language` is the system's (§16.x): it has a select of its own, so it must
+  // `language` is the system's (§16.1): it has a select of its own, so it must
   // not also appear as a generic text box.
   it("does not offer the language column as a text box", () => {
     expect(SYSTEM_USER_COLUMNS).toContain("language");
@@ -160,7 +160,7 @@ describe("the form", () => {
     expect(body.extra).toEqual({ nickname: null, age: 37, member: true });
   });
 
-  // §16.x: the language box has three states and the body has to distinguish
+  // §16.1: the language box has three states and the body has to distinguish
   // two of them, because the server reads an absent `language` as "leave it
   // alone" and an explicit null as "back to the site default".
   it("sends null for the site default and the tag otherwise", () => {

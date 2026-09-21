@@ -877,7 +877,7 @@ async fn dispatch_app(
     }
 
     // The app's catalogue, in the same place and for the same reason
-    // (`{mount}/i18n/{locale}.json`, §16.x D7). An application with no locales
+    // (`{mount}/i18n/{locale}.json`, §16.1 D7). An application with no locales
     // never reaches the store: the guard is the first thing
     // [`app_i18n_catalog`] does, which is what D11 costs.
     if let Some(tag) = sc_app::i18n_locale_in_path(&app.app, path) {
@@ -1031,7 +1031,7 @@ async fn dispatch_app(
         },
         None => None,
     };
-    // The locale, negotiated once for this request (§16.x, D8): an application's
+    // The locale, negotiated once for this request (§16.1, D8): an application's
     // own pages, its view runtime and anything it fires are served in one
     // language, and it is the one this response's `Content-Language` names.
     // Against the *application's* locales when it declares any: they belong to
@@ -1089,7 +1089,7 @@ async fn dispatch_app(
     }
 }
 
-/// An application's catalogue: `GET {mount}/i18n/{locale}.json` (§16.x, D7).
+/// An application's catalogue: `GET {mount}/i18n/{locale}.json` (§16.1, D7).
 ///
 /// Served rather than bundled, which is the decision this route exists to keep:
 /// an admin who fixes a mistranslation must not have to wait for a bundler, and
@@ -1449,7 +1449,7 @@ async fn handle_api(
     };
 
     // The locale, negotiated once for this request now that the user is known
-    // (§16.x, D8), and `None` on a monolingual installation — which is what makes
+    // (§16.1, D8), and `None` on a monolingual installation — which is what makes
     // this cost nothing there (D11).
     let settings = sc_i18n::active();
     let negotiated = crate::i18n::negotiate(&settings, uri, headers, &jar, user.as_ref());
@@ -1496,7 +1496,7 @@ fn enforce_auth(auth: &AuthRequirement, user: Option<&User>) -> Option<Response>
     if matches!(auth, AuthRequirement::Public) {
         return None;
     }
-    // Two sentences a person reads, in the language that person reads (§16.x,
+    // Two sentences a person reads, in the language that person reads (§16.1,
     // D5). The locale is the signed-in user's, which is all this function is
     // given and all a refusal needs — see `i18n::locale_for_user`.
     let locale = crate::i18n::locale_for_user(user);

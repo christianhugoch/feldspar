@@ -1,4 +1,4 @@
-// The language picker in the sidebar's account row (design §16.x, task 3.3).
+// The language picker in the sidebar's account row (design §16.1, task 3.3).
 //
 // It writes the signed-in admin's **`language` column**, not a cookie and not
 // `localStorage`. The column is the second source a request's locale is

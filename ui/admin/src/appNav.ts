@@ -115,7 +115,7 @@ export function appNavLinks(
     });
   }
   // Every application has strings a person reads, whatever its framework
-  // writes them in, so this is not conditional on one (§16.x, 4.4). It sits
+  // writes them in, so this is not conditional on one (§16.1, 4.4). It sits
   // above Settings because Settings is always last.
   links.push({
     id: "translations",

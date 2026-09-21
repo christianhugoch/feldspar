@@ -239,14 +239,14 @@ async fn a_user_can_be_edited_and_deleted() -> Result<()> {
             email: "before@example.com".into(),
             password: "first-password".into(),
             role: 100,
-            // §16.x: an account created for somebody who reads French.
+            // §16.1: an account created for somebody who reads French.
             language: Some("fr".to_owned()),
             extra: BTreeMap::new(),
         },
     )
     .await?;
     let id = created.user.id;
-    // §16.x: the chosen language is on the row and on the user read back from
+    // §16.1: the chosen language is on the row and on the user read back from
     // it, so the router can negotiate from it without a second read.
     assert_eq!(created.user.language(), Some("fr"));
     assert_eq!(

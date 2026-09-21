@@ -20,7 +20,7 @@
 //! - [`email`] is the second section: the SMTP transport every message this
 //!   installation sends goes out through (§18.2).
 //! - [`localisation`] is the fourth: which languages this installation serves
-//!   (§16.x). Two keys, and a server that has never opened the section runs
+//!   (§16.1). Two keys, and a server that has never opened the section runs
 //!   exactly as it did before there was one.
 //! - [`development`] is the third: what this server prints while it runs — the
 //!   SQL echo and the log verbosity, both of which are switches on the

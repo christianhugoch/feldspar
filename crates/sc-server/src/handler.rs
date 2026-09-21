@@ -49,7 +49,7 @@ pub struct HandlerCtx {
     /// The authenticated user, if any. Presence/role already satisfy the
     /// endpoint's [`AuthRequirement`](sc_api::AuthRequirement).
     pub user: Option<User>,
-    /// The locale this request is served in (§16.x, D8).
+    /// The locale this request is served in (§16.1, D8).
     ///
     /// Negotiated **once**, in the router, from `?lang=`, the user's `language`
     /// column, the `lang` cookie and `Accept-Language`, against the enabled set.

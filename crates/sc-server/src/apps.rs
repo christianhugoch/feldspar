@@ -38,7 +38,7 @@ pub struct MountedApp {
     pub framework: Arc<dyn Framework>,
     /// The API providers it enables, each on its own sub-path.
     pub providers: Vec<Box<dyn ApiProvider>>,
-    /// The app's catalogues, as they are served (§16.x, D7): locale tag → the
+    /// The app's catalogues, as they are served (§16.1, D7): locale tag → the
     /// bytes and the ETag of `{mount}/i18n/{tag}.json`.
     ///
     /// **A cache, not the truth.** The truth is the `CatalogStore` — a file in
@@ -725,7 +725,7 @@ impl AppMounts {
     }
 
     /// Put a changed application **record** in front of the running mount,
-    /// without rebuilding anything (§16.x, task 4.4).
+    /// without rebuilding anything (§16.1, task 4.4).
     ///
     /// The case this exists for is the locale set: which languages an
     /// application serves is a property of its record, the router negotiates
@@ -763,7 +763,7 @@ impl AppMounts {
     }
 
     /// Drop every mounted app's cached catalogues, so the next request for one
-    /// re-reads its store (§16.x, D7).
+    /// re-reads its store (§16.1, D7).
     ///
     /// Called when a translation is saved. It is a sweep over the mounts rather
     /// than a lookup by id because the admin API holds the application, not the

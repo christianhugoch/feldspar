@@ -62,7 +62,7 @@ pub struct AppRequest {
     /// on first contact) — what a server-rendered form carries as `_csrf` and
     /// v1's `req.csrfToken()` answers. Empty when there is none.
     pub csrf_token: String,
-    /// The locale this request is served in (§16.x, D8) — v1's `req.getLocale()`.
+    /// The locale this request is served in (§16.1, D8) — v1's `req.getLocale()`.
     ///
     /// Negotiated once by the router and **carried**, never reached for: a
     /// framework that renders a page, a view runtime that looks a label up and a
@@ -278,7 +278,7 @@ pub trait Framework: Send + Sync {
     async fn handle(&self, req: AppRequest, cat: &Catalog) -> Result<AppResponse>;
 
     /// Drop whatever this framework has cached of the application's catalogue
-    /// (§16.x, D7).
+    /// (§16.1, D7).
     ///
     /// Called when a translation is saved. The default does nothing, which is
     /// right for every framework that serves a static bundle: a code

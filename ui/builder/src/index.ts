@@ -37,7 +37,7 @@ export interface StartBuilder {
   options: unknown;
   layout: unknown;
   mode: BuilderMode;
-  /** The locale the builder route negotiated for this admin (§16.x). */
+  /** The locale the builder route negotiated for this admin (§16.1). */
   locale?: string;
 }
 

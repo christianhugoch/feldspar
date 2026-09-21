@@ -1,5 +1,5 @@
 //! An application's own strings: finding them, filling them, and saving them
-//! (§16.x, task 4.4).
+//! (§16.1, task 4.4).
 //!
 //! This is the server half of the Translations screen. Three questions, and
 //! each is answered by asking the application rather than by keeping a record

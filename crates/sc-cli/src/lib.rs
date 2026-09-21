@@ -97,7 +97,7 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
     // The stored Localisation settings, on the same footing and here for the
     // same reason: what a `feldspar` command prints to an admin — and what a
     // server negotiates a request into — is a stored setting, so it has to be
-    // read as soon as there is a database to read it from (§16.x).
+    // read as soon as there is a database to read it from (§16.1).
     //
     // **Before** the Development settings, and that order is load-bearing: the
     // switch below turns SQL echoing on for this process, and a read performed

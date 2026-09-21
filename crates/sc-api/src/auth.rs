@@ -77,7 +77,7 @@ pub fn user_row_schema() -> TypeSchema {
         StructField::new("disabled", TypeSchema::bool()),
         // The language this account reads the product in — a system column with
         // its own select on the form, so it is a named field rather than one of
-        // `extra`'s (§16.x). Optional: most accounts have never stated one.
+        // `extra`'s (§16.1). Optional: most accounts have never stated one.
         StructField::new("language", TypeSchema::optional(TypeSchema::text())),
         // Keyed by column name, since only the admin's own schema knows what is
         // in here — `listFields` on the users table is what names them.

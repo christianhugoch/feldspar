@@ -48,7 +48,7 @@ pub const COL_DISABLED: &str = "disabled";
 ///
 /// Nullable, and `NULL` reads as *whatever the request would otherwise negotiate
 /// to*: a preference is a thing somebody states, and most people never do. It is
-/// the second source a request's locale is taken from (§16.x, D8), after an
+/// the second source a request's locale is taken from (§16.1, D8), after an
 /// explicit `?lang=` and before the cookie.
 ///
 /// It is also the one column here that is **the user's own**, which is why it is

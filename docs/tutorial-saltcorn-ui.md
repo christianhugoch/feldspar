@@ -478,3 +478,4 @@ and pages; a plugin pattern's layout step, if it has one, is not opened in it ye
 - [tutorial-ownership.md](tutorial-ownership.md) — rows a view shows per viewer.
 - [tutorial-triggers.md](tutorial-triggers.md) — triggers a view's or a page's action runs.
 - [tutorial-modules.md](tutorial-modules.md) — patterns from an installed plugin.
+- [tutorial-i18n.md](tutorial-i18n.md) — these views' own strings, in a second language.

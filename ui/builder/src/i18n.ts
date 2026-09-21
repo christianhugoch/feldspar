@@ -1,4 +1,4 @@
-// The `builder` domain: v1's builder, translated (design §16.x, task 3.5).
+// The `builder` domain: v1's builder, translated (design §16.1, task 3.5).
 //
 // The vendored builder already has the whole mechanism. `useTranslation` in
 // `vendor/saltcorn-builder/hooks/useTranslation.js` is

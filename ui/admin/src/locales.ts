@@ -1,6 +1,6 @@
 // The languages this installation serves, as the admin UI needs them.
 //
-// Two keys in Settings → Localisation decide everything here (design §16.x): a
+// Two keys in Settings → Localisation decide everything here (design §16.1): a
 // default locale, and the enabled set a request may be negotiated into. Both
 // arrive on `authStatus`, which is the call the SPA makes before it renders
 // anything — so the list is in hand wherever a screen offers a choice of

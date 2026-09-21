@@ -1,5 +1,5 @@
 //! Negotiating a request's locale, and saying which one was served
-//! (design §16.x, decision D8).
+//! (design §16.1, decision D8).
 //!
 //! The router is the one place a locale is decided. Everything below it — a
 //! handler, a framework, a view runtime, a trigger — is *given* one, because a
@@ -64,7 +64,7 @@ pub fn negotiate(
 }
 
 /// The settings a request **to an application** is negotiated against
-/// (§16.x, D8).
+/// (§16.1, D8).
 ///
 /// An application's locales are its own: they are a property of the thing the
 /// admin built, not of the installation that serves it, and an admin who

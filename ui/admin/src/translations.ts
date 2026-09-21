@@ -1,4 +1,4 @@
-// An application's Translations screen, as logic (design §16.x, task 4.4).
+// An application's Translations screen, as logic (design §16.1, task 4.4).
 //
 // The screen is one table: a row per message the application's source says, a
 // column per locale it serves, and a cell you can type in. Everything here is

@@ -172,7 +172,7 @@ pub async fn delete_application(catalog: &Catalog, id: AppId) -> Result<bool> {
     let existed = load_application(catalog, id).await?.is_some();
     let delete = Delete::from(APPLICATIONS_TABLE).filter(Expr::col(COL_ID).eq(Expr::lit(id.0)));
     run(catalog, Statement::from(delete)).await?;
-    // `_fd_translations.application` is by value (§16.x), so the cascade is
+    // `_fd_translations.application` is by value (§16.1), so the cascade is
     // ours to perform — the same arrangement views, pages and the library have.
     crate::i18n::delete_application_translations(catalog, id).await?;
     Ok(existed)

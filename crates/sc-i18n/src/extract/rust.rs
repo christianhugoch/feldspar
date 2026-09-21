@@ -155,7 +155,7 @@ fn read_macro(
 /// The second half of the `core` domain, and the reason it needs one: the
 /// settings screen's headings, a stream provider's `Broker URL`, a file
 /// backend's operations are **data**, not `t!` call sites, and the server
-/// translates them at the API edge with `translate_spec` (§16.x, D5). A
+/// translates them at the API edge with `translate_spec` (§16.1, D5). A
 /// catalogue that never heard of them is a `translate_spec` that can never
 /// find anything, so the scanner that fills the catalogue has to read them
 /// where they are written — which is a builder method or a struct field, and

@@ -67,7 +67,7 @@ export function appTabs(
   const tabs: { id: AppTab; label: string; href: string }[] = [
     { id: "settings", label: "Settings", href: `${base}/edit` },
     // Every application has strings a person reads, whatever its framework
-    // writes them in, so this tab is not conditional on one (§16.x, 4.4).
+    // writes them in, so this tab is not conditional on one (§16.1, 4.4).
     { id: "translations", label: "Translations", href: `${base}/translations` },
   ];
   if (app.has_views) {

@@ -1,5 +1,5 @@
 //! The Localisation settings: which languages this installation serves
-//! (design §16.x, decision D8).
+//! (design §16.1, decision D8).
 //!
 //! Two keys, because there are exactly two decisions: what a request falls back
 //! to when nothing else is known, and what it may be negotiated into. Everything

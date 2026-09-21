@@ -351,3 +351,6 @@ Your app is admin-only until you say otherwise, and its columns are all plain SQ
 next tutorial opens the `tasks` table to a non-admin role, gives it a **`File` field**, and
 uploads and serves real files from this app — with folder and file-type rules the server
 enforces: [tutorial-file-fields.md](tutorial-file-fields.md).
+
+And when this app needs a second language, every string in it goes through `t()` and the
+translations are a screen and a button away: [tutorial-i18n.md](tutorial-i18n.md).

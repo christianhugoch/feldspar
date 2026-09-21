@@ -2636,7 +2636,7 @@ fn normalise(html: &str) -> String {
     out
 }
 
-/// The milestone's Saltcorn UI half (§16.x, task 4.6): the **same screen, the
+/// The milestone's Saltcorn UI half (§16.1, task 4.6): the **same screen, the
 /// same button, rows instead of files**.
 ///
 /// A Saltcorn UI application's definition is rows, so its strings are values in

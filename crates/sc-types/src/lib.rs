@@ -25,7 +25,7 @@
 //! - [`catchall`] — the reduced display/edit path (value → text, text → value)
 //!   that stands in for the full `FieldView` trait until post-MVP.
 //! - [`translate_spec`] — the labels of a declared spec, translated against a
-//!   request's locale before the admin API serialises them (§16.x, [`i18n`]).
+//!   request's locale before the admin API serialises them (§16.1, [`i18n`]).
 //!
 //! `BaseField` and `Attrs` live here rather than in `sc-catalog`, where they
 //! started: neither is a catalog concept, and `FormField` needs both while

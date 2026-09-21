@@ -1,4 +1,4 @@
-//! End-to-end: which language a request is served in (design §16.x, decision
+//! End-to-end: which language a request is served in (design §16.1, decision
 //! D8), driven through the assembled router against a real Postgres database.
 //!
 //! Four claims, and each is one the unit tests below the router cannot make:

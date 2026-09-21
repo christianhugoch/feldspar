@@ -2,6 +2,102 @@
 
 Changes in reverse chronological order.
 
+## Internationalisation, phase 5: the documentation — and the milestone walked
+
+The fifth and last phase (`docs/I18N.md`, `TODO.md` §5). The facility was built over the four
+phases below this entry; this is the part that makes it findable by somebody who did not build
+it, and the part that says out loud which half of the definition of done a test can assert and
+which a human has to.
+
+- **`docs/TECHNICAL_DESIGN.md` §16.1 Internationalisation**, the last subsection of
+  cross-cutting concerns, because i18n is not a layer — it is something every layer does. It
+  carries the three populations of string and which one is out of scope, the catalogue's shape
+  and the one decision everything else follows from (the id **is** the English), the format with
+  the argument for single braces over the `{{ }}` template language and the shared fixture that
+  holds its two implementations to each other, the four domains and the two homes an
+  application's catalogue has, the negotiation order and the rule that a locale is never ambient,
+  D5 with where `translate_spec` actually lives (`sc-types`, not `sc-i18n`, and why), extraction
+  as a Rust pass with the constraint no JS library satisfies, the `Translator` seam with the
+  validation that is deliberately not in the prompt, what each population gets on both sides of
+  the Rust/TypeScript split, and a closing list of what stays English on purpose.
+- **The rest of the document moved with it**: `sc-i18n` in §2's crate tree (its arrows and its
+  dependency-table row landed with phase 1, which is why `the_design_crate_diagram_matches_the_workspace_manifests`
+  never went red), `Translator` and `CatalogStore` in §2.1's extension-point table, the crate in
+  §3's layer picture — drawn off to the side, because it is under *everything* rather than under
+  the query layer — the `language` column in §7.1 with the reason it is a system column, and the
+  catalogue route in §13.2 beside the observe socket it copies. `_fd_translations` was already in
+  §9's table catalogue and §9.2's ER diagram: `the_er_diagram_names_every_metadata_table` enforces
+  that the moment a table exists.
+- **The forward references are now real.** Four crates, the generated runtime and the admin SPA
+  all cited "§16.x" against a section that had not been written; the placeholder is gone and all
+  77 references point at §16.1.
+- **`docs/tutorial-i18n.md`**, the walkthrough: two locales turned on, the picker that appears in
+  the account row only when there is something to pick, what is French immediately (the `core`
+  catalogue ships) and what needs one `feldspar i18n translate` run and a rebuild (the `admin`
+  bundle) — which is the clearest statement of D5 there is. Then a React application end to end:
+  the four rules of a `t()` call site, `<T>` for a sentence with a link in it, the paragraph to
+  put in a coding agent's prompt, the Translations tab with its coverage, its **Translate
+  missing**, its rejected translations, its orphans and its unwrapped literals, the
+  `locales/fr.json` that appears in the app's own repository, and the reload that is French with
+  no rebuild. Then the same for a Saltcorn UI application, with its two differences: v1's `%s` is
+  preserved, and a plural entry is not used because v1's `__` has no plural forms.
+- **Both documents are pinned to the code** (`crates/sc-cli/tests/repo_hygiene.rs`, three tests):
+  §16.1 still names each decision a reader would otherwise reconstruct from four crates, the
+  tutorial still walks each step of the definition of done and still says the two rules a reader
+  is most harmed by losing, and the tutorial is linked from the two tutorials whose applications
+  it translates. Prose is not checked; names, numbers and rules are.
+
+### The definition of done, walked
+
+> An admin sets the enabled locales to English and French, picks French in the user menu, and the
+> table editor, the settings screen and a stream provider's configuration form — whose labels are
+> Rust data — are all in French. A React application whose labels are written `t("Add a task")`
+> lists its strings on a Translations screen with a coverage figure; **Translate missing** fills
+> the French column through the configured LLM, rejecting any translation that lost a
+> `{placeholder}`; saving writes `<project>/locales/fr.json` in the app's file store, and the
+> running application serves French on the next reload **without a rebuild**. A Saltcorn UI
+> application's list-view header is translated from the same screen, out of `_fd_translations`.
+> `feldspar i18n lint` is clean for `ui/admin/src`. The same scenario — with a scripted translator
+> in place of the LLM — passes in `cargo test`.
+
+The last sentence is the one a machine can answer, and it does.
+
+- **Negotiation and the server's half**: `locale_negotiation::a_request_is_served_in_the_language_it_negotiated`
+  and `what_the_server_says_is_said_in_the_request_s_language` — the second walks the settings
+  sections and an extension point's `config_spec` in French over real HTTP, which is the "whose
+  labels are Rust data" clause.
+- **The React half, end to end**: `app_i18n::an_application_is_extracted_translated_and_served_end_to_end`
+  scaffolds an application, extracts its strings, fills French through a **scripted** translator,
+  reads `{mount}/i18n/fr.json` back and asserts `Content-Language: fr`.
+  `a_translation_is_live_without_a_rebuild` is the no-rebuild clause,
+  `an_applications_catalogue_is_served_beside_its_api_with_an_etag` the 304,
+  `an_orphan_survives_a_save_that_never_showed_it` the rule that the *server* puts orphans back,
+  and `an_untranslated_application_costs_nothing` D11.
+- **The rejection**: `sc_i18n::translate` against a scripted translator that renames a
+  placeholder, drops one, and loses a plural category — each refused and left in English with the
+  key in the warning — and `sc-cli`'s `coverage_counts_and_the_check_catches_a_renamed_placeholder`
+  for the same check at the command line.
+- **The Saltcorn UI half**: `saltcorn_ui_render::a_saltcorn_ui_applications_strings_are_translated_from_the_same_screen`,
+  which translates a list view's **link label** rather than a column header — both are type B
+  strings the pattern reports through `getStringsForI18n`, but BooksDB's columns carry no
+  `header_label`, so the label is the string that actually crosses the seam in this fixture.
+- **The lint**: `feldspar i18n lint ui/admin/src` is clean, and CI runs `feldspar i18n check`
+  beside `fmt` and `clippy`.
+
+Green on this machine for this phase: `sc-i18n` 65 tests, `sc-server`'s ten i18n tests
+(`app_i18n` 7, `locale_negotiation` 2, the Saltcorn UI one), and `sc-cli`'s 40 `repo_hygiene`
+tests including the three added here.
+
+**What has not been walked by hand, and this entry does not pretend otherwise.** Picking French
+in the user menu and reading the *SPA's own* labels in French needs
+`ui/admin/src/locales/fr.json`, and that file is a `feldspar i18n translate --domain admin
+--locale fr` run: 833 messages against a configured provider, which needs an API key and spends
+money. The same is true of the builder's 339 and of `de`, `es`, `zh-Hans` and `ar` for all three
+domains — fourteen files, ~5,700 messages. `crates/sc-i18n/locales/fr.json` is complete (256/256)
+and is what the French demo and the negotiation tests run on; the command per file is in
+`crates/sc-i18n/locales/README.md`, and the rest is carried in `TODO.md` beside the other items
+that need a provider.
+
 ## Internationalisation, phase 4: applications
 
 The fourth of five phases (`docs/I18N.md`, `TODO.md` §4). Phase 3 covered population **A** — our

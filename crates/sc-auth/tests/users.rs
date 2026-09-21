@@ -69,7 +69,7 @@ async fn bootstrap_creates_users_table() -> sc_error::Result<()> {
     assert!(!disabled.required);
     assert_eq!(disabled.base.type_, TypeRef::Basic(BasicType::Bool));
 
-    // The chosen language (§16.x): nullable text, since `NULL` is "whatever the
+    // The chosen language (§16.1): nullable text, since `NULL` is "whatever the
     // request negotiates" and most accounts never state one.
     let language = users.field(COL_LANGUAGE).expect("language field");
     assert!(!language.required);

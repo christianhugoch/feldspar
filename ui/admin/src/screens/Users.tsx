@@ -296,7 +296,7 @@ export function Users() {
  * field.
  *
  * The language select is only rendered on an installation that serves more than
- * one (§16.x, D11) — a control with one option is a control that asks a question
+ * one (§16.1, D11) — a control with one option is a control that asks a question
  * with one answer.
  */
 function UserDialog({

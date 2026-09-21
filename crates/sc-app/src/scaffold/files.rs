@@ -86,7 +86,7 @@ const RUNTIME_README_FILE: &str = "README.md";
 const RUNTIME_SCHEMA_FILE: &str = "schema.sql";
 
 /// The generated message runtime: the format, the negotiation and the catalogue
-/// fetch (§16.x, D10 — the runtime is generated rather than depended on).
+/// fetch (§16.1, D10 — the runtime is generated rather than depended on).
 const RUNTIME_MESSAGES_FILE: &str = "messages.ts";
 
 /// React's i18n layer over it: the provider, the hook and `<T>`.

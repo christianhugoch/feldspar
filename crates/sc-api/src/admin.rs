@@ -58,7 +58,7 @@ pub fn admin_endpoints() -> EndpointSet {
             .output(TypeSchema::struct_of([
                 StructField::new("any_user_exists", TypeSchema::bool()),
                 StructField::new("current_user", TypeSchema::optional(user_summary_schema())),
-                // Which languages this installation serves (§16.x). Here rather
+                // Which languages this installation serves (§16.1). Here rather
                 // than on the settings payload because this is the call the SPA
                 // makes before it renders anything, and three screens need the
                 // list: the user menu's locale picker, the user form's language
@@ -2118,7 +2118,7 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
-    // --- Translations (§16.x, task 4.4) -----------------------------------------
+    // --- Translations (§16.1, task 4.4) -----------------------------------------
     // An application's own strings — type B, the admin's, written while they
     // built the application. One read and three writes, because the screen is
     // one table: what the source says, what each locale has, what nobody
@@ -3640,13 +3640,13 @@ fn role_schema() -> TypeSchema {
 /// keyed by column name; the system's own columns are refused there, since each
 /// has its own way in.
 /// What languages this installation serves: the default, and the enabled set
-/// (§16.x). `enabled` always contains `default`, and a one-element `enabled` is
+/// (§16.1). `enabled` always contains `default`, and a one-element `enabled` is
 /// an installation that negotiates nothing.
 fn locales_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("default", TypeSchema::text()),
         StructField::new("enabled", TypeSchema::array(TypeSchema::text())),
-        // The locale **this request** was negotiated into (§16.x, D8), so the
+        // The locale **this request** was negotiated into (§16.1, D8), so the
         // SPA loads the catalogue the server has already committed to in
         // `Content-Language` rather than negotiating a second time from the
         // browser's own idea of the order. Two negotiations of one request is
@@ -3663,7 +3663,7 @@ fn user_input_schema() -> TypeSchema {
         // A BCP-47 tag, or null/absent for "whatever the request negotiates".
         // On an **update** the two are not the same: an absent `language` leaves
         // the stored one alone, and an explicit `null` clears it, which is what
-        // the form's "Site default" option sends (§16.x).
+        // the form's "Site default" option sends (§16.1).
         StructField::new("language", TypeSchema::optional(TypeSchema::text())),
         StructField::new("extra", TypeSchema::optional(TypeSchema::json())),
     ])

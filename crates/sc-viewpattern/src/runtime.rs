@@ -100,7 +100,7 @@ pub struct ViewRequest {
     /// an ajax reload of a view asks for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap: Option<Wrap>,
-    /// The locale this request is served in (§16.x, D8), which is what v1's
+    /// The locale this request is served in (§16.1, D8), which is what v1's
     /// `req.getLocale()` answers. `None` is English.
     ///
     /// Carried on the request rather than reached for, like every other locale
@@ -336,7 +336,7 @@ pub trait ViewRuntime: Send + Sync {
 
     /// v1's `getStringsForI18n`: the strings a view's own configuration puts in
     /// front of a person — a column's header, a link's text, an action's label
-    /// (§16.x, task 4.5).
+    /// (§16.1, task 4.5).
     ///
     /// These are **type B** strings, the admin's: they were written when the
     /// view was configured, so they cannot ship in any catalogue of ours, and

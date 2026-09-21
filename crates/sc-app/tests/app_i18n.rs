@@ -1,5 +1,5 @@
 //! An application's catalogue, through both halves of the [`CatalogStore`]
-//! seam (§16.x, D4): files for an app with a project tree, `_fd_translations`
+//! seam (§16.1, D4): files for an app with a project tree, `_fd_translations`
 //! rows for one without.
 //!
 //! The point of the seam is that everything above it — the admin API, the
@@ -199,7 +199,7 @@ async fn an_application_without_a_tree_keeps_its_catalogues_in_rows() -> Result<
     let cat = catalog(&db).await?;
 
     // No application row is needed to hold a catalogue: `application` is a value
-    // (§16.x), not a key, for the reason `_fd_views.application` is not one.
+    // (§16.1), not a key, for the reason `_fd_views.application` is not one.
     let app = AppId::new();
     let store = RowCatalogStore::new(app);
     round_trip(&cat, &store).await?;

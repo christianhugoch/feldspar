@@ -284,7 +284,7 @@ translates against *that customer's* `language`, which is a bug class v1 had.
 
 ## Phase 5 — Documentation
 
-- [ ] 5.1 `docs/TECHNICAL_DESIGN.md`: a new **§16.x Internationalisation** (the three
+- [x] 5.1 `docs/TECHNICAL_DESIGN.md`: a new **§16.1 Internationalisation** (the three
       populations, the catalogue, the format, the domains, negotiation, the seams and what is
       *not* translated), `sc-i18n` in §2's crate tree and §3's layers, `Translator` and
       `CatalogStore` in §2.1's extension-point table, `_fd_translations` in §9's table
@@ -292,11 +292,12 @@ translates against *that customer's* `language`, which is a bug class v1 had.
       column in §7.1.
       **Partly done by 4.1:** `_fd_translations` is already in §9's table catalogue and §9.2's
       ER diagram and relationships — `repo_hygiene`'s "the ER diagram names every metadata
-      table" enforces that the moment the table exists. The rest of 5.1 is still to write.
-- [ ] 5.2 `docs/tutorial-i18n.md`: turn on two locales, see the admin UI in French, translate a
+      table" enforces that the moment the table exists. The rest is written, and the 77
+      "§16.x" forward references in the code now point at a section that exists.
+- [x] 5.2 `docs/tutorial-i18n.md`: turn on two locales, see the admin UI in French, translate a
       React application end to end (including what the coding agent should be told), then the
       same for a Saltcorn UI application.
-- [ ] 5.3 The CHANGELOG entry for the milestone.
+- [x] 5.3 The CHANGELOG entry for the milestone.
 
 ---
 
@@ -324,7 +325,7 @@ translates against *that customer's* `language`, which is a bug class v1 had.
 ## Carried past this milestone
 
 - From this milestone: the rest of 3.6 — `de`, `es`, `zh-Hans` and `ar` for all three domains,
-  and `fr` for `admin` (803 messages) and `builder` (339). One `feldspar i18n translate
+  and `fr` for `admin` (833 messages) and `builder` (339). One `feldspar i18n translate
   --domain D --locale L` per file, against a configured provider.
 - From this milestone: the non-JSX half of 3.4's sweep (see its deviations) — the `setError`
   fallback sentences, and `deleteConfirmation`/`libraryDeleteConfirmation`, which are pure

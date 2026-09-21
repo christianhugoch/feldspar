@@ -300,7 +300,7 @@ pub struct SaltcornUiFramework {
     runtime: Arc<dyn ViewRuntime>,
     /// The snapshot of the view set's current generation, built once for it.
     snapshot: RwLock<Option<Arc<ViewSnapshot>>>,
-    /// The application's catalogue per locale, flat (§16.x, task 4.5).
+    /// The application's catalogue per locale, flat (§16.1, task 4.5).
     ///
     /// This framework renders **server-side**, so the phrases are looked up as
     /// the HTML is built and the catalogue has to be here rather than in the
@@ -366,7 +366,7 @@ impl Framework for SaltcornUiFramework {
 
     async fn handle(&self, req: AppRequest, cat: &Catalog) -> Result<AppResponse> {
         // The request's catalogue, read once here so the six places that build
-        // a `ViewRequest` can pick it up synchronously (§16.x, task 4.5).
+        // a `ViewRequest` can pick it up synchronously (§16.1, task 4.5).
         let _ = self.catalogue(cat, req.locale.as_str()).await;
         let path = req.path.clone();
         let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();

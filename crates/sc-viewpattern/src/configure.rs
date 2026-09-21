@@ -149,7 +149,7 @@ impl<'a> Configurer<'a> {
     }
 
     /// The strings a view's own configuration puts in front of a person — v1's
-    /// `getStringsForI18n`, asked of the pattern (§16.x, task 4.5).
+    /// `getStringsForI18n`, asked of the pattern (§16.1, task 4.5).
     ///
     /// This is a Saltcorn UI application's half of "what does this application
     /// say?": a code application's strings are `t()` call sites a parser finds,

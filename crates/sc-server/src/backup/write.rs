@@ -142,7 +142,7 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
                 // A backup is an archive, not a screen: its `table.json` is
                 // read back by a restore and by a person grepping it, so it is
                 // written in the source language whatever the admin who pressed
-                // the button reads (§16.x).
+                // the button reads (§16.1).
                 "table": table_json(catalog, &table, rls, &sc_i18n::Locale::source()),
                 "fields": fields,
                 "constraints": constraints,

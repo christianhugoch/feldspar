@@ -55,7 +55,7 @@ mod diagnostics;
 mod factory;
 mod framework;
 // An application's own catalogue: the `CatalogStore` seam and `_fd_translations`
-// (§16.x, D4).
+// (§16.1, D4).
 pub mod i18n;
 // The application third of the administrative tool surface (§13.6), and the one
 // constructor of the whole nine-tool set.

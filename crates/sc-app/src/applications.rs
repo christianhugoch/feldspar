@@ -127,7 +127,7 @@ pub async fn bootstrap(catalog: &Catalog) -> Result<Table> {
     let table = catalog
         .bootstrap_table(APPLICATIONS_TABLE, &applications_fields())
         .await?;
-    // An application's translations are part of what an application is (§16.x,
+    // An application's translations are part of what an application is (§16.1,
     // D4): they are created with it, deleted with it, and a deployment that can
     // hold an app can hold its catalogue. So they bootstrap together, rather
     // than leaving every call site to remember a second one.

@@ -30,7 +30,7 @@ mod handler;
 mod handlers;
 mod i18n;
 // An application's own strings: the Translations screen's server half
-// (§16.x, 4.4).
+// (§16.1, 4.4).
 mod logging;
 mod lsp;
 mod mcp;

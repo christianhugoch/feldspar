@@ -1,4 +1,4 @@
-// The language choices the admin UI offers (design §16.x).
+// The language choices the admin UI offers (design §16.1).
 //
 // The decisions worth pinning are the three that would otherwise be quietly
 // wrong: that one enabled locale is no choice at all (D11), that a language is
