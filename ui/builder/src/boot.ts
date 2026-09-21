@@ -35,6 +35,8 @@ export interface BootData {
   options: unknown;
   layout: unknown;
   mode: BuilderMode;
+  /** The locale the builder route negotiated for this admin (§16.x). */
+  locale?: string;
   /** Where a saved layout goes next. */
   afterSave: string;
 }
@@ -77,6 +79,7 @@ export function bootFromDocument(
       options: boot.options,
       layout: boot.layout,
       mode: boot.mode,
+      locale: boot.locale,
     },
     client,
   );

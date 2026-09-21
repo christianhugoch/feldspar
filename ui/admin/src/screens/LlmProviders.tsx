@@ -25,6 +25,7 @@ import { navigate } from "../App";
 import { IconPlus } from "../icons";
 import { PageBody, PageHeader } from "../layout";
 import { asString } from "../settings";
+import { T, useT } from "../i18n";
 
 type ProviderItem = ListLlmProvidersResponse[number];
 
@@ -45,6 +46,7 @@ function elide(value: string, max = 48): string {
 }
 
 export function LlmProviders() {
+  const { t } = useT();
   const [providers, setProviders] = useState<ProviderItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -63,8 +65,10 @@ export function LlmProviders() {
   const remove = async (provider: ProviderItem) => {
     if (
       !window.confirm(
-        `Remove the LLM provider "${provider.name}"?\n\n` +
-          "Anything configured to use it will stop working until it is repointed.",
+        t(
+          'Remove the LLM provider "{name}"?\n\nAnything configured to use it will stop working until it is repointed.',
+          { name: provider.name },
+        ),
       )
     ) {
       return;
@@ -84,11 +88,11 @@ export function LlmProviders() {
     <>
       <PageHeader
         pretitle="Agents"
-        title="LLM providers"
+        title={t("LLM providers")}
         actions={
           <Button onClick={() => navigate("/llm-providers/new")}>
             <IconPlus className="icon-2" />
-            New provider
+            <T text="New provider" />
           </Button>
         }
       />
@@ -99,17 +103,17 @@ export function LlmProviders() {
           <Table hover responsive className="card-table table-vcenter">
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Backend</th>
-                <th>Settings</th>
-                <th className="text-end">Actions</th>
+                <th><T text="Name" /></th>
+                <th><T text="Backend" /></th>
+                <th><T text="Settings" /></th>
+                <th className="text-end"><T text="Actions" /></th>
               </tr>
             </thead>
             <tbody>
               {providers?.length === 0 && (
                 <tr>
                   <td colSpan={4} className="text-muted">
-                    No LLM providers yet. Add one to give an agent a model to talk to.
+                    <T text="No LLM providers yet. Add one to give an agent a model to talk to." />
                   </td>
                 </tr>
               )}
@@ -130,14 +134,14 @@ export function LlmProviders() {
                         variant="outline-secondary"
                         href={`#/llm-providers/${encodeURIComponent(provider.id)}/edit`}
                       >
-                        Edit
+                        <T text="Edit" />
                       </Button>
                       <Button
                         size="sm"
                         variant="outline-danger"
                         onClick={() => void remove(provider)}
                       >
-                        Remove
+                        <T text="Remove" />
                       </Button>
                     </div>
                   </td>
@@ -148,9 +152,7 @@ export function LlmProviders() {
         </div>
 
         <p className="text-muted small mt-3">
-          API keys are stored in the Saltcorn database and are never sent back to this
-          screen — an existing key shows as ••••••••. They are not encrypted at rest, so
-          treat database access as key access.
+          <T text="API keys are stored in the Saltcorn database and are never sent back to this screen — an existing key shows as ••••••••. They are not encrypted at rest, so treat database access as key access." />
         </p>
       </PageBody>
     </>

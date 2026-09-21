@@ -71,8 +71,10 @@ import {
   type Toolchains,
 } from "../modules";
 import { SettingField, buildConfig, initialValues, type FieldSpec } from "../settings";
+import { T, useT } from "../i18n";
 
 export function ModulesTab() {
+  const { t } = useT();
   const [modules, setModules] = useState<Module[] | null>(null);
   const [bundled, setBundled] = useState<BundledModule[]>([]);
   const [root, setRoot] = useState("");
@@ -171,7 +173,13 @@ export function ModulesTab() {
   };
 
   const remove = async (module: Module) => {
-    if (!window.confirm(`Remove ${module.name} and the actions it supplies?`)) return;
+    if (
+      !window.confirm(
+        t("Remove {name} and the actions it supplies?", { name: module.name }),
+      )
+    ) {
+      return;
+    }
     setBusy("Removing…");
     setError(null);
     setNote(null);
@@ -239,60 +247,102 @@ export function ModulesTab() {
       {tools.npmTooOld && (
         <Alert variant="warning">
           <AlertBody>
-            This server&apos;s <code>npm</code> is {tools.npmTooOld.version}, which cannot install
-            a module: it cannot resolve the local <code>@saltcorn/*</code> packages the modules
-            directory depends on, so every install fails with{" "}
-            <code>Invalid comparator: file:…</code> whatever is being installed. npm{" "}
-            {tools.npmTooOld.minimum} or newer is needed. Debian and Ubuntu package npm 9.2.0, so
-            this is what <code>apt install npm</code> gives — install Node.js from NodeSource, or
-            upgrade npm alone with <code>sudo npm install -g npm@latest</code>.
+            <T
+              text="This server’s {npm} is {version}, which cannot install a module: it cannot resolve the local {packages} packages the modules directory depends on, so every install fails with {error} whatever is being installed."
+              values={{
+                npm: <code>npm</code>,
+                packages: <code>@saltcorn/*</code>,
+                error: <code>Invalid comparator: file:…</code>,
+              }}
+              args={{ version: tools.npmTooOld.version }}
+            />{" "}
+            <T
+              text="npm {minimum} or newer is needed. Debian and Ubuntu package npm 9.2.0, so this is what {apt} gives — install Node.js from NodeSource, or upgrade npm alone with {upgrade}."
+              values={{
+                apt: <code>apt install npm</code>,
+                upgrade: <code>sudo npm install -g npm@latest</code>,
+              }}
+              args={{ minimum: tools.npmTooOld.minimum }}
+            />
           </AlertBody>
         </Alert>
       )}
       {!tools.node && (
         <Alert variant="warning">
           <AlertBody>
-            This server has no Node.js on its PATH. Modules <em>run</em> inside Saltcorn and do
-            not need it — but <code>npm</code> is what installs one, so no new JavaScript module
-            can be installed until Node.js is.
+            <T text="This server has no Node.js on its PATH. Modules" /> <em><T text="run" /></em> <T text="inside Saltcorn and do not need it — but" /> <code>npm</code> <T text="is what installs one, so no new JavaScript module can be installed until Node.js is." />
           </AlertBody>
         </Alert>
       )}
 
       <div className="card mb-3">
         <div className="card-header">
-          <h3 className="card-title">Install a module</h3>
+          <h3 className="card-title"><T text="Install a module" /></h3>
           <div className="card-actions">
             <Button variant="outline-secondary" size="sm" disabled={!!busy} onClick={() => void reload()}>
-              Reload modules
+              <T text="Reload modules" />
             </Button>
           </div>
         </div>
         <div className="card-body">
           <p className="text-secondary">
-            A module is a Saltcorn plugin: a package that supplies actions your triggers can
-            run, functions your formulas and code bodies can call, and tables Saltcorn can read.
-            A <strong>JavaScript</strong> module is an npm package and runs on a worker that
-            reaches only what you grant it under <strong>Permissions</strong> — nothing, until
-            you do. A <strong>Python</strong> module is a distribution installed into this
-            server&apos;s Python environment and runs in the server&apos;s own interpreter, with
-            the server&apos;s own privileges: there is no sandbox for one and nothing to grant.{" "}
-            <strong>Installing</strong> either is not sandboxed: <code>npm install</code> and{" "}
-            <code>pip install</code> run the package&apos;s own install scripts with this
-            server&apos;s privileges, so install only modules you trust. npm packages are
-            installed under <code>{root}</code>
+            <T text="A module is a Saltcorn plugin: a package that supplies actions your triggers can run, functions your formulas and code bodies can call, and tables Saltcorn can read." />{" "}
+            <T
+              text="A {javascript} module is an npm package and runs on a worker that reaches only what you grant it under {permissions} — nothing, until you do."
+              values={{
+                javascript: (
+                  <strong>
+                    <T text="JavaScript" />
+                  </strong>
+                ),
+                permissions: (
+                  <strong>
+                    <T text="Permissions" />
+                  </strong>
+                ),
+              }}
+            />{" "}
+            <T
+              text="A {python} module is a distribution installed into this server’s Python environment and runs in the server’s own interpreter, with the server’s own privileges: there is no sandbox for one and nothing to grant."
+              values={{
+                python: (
+                  <strong>
+                    <T text="Python" />
+                  </strong>
+                ),
+              }}
+            />{" "}
+            <T
+              text="{installing} either is not sandboxed: {npm} and {pip} run the package’s own install scripts with this server’s privileges, so install only modules you trust."
+              values={{
+                installing: (
+                  <strong>
+                    <T text="Installing" />
+                  </strong>
+                ),
+                npm: <code>npm install</code>,
+                pip: <code>pip install</code>,
+              }}
+            />{" "}
             {pythonDir ? (
-              <>
-                {" "}
-                and Python distributions into <code>{pythonDir}</code>
-              </>
-            ) : null}
-            .
+              <T
+                text="npm packages are installed under {root}, and Python distributions into {pythonDir}."
+                values={{
+                  root: <code>{root}</code>,
+                  pythonDir: <code>{pythonDir}</code>,
+                }}
+              />
+            ) : (
+              <T
+                text="npm packages are installed under {root}."
+                values={{ root: <code>{root}</code> }}
+              />
+            )}
           </p>
           <div className="row g-2 align-items-end">
             <div className="col-md-3">
               <Form.Group controlId="module-source">
-                <Form.Label>Type</Form.Label>
+                <Form.Label><T text="Type" /></Form.Label>
                 <Form.Select
                   value={choiceValue(form)}
                   onChange={(e) => {
@@ -343,16 +393,23 @@ export function ModulesTab() {
       {bundled.length > 0 && (
         <div className="card mb-3">
           <div className="card-header">
-            <h3 className="card-title">Modules that ship with Saltcorn</h3>
+            <h3 className="card-title"><T text="Modules that ship with Saltcorn" /></h3>
           </div>
           <div className="card-body">
             <p className="text-secondary">
-              These are written and maintained here and travel inside Saltcorn itself, so there
-              is no package name to look up and nothing to trust beyond what you already run.
-              They are still modules: nothing below does anything until you install it. What is
-              <em> not</em> shipped is what each one depends on — installing fetches that from{" "}
-              <code>npm</code> or <code>PyPI</code>, which is the one part of the click that
-              reaches the network.
+              <T text="These are written and maintained here and travel inside Saltcorn itself, so there is no package name to look up and nothing to trust beyond what you already run. They are still modules: nothing below does anything until you install it." />{" "}
+              <T
+                text="What is {not_} shipped is what each one depends on — installing fetches that from {npm} or {pypi}, which is the one part of the click that reaches the network."
+                values={{
+                  not_: (
+                    <em>
+                      <T text="not" />
+                    </em>
+                  ),
+                  npm: <code>npm</code>,
+                  pypi: <code>PyPI</code>,
+                }}
+              />
             </p>
             <div className="row g-3">
               {bundled.map((entry) => (
@@ -370,12 +427,11 @@ export function ModulesTab() {
       )}
 
       {modules === null ? (
-        <div className="text-secondary">Loading…</div>
+        <div className="text-secondary"><T text="Loading…" /></div>
       ) : modules.length === 0 ? (
         <div className="card">
           <div className="card-body text-secondary">
-            No modules are installed. Try <code>@saltcorn/mqtt</code>, which supplies an action
-            that publishes a row to an MQTT broker.
+            <T text="No modules are installed. Try" /> <code>@saltcorn/mqtt</code><T text=", which supplies an action that publishes a row to an MQTT broker." />
           </div>
         </div>
       ) : (
@@ -421,7 +477,7 @@ function BundledCard({
         <div className="card-body">
           <h4 className="card-title mb-1">
             {entry.title}{" "}
-            {entry.installed && <StatusBadge tone="green">Installed</StatusBadge>}
+            {entry.installed && <StatusBadge tone="green"><T text="Installed" /></StatusBadge>}
           </h4>
           <div className="text-secondary mb-2">{bundledSubtitle(entry)}</div>
           <p className="mb-2">{entry.description}</p>
@@ -459,8 +515,7 @@ function BundledCard({
           </Button>
           {entry.installed && (
             <span className="text-secondary ms-2">
-              Reinstalling takes the version in this release, keeping its settings and
-              permissions.
+              <T text="Reinstalling takes the version in this release, keeping its settings and permissions." />
             </span>
           )}
         </div>
@@ -522,7 +577,7 @@ function ModuleCard({
             </Button>
           )}
           <Button variant="outline-danger" size="sm" disabled={busy} onClick={onRemove}>
-            Remove
+            <T text="Remove" />
           </Button>
         </div>
       </div>
@@ -541,7 +596,7 @@ function ModuleCard({
 
         {module.actions.length > 0 && (
           <>
-            <div className="text-secondary mb-1">Actions</div>
+            <div className="text-secondary mb-1"><T text="Actions" /></div>
             <ul className="list-unstyled mb-2">
               {module.actions.map((action) => (
                 <li key={action.name}>
@@ -555,7 +610,7 @@ function ModuleCard({
 
         {module.functions.length > 0 && (
           <>
-            <div className="text-secondary mb-1">Functions</div>
+            <div className="text-secondary mb-1"><T text="Functions" /></div>
             <ul className="list-unstyled mb-2">
               {module.functions.map((fn) => (
                 <li key={fn.name}>
@@ -567,16 +622,14 @@ function ModuleCard({
               ))}
             </ul>
             <div className="text-secondary mb-2">
-              A code body calls these with <code>await</code>, including the ones this module
-              wrote synchronously; a formula calls them by name, and the call is resolved before
-              the formula runs.
+              <T text="A code body calls these with" /> <code>await</code><T text=", including the ones this module wrote synchronously; a formula calls them by name, and the call is resolved before the formula runs." />
             </div>
           </>
         )}
 
         {module.table_providers.length > 0 && (
           <>
-            <div className="text-secondary mb-1">Table providers</div>
+            <div className="text-secondary mb-1"><T text="Table providers" /></div>
             <ul className="list-unstyled mb-2">
               {module.table_providers.map((provider) => (
                 <li key={provider}>
@@ -585,15 +638,14 @@ function ModuleCard({
               ))}
             </ul>
             <div className="text-secondary mb-2">
-              Create a table from one under Data → Tables → New table. Saltcorn reads its rows;
-              it does not write them.
+              <T text="Create a table from one under Data → Tables → New table. Saltcorn reads its rows; it does not write them." />
             </div>
           </>
         )}
 
         {module.view_patterns.length > 0 && (
           <>
-            <div className="text-secondary mb-1">View patterns</div>
+            <div className="text-secondary mb-1"><T text="View patterns" /></div>
             <ul className="list-unstyled mb-2">
               {module.view_patterns.map((pattern) => (
                 <li key={pattern}>
@@ -602,8 +654,7 @@ function ModuleCard({
               ))}
             </ul>
             <div className="text-secondary mb-2">
-              A Saltcorn UI application offers these under Views → New view, beside Saltcorn
-              1's own.
+              <T text="A Saltcorn UI application offers these under Views → New view, beside Saltcorn 1's own." />
             </div>
           </>
         )}
@@ -656,7 +707,7 @@ function ModuleCard({
               />
             ))}
             <Button type="submit" size="sm" disabled={busy}>
-              Save settings
+              <T text="Save settings" />
             </Button>
           </form>
         )}
@@ -706,11 +757,18 @@ function PermissionsForm({
       }}
     >
       <p className="text-secondary">
-        A module reaches nothing it is not granted here — no host, no file, no environment
-        variable — and it always runs on a worker of its own while its permissions differ from
-        the other modules&apos;. <strong>Installing</strong> a module is not sandboxed:{" "}
-        <code>npm install</code> and the package&apos;s own install scripts run as this server,
-        before any of this applies.
+        <T text="A module reaches nothing it is not granted here — no host, no file, no environment variable — and it always runs on a worker of its own while its permissions differ from the other modules’." />{" "}
+        <T
+          text="{installing} a module is not sandboxed: {npm} and the package’s own install scripts run as this server, before any of this applies."
+          values={{
+            installing: (
+              <strong>
+                <T text="Installing" />
+              </strong>
+            ),
+            npm: <code>npm install</code>,
+          }}
+        />
       </p>
       {PERMISSION_KINDS.map((kind) => (
         <Form.Group className="mb-2" controlId={`module-${module.id}-${kind.key}`} key={kind.key}>
@@ -737,7 +795,7 @@ function PermissionsForm({
         </Alert>
       )}
       <Button type="submit" size="sm" disabled={busy || problems.length > 0}>
-        Save permissions
+        <T text="Save permissions" />
       </Button>
     </form>
   );

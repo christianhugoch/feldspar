@@ -32,10 +32,12 @@ import {
 } from "../library";
 import type { AppItem } from "../views";
 import { ApplicationTabs } from "./ApplicationViews";
+import { T, useT } from "../i18n";
 
 type Renaming = { item: LibraryItem; name: string; error: string | null };
 
 export function ApplicationLibrary({ appId }: { appId: string }) {
+  const { t } = useT();
   const builderAvailable = useBuilderAvailable();
   const [app, setApp] = useState<AppItem | null>(null);
   const [items, setItems] = useState<LibraryItem[] | null>(null);
@@ -107,7 +109,7 @@ export function ApplicationLibrary({ appId }: { appId: string }) {
       actions={
         <Button variant="outline-secondary" onClick={() => navigate("/applications")}>
           <IconArrowLeft className="icon-2" />
-          Applications
+          <T text="Applications" />
         </Button>
       }
     />
@@ -148,10 +150,10 @@ export function ApplicationLibrary({ appId }: { appId: string }) {
           <Table hover responsive className="card-table table-vcenter">
             <thead>
               <tr>
-                <th>Icon</th>
-                <th>Name</th>
-                <th>Used by</th>
-                <th className="text-end">Actions</th>
+                <th><T text="Icon" /></th>
+                <th><T text="Name" /></th>
+                <th><T text="Used by" /></th>
+                <th className="text-end"><T text="Actions" /></th>
               </tr>
             </thead>
             <tbody>
@@ -206,7 +208,7 @@ export function ApplicationLibrary({ appId }: { appId: string }) {
                         className="me-1"
                         onClick={() => setShowing(item)}
                       >
-                        Layout
+                        <T text="Layout" />
                       </Button>
                       <Button
                         size="sm"
@@ -214,10 +216,10 @@ export function ApplicationLibrary({ appId }: { appId: string }) {
                         className="me-1"
                         onClick={() => setRenaming({ item, name: item.name, error: null })}
                       >
-                        Rename
+                        <T text="Rename" />
                       </Button>
                       <Button size="sm" variant="outline-danger" onClick={() => void remove(item)}>
-                        Delete
+                        <T text="Delete" />
                       </Button>
                     </td>
                   </tr>
@@ -233,7 +235,7 @@ export function ApplicationLibrary({ appId }: { appId: string }) {
           </Modal.Header>
           <Modal.Body>
             <p className="text-muted">
-              The layout as saved. It is edited in the builder, inside any view or page that places it.
+              <T text="The layout as saved. It is edited in the builder, inside any view or page that places it." />
             </p>
             {showing && <pre className="small mb-0">{libraryLayoutJson(showing)}</pre>}
           </Modal.Body>
@@ -242,13 +244,15 @@ export function ApplicationLibrary({ appId }: { appId: string }) {
         <Modal show={renaming !== null} onHide={() => setRenaming(null)}>
           <Form onSubmit={rename}>
             <Modal.Header closeButton>
-              <Modal.Title className="h4">Rename {renaming?.item.name}</Modal.Title>
+              <Modal.Title className="h4">
+                {t("Rename {name}", { name: renaming?.item.name ?? "" })}
+              </Modal.Title>
             </Modal.Header>
             <Modal.Body>
               {renaming?.error && <Alert variant="danger">{renaming.error}</Alert>}
               {renaming && (
                 <Form.Group controlId="renameLibraryItem">
-                  <Form.Label>New name</Form.Label>
+                  <Form.Label><T text="New name" /></Form.Label>
                   <Form.Control
                     value={renaming.name}
                     autoFocus
@@ -256,20 +260,20 @@ export function ApplicationLibrary({ appId }: { appId: string }) {
                     onChange={(e) => setRenaming({ ...renaming, name: e.target.value })}
                   />
                   <Form.Text muted>
-                    Views and pages place an item by its id, so they keep finding it under the new name.
+                    <T text="Views and pages place an item by its id, so they keep finding it under the new name." />
                   </Form.Text>
                 </Form.Group>
               )}
             </Modal.Body>
             <Modal.Footer>
               <Button variant="secondary" type="button" onClick={() => setRenaming(null)}>
-                Cancel
+                <T text="Cancel" />
               </Button>
               <Button
                 type="submit"
                 disabled={busy || !renaming || renaming.name.trim() === renaming.item.name}
               >
-                Rename
+                <T text="Rename" />
               </Button>
             </Modal.Footer>
           </Form>

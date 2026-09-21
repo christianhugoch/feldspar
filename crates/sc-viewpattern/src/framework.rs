@@ -57,6 +57,7 @@ use sc_auth::User;
 use sc_catalog::Catalog;
 use sc_error::{Error, ErrorKind, Repr, Result};
 use sc_expr::{CodeHosts, JsEvaluator, ModuleFnHost, TriggerHost};
+use sc_i18n::t;
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Map, Value as Json};
 
@@ -335,8 +336,8 @@ impl Framework for SaltcornUiFramework {
                     _ => Ok(self.message(
                         &req,
                         404,
-                        "Not found",
-                        "There is nothing to post to at this address.",
+                        &t!(req.locale, "Not found"),
+                        &t!(req.locale, "There is nothing to post to at this address."),
                     )),
                 };
             }
@@ -353,7 +354,12 @@ impl Framework for SaltcornUiFramework {
             ["plugins", "public", plugin, rest @ ..] if !rest.is_empty() => {
                 Ok(plugin_asset(&percent_decode(plugin), rest))
             }
-            _ => Ok(self.message(&req, 404, "Not found", "There is nothing at this address.")),
+            _ => Ok(self.message(
+                &req,
+                404,
+                &t!(req.locale, "Not found"),
+                &t!(req.locale, "There is nothing at this address."),
+            )),
         }
     }
 
@@ -480,7 +486,11 @@ impl SaltcornUiFramework {
         let Some(view) = set.view(name) else {
             return Ok(self.no_view(req, name));
         };
-        if let Some(refused) = self.refused(req, &format!("the view {name}"), view.min_role) {
+        if let Some(refused) = self.refused(
+            req,
+            &t!(req.locale, "the view {name}", name = name),
+            view.min_role,
+        ) {
             return Ok(refused);
         }
         let state = state_of(req, view, slug);
@@ -516,7 +526,11 @@ impl SaltcornUiFramework {
         let Some(view) = set.view(name) else {
             return Ok(self.no_view(req, name));
         };
-        if let Some(refused) = self.refused(req, &format!("the view {name}"), view.min_role) {
+        if let Some(refused) = self.refused(
+            req,
+            &t!(req.locale, "the view {name}", name = name),
+            view.min_role,
+        ) {
             return Ok(refused);
         }
         if let [route] = rest {
@@ -606,7 +620,11 @@ impl SaltcornUiFramework {
         let Some(page) = set.page(name) else {
             return json_response(404, &serde_json::json!({ "error": "Action not found" }));
         };
-        if let Some(refused) = self.refused(req, &format!("the page {name}"), page.min_role) {
+        if let Some(refused) = self.refused(
+            req,
+            &t!(req.locale, "the page {name}", name = name),
+            page.min_role,
+        ) {
             return Ok(refused);
         }
         let request = self.view_request(req, None);
@@ -727,13 +745,18 @@ impl SaltcornUiFramework {
             ("signup", _) if !self.signup_allowed() => Ok(self.message(
                 req,
                 404,
-                "Not found",
-                "This application does not offer sign-up.",
+                &t!(req.locale, "Not found"),
+                &t!(req.locale, "This application does not offer sign-up."),
             )),
             ("signup", Method::Get) => Ok(self.auth_form(req, AuthForm::Signup, 200, "", None)),
             ("signup", Method::Post) => self.signup(req, cat, &dest).await,
             ("login" | "logout" | "signup", _) => Ok(AppResponse::method_not_allowed()),
-            _ => Ok(self.message(req, 404, "Not found", "There is nothing at this address.")),
+            _ => Ok(self.message(
+                req,
+                404,
+                &t!(req.locale, "Not found"),
+                &t!(req.locale, "There is nothing at this address."),
+            )),
         }
     }
 
@@ -754,7 +777,7 @@ impl SaltcornUiFramework {
                 AuthForm::Login,
                 401,
                 email.trim(),
-                Some("Incorrect email or password."),
+                Some(&t!(req.locale, "Incorrect email or password.")),
             )),
         }
     }
@@ -768,16 +791,19 @@ impl SaltcornUiFramework {
         let again =
             |problem: &str| Ok(self.auth_form(req, AuthForm::Signup, 400, &email, Some(problem)));
         if email.is_empty() {
-            return again("An email address is required.");
+            return again(&t!(req.locale, "An email address is required."));
         }
         if password.is_empty() {
-            return again("A password is required.");
+            return again(&t!(req.locale, "A password is required."));
         }
         if has_field(req, "passwordRepeat") && field_of(req, "passwordRepeat") != password {
-            return again("The two passwords are not the same.");
+            return again(&t!(req.locale, "The two passwords are not the same."));
         }
         if sc_auth::load_user_by_email(cat, &email).await?.is_some() {
-            return again("There is already an account with this email address.");
+            return again(&t!(
+                req.locale,
+                "There is already an account with this email address."
+            ));
         }
         match sc_auth::create_user(cat, &email, &password, self.new_user_role()).await {
             Ok(user) => Ok(signed_in(user, dest)),
@@ -831,11 +857,16 @@ impl SaltcornUiFramework {
             format!("?dest={}", percent_encode(&dest))
         };
         let (heading, action, button, password_autocomplete) = match kind {
-            AuthForm::Login => ("Sign in", "/auth/login", "Sign in", "current-password"),
+            AuthForm::Login => (
+                t!(req.locale, "Sign in"),
+                "/auth/login",
+                t!(req.locale, "Sign in"),
+                "current-password",
+            ),
             AuthForm::Signup => (
-                "Create an account",
+                t!(req.locale, "Create an account"),
                 "/auth/signup",
-                "Sign up",
+                t!(req.locale, "Sign up"),
                 "new-password",
             ),
         };
@@ -849,23 +880,36 @@ impl SaltcornUiFramework {
             .unwrap_or_default();
         let repeat = match kind {
             AuthForm::Login => String::new(),
-            AuthForm::Signup => "<div class=\"mb-3\"><label class=\"form-label\" \
-                                 for=\"passwordRepeat\">Password again</label><input \
-                                 class=\"form-control\" type=\"password\" id=\"passwordRepeat\" \
-                                 name=\"passwordRepeat\" autocomplete=\"new-password\" \
-                                 required></div>"
-                .to_owned(),
+            AuthForm::Signup => format!(
+                "<div class=\"mb-3\"><label class=\"form-label\" for=\"passwordRepeat\">{}\
+                 </label><input class=\"form-control\" type=\"password\" id=\"passwordRepeat\" \
+                 name=\"passwordRepeat\" autocomplete=\"new-password\" required></div>",
+                escape(&t!(req.locale, "Password again"))
+            ),
         };
         let other = match kind {
+            // The link is *inside* the sentence, so the sentence is the message
+            // and the anchor is two of its arguments: a translator who has to
+            // move "Sign up" to the front of the clause can, which is the whole
+            // reason a message is not three concatenated fragments.
             AuthForm::Login if self.signup_allowed() => format!(
-                "<p class=\"mt-3\">No account yet? <a href=\"/auth/signup{}\">Sign up</a></p>",
-                escape(&back)
+                "<p class=\"mt-3\">{}</p>",
+                t!(
+                    req.locale,
+                    "No account yet? {link_start}Sign up{link_end}",
+                    link_start = format!("<a href=\"/auth/signup{}\">", escape(&back)),
+                    link_end = "</a>"
+                )
             ),
             AuthForm::Login => String::new(),
             AuthForm::Signup => format!(
-                "<p class=\"mt-3\">Already have an account? <a href=\"/auth/login{}\">Sign \
-                 in</a></p>",
-                escape(&back)
+                "<p class=\"mt-3\">{}</p>",
+                t!(
+                    req.locale,
+                    "Already have an account? {link_start}Sign in{link_end}",
+                    link_start = format!("<a href=\"/auth/login{}\">", escape(&back)),
+                    link_end = "</a>"
+                )
             ),
         };
         let body = format!(
@@ -876,10 +920,11 @@ impl SaltcornUiFramework {
              <form action=\"{action}\" method=\"post\">\
              <input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\">\
              <input type=\"hidden\" name=\"dest\" value=\"{dest}\">\
-             <div class=\"mb-3\"><label class=\"form-label\" for=\"email\">Email</label>\
+             <div class=\"mb-3\"><label class=\"form-label\" for=\"email\">{email_label}</label>\
              <input class=\"form-control\" type=\"email\" id=\"email\" name=\"email\" \
              value=\"{email}\" autocomplete=\"username\" required autofocus></div>\
-             <div class=\"mb-3\"><label class=\"form-label\" for=\"password\">Password</label>\
+             <div class=\"mb-3\"><label class=\"form-label\" \
+             for=\"password\">{password_label}</label>\
              <input class=\"form-control\" type=\"password\" id=\"password\" name=\"password\" \
              autocomplete=\"{password_autocomplete}\" required></div>\
              {repeat}\
@@ -889,8 +934,10 @@ impl SaltcornUiFramework {
             csrf = escape(&req.csrf_token),
             dest = escape(&dest),
             email = escape(email),
+            email_label = escape(&t!(req.locale, "Email")),
+            password_label = escape(&t!(req.locale, "Password")),
         );
-        AppResponse::html(status, self.document(req, heading, &body, &[]))
+        AppResponse::html(status, self.document(req, &heading, &body, &[]))
     }
 
     /// `/page/:name`.
@@ -900,8 +947,12 @@ impl SaltcornUiFramework {
             return Ok(self.message(
                 req,
                 404,
-                "Not found",
-                &format!("This application has no page named {name}."),
+                &t!(req.locale, "Not found"),
+                &t!(
+                    req.locale,
+                    "This application has no page named {name}.",
+                    name = name
+                ),
             ));
         };
         self.render_page(req, cat, &set, page).await
@@ -914,8 +965,11 @@ impl SaltcornUiFramework {
         set: &ViewSet,
         page: &Page,
     ) -> Result<AppResponse> {
-        if let Some(refused) = self.refused(req, &format!("the page {}", page.name), page.min_role)
-        {
+        if let Some(refused) = self.refused(
+            req,
+            &t!(req.locale, "the page {name}", name = &page.name),
+            page.min_role,
+        ) {
             return Ok(refused);
         }
         let title = if page.title.trim().is_empty() {
@@ -1062,8 +1116,12 @@ impl SaltcornUiFramework {
         self.message(
             req,
             404,
-            "Not found",
-            &format!("This application has no view named {name}."),
+            &t!(req.locale, "Not found"),
+            &t!(
+                req.locale,
+                "This application has no view named {name}.",
+                name = name
+            ),
         )
     }
 
@@ -1156,14 +1214,18 @@ impl SaltcornUiFramework {
             None => self.message(
                 req,
                 401,
-                "Please sign in",
-                &format!("You need to sign in to see {what}."),
+                &t!(req.locale, "Please sign in"),
+                &t!(
+                    req.locale,
+                    "You need to sign in to see {what}.",
+                    what = what
+                ),
             ),
             Some(_) => self.message(
                 req,
                 403,
-                "Not permitted",
-                &format!("Your role may not see {what}."),
+                &t!(req.locale, "Not permitted"),
+                &t!(req.locale, "Your role may not see {what}.", what = what),
             ),
         })
     }

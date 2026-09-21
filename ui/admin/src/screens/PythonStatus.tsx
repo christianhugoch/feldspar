@@ -27,6 +27,7 @@ import Spinner from "react-bootstrap/Spinner";
 import { api } from "../api";
 import type { GetPythonStatusResponse } from "../client";
 import { AlertBody } from "../layout";
+import { T, useT } from "../i18n";
 
 /** How each state is labelled, and how loudly. `unavailable` is the process
  * that booted no runtime at all — a test or an admin-only server — and is not
@@ -57,6 +58,7 @@ export function showsDetail(state: string): boolean {
 }
 
 export function PythonStatusPanel() {
+  const { t } = useT();
   const [status, setStatus] = useState<GetPythonStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -76,10 +78,9 @@ export function PythonStatusPanel() {
     <div className="card mb-4">
       <div className="card-header">
         <div>
-          <h3 className="card-title">Python</h3>
+          <h3 className="card-title"><T text="Python" /></h3>
           <p className="card-subtitle text-secondary mb-0">
-            What this process can do about Python triggers, and what it is doing now. Nothing
-            here is a setting: it is read from the running server.
+            <T text="What this process can do about Python triggers, and what it is doing now. Nothing here is a setting: it is read from the running server." />
           </p>
         </div>
       </div>
@@ -95,7 +96,9 @@ export function PythonStatusPanel() {
             <div className="mb-3">
               <span className={`badge ${badge.tone} me-2`}>{badge.label}</span>
               {status.version && (
-                <span className="text-secondary">CPython {status.version}</span>
+                <span className="text-secondary">
+                  {t("CPython {version}", { version: status.version })}
+                </span>
               )}
             </div>
             <p className="text-secondary">{status.explanation}</p>
@@ -103,25 +106,25 @@ export function PythonStatusPanel() {
               <>
                 <dl className="row mb-0">
                   <Reading
-                    label="Environment"
+                    label={t("Environment")}
                     value={status.dir}
                     absent="This machine has no data directory to put one in, and none was named with --python-dir, so a body may import only the standard library."
                   />
-                  <Reading label="Packages installed in" value={status.site_packages} />
+                  <Reading label={t("Packages installed in")} value={status.site_packages} />
                   <Reading
-                    label="pip runs under"
+                    label={t("pip runs under")}
                     value={status.bin ?? "python3 (on the PATH)"}
                   />
                   <Reading
-                    label="Runs in flight"
+                    label={t("Runs in flight")}
                     value={`${status.resident} of ${status.max_inflight} (--python-max-inflight)`}
                   />
                   <Reading
-                    label="Run threads"
+                    label={t("Run threads")}
                     value={`${status.threads} (a finished thread is kept for the next run)`}
                   />
                   <Reading
-                    label="Threads that never returned"
+                    label={t("Threads that never returned")}
                     value={`${status.stuck} of ${status.max_stuck} tolerated (--python-max-stuck)`}
                   />
                 </dl>
@@ -133,16 +136,15 @@ export function PythonStatusPanel() {
                 {status.stuck > 0 && (
                   <Alert variant="warning" className="mt-3">
                     <AlertBody>
-                      {status.stuck} run{status.stuck === 1 ? "" : "s"} never came back. A
-                      Python thread stuck inside a C call cannot be stopped or reclaimed, so
-                      this number only goes down when one of them finishes on its own; at{" "}
-                      {status.max_stuck} this server refuses new Python runs and the remedy is
-                      a restart.
+                      {t(
+                        "{count} runs never came back. A Python thread stuck inside a C call cannot be stopped or reclaimed, so this number only goes down when one of them finishes on its own; at {cap} this server refuses new Python runs and the remedy is a restart.",
+                        { count: status.stuck, cap: status.max_stuck },
+                      )}
                     </AlertBody>
                   </Alert>
                 )}
                 <div className="mt-3">
-                  <h4 className="mb-1">Installed packages</h4>
+                  <h4 className="mb-1"><T text="Installed packages" /></h4>
                   {status.packages.length === 0 ? (
                     <p className="text-secondary mb-0">
                       {status.env_error

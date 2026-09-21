@@ -27,6 +27,7 @@ import { IconArrowLeft } from "../icons";
 import { PageBody, PageHeader } from "../layout";
 import { ALL_WRITES, canSubmit, formOffered, writesOf, type TableWrites } from "../tableWrites";
 import type { BrowseFilesResponse, ListFieldsResponse, ListTablesResponse } from "../client";
+import { T } from "../i18n";
 
 /**
  * Best-effort parse of a form input into JSON: `5` → number, `true` → boolean,
@@ -102,13 +103,11 @@ export function TableData({ table }: { table: string }) {
         {error && <Alert variant="danger">{error}</Alert>}
         {provider !== null && !formOffered(writes) && !writes.delete && (
           <Alert variant="secondary">
-            These rows come from the table provider <strong>{provider}</strong>, which is read-only
-            for the settings this table has. Change them on the table page if the provider can be
-            configured to write.
+            <T text="These rows come from the table provider" /> <strong>{provider}</strong><T text=", which is read-only for the settings this table has. Change them on the table page if the provider can be configured to write." />
           </Alert>
         )}
         {fields !== null && fields.length === 0 && (
-          <Alert variant="secondary">Add a field before creating rows.</Alert>
+          <Alert variant="secondary"><T text="Add a field before creating rows." /></Alert>
         )}
         {fields !== null && fields.length > 0 && (
           <DataGrid
@@ -248,7 +247,7 @@ function RowForm({
         </Modal.Body>
         <Modal.Footer>
           <Button variant="secondary" onClick={onClose} type="button">
-            Cancel
+            <T text="Cancel" />
           </Button>
           <Button type="submit" disabled={busy || !submittable}>
             {editingId !== null ? "Save changes" : "Add row"}
@@ -316,7 +315,7 @@ function FileFieldInput({
           onChange={(e) => onChange(e.target.value)}
         />
         <Button size="sm" variant="outline-secondary" type="button" onClick={open}>
-          Choose…
+          <T text="Choose…" />
         </Button>
       </div>
 
@@ -329,7 +328,7 @@ function FileFieldInput({
         </Modal.Header>
         <Modal.Body>
           {error && <Alert variant="danger">{error}</Alert>}
-          {!entries && !error && <p className="text-muted mb-0">Loading…</p>}
+          {!entries && !error && <p className="text-muted mb-0"><T text="Loading…" /></p>}
           {entries && (
             <div className="list-group">
               {dir !== "" && (
@@ -338,7 +337,7 @@ function FileFieldInput({
                   className="list-group-item list-group-item-action"
                   onClick={() => setDir(parent)}
                 >
-                  ← up
+                  <T text="← up" />
                 </button>
               )}
               {entries.length === 0 && <div className="list-group-item text-muted">Empty.</div>}

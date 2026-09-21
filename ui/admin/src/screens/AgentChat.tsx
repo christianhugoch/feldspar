@@ -107,6 +107,7 @@ import {
 } from "../icons";
 import { StatusBadge, type Tone } from "../layout";
 import { RunBar } from "./RunPanel";
+import { T, useT } from "../i18n";
 
 type RunItem = ListRunsResponse[number];
 
@@ -175,6 +176,7 @@ export function AgentChat({
   initial?: { runId: string | null; entries: Entry[] };
   frame?: ChatFrame;
 }) {
+  const { t } = useT();
   const [chat, setChat] = useState<ChatState>(emptyChat());
   const [runs, setRuns] = useState<RunItem[]>([]);
   const [viewing, setViewing] = useState<{ run: RunItem; entries: Entry[] } | null>(null);
@@ -431,8 +433,8 @@ export function AgentChat({
             <button
               type="button"
               className="btn btn-icon btn-ghost-secondary btn-sm"
-              aria-label="Back to agents"
-              title="Back to agents"
+              aria-label={t("Back to agents")}
+              title={t("Back to agents")}
               onClick={() => navigate("/agents")}
             >
               <IconArrowLeft className="icon-2" />
@@ -447,7 +449,7 @@ export function AgentChat({
               onClick={newConversation}
             >
               <IconMessagePlus className="icon-2" />
-              New chat
+              <T text="New chat" />
             </button>
             {splitAvailable && (
               <button
@@ -499,7 +501,7 @@ export function AgentChat({
                 <span className="chat-dot" />
                 <span className="chat-dot" />
                 <span className="chat-dot" />
-                <span className="ms-1">Working…</span>
+                <span className="ms-1"><T text="Working…" /></span>
               </div>
             )}
           </div>
@@ -560,8 +562,8 @@ export function AgentChat({
           <button
             type="button"
             className="btn btn-icon btn-ghost-secondary btn-sm"
-            aria-label="New chat"
-            title="New chat"
+            aria-label={t("New chat")}
+            title={t("New chat")}
             onClick={newConversation}
           >
             <IconMessagePlus className="icon-2" />
@@ -571,8 +573,8 @@ export function AgentChat({
           <button
             type="button"
             className="btn btn-icon btn-ghost-secondary btn-sm"
-            aria-label="Show this chat"
-            title="Show this chat"
+            aria-label={t("Show this chat")}
+            title={t("Show this chat")}
             onClick={frame.onRestore}
           >
             <IconArrowUp className="icon-2" />
@@ -581,8 +583,8 @@ export function AgentChat({
           <button
             type="button"
             className="btn btn-icon btn-ghost-secondary btn-sm"
-            aria-label="Minimize this chat"
-            title="Minimize"
+            aria-label={t("Minimize this chat")}
+            title={t("Minimize")}
             onClick={frame.onMinimize}
           >
             <IconMinus className="icon-2" />
@@ -604,8 +606,8 @@ export function AgentChat({
         <button
           type="button"
           className="btn btn-icon btn-ghost-secondary btn-sm"
-          aria-label="Close this chat"
-          title="Close"
+          aria-label={t("Close this chat")}
+          title={t("Close")}
           onClick={frame.onClose}
         >
           <IconX className="icon-2" />
@@ -643,11 +645,12 @@ function PreviewPaneView({
   onReload: () => void;
   onClose: () => void;
 }) {
+  const { t } = useT();
   const chosen = PANE_WIDTHS.find((w) => w.name === width) ?? PANE_WIDTHS[0];
   return (
-    <section className="chat-pane" aria-label="The application">
+    <section className="chat-pane" aria-label={t("The application")}>
       <div className="chat-pane-bar">
-        <div className="btn-group btn-group-sm" role="group" aria-label="Screen width">
+        <div className="btn-group btn-group-sm" role="group" aria-label={t("Screen width")}>
           {PANE_WIDTHS.map((option) => (
             <button
               key={option.name}
@@ -670,8 +673,8 @@ function PreviewPaneView({
         <button
           type="button"
           className="btn btn-icon btn-ghost-secondary btn-sm"
-          aria-label="Reload the application"
-          title="Reload"
+          aria-label={t("Reload the application")}
+          title={t("Reload")}
           onClick={onReload}
         >
           <IconRefresh className="icon-2" />
@@ -681,16 +684,16 @@ function PreviewPaneView({
           href={url}
           target="_blank"
           rel="noreferrer"
-          aria-label="Open the application in a new tab"
-          title="Open in a new tab"
+          aria-label={t("Open the application in a new tab")}
+          title={t("Open in a new tab")}
         >
           <IconArrowsDiagonal className="icon-2" />
         </a>
         <button
           type="button"
           className="btn btn-icon btn-ghost-secondary btn-sm"
-          aria-label="Hide the application"
-          title="Hide the application"
+          aria-label={t("Hide the application")}
+          title={t("Hide the application")}
           onClick={onClose}
         >
           <IconX className="icon-2" />
@@ -702,7 +705,7 @@ function PreviewPaneView({
           className="chat-pane-frame"
           style={chosen.px === null ? undefined : { width: `${chosen.px}px` }}
           src={url}
-          title="The application"
+          title={t("The application")}
         />
       </div>
     </section>
@@ -728,6 +731,7 @@ function PaneWidthIcon({ name }: { name: string }) {
  * is one that says to wait rather than one that quietly loses an answer.
  */
 function PopOutButton({ running, onPopOut }: { running: boolean; onPopOut: () => void }) {
+  const { t } = useT();
   const room = useChatWindows().length < MAX_CHAT_WINDOWS;
   const why = running
     ? "Wait for the agent to finish before popping this chat out"
@@ -738,7 +742,7 @@ function PopOutButton({ running, onPopOut }: { running: boolean; onPopOut: () =>
     <button
       type="button"
       className="btn btn-icon btn-ghost-secondary btn-sm"
-      aria-label="Pop out this chat"
+      aria-label={t("Pop out this chat")}
       title={why}
       disabled={running || !room}
       onClick={onPopOut}
@@ -768,6 +772,7 @@ function ConversationRail({
   onDelete: (run: RunItem) => void;
   onNew: () => void;
 }) {
+  const { t } = useT();
   const groups = useMemo(() => {
     const now = new Date();
     const out: { title: string; runs: RunItem[] }[] = [];
@@ -781,16 +786,16 @@ function ConversationRail({
   }, [runs]);
 
   return (
-    <aside className="chat-history" aria-label="Conversations">
+    <aside className="chat-history" aria-label={t("Conversations")}>
       <div className="p-2">
         <button type="button" className="btn btn-sm btn-outline-secondary w-100" onClick={onNew}>
           <IconMessagePlus className="icon-2" />
-          New chat
+          <T text="New chat" />
         </button>
       </div>
       <div className="chat-history-list">
         {runs.length === 0 && (
-          <div className="text-secondary small px-2 py-1">No conversations yet.</div>
+          <div className="text-secondary small px-2 py-1"><T text="No conversations yet." /></div>
         )}
         {groups.map((group) => (
           <div key={group.title} className="mt-2">
@@ -833,8 +838,8 @@ function ConversationRail({
                 <button
                   type="button"
                   className="chat-history-delete"
-                  aria-label="Delete this conversation"
-                  title="Delete this conversation"
+                  aria-label={t("Delete this conversation")}
+                  title={t("Delete this conversation")}
                   onClick={() => onDelete(run)}
                 >
                   <IconTrash className="icon-2" />
@@ -857,8 +862,7 @@ function EmptyTranscript({ agent }: { agent: string }) {
       </div>
       <h3 className="mb-1">{agent}</h3>
       <p className="text-secondary mb-0" style={{ maxWidth: "26rem" }}>
-        Ask this agent something. Everything it does — every table it reads, every trigger it
-        runs — happens as you.
+        <T text="Ask this agent something. Everything it does — every table it reads, every trigger it runs — happens as you." />
       </p>
     </div>
   );
@@ -877,16 +881,16 @@ function PastConversationBar({
   return (
     <div className="chat-composer d-flex align-items-center gap-2 flex-wrap">
       <span className="text-secondary small me-auto">
-        A past conversation, shown as it happened.{" "}
+        <T text="A past conversation, shown as it happened." />{" "}
         <StatusBadge tone={stateTone(run.state)} title={run.error ?? undefined}>
           {run.state}
         </StatusBadge>
       </span>
       <button type="button" className="btn btn-sm btn-ghost-secondary" onClick={onNew}>
-        New chat
+        <T text="New chat" />
       </button>
       <button type="button" className="btn btn-sm btn-primary" onClick={onContinue}>
-        Continue this conversation
+        <T text="Continue this conversation" />
       </button>
     </div>
   );
@@ -913,6 +917,7 @@ function Composer({
   onSend: () => void;
   onAbort: () => void;
 }) {
+  const { t } = useT();
   const box = useRef<HTMLTextAreaElement | null>(null);
 
   // Grow with what is typed, up to the height `admin.css` caps it at — a
@@ -937,7 +942,7 @@ function Composer({
         ref={box}
         rows={1}
         value={draft}
-        aria-label="Message"
+        aria-label={t("Message")}
         placeholder={running ? "Waiting for the agent…" : "Ask the agent…"}
         disabled={running}
         onChange={(e) => onDraft(e.target.value)}
@@ -968,8 +973,8 @@ function Composer({
           <button
             type="button"
             className="chat-send chat-send-stop"
-            aria-label="Stop the agent"
-            title="Stop"
+            aria-label={t("Stop the agent")}
+            title={t("Stop")}
             onClick={onAbort}
           >
             <IconPlayerStop className="icon-2" />
@@ -978,8 +983,8 @@ function Composer({
           <button
             type="submit"
             className="chat-send"
-            aria-label="Send"
-            title="Send"
+            aria-label={t("Send")}
+            title={t("Send")}
             disabled={draft.trim() === ""}
           >
             <IconArrowUp className="icon-2" />
@@ -1049,7 +1054,7 @@ export function TranscriptEntry({ entry }: { entry: Entry }) {
           <details className="chat-reasoning">
             <summary>
               <IconSparkles className="icon-2" />
-              Reasoning
+              <T text="Reasoning" />
             </summary>
             <div className="chat-reasoning-text">{entry.reasoning}</div>
           </details>
@@ -1143,6 +1148,7 @@ function CodeBlock({ language, text }: { language: string; text: string }) {
 
 /** A tool call: the line, and what it opens onto. */
 function ToolEntry({ entry }: { entry: Extract<Entry, { kind: "tool" }> }) {
+  const { t } = useT();
   const [open, setOpen] = useState(false);
   const running = entry.result === null;
 
@@ -1176,10 +1182,10 @@ function ToolEntry({ entry }: { entry: Extract<Entry, { kind: "tool" }> }) {
       ))}
       {open && (
         <div className="chat-tool-body">
-          <Labelled label="Arguments">
+          <Labelled label={t("Arguments")}>
             <pre>{pretty(entry.args)}</pre>
           </Labelled>
-          <Labelled label="Result">
+          <Labelled label={t("Result")}>
             <pre className={entry.isError ? "text-danger" : undefined}>
               {running ? "(still running)" : pretty(entry.result)}
             </pre>
@@ -1191,8 +1197,9 @@ function ToolEntry({ entry }: { entry: Extract<Entry, { kind: "tool" }> }) {
 }
 
 function RunningDots() {
+  const { t } = useT();
   return (
-    <span className="chat-thinking" aria-label="running">
+    <span className="chat-thinking" aria-label={t("running")}>
       <span className="chat-dot" />
       <span className="chat-dot" />
       <span className="chat-dot" />

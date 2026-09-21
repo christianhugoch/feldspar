@@ -45,6 +45,7 @@ import {
   IconRefresh,
   IconSettings,
 } from "./icons";
+import { T, useT } from "./i18n";
 
 type AppItem = ListApplicationsResponse[number];
 type AgentItem = ListAgentsResponse[number];
@@ -183,7 +184,7 @@ export function ApplicationsNav({ route, folded }: { route: string; folded: bool
             </button>
           ))}
           {apps?.length === 0 && (
-            <span className="dropdown-item disabled">No applications yet</span>
+            <span className="dropdown-item disabled"><T text="No applications yet" /></span>
           )}
           <div className="dropdown-divider" />
           <a
@@ -191,14 +192,14 @@ export function ApplicationsNav({ route, folded }: { route: string; folded: bool
             href="#/applications"
             role="menuitem"
           >
-            All applications
+            <T text="All applications" />
           </a>
           <a
             className={`dropdown-item${path === "/applications/new" ? " active" : ""}`}
             href="#/applications/new"
             role="menuitem"
           >
-            New application
+            <T text="New application" />
           </a>
         </div>
       </li>
@@ -283,6 +284,7 @@ function AppLink({
  * on when it arrives. Tabler's toast, top right, until dismissed: a failed
  * build's diagnostics are the thing to read, so it does not time out. */
 export function AppOutcomeToast() {
+  const { t } = useT();
   const { outcome } = useAppActions();
   if (!outcome) return null;
   return (
@@ -299,7 +301,7 @@ export function AppOutcomeToast() {
           <button
             type="button"
             className="btn-close"
-            aria-label="Close"
+            aria-label={t("Close")}
             onClick={() => showAppOutcome(null)}
           />
         </div>

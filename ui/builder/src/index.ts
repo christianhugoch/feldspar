@@ -18,6 +18,7 @@ import { bootFromDocument } from "./boot";
 import { createClient, type ApiClient } from "./client";
 import { setBuilderContext, type BuilderTarget } from "./context";
 import { installGlobals, missingDocumentGlobals } from "./globals";
+import { builderTranslations, withTranslations } from "./i18n";
 import { installLinkListener } from "./links";
 
 /** The modes v1's builder has a toolbox for that this server builds (§12). */
@@ -36,6 +37,8 @@ export interface StartBuilder {
   options: unknown;
   layout: unknown;
   mode: BuilderMode;
+  /** The locale the builder route negotiated for this admin (§16.x). */
+  locale?: string;
 }
 
 export function startBuilder(start: StartBuilder, client: ApiClient = createClient()): void {
@@ -54,12 +57,20 @@ export function startBuilder(start: StartBuilder, client: ApiClient = createClie
   });
   installGlobals(window, { csrfToken: start.csrfToken, lightmode: start.lightmode });
   installLinkListener(document);
-  renderBuilder(
-    start.containerId,
-    encodeURIComponent(JSON.stringify(start.options)),
-    encodeURIComponent(JSON.stringify(start.layout ?? {})),
-    start.mode,
-  );
+  // v1's `translations` map, filled from the `builder` domain (task 3.5). The
+  // catalogue is a chunk of its own and is fetched only when there is one, so
+  // an English builder renders on the same tick it always did — `then` on an
+  // already-resolved promise is a microtask, not a round trip.
+  void builderTranslations(start.locale).then((translations) => {
+    renderBuilder(
+      start.containerId,
+      encodeURIComponent(
+        JSON.stringify(withTranslations(start.options, translations)),
+      ),
+      encodeURIComponent(JSON.stringify(start.layout ?? {})),
+      start.mode,
+    );
+  });
 }
 
 export { builderFetch } from "./builder-fetch";

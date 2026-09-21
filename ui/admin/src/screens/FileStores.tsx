@@ -23,6 +23,7 @@ import { ideUrl, navigate } from "../App";
 import { IconPlus } from "../icons";
 import { PageBody, PageHeader, StatusBadge } from "../layout";
 import { asString } from "../settings";
+import { T, useT } from "../i18n";
 
 type StoreItem = ListFileStoresResponse[number];
 
@@ -47,6 +48,7 @@ function elide(value: string, max = 60): string {
 }
 
 export function FileStores() {
+  const { t } = useT();
   const [stores, setStores] = useState<StoreItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -66,8 +68,10 @@ export function FileStores() {
     if (!store.id) return;
     if (
       !window.confirm(
-        `Remove the file store "${store.name}"?\n\n` +
-          "This disconnects it from Saltcorn. The directory and its files are left untouched.",
+        t(
+          'Remove the file store "{name}"?\n\nThis disconnects it from Saltcorn. The directory and its files are left untouched.',
+          { name: store.name },
+        ),
       )
     ) {
       return;
@@ -87,11 +91,11 @@ export function FileStores() {
     <>
       <PageHeader
         pretitle="Storage"
-        title="File stores"
+        title={t("File stores")}
         actions={
           <Button onClick={() => navigate("/file-stores/new")}>
             <IconPlus className="icon-2" />
-            New file store
+            <T text="New file store" />
           </Button>
         }
       />
@@ -102,18 +106,18 @@ export function FileStores() {
           <Table hover responsive className="card-table table-vcenter">
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Backend</th>
-                <th>Location</th>
-                <th>Status</th>
-                <th className="text-end">Actions</th>
+                <th><T text="Name" /></th>
+                <th><T text="Backend" /></th>
+                <th><T text="Location" /></th>
+                <th><T text="Status" /></th>
+                <th className="text-end"><T text="Actions" /></th>
               </tr>
             </thead>
             <tbody>
               {stores?.length === 0 && (
                 <tr>
                   <td colSpan={5} className="text-muted">
-                    No file stores yet.
+                    <T text="No file stores yet." />
                   </td>
                 </tr>
               )}
@@ -125,7 +129,9 @@ export function FileStores() {
                       <div className="text-muted small">{store.description}</div>
                     )}
                     {store.min_role != null && (
-                      <div className="text-muted small">Minimum role {store.min_role}</div>
+                      <div className="text-muted small">
+                        {t("Minimum role {role}", { role: store.min_role })}
+                      </div>
                     )}
                   </td>
                   <td>{store.backend}</td>
@@ -142,7 +148,7 @@ export function FileStores() {
                             variant="outline-secondary"
                             href={`#/file-stores/${encodeURIComponent(store.id)}/edit`}
                           >
-                            Edit
+                            <T text="Edit" />
                           </Button>
                           <Button
                             size="sm"
@@ -150,7 +156,7 @@ export function FileStores() {
                             disabled={!store.connected}
                             href={`#/files/${encodeURIComponent(store.name)}`}
                           >
-                            Browse
+                            <T text="Browse" />
                           </Button>
                           <Button
                             size="sm"
@@ -159,14 +165,14 @@ export function FileStores() {
                             href={ideUrl(store.name)}
                             target="_blank"
                           >
-                            Edit code
+                            <T text="Edit code" />
                           </Button>
                           <Button
                             size="sm"
                             variant="outline-danger"
                             onClick={() => void remove(store)}
                           >
-                            Remove
+                            <T text="Remove" />
                           </Button>
                         </>
                       ) : (
@@ -176,7 +182,7 @@ export function FileStores() {
                             variant="outline-primary"
                             href={`#/files/${encodeURIComponent(store.name)}`}
                           >
-                            Browse
+                            <T text="Browse" />
                           </Button>
                           <Button
                             size="sm"
@@ -184,11 +190,11 @@ export function FileStores() {
                             href={ideUrl(store.name)}
                             target="_blank"
                           >
-                            Edit code
+                            <T text="Edit code" />
                           </Button>
                           {/* No row behind it, so nothing to edit or delete.
                               Saying so beats offering buttons that would 404. */}
-                          <span className="text-muted small">Not editable</span>
+                          <span className="text-muted small"><T text="Not editable" /></span>
                         </>
                       )}
                     </div>
@@ -201,9 +207,7 @@ export function FileStores() {
 
         {stores?.some((s) => !s.id) && (
           <p className="text-muted small mt-3">
-            Stores shown as <em>from --file-store</em> were supplied on the command line. They
-            are not saved and will be gone when the server restarts unless the flag is passed
-            again.
+            <T text="Stores shown as" /> <em><T text="from --file-store" /></em> <T text="were supplied on the command line. They are not saved and will be gone when the server restarts unless the flag is passed again." />
           </p>
         )}
       </PageBody>
@@ -217,7 +221,7 @@ function StatusCell({ store }: { store: StoreItem }) {
   if (!store.connected) {
     return (
       <>
-        <StatusBadge tone="red">Not connected</StatusBadge>
+        <StatusBadge tone="red"><T text="Not connected" /></StatusBadge>
         {store.error && (
           <div className="text-danger small text-break mt-1">{store.error}</div>
         )}
@@ -226,15 +230,15 @@ function StatusCell({ store }: { store: StoreItem }) {
   }
   return (
     <>
-      <StatusBadge tone="green">Connected</StatusBadge>
+      <StatusBadge tone="green"><T text="Connected" /></StatusBadge>
       {store.is_git_repo && (
         <StatusBadge tone="secondary" className="ms-1">
-          git
+          <T text="git" />
         </StatusBadge>
       )}
       {!store.id && (
         <div className="text-muted small mt-1">
-          <em>from --file-store</em>
+          <em><T text="from --file-store" /></em>
         </div>
       )}
     </>

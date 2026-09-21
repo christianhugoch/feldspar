@@ -43,10 +43,12 @@ import {
 } from "../graphqlExplorer";
 import { IconArrowLeft } from "../icons";
 import { PageBody, PageHeader } from "../layout";
+import { T, useT } from "../i18n";
 
 type AppItem = ListApplicationsResponse[number];
 
 export function GraphqlExplorer({ appId, user }: { appId: string; user: CurrentUser }) {
+  const { t } = useT();
   const [app, setApp] = useState<AppItem | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [schema, setSchema] = useState<SchemaOverview | null>(null);
@@ -168,12 +170,12 @@ export function GraphqlExplorer({ appId, user }: { appId: string; user: CurrentU
           <>
             <Button variant="outline-secondary" href="#/applications">
               <IconArrowLeft className="icon-2" />
-              Applications
+              <T text="Applications" />
             </Button>
             <Button onClick={() => void run()} disabled={running || !mount}>
               {running ? (
                 <>
-                  <Spinner animation="border" size="sm" role="status" /> Running…
+                  <Spinner animation="border" size="sm" role="status" /> <T text="Running…" />
                 </>
               ) : (
                 "Run (Ctrl+Enter)"
@@ -187,12 +189,22 @@ export function GraphqlExplorer({ appId, user }: { appId: string; user: CurrentU
 
         {app && !mount && (
           <Alert variant="warning">
-            <strong>{app.name}</strong> does not enable the GraphQL API provider, so there is
-            nothing to explore.{" "}
-            <Alert.Link href={`#/applications/${encodeURIComponent(app.id)}/edit`}>
-              Add it to the application's APIs
-            </Alert.Link>{" "}
-            and build the application.
+            <T
+              text="{app} does not enable the GraphQL API provider, so there is nothing to explore."
+              values={{ app: <strong>{app.name}</strong> }}
+            />{" "}
+            <T
+              text="{link} and build the application."
+              values={{
+                link: (
+                  <Alert.Link
+                    href={`#/applications/${encodeURIComponent(app.id)}/edit`}
+                  >
+                    <T text="Add it to the application’s APIs" />
+                  </Alert.Link>
+                ),
+              }}
+            />
           </Alert>
         )}
 
@@ -220,7 +232,7 @@ export function GraphqlExplorer({ appId, user }: { appId: string; user: CurrentU
           <div className="col-12 col-lg-8">
             <div className="card mb-3">
               <div className="card-header">
-                <h3 className="card-title">Query</h3>
+                <h3 className="card-title"><T text="Query" /></h3>
               </div>
               <div className="card-body">
                 <Form.Control
@@ -231,32 +243,32 @@ export function GraphqlExplorer({ appId, user }: { appId: string; user: CurrentU
                   value={document}
                   onChange={(e) => setDocument(e.target.value)}
                   onKeyDown={onEditorKey}
-                  aria-label="GraphQL query"
+                  aria-label={t("GraphQL query")}
                 />
-                <Form.Label className="mt-3">Variables (JSON)</Form.Label>
+                <Form.Label className="mt-3"><T text="Variables (JSON)" /></Form.Label>
                 <Form.Control
                   as="textarea"
                   rows={4}
                   className="font-monospace"
                   spellCheck={false}
-                  placeholder='{ "floor": 40000 }'
+                  placeholder={t("{ \"floor\": 40000 }")}
                   value={variables}
                   onChange={(e) => setVariables(e.target.value)}
                   onKeyDown={onEditorKey}
-                  aria-label="Variables"
+                  aria-label={t("Variables")}
                 />
                 {/* Only when the document really declares several: GraphQL needs
                     an operation name exactly then, and a picker with one entry
                     is a control that does nothing. */}
                 {operations.length > 1 && (
                   <>
-                    <Form.Label className="mt-3">Operation</Form.Label>
+                    <Form.Label className="mt-3"><T text="Operation" /></Form.Label>
                     <Form.Select
                       value={operation}
                       onChange={(e) => setOperation(e.target.value)}
-                      aria-label="Operation"
+                      aria-label={t("Operation")}
                     >
-                      <option value="">(choose one)</option>
+                      <option value=""><T text="(choose one)" /></option>
                       {operations.map((name) => (
                         <option key={name} value={name}>
                           {name}
@@ -279,6 +291,7 @@ export function GraphqlExplorer({ appId, user }: { appId: string; user: CurrentU
 
 /** The response, as its two halves — both of them when both are there. */
 function ResponsePane({ view }: { view: ResponseView | null }) {
+  const { t } = useT();
   if (!view) return null;
   return (
     <>
@@ -293,7 +306,11 @@ function ResponsePane({ view }: { view: ResponseView | null }) {
             {view.errors.map((err, i) => (
               <li key={i}>
                 {err.message}
-                {err.path && <span className="text-secondary"> — at {err.path}</span>}
+                {err.path && (
+                  <span className="text-secondary">
+                    {t(" — at {path}", { path: err.path })}
+                  </span>
+                )}
                 {err.code && <span className="text-secondary"> [{err.code}]</span>}
               </li>
             ))}
@@ -303,7 +320,7 @@ function ResponsePane({ view }: { view: ResponseView | null }) {
       {view.data !== null && (
         <div className="card">
           <div className="card-header">
-            <h3 className="card-title">Response</h3>
+            <h3 className="card-title"><T text="Response" /></h3>
           </div>
           <div className="card-body">
             <pre className="mb-0 text-pre-wrap font-monospace">{view.data}</pre>
@@ -330,10 +347,10 @@ function SchemaPane({
     return (
       <div className="card">
         <div className="card-header">
-          <h3 className="card-title">Schema</h3>
+          <h3 className="card-title"><T text="Schema" /></h3>
         </div>
         <div className="card-body text-secondary">
-          The application's schema will appear here once it is built and serving.
+          <T text="The application's schema will appear here once it is built and serving." />
         </div>
       </div>
     );
@@ -348,7 +365,7 @@ function SchemaPane({
   return (
     <div className="card">
       <div className="card-header">
-        <h3 className="card-title">Schema</h3>
+        <h3 className="card-title"><T text="Schema" /></h3>
       </div>
       <div className="list-group list-group-flush">
         {ordered.map((type) => (
@@ -410,12 +427,12 @@ function TypeRow({
                   className="btn btn-link btn-sm p-0 align-baseline"
                   onClick={() => onUse(field.name)}
                 >
-                  use
+                  <T text="use" />
                 </button>
               )}
             </li>
           ))}
-          {type.fields.length === 0 && <li className="text-secondary">No fields.</li>}
+          {type.fields.length === 0 && <li className="text-secondary"><T text="No fields." /></li>}
         </ul>
       )}
     </div>

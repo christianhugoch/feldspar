@@ -16,6 +16,7 @@ import Form from "react-bootstrap/Form";
 
 import { CodeEditor } from "./CodeEditor";
 import type { CodeScope } from "./codeTypes";
+import { T } from "./i18n";
 
 /** One settings field, structurally matching the API's `form_field_schema`.
  *
@@ -170,7 +171,7 @@ export function SettingField({
   const fixed = locked && Boolean(field.create_only);
   // Why the control cannot be edited, said once, wherever it is rendered.
   const fixedHint = fixed ? (
-    <Form.Text muted>Chosen when this was created; it cannot be changed.</Form.Text>
+    <Form.Text muted><T text="Chosen when this was created; it cannot be changed." /></Form.Text>
   ) : null;
   if (field.options.length > 0) {
     return (
@@ -303,7 +304,7 @@ export function SettingField({
       )}
       {fixedHint}
       {field.secret && value === SECRET_SENTINEL && (
-        <Form.Text muted>Stored. Type to replace it.</Form.Text>
+        <Form.Text muted><T text="Stored. Type to replace it." /></Form.Text>
       )}
     </Form.Group>
   );

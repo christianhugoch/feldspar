@@ -66,16 +66,44 @@ mod tests {
 
     #[test]
     fn a_spec_with_no_catalogue_entry_comes_back_untouched() {
-        // D11: the shipped `core` domain has no entry for these, so nothing
-        // moves — and nothing is lost, because the label already *is* English.
+        // D1 and D11 together: a label the catalogue has never heard of comes
+        // back as itself, because the label already *is* English.
+        //
+        // The labels here are deliberately not sentences anybody would declare.
+        // The extractor reads `.label("…")` where it is written (task 2.3), so
+        // a real setting's label — `Source directory`, `Port` — is in the
+        // shipped `fr` catalogue and *would* move, which is the facility
+        // working rather than this test failing.
         let locale = Locale::parse("fr").unwrap();
         let mut spec = vec![
-            FormField::new("source", BasicType::Text).label("Source directory"),
-            FormField::new("port", BasicType::Int).label("Port"),
+            FormField::new("source", BasicType::Text)
+                .label("A label no shipped catalogue will ever hold"),
+            FormField::new("port", BasicType::Int).label("Nor this one"),
         ];
         let before = spec.clone();
         translate_spec(&mut spec, &locale);
         assert_eq!(spec, before);
+    }
+
+    #[test]
+    fn a_label_the_catalogue_has_is_the_one_that_comes_back() {
+        // The other half, and the one the settings screen depends on: a
+        // declared label is *data*, so this lookup is the only thing standing
+        // between a French admin and an English form.
+        let fr = Locale::parse("fr").unwrap();
+        let mut spec = vec![FormField::new("port", BasicType::Int).label("Port")];
+        translate_spec(&mut spec, &fr);
+        assert_eq!(spec[0].base.label, "Port", "`Port` is `Port` in French");
+
+        let mut spec = vec![FormField::new("name", BasicType::Text).label("Site name")];
+        translate_spec(&mut spec, &fr);
+        assert_eq!(spec[0].base.label, "Nom du site");
+
+        // …and English is untouched, because there is no `en` catalogue to
+        // touch it with.
+        let mut spec = vec![FormField::new("name", BasicType::Text).label("Site name")];
+        translate_spec(&mut spec, &Locale::source());
+        assert_eq!(spec[0].base.label, "Site name");
     }
 
     #[test]

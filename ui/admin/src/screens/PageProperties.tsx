@@ -30,8 +30,10 @@ import {
   type PageReferences,
 } from "../views";
 import { ApplicationTabs } from "./ApplicationViews";
+import { T, useT } from "../i18n";
 
 export function PageProperties({ appId, name }: { appId: string; name: string | null }) {
+  const { t } = useT();
   const roles = useRoles();
   const builderAvailable = useBuilderAvailable();
   const [app, setApp] = useState<AppItem | null>(null);
@@ -111,12 +113,12 @@ export function PageProperties({ appId, name }: { appId: string; name: string | 
         <>
           {page && builderAvailable && (
             <a className="btn btn-outline-primary" href={builderPageUrl(appId, page.name)}>
-              Open in builder
+              <T text="Open in builder" />
             </a>
           )}
           <Button variant="outline-secondary" onClick={() => navigate(pagesRoute)}>
             <IconArrowLeft className="icon-2" />
-            Pages
+            <T text="Pages" />
           </Button>
         </>
       }
@@ -162,7 +164,7 @@ export function PageProperties({ appId, name }: { appId: string; name: string | 
           </div>
           <div className="card-body">
             <Form.Group className="mb-3" controlId="pageName">
-              <Form.Label>Name</Form.Label>
+              <Form.Label><T text="Name" /></Form.Label>
               <Form.Control
                 value={form.name}
                 autoFocus={!page}
@@ -170,7 +172,7 @@ export function PageProperties({ appId, name }: { appId: string; name: string | 
                 onChange={(e) => set({ name: e.target.value })}
               />
               <Form.Control.Feedback type="invalid">{errors.name}</Form.Control.Feedback>
-              <Form.Text muted>Also its address: /page/&lt;name&gt; on the app's subdomain.</Form.Text>
+              <Form.Text muted><T text="Also its address: /page/<name> on the app's subdomain." /></Form.Text>
             </Form.Group>
             {renamed && (
               <Alert variant="warning">
@@ -186,12 +188,12 @@ export function PageProperties({ appId, name }: { appId: string; name: string | 
               </Alert>
             )}
             <Form.Group className="mb-3" controlId="pageTitle">
-              <Form.Label>Title</Form.Label>
+              <Form.Label><T text="Title" /></Form.Label>
               <Form.Control value={form.title} onChange={(e) => set({ title: e.target.value })} />
-              <Form.Text muted>The browser tab's title while the page is open.</Form.Text>
+              <Form.Text muted><T text="The browser tab's title while the page is open." /></Form.Text>
             </Form.Group>
             <Form.Group className="mb-3" controlId="pageDescription">
-              <Form.Label>Description</Form.Label>
+              <Form.Label><T text="Description" /></Form.Label>
               <Form.Control
                 value={form.description}
                 onChange={(e) => set({ description: e.target.value })}
@@ -199,12 +201,12 @@ export function PageProperties({ appId, name }: { appId: string; name: string | 
             </Form.Group>
             <RoleSelect
               id="pageRole"
-              label="Minimum role"
+              label={t("Minimum role")}
               roles={roles}
               value={form.min_role}
               onChange={(min_role) => set({ min_role })}
             >
-              The least privileged role that can open the page.
+              <T text="The least privileged role that can open the page." />
             </RoleSelect>
             {submitted && errors.min_role && (
               <div className="text-danger small mb-3">{errors.min_role}</div>
@@ -212,20 +214,20 @@ export function PageProperties({ appId, name }: { appId: string; name: string | 
             <Form.Check
               className="mb-2"
               id="pageNoMenu"
-              label="No menu: show the page without the application's menu"
+              label={t("No menu: show the page without the application's menu")}
               checked={form.no_menu}
               onChange={(e) => set({ no_menu: e.target.checked })}
             />
             <Form.Check
               id="pageFluid"
-              label="Fluid layout: use the full width of the window"
+              label={t("Fluid layout: use the full width of the window")}
               checked={form.request_fluid_layout}
               onChange={(e) => set({ request_fluid_layout: e.target.checked })}
             />
           </div>
           <div className="card-footer d-flex gap-2">
             <Button variant="outline-secondary" type="button" onClick={() => navigate(pagesRoute)}>
-              Cancel
+              <T text="Cancel" />
             </Button>
             <Button className="ms-auto" type="submit" disabled={busy || builderAvailable === null}>
               {page ? (renamed ? "Rename and save" : "Save") : builderAvailable ? "Create and build" : "Create"}

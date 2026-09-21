@@ -19,6 +19,7 @@ import { navigate } from "../App";
 import { IconPlus } from "../icons";
 import { PageBody, PageHeader, StatusBadge } from "../layout";
 import { roleLabel, useRoles } from "../roles";
+import { T, useT } from "../i18n";
 
 type AgentItem = ListAgentsResponse[number];
 
@@ -41,6 +42,7 @@ function traitSummary(agent: AgentItem): string {
 }
 
 export function Agents() {
+  const { t } = useT();
   const [agents, setAgents] = useState<AgentItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const roles = useRoles();
@@ -60,8 +62,10 @@ export function Agents() {
   const remove = async (agent: AgentItem) => {
     if (
       !window.confirm(
-        `Remove the agent "${agent.name}"?\n\n` +
-          "Its past conversations are kept — they are a record of what happened.",
+        t(
+          'Remove the agent "{name}"?\n\nIts past conversations are kept — they are a record of what happened.',
+          { name: agent.name },
+        ),
       )
     ) {
       return;
@@ -82,18 +86,18 @@ export function Agents() {
     <>
       <PageHeader
         pretitle="Agents"
-        title="Agents"
+        title={t("Agents")}
         actions={
           <>
             <Button
               variant="outline-secondary"
               onClick={() => navigate("/llm-providers")}
             >
-              LLM providers
+              <T text="LLM providers" />
             </Button>
             <Button onClick={() => navigate("/agents/new")}>
               <IconPlus className="icon-2" />
-              New agent
+              <T text="New agent" />
             </Button>
           </>
         }
@@ -105,18 +109,18 @@ export function Agents() {
           <Table hover responsive className="card-table table-vcenter">
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Provider</th>
-                <th>Traits</th>
-                <th>Who may chat</th>
-                <th className="text-end">Actions</th>
+                <th><T text="Name" /></th>
+                <th><T text="Provider" /></th>
+                <th><T text="Traits" /></th>
+                <th><T text="Who may chat" /></th>
+                <th className="text-end"><T text="Actions" /></th>
               </tr>
             </thead>
             <tbody>
               {agents?.length === 0 && (
                 <tr>
                   <td colSpan={5} className="text-muted">
-                    No agents yet. Connect an LLM provider, then add an agent to talk to it.
+                    <T text="No agents yet. Connect an LLM provider, then add an agent to talk to it." />
                   </td>
                 </tr>
               )}
@@ -132,7 +136,7 @@ export function Agents() {
                         the row. */}
                     {agent.error && (
                       <StatusBadge tone="red" title={agent.error} className="mt-1">
-                        Not usable
+                        <T text="Not usable" />
                       </StatusBadge>
                     )}
                   </td>
@@ -149,21 +153,21 @@ export function Agents() {
                         variant="primary"
                         href={`#/agents/${encodeURIComponent(agent.name)}/chat`}
                       >
-                        Chat
+                        <T text="Chat" />
                       </Button>
                       <Button
                         size="sm"
                         variant="outline-secondary"
                         href={`#/agents/${encodeURIComponent(agent.id)}/edit`}
                       >
-                        Edit
+                        <T text="Edit" />
                       </Button>
                       <Button
                         size="sm"
                         variant="outline-danger"
                         onClick={() => void remove(agent)}
                       >
-                        Remove
+                        <T text="Remove" />
                       </Button>
                     </div>
                   </td>

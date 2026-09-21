@@ -41,6 +41,7 @@ import {
   type RunPath,
   type StepKindName,
 } from "../workflowGraph";
+import { T } from "../i18n";
 
 /** Where each node sits, kept by the editor so a re-render does not undo a drag. */
 export type Positions = Record<string, { x: number; y: number }>;
@@ -243,7 +244,7 @@ function StepNode({ data, selected }: NodeProps) {
       <Handle type="target" position={Position.Top} />
       <div className="wf-node-head">
         <span className={`wf-node-kind badge bg-${info.tone}-lt`}>{info.label}</span>
-        {step.start && <span className="badge bg-green-lt">start</span>}
+        {step.start && <span className="badge bg-green-lt"><T text="start" /></span>}
         {step.problem && (
           <span className="badge bg-red-lt" title={step.problem}>
             !
@@ -275,7 +276,7 @@ function ComputedNode({ data }: NodeProps) {
       title={marker.summary}
     >
       <Handle type="target" position={Position.Top} />
-      computed
+      <T text="computed" />
     </div>
   );
 }

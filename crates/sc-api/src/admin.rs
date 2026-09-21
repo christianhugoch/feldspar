@@ -3564,6 +3564,12 @@ fn locales_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("default", TypeSchema::text()),
         StructField::new("enabled", TypeSchema::array(TypeSchema::text())),
+        // The locale **this request** was negotiated into (§16.x, D8), so the
+        // SPA loads the catalogue the server has already committed to in
+        // `Content-Language` rather than negotiating a second time from the
+        // browser's own idea of the order. Two negotiations of one request is
+        // how a page ends up with a French navbar and English tables.
+        StructField::new("current", TypeSchema::text()),
     ])
 }
 

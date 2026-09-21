@@ -124,6 +124,18 @@ pub struct Finding {
     pub text: String,
     /// Where it was.
     pub what: Unwrapped,
+    /// The byte range of the node this is about, in the file as it was read.
+    ///
+    /// For a JSX text node, the text itself — whitespace and all, because the
+    /// whitespace around a text node is layout and a rewrite has to put it
+    /// back. For an attribute, the **value including its quotes**, which is
+    /// exactly the span a `t(…)` replaces.
+    ///
+    /// Carried because [`text`](Finding::text) is clipped for reading and a
+    /// tool that wants to *change* the file needs the whole of it: `--json`
+    /// reports this, and the Translations screen (task 4.4) shows what it
+    /// names.
+    pub span: (usize, usize),
 }
 
 /// The two places the lint looks.

@@ -49,11 +49,13 @@ import {
   type UserForm,
   type UserRow,
 } from "../userForm";
+import { T, useT } from "../i18n";
 
 /** Which user the dialog is editing, or `"new"` for one that does not exist yet. */
 type Editing = { mode: "new" } | { mode: "edit"; user: UserRow };
 
 export function Users() {
+  const { t } = useT();
   const [users, setUsers] = useState<ListUsersResponse | null>(null);
   const [fields, setFields] = useState<ListFieldsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -92,7 +94,13 @@ export function Users() {
   };
 
   const remove = (user: UserRow) => {
-    if (!window.confirm(`Delete ${user.email}? This cannot be undone.`)) return;
+    if (
+      !window.confirm(
+        t("Delete {address}? This cannot be undone.", { address: user.email }),
+      )
+    ) {
+      return;
+    }
     void act("Could not delete the user.", () => api.deleteUser(user.id));
   };
 
@@ -106,7 +114,15 @@ export function Users() {
     void act("Could not end the sessions.", () => api.forceLogoutUser(user.id));
 
   const resetPassword = (user: UserRow) => {
-    if (!window.confirm(`Replace ${user.email}'s password with a random one?`)) return;
+    if (
+      !window.confirm(
+        t("Replace {address}’s password with a random one?", {
+          address: user.email,
+        }),
+      )
+    ) {
+      return;
+    }
     void act("Could not set a new password.", async () => {
       const reset = await api.setRandomPassword(user.id);
       setCredentials({ email: reset.email, password: reset.password, url: loginUrl() });
@@ -122,7 +138,10 @@ export function Users() {
   const become = (user: UserRow) => {
     if (
       !window.confirm(
-        `Continue as ${user.email}? Your admin session ends — you will have to sign in again.`,
+        t(
+          "Continue as {address}? Your admin session ends — you will have to sign in again.",
+          { address: user.email },
+        ),
       )
     ) {
       return;
@@ -139,15 +158,15 @@ export function Users() {
     <>
       <PageHeader
         pretitle="Access"
-        title="Users"
+        title={t("Users")}
         actions={
           <>
             <Button variant="outline-secondary" onClick={() => navigate("/roles")}>
-              Roles
+              <T text="Roles" />
             </Button>
             <Button onClick={() => setEditing({ mode: "new" })}>
               <IconPlus className="icon-2" />
-              Add user
+              <T text="Add user" />
             </Button>
           </>
         }
@@ -161,14 +180,14 @@ export function Users() {
 
         <Card>
           <Card.Header>
-            <h3 className="card-title">Users</h3>
+            <h3 className="card-title"><T text="Users" /></h3>
           </Card.Header>
           <Table hover responsive className="card-table table-vcenter">
             <thead>
               <tr>
-                <th>Email</th>
-                <th>Role</th>
-                <th>Status</th>
+                <th><T text="Email" /></th>
+                <th><T text="Role" /></th>
+                <th><T text="Status" /></th>
                 {columns.map((f) => (
                   <th key={f.name}>{f.label || f.name}</th>
                 ))}
@@ -179,7 +198,7 @@ export function Users() {
               {users?.length === 0 && (
                 <tr>
                   <td colSpan={4 + columns.length} className="text-muted">
-                    No users yet.
+                    <T text="No users yet." />
                   </td>
                 </tr>
               )}
@@ -191,9 +210,9 @@ export function Users() {
                     <td>{roleLabel(u.role, roles)}</td>
                     <td>
                       {u.disabled ? (
-                        <StatusBadge tone="red">Disabled</StatusBadge>
+                        <StatusBadge tone="red"><T text="Disabled" /></StatusBadge>
                       ) : (
-                        <StatusBadge tone="green">Active</StatusBadge>
+                        <StatusBadge tone="green"><T text="Active" /></StatusBadge>
                       )}
                     </td>
                     {columns.map((f) => (
@@ -207,7 +226,7 @@ export function Users() {
                           disabled={busy}
                           onClick={() => setEditing({ mode: "edit", user: u })}
                         >
-                          Edit
+                          <T text="Edit" />
                         </Button>
                         <Dropdown align="end">
                           <Dropdown.Toggle
@@ -226,18 +245,18 @@ export function Users() {
                               clipped by it. */}
                           <Dropdown.Menu renderOnMount popperConfig={{ strategy: "fixed" }}>
                             <Dropdown.Item onClick={() => resetPassword(u)}>
-                              Set random password
+                              <T text="Set random password" />
                             </Dropdown.Item>
                             <Dropdown.Item onClick={() => forceLogout(u)}>
-                              Force logout
+                              <T text="Force logout" />
                             </Dropdown.Item>
-                            <Dropdown.Item onClick={() => become(u)}>Become user</Dropdown.Item>
+                            <Dropdown.Item onClick={() => become(u)}><T text="Become user" /></Dropdown.Item>
                             <Dropdown.Divider />
                             <Dropdown.Item onClick={() => setDisabled(u, !u.disabled)}>
                               {u.disabled ? "Enable user" : "Disable user"}
                             </Dropdown.Item>
                             <Dropdown.Item className="text-danger" onClick={() => remove(u)}>
-                              Delete user
+                              <T text="Delete user" />
                             </Dropdown.Item>
                           </Dropdown.Menu>
                         </Dropdown>
@@ -295,6 +314,7 @@ function UserDialog({
   onClose: () => void;
   onSaved: (credentials: Credentials | null) => void;
 }) {
+  const { t } = useT();
   const [form, setForm] = useState<UserForm>(() => newUserForm(roles));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -360,7 +380,7 @@ function UserDialog({
           {error && <Alert variant="danger">{error}</Alert>}
 
           <Form.Group className="mb-3" controlId="userEmail">
-            <Form.Label>Email</Form.Label>
+            <Form.Label><T text="Email" /></Form.Label>
             <Form.Control
               type="email"
               value={form.email}
@@ -372,7 +392,7 @@ function UserDialog({
           </Form.Group>
 
           <Form.Group className="mb-3" controlId="userPassword">
-            <Form.Label>Password</Form.Label>
+            <Form.Label><T text="Password" /></Form.Label>
             <Form.Control
               type="password"
               value={form.password}
@@ -389,22 +409,26 @@ function UserDialog({
 
           <RoleSelect
             id="userRole"
-            label="Role"
+            label={t("Role")}
             roles={roles}
             value={form.role}
             onChange={(role) => setForm({ ...form, role })}
           >
-            Lower is more privileged. Add roles on the <a href="#/roles">Roles</a> screen.
+            <T text="Lower is more privileged. Add roles on the" /> <a href="#/roles"><T text="Roles" /></a> screen.
           </RoleSelect>
 
           {isMultilingual(locales) && (
             <Form.Group className="mb-3" controlId="userLanguage">
-              <Form.Label>Language</Form.Label>
+              <Form.Label><T text="Language" /></Form.Label>
               <Form.Select
                 value={form.language}
                 onChange={(e) => setForm({ ...form, language: e.target.value })}
               >
-                <option value="">Site default ({localeLabel(locales.default)})</option>
+                <option value="">
+                  {t("Site default ({language})", {
+                    language: localeLabel(locales.default),
+                  })}
+                </option>
                 {localeOptions(form.language || null, locales).map((tag) => (
                   <option key={tag} value={tag}>
                     {localeLabel(tag)}
@@ -412,7 +436,7 @@ function UserDialog({
                 ))}
               </Form.Select>
               <Form.Text muted>
-                What this account reads the product in. They can change it themselves.
+                <T text="What this account reads the product in. They can change it themselves." />
               </Form.Text>
             </Form.Group>
           )}
@@ -432,7 +456,7 @@ function UserDialog({
         </Modal.Body>
         <Modal.Footer>
           <Button variant="secondary" type="button" onClick={onClose}>
-            Cancel
+            <T text="Cancel" />
           </Button>
           <Button type="submit" disabled={busy}>
             {isEdit ? "Save changes" : "Create user"}
@@ -460,6 +484,7 @@ function CredentialsDialog({
   credentials: Credentials | null;
   onClose: () => void;
 }) {
+  const { t } = useT();
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -482,12 +507,14 @@ function CredentialsDialog({
   return (
     <Modal show={credentials !== null} onHide={onClose}>
       <Modal.Header closeButton>
-        <Modal.Title className="h4">Password set</Modal.Title>
+        <Modal.Title className="h4"><T text="Password set" /></Modal.Title>
       </Modal.Header>
       <Modal.Body>
         <p>
-          Send these to {credentials?.email} over a channel you trust. The password is not
-          stored in a readable form and will not be shown again.
+          {t(
+            "Send these to {address} over a channel you trust. The password is not stored in a readable form and will not be shown again.",
+            { address: credentials?.email ?? "" },
+          )}
         </p>
         <pre className="border rounded p-3 mb-3 user-credentials">{text}</pre>
         <Button variant="outline-secondary" onClick={() => void copy()}>
@@ -495,7 +522,7 @@ function CredentialsDialog({
         </Button>
       </Modal.Body>
       <Modal.Footer>
-        <Button onClick={onClose}>Done</Button>
+        <Button onClick={onClose}><T text="Done" /></Button>
       </Modal.Footer>
     </Modal>
   );

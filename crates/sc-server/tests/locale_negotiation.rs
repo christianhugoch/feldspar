@@ -194,6 +194,16 @@ async fn setup() -> sc_error::Result<(Client, TestDb)> {
     Ok((client, db))
 }
 
+/// One test at a time may hold the enabled set.
+///
+/// The enabled set is the **installation's**, so it lives in a process-wide slot
+/// (`sc_i18n::set_active`), and every test in this binary shares the process.
+/// Two tests each enabling their own locales would each see the other's, which
+/// is not a race in the server so much as a race in the fixture — so they queue.
+/// A `tokio` mutex rather than a `std` one because the guard is held across
+/// every `await` in the test it guards — which is the whole test.
+static LOCALES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Save the Localisation section.
 async fn set_locales(client: &mut Client, default: &str, enabled: &str) {
     let answer = client
@@ -211,6 +221,7 @@ async fn set_locales(client: &mut Client, default: &str, enabled: &str) {
 
 #[tokio::test]
 async fn a_request_is_served_in_the_language_it_negotiated() -> sc_error::Result<()> {
+    let _held = LOCALES.lock().await;
     let (mut admin, _db) = setup().await?;
 
     // --- Monolingual: nothing is negotiated and nothing is said (D11) --------
@@ -229,8 +240,10 @@ async fn a_request_is_served_in_the_language_it_negotiated() -> sc_error::Result
     assert_eq!(answer.vary(), None);
     assert_eq!(
         answer.body["locales"],
-        json!({ "default": "en", "enabled": ["en"] }),
-        "and it says so to the SPA, which is how the picker knows not to appear"
+        json!({ "default": "en", "current": "en", "enabled": ["en"] }),
+        "and it says so to the SPA, which is how the picker knows not to appear \
+         — and `current` is still answered, because the SPA needs a locale to \
+         load a catalogue for whether or not there is a choice"
     );
 
     // --- Turning it on is a save, not a restart -----------------------------
@@ -246,7 +259,7 @@ async fn a_request_is_served_in_the_language_it_negotiated() -> sc_error::Result
     assert_eq!(answer.vary(), Some("Accept-Language, Cookie"));
     assert_eq!(
         answer.body["locales"],
-        json!({ "default": "en", "enabled": ["en", "fr", "de"] })
+        json!({ "default": "en", "current": "fr", "enabled": ["en", "fr", "de"] })
     );
 
     // A tag nobody enabled never escapes the enabled set: the default answers.
@@ -413,4 +426,170 @@ async fn a_request_is_served_in_the_language_it_negotiated() -> sc_error::Result
         .await;
     assert_eq!(answer.content_language(), None);
     Ok(())
+}
+
+/// What the negotiated language actually *changes* (tasks 3.1 and 3.2).
+///
+/// The companion to the test above: that one asserts which locale a request was
+/// served in, this one asserts that the server then said something different.
+/// Four surfaces, and each is a different way a sentence reaches a person:
+///
+/// - **A refusal an admin reads** — a wrong password, and a request with no
+///   session at all. `t!` at the call site, against the request's locale (3.1).
+/// - **A settings section** — its heading, its one sentence, a field's label and
+///   that field's help text. All four are `sc-config` *data*, translated at the
+///   API edge because the server translates everything the server says (3.2, D5).
+/// - **A declared `config_spec`** — a framework's, which is the shape every
+///   extension point's settings arrive in. If this one moved, they all do: they
+///   go through one function.
+/// - **A declared description** — a framework's one-line pitch, which is a
+///   `&'static str` in a registry rather than a `FormField`.
+///
+/// The French comes from `crates/sc-i18n/locales/fr.json`, which is generated
+/// from these very call sites by `feldspar i18n translate` — so a key that moved
+/// makes this test fail loudly rather than silently serving English.
+#[tokio::test]
+async fn what_the_server_says_is_said_in_the_request_s_language() -> sc_error::Result<()> {
+    let _held = LOCALES.lock().await;
+    let (mut admin, _db) = setup().await?;
+
+    // --- English first, so every assertion below is a *change* --------------
+    let english = admin.get("/api/settings", &[]).await;
+    let localisation = section(&english.body, "localisation");
+    assert_eq!(localisation["label"], json!("Localisation"));
+    assert_eq!(
+        field(localisation, "enabled_locales")["label"],
+        json!("Enabled languages")
+    );
+
+    set_locales(&mut admin, "en", "en, fr").await;
+
+    // --- 3.1: a refusal, in the language of the person refused ---------------
+    let mut stranger = Client::new(admin.router.clone());
+    stranger.get("/api/auth/status", &[]).await;
+    let answer = stranger
+        .send(
+            "POST",
+            "/api/login",
+            Some(json!({ "email": "admin@example.com", "password": "not-the-password" })),
+            &[(header::ACCEPT_LANGUAGE.as_str(), "fr")],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(answer.content_language(), Some("fr"));
+    assert!(
+        answer.body.to_string().contains("identifiants invalides"),
+        "a wrong password should be refused in French: {}",
+        answer.body
+    );
+
+    // The authorization refusal, which is decided before a handler runs and
+    // from the user alone — here, from no user at all, so the installation
+    // default answers and the sentence is English.
+    let mut nobody = Client::new(admin.router.clone());
+    let answer = nobody.get("/api/tables", &[]).await;
+    assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+    assert!(
+        answer.body.to_string().contains("authentication required"),
+        "{}",
+        answer.body
+    );
+
+    // --- 3.2: the settings screen, all four kinds of English on it -----------
+    let french = admin
+        .get("/api/settings", &[(header::ACCEPT_LANGUAGE.as_str(), "fr")])
+        .await;
+    assert_eq!(french.content_language(), Some("fr"));
+    let localisation = section(&french.body, "localisation");
+    assert_eq!(localisation["label"], json!("Localisation"));
+    assert_eq!(
+        localisation["description"],
+        json!("Les langues que cette installation sert, et celle vers laquelle elle se replie"),
+        "the section's own sentence is the server's too"
+    );
+    let enabled = field(localisation, "enabled_locales");
+    assert_eq!(enabled["label"], json!("Langues activées"));
+    assert!(
+        enabled["help"]
+            .as_str()
+            .is_some_and(|h| h.starts_with("Étiquettes BCP-47")),
+        "the help text hangs off ConfigDef rather than FormField, and is \
+         translated where it is serialised: {}",
+        enabled["help"]
+    );
+    // A name is an identifier, not a label: translating it would rename the
+    // setting, and a save keyed by `Langues activées` would store nothing.
+    assert_eq!(enabled["name"], json!("enabled_locales"));
+
+    // --- 3.2: a declared spec, and a declared sentence ----------------------
+    let frameworks = admin
+        .get(
+            "/api/frameworks",
+            &[(header::ACCEPT_LANGUAGE.as_str(), "fr")],
+        )
+        .await;
+    assert_eq!(frameworks.status, StatusCode::OK, "{}", frameworks.body);
+    let saltcorn_ui = frameworks
+        .body
+        .as_array()
+        .expect("a list of frameworks")
+        .iter()
+        .find(|f| f["name"] == json!("saltcorn-ui"))
+        .expect("the Saltcorn UI framework")
+        .clone();
+    assert_eq!(saltcorn_ui["label"], json!("Interface Saltcorn"));
+    assert!(
+        saltcorn_ui["description"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("Des vues et des pages")),
+        "a framework's one-line pitch is a declared string and is translated \
+         at the edge: {}",
+        saltcorn_ui["description"]
+    );
+    let labels: Vec<&str> = saltcorn_ui["config_spec"]
+        .as_array()
+        .expect("a config spec")
+        .iter()
+        .filter_map(|f| f["label"].as_str())
+        .collect();
+    assert!(
+        labels.contains(&"Nom du site"),
+        "every declared spec goes through one function, and this is it: {labels:?}"
+    );
+
+    // …and English, asked for, is still English: the catalogue is a lookup and
+    // not a transformation.
+    let english_again = admin.get("/api/frameworks?lang=en", &[]).await;
+    let saltcorn_ui = english_again
+        .body
+        .as_array()
+        .expect("a list of frameworks")
+        .iter()
+        .find(|f| f["name"] == json!("saltcorn-ui"))
+        .expect("the Saltcorn UI framework")
+        .clone();
+    assert_eq!(saltcorn_ui["label"], json!("Saltcorn UI"));
+
+    set_locales(&mut admin, "en", "").await;
+    Ok(())
+}
+
+/// One section of the settings payload, by name.
+fn section<'a>(settings: &'a Value, name: &str) -> &'a Value {
+    settings["sections"]
+        .as_array()
+        .expect("the settings sections")
+        .iter()
+        .find(|s| s["name"] == json!(name))
+        .unwrap_or_else(|| panic!("no `{name}` section"))
+}
+
+/// One field of a section, by name.
+fn field<'a>(section: &'a Value, name: &str) -> &'a Value {
+    section["fields"]
+        .as_array()
+        .expect("the section's fields")
+        .iter()
+        .find(|f| f["name"] == json!(name))
+        .unwrap_or_else(|| panic!("no `{name}` field"))
 }

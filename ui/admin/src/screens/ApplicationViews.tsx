@@ -56,6 +56,7 @@ import {
   type PatternItem,
   type ViewItem,
 } from "../views";
+import { T, useT } from "../i18n";
 
 /** The rename dialog: a view or a page, the name being typed, and what refers to
  * it — `null` while that is being found out. */
@@ -92,6 +93,7 @@ export function ApplicationTabs({ app, active }: { app: AppItem; active: AppTab 
 }
 
 export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" | "pages" }) {
+  const { t } = useT();
   const roles = useRoles();
   const builderAvailable = useBuilderAvailable();
   const [app, setApp] = useState<AppItem | null>(null);
@@ -277,17 +279,17 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
                 });
               }}
             >
-              New view
+              <T text="New view" />
             </Button>
           )}
           {tab === "pages" && app && (
             <a className="btn btn-primary" href={newPageHref(appId)}>
-              New page
+              <T text="New page" />
             </a>
           )}
           <Button variant="outline-secondary" onClick={() => navigate("/applications")}>
             <IconArrowLeft className="icon-2" />
-            Applications
+            <T text="Applications" />
           </Button>
         </>
       }
@@ -333,11 +335,11 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
             <Table hover responsive className="card-table table-vcenter">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>Pattern</th>
-                  <th>Table</th>
-                  <th>Role</th>
-                  <th className="text-end">Actions</th>
+                  <th><T text="Name" /></th>
+                  <th><T text="Pattern" /></th>
+                  <th><T text="Table" /></th>
+                  <th><T text="Role" /></th>
+                  <th className="text-end"><T text="Actions" /></th>
                 </tr>
               </thead>
               <tbody>
@@ -360,7 +362,7 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
                       {row.pattern}
                       {row.patternMissing && (
                         <div>
-                          <StatusBadge tone="red">not on this server</StatusBadge>
+                          <StatusBadge tone="red"><T text="not on this server" /></StatusBadge>
                         </div>
                       )}
                     </td>
@@ -368,7 +370,7 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
                     <td>{row.role}</td>
                     <td className="text-end text-nowrap">
                       <a className="btn btn-sm btn-outline-primary me-1" href={viewEditorHref(appId, row.name)}>
-                        Configure
+                        <T text="Configure" />
                       </a>
                       <Button
                         size="sm"
@@ -376,14 +378,14 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
                         className="me-1"
                         onClick={() => void startRename("view", row.name)}
                       >
-                        Rename
+                        <T text="Rename" />
                       </Button>
                       <Button
                         size="sm"
                         variant="outline-danger"
                         onClick={() => void remove("view", row.name)}
                       >
-                        Delete
+                        <T text="Delete" />
                       </Button>
                     </td>
                   </tr>
@@ -396,11 +398,11 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
             <Table hover responsive className="card-table table-vcenter">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>Title</th>
-                  <th>Role</th>
-                  <th>Home page for</th>
-                  <th className="text-end">Actions</th>
+                  <th><T text="Name" /></th>
+                  <th><T text="Title" /></th>
+                  <th><T text="Role" /></th>
+                  <th><T text="Home page for" /></th>
+                  <th className="text-end"><T text="Actions" /></th>
                 </tr>
               </thead>
               <tbody>
@@ -427,14 +429,14 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
                           className="btn btn-sm btn-outline-primary me-1"
                           href={builderPageUrl(appId, row.name)}
                         >
-                          Edit
+                          <T text="Edit" />
                         </a>
                       ) : (
                         // A disabled button swallows hover, so the reason sits on
                         // a wrapper.
                         <span className="d-inline-block me-1" title={builderAvailable === false ? NO_BUILDER : undefined}>
                           <Button size="sm" variant="outline-primary" disabled>
-                            Edit
+                            <T text="Edit" />
                           </Button>
                         </span>
                       )}
@@ -442,7 +444,7 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
                         className="btn btn-sm btn-outline-secondary me-1"
                         href={pagePropertiesHref(appId, row.name)}
                       >
-                        Properties
+                        <T text="Properties" />
                       </a>
                       <Button
                         size="sm"
@@ -450,14 +452,14 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
                         className="me-1"
                         onClick={() => void startRename("page", row.name)}
                       >
-                        Rename
+                        <T text="Rename" />
                       </Button>
                       <Button
                         size="sm"
                         variant="outline-danger"
                         onClick={() => void remove("page", row.name)}
                       >
-                        Delete
+                        <T text="Delete" />
                       </Button>
                     </td>
                   </tr>
@@ -469,24 +471,24 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
         <Modal show={creating !== null} onHide={() => setCreating(null)}>
           <Form onSubmit={create}>
             <Modal.Header closeButton>
-              <Modal.Title className="h4">New view</Modal.Title>
+              <Modal.Title className="h4"><T text="New view" /></Modal.Title>
             </Modal.Header>
             <Modal.Body>
               {createError && <Alert variant="danger">{createError}</Alert>}
               {creating && (
                 <>
                   <Form.Group className="mb-3" controlId="newViewName">
-                    <Form.Label>Name</Form.Label>
+                    <Form.Label><T text="Name" /></Form.Label>
                     <Form.Control
                       value={creating.name}
                       autoFocus
                       required
                       onChange={(e) => setCreating({ ...creating, name: e.target.value })}
                     />
-                    <Form.Text muted>Also its address: /view/&lt;name&gt; on the app's subdomain.</Form.Text>
+                    <Form.Text muted><T text="Also its address: /view/<name> on the app's subdomain." /></Form.Text>
                   </Form.Group>
                   <Form.Group className="mb-3" controlId="newViewPattern">
-                    <Form.Label>Pattern</Form.Label>
+                    <Form.Label><T text="Pattern" /></Form.Label>
                     <Form.Select
                       value={creating.viewpattern}
                       onChange={(e) => setCreating({ ...creating, viewpattern: e.target.value })}
@@ -504,7 +506,7 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
                     )}
                   </Form.Group>
                   <Form.Group className="mb-3" controlId="newViewTable">
-                    <Form.Label>Table</Form.Label>
+                    <Form.Label><T text="Table" /></Form.Label>
                     <Form.Select
                       value={creating.table_name}
                       onChange={(e) => setCreating({ ...creating, table_name: e.target.value })}
@@ -516,17 +518,17 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
                         </option>
                       ))}
                     </Form.Select>
-                    <Form.Text muted>One of the application's tables.</Form.Text>
+                    <Form.Text muted><T text="One of the application's tables." /></Form.Text>
                   </Form.Group>
                   <RoleSelect
                     id="newViewRole"
-                    label="Minimum role"
+                    label={t("Minimum role")}
                     roles={roles}
                     value={creating.min_role}
                     onChange={(min_role) => setCreating({ ...creating, min_role })}
                   />
                   <Form.Group className="mb-3" controlId="newViewDescription">
-                    <Form.Label>Description</Form.Label>
+                    <Form.Label><T text="Description" /></Form.Label>
                     <Form.Control
                       value={creating.description}
                       onChange={(e) => setCreating({ ...creating, description: e.target.value })}
@@ -537,10 +539,10 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
             </Modal.Body>
             <Modal.Footer>
               <Button variant="secondary" type="button" onClick={() => setCreating(null)}>
-                Cancel
+                <T text="Cancel" />
               </Button>
               <Button type="submit" disabled={busy || builderAvailable === null}>
-                Create and configure
+                <T text="Create and configure" />
               </Button>
             </Modal.Footer>
           </Form>
@@ -549,14 +551,16 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
         <Modal show={renaming !== null} onHide={() => setRenaming(null)}>
           <Form onSubmit={rename}>
             <Modal.Header closeButton>
-              <Modal.Title className="h4">Rename {renaming?.original}</Modal.Title>
+              <Modal.Title className="h4">
+                {t("Rename {name}", { name: renaming?.original ?? "" })}
+              </Modal.Title>
             </Modal.Header>
             <Modal.Body>
               {renaming?.error && <Alert variant="danger">{renaming.error}</Alert>}
               {renaming && (
                 <>
                   <Form.Group className="mb-3" controlId="renameViewOrPage">
-                    <Form.Label>New name</Form.Label>
+                    <Form.Label><T text="New name" /></Form.Label>
                     <Form.Control
                       value={renaming.name}
                       autoFocus
@@ -578,7 +582,7 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
             </Modal.Body>
             <Modal.Footer>
               <Button variant="secondary" type="button" onClick={() => setRenaming(null)}>
-                Cancel
+                <T text="Cancel" />
               </Button>
               <Button
                 type="submit"
@@ -590,7 +594,7 @@ export function ApplicationViews({ appId, tab }: { appId: string; tab: "views" |
                   renaming.name.trim() === renaming.original
                 }
               >
-                Rename
+                <T text="Rename" />
               </Button>
             </Modal.Footer>
           </Form>

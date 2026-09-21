@@ -72,6 +72,27 @@ pub fn locale_or_default(settings: &I18nSettings, negotiated: Option<&Locale>) -
     }
 }
 
+/// The locale for a sentence decided *before* — or *outside* — a request's full
+/// context: an authorization refusal, which is settled from the user alone.
+///
+/// Still not ambient (D8): the user is the request's user, passed in. What it
+/// gives up is the `?lang=`, the cookie and `Accept-Language`, which is the
+/// right trade for a refusal — the one signal that matters for "you may not do
+/// that" is the language the person who is signed in reads, and a refusal is
+/// decided in half a dozen places that have a `User` and no `Uri`.
+///
+/// A monolingual installation gets the default with nothing parsed (D11).
+pub fn locale_for_user(user: Option<&User>) -> Locale {
+    let settings = sc_i18n::active();
+    if !settings.is_multilingual() {
+        return settings.default_locale().clone();
+    }
+    settings.resolve(&RequestLocale {
+        user: user.and_then(User::language),
+        ..RequestLocale::default()
+    })
+}
+
 /// Say which language this response is in, and what the answer depended on.
 ///
 /// `Content-Language` is the locale that was actually negotiated — not the one

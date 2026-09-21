@@ -8853,6 +8853,7 @@ dependencies = [
  "sc-error",
  "sc-expr",
  "sc-files",
+ "sc-i18n",
  "sc-query",
  "sc-test-harness",
  "sc-types",

@@ -12,11 +12,11 @@ import { MONOLINGUAL, isMultilingual, localeLabel, localeOptions } from "./local
 describe("isMultilingual", () => {
   it("is false for an installation that has configured nothing", () => {
     expect(isMultilingual(MONOLINGUAL)).toBe(false);
-    expect(isMultilingual({ default: "fr", enabled: ["fr"] })).toBe(false);
+    expect(isMultilingual({ default: "fr", current: "fr", enabled: ["fr"] })).toBe(false);
   });
 
   it("is true the moment there are two", () => {
-    expect(isMultilingual({ default: "en", enabled: ["en", "fr"] })).toBe(true);
+    expect(isMultilingual({ default: "en", current: "en", enabled: ["en", "fr"] })).toBe(true);
   });
 });
 
@@ -44,14 +44,14 @@ describe("localeLabel", () => {
 
 describe("localeOptions", () => {
   it("is the enabled set when the current value is in it", () => {
-    expect(localeOptions("fr", { default: "en", enabled: ["en", "fr"] })).toEqual(["en", "fr"]);
-    expect(localeOptions(null, { default: "en", enabled: ["en", "fr"] })).toEqual(["en", "fr"]);
+    expect(localeOptions("fr", { default: "en", current: "en", enabled: ["en", "fr"] })).toEqual(["en", "fr"]);
+    expect(localeOptions(null, { default: "en", current: "en", enabled: ["en", "fr"] })).toEqual(["en", "fr"]);
   });
 
   it("keeps a stored locale that is no longer enabled", () => {
     // A user reading Portuguese must not be silently switched to English by
     // opening their own record: the next Save would make it true.
-    expect(localeOptions("pt-BR", { default: "en", enabled: ["en", "fr"] })).toEqual([
+    expect(localeOptions("pt-BR", { default: "en", current: "en", enabled: ["en", "fr"] })).toEqual([
       "en",
       "fr",
       "pt-BR",

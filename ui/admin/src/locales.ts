@@ -20,7 +20,11 @@ import type { AuthStatusResponse } from "./client";
 export type Locales = AuthStatusResponse["locales"];
 
 /** An installation that has configured nothing: English, and nothing to pick. */
-export const MONOLINGUAL: Locales = { default: "en", enabled: ["en"] };
+export const MONOLINGUAL: Locales = {
+  default: "en",
+  current: "en",
+  enabled: ["en"],
+};
 
 /**
  * Load the enabled locales once.

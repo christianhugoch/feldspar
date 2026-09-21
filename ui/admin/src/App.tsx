@@ -38,7 +38,9 @@ import {
   IconUsers,
   SaltcornLogo,
 } from "./icons";
+import { I18nProvider } from "./i18n";
 import { useFoldedSidebar, useTheme } from "./layout";
+import { LocalePicker } from "./screens/LocalePicker";
 import { AgentChat } from "./screens/AgentChat";
 import { AgentForm } from "./screens/AgentForm";
 import { Agents } from "./screens/Agents";
@@ -74,6 +76,7 @@ import { TriggerForm } from "./screens/TriggerForm";
 import { Users } from "./screens/Users";
 import { WorkflowEditor } from "./screens/WorkflowEditor";
 import { WorkflowRuns } from "./screens/WorkflowRuns";
+import { T, useT } from "./i18n";
 
 /** The authenticated user, as reported by `authStatus` / `login`. */
 export type CurrentUser = NonNullable<AuthStatusResponse["current_user"]>;
@@ -143,15 +146,25 @@ export function App() {
     );
   }
 
-  if (!status.any_user_exists) {
-    return <FirstUser onCreated={refresh} />;
-  }
-
-  if (!status.current_user) {
-    return <Login onLoggedIn={refresh} />;
-  }
-
-  return <Shell user={status.current_user} onLogout={refresh} />;
+  // The locale the *server* negotiated for this request (§16.x, D8), which is
+  // the one it has already promised in `Content-Language`. The provider is
+  // outside the three top-level states on purpose: the sign-in page is a page
+  // too, and it has a language.
+  return (
+    <I18nProvider locale={status.locales?.current ?? "en"}>
+      {!status.any_user_exists ? (
+        <FirstUser onCreated={refresh} />
+      ) : !status.current_user ? (
+        <Login onLoggedIn={refresh} />
+      ) : (
+        <Shell
+          user={status.current_user}
+          locales={status.locales}
+          onLogout={refresh}
+        />
+      )}
+    </I18nProvider>
+  );
 }
 
 /** One entry in the sidebar: where it goes, what it is called, and which routes
@@ -243,11 +256,14 @@ export const NAV: NavItem[] = [
 /** The authenticated admin shell: Tabler's vertical layout around the screen. */
 function Shell({
   user,
+  locales,
   onLogout,
 }: {
   user: CurrentUser;
+  locales: AuthStatusResponse["locales"];
   onLogout: () => void;
 }) {
+  const { t } = useT();
   const route = useHashRoute();
   const [menuOpen, setMenuOpen] = useState(false);
   const [theme, toggleTheme] = useTheme();
@@ -309,7 +325,7 @@ function Shell({
             type="button"
             aria-controls="sidebar-menu"
             aria-expanded={menuOpen}
-            aria-label="Toggle navigation"
+            aria-label={t("Toggle navigation")}
             onClick={() => setMenuOpen((open) => !open)}
           >
             <span className="navbar-toggler-icon" />
@@ -321,7 +337,7 @@ function Shell({
             <a
               href="#/tables"
               className="d-flex align-items-center gap-2"
-              aria-label="Saltcorn"
+              aria-label={t("Saltcorn")}
             >
               <div className="d-flex">
                 <SaltcornLogo />
@@ -329,8 +345,8 @@ function Shell({
                     rail is the logo mark's width and Tabler would crop this to
                     the stems of its first two letters. */}
                 <div className="ms-2 sidebar-wide-only">
-                  <div className="saltcorn-label">Saltcorn</div>
-                  <div className="feldspar-label">Feldspar</div>
+                  <div className="saltcorn-label"><T text="Saltcorn" /></div>
+                  <div className="feldspar-label"><T text="Feldspar" /></div>
                 </div>
               </div>
             </a>
@@ -345,7 +361,7 @@ function Shell({
                 type="button"
                 className="nav-link px-0"
                 onClick={() => void logout()}
-                aria-label="Log out"
+                aria-label={t("Log out")}
                 title={`Log out (${user.email})`}
               >
                 <IconLogout className="icon-1" />
@@ -363,7 +379,7 @@ function Shell({
             <ul className="navbar-nav pt-lg-3">
               {/* Tabler's section titles: folded to a rail, each becomes a short
                   rule between the groups of icons. */}
-              <li className="nav-section-title">Data Layer</li>
+              <li className="nav-section-title"><T text="Data Layer" /></li>
               {NAV.map((item) => {
                 const active = item.matches.some((prefix) =>
                   route.startsWith(prefix),
@@ -390,7 +406,7 @@ function Shell({
                   </li>
                 );
               })}
-              <li className="nav-section-title">Applications</li>
+              <li className="nav-section-title"><T text="Applications" /></li>
               <ApplicationsNav route={route} folded={folded} />
             </ul>
             {/* The nav list above is `flex-grow: 1` in a column collapse, so
@@ -444,9 +460,13 @@ function Shell({
                   title={`Log out (${user.email})`}
                 >
                   <IconLogout className="icon-2" />
-                  <span className="sidebar-wide-only">Log out</span>
+                  <span className="sidebar-wide-only"><T text="Log out" /></span>
                 </button>
                 <ThemeToggle theme={theme} onToggle={toggleTheme} />
+                {/* Nothing at all on an installation that serves one language
+                    (D11): i18n is a thing an admin turns on, not a control
+                    every installation grows. */}
+                <LocalePicker user={user} locales={locales} folded={folded} />
               </div>
             </div>
           </div>
@@ -459,7 +479,7 @@ function Shell({
           <div className="container-xl">
             <div className="row text-center align-items-center flex-row-reverse">
               <div className="col-12 col-lg-auto mt-3 mt-lg-0">
-                <span className="text-secondary">Saltcorn</span>
+                <span className="text-secondary"><T text="Saltcorn" /></span>
               </div>
             </div>
           </div>

@@ -1252,7 +1252,25 @@ fn i18n_lint(root: &std::path::Path, parsed: &sc_cli::i18n::I18nArgs) -> Result<
     for (name, dir, kind) in i18n_trees(root, parsed) {
         let (_, findings) = sc_cli::i18n::scan_tree(root, &dir, kind)?;
         for finding in &findings {
-            println!("{finding}");
+            if parsed.json {
+                // One object per line, so the output streams and `jq` reads it
+                // without holding the whole run.
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "file": finding.file,
+                        "line": finding.line,
+                        "what": match &finding.what {
+                            sc_i18n::Unwrapped::JsxText => "text".to_owned(),
+                            sc_i18n::Unwrapped::Attribute(name) => name.clone(),
+                        },
+                        "start": finding.span.0,
+                        "end": finding.span.1,
+                    })
+                );
+            } else {
+                println!("{finding}");
+            }
         }
         eprintln!(
             "feldspar: {name} — {} unwrapped literal{}",

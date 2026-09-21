@@ -51,6 +51,7 @@ import { MultiSelect } from "../multiSelect";
 import { CustomQueries } from "./CustomQueries";
 import { ApplicationTabs } from "./ApplicationViews";
 import { appTabs, settingsOnOwnTab } from "../views";
+import { T, useT } from "../i18n";
 
 type FrameworkInfo = ListFrameworksResponse[number];
 type AppItem = ListApplicationsResponse[number];
@@ -97,6 +98,7 @@ export function ApplicationForm({
    * application, so each tab keeps what the other one holds. */
   tab?: "settings" | "app-settings";
 }) {
+  const { t } = useT();
   const [frameworks, setFrameworks] = useState<FrameworkInfo[] | null>(null);
   // The server's triggers, so the exposed subset is *picked* rather than typed:
   // a name that does not resolve is an application that will not mount, and the
@@ -318,7 +320,7 @@ export function ApplicationForm({
             onClick={() => navigate("/applications")}
           >
             <IconArrowLeft className="icon-2" />
-            Back
+            <T text="Back" />
           </Button>
         }
       />
@@ -331,7 +333,9 @@ export function ApplicationForm({
             {ownTab ? (
               <Card className="mb-3">
                 <Card.Header>
-                  {selected?.label || frameworkName} settings
+                  {t("{framework} settings", {
+                    framework: selected?.label || frameworkName,
+                  })}
                 </Card.Header>
                 <Card.Body>
                   <SettingsFields
@@ -347,8 +351,7 @@ export function ApplicationForm({
               // Reached by typing the address, or after switching the
               // application to a framework whose settings are on its form.
               <Alert variant="info">
-                This application&apos;s framework settings are on its Settings
-                tab.
+                <T text="This application's framework settings are on its Settings tab." />
               </Alert>
             )}
             {ownTab && (
@@ -362,7 +365,7 @@ export function ApplicationForm({
             <Row>
               <Col md={6}>
                 <Form.Group className="mb-3" controlId="appName">
-                  <Form.Label>Name</Form.Label>
+                  <Form.Label><T text="Name" /></Form.Label>
                   <Form.Control
                     value={name}
                     required
@@ -372,21 +375,23 @@ export function ApplicationForm({
               </Col>
               <Col md={6}>
                 <Form.Group className="mb-3" controlId="appSubdomain">
-                  <Form.Label>Subdomain</Form.Label>
+                  <Form.Label><T text="Subdomain" /></Form.Label>
                   <Form.Control
                     value={subdomain}
                     required
                     onChange={(e) => setSubdomain(e.target.value)}
                   />
                   <Form.Text muted>
-                    Served at {subdomain || "<subdomain>"}.your-domain.
+                    {t("Served at {subdomain}.your-domain.", {
+                      subdomain: subdomain || "<subdomain>",
+                    })}
                   </Form.Text>
                 </Form.Group>
               </Col>
             </Row>
 
             <Form.Group className="mb-3" controlId="appDescription">
-              <Form.Label>Description</Form.Label>
+              <Form.Label><T text="Description" /></Form.Label>
               <Form.Control
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
@@ -394,7 +399,7 @@ export function ApplicationForm({
             </Form.Group>
 
             <Card className="mb-3">
-              <Card.Header>Framework</Card.Header>
+              <Card.Header><T text="Framework" /></Card.Header>
               <Card.Body>
                 {/* One choice per framework, each with the name and sentence the
                   *server* supplied. Two frameworks are not two equal names in a
@@ -405,7 +410,7 @@ export function ApplicationForm({
                   without knowing which framework is which. The first offered is the
                   one an admin should take, and is what a new application starts on. */}
                 <fieldset className="mb-3">
-                  <legend className="form-label">Framework</legend>
+                  <legend className="form-label"><T text="Framework" /></legend>
                   {frameworks.map((f) => (
                     <Form.Check
                       key={f.name}
@@ -437,14 +442,25 @@ export function ApplicationForm({
                   branch in this file: the spec is the branch. */}
                 {ownTab ? (
                   <Form.Text muted>
-                    Its menu, login form, languages and other settings are on
-                    the application&apos;s{" "}
-                    {appSettingsHref && appId ? (
-                      <a href={appSettingsHref}>App settings</a>
+                    {/* One sentence with a hole in it, not three fragments: a
+                      translator has to be able to move the link. */}
+                    {appId ? (
+                      <T
+                        text="Its menu, login form, languages and other settings are on the application’s {tab} tab."
+                        values={{
+                          tab: appSettingsHref ? (
+                            <a href={appSettingsHref}>{t("App settings")}</a>
+                          ) : (
+                            t("App settings")
+                          ),
+                        }}
+                      />
                     ) : (
-                      "App settings"
-                    )}{" "}
-                    tab{appId ? "" : ", once it is created"}.
+                      <T
+                        text="Its menu, login form, languages and other settings are on the application’s {tab} tab, once it is created."
+                        values={{ tab: t("App settings") }}
+                      />
+                    )}
                   </Form.Text>
                 ) : (
                   <SettingsFields
@@ -461,28 +477,30 @@ export function ApplicationForm({
             <Row>
               <Col md={6}>
                 <Form.Group className="mb-3">
-                  <Form.Label htmlFor="appTables">Tables</Form.Label>
+                  <Form.Label htmlFor="appTables"><T text="Tables" /></Form.Label>
                   {/* The catalog, ticked — not a comma-separated list typed from
                     memory. A table's label is worth showing beside its name for
                     the same reason the tables screen shows it: the name is what
                     the app addresses and the label is what it is. */}
                   <MultiSelect
                     id="appTables"
-                    options={allTables.map((t) => ({
-                      value: t.name,
+                    options={allTables.map((table) => ({
+                      value: table.name,
                       description:
-                        t.label && t.label !== t.name ? t.label : t.description,
+                        table.label && table.label !== table.name
+                          ? table.label
+                          : table.description,
                     }))}
                     selected={tables}
                     onChange={setTables}
                     emptyText="This server has no tables yet."
                   />
-                  <Form.Text muted>The tables this app may access.</Form.Text>
+                  <Form.Text muted><T text="The tables this app may access." /></Form.Text>
                 </Form.Group>
               </Col>
               <Col md={6}>
                 <Form.Group className="mb-3">
-                  <Form.Label htmlFor="appFileStores">File stores</Form.Label>
+                  <Form.Label htmlFor="appFileStores"><T text="File stores" /></Form.Label>
                   <MultiSelect
                     id="appFileStores"
                     options={allFileStores.map((s) => ({
@@ -502,45 +520,51 @@ export function ApplicationForm({
                     emptyText="This server has no file stores yet."
                   />
                   <Form.Text muted>
-                    The file stores this app may access.
+                    <T text="The file stores this app may access." />
                   </Form.Text>
                 </Form.Group>
               </Col>
             </Row>
 
             <Card className="mb-3">
-              <Card.Header>Triggers</Card.Header>
+              <Card.Header><T text="Triggers" /></Card.Header>
               <Card.Body>
                 {allTriggers.length === 0 && (
                   <div className="text-muted">
-                    No triggers are configured on this server.
+                    <T text="No triggers are configured on this server." />
                   </div>
                 )}
-                {allTriggers.map((t) => (
+                {allTriggers.map((trigger) => (
                   <Form.Check
-                    key={t.id}
+                    key={trigger.id}
                     type="checkbox"
-                    id={`trigger-${t.id}`}
+                    id={`trigger-${trigger.id}`}
                     className="mb-2"
-                    checked={triggers.includes(t.name)}
+                    checked={triggers.includes(trigger.name)}
                     onChange={(e) =>
                       setTriggers((current) =>
                         e.target.checked
-                          ? [...current, t.name]
-                          : current.filter((n) => n !== t.name),
+                          ? [...current, trigger.name]
+                          : current.filter((n) => n !== trigger.name),
                       )
                     }
                     label={
                       <>
-                        <span className="fw-semibold">{t.name}</span>
+                        <span className="fw-semibold">{trigger.name}</span>
                         <div className="text-muted small">
                           {/* A workflow body has no action to name (§10.3). */}
-                          {t.action ?? "workflow"} · on {t.when} ·{" "}
-                          {/* Same vocabulary the trigger form uses: 1 is admin,
-                            100 is public, and no role set means admins only. */}
-                          {t.min_role == null
-                            ? "admins only (no minimum role set)"
-                            : `minimum role ${t.min_role}`}
+                          {t("{body} · on {event} · {access}", {
+                            body: trigger.action ?? "workflow",
+                            event: trigger.when,
+                            // Same vocabulary the trigger form uses: 1 is admin,
+                            // 100 is public, and no role set means admins only.
+                            access:
+                              trigger.min_role == null
+                                ? t("admins only (no minimum role set)")
+                                : t("minimum role {role}", {
+                                    role: trigger.min_role,
+                                  }),
+                          })}
                         </div>
                       </>
                     }
@@ -553,9 +577,7 @@ export function ApplicationForm({
                   .filter((name) => !allTriggers.some((t) => t.name === name))
                   .map((name) => (
                     <div key={name} className="text-danger small mb-2">
-                      <span className="fw-semibold">{name}</span> — no trigger
-                      of that name exists here, so this application will not
-                      mount until it is removed or the trigger is recreated.
+                      <span className="fw-semibold">{name}</span> <T text="— no trigger of that name exists here, so this application will not mount until it is removed or the trigger is recreated." />
                       <Button
                         size="sm"
                         variant="outline-danger"
@@ -566,27 +588,27 @@ export function ApplicationForm({
                           )
                         }
                       >
-                        Remove
+                        <T text="Remove" />
                       </Button>
                     </div>
                   ))}
                 <Form.Text muted>
-                  Each ticked trigger is exposed as{" "}
-                  <code>
-                    POST {"{api mount}"}/actions/
-                    {"{name}"}
-                  </code>{" "}
-                  on this app, guarded by the trigger's own minimum role.
+                  <T
+                    text="Each ticked trigger is exposed as {route} on this app, guarded by the trigger’s own minimum role."
+                    values={{
+                      route: <code>POST {"{api mount}"}/actions/{"{name}"}</code>,
+                    }}
+                  />
                 </Form.Text>
               </Card.Body>
             </Card>
 
             <Card className="mb-3">
-              <Card.Header>Streams</Card.Header>
+              <Card.Header><T text="Streams" /></Card.Header>
               <Card.Body>
                 {allStreams.length === 0 && (
                   <div className="text-muted">
-                    No streams are configured on this server.
+                    <T text="No streams are configured on this server." />
                   </div>
                 )}
                 {allStreams.map((s) => (
@@ -626,9 +648,7 @@ export function ApplicationForm({
                   .filter((name) => !allStreams.some((s) => s.name === name))
                   .map((name) => (
                     <div key={name} className="text-danger small mb-2">
-                      <span className="fw-semibold">{name}</span> — no stream of
-                      that name exists here, so this application cannot observe
-                      it until it is removed or the stream is recreated.
+                      <span className="fw-semibold">{name}</span> <T text="— no stream of that name exists here, so this application cannot observe it until it is removed or the stream is recreated." />
                       <Button
                         size="sm"
                         variant="outline-danger"
@@ -639,18 +659,22 @@ export function ApplicationForm({
                           )
                         }
                       >
-                        Remove
+                        <T text="Remove" />
                       </Button>
                     </div>
                   ))}
                 <Form.Text muted>
-                  Each ticked stream can be observed at{" "}
-                  <code>
-                    {"{api mount}"}/streams/{"{name}"}/observe
-                  </code>{" "}
-                  over a WebSocket, guarded by the stream's own minimum role, and
-                  appears in this app's generated client as{" "}
-                  <code>observeStream_{"{name}"}()</code>.
+                  <T
+                    text="Each ticked stream can be observed at {route} over a WebSocket, guarded by the stream’s own minimum role, and appears in this app’s generated client as {call}."
+                    values={{
+                      route: (
+                        <code>
+                          {"{api mount}"}/streams/{"{name}"}/observe
+                        </code>
+                      ),
+                      call: <code>observeStream_{"{name}"}()</code>,
+                    }}
+                  />
                 </Form.Text>
               </Card.Body>
             </Card>
@@ -663,7 +687,7 @@ export function ApplicationForm({
             />
 
             <RepeatableRows
-              title="Static directories"
+              title={t("Static directories")}
               rows={staticDirs}
               columns={[
                 { key: "mount", label: "Mount", placeholder: "/docs" },
@@ -683,8 +707,7 @@ export function ApplicationForm({
                 onChange={(e) => setCsp(e.target.value)}
               />
               <Form.Text muted>
-                One directive per line, e.g. `default-src: 'self'`. Leave empty
-                to use the framework's own default policy.
+                <T text="One directive per line, e.g. `default-src: 'self'`. Leave empty to use the framework's own default policy." />
               </Form.Text>
             </Form.Group>
 
@@ -720,18 +743,19 @@ function ApiRows({
   tables: string[];
   onChange: (rows: ApiRow[]) => void;
 }) {
+  const { t } = useT();
   const setRow = (index: number, next: ApiRow) =>
     onChange(rows.map((r, i) => (i === index ? next : r)));
   return (
     <Card className="mb-3">
       <Card.Header className="d-flex justify-content-between align-items-center">
-        <span>APIs</span>
+        <span><T text="APIs" /></span>
         <Button
           size="sm"
           variant="outline-primary"
           onClick={() => onChange([...rows, blankApiRow()])}
         >
-          Add
+          <T text="Add" />
         </Button>
       </Card.Header>
       <Card.Body>
@@ -745,7 +769,7 @@ function ApiRows({
             >
               <Row className="mb-2 align-items-end">
                 <Col>
-                  <Form.Label className="small mb-1">Provider</Form.Label>
+                  <Form.Label className="small mb-1"><T text="Provider" /></Form.Label>
                   {/* The registered names, from the server. An empty list — a
                       server that could not list them — leaves this the text box
                       it was: a picker that cannot be populated should not become
@@ -768,7 +792,7 @@ function ApiRows({
                         });
                       }}
                     >
-                      <option value="">Choose…</option>
+                      <option value=""><T text="Choose…" /></option>
                       {providers.map((p) => (
                         <option key={p.name} value={p.name}>
                           {p.label}
@@ -781,14 +805,16 @@ function ApiRows({
                       {row.provider &&
                         !providers.some((p) => p.name === row.provider) && (
                           <option value={row.provider}>
-                            {row.provider} (not registered)
+                            {t("{name} (not registered)", {
+                              name: row.provider,
+                            })}
                           </option>
                         )}
                     </Form.Select>
                   ) : (
                     <Form.Control
                       value={row.provider}
-                      placeholder="rest"
+                      placeholder={t("rest")}
                       onChange={(e) =>
                         setRow(index, { ...row, provider: e.target.value })
                       }
@@ -796,7 +822,7 @@ function ApiRows({
                   )}
                 </Col>
                 <Col>
-                  <Form.Label className="small mb-1">Mount</Form.Label>
+                  <Form.Label className="small mb-1"><T text="Mount" /></Form.Label>
                   <Form.Control
                     value={row.mount}
                     placeholder="/api"
@@ -810,7 +836,7 @@ function ApiRows({
                     variant="outline-danger"
                     onClick={() => onChange(rows.filter((_, i) => i !== index))}
                   >
-                    Remove
+                    <T text="Remove" />
                   </Button>
                 </Col>
               </Row>
@@ -851,8 +877,7 @@ function ApiRows({
               </div>
             ))}
             <div className="mt-1">
-              Each provider is mounted on its own sub-path; two on the same one
-              is refused, because a request resolves to only one of them.
+              <T text="Each provider is mounted on its own sub-path; two on the same one is refused, because a request resolves to only one of them." />
             </div>
           </Form.Text>
         )}
@@ -890,7 +915,7 @@ function RepeatableRows<T extends Record<string, string>>({
           variant="outline-primary"
           onClick={() => onChange([...rows, { ...blank }])}
         >
-          Add
+          <T text="Add" />
         </Button>
       </Card.Header>
       <Card.Body>
@@ -912,7 +937,7 @@ function RepeatableRows<T extends Record<string, string>>({
                 variant="outline-danger"
                 onClick={() => onChange(rows.filter((_, i) => i !== index))}
               >
-                Remove
+                <T text="Remove" />
               </Button>
             </Col>
           </Row>

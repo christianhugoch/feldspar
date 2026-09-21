@@ -62,6 +62,7 @@ import {
 } from "../models";
 import { SettingsFields, buildConfig, readConfig } from "../settings";
 import { fitTone } from "./Models";
+import { T, useT } from "../i18n";
 
 /** How long the form waits after a keystroke before asking the server what the
  * dataset answers. Long enough that typing a formula is not a request per
@@ -77,6 +78,7 @@ const POLL_MS = 1500;
 type SplitForm = { train: string; validation: string; test: string; seed: string };
 
 export function ModelForm({ modelId }: { modelId?: string }) {
+  const { t } = useT();
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
@@ -366,7 +368,13 @@ export function ModelForm({ modelId }: { modelId?: string }) {
   };
 
   const removeInstance = async (instance: InstanceItem) => {
-    if (!window.confirm(`Remove the fit "${instanceLabel(instance)}"?`)) return;
+    if (
+      !window.confirm(
+        t('Remove the fit "{name}"?', { name: instanceLabel(instance) }),
+      )
+    ) {
+      return;
+    }
     try {
       await api.deleteModelInstance(instance.id);
       if (id) await loadInstances(id);
@@ -400,7 +408,7 @@ export function ModelForm({ modelId }: { modelId?: string }) {
         actions={
           <Button variant="outline-secondary" onClick={() => navigate("/models")}>
             <IconArrowLeft className="icon-2" />
-            Back
+            <T text="Back" />
           </Button>
         }
       />
@@ -412,17 +420,17 @@ export function ModelForm({ modelId }: { modelId?: string }) {
             <Col md={6}>
               <Form.Group className="mb-3" controlId="modelName">
                 <Form.Label>
-                  Name<span className="text-danger"> *</span>
+                  <T text="Name" /><span className="text-danger"> *</span>
                 </Form.Label>
                 <Form.Control value={name} required onChange={(e) => setName(e.target.value)} />
                 <Form.Text muted>
-                  What a <code>predict_row</code> action names this model by.
+                  <T text="What a" /> <code>predict_row</code> <T text="action names this model by." />
                 </Form.Text>
               </Form.Group>
             </Col>
             <Col md={6}>
               <Form.Group className="mb-3" controlId="modelDescription">
-                <Form.Label>Description</Form.Label>
+                <Form.Label><T text="Description" /></Form.Label>
                 <Form.Control
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
@@ -433,17 +441,19 @@ export function ModelForm({ modelId }: { modelId?: string }) {
 
           {/* --- the dataset ------------------------------------------------ */}
           <Card className="mb-3">
-            <Card.Header>Dataset</Card.Header>
+            <Card.Header><T text="Dataset" /></Card.Header>
             <Card.Body>
               <Row>
                 <Col md={4}>
                   <Form.Group className="mb-3" controlId="modelTable">
                     <Form.Label>
-                      Table<span className="text-danger"> *</span>
+                      <T text="Table" /><span className="text-danger"> *</span>
                     </Form.Label>
                     <Form.Select value={table} onChange={(e) => setTable(e.target.value)}>
                       {tables.every((t) => t !== table) && table !== "" && (
-                        <option value={table}>{table} (missing)</option>
+                        <option value={table}>
+                          {t("{name} (missing)", { name: table })}
+                        </option>
                       )}
                       {tables.map((t) => (
                         <option key={t} value={t}>
@@ -452,25 +462,21 @@ export function ModelForm({ modelId }: { modelId?: string }) {
                       ))}
                     </Form.Select>
                     <Form.Text muted>
-                      The table every formula below is written over. Changing it leaves the
-                      columns as they are — they are formulas, and most of them will not
-                      resolve over another table.
+                      <T text="The table every formula below is written over. Changing it leaves the columns as they are — they are formulas, and most of them will not resolve over another table." />
                     </Form.Text>
                   </Form.Group>
                 </Col>
                 <Col md={8}>
                   <Form.Group className="mb-3" controlId="modelFilter">
-                    <Form.Label>Filter</Form.Label>
+                    <Form.Label><T text="Filter" /></Form.Label>
                     <Form.Control
                       className="font-monospace"
                       value={filter}
-                      placeholder="sold"
+                      placeholder={t("sold")}
                       onChange={(e) => setFilter(e.target.value)}
                     />
                     <Form.Text muted>
-                      One boolean formula deciding which rows are in the data, or blank for all
-                      of them. <code>user</code> and the operation flags may not be used: a
-                      dataset has no caller.
+                      <T text="One boolean formula deciding which rows are in the data, or blank for all of them." /> <code>user</code> <T text="and the operation flags may not be used: a dataset has no caller." />
                     </Form.Text>
                   </Form.Group>
                 </Col>
@@ -479,8 +485,8 @@ export function ModelForm({ modelId }: { modelId?: string }) {
               <Table size="sm" className="mb-2">
                 <thead>
                   <tr>
-                    <th style={{ width: "30%" }}>Column</th>
-                    <th>Formula</th>
+                    <th style={{ width: "30%" }}><T text="Column" /></th>
+                    <th><T text="Formula" /></th>
                     <th style={{ width: "1%" }} />
                   </tr>
                 </thead>
@@ -488,7 +494,7 @@ export function ModelForm({ modelId }: { modelId?: string }) {
                   {columns.length === 0 && (
                     <tr>
                       <td colSpan={3} className="text-muted">
-                        No columns yet. Pick one below, or add a blank row and write a formula.
+                        <T text="No columns yet. Pick one below, or add a blank row and write a formula." />
                       </td>
                     </tr>
                   )}
@@ -545,10 +551,10 @@ export function ModelForm({ modelId }: { modelId?: string }) {
                 <Form.Select
                   className="w-auto"
                   value=""
-                  aria-label="Add a column"
+                  aria-label={t("Add a column")}
                   onChange={(e) => addColumn(Number(e.target.value))}
                 >
-                  <option value="">Add a field, join path or aggregation…</option>
+                  <option value=""><T text="Add a field, join path or aggregation…" /></option>
                   {grouped.map(([group, list]) => (
                     <optgroup key={group} label={group}>
                       {list.map((choice) => (
@@ -564,24 +570,27 @@ export function ModelForm({ modelId }: { modelId?: string }) {
                   onClick={() => setColumns((list) => [...list, { name: "", expr: "" }])}
                 >
                   <IconPlus className="icon-2" />
-                  Blank column
+                  <T text="Blank column" />
                 </Button>
               </div>
 
               <hr />
 
-              <h4 className="h5">Preview</h4>
+              <h4 className="h5"><T text="Preview" /></h4>
               {previewError && <Alert variant="warning">{previewError}</Alert>}
               {!previewError && !preview && (
                 <p className="text-muted mb-0">
-                  Add a column to see the first rows and the types they came back as.
+                  <T text="Add a column to see the first rows and the types they came back as." />
                 </p>
               )}
               {preview && (
                 <>
                   {preview.split_error && (
                     <Alert variant="warning">
-                      {preview.split_error} — the dataset reads, and a fit cannot divide it.
+                      {t(
+                        "{problem} — the dataset reads, and a fit cannot divide it.",
+                        { problem: preview.split_error },
+                      )}
                     </Alert>
                   )}
                   <div className="table-responsive">
@@ -610,9 +619,9 @@ export function ModelForm({ modelId }: { modelId?: string }) {
                     </Table>
                   </div>
                   <p className="text-muted small mb-0">
-                    The first rows, and the type each column&apos;s values came back as — which
-                    is what the provider&apos;s form below is built from.
-                    {preview.primary_key && ` Split by ${preview.primary_key}.`}
+                    <T text="The first rows, and the type each column’s values came back as — which is what the provider’s form below is built from." />
+                    {preview.primary_key &&
+                      ` ${t("Split by {column}.", { column: preview.primary_key })}`}
                   </p>
                 </>
               )}
@@ -621,13 +630,13 @@ export function ModelForm({ modelId }: { modelId?: string }) {
 
           {/* --- the provider ----------------------------------------------- */}
           <Card className="mb-3">
-            <Card.Header>Provider</Card.Header>
+            <Card.Header><T text="Provider" /></Card.Header>
             <Card.Body>
               <Row>
                 <Col md={5}>
                   <Form.Group className="mb-3" controlId="modelProvider">
                     <Form.Label>
-                      Model provider<span className="text-danger"> *</span>
+                      <T text="Model provider" /><span className="text-danger"> *</span>
                     </Form.Label>
                     <Form.Select value={provider} onChange={(e) => setProvider(e.target.value)}>
                       <option value="">—</option>
@@ -635,7 +644,9 @@ export function ModelForm({ modelId }: { modelId?: string }) {
                           model is still shown, or saving this form would
                           silently repoint the model at another one. */}
                       {provider !== "" && providers.every((p) => p.name !== provider) && (
-                        <option value={provider}>{provider} (not on this server)</option>
+                        <option value={provider}>
+                          {t("{name} (not on this server)", { name: provider })}
+                        </option>
                       )}
                       {providers.map((p) => (
                         <option key={p.name} value={p.name}>
@@ -648,7 +659,7 @@ export function ModelForm({ modelId }: { modelId?: string }) {
                   </Form.Group>
                 </Col>
                 <Col md={7}>
-                  <Form.Label>Outcome</Form.Label>
+                  <Form.Label><T text="Outcome" /></Form.Label>
                   <div className="mb-3">
                     {outcome ? (
                       <StatusBadge tone="blue">{outcomeSummary(outcome)}</StatusBadge>
@@ -663,8 +674,7 @@ export function ModelForm({ modelId }: { modelId?: string }) {
                   </div>
                   {chosen?.standardise && (
                     <Form.Text muted className="d-block">
-                      This provider is handed standardised features, so its parameters are in
-                      standard deviations rather than the data&apos;s own units.
+                      <T text="This provider is handed standardised features, so its parameters are in standard deviations rather than the data's own units." />
                     </Form.Text>
                   )}
                 </Col>
@@ -673,11 +683,10 @@ export function ModelForm({ modelId }: { modelId?: string }) {
               {chosen && chosen.config_spec.length > 0 && (
                 <>
                   <hr />
-                  <h4 className="h5">Settings</h4>
+                  <h4 className="h5"><T text="Settings" /></h4>
                   {!resolved && (
                     <p className="text-muted small">
-                      The dataset could not be read, so a setting that would offer this
-                      dataset&apos;s columns is a text box here.
+                      <T text="The dataset could not be read, so a setting that would offer this dataset's columns is a text box here." />
                     </p>
                   )}
                   <SettingsFields
@@ -692,11 +701,9 @@ export function ModelForm({ modelId }: { modelId?: string }) {
               {chosen && chosen.hyperparameters.length > 0 && (
                 <>
                   <hr />
-                  <h4 className="h5">Hyperparameters</h4>
+                  <h4 className="h5"><T text="Hyperparameters" /></h4>
                   <p className="text-muted small">
-                    A value, or several separated by commas — a fit runs every combination of
-                    the lists, scores each on the validation rows and reports the winner. A
-                    blank box leaves the provider&apos;s own default.
+                    <T text="A value, or several separated by commas — a fit runs every combination of the lists, scores each on the validation rows and reports the winner. A blank box leaves the provider's own default." />
                   </p>
                   <Row>
                     {chosen.hyperparameters.map((field) => (
@@ -717,16 +724,23 @@ export function ModelForm({ modelId }: { modelId?: string }) {
                   </Row>
                   {points > 1 && (
                     <p className="text-muted small mb-0">
-                      {points} combinations, and each one is a fit
-                      {points > MAX_GRID_POINTS && ` — more than the ${MAX_GRID_POINTS} a fit will run`}
-                      .{" "}
+                      {points > MAX_GRID_POINTS
+                        ? t(
+                            "{count} combinations, and each one is a fit — more than the {cap} a fit will run.",
+                            { count: points, cap: MAX_GRID_POINTS },
+                          )
+                        : t("{count} combinations, and each one is a fit.", {
+                            count: points,
+                          })}{" "}
                       {!validationRows &&
-                        "A search scores its points on the validation rows, and this split has none — give it some below."}
+                        t(
+                          "A search scores its points on the validation rows, and this split has none — give it some below.",
+                        )}
                     </p>
                   )}
                   {points === 0 && (
                     <p className="text-danger small mb-0">
-                      One of these is an empty list, which is a search over nothing.
+                      <T text="One of these is an empty list, which is a search over nothing." />
                     </p>
                   )}
                 </>
@@ -736,7 +750,7 @@ export function ModelForm({ modelId }: { modelId?: string }) {
 
           {/* --- the split --------------------------------------------------- */}
           <Card className="mb-3">
-            <Card.Header>Split</Card.Header>
+            <Card.Header><T text="Split" /></Card.Header>
             <Card.Body>
               <Row>
                 {(["train", "validation", "test"] as const).map((part) => (
@@ -756,7 +770,7 @@ export function ModelForm({ modelId }: { modelId?: string }) {
                 ))}
                 <Col md={3}>
                   <Form.Group className="mb-3" controlId="model-split-seed">
-                    <Form.Label>Seed</Form.Label>
+                    <Form.Label><T text="Seed" /></Form.Label>
                     <Form.Control
                       type="number"
                       value={split.seed}
@@ -767,14 +781,11 @@ export function ModelForm({ modelId }: { modelId?: string }) {
               </Row>
               {!splitSums(split) && (
                 <p className="text-danger small mb-2">
-                  The three fractions must sum to 1.
+                  <T text="The three fractions must sum to 1." />
                 </p>
               )}
               <p className="text-muted small mb-0">
-                Which side of the split a row falls on is a hash of its primary key and the
-                seed, not a shuffle — so new rows arriving keep every old row where it was, and
-                the test metric of this fit is comparable with the test metric of the last one.
-                The fractions are therefore approximate; each fit records the counts it got.
+                <T text="Which side of the split a row falls on is a hash of its primary key and the seed, not a shuffle — so new rows arriving keep every old row where it was, and the test metric of this fit is comparable with the test metric of the last one. The fractions are therefore approximate; each fit records the counts it got." />
               </p>
             </Card.Body>
           </Card>
@@ -784,10 +795,10 @@ export function ModelForm({ modelId }: { modelId?: string }) {
               {busy ? "Saving…" : id ? "Save changes" : "Create model"}
             </Button>
             <Button variant="success" disabled={busy} onClick={() => void fit()}>
-              Fit
+              <T text="Fit" />
             </Button>
             <span className="text-muted small align-self-center">
-              Fitting saves this model first, so what is fitted is what is on the screen.
+              <T text="Fitting saves this model first, so what is fitted is what is on the screen." />
             </span>
           </div>
         </Form>
@@ -795,23 +806,22 @@ export function ModelForm({ modelId }: { modelId?: string }) {
         {/* --- the fits ----------------------------------------------------- */}
         {id && (
           <Card className="mb-3">
-            <Card.Header>Fits</Card.Header>
+            <Card.Header><T text="Fits" /></Card.Header>
             <Table hover responsive className="card-table table-vcenter">
               <thead>
                 <tr>
-                  <th>Fit</th>
-                  <th>Status</th>
-                  <th>Result</th>
-                  <th>Hyperparameters</th>
-                  <th className="text-end">Actions</th>
+                  <th><T text="Fit" /></th>
+                  <th><T text="Status" /></th>
+                  <th><T text="Result" /></th>
+                  <th><T text="Hyperparameters" /></th>
+                  <th className="text-end"><T text="Actions" /></th>
                 </tr>
               </thead>
               <tbody>
                 {instances.length === 0 && (
                   <tr>
                     <td colSpan={5} className="text-muted">
-                      Not fitted yet. A fit reads every row of the dataset and runs on the
-                      server; this list says how it went.
+                      <T text="Not fitted yet. A fit reads every row of the dataset and runs on the server; this list says how it went." />
                     </td>
                   </tr>
                 )}
@@ -834,7 +844,7 @@ export function ModelForm({ modelId }: { modelId?: string }) {
                         <StatusBadge tone={fitTone(instance.status)}>
                           {instance.status}
                         </StatusBadge>
-                        {instance.active && <StatusBadge tone="green">active</StatusBadge>}
+                        {instance.active && <StatusBadge tone="green"><T text="active" /></StatusBadge>}
                       </div>
                       {/* A fit that failed says so **here**, because the request
                           that started it returned long before it failed. */}
@@ -857,7 +867,7 @@ export function ModelForm({ modelId }: { modelId?: string }) {
                             variant="outline-primary"
                             onClick={() => void activate(instance)}
                           >
-                            Activate
+                            <T text="Activate" />
                           </Button>
                         )}
                         <Button
@@ -865,14 +875,14 @@ export function ModelForm({ modelId }: { modelId?: string }) {
                           variant="outline-secondary"
                           href={`#/model-instances/${encodeURIComponent(instance.id)}`}
                         >
-                          Open
+                          <T text="Open" />
                         </Button>
                         <Button
                           size="sm"
                           variant="outline-danger"
                           onClick={() => void removeInstance(instance)}
                         >
-                          Remove
+                          <T text="Remove" />
                         </Button>
                       </div>
                     </td>
@@ -881,9 +891,7 @@ export function ModelForm({ modelId }: { modelId?: string }) {
               </tbody>
             </Table>
             <Card.Footer className="text-muted small">
-              A fit runs on the server and this list polls until it finishes. Nothing survives a
-              restart: an instance still fitting when the server stops is failed at boot,
-              because there is no cancel and no way to pick it back up.
+              <T text="A fit runs on the server and this list polls until it finishes. Nothing survives a restart: an instance still fitting when the server stops is failed at boot, because there is no cancel and no way to pick it back up." />
             </Card.Footer>
           </Card>
         )}

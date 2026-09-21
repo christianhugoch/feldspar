@@ -34,6 +34,7 @@ import { IconDownload, IconUpload } from "../icons";
 import { AlertBody } from "../layout";
 import { MultiSelect } from "../multiSelect";
 import type { RestoreBackupResponse } from "../client";
+import { T, useT } from "../i18n";
 
 /** What the restore flow is doing: nothing, holding an uploaded file's contents,
  * or showing what a finished restore did. */
@@ -43,6 +44,7 @@ type Restore =
   | { stage: "done"; report: RestoreBackupResponse };
 
 export function BackupTab() {
+  const { t } = useT();
   const [contents, setContents] = useState<BackupContents>(NO_CONTENTS);
   const [selection, setSelection] = useState<BackupSelection | null>(null);
   const [choosing, setChoosing] = useState(false);
@@ -127,8 +129,7 @@ export function BackupTab() {
       {taken && (
         <Alert variant="success" dismissible onClose={() => setTaken(false)}>
           <AlertBody>
-            The backup has been downloaded. What it includes has been saved, so the next
-            one covers the same things.
+            <T text="The backup has been downloaded. What it includes has been saved, so the next one covers the same things." />
           </AlertBody>
         </Alert>
       )}
@@ -136,11 +137,9 @@ export function BackupTab() {
       <div className="card mb-4">
         <div className="card-header">
           <div>
-            <h3 className="card-title">Backup</h3>
+            <h3 className="card-title"><T text="Backup" /></h3>
             <p className="card-subtitle text-secondary mb-0">
-              One zip file holding this installation: table definitions and their rows,
-              applications, file stores and their contents, users, agents, triggers and the
-              SSL settings. Choose what goes in when you take it.
+              <T text="One zip file holding this installation: table definitions and their rows, applications, file stores and their contents, users, agents, triggers and the SSL settings. Choose what goes in when you take it." />
             </p>
           </div>
         </div>
@@ -150,20 +149,20 @@ export function BackupTab() {
           ) : (
             <>
               <p className="text-secondary mb-3">
-                Currently included: {summarise(selection, contents)}
+                {t("Currently included: {summary}", {
+                  summary: summarise(selection, contents),
+                })}
               </p>
               <div className="btn-list">
                 <Button onClick={() => setChoosing(true)} disabled={busy !== null}>
-                  <IconDownload /> Backup now
+                  <IconDownload /> <T text="Backup now" />
                 </Button>
               </div>
               {/* Said where the choice is made, not in a footnote: a backup carries
                   password hashes, a file store's credentials and the TLS private
                   key, so the file is exactly as sensitive as the database. */}
               <p className="form-hint mt-3 mb-0 text-secondary">
-                A backup contains everything needed to restore this installation, including
-                password hashes, file-store credentials and the SSL private key. Keep it
-                somewhere you would keep a database dump.
+                <T text="A backup contains everything needed to restore this installation, including password hashes, file-store credentials and the SSL private key. Keep it somewhere you would keep a database dump." />
               </p>
             </>
           )}
@@ -173,15 +172,9 @@ export function BackupTab() {
       <div className="card">
         <div className="card-header">
           <div>
-            <h3 className="card-title">Restore</h3>
+            <h3 className="card-title"><T text="Restore" /></h3>
             <p className="card-subtitle text-secondary mb-0">
-              Read a backup file and put back the parts of it you choose. A Saltcorn 1
-              backup works too: its tables, rows, users, files and actions are imported,
-              and the restore says what it could not bring across. Nothing already
-              on this server is deleted or overwritten: tables, users and file stores that
-              are already here are left as they are, and the restore says what it skipped.
-              Restored applications are built and start serving straight away, so a restore
-              that includes one takes as long as its build does.
+              <T text="Read a backup file and put back the parts of it you choose. A Saltcorn 1 backup works too: its tables, rows, users, files and actions are imported, and the restore says what it could not bring across. Nothing already on this server is deleted or overwritten: tables, users and file stores that are already here are left as they are, and the restore says what it skipped. Restored applications are built and start serving straight away, so a restore that includes one takes as long as its build does." />
             </p>
           </div>
         </div>
@@ -192,7 +185,7 @@ export function BackupTab() {
               disabled={busy !== null}
               onClick={() => fileInput.current?.click()}
             >
-              <IconUpload /> Restore
+              <IconUpload /> <T text="Restore" />
             </Button>
           </div>
           <input
@@ -225,7 +218,7 @@ export function BackupTab() {
       {selection !== null && (
         <IncludeDialog
           show={choosing}
-          title="What should the backup include?"
+          title={t("What should the backup include?")}
           confirm="Backup now"
           busy={busy}
           contents={contents}
@@ -239,7 +232,7 @@ export function BackupTab() {
       {restore.stage === "choosing" && (
         <IncludeDialog
           show
-          title="What should be restored?"
+          title={t("What should be restored?")}
           subtitle={restoreSubtitle(restore.uploaded)}
           confirm="Restore"
           busy={busy}
@@ -297,6 +290,7 @@ function IncludeDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const { t } = useT();
   const nothing = isEmpty(selection);
   return (
     <Modal show={show} onHide={onCancel} size="lg" scrollable>
@@ -309,34 +303,33 @@ function IncludeDialog({
         {contents.tables.length > 0 && (
           <>
             <Form.Group className="mb-3" controlId="backup-tables">
-              <Form.Label>Table definitions</Form.Label>
+              <Form.Label><T text="Table definitions" /></Form.Label>
               <MultiSelect
                 id="backup-tables"
                 options={choices(contents.tables, "row")}
                 selected={selection.tables}
                 onChange={(tables) => onChange(withTables(selection, tables))}
-                placeholder="No tables"
+                placeholder={t("No tables")}
               />
               <Form.Text muted>
-                A table's columns, its access rules and its ownership formula.
+                <T text="A table's columns, its access rules and its ownership formula." />
               </Form.Text>
             </Form.Group>
 
             <Form.Group className="mb-3" controlId="backup-table-data">
-              <Form.Label>Table data</Form.Label>
+              <Form.Label><T text="Table data" /></Form.Label>
               <MultiSelect
                 id="backup-table-data"
                 options={dataChoices(contents, selection)}
                 selected={selection.table_data}
                 onChange={(data) => onChange(withTableData(selection, data))}
-                placeholder="No rows"
+                placeholder={t("No rows")}
                 emptyText="Choose a table above first."
               />
               {/* The rule, where it applies: the picker above is the list this one
                   offers, so unticking a table takes its rows with it. */}
               <Form.Text muted>
-                The rows themselves. Only a table whose definition is included can have its
-                rows included.
+                <T text="The rows themselves. Only a table whose definition is included can have its rows included." />
               </Form.Text>
             </Form.Group>
           </>
@@ -344,35 +337,32 @@ function IncludeDialog({
 
         {contents.applications.length > 0 && (
           <Form.Group className="mb-3" controlId="backup-applications">
-            <Form.Label>Applications</Form.Label>
+            <Form.Label><T text="Applications" /></Form.Label>
             <MultiSelect
               id="backup-applications"
               options={choices(contents.applications, "")}
               selected={selection.applications}
               onChange={(applications) => onChange({ ...selection, applications })}
-              placeholder="No applications"
+              placeholder={t("No applications")}
             />
             <Form.Text muted>
-              An application's definition — its framework, its API and the tables it
-              exposes. The built bundle is not in the backup: a restored application is
-              rebuilt from the source its file store carries, which is what makes it serve
-              again without anybody pressing Build.
+              <T text="An application's definition — its framework, its API and the tables it exposes. The built bundle is not in the backup: a restored application is rebuilt from the source its file store carries, which is what makes it serve again without anybody pressing Build." />
             </Form.Text>
           </Form.Group>
         )}
 
         {contents.file_stores.length > 0 && (
           <Form.Group className="mb-3" controlId="backup-file-stores">
-            <Form.Label>Files</Form.Label>
+            <Form.Label><T text="Files" /></Form.Label>
             <MultiSelect
               id="backup-file-stores"
               options={choices(contents.file_stores, "file")}
               selected={selection.file_stores}
               onChange={(file_stores) => onChange({ ...selection, file_stores })}
-              placeholder="No file stores"
+              placeholder={t("No file stores")}
             />
             <Form.Text muted>
-              Each store's definition, every file in it, and each file's access rules.
+              <T text="Each store's definition, every file in it, and each file's access rules." />
             </Form.Text>
           </Form.Group>
         )}
@@ -387,10 +377,15 @@ function IncludeDialog({
               onChange={(e) => onChange({ ...selection, users: e.target.checked })}
               label={
                 <>
-                  <span className="fw-semibold">Users and roles</span>
+                  <span className="fw-semibold"><T text="Users and roles" /></span>
                   <div className="text-muted small">
-                    {contents.users} {contents.users === 1 ? "account" : "accounts"}, with
-                    their password hashes and the roles they hold.
+                    {/* One message with a plural form, not a ternary over two
+                      English words: which forms a language needs is CLDR's
+                      answer and not this file's. */}
+                    {t(
+                      "{count} accounts, with their password hashes and the roles they hold.",
+                      { count: contents.users },
+                    )}
                   </div>
                 </>
               }
@@ -405,10 +400,12 @@ function IncludeDialog({
               onChange={(e) => onChange({ ...selection, agents: e.target.checked })}
               label={
                 <>
-                  <span className="fw-semibold">Agents</span>
+                  <span className="fw-semibold"><T text="Agents" /></span>
                   <div className="text-muted small">
-                    {contents.agents} {contents.agents === 1 ? "agent" : "agents"}, with
-                    their prompts and enabled traits. Their runs are not included.
+                    {t(
+                      "{count} agents, with their prompts and enabled traits. Their runs are not included.",
+                      { count: contents.agents },
+                    )}
                   </div>
                 </>
               }
@@ -423,11 +420,12 @@ function IncludeDialog({
               onChange={(e) => onChange({ ...selection, triggers: e.target.checked })}
               label={
                 <>
-                  <span className="fw-semibold">Triggers</span>
+                  <span className="fw-semibold"><T text="Triggers" /></span>
                   <div className="text-muted small">
-                    {contents.triggers} {contents.triggers === 1 ? "trigger" : "triggers"}. A
-                    trigger that fires on a table whose definition is not included is left
-                    out with it.
+                    {t(
+                      "{count} triggers. A trigger that fires on a table whose definition is not included is left out with it.",
+                      { count: contents.triggers },
+                    )}
                   </div>
                 </>
               }
@@ -443,11 +441,12 @@ function IncludeDialog({
               onChange={(e) => onChange({ ...selection, views: e.target.checked })}
               label={
                 <>
-                  <span className="fw-semibold">Views</span>
+                  <span className="fw-semibold"><T text="Views" /></span>
                   <div className="text-muted small">
-                    {contents.views} Saltcorn UI {contents.views === 1 ? "view" : "views"}, in
-                    the applications chosen above. Restored, they replace the views the
-                    application has.
+                    {t(
+                      "{count} Saltcorn UI views, in the applications chosen above. Restored, they replace the views the application has.",
+                      { count: contents.views },
+                    )}
                   </div>
                 </>
               }
@@ -463,11 +462,12 @@ function IncludeDialog({
               onChange={(e) => onChange({ ...selection, pages: e.target.checked })}
               label={
                 <>
-                  <span className="fw-semibold">Pages</span>
+                  <span className="fw-semibold"><T text="Pages" /></span>
                   <div className="text-muted small">
-                    {contents.pages} Saltcorn UI {contents.pages === 1 ? "page" : "pages"}, in
-                    the applications chosen above. Restored, they replace the pages the
-                    application has.
+                    {t(
+                      "{count} Saltcorn UI pages, in the applications chosen above. Restored, they replace the pages the application has.",
+                      { count: contents.pages },
+                    )}
                   </div>
                 </>
               }
@@ -482,10 +482,9 @@ function IncludeDialog({
               onChange={(e) => onChange({ ...selection, ssl: e.target.checked })}
               label={
                 <>
-                  <span className="fw-semibold">SSL settings</span>
+                  <span className="fw-semibold"><T text="SSL settings" /></span>
                   <div className="text-muted small">
-                    The certificate source and, in <code>custom</code> mode, the certificate
-                    and its private key.
+                    <T text="The certificate source and, in" /> <code>custom</code> <T text="mode, the certificate and its private key." />
                   </div>
                 </>
               }
@@ -495,7 +494,7 @@ function IncludeDialog({
       </Modal.Body>
       <Modal.Footer>
         <Button variant="secondary" type="button" onClick={onCancel}>
-          Cancel
+          <T text="Cancel" />
         </Button>
         <Button type="button" disabled={busy !== null || nothing} onClick={onConfirm}>
           {busy !== null ? "Working…" : confirm}
@@ -536,7 +535,7 @@ function RestoreReport({ report }: { report: RestoreBackupResponse }) {
       </Alert>
       {report.restored.length > 0 && (
         <details>
-          <summary className="text-secondary">What was restored</summary>
+          <summary className="text-secondary"><T text="What was restored" /></summary>
           <ul className="mt-2 text-secondary">
             {report.restored.map((line, i) => (
               <li key={i}>{line}</li>

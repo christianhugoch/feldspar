@@ -52,6 +52,7 @@ import { McpTokensPanel } from "./McpTokens";
 import { ModulesTab } from "./ModulesTab";
 import { PythonStatusPanel } from "./PythonStatus";
 import { TestEmail } from "./TestEmail";
+import { T, useT } from "../i18n";
 
 /** One section as the API describes it. */
 type Section = GetSettingsResponse["sections"][number];
@@ -120,6 +121,7 @@ export function initialTab(sections: Section[]): SettingsTab {
 }
 
 export function Settings() {
+  const { t } = useT();
   // The sections are loaded *here* rather than inside a panel because the tab
   // strip is derived from them: a screen whose panels fetched their own could
   // not name its own tabs.
@@ -178,7 +180,7 @@ export function Settings() {
   if (!sections) {
     return (
       <>
-        <PageHeader title="Settings" />
+        <PageHeader title={t("Settings")} />
         <PageBody>
           {error ? (
             <Alert variant="danger">{error}</Alert>
@@ -192,7 +194,7 @@ export function Settings() {
 
   return (
     <>
-      <PageHeader title="Settings" />
+      <PageHeader title={t("Settings")} />
       <PageBody>
         {/* Hand-built rather than react-bootstrap's `Tabs`, for the reason the
             multi-select is hand-built: the admin SPA is served under a strict CSP
@@ -227,8 +229,7 @@ export function Settings() {
             {saved && (
               <Alert variant="success" dismissible onClose={() => setSaved(false)}>
                 <AlertBody>
-                  Settings saved. Certificate and port changes take effect when the server
-                  restarts.
+                  <T text="Settings saved. Certificate and port changes take effect when the server restarts." />
                 </AlertBody>
               </Alert>
             )}

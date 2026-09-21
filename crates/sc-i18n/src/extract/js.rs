@@ -216,6 +216,7 @@ pub fn scan(language: Language, file: &str, source: &[u8]) -> (Extraction, Vec<F
                         line: line_of(value),
                         text: quote(&text),
                         what: Unwrapped::Attribute(name.to_owned()),
+                        span: (value.start_byte(), value.end_byte()),
                     });
                 }
             }
@@ -225,12 +226,13 @@ pub fn scan(language: Language, file: &str, source: &[u8]) -> (Extraction, Vec<F
                     continue;
                 };
                 let text = node.utf8_text(source).unwrap_or_default();
-                if super::looks_like_prose(text) {
+                if super::looks_like_prose(text) && !inside_code(node, source) {
                     findings.push(Finding {
                         file: file.to_owned(),
                         line: line_of(node),
                         text: quote(text),
                         what: Unwrapped::JsxText,
+                        span: (node.start_byte(), node.end_byte()),
                     });
                 }
             }
@@ -421,4 +423,31 @@ fn unescape(escape: &str) -> String {
 fn from_hex(digits: &str) -> Option<String> {
     let code = u32::from_str_radix(digits, 16).ok()?;
     Some(char::from_u32(code)?.to_string())
+}
+
+/// The elements whose text is **code**, not prose.
+///
+/// `<code>npm install</code>` is a command, `<code>user</code>` is an
+/// identifier in a formula, and `<kbd>Ctrl</kbd>` is a key. Translating any of
+/// them would break the thing they name, so the lint does not ask for them to
+/// be wrapped — which matters because a sentence with a command in the middle
+/// of it is exactly the shape `<T values={{…}}>` is for, and the wrapped
+/// sentence puts the element in a hole rather than translating its contents.
+///
+/// Five tags, and the test is the *parent element's* name: a `<code>` nested in
+/// a `<p>` is code, and a `<p>` nested in a `<code>` does not happen.
+const CODE_ELEMENTS: [&str; 5] = ["code", "kbd", "samp", "pre", "var"];
+
+/// Whether this text node is the content of one of [`CODE_ELEMENTS`].
+fn inside_code(node: tree_sitter::Node<'_>, source: &[u8]) -> bool {
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    let Some(open) = parent.child(0) else {
+        return false;
+    };
+    let Some(name) = open.child_by_field_name("name") else {
+        return false;
+    };
+    CODE_ELEMENTS.contains(&name.utf8_text(source).unwrap_or_default())
 }

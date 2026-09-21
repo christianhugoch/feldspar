@@ -109,6 +109,7 @@ import {
 } from "../icons";
 import type { ListFieldsResponse } from "../client";
 import type { TableWrites } from "../tableWrites";
+import { T, useT } from "../i18n";
 
 /** One merged field as `listFields` reports it. */
 export type FieldInfo = ListFieldsResponse[number];
@@ -176,6 +177,7 @@ export function DataGrid({
   /** Bumped by the screen when something outside the grid changed the rows. */
   reloadToken: number;
 }) {
+  const { t } = useT();
   // --- what is asked for -----------------------------------------------------
   const [sorting, setSorting] = useState<Sort[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -331,7 +333,7 @@ export function DataGrid({
           <button
             type="button"
             className="grid-expand"
-            title="Open this row"
+            title={t("Open this row")}
             onClick={() => {
               const record = rowAt(row.original.index);
               if (record) onOpenRow(record);
@@ -651,9 +653,15 @@ export function DataGrid({
     <div className="grid-shell">
       <div className="grid-toolbar">
         <span className="text-muted small">
-          {total === null ? "Counting…" : `${total.toLocaleString()} row${total === 1 ? "" : "s"}`}
+          {total === null
+            ? t("Counting…")
+            : t("{count} rows", { count: total })}
           {total !== null && total > ROW_CEILING && (
-            <> — showing the first {ROW_CEILING.toLocaleString()}; narrow with a filter</>
+            <>
+              {t(" — showing the first {shown}; narrow with a filter", {
+                shown: ROW_CEILING.toLocaleString(),
+              })}
+            </>
           )}
         </span>
         <div className="flex-grow-1" />
@@ -663,13 +671,13 @@ export function DataGrid({
           onClick={() => setShowFilters((s) => !s)}
         >
           <IconFilter className="icon-2" />
-          Filter
+          <T text="Filter" />
           {filterCount > 0 && <span className="badge bg-secondary ms-1">{filterCount}</span>}
         </Button>
         <FieldsMenu layout={layout} fields={fields} onChange={setAndSaveLayout} />
         {sorting.length > 0 && (
           <Button size="sm" variant="outline-secondary" onClick={() => setSorting([])}>
-            Clear sort
+            <T text="Clear sort" />
           </Button>
         )}
         {writes.delete && selectedRows.length > 0 && pk !== null && (
@@ -687,13 +695,13 @@ export function DataGrid({
             }}
           >
             <IconTrash className="icon-2" />
-            Delete {selectedRows.length} row{selectedRows.length === 1 ? "" : "s"}
+            {t("Delete {count} rows", { count: selectedRows.length })}
           </Button>
         )}
         {writes.insert && (
           <Button size="sm" variant="primary" onClick={() => onOpenRow(null)}>
             <IconPlus className="icon-2" />
-            New row
+            <T text="New row" />
           </Button>
         )}
       </div>
@@ -705,9 +713,17 @@ export function DataGrid({
       )}
       {pk === null && fields.length > 0 && (
         <Alert variant="warning" className="mb-2">
-          This table has no single-column primary key, so a row cannot be picked out to change or
-          delete. Rows can still be read and added. Give one field the <strong>Primary key</strong>{" "}
-          tick on the table page to edit them here.
+          <T text="This table has no single-column primary key, so a row cannot be picked out to change or delete. Rows can still be read and added." />{" "}
+          <T
+            text="Give one field the {tick} tick on the table page to edit them here."
+            values={{
+              tick: (
+                <strong>
+                  <T text="Primary key" />
+                </strong>
+              ),
+            }}
+          />
         </Alert>
       )}
 
@@ -919,14 +935,19 @@ function FieldsMenu({
   fields: FieldInfo[];
   onChange: (layout: ColumnLayout) => void;
 }) {
+  const { t } = useT();
   const kinds = new Map(fields.map((f) => [f.name, f.type]));
   const hiddenCount = layout.hidden.length;
   return (
     <Dropdown autoClose="outside">
       <Dropdown.Toggle size="sm" variant="outline-secondary">
         <IconLayoutColumns className="icon-2" />
-        Fields
-        {hiddenCount > 0 && <span className="badge bg-secondary ms-1">{hiddenCount} hidden</span>}
+        <T text="Fields" />
+        {hiddenCount > 0 && (
+          <span className="badge bg-secondary ms-1">
+            {t("{count} hidden", { count: hiddenCount })}
+          </span>
+        )}
       </Dropdown.Toggle>
       <Dropdown.Menu className="grid-fields-menu">
         {layout.order.map((name, at) => (
@@ -946,7 +967,7 @@ function FieldsMenu({
             <button
               type="button"
               className="grid-fields-move"
-              title="Move earlier"
+              title={t("Move earlier")}
               disabled={at === 0}
               onClick={() => onChange(nudge(layout, name, -1))}
             >
@@ -955,7 +976,7 @@ function FieldsMenu({
             <button
               type="button"
               className="grid-fields-move"
-              title="Move later"
+              title={t("Move later")}
               disabled={at === layout.order.length - 1}
               onClick={() => onChange(nudge(layout, name, 1))}
             >
@@ -971,7 +992,7 @@ function FieldsMenu({
             className="p-0"
             onClick={() => onChange(showAll(layout, true))}
           >
-            Show all
+            <T text="Show all" />
           </Button>
           <Button
             size="sm"
@@ -979,7 +1000,7 @@ function FieldsMenu({
             className="p-0"
             onClick={() => onChange(showAll(layout, false))}
           >
-            Hide all
+            <T text="Hide all" />
           </Button>
         </div>
       </Dropdown.Menu>

@@ -2,6 +2,163 @@
 
 Changes in reverse chronological order.
 
+## Internationalisation, phase 3: the product's own strings
+
+The third of five phases (`docs/I18N.md`, `TODO.md` §3). Phase 1 built a kernel that knew what a
+catalogue is and phase 2 built what fills and checks one; this phase is the one that makes a
+screen come out in another language. Population **A** — our strings, written at release — is
+split across a Rust core and a React SPA that share no library, and this phase covers both sides
+of that split.
+
+### The rule, and where the line falls
+
+**The server translates everything the server says** (decision D5), and it says two very
+different kinds of thing. A sentence it *writes* — "invalid credentials", "There is nothing at
+this address." — is a `t!` call site with the request's locale passed to it. A sentence it
+*declares* — a stream provider's `Broker URL`, the Localisation section's heading, a framework's
+one-line pitch — is **data**, looked up at the API edge by the English it was declared as. Both
+reach the catalogue by the same route and both are keyed by the same English (D1); what differs
+is only where the lookup happens.
+
+The line that took the most thought is the one inside "what the server says":
+
+- **Wrapped:** what a *person* reads. Saltcorn UI's sign-in and sign-up forms and their
+  validation, its 401/403/404 pages, and the admin API's authentication and authorization
+  refusals.
+- **Not wrapped:** what a *programmer* reads. `sc-auth`'s `"password is required"` and
+  `handlers.rs`'s "`csv` must be the CSV document as text" are about the shape of a request, they
+  never reach a form — Saltcorn UI's sign-up validates and phrases its own sentences before ever
+  calling `create_user` — and translating them would only make a support thread harder to search.
+  This is §16's rule about system errors, applied one level up.
+
+### The Rust half (tasks 3.1, 3.2)
+
+- **`sc-viewpattern`'s own sentences** (`framework.rs`) are `t!(req.locale, …)`: the sign-in and
+  sign-up forms' headings, labels and buttons, every refusal the sign-up can produce, the 404 and
+  405 pages, and `refused`'s two — "You need to sign in to see {what}." and "Your role may not see
+  {what}.". The two sentences with a link in them are **one message each**, with the anchor as two
+  arguments (`{link_start}Sign up{link_end}`), because a translator who has to move the link to
+  the front of the clause must be able to.
+- **`enforce_auth`** answers "authentication required" and "insufficient privilege" in the
+  signed-in user's language, through a new `i18n::locale_for_user`. Not ambient (D8) — the user is
+  the request's user, passed in — but deliberately narrower than a full negotiation: a refusal is
+  decided in half a dozen places that hold a `User` and no `Uri`, and the signal that matters for
+  "you may not do that" is the language of the person who is signed in. `AuthRequirement::Public`
+  is answered before the locale is even asked for, so the overwhelmingly common call costs what it
+  always did.
+- **`spec_json`, the one place a `config_spec` becomes JSON.** Every extension point's declared
+  settings — actions, agent traits, file-store backends and their operations, LLM providers and
+  models, model providers, stream providers, table providers, frameworks, API providers, a
+  workflow's pending form, a view's configuration step — go through it, so they are translated by
+  construction rather than by remembering to. Its companion `say` does the same for a declared
+  *sentence*: a framework's label and description, an action's, a trait's.
+  - **A module's strings pass through untouched.** `say_unless_module` tests the declaration's own
+    `module: Option<_>`, so the rule is the data rather than a convention: a v1 plugin's labels are
+    its own, in its own package, and this server translating them would be it claiming authorship
+    of text it did not write.
+  - The **settings screen** is the one place with three kinds of declared English on it, and all
+    three move: the section's heading, its one sentence, and each setting's label *and* help text.
+    The help is the one `translate_spec` cannot reach — it hangs off `sc_config::ConfigDef` rather
+    than off `FormField` — so it is translated where it is serialised.
+  - A **backup archive** is explicitly not a screen: `table.json` is written in the source language
+    whatever the admin who pressed the button reads.
+
+### Declared labels reach the catalogue (a deviation from task 2.3)
+
+`translate_spec` can only find what the catalogue holds, and the extractor of task 2.3 read `t!`
+and `tc!` call sites — so a declared `Broker URL` would have been a lookup that could never
+succeed. The Rust scanner now also reads **`label:` / `description:` / `sublabel:` / `help:` /
+`blurb:`**, as a builder method (`.label("…")`), as a struct field (`label: "…"`) or as
+`ConfigDef::help(field, "…")`. Five names and not "every string": a `name` is an identifier and a
+`key` is a key, and a list of field names is not something to hand a translator. A non-literal is
+**skipped silently** here, which is where this parts company with `t!`: a `.label(name)` on a
+field built in a loop is an ordinary thing to write, not a call site somebody forgot to wrap.
+
+This took the `core` domain from a few dozen messages to **256**, which is what a settings screen
+in French actually costs.
+
+### The admin SPA (tasks 3.3, 3.4)
+
+- **`ui/admin/src/i18n.tsx`** — `I18nProvider`, `useT`, `<T>` — and **no new npm dependency**
+  (D10). A message format is one scanner and a plural is `Intl.PluralRules`; the whole runtime is
+  a little over two hundred lines, and it is held to `sc_i18n::format` by
+  `crates/sc-i18n/fixtures/format.json`, which a Rust test and `i18n.format.test.ts` now both run
+  (33 shared cases).
+  - **The locale comes from the server**, as `locales.current` on `authStatus`. Not from
+    `navigator.languages`: the server has already negotiated this request and promised the answer
+    in `Content-Language`, and a browser negotiating a second time would disagree with that promise
+    on exactly the requests where it matters — a French navbar over English tables.
+  - The catalogue is `src/locales/{tag}.json`, `import.meta.glob`-ed so shipping a locale is
+    adding a file. **English loads nothing at all** (D11): the key is the English.
+  - `<html lang>` and `<html dir>` are set by the provider, and an RTL locale lazily pulls in
+    `bootstrap.rtl.min.css`. Tabler is not vendored in an RTL build, so that mirrors the Bootstrap
+    layer underneath it and no further; the gaps above it are what Arabic is in the shipped set to
+    make visible, and an RTL layout audit is out of scope by name.
+  - **The locale picker** sits in the sidebar's account row and writes the admin's `language`
+    column — the second source a request is negotiated from, so the choice follows them to another
+    browser — then reloads the page, because the server said half of what is on it. Nothing renders
+    at all on a monolingual installation.
+- **`<T>` takes element values**, and this is the addition that made the sweep possible at all.
+  `<T text="Each ticked trigger is exposed as {route} on this app." values={{ route: <code>…</code> }} />`
+  is one message with a hole in it. Without it, every sentence with a link or a `<code>` in the
+  middle — and a third of the sentences on these screens have one — becomes three fragments that
+  no translator can reorder and half of whose languages cannot make grammatical.
+- **The sweep: 1,196 unwrapped literals, and `feldspar i18n lint ui/admin/src` is now clean.**
+  1,108 of them were mechanical and were rewritten from the lint's own byte spans — a JSX text node
+  became `<T text="…" />` (a component, so no hook has to be introduced into the enclosing
+  function), one of the four linted attributes became `{t("…")}`. Two text nodes separated only by
+  an HTML entity were merged first, because tree-sitter ends a text node at `&rsquo;` and the two
+  halves are one sentence. The remaining 88 — plus the 32 the merges revealed — sat beside a
+  `{expression}` and were done by hand, each becoming one message with a placeholder or an element
+  hole. Every `window.confirm` question was translated too.
+- **The lint learned what code is.** A text node inside `<code>`, `<kbd>`, `<samp>`, `<pre>` or
+  `<var>` is no longer reported: `npm install` is a command, `user` is an identifier in a formula,
+  and translating either would break the thing it names. This matters more than it sounds — it is
+  what makes "wrap the sentence and put the command in a hole" the answer the lint is asking for.
+- `feldspar i18n lint --json` reports each finding's **byte span**, which is what the sweep was
+  driven from and what the Translations screen (task 4.4) will show.
+
+### The builder (task 3.5)
+
+v1's builder has had the whole mechanism since 2021: `useTranslation` is
+`translations[phrase] || phrase`, a lookup keyed by the English phrase, which is decision D1
+written four years early. What was missing was the map. `ui/builder/src/i18n.ts` loads
+`src/locales/{locale}.json` and flattens it into `options.translations`, and the builder route
+puts the admin's negotiated locale in the boot data.
+
+The phrases themselves are in `ui/builder/vendor/saltcorn-builder`, not `ui/builder/src`, so the
+`builder` domain grew a **`vendored`** source list: a vendored tree's messages count (339 of
+them), its lint findings and its unreadable call sites do not. There is nothing to be done about
+what a vendored file says, and a lint whose findings cannot be acted on is a lint that gets
+turned off.
+
+### The first locale (task 3.6, partly)
+
+`crates/sc-i18n/locales/fr.json` is written and **complete**: 256 of 256, placeholders checked by
+`feldspar i18n check`. It is what the milestone's French demo runs on and what
+`tests/locale_negotiation.rs` asserts against. The other fourteen files — four more locales across
+three domains, about 5,700 messages — are a `feldspar i18n translate` run against a configured
+provider, which needs an API key and spends money; they are carried, with the command in
+`crates/sc-i18n/locales/README.md`.
+
+### Tests
+
+- `tests/locale_negotiation.rs` gains **what the negotiated language actually changes**, over real
+  HTTP against Postgres: a wrong password refused in French, an unauthenticated request refused in
+  the installation default, the Localisation section's heading, sentence, field label and help text
+  all in French, a framework's label, description and `config_spec` labels in French — and the same
+  framework in English when `?lang=en` asks for it, because the catalogue is a lookup and not a
+  transformation. Both tests in that file queue on one mutex: the enabled set is an installation's,
+  so it is process-wide, and two tests each enabling their own locales would each see the other's.
+- `sc-types`' `translate_spec` tests gained the other half — a declared label the catalogue *does*
+  hold comes back translated. Its old "nothing moves" test now uses labels nothing will ever
+  declare, because `Port` and `Source directory` are real settings and are in the shipped
+  catalogue, which is the facility working rather than the test failing.
+- `ui/admin`: 42 test files, 581 tests, plus the shared format corpus and the `<T values>`
+  interleaving asserted without a DOM.
+- `ui/builder/src/i18n.test.ts` covers the map's shape and that it leaves the worker's options
+  alone. It could not be **run** here — `ui/builder/node_modules` is empty on this machine.
+
 ## Internationalisation, phase 2: extraction, the lint, and the CLI
 
 The second of five phases (`docs/I18N.md`, `TODO.md` §2). Phase 1 built a kernel that knew what

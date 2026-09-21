@@ -42,8 +42,10 @@ import {
   when,
 } from "../mcpTokens";
 import type { FieldSpec } from "../settings";
+import { T, useT } from "../i18n";
 
 export function McpTokensPanel({ enabled }: { enabled: boolean }) {
+  const { t } = useT();
   const [fields, setFields] = useState<FieldSpec[] | null>(null);
   const [tokens, setTokens] = useState<ApiToken[] | null>(null);
   const [form, setForm] = useState<MintForm | null>(null);
@@ -115,11 +117,19 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
     <div className="card mb-4">
       <div className="card-header">
         <div>
-          <h3 className="card-title">Administration MCP tokens</h3>
+          <h3 className="card-title"><T text="Administration MCP tokens" /></h3>
           <p className="card-subtitle text-secondary mb-0">
-            Bearer credentials for the MCP server above, so a coding agent can read and change
-            this installation's schema, triggers and applications. Each one runs with{" "}
-            <strong>your</strong> authority, bounded by the boxes ticked when it is generated.
+            <T text="Bearer credentials for the MCP server above, so a coding agent can read and change this installation’s schema, triggers and applications." />{" "}
+            <T
+              text="Each one runs with {whose} authority, bounded by the boxes ticked when it is generated."
+              values={{
+                whose: (
+                  <strong>
+                    <T text="your" />
+                  </strong>
+                ),
+              }}
+            />
           </p>
         </div>
       </div>
@@ -133,9 +143,20 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
         {!enabled && (
           <Alert variant="warning">
             <AlertBody>
-              The administration MCP server is turned off, so <code>{mcpUrl(origin)}</code>{" "}
-              answers 404 and no token is looked at. Tick{" "}
-              <strong>Administration MCP server</strong> above and save before generating one .
+              <T
+                text="The administration MCP server is turned off, so {url} answers 404 and no token is looked at."
+                values={{ url: <code>{mcpUrl(origin)}</code> }}
+              />{" "}
+              <T
+                text="Tick {setting} above and save before generating one."
+                values={{
+                  setting: (
+                    <strong>
+                      <T text="Administration MCP server" />
+                    </strong>
+                  ),
+                }}
+              />
             </AlertBody>
           </Alert>
         )}
@@ -144,10 +165,7 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
           <Alert variant="success">
             <AlertBody>
               <p className="mb-2">
-                <strong>This is the only time this token is shown.</strong> It is stored as a
-                hash, so nothing — not this screen, not the log, not the database — can read it
-                back. Copy the line below now; if you lose it, revoke the token and generate
-                another.
+                <strong><T text="This is the only time this token is shown." /></strong> <T text="It is stored as a hash, so nothing — not this screen, not the log, not the database — can read it back. Copy the line below now; if you lose it, revoke the token and generate another." />
               </p>
               <pre className="border rounded p-3 mb-2 text-wrap">{command}</pre>
               <div className="btn-list">
@@ -155,7 +173,7 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
                   {copied ? "Copied" : "Copy the command"}
                 </Button>
                 <Button variant="outline-secondary" size="sm" onClick={() => setSecret(null)}>
-                  Done
+                  <T text="Done" />
                 </Button>
               </div>
             </AlertBody>
@@ -165,9 +183,7 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
         {enabled && !secret && (
           <div className="mb-3">
             <p className="text-secondary mb-2">
-              Register this server with a coding agent by running this, with a token of its own
-              in place of the placeholder — a generated token is shown in full exactly once, and
-              this line is shown with it.
+              <T text="Register this server with a coding agent by running this, with a token of its own in place of the placeholder — a generated token is shown in full exactly once, and this line is shown with it." />
             </p>
             <pre className="border rounded p-3 mb-2 text-wrap">{command}</pre>
             <Button variant="outline-secondary" size="sm" onClick={() => void copy()}>
@@ -182,20 +198,20 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
           <>
             <form onSubmit={(e) => void mint(e)}>
               <Form.Group className="mb-3" controlId="mcp-token-label">
-                <Form.Label>Label</Form.Label>
+                <Form.Label><T text="Label" /></Form.Label>
                 <Form.Control
                   type="text"
                   value={form.label}
-                  placeholder="claude-code on my laptop"
+                  placeholder={t("claude-code on my laptop")}
                   onChange={(e) => setForm({ ...form, label: e.target.value })}
                 />
                 <Form.Text muted>
-                  What this token is called in the log line every one of its calls writes.
+                  <T text="What this token is called in the log line every one of its calls writes." />
                 </Form.Text>
               </Form.Group>
 
               <fieldset className="mb-3">
-                <legend className="form-label">This token may</legend>
+                <legend className="form-label"><T text="This token may" /></legend>
                 {(fields ?? []).map((field) => (
                   <Form.Check
                     key={field.name}
@@ -214,14 +230,14 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
               </fieldset>
 
               <Form.Group className="mb-3" controlId="mcp-token-expiry">
-                <Form.Label>Expires in (days)</Form.Label>
+                <Form.Label><T text="Expires in (days)" /></Form.Label>
                 <Form.Control
                   type="text"
                   value={form.expiresInDays}
                   onChange={(e) => setForm({ ...form, expiresInDays: e.target.value })}
                 />
                 <Form.Text muted>
-                  Leave empty for a token that never lapses.
+                  <T text="Leave empty for a token that never lapses." />
                 </Form.Text>
               </Form.Group>
 
@@ -233,19 +249,19 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
               </Button>
             </form>
 
-            <h4 className="mt-4 mb-2">Tokens</h4>
+            <h4 className="mt-4 mb-2"><T text="Tokens" /></h4>
             {tokens.length === 0 ? (
-              <p className="text-secondary mb-0">No active tokens.</p>
+              <p className="text-secondary mb-0"><T text="No active tokens." /></p>
             ) : (
               <div className="table-responsive">
                 <table className="table table-vcenter">
                   <thead>
                     <tr>
-                      <th>Label</th>
-                      <th>May</th>
-                      <th>Created</th>
-                      <th>Last used</th>
-                      <th>Expires</th>
+                      <th><T text="Label" /></th>
+                      <th><T text="May" /></th>
+                      <th><T text="Created" /></th>
+                      <th><T text="Last used" /></th>
+                      <th><T text="Expires" /></th>
                       <th />
                     </tr>
                   </thead>
@@ -271,7 +287,9 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
                           <td className="text-end">
                             {token.revoked_at ? (
                               <span className="text-secondary">
-                                revoked {when(token.revoked_at)}
+                                {t("revoked {when}", {
+                                  when: when(token.revoked_at),
+                                })}
                               </span>
                             ) : (
                               <Button
@@ -279,7 +297,7 @@ export function McpTokensPanel({ enabled }: { enabled: boolean }) {
                                 size="sm"
                                 onClick={() => void revoke(token)}
                               >
-                                Revoke
+                                <T text="Revoke" />
                               </Button>
                             )}
                           </td>

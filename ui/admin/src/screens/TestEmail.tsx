@@ -24,6 +24,7 @@ import Form from "react-bootstrap/Form";
 
 import { api } from "../api";
 import { AlertBody } from "../layout";
+import { T, useT } from "../i18n";
 
 /** What the test-email form sends: an address, or nothing at all.
  *
@@ -37,6 +38,7 @@ export function testEmailBody(to: string): { to?: string } {
 }
 
 export function TestEmail() {
+  const { t } = useT();
   const [to, setTo] = useState("");
   const [busy, setBusy] = useState(false);
   const [sentTo, setSentTo] = useState<string | null>(null);
@@ -61,10 +63,9 @@ export function TestEmail() {
     <div className="card mb-4">
       <div className="card-header">
         <div>
-          <h3 className="card-title">Send test email</h3>
+          <h3 className="card-title"><T text="Send test email" /></h3>
           <p className="card-subtitle text-secondary mb-0">
-            Sends one message through the settings as they are <strong>stored</strong>. Save
-            your changes above first, or this tests the previous configuration.
+            <T text="Sends one message through the settings as they are" /> <strong><T text="stored" /></strong><T text=". Save your changes above first, or this tests the previous configuration." />
           </p>
         </div>
       </div>
@@ -77,21 +78,23 @@ export function TestEmail() {
         {sentTo && (
           <Alert variant="success" dismissible onClose={() => setSentTo(null)}>
             <AlertBody>
-              Sent to {sentTo}. The mail server accepted it — whether it is delivered is now
-              between that server and the recipient's.
+              {t(
+                "Sent to {address}. The mail server accepted it — whether it is delivered is now between that server and the recipient’s.",
+                { address: sentTo },
+              )}
             </AlertBody>
           </Alert>
         )}
         <form onSubmit={(e) => void send(e)}>
           <Form.Group className="mb-3" controlId="test-email-to">
-            <Form.Label>Send to</Form.Label>
+            <Form.Label><T text="Send to" /></Form.Label>
             <Form.Control
               type="text"
               value={to}
-              placeholder="your own address"
+              placeholder={t("your own address")}
               onChange={(e) => setTo(e.target.value)}
             />
-            <Form.Text muted>Leave empty to send it to your own account's address.</Form.Text>
+            <Form.Text muted><T text="Leave empty to send it to your own account's address." /></Form.Text>
           </Form.Group>
           <Button type="submit" variant="outline-primary" disabled={busy}>
             {busy ? "Sending…" : "Send test email"}

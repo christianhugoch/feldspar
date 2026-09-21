@@ -438,6 +438,14 @@ async fn document(
         );
         obj.insert("csrfToken".into(), json!(csrf));
         obj.insert("lightmode".into(), json!("light"));
+        // The locale for the `builder` domain (§16.x, task 3.5). The builder is
+        // admin-only and its document is not the SPA's, so the signal is the
+        // signed-in admin's `language` column — the same column the SPA's own
+        // picker writes, so choosing French there opens a French builder.
+        obj.insert(
+            "locale".into(),
+            json!(crate::i18n::locale_for_user(Some(user)).as_str()),
+        );
     }
     let html = render_document(&app, &page, &boot, csrf, &bundle_tag(bundle));
     let mut response = Html(html).into_response();

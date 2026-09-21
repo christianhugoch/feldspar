@@ -53,6 +53,18 @@ pub struct Domain {
     pub name: &'static str,
     /// Relative to the repository root.
     pub sources: &'static [&'static str],
+    /// Trees whose messages count but whose call sites are **not ours**.
+    ///
+    /// The `builder` domain's phrases are `t("Delete")` call sites inside
+    /// `ui/builder/vendor/saltcorn-builder` — Saltcorn 1's builder, vendored
+    /// whole and never edited here. Those keys have to reach the catalogue,
+    /// because filling v1's `translations` map is the entire job (task 3.5),
+    /// but the *lint* must not report a vendored file: there is nothing to do
+    /// about what it says, and a lint whose findings cannot be acted on is a
+    /// lint that gets turned off. A call site whose message is not a literal is
+    /// skipped here for the same reason — it is a v1 decision, made in 2021, in
+    /// a package this repository copies rather than writes.
+    pub vendored: &'static [&'static str],
     /// Relative to the repository root.
     pub locales: &'static str,
     pub kind: Kind,
@@ -65,6 +77,7 @@ pub const DOMAINS: &[Domain] = &[
     Domain {
         name: "core",
         sources: &["crates"],
+        vendored: &[],
         locales: "crates/sc-i18n/locales",
         kind: Kind::Rust,
         about: "everything the server says: authentication, validation, the admin API's refusals",
@@ -72,6 +85,7 @@ pub const DOMAINS: &[Domain] = &[
     Domain {
         name: "admin",
         sources: &["ui/admin/src"],
+        vendored: &[],
         locales: "ui/admin/src/locales",
         kind: Kind::Js,
         about: "the admin SPA",
@@ -79,6 +93,9 @@ pub const DOMAINS: &[Domain] = &[
     Domain {
         name: "builder",
         sources: &["ui/builder/src"],
+        // Where the phrases actually are: v1's builder, vendored (see
+        // `vendored` above).
+        vendored: &["ui/builder/vendor/saltcorn-builder"],
         locales: "ui/builder/src/locales",
         kind: Kind::Js,
         about: "the drag-and-drop layout builder",
@@ -125,6 +142,13 @@ pub struct I18nArgs {
     /// `translate`: which configured LLM provider, and which of its models.
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// `lint --json`: one JSON object per finding, with its byte span.
+    ///
+    /// For a tool rather than for a person. The sweep of task 3.4 was done with
+    /// it, and the Translations screen (4.4) shows what it reports; the plain
+    /// output stays what somebody reading a terminal wants, which is a
+    /// `file:line:` they can click.
+    pub json: bool,
 }
 
 impl I18nArgs {
@@ -155,6 +179,7 @@ impl I18nArgs {
             root: None,
             provider: None,
             model: None,
+            json: false,
         };
         let mut rest = args[1..].iter();
         while let Some(arg) = rest.next() {
@@ -169,6 +194,7 @@ impl I18nArgs {
                 "--root" => parsed.root = Some(PathBuf::from(value("--root")?)),
                 "--provider" => parsed.provider = Some(value("--provider")?),
                 "--model" => parsed.model = Some(value("--model")?),
+                "--json" => parsed.json = true,
                 other if other.starts_with('-') => {
                     return Err(Error::config(format!("unknown i18n argument `{other}`")));
                 }
@@ -227,12 +253,21 @@ const SKIPPED_DIRECTORIES: &[&str] = &[
 /// nobody reads in front of a translator who has to decide what it means.
 /// Likewise a `crates/*/tests` tree, and the `fixtures` the extractor's own
 /// tests read.
+/// The files that **define** the runtime rather than call it.
+///
+/// `i18n.tsx` is where `t`, `tc` and `<T>` are written, so it holds the one
+/// `t(text, args)` in the tree whose message is a variable — and it has to.
+/// Reported, it would be a permanent error in every run of `check`, which is a
+/// rule that teaches people to ignore the command. `messages.ts` is the same
+/// file in an application's generated runtime (task 4.3).
+const RUNTIME_FILES: &[&str] = &["i18n.ts", "i18n.tsx", "messages.ts"];
+
 fn scannable(path: &Path) -> bool {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_default();
-    !name.contains(".test.") && !name.contains(".spec.")
+    !name.contains(".test.") && !name.contains(".spec.") && !RUNTIME_FILES.contains(&name)
 }
 
 fn scannable_directory(name: &str) -> bool {
@@ -319,6 +354,12 @@ pub fn scan_domain(root: &Path, domain: &Domain) -> Result<(Extraction, Vec<Find
         let (found, lint) = scan_tree(root, &root.join(source), domain.kind)?;
         extraction.merge(found);
         findings.extend(lint);
+    }
+    for source in domain.vendored {
+        let (mut found, _lint) = scan_tree(root, &root.join(source), domain.kind)?;
+        // Its messages, and neither its lint nor its problems: see `vendored`.
+        found.problems.clear();
+        extraction.merge(found);
     }
     Ok((extraction, findings))
 }

@@ -5,7 +5,7 @@ import { clientError, requestHeaders, type ClientOptions } from "./helper";
 
 export type { ClientOptions } from "./helper";
 
-export type AuthStatusResponse = { any_user_exists: boolean; current_user?: { id: string; email: string; role: number } | null; locales: { default: string; enabled: Array<string> } };
+export type AuthStatusResponse = { any_user_exists: boolean; current_user?: { id: string; email: string; role: number } | null; locales: { default: string; enabled: Array<string>; current: string } };
 export type CreateFirstUserRequest = { email: string; password: string };
 export type CreateFirstUserResponse = { id: string; email: string; role: number };
 export type LoginRequest = { email: string; password: string };

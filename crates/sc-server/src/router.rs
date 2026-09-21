@@ -31,6 +31,7 @@ use sc_api::{
 use sc_app::AppRequest;
 use sc_auth::{SessionStore, User};
 use sc_error::{Error, ErrorKind, Repr, Result};
+use sc_i18n::t;
 use serde_json::Value;
 use tower::ServiceExt;
 use tower_http::services::ServeDir;
@@ -1329,14 +1330,32 @@ async fn handle_api(
 /// Check a user against an [`AuthRequirement`]. Returns `Some(rejection)` when
 /// the request is not authorized, `None` when it may proceed.
 fn enforce_auth(auth: &AuthRequirement, user: Option<&User>) -> Option<Response> {
-    let unauthenticated = || json_error(StatusCode::UNAUTHORIZED, "authentication required");
+    // `Public` decides nothing and says nothing, so it is answered before the
+    // locale is asked for: the overwhelmingly common call costs what it always
+    // did.
+    if matches!(auth, AuthRequirement::Public) {
+        return None;
+    }
+    // Two sentences a person reads, in the language that person reads (§16.x,
+    // D5). The locale is the signed-in user's, which is all this function is
+    // given and all a refusal needs — see `i18n::locale_for_user`.
+    let locale = crate::i18n::locale_for_user(user);
+    let unauthenticated = || {
+        json_error(
+            StatusCode::UNAUTHORIZED,
+            t!(locale, "authentication required"),
+        )
+    };
     match auth {
         AuthRequirement::Public => None,
         AuthRequirement::LoggedIn => user.is_none().then(unauthenticated),
         AuthRequirement::MinRole(min) => match user {
             None => Some(unauthenticated()),
             Some(u) if u.meets_role(*min) => None,
-            Some(_) => Some(json_error(StatusCode::FORBIDDEN, "insufficient privilege")),
+            Some(_) => Some(json_error(
+                StatusCode::FORBIDDEN,
+                t!(locale, "insufficient privilege"),
+            )),
         },
     }
 }

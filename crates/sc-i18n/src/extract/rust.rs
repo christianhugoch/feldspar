@@ -65,6 +65,9 @@ pub fn extract_rust(file: &str, source: &str) -> Extraction {
                 read_macro("t", src, i + 3, file, &lines, i, &mut out);
             }
         }
+        if !ident_char(src.get(i.wrapping_sub(1))) {
+            read_declaration(src, i, file, &lines, &mut out);
+        }
         i += 1;
     }
     out
@@ -145,6 +148,58 @@ fn read_macro(
         file: file.to_owned(),
         line,
     });
+}
+
+/// The names a *declared* label is written under.
+///
+/// The second half of the `core` domain, and the reason it needs one: the
+/// settings screen's headings, a stream provider's `Broker URL`, a file
+/// backend's operations are **data**, not `t!` call sites, and the server
+/// translates them at the API edge with `translate_spec` (§16.x, D5). A
+/// catalogue that never heard of them is a `translate_spec` that can never
+/// find anything, so the scanner that fills the catalogue has to read them
+/// where they are written — which is a builder method or a struct field, and
+/// never a macro.
+///
+/// Five names and not "every string": these are the ones a person reads. A
+/// `name` is an identifier, a `key` is a key, and a lint that swept those up
+/// would hand a translator a list of field names to translate.
+const DECLARED: &[&[u8]] = &[b"label", b"description", b"sublabel", b"help", b"blurb"];
+
+/// A declared label at `at`: `.label("…")`, `label: "…"`, or
+/// `ConfigDef::help(field, "…")`.
+///
+/// A non-literal is **skipped silently**, which is where this parts company
+/// with [`read_macro`]. A `t!` whose message is computed is a message nothing
+/// can ever translate and therefore a bug worth reporting; a `.label(name)` on
+/// a field built in a loop is an ordinary thing to write, it is not a call site
+/// somebody forgot to wrap, and reporting it would make the lint noise that
+/// gets a lint turned off.
+fn read_declaration(src: &[u8], at: usize, file: &str, lines: &[usize], out: &mut Extraction) {
+    let Some(name) = DECLARED.iter().find(|n| src[at..].starts_with(n)) else {
+        return;
+    };
+    let after = at + name.len();
+    // `help` is the one written as a free function taking the field first:
+    // `ConfigDef::help(FormField::new(…), "what this setting does")`.
+    let arg = match src.get(after) {
+        Some(b':') if src.get(after + 1) != Some(&b':') => skip_trivia(src, after + 1),
+        Some(b'(') if *name == b"help" => match top_level_comma(src, after + 1) {
+            Some(comma) => skip_trivia(src, comma + 1),
+            None => skip_trivia(src, after + 1),
+        },
+        Some(b'(') => skip_trivia(src, after + 1),
+        _ => return,
+    };
+    if let Some((value, _)) = string_at(src, arg)
+        && !value.trim().is_empty()
+    {
+        out.messages.push(Extracted {
+            key: value,
+            file: file.to_owned(),
+            line: line_at(lines, at),
+        });
+    }
 }
 
 /// Spelled as rustfmt writes it, which is how every one of them in this

@@ -43,6 +43,7 @@ import {
   readElementType,
   type StreamProviderInfo,
 } from "../streams";
+import { T, useT } from "../i18n";
 
 /** How long the form waits before asking what the typed configuration would
  * produce. Long enough that typing a broker host is one request rather than
@@ -50,6 +51,7 @@ import {
 const DEBOUNCE_MS = 400;
 
 export function StreamForm({ streamId }: { streamId?: string }) {
+  const { t } = useT();
   const roles = useRoles();
   const [providers, setProviders] = useState<StreamProviderInfo[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -156,7 +158,7 @@ export function StreamForm({ streamId }: { streamId?: string }) {
   if (loadError) {
     return (
       <>
-        <PageHeader pretitle="Dataflows" title="Stream" />
+        <PageHeader pretitle="Dataflows" title={t("Stream")} />
         <PageBody>
           <Alert variant="danger">{loadError}</Alert>
         </PageBody>
@@ -180,7 +182,7 @@ export function StreamForm({ streamId }: { streamId?: string }) {
         actions={
           <Button variant="outline-secondary" href="#/streams">
             <IconArrowLeft className="icon-2" />
-            Streams
+            <T text="Streams" />
           </Button>
         }
       />
@@ -188,8 +190,7 @@ export function StreamForm({ streamId }: { streamId?: string }) {
         {error && <Alert variant="danger">{error}</Alert>}
         {providers.length === 0 && (
           <Alert variant="info">
-            No stream providers are registered. The built-in MQTT provider is behind a build
-            feature, and a module can supply more.
+            <T text="No stream providers are registered. The built-in MQTT provider is behind a build feature, and a module can supply more." />
           </Alert>
         )}
         <Form onSubmit={(e) => void submit(e)}>
@@ -197,19 +198,18 @@ export function StreamForm({ streamId }: { streamId?: string }) {
             <Col md={6}>
               <Form.Group className="mb-3" controlId="streamName">
                 <Form.Label>
-                  Name<span className="text-danger"> *</span>
+                  <T text="Name" /><span className="text-danger"> *</span>
                 </Form.Label>
                 <Form.Control value={name} required onChange={(e) => setName(e.target.value)} />
                 <Form.Text muted>
-                  It names a trigger's channel and a socket path, so a rename breaks those
-                  references deliberately.
+                  <T text="It names a trigger's channel and a socket path, so a rename breaks those references deliberately." />
                 </Form.Text>
               </Form.Group>
             </Col>
             <Col md={6}>
               <OptionalRoleSelect
                 id="streamMinRole"
-                label="Minimum role to observe"
+                label={t("Minimum role to observe")}
                 value={minRole}
                 roles={roles}
                 blank="Admin only"
@@ -219,7 +219,7 @@ export function StreamForm({ streamId }: { streamId?: string }) {
           </Row>
 
           <Form.Group className="mb-3" controlId="streamDescription">
-            <Form.Label>Description</Form.Label>
+            <Form.Label><T text="Description" /></Form.Label>
             <Form.Control
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -227,11 +227,11 @@ export function StreamForm({ streamId }: { streamId?: string }) {
           </Form.Group>
 
           <Card className="mb-3">
-            <Card.Header>Provider</Card.Header>
+            <Card.Header><T text="Provider" /></Card.Header>
             <Card.Body>
               <Form.Group className="mb-3" controlId="streamProvider">
                 <Form.Label>
-                  Provider<span className="text-danger"> *</span>
+                  <T text="Provider" /><span className="text-danger"> *</span>
                 </Form.Label>
                 <Form.Select
                   value={provider}
@@ -284,12 +284,12 @@ export function StreamForm({ streamId }: { streamId?: string }) {
           <Form.Group className="mb-3" controlId="streamEnabled">
             <Form.Check
               type="checkbox"
-              label="Enabled"
+              label={t("Enabled")}
               checked={enabled}
               onChange={(e) => setEnabled(e.target.checked)}
             />
             <Form.Text muted>
-              Saving an enabled stream connects it: there is no separate Start.
+              <T text="Saving an enabled stream connects it: there is no separate Start." />
             </Form.Text>
           </Form.Group>
 
@@ -298,7 +298,7 @@ export function StreamForm({ streamId }: { streamId?: string }) {
               {busy ? "Saving…" : "Save"}
             </Button>
             <Button variant="outline-secondary" href="#/streams">
-              Cancel
+              <T text="Cancel" />
             </Button>
           </div>
         </Form>

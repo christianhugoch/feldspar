@@ -37,10 +37,12 @@ import {
 import { AgentRunDetail } from "./RunPanel";
 import { WorkflowCanvas, type Positions } from "./WorkflowCanvas";
 import { runTone, when } from "./WorkflowRuns";
+import { T, useT } from "../i18n";
 
 type TraceRow = GetRunResponse["trace"][number];
 
 export function RunDetail({ runId }: { runId: string }) {
+  const { t } = useT();
   const [run, setRun] = useState<GetRunResponse | null>(null);
   const [graph, setGraph] = useState<Graph | null>(null);
   const [positions, setPositions] = useState<Positions>({});
@@ -159,10 +161,10 @@ export function RunDetail({ runId }: { runId: string }) {
               }
             >
               <IconArrowLeft className="icon-2" />
-              Back
+              <T text="Back" />
             </Button>
             <Button variant="outline-secondary" disabled={busy} onClick={() => void load()}>
-              Refresh
+              <T text="Refresh" />
             </Button>
             {/* Cancelling is for a run that is going, retrying for one that
                 stopped: offering both at once would offer one that cannot do
@@ -180,12 +182,14 @@ export function RunDetail({ runId }: { runId: string }) {
                   void act(() => api.cancelRun(runId, { reason: reason || null }));
                 }}
               >
-                Cancel
+                <T text="Cancel" />
               </Button>
             )}
             {run.state === "failed" && (
               <Button variant="outline-primary" disabled={busy} onClick={() => void act(() => api.retryRun(runId))}>
-                Retry from `{run.current_step ?? "the failed step"}`
+                {t("Retry from `{step}`", {
+                  step: run.current_step ?? t("the failed step"),
+                })}
               </Button>
             )}
           </>
@@ -207,7 +211,7 @@ export function RunDetail({ runId }: { runId: string }) {
 
         {form && (
           <Card className="mb-3">
-            <Card.Header>Waiting for an answer</Card.Header>
+            <Card.Header><T text="Waiting for an answer" /></Card.Header>
             <Card.Body>
               {/* Rendered from the step's own declaration, by the same component
                   that renders a file store's settings — so an approval form is a
@@ -225,10 +229,11 @@ export function RunDetail({ runId }: { runId: string }) {
                 {busy ? "Sending…" : "Answer and carry on"}
               </Button>
               <div className="text-muted small mt-2">
-                The answers are merged into the run context under{" "}
-                <code>context.{form.assign_to}</code>. This is the form the person was
-                shown — the workflow may have been edited since, and the run finishes on
-                the version it started with.
+                <T
+                  text="The answers are merged into the run context under {key}."
+                  values={{ key: <code>context.{form.assign_to}</code> }}
+                />{" "}
+                <T text="This is the form the person was shown — the workflow may have been edited since, and the run finishes on the version it started with." />
               </div>
             </Card.Body>
           </Card>
@@ -238,10 +243,13 @@ export function RunDetail({ runId }: { runId: string }) {
           <div className="col-12 col-xl-7">
             <Card>
               <Card.Header>
-                Where it got to
+                <T text="Where it got to" />
                 {run.subject_version != null && (
                   <span className="text-muted small ms-2">
-                    drawn on version {run.subject_version}, the one this run is pinned to
+                    {t(
+                      "drawn on version {version}, the one this run is pinned to",
+                      { version: run.subject_version },
+                    )}
                   </span>
                 )}
               </Card.Header>
@@ -250,8 +258,7 @@ export function RunDetail({ runId }: { runId: string }) {
                   <WorkflowCanvas graph={graph} positions={positions} readOnly path={path} />
                 ) : (
                   <div className="p-3 text-muted">
-                    The version this run is pinned to could not be read, so there is no
-                    graph to draw it on.
+                    <T text="The version this run is pinned to could not be read, so there is no graph to draw it on." />
                   </div>
                 )}
               </Card.Body>
@@ -273,28 +280,31 @@ export function RunDetail({ runId }: { runId: string }) {
  * looking for is the one key the step wrote. The whole document is one click
  * away, for when the diff is not the question. */
 function Timeline({ run }: { run: GetRunResponse }) {
+  const { t } = useT();
   const rows = useMemo(() => [...run.trace].sort((a, b) => a.seq - b.seq), [run.trace]);
   if (rows.length === 0) {
     return (
       <Card>
-        <Card.Header>What happened</Card.Header>
+        <Card.Header><T text="What happened" /></Card.Header>
         <Card.Body className="text-muted">
-          This workflow does not record a trace. Turn one on in the editor — it writes
-          the context after every step, which is what this timeline draws.
+          <T text="This workflow does not record a trace. Turn one on in the editor — it writes the context after every step, which is what this timeline draws." />
         </Card.Body>
       </Card>
     );
   }
   return (
     <Card>
-      <Card.Header>What happened</Card.Header>
+      <Card.Header><T text="What happened" /></Card.Header>
       <div className="list-group list-group-flush">
         {rows.map((row, index) => (
           <TraceEntry key={row.id} row={row} previous={rows[index - 1] ?? null} />
         ))}
       </div>
       <Card.Footer className="text-muted small">
-        Started {when(run.created_at)} · last advanced {when(run.updated_at)}
+        {t("Started {created} · last advanced {updated}", {
+          created: when(run.created_at),
+          updated: when(run.updated_at),
+        })}
       </Card.Footer>
     </Card>
   );
@@ -302,6 +312,7 @@ function Timeline({ run }: { run: GetRunResponse }) {
 
 /** One step of the trace. */
 function TraceEntry({ row, previous }: { row: TraceRow; previous: TraceRow | null }) {
+  const { t } = useT();
   const [open, setOpen] = useState(false);
   const changed = changedKeys(previous?.context, row.context);
   const tone = row.outcome === "error" ? "red" : row.outcome === "suspended" ? "yellow" : "green";
@@ -311,7 +322,9 @@ function TraceEntry({ row, previous }: { row: TraceRow; previous: TraceRow | nul
         <div>
           <strong>{row.step}</strong>
           {row.attempt > 1 && (
-            <span className="text-muted small ms-2">attempt {row.attempt}</span>
+            <span className="text-muted small ms-2">
+              {t("attempt {n}", { n: row.attempt })}
+            </span>
           )}
         </div>
         <div className="d-flex align-items-center gap-2">
@@ -325,7 +338,7 @@ function TraceEntry({ row, previous }: { row: TraceRow; previous: TraceRow | nul
           "The context did not change."
         ) : (
           <>
-            Wrote{" "}
+            <T text="Wrote" />{" "}
             {changed.map((key) => (
               <code key={key} className="me-1">
                 {key}

@@ -28,6 +28,7 @@ import {
 } from "../runInfo";
 import { TranscriptEntry } from "./AgentChat";
 import { runTone } from "./WorkflowRuns";
+import { T, useT } from "../i18n";
 
 type Plan = NonNullable<GetRunResponse["plan"]>;
 
@@ -38,9 +39,12 @@ export function runHref(id: string): string {
 
 /** The plan as a checklist: each feature, its status, and its sessions. */
 export function PlanChecklist({ plan }: { plan: Plan }) {
+  const { t } = useT();
   return (
     <div className="run-plan">
-      <div className="text-secondary small mb-1">Plan · {planProgress(plan)}</div>
+      <div className="text-secondary small mb-1">
+        {t("Plan · {progress}", { progress: planProgress(plan) })}
+      </div>
       <ul className="list-unstyled mb-0">
         {plan.features.map((feature) => {
           const mark = featureMark(feature.status);
@@ -60,8 +64,8 @@ export function PlanChecklist({ plan }: { plan: Plan }) {
                   <code className="me-1">{feature.id}</code>
                   {feature.title}
                   {feature.kind === "bug" && (
-                    <StatusBadge tone="red" title="Reproduced before it is fixed">
-                      bug
+                    <StatusBadge tone="red" title={t("Reproduced before it is fixed")}>
+                      <T text="bug" />
                     </StatusBadge>
                   )}
                 </div>
@@ -70,7 +74,7 @@ export function PlanChecklist({ plan }: { plan: Plan }) {
                   <div className="small">
                     {feature.runs.map((run, i) => (
                       <a key={run} href={runHref(run)} className="me-2">
-                        session {i + 1}
+                        {t("session {n}", { n: i + 1 })}
                       </a>
                     ))}
                   </div>
@@ -86,6 +90,7 @@ export function PlanChecklist({ plan }: { plan: Plan }) {
 
 /** The run's diff, its sessions' included: the diffstat, then each file's lines. */
 export function RunDiffView({ runId }: { runId: string }) {
+  const { t } = useT();
   const [diff, setDiff] = useState<GetRunDiffResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -109,14 +114,16 @@ export function RunDiffView({ runId }: { runId: string }) {
   if (error) return <Alert variant="danger">{error}</Alert>;
   if (!diff) return <Spinner animation="border" size="sm" role="status" />;
   if (diff.scopes.length === 0) {
-    return <p className="text-secondary mb-0">This run changed no files.</p>;
+    return <p className="text-secondary mb-0"><T text="This run changed no files." /></p>;
   }
   return (
     <>
       {diff.runs.length > 1 && (
         <p className="text-secondary small">
-          Changes from this run and {diff.runs.length - 1} session
-          {diff.runs.length === 2 ? "" : "s"} it started, against what the files hold now.
+          {t(
+            "Changes from this run and {count} sessions it started, against what the files hold now.",
+            { count: diff.runs.length - 1 },
+          )}
         </p>
       )}
       {diff.scopes.map((scope) => (
@@ -154,7 +161,7 @@ export function RunBar({ run }: { run: GetRunResponse }) {
       <div className="chat-runbar-body">
         {run.plan && <PlanChecklist plan={run.plan} />}
         <a href={runHref(run.id)} className="small">
-          Open this run: its changes and its sessions
+          <T text="Open this run: its changes and its sessions" />
         </a>
       </div>
     </details>
@@ -163,6 +170,7 @@ export function RunBar({ run }: { run: GetRunResponse }) {
 
 /** An agent run's own page: its record, its changes and its transcript. */
 export function AgentRunDetail({ run, onRefresh }: { run: GetRunResponse; onRefresh: () => void }) {
+  const { t } = useT();
   const totals = runTotals(run.context);
   const entries = transcriptFromRun(run.context);
   const notice = conclusionNotice(run.conclusion as Conclusion | null);
@@ -183,10 +191,10 @@ export function AgentRunDetail({ run, onRefresh }: { run: GetRunResponse; onRefr
               onClick={() => navigate(`/agents/${encodeURIComponent(run.subject)}/chat`)}
             >
               <IconArrowLeft className="icon-2" />
-              Chat with {run.subject}
+              {t("Chat with {agent}", { agent: run.subject })}
             </Button>
             <Button variant="outline-secondary" onClick={onRefresh}>
-              Refresh
+              <T text="Refresh" />
             </Button>
           </>
         }
@@ -203,15 +211,15 @@ export function AgentRunDetail({ run, onRefresh }: { run: GetRunResponse; onRefr
           </Card>
         )}
         <Card className="mb-3">
-          <Card.Header>Changes</Card.Header>
+          <Card.Header><T text="Changes" /></Card.Header>
           <Card.Body>
             <RunDiffView key={run.updated_at} runId={run.id} />
           </Card.Body>
         </Card>
         <Card>
-          <Card.Header>Transcript</Card.Header>
+          <Card.Header><T text="Transcript" /></Card.Header>
           <Card.Body>
-            {entries.length === 0 && <p className="text-secondary mb-0">Nothing was said.</p>}
+            {entries.length === 0 && <p className="text-secondary mb-0"><T text="Nothing was said." /></p>}
             {entries.map((entry, i) => (
               <TranscriptEntry key={i} entry={entry} />
             ))}
