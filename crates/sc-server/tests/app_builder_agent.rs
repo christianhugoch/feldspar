@@ -291,10 +291,11 @@ async fn creating_an_application_creates_the_agent_that_builds_it() -> sc_error:
         "{stored}"
     );
 
-    // `coding` and the pane: the build is one of `coding`'s checks, not a trait
-    // of its own, and the pane is what puts the application beside the chat.
+    // `coding`, `http` and the pane: the build is one of `coding`'s checks, not
+    // a trait of its own, `http` reads documentation, and the pane is what puts
+    // the application beside the chat.
     let traits = stored["traits"].as_array().unwrap();
-    assert_eq!(traits.len(), 2, "{stored}");
+    assert_eq!(traits.len(), 3, "{stored}");
     let coding = &traits[0];
     assert_eq!(coding["trait"], json!("coding"));
     // Scoped to *this* application's project directory, which the framework
@@ -319,7 +320,15 @@ async fn creating_an_application_creates_the_agent_that_builds_it() -> sc_error:
     // ...and the preview pane, pointed at this application's own subdomain on
     // whatever host the admin is open on (TODO "The preview pane"). The stored
     // URL is a template: one agent, every deployment.
-    let pane = &traits[1];
+    // Reading public pages, and nothing more: it saved, so the trait accepted
+    // the configuration, and it may neither send nor reach this network.
+    let http = &traits[1];
+    assert_eq!(http["trait"], json!("http"));
+    assert_eq!(http["config"]["name"], json!("web"));
+    assert_eq!(http["config"]["may_send"], json!(false));
+    assert_eq!(http["config"]["private_network"], json!(false));
+
+    let pane = &traits[2];
     assert_eq!(pane["trait"], json!("preview_pane"));
     assert_eq!(pane["config"]["url"], json!("//todo.{host}"));
     assert_eq!(pane["config"]["reload_on_turn"], json!(true));

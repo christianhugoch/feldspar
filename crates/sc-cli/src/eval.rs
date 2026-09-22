@@ -778,6 +778,13 @@ impl World {
         }
         for enabled in spec.traits {
             let mut config = enabled.config;
+            // What follows are `coding`'s settings. Every other trait the builder
+            // carries (`http`, `preview_pane`) refuses a setting it does not
+            // declare, so they go to `coding` alone.
+            if enabled.trait_ != sc_app::TRAIT_CODING {
+                agent = agent.with_trait(EnabledTrait::new(enabled.trait_).configuration(config));
+                continue;
+            }
             // The task's own checks, when it named them: a fixture without
             // `node_modules` cannot run a type check, and a task that knows that
             // says so rather than counting a red baseline as the model's fault.

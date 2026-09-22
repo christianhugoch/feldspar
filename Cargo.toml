@@ -527,6 +527,17 @@ reqwest = { version = "0.13", default-features = false, features = [
     "json",
 ] }
 
+# HTML → Markdown for the agent's `http` trait (`fetch_<name>`). `htmd` is a
+# port of Turndown — the converter Claude Code's and OpenCode's web fetch both
+# run — over html5ever, so a page is parsed the way a browser parses it rather
+# than by regular expression, and the result is the Markdown a model reads
+# best. `markup5ever_rcdom` is the tree it parses into, named directly because
+# the trait walks that tree first: to pick the page's `<main>` over its
+# navigation, lift the `<title>`, and make relative links absolute so the model
+# can follow them. Pinned to the version `htmd` itself builds on.
+htmd = "0.5"
+markup5ever_rcdom = "0.38"
+
 # --- Mail transport (design §18.2) -------------------------------------------
 #
 # The SMTP client behind `sc-email`'s own `Mailer` seam. `lettre` is the crate

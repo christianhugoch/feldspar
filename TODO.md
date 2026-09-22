@@ -263,6 +263,37 @@ found:
    created there and the production database was untouched). Cosmetic, out of this milestone,
    and noted because the first reading of that line is alarming.
 
+## Interjected — web access for agents (the `http` trait)
+
+Asked for directly, outside this milestone: can a coding agent read a library's documentation?
+It could not — no trait reached the web, and the only route was `shell_*` with `shell_network`
+on, i.e. `curl` returning raw HTML into the context. Design and the survey of how other agents
+bound a page's size are in `docs/TECHNICAL_DESIGN.md` §11.3, "The web".
+
+- [x] W.1 `sc-core-traits/src/http/guard.rs`: the host policy — public addresses only unless
+      opened, an optional allow-list with subdomains, checked on every redirect hop; a resolver
+      that filters what the client connects to.
+- [x] W.2 `http/client.rs`: redirects by hand, headers dropped on a host change, a whole-request
+      deadline, a 5 MB read cap that is reported rather than silent.
+- [x] W.3 `http/document.rs`: HTML to the Markdown of its main content (`htmd`), links absolute,
+      permalinks and `data:` images removed; JSON pretty-printed; binary described.
+- [x] W.4 `http/page.rs` and `http/cache.rs`: the window, the outline, `find`, and the per-run
+      cache that makes paging free.
+- [x] W.5 `http.rs`: the trait — `fetch_<name>`, its form, `elide`, `run_ended`; registered with
+      the built-ins.
+- [x] W.6 Tests: unit tests per module; `tests/http_fetch.rs` against a local server (paging,
+      cache hits counted on the wire, redirects, 404, `POST`, headers, a whole agent run);
+      `docs_agents.rs` pins the tutorial's names. Design §11.3, tutorial Step 10, `CHANGELOG`.
+
+- [x] W.7 Every framework's builder agent (`sc_app::framework_builder_agent`) carries `http`:
+      `fetch_web`, read-only, public hosts, no allow-list (design §11.3, "The web"). The eval
+      harness now applies a task's `checks`/`workflow` to `coding` alone, since `http` and
+      `preview_pane` refuse settings they do not declare.
+- [ ] W.8 Agent trait configuration is not redacted when an agent is read back (streams do this
+      with `redact_attrs`/`merge_secrets`). `http`'s `headers` is declared `secret()` so it will
+      be covered when agents adopt it; until then an admin reading the agent sees the key.
+      (The builder's own `http` carries no headers, so it has no key to show.)
+
 ## Explicitly OUT of scope for this milestone
 
 - **Uploading or writing assets from the agent.** §6. Reading is what the use case needs, and a

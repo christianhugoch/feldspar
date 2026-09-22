@@ -120,7 +120,7 @@ fn the_grants_and_the_build_target_are_the_settings_the_coding_trait_means() {
     // by planning, and may not run scripts or a shell.
     let app = react_app();
     let spec = spec_for(&app);
-    assert_eq!(spec.traits.len(), 2, "{:?}", spec.traits);
+    assert_eq!(spec.traits.len(), 3, "{:?}", spec.traits);
     let coding = &spec.traits[0];
     assert_eq!(coding.trait_, TRAIT_CODING);
     for (key, value) in [
@@ -191,5 +191,54 @@ fn the_scope_a_framework_declares_is_one_the_coding_trait_resolves() {
     for name in sc_core_traits::tool_names::coding(&scope) {
         assert!(!name.is_empty());
         assert!(name.len() <= 64, "tool `{name}` is {} chars", name.len());
+    }
+}
+
+#[test]
+fn the_web_a_builder_reads_is_the_http_trait_read_only_over_public_hosts() {
+    use sc_app::{
+        HTTP_NAME_WEB, TRAIT_CFG_HTTP_MAY_SEND, TRAIT_CFG_HTTP_NAME,
+        TRAIT_CFG_HTTP_PRIVATE_NETWORK, TRAIT_HTTP,
+    };
+    // The same rename risk as the pane's: strings on the `sc-app` side, held to
+    // the trait's own here.
+    for (declared, real) in [
+        (TRAIT_CFG_HTTP_NAME, sc_core_traits::http::CFG_NAME),
+        (TRAIT_CFG_HTTP_MAY_SEND, sc_core_traits::http::CFG_MAY_SEND),
+        (
+            TRAIT_CFG_HTTP_PRIVATE_NETWORK,
+            sc_core_traits::http::CFG_PRIVATE_NETWORK,
+        ),
+        (HTTP_NAME_WEB, sc_core_traits::http::DEFAULT_NAME),
+    ] {
+        assert_eq!(declared, real);
+    }
+    let registry = sc_core_traits::builtin_traits().expect("the built-in traits assemble");
+    assert!(registry.get(TRAIT_HTTP).is_some());
+
+    for app in [react_app(), code_app()] {
+        let spec = spec_for(&app);
+        let http = spec
+            .traits
+            .iter()
+            .find(|t| t.trait_ == TRAIT_HTTP)
+            .expect("a builder agent reads the web");
+        // Reading public pages is the whole grant: no sending, no private
+        // network, and no headers — so no key comes with an application.
+        assert_eq!(http.config[TRAIT_CFG_HTTP_MAY_SEND], json!(false));
+        assert_eq!(http.config[TRAIT_CFG_HTTP_PRIVATE_NETWORK], json!(false));
+        assert!(!http.config.contains_key(sc_core_traits::http::CFG_HEADERS));
+        // The tool it offers is the one the tutorial and the prompt call it,
+        // and it does not collide with any of `coding`'s.
+        let name = http.config[TRAIT_CFG_HTTP_NAME].as_str().unwrap();
+        let tool = sc_core_traits::tool_names::http(name);
+        assert_eq!(tool, "fetch_web");
+        let coding = spec
+            .traits
+            .iter()
+            .find(|t| t.trait_ == TRAIT_CODING)
+            .unwrap();
+        let scope = sc_core_traits::configured_scope(&coding.config).unwrap();
+        assert!(!sc_core_traits::tool_names::coding(&scope).contains(&tool));
     }
 }

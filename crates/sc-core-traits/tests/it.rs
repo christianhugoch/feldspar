@@ -50,6 +50,8 @@ mod coding_shell;
 mod coding_traits;
 #[path = "docs_agents.rs"]
 mod docs_agents;
+#[path = "http_fetch.rs"]
+mod http_fetch;
 #[path = "query_table.rs"]
 mod query_table;
 #[path = "run_agent.rs"]

@@ -269,3 +269,32 @@ fn the_design_note_names_the_settings_it_describes() {
         );
     }
 }
+
+/// The `http` trait's two grants are decisions an admin makes on the form, so
+/// the tutorial names both as the form labels them, and the tool name it tells
+/// the reader to look for is the one the default configuration derives.
+#[test]
+fn the_tutorial_names_the_http_grants_and_its_tool() {
+    use sc_core_traits::http::{CFG_MAY_SEND, CFG_PRIVATE_NETWORK, DEFAULT_NAME};
+    let http = sc_core_traits::Http::new().expect("the http trait builds");
+    let plain = plain_tutorial();
+    for key in [CFG_MAY_SEND, CFG_PRIVATE_NETWORK] {
+        let label = http
+            .config_spec()
+            .into_iter()
+            .find(|field| field.name() == key)
+            .unwrap_or_else(|| panic!("`http` has no `{key}` setting any more"))
+            .base
+            .label;
+        let clause = leading_clause(&label);
+        assert!(
+            plain.contains(&clause),
+            "docs/tutorial-agents.md does not name the `{key}` checkbox (`{clause}…`)"
+        );
+    }
+    let tool = tool_names::http(DEFAULT_NAME);
+    assert!(
+        tutorial().contains(&format!("`{tool}`")),
+        "the tutorial does not name `{tool}`"
+    );
+}

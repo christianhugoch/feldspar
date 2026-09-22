@@ -25,9 +25,10 @@
 //! Assembling a spec into an [`Agent`](sc_agent::Agent) and storing it is the
 //! server's, for the same layering reason: this crate does not know agents exist.
 //!
-//! ## Two traits, planned
+//! ## Three traits, planned
 //!
-//! The agent is `coding`, plus `preview_pane` pointed at the application's own
+//! The agent is `coding`, plus `http` so it can read the documentation of what
+//! it is building with, plus `preview_pane` pointed at the application's own
 //! subdomain (TODO §12, "The preview pane"). Building the application is one of
 //! `coding`'s checks — its `application` setting — rather than a second trait
 //! with a tool of its own, so the build runs where the ratchet, the baseline and
@@ -36,6 +37,14 @@
 //! work and look at the result, and may not run arbitrary scripts or a shell:
 //! those execute code nobody reviewed, and are grants the admin gives
 //! deliberately rather than ones that arrive with an application.
+//!
+//! `http` is the trait's default shape: `fetch_web`, read-only, public hosts
+//! only. No host allow-list, because which documentation a project needs is the
+//! project's — a React app reads `react.dev`, a declared framework's app reads
+//! whatever that framework is — and a list that is wrong is a builder that cannot
+//! read the one page it needed. It cannot send (`may_send` off) and cannot reach
+//! the private network, so what it adds is reading public pages; an admin who
+//! wants it narrower lists hosts on the agent.
 //!
 //! `preview_pane` contributes no tool and no prompt: it is what lets the person
 //! chatting put the running application beside the conversation and watch it
@@ -88,6 +97,17 @@ pub const TRAIT_CFG_EDIT_FORMAT: &str = "edit_format";
 pub const WORKFLOW_PLANNED: &str = "planned";
 /// The [`TRAIT_CFG_EDIT_FORMAT`] a builder agent is created with.
 pub const EDIT_FORMAT_AUTO: &str = "auto";
+
+/// The trait that fetches web pages, for the documentation a builder reads.
+pub const TRAIT_HTTP: &str = "http";
+/// `http`'s name setting: the tool is `fetch_<name>`.
+pub const TRAIT_CFG_HTTP_NAME: &str = "name";
+/// `http`'s "may send POST, PUT, PATCH and DELETE" grant.
+pub const TRAIT_CFG_HTTP_MAY_SEND: &str = "may_send";
+/// `http`'s "may reach loopback and private-network addresses" grant.
+pub const TRAIT_CFG_HTTP_PRIVATE_NETWORK: &str = "private_network";
+/// The [`TRAIT_CFG_HTTP_NAME`] a builder agent is created with: `fetch_web`.
+pub const HTTP_NAME_WEB: &str = "web";
 
 /// The trait that puts a page beside the conversation (TODO "The preview pane").
 pub const TRAIT_PREVIEW_PANE: &str = "preview_pane";
@@ -289,6 +309,13 @@ fn coding_agent(
                 .with(TRAIT_CFG_CHECKS, checks)
                 .with(TRAIT_CFG_WORKFLOW, WORKFLOW_PLANNED)
                 .with(TRAIT_CFG_EDIT_FORMAT, EDIT_FORMAT_AUTO),
+            // The documentation of what it builds with: read-only, public hosts,
+            // stated explicitly rather than left to the trait's defaults so the
+            // stored agent says what it may do.
+            BuilderTrait::new(TRAIT_HTTP)
+                .with(TRAIT_CFG_HTTP_NAME, HTTP_NAME_WEB)
+                .with(TRAIT_CFG_HTTP_MAY_SEND, false)
+                .with(TRAIT_CFG_HTTP_PRIVATE_NETWORK, false),
             // ...and the application itself, beside the conversation. An agent
             // that builds a thing a person looks at should be able to put the
             // thing it built next to what it said about it, and the pane is
@@ -363,13 +390,22 @@ mod tests {
         assert_eq!(spec.name, "build-todo");
         assert!(spec.description.contains("Todo"), "{}", spec.description);
 
-        // `coding` builds it and `preview_pane` shows it: building is one of
-        // `coding`'s checks, not a trait of its own.
-        assert_eq!(spec.traits.len(), 2, "{:?}", spec.traits);
-        assert_eq!(spec.traits[1].trait_, TRAIT_PREVIEW_PANE);
+        // `coding` builds it, `http` reads the documentation, and
+        // `preview_pane` shows it: building is one of `coding`'s checks, not a
+        // trait of its own.
+        let names: Vec<&str> = spec.traits.iter().map(|t| t.trait_.as_str()).collect();
+        assert_eq!(names, [TRAIT_CODING, TRAIT_HTTP, TRAIT_PREVIEW_PANE]);
         assert_eq!(
-            spec.traits[1].config[TRAIT_CFG_PREVIEW_URL],
+            spec.traits[2].config[TRAIT_CFG_PREVIEW_URL],
             Json::from("//todo.{host}")
+        );
+        // Reading public pages only: it may not send, nor reach this network.
+        let http = &spec.traits[1];
+        assert_eq!(http.config[TRAIT_CFG_HTTP_NAME], Json::from("web"));
+        assert_eq!(http.config[TRAIT_CFG_HTTP_MAY_SEND], Json::from(false));
+        assert_eq!(
+            http.config[TRAIT_CFG_HTTP_PRIVATE_NETWORK],
+            Json::from(false)
         );
         // The coding trait is scoped to the *derived* project directory, not the
         // store root: an agent that could edit every project in the store would
@@ -417,6 +453,8 @@ mod tests {
         let spec = framework_builder_agent(&app.framework, &app).expect("code declares one");
 
         assert_eq!(spec.name, "build-blog");
+        // Every framework's builder reads the web, not only React's.
+        assert!(spec.traits.iter().any(|t| t.trait_ == TRAIT_HTTP));
         let coding = &spec.traits[0];
         assert_eq!(coding.config[TRAIT_CFG_STORE], Json::from("apps"));
         // The `code` framework states its source directory rather than deriving

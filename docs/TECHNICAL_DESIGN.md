@@ -3495,12 +3495,14 @@ scope, so what it changed enters the change ledger and the model's reads of it g
   `<workflow>`/`<rules>`/`<edit_format>` blocks. The scope is named **once**, in the prompt,
   rather than in fifteen tool descriptions. The size test (8.3) is the reason several of these
   texts are as short as they are: the React builder's stable prefix plus tool definitions is
-  ≤ 1 600 estimated tokens in both `act` and `plan`, and it took cutting every tool description
+  ≤ 1 750 estimated tokens in both `act` and `plan`, and it took cutting every tool description
   and dropping `SHARED_PROMPT`'s workflow to get there. The budget was 1 500 and `act` measured
   1 496 — spent to the last token — until `list_assets` made the set ten tools
   (TODO "Static directories" §6); a tenth tool costs about a hundred, so the number went up
-  rather than an existing description coming off. It is still a **test**, and the next tool has
-  the same argument to make.
+  rather than an existing description coming off. It went up again, to 1 750, when the builder
+  gained `http`'s `fetch_web` (TODO W.7): `act` was at 1 596, and `fetch_web`'s description was
+  halved to 676 characters first, so the ~150 it costs is the tool and not its prose. It is
+  still a **test**, and the next tool has the same argument to make.
 - **`planned` is a workflow setting, not a second trait.** `workflow = planned` starts the run in
   `plan` mode (the new `AgentTrait::starting_mode` hook, read by `Runner::new`), where the tools
   are the read-only four plus `save_plan`, `implement_feature` and `explore`. The plan — an
@@ -3784,6 +3786,78 @@ answer, and the child is its own run.
   conversation, and interleaving them would render one agent's thinking as another's (§11.4).
   What the chat panel shows is the tool call and its result; the sub-agent's run is
   `getRun`-able, linked by the `parent_run` and `delegated_by` attributes on its row.
+
+**The web.** `http` gives an agent one tool, `fetch_<name>`, that fetches a URL and reads it as
+text: a coding agent reading the documentation of the library it is using, a support agent reading
+a status page, any agent calling a JSON API it holds a key for. It is a building block, configured
+by what it may reach rather than by a target: a blank form is `fetch_web`, read-only, over any
+public host; a second instance named `github`, listing `api.github.com` and carrying an
+`Authorization` header, is `fetch_github` beside it.
+
+**The design constraint is the context, not the request.** A documentation page is 100–500 KB of
+HTML, and a tool result is re-sent with every later step. Agents elsewhere answer this three ways:
+a second, cheaper model reads the page and returns an answer to a question (Claude Code's
+`WebFetch`, Gemini CLI, Amp) — small, but lossy where the caller cannot see it, and a second
+provider call per fetch; the whole page capped at a token limit (the Claude API's
+`max_content_tokens`, OpenCode) — exact, but one page can be most of a window, and a cap the model
+is not told about is silent truncation (a failure reported against Claude Code's own fetch); or
+code the model writes to filter the page (the Claude API's dynamic filtering) — exact and small,
+but it needs a sandbox beside every agent that fetches. `http` **pages**: the document is
+converted once, cached for the run, and shown a window at a time with its edges stated.
+
+**What was built, where it deviates** (`http`):
+
+- **HTML becomes the Markdown of its main content.** `htmd` (a port of Turndown, the converter the
+  agents above use) over html5ever, from the page's `<main>`, `role="main"` or `<article>` — the
+  body when that holds almost nothing — with scripts, styles, navigation, footers, forms and
+  inline SVG dropped, `data:` images removed, heading permalinks (`[¶](#…)`) removed, and relative
+  links made absolute so a link the model reads is a URL it can fetch next. Measured on five
+  documentation sites: react.dev's `useEffect` page is 598 KB of HTML and 47 K characters of
+  Markdown; MDN, Python, Vite and docs.rs convert at 3–8×. JSON is pretty-printed so it has lines;
+  text and Markdown pass through (the request's `Accept` asks for `text/markdown` first); anything
+  else is described and not shown.
+- **One window per call, and it says what it left out.** At most `max_chars` (default 12,000,
+  about 3,000 tokens) of whole lines. The header states the status, type, final URL, title and the
+  document's size in lines and characters; a window that is not the whole says which lines it is
+  and ends with the `start_line` that continues. The first window of a long document carries its
+  outline — headings to level 3 with line numbers, at most 40, then "N more; use `find`".
+  `find` searches the whole document case-insensitively and returns the matching lines numbered,
+  grep-style, with two lines of context, within the same budget. Reading one fact from a long page
+  costs one window and one search.
+- **Paging is free because the page is cached per run.** A `GET` that succeeded is kept in
+  process memory keyed by run, tool, URL and `raw` — two runs do not share what they read, since
+  two instances' headers may differ — for 15 minutes, inside a 64 MB LRU budget; `run_ended`
+  drops a run's pages, and `refresh` skips the cache on purpose. Memory rather than the run's
+  state, because a page is megabytes and the state is written after every step. An old window is
+  elided to one line naming the URL and range, since reading it again is a cache hit.
+- **A model chooses the URL, so the server does not go everywhere it could.** The `fetch` action
+  reaches whatever the server can because an admin wrote the URL; here a model did, possibly on a
+  page's instructions. So: public addresses only unless `private_network` is set — loopback,
+  RFC 1918, link-local (a cloud's metadata endpoint), CGNAT, reserved and IPv4-in-IPv6 forms are
+  refused, a literal before anything is sent and a name by a resolver that filters what it
+  connects to (so a public name resolving to `127.0.0.1` is refused too); an optional host
+  allow-list, each entry admitting its subdomains; both checked on **every redirect hop**, which is
+  why redirects are followed by hand. No proxy from the environment, since a proxy would resolve
+  the name out of reach of the check. Configured headers are accepted only with an allow-list, are
+  marked sensitive, are never shown to the model, and are dropped when a redirect changes host.
+  `POST`/`PUT`/`PATCH`/`DELETE` are the `may_send` checkbox. Bounds: 5 MB read (then marked cut
+  off), 5 redirects, a 30 s default timeout (at most 120), URLs up to 2,000 characters with no
+  credentials in them.
+- **Fetched content is data.** The tool's description says so to the model in as many words. A
+  page with almost no text and a `<script>` is reported as needing JavaScript, with where to look
+  instead, rather than as empty — this tool does not run scripts, and `view_app`'s browser is for
+  the application's own preview, not for the web.
+- **Every application's builder carries it** (`sc_app::framework_builder_agent`, beside `coding`
+  and `preview_pane`): `fetch_web`, read-only, private network off, no headers and **no
+  allow-list** — the documentation a project needs is the project's, a declared framework's is
+  unknowable here, and a wrong list is a builder that cannot read the page it needed. The risk
+  that trades for is a builder that edits source reading untrusted pages: what bounds it is that
+  the tool cannot send, cannot reach this network, carries no credential, and that every edit
+  lands in the ledger and the diff for review; an admin who wants less lists hosts on the agent.
+- **Not built:** summarising with a second model (a mode that could be added over the same cache,
+  where a deployment wants it); PDFs (described, not read); honouring the Claude API's "only URLs
+  already in the conversation" rule, which needs the transcript at call time. What stands in for
+  that is the allow-list, which an admin should set wherever the agent also reads private data.
 
 ### 11.4 Chat: runs, transport, UI
 

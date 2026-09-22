@@ -21,7 +21,7 @@
 //!
 //! ## The set
 //!
-//! Ten traits over six things an agent can be given. **Tables**:
+//! Eleven traits over seven things an agent can be given. **Tables**:
 //! [`QueryTable`] reads one, and [`InsertRow`], [`UpdateRows`] and
 //! [`DeleteRows`] are three separate opt-in grants over one — so a read-only
 //! agent is the default shape and each way of changing data is a deliberate act
@@ -46,7 +46,12 @@
 //! by a second, hidden inference call. And **other agents**: [`Subagent`] hands one bounded task to one
 //! configured agent, which does it in a context of its own and reports back —
 //! the trait that makes an agent something an agent can be given, and the reason
-//! `sc-agent` grew a [`Delegator`](sc_agent::Delegator) seam.
+//! `sc-agent` grew a [`Delegator`](sc_agent::Delegator) seam. And **the
+//! web**: [`Http`] fetches pages and calls endpoints — documentation for a
+//! coding agent, an API for anything else — and shows a long document a window
+//! at a time, with its outline and a search, so one page cannot take over the
+//! context. It reaches public addresses only unless told otherwise, and only the
+//! hosts its configuration lists when it lists any.
 //!
 //! ## And one thing that is not a trait
 //!
@@ -99,6 +104,7 @@ mod build_application;
 mod coding;
 mod delete_rows;
 mod files;
+pub mod http;
 mod insert_row;
 mod preview_pane;
 mod query_table;
@@ -144,6 +150,7 @@ pub use coding::{
     run_plan,
 };
 pub use delete_rows::DeleteRows;
+pub use http::Http;
 pub use insert_row::InsertRow;
 pub use preview_pane::{
     CFG_RELOAD_ON_TURN, CFG_URL, DEFAULT_RELOAD_ON_TURN, PreviewPane, configured_url, is_framable,
@@ -179,6 +186,7 @@ pub mod tool_names {
         view_app_tool_name as view_app, write_file_tool_name as write_file,
     };
     pub use crate::delete_rows::tool_name as delete_rows;
+    pub use crate::http::tool_name as http;
     pub use crate::insert_row::tool_name as insert_row;
     pub use crate::query_table::tool_name as query_table;
     pub use crate::run_trigger::tool_name as run_trigger;
@@ -231,6 +239,7 @@ pub fn register_builtin_traits(registry: &mut AgentRegistry) -> Result<()> {
     registry.register(Arc::new(Coding))?;
     registry.register(Arc::new(BuildApplication))?;
     registry.register(Arc::new(Subagent))?;
+    registry.register(Arc::new(Http::new()?))?;
     Ok(())
 }
 
@@ -248,6 +257,7 @@ mod tests {
                 "build_application",
                 "coding",
                 "delete_rows",
+                "http",
                 "insert_row",
                 "preview_pane",
                 "query_table",
@@ -266,12 +276,14 @@ mod tests {
         // it names no table, because the tables it makes do not exist when it is
         // configured. Its form is four grants and two areas, each with a default,
         // and a blank one is a meaningful (read-only over all three) configuration
-        // rather than an incomplete one.
+        // rather than an incomplete one. `http` is the other, for the same
+        // reason: the web is not a target it could name, and a blank form is
+        // `fetch_web`, read-only, over public hosts.
         for trait_ in registry.all() {
             assert!(!trait_.description().is_empty(), "{}", trait_.name());
             let spec = trait_.config_spec();
             assert!(!spec.is_empty(), "{}", trait_.name());
-            if trait_.name() != "admin_copilot" {
+            if !matches!(trait_.name(), "admin_copilot" | "http") {
                 assert!(spec.iter().any(|f| f.required), "{}", trait_.name());
             }
         }

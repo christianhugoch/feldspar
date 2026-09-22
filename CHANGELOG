@@ -2,6 +2,94 @@
 
 Changes in reverse chronological order.
 
+## Every application's builder agent can read the web
+
+`sc_app::framework_builder_agent` now declares three traits: `coding`, **`http`**, and
+`preview_pane`. The builder gets `fetch_web` configured **read-only** (`may_send` off), with the
+**private network off** and **no headers**, so no credential comes with an application. There is
+also **no host allow-list**: the documentation a project needs depends on its stack (React,
+`code`, or a declared framework this crate knows nothing about), and a wrong list is a builder
+that cannot read the one page it needed. An admin who wants it narrower lists hosts on the agent.
+The trade-off, a source-editing agent reading untrusted pages, is written down in design §11.3
+("The web"). What limits it: the tool cannot send, reach this network or carry a key, and every
+edit lands in the ledger and the diff.
+
+**The prefix budget.** The React builder's stable prefix test had `act` at 1,596 of its 1,600
+tokens, so no tool fitted. First I halved `fetch_web`'s own description (1,374 → 676 characters),
+since the result's header already explains paging when a page needs it and the tool's
+description is resent on every request. Then the budget went to **1,750**, the move
+`list_assets` made before it, with the reason in the test's doc comment and in design §11.3.
+Measured: `act` 1,691 on Claude and 1,746 on GPT (`apply_patch`); `plan` 1,501.
+
+**A fix it needed.** The eval harness (`sc-cli/src/eval.rs`) applied a task's `checks` and
+`workflow`, and a host's `may_view_app`, to **every** trait the builder declared. `http` refuses
+settings it does not declare, so the eval could not save its agent. Those keys now go to `coding`
+alone. Verified by reverting the fix: `the_harness_scores_a_solved_task_and_an_unsolved_one`
+fails without it and passes with it.
+
+Tested: `sc-app`'s builder unit tests (the trait order, and `http`'s three settings);
+`sc-core-traits`' `builder_agent_traits.rs` (the `sc-app` strings are the trait's own, both
+frameworks carry it, the tool is `fetch_web` and collides with none of `coding`'s); `sc-server`'s
+`app_builder_agent.rs` (a created application's stored agent has it, and it saved, so the trait
+accepted the configuration). Tutorial Step 10 now says `build-todo` already has the trait.
+
+## Agents can read the web: the `http` trait, a window at a time
+
+**Before this, no agent could fetch a URL.** The one way out was `coding`'s shell with
+`shell_network` on — `curl`, returning raw HTML into the context, capped at 20,000 characters and
+not said to be. So a coding agent writing against a library could not read that library's
+documentation, and an agent with no shell could not reach the web at all.
+
+**`http`** (`sc_core_traits::http`) is a new built-in trait with one tool, `fetch_<name>`
+(`fetch_web` by default). It is a building block, not a coding feature: it is configured by what
+it may reach — a host allow-list, headers such as an API key, whether it may send
+`POST`/`PUT`/`PATCH`/`DELETE`, whether it may reach the private network — so the same trait serves
+a coding agent reading `react.dev` and a support agent calling a JSON API.
+
+**What it is designed around is the context, not the request.** A documentation page is
+100–500 KB of HTML, and a tool result is resent on every later step. Other agents either
+summarise the page with a second model (Claude Code, Gemini CLI, Amp: small, but lossy where the
+caller cannot see it), return it capped (the Claude API, OpenCode: exact, but large, and a cap
+nobody mentions is silent truncation), or filter it with model-written code (the Claude API's
+dynamic filtering: needs a sandbox). This one pages:
+
+- HTML becomes **the Markdown of the page's main content** (`htmd`, a Turndown port): `<main>` or
+  `<article>`, no navigation, scripts, footers, `data:` images or heading permalinks, links made
+  absolute. Measured on real pages: react.dev's `useEffect` reference is 598 KB of HTML and 47 K
+  characters of Markdown; MDN, Python, Vite and docs.rs shrink 3–8×.
+- One call shows **one window** (12,000 characters by default). The header states the document's
+  size in lines and characters; a partial window says which lines it is and ends with the
+  `start_line` that continues; the first window lists the headings with line numbers; `find`
+  searches the whole document and returns only the matching lines, numbered.
+- The page is **cached per run** (15 minutes, a 64 MB LRU, dropped when the run ends), so paging
+  and searching cost no request — asserted by counting requests on the wire. An old window is
+  elided to one line.
+
+**A model picks the URL, so the server does not go everywhere it can.** Unlike the `fetch` action
+(whose URL an admin wrote), `http` refuses loopback, private, link-local (a cloud's metadata
+endpoint), CGNAT and reserved addresses unless the admin opens the private network — a literal
+before anything is sent, and a name through a resolver that filters what the client connects to.
+The allow-list and the address rule are checked on **every redirect hop**, which is why redirects
+are followed by hand; configured headers need an allow-list, are never shown to the model, and are
+dropped when a redirect changes host. Bounds: 5 MB read, 5 redirects, 30 s timeout, 2,000-character
+URLs. The tool's description tells the model that fetched content is data, not instructions.
+
+New workspace dependencies: `htmd` and `markup5ever_rcdom` (html5ever). Documented in design §11.3
+("The web", with the survey) and `docs/tutorial-agents.md` Step 10.
+
+Tested in `crates/sc-core-traits/src/http/*` (the address rules, the conversion, the window,
+`find`, the outline, the cache's budget) and `tests/http_fetch.rs`, against a local HTTP server:
+a long page is one bounded window with its outline and continuation; the next window and a
+`find` make no second request, another run does, `run_ended` empties the cache; loopback is
+refused by default with nothing sent; a redirect is followed and said, and one off the allow-list
+(to the metadata address, or another site) is refused; a 404 quotes the server; `POST` needs
+`may_send`; configured headers arrive; and a whole agent run is offered `fetch_web` and reads a
+match rather than a page. `docs_agents.rs` pins the tutorial's checkbox names and tool name.
+
+**Not done** (TODO W.8): agent trait settings are not yet redacted when read back, so a
+header's key is visible to an admin opening the agent. (W.7, the builder carrying `http`, is the
+entry above.)
+
 ## Static directories, walked by hand: an edit now reaches the running mount
 
 The last phase of the static-directories milestone is its documentation and its definition of

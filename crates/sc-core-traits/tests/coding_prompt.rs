@@ -262,9 +262,18 @@ async fn a_store_inside_someone_elses_repository_gets_no_git_log() -> Result<()>
 /// the other nine. It is the cheapest tool in the set at 279 characters, and
 /// what it buys is the one question the other nine cannot answer: a model that
 /// is not told an image's URL invents one, and the page 404s.
+///
+/// **1 750 since the builder carries `http`** (`fetch_web`, TODO W.7). `act`
+/// measured 1 596 before it, so no tool at all fitted under 1 600. The tool's
+/// description was cut from 1 374 characters to 676 to get here — what a model
+/// needs before calling, with paging explained by the result's own header when
+/// there is any — and it costs about 150 tokens. What it buys is the builder
+/// reading the documentation of the library it is writing against instead of
+/// its memory of it. Measured: `act` 1 691 on Claude (`str_replace`), 1 746 on
+/// GPT (`apply_patch`, the larger edit tool); `plan` 1 501 on both.
 #[tokio::test]
-async fn the_react_builder_agents_stable_prefix_is_at_most_1600_tokens() -> Result<()> {
-    const LIMIT: u64 = 1_600;
+async fn the_react_builder_agents_stable_prefix_is_at_most_1750_tokens() -> Result<()> {
+    const LIMIT: u64 = 1_750;
     let env = Env::new().await?;
     let app = Application::new(
         "Todo",

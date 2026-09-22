@@ -675,6 +675,43 @@ And the rule that has held all the way down this page still holds here: `librari
 **you**, so it reads the rows you may read, and if its **Minimum role** is stricter than yours,
 `front_desk` is refused by name. Delegation is not a way round anything.
 
+## Step 10 — Letting an agent read the web
+
+A coding agent that writes against a library it half-remembers writes the half it remembers.
+So an application's builder (Step 5's `build-todo`) is created with the **`http`** trait already
+on: its tool is `fetch_web`, it may only read, and it reaches public hosts only. Open the agent
+and it is there beside `coding`:
+
+| Field | Value |
+|---|---|
+| Name | `web` |
+| Hosts it may reach | empty — any public host |
+| May send POST, PUT, PATCH and DELETE requests | off |
+| May reach loopback and private-network addresses | off |
+| Most characters of a page shown per call | 12000 |
+
+To narrow it, list hosts — `react.dev`, `vite.dev`, `developer.mozilla.org`, one per line — and
+it will refuse the rest, redirects included. To take it away, remove the trait. Any other agent
+gets it the same way: add the `http` trait, and a blank form is this one.
+
+Ask it something only the documentation answers — *"what does `useEffect` do with its cleanup
+function when the dependencies change?"* — and open the tool result. It is **not** the page. It
+is a header (`200 text/html https://react.dev/reference/react/useEffect`, the title, *"Markdown
+converted from 598,072 bytes of HTML; 1,216 lines"*), the page's headings with their line numbers,
+the first ~12,000 characters, and a last line saying how to go on. The next call to look for is
+`find: "cleanup"`: it comes back with the matching lines, numbered, rather than another page — and
+costs no request, because the page is cached for the conversation.
+
+Two things to know:
+
+- **It cannot reach your network.** `localhost`, `10.x`, `192.168.x` and a cloud's metadata
+  address are refused, by address, even through a redirect, unless you tick **May reach loopback
+  and private-network addresses** — do that only for an intranet wiki, and list its host.
+- **A key goes with a host list.** To let an agent call an API, add a second `http` trait named
+  `github`, list `api.github.com`, and put `{"Authorization": "Bearer …"}` in **Headers**. The
+  form refuses headers without a host list: a key the model could send anywhere is a key it can be
+  talked into sending anywhere. The model never sees the header's value.
+
 ## The traits you have
 
 | Trait | Configured with | What the agent gets |
@@ -688,6 +725,7 @@ And the rule that has held all the way down this page still holds here: `librari
 | `build_application` | an application's subdomain | builds it, and gets the diagnostics — for an agent whose job is only to build one; a `coding` agent builds through its own `check` instead |
 | `admin_copilot` | four grants, two areas, and **no table** | describes and edits the schema itself, the triggers over it, and an application's custom SQL endpoints |
 | `subagent` | one agent, when to use it, two bounds | hands it one task and reads back what it concluded |
+| `http` | a name, the hosts it may reach, optional headers, whether it may send | fetches a URL and reads it a window at a time — Markdown of the page's main content, with its outline, and `find` to search it; `POST`/`PUT`/`PATCH`/`DELETE` only under **May send** |
 | `preview_pane` | a URL, and whether to reload it | **no tool at all**: the chat screen gains a button that puts that page beside the conversation (see below) |
 
 Each is a grant. Adding one is a decision you can read off the agent's page later — except the

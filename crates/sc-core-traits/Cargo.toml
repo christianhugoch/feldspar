@@ -64,9 +64,19 @@ sha2.workspace = true
 regex-lite.workspace = true
 # `process` spawns `npm run <script>` and `time` bounds it; a script that hangs
 # must not hold a conversation open (§11.3).
-tokio = { workspace = true, features = ["process", "time"] }
+tokio = { workspace = true, features = ["process", "time", "net"] }
 # A unique name for each sandbox container the shell starts (TODO 6a.5).
 uuid.workspace = true
+# The `http` trait's client — the workspace's one reqwest, on rustls, so an
+# agent's fetch shares a TLS stack with the `fetch` action and the LLM provider.
+reqwest.workspace = true
+# The `http` trait turns an HTML page into Markdown, walking the parsed tree
+# first to find the page's main content (see the workspace pin).
+htmd.workspace = true
+markup5ever_rcdom.workspace = true
+# The `http` trait's page cache: fetched documents, byte-bounded, least
+# recently used out first.
+lru.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # The coding shell's child processes (TODO 6a): a process group per command, so
