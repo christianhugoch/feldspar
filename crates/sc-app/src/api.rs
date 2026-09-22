@@ -154,17 +154,23 @@ pub fn validate_api_config(app: &Application, api: &ApiConfig) -> Result<()> {
         sc_api::validate_custom_queries(&queries, &tables)?;
         settings.remove(sc_api::REST_CFG_QUERIES);
     }
-    validate_attrs(&spec, &settings).map_err(|e| {
-        // Name the provider as well as the setting, rebuilt rather than wrapped
-        // for the reason `check_attrs` gives in `framework.rs`: `Error`'s
-        // `Invalid` renders its own prefix, and a `Context` would hide the
-        // setting, which is the part the admin needs.
-        if let Repr::Invalid(msg) = e.repr() {
-            Error::invalid(format!("API provider `{}`: {msg}", api.provider))
-        } else {
-            e
-        }
-    })
+    validate_attrs(&spec, &settings)
+        .and_then(|()| match api.provider.as_str() {
+            // What the spec cannot say: sign-up never makes an administrator.
+            REST_PROVIDER => sc_api::check_rest_config(&settings),
+            _ => Ok(()),
+        })
+        .map_err(|e| {
+            // Name the provider as well as the setting, rebuilt rather than wrapped
+            // for the reason `check_attrs` gives in `framework.rs`: `Error`'s
+            // `Invalid` renders its own prefix, and a `Context` would hide the
+            // setting, which is the part the admin needs.
+            if let Repr::Invalid(msg) = e.repr() {
+                Error::invalid(format!("API provider `{}`: {msg}", api.provider))
+            } else {
+                e
+            }
+        })
 }
 
 /// Prepare every custom SQL query this API declares, and return the
@@ -531,6 +537,8 @@ pub fn app_providers_with(
                     // The application's own cap on a list read, from its stored
                     // provider configuration.
                     .with_row_cap(rest_row_cap(&api.config))
+                    // Its sign-up endpoint, where its settings offer one…
+                    .with_signup(sc_api::rest_signup_role(&api.config))
                     // …and its custom SQL queries, one endpoint each (§13.4).
                     .with_queries(sc_api::custom_queries(&api.config)?)
                     .map_err(|e| Error::config(format!("application `{}`: {e}", app.name)))?;

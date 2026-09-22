@@ -5788,6 +5788,14 @@ and get typed methods (`listPosts`, `createPosts`, …) instead of a stringly-ty
 projection includes the app's own `login` / `logout` / `whoami` (§7.2), which is why it is the
 provider a scaffolded client can authenticate against (§13.3).
 
+**Sign-up is a setting of the REST API**, not of the application's framework: `allow_signup`
+(off by default) projects a public `POST /api/signup` taking the same `{ email, password }` as
+`login`. It creates an account with `new_user_role` (default 80; a save refuses the admin role),
+answers `201` with the same user summary `login` returns, and starts the session in that
+response. An address that already has an account gets `409`. When the setting is off, the route
+and the client's `signup` method do not exist. The generated `src/feldspar/README.md` says which
+of the two cases applies, and the builder agents' prompts point to it.
+
 A **list read takes a query string** in PostgREST's syntax:
 
 ```
@@ -5893,7 +5901,7 @@ an admin opening a hole should be told what it is a hole in, where they are open
 
 **Validated as a model, before anything is prepared**: a name that is a valid client method name,
 unique within the API and not one a table endpoint already holds; a sub-path that cannot collide
-with a table's routes or with `actions`/`login`/`logout`/`whoami`; one statement; every `:name`
+with a table's routes or with `actions`/`login`/`logout`/`whoami`/`signup`; one statement; every `:name`
 in the SQL declared and every declared parameter used; and no two result columns of one name,
 which would collapse into a single JSON property. Parameters project as **query parameters** for
 `GET`/`DELETE` and as a typed body otherwise, and `AuthRequirement::MinRole` comes from

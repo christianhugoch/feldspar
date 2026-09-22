@@ -328,6 +328,13 @@ fn coding_agent(
     })
 }
 
+/// What a builder agent is told to do about a sign-up form the application's
+/// API does not back: say so, rather than post to a route that 404s only when
+/// somebody fills the form in.
+const SIGNUP_SWITCH: &str = "When sign-up is off, do not build a sign-up form \
+     against a request you wrote yourself: tell the user that an administrator has \
+     to turn on \"Allow sign-up\" in the application's REST API settings.";
+
 /// The prompt for a scaffolded React project: the role, and the one platform
 /// convention a model would otherwise break on its first edit.
 fn react_prompt(app: &Application, store: &str, root: &str) -> String {
@@ -336,7 +343,11 @@ fn react_prompt(app: &Application, store: &str, root: &str) -> String {
          `{subdomain}` subdomain, from the `{store}` file store under `{root}`.\n\n\
          `src/feldspar/` is the client generated from the application's API, rewritten \
          on every build: read it to learn what data there is, never edit it, and reach \
-         data only through it.",
+         data only through it.\n\n\
+         Signing in is `api.login` / `api.logout` / `api.whoami`, wrapped by \
+         `src/auth.tsx`. Signing up is `api.signup`, which exists only when the \
+         application's REST API settings allow sign-up; `src/feldspar/README.md` says \
+         whether they do. {SIGNUP_SWITCH}",
         name = app.name,
         subdomain = app.subdomain.trim(),
     )
@@ -348,7 +359,11 @@ fn code_prompt(app: &Application, store: &str, root: &str) -> String {
     format!(
         "You build the `{name}` application, served at the `{subdomain}` subdomain, \
          from the `{store}` file store under `{root}`. The project is the admin's \
-         own: read it before changing it rather than assuming a layout.",
+         own: read it before changing it rather than assuming a layout.\n\n\
+         The application's REST API signs people in with `POST /api/login` (and \
+         `/api/logout`, `/api/whoami`); `POST /api/signup` — email and password, \
+         answering the new user and signing them in — exists only when its REST \
+         API settings allow sign-up. {SIGNUP_SWITCH}",
         name = app.name,
         subdomain = app.subdomain.trim(),
     )
@@ -469,6 +484,19 @@ mod tests {
         // nothing about.
         assert!(!spec.system_prompt.contains("src/feldspar/"));
         assert!(spec.system_prompt.contains("Blog"));
+    }
+
+    /// Both builders are told that sign-up is an API setting, and what to say
+    /// when it is off — a sign-up form against a route the server does not
+    /// serve fails only when somebody fills it in.
+    #[test]
+    fn builders_are_told_where_signup_is_switched_on() {
+        for app in [react_app(), code_app()] {
+            let spec = framework_builder_agent(&app.framework, &app).expect("declares one");
+            let prompt = &spec.system_prompt;
+            assert!(prompt.contains("signup"), "{prompt}");
+            assert!(prompt.contains("Allow sign-up"), "{prompt}");
+        }
     }
 
     #[test]

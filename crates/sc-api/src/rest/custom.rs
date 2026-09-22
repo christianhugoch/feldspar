@@ -285,6 +285,13 @@ fn validate_custom_query(q: &CustomQuery, tables: &[String]) -> Result<()> {
             q.name
         )));
     }
+    if super::RESERVED_AUTH_NAMES.contains(&q.name.as_str()) {
+        return Err(Error::invalid(format!(
+            "custom SQL query `{}` has the name of one of the API's own sign-in \
+             endpoints; give it another name",
+            q.name
+        )));
+    }
     for table in tables {
         for op in TABLE_OPS {
             if q.name == super::op_name(op, table) {
@@ -693,7 +700,7 @@ mod tests {
 
     #[test]
     fn a_path_under_a_reserved_segment_is_refused() {
-        for reserved in ["/actions/run", "/login", "/whoami/me"] {
+        for reserved in ["/actions/run", "/login", "/whoami/me", "/signup"] {
             let mut q = query();
             q.path = reserved.into();
             assert!(
@@ -720,6 +727,17 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(msg.contains("listBooks"), "{msg}");
+    }
+
+    /// `signup` is refused even for an API that does not offer sign-up: turning
+    /// it on later must not be what makes the application fail to mount.
+    #[test]
+    fn a_name_the_auth_endpoints_use_is_refused() {
+        for name in ["login", "logout", "whoami", "signup"] {
+            let mut q = query();
+            q.name = name.into();
+            assert!(validate_custom_queries(&[q], &[]).is_err(), "{name}");
+        }
     }
 
     #[test]

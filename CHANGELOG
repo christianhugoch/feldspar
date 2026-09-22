@@ -2,6 +2,48 @@
 
 Changes in reverse chronological order.
 
+## An application's REST API can offer sign-up
+
+A React application had a sign-up form but nowhere to post it. The app's REST API projected
+`login`, `logout` and `whoami`, and nothing else. Sign-up existed only as Saltcorn UI's
+server-rendered `/auth/signup`, which a React app cannot use. The REST provider now has
+**`POST {mount}/signup`**. An admin switches it on in the application's API settings, since not
+every application should let anybody make an account.
+
+- **Two new REST settings** in `rest_config_spec`: `allow_signup` ("Allow sign-up", default off)
+  and `new_user_role` (default 80). These are the key names the Saltcorn UI framework's sign-up
+  already uses. `validate_api_config` runs the new `sc_api::check_rest_config`, which refuses a
+  `new_user_role` of 1. `rest_signup_role` reads the settings and returns `None` for an
+  out-of-range role, so a bad value turns sign-up off rather than making an administrator.
+- **`RestProvider::with_signup(role)`** registers the endpoint after the other auth endpoints and
+  before every table's. `resolve` takes the first match, so a table named `signup` cannot shadow
+  it. `app_providers_with` calls it from the stored settings. The endpoint is `Public` and takes
+  `{ email, password }`. It creates the account with `sc_auth::create_user` and answers `201`
+  with the user summary and a `SessionAction::Start`, so the caller is signed in by the same
+  response. An email that already has an account gets `409`, and a blank password gets `400`.
+  When the setting is off, nothing is projected: the route is a 404 and the generated client has
+  no `signup` method.
+- **Custom SQL queries** may no longer be named `login`/`logout`/`whoami`/`signup`, and `signup`
+  joins the reserved first path segments. It is reserved even while sign-up is off, so turning
+  the setting on cannot make an application fail to mount.
+- **The coding agent is told about it.** The generated `src/feldspar/README.md` is rewritten on
+  every build. It now has a "Signing in and signing up" section that says whether `api.signup`
+  exists, what it returns, and, when it does not, that "Allow sign-up" in the application's API
+  settings is the switch. Both builder prompts (`react` and `code`) say that sign-up exists only
+  when the REST settings allow it. They also tell the agent not to hand-write a request for it,
+  and to tell the user an administrator has to turn it on. The scaffold's `src/auth.tsx` is
+  unchanged. It is written once, and the README tells the agent to add a `signUp` beside
+  `signIn`.
+
+Tested: `sc-api` unit tests `signup_is_projected_only_where_the_settings_offer_it` (projection,
+precedence over a table named `signup`, client method, query-name clash) and
+`signup_never_makes_an_administrator`. `custom::a_name_the_auth_endpoints_use_is_refused`. In
+`sc-app`: `the_runtime_readme_says_whether_signup_is_on` and
+`builders_are_told_where_signup_is_switched_on`. In `sc-server`, `app_signup` runs against
+Postgres through the router: 404 when off; when on, 201 with role 80, signed in, 409 on a
+duplicate, 400 on a blank password, and log out and back in; and a role-1 setting is refused on
+save.
+
 ## A new application can create its own local file store
 
 The admin UI's **new application** form offered only existing stores in the framework's store

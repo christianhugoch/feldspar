@@ -39,6 +39,8 @@ mod app_file_access;
 mod app_i18n;
 #[path = "app_serving.rs"]
 mod app_serving;
+#[path = "app_signup.rs"]
+mod app_signup;
 #[path = "app_static_dirs.rs"]
 mod app_static_dirs;
 #[path = "app_streams.rs"]

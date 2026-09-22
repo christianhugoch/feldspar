@@ -18,11 +18,14 @@
 //!
 //! **Authentication**: the projection includes the app's own `login` / `logout` /
 //! `whoami`, so a React app authenticates against `sc-auth` through its own API
-//! rather than borrowing the admin's (§7.2). `login` is the one public endpoint —
-//! it is how a caller stops being anonymous — and it verifies credentials against
-//! the same `sc_auth::authenticate` the admin login uses, for any role rather
-//! than admins only. The provider never touches cookies: it returns a
-//! [`SessionAction`] and the transport mints and carries the token.
+//! rather than borrowing the admin's (§7.2). `login` is public — it is how a
+//! caller stops being anonymous — and it verifies credentials against the same
+//! `sc_auth::authenticate` the admin login uses, for any role rather than admins
+//! only. `signup` is the other public one, and it exists only where the
+//! application's REST settings turn it on ([`CFG_ALLOW_SIGNUP`]): anybody at all
+//! making an account is a decision, not a default. The provider never touches
+//! cookies: it returns a [`SessionAction`] and the transport mints and carries
+//! the token.
 //!
 //! **Custom SQL queries** (§13.4) are the one thing here that is not a
 //! projection of the row layer: an administrator's own statement, at their own
@@ -95,9 +98,21 @@ pub const DEFAULT_ROW_CAP: u64 = 500;
 /// The setting behind [`RestProvider::with_row_cap`].
 pub const CFG_ROW_CAP: &str = "row_cap";
 
+/// The setting that projects `POST {mount}/signup` ([`RestProvider::with_signup`]).
+/// Off unless an admin turns it on: an application whose accounts are made by
+/// an administrator must not grow a door anybody can walk through.
+pub const CFG_ALLOW_SIGNUP: &str = "allow_signup";
+
+/// The setting naming the role an account made through `signup` gets. The key
+/// the Saltcorn UI framework's own sign-up setting has, for the same thing.
+pub const CFG_NEW_USER_ROLE: &str = "new_user_role";
+
+/// The role [`CFG_NEW_USER_ROLE`] defaults to — v1's `user` role.
+pub const DEFAULT_NEW_USER_ROLE: u8 = 80;
+
 /// What an admin enabling the REST provider may configure.
 ///
-/// One setting today, and the same arrangement the GraphQL provider's five are
+/// The same arrangement the GraphQL provider's five are
 /// under ([`graphql_config_spec`](crate::graphql_config_spec)): the application
 /// form renders whatever a provider declares, so this list is the only place
 /// that decides what a REST API can be configured with.
@@ -106,7 +121,59 @@ pub fn rest_config_spec() -> Vec<FormField> {
         FormField::new(CFG_ROW_CAP, BasicType::Int)
             .label("Row cap per list read")
             .default_value(DEFAULT_ROW_CAP as i64),
+        FormField::new(CFG_ALLOW_SIGNUP, BasicType::Bool)
+            .label("Allow sign-up (anybody may create an account)")
+            .default_value(false),
+        FormField::new(CFG_NEW_USER_ROLE, BasicType::Int)
+            .label("Role of a signed-up account")
+            .default_value(i64::from(DEFAULT_NEW_USER_ROLE)),
     ]
+}
+
+/// The role an account made through the application's `signup` endpoint gets,
+/// or `None` when the stored configuration does not offer sign-up.
+///
+/// A role outside `2..=100` is `None` too rather than the default: the
+/// configuration was checked on save ([`check_rest_config`]), so one that is
+/// out of range now was never accepted, and failing closed is the answer that
+/// cannot make an administrator.
+pub fn rest_signup_role(config: &Attrs) -> Option<u8> {
+    if !config
+        .get(CFG_ALLOW_SIGNUP)
+        .and_then(Json::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    match config.get(CFG_NEW_USER_ROLE).filter(|r| !r.is_null()) {
+        None => Some(DEFAULT_NEW_USER_ROLE),
+        Some(role) => role
+            .as_u64()
+            .and_then(|r| u8::try_from(r).ok())
+            .filter(|r| signup_role_allowed(*r)),
+    }
+}
+
+/// What [`rest_config_spec`]'s vocabulary cannot say about the settings: that
+/// the role a sign-up gives is never the administrator's.
+pub fn check_rest_config(config: &Attrs) -> Result<()> {
+    if let Some(role) = config.get(CFG_NEW_USER_ROLE).filter(|r| !r.is_null())
+        && !role
+            .as_u64()
+            .and_then(|r| u8::try_from(r).ok())
+            .is_some_and(signup_role_allowed)
+    {
+        return Err(Error::invalid(format!(
+            "`{CFG_NEW_USER_ROLE}` must be a role from 2 to 100; an account \
+             anybody can make through sign-up cannot be an administrator"
+        )));
+    }
+    Ok(())
+}
+
+/// Any role but the administrator's.
+fn signup_role_allowed(role: u8) -> bool {
+    (sc_auth::ROLE_ADMIN + 1..=sc_auth::ROLE_PUBLIC).contains(&role)
 }
 
 /// The row cap an application's stored provider configuration names, or
@@ -171,14 +238,20 @@ const ACTIONS_SEGMENT: &str = "actions";
 const LOGIN: &str = "login";
 const LOGOUT: &str = "logout";
 const WHOAMI: &str = "whoami";
+const SIGNUP: &str = "signup";
 
 /// The first path segments this provider's own routes claim, which a custom SQL
 /// query's sub-path may therefore not start with (see
 /// [`custom::validate_custom_queries`]).
 ///
 /// A table's name is the other half of that rule, and it is not a constant — it
-/// is whatever the application declares.
-pub(crate) const RESERVED_SEGMENTS: [&str; 4] = [ACTIONS_SEGMENT, LOGIN, LOGOUT, WHOAMI];
+/// is whatever the application declares. `signup` is reserved whether or not
+/// the application offers it, so turning sign-up on cannot shadow a query.
+pub(crate) const RESERVED_SEGMENTS: [&str; 5] = [ACTIONS_SEGMENT, LOGIN, LOGOUT, WHOAMI, SIGNUP];
+
+/// Every endpoint name the provider's own auth may project — the three every
+/// app has plus `signup` — which a custom query may therefore not be named.
+pub(crate) const RESERVED_AUTH_NAMES: [&str; 4] = [LOGIN, LOGOUT, WHOAMI, SIGNUP];
 
 /// The app's own auth operations, as a client generator meets them.
 ///
@@ -198,6 +271,9 @@ pub struct RestProvider {
     routes: HashMap<String, TableRoute>,
     /// Endpoint name → the trigger it runs, for the app's exposed subset.
     trigger_routes: HashMap<String, String>,
+    /// The role a `signup` gives a new account, when the application offers
+    /// sign-up at all ([`with_signup`](RestProvider::with_signup)).
+    signup_role: Option<u8>,
     /// Endpoint name → the admin-authored SQL query it runs
     /// ([`with_queries`](RestProvider::with_queries)). Keyed the same way the
     /// [`HandlerRef::Sql`] on the endpoint names it, so dispatch is a lookup.
@@ -449,11 +525,59 @@ impl RestProvider {
             endpoints,
             routes,
             trigger_routes,
+            signup_role: None,
             custom_routes: HashMap::new(),
             dispatcher: None,
             evaluator: None,
             row_cap: DEFAULT_ROW_CAP,
         }
+    }
+
+    /// Offer sign-up: project `POST {mount}/signup`, which makes an account with
+    /// `role` and signs it in, as `login` signs in an existing one. `None` is
+    /// the default and projects nothing — an application that does not offer
+    /// sign-up has no such route, and its generated client no such method.
+    ///
+    /// The endpoint goes in beside the other auth endpoints, ahead of every
+    /// table's: `resolve` takes the first match, so a table that happens to be
+    /// called `signup` cannot shadow it, exactly as one called `login` cannot
+    /// shadow that.
+    ///
+    /// Called before [`with_queries`](RestProvider::with_queries), whose name
+    /// check then sees `signup` among the endpoints already projected.
+    pub fn with_signup(mut self, role: Option<u8>) -> RestProvider {
+        let Some(role) = role else {
+            self.signup_role = None;
+            return self;
+        };
+        if self.endpoints.find(SIGNUP).is_some() {
+            self.signup_role = Some(role);
+            return self;
+        }
+        let signup = Endpoint::new(SIGNUP, Method::Post, path_at(&self.mount).lit(SIGNUP))
+            .input(credentials_schema())
+            .output(user_summary_schema())
+            // Public for the reason `login` is: it is how a caller who has no
+            // account stops being anonymous.
+            .auth(AuthRequirement::Public);
+        let mut endpoints = EndpointSet::new();
+        let mut placed = false;
+        for ep in self.endpoints.iter() {
+            endpoints.register(ep.clone());
+            if ep.name == WHOAMI {
+                endpoints.register(signup.clone());
+                placed = true;
+            }
+        }
+        if !placed {
+            endpoints.register(signup);
+        }
+        for resource in self.endpoints.resources() {
+            endpoints.register_resource(resource.clone());
+        }
+        self.endpoints = endpoints;
+        self.signup_role = Some(role);
+        self
     }
 
     /// Serve this API's list endpoints under a different row cap than
@@ -622,6 +746,38 @@ impl RestProvider {
             }
             None => Ok(ApiResponse::error(401, "invalid credentials")),
         }
+    }
+
+    /// Make an account and start a session for it — `POST {mount}/signup`,
+    /// projected only where the application offers sign-up.
+    ///
+    /// The account gets the role the application's settings name, never the
+    /// administrator's ([`check_rest_config`]), under the password rule every
+    /// other way of making one has: not blank. An address that already has an
+    /// account is a `409` — unlike a failed login, the answer cannot be kept
+    /// vague, because the caller has to be told to sign in instead.
+    async fn signup(&self, body: &Json, cat: &Catalog) -> Result<ApiResponse> {
+        let Some(role) = self.signup_role else {
+            // The route is only projected alongside a role, so this is the set
+            // having been extended by something else.
+            return Ok(ApiResponse::error(
+                404,
+                "this application does not offer sign-up",
+            ));
+        };
+        let (email, password) = credentials(body)?;
+        let email = email.trim().to_owned();
+        if sc_auth::load_user_by_email(cat, &email).await?.is_some() {
+            return Ok(ApiResponse::error(
+                409,
+                "there is already an account with this email address",
+            ));
+        }
+        let user = sc_auth::create_user(cat, &email, &password, role).await?;
+        let summary = user_summary_json(&user);
+        let mut out = ApiResponse::start_session(user, summary);
+        out.status = 201;
+        Ok(out)
     }
 
     /// Run a resolved table operation, enforcing the §7.3 access rule:
@@ -1226,6 +1382,7 @@ impl ApiProvider for RestProvider {
 
         match &endpoint.handler {
             HandlerRef::Named(_) if endpoint.name == LOGIN => self.login(&req.body, cat).await,
+            HandlerRef::Named(_) if endpoint.name == SIGNUP => self.signup(&req.body, cat).await,
             HandlerRef::Named(_) if endpoint.name == LOGOUT => {
                 Ok(ApiResponse::end_session(json!({ "ok": true })))
             }
@@ -1758,6 +1915,65 @@ mod tests {
         assert!(enforce_auth(&login.auth, None).is_none());
     }
 
+    /// Sign-up is off unless the application's settings turn it on, and when
+    /// they do it is one more public auth endpoint — ahead of every table's, so
+    /// a table called `signup` cannot shadow it.
+    #[test]
+    fn signup_is_projected_only_where_the_settings_offer_it() {
+        let tables = [
+            table("posts", AccessRules::default()),
+            table("signup", AccessRules::default()),
+        ];
+        let off = RestProvider::project("/api", &tables);
+        assert!(off.endpoints().find("signup").is_none());
+        assert!(!crate::generate_client(off.endpoints()).contains("signup(body"));
+
+        let mut config = Attrs::new();
+        assert_eq!(rest_signup_role(&config), None);
+        config.insert(CFG_ALLOW_SIGNUP.to_owned(), Json::Bool(true));
+        assert_eq!(rest_signup_role(&config), Some(DEFAULT_NEW_USER_ROLE));
+        config.insert(CFG_NEW_USER_ROLE.to_owned(), Json::from(40));
+        assert_eq!(rest_signup_role(&config), Some(40));
+
+        let on = RestProvider::project("/api", &tables).with_signup(rest_signup_role(&config));
+        let signup = on.endpoints().find("signup").expect("projected");
+        assert_eq!(signup.method, Method::Post);
+        assert_eq!(signup.path.pattern(), "/api/signup");
+        assert_eq!(signup.auth, AuthRequirement::Public);
+        assert_eq!(on.endpoints().len(), off.endpoints().len() + 1);
+        // The table's own create is registered after it, so resolution finds
+        // the sign-up.
+        let (ep, _) = on
+            .resolve(&ApiRequest::new(Method::Post, "/api/signup"))
+            .unwrap();
+        assert_eq!(ep.name, "signup");
+        // The resources survive the rebuild, and the client gains the method.
+        assert!(on.endpoints().resource("posts").is_some());
+        let ts = crate::generate_client(on.endpoints());
+        assert!(ts.contains("signup(body: SignupRequest)"), "{ts}");
+
+        // A custom query cannot take the name once sign-up is on.
+        let clash = custom::CustomQuery::new("signup", Method::Get, "/x", "SELECT 1 AS n");
+        assert!(on.with_queries(vec![clash]).is_err());
+    }
+
+    /// Anybody can make an account through sign-up, so it may never make an
+    /// administrator — refused on save, and failed closed if one got stored.
+    #[test]
+    fn signup_never_makes_an_administrator() {
+        let mut config = Attrs::new();
+        config.insert(CFG_ALLOW_SIGNUP.to_owned(), Json::Bool(true));
+        config.insert(CFG_NEW_USER_ROLE.to_owned(), Json::from(1));
+        let msg = check_rest_config(&config).unwrap_err().to_string();
+        assert!(msg.contains(CFG_NEW_USER_ROLE), "{msg}");
+        assert_eq!(rest_signup_role(&config), None);
+
+        config.insert(CFG_NEW_USER_ROLE.to_owned(), Json::from(80));
+        check_rest_config(&config).expect("an ordinary role is fine");
+        // The spec validates the settings the form renders.
+        sc_types::validate_attrs(&rest_config_spec(), &config).expect("declared settings");
+    }
+
     #[test]
     fn a_table_cannot_collide_with_the_auth_endpoints() {
         // A table actually named `login` still projects `listLogin` etc., because
@@ -1891,7 +2107,6 @@ mod tests {
         assert_eq!(rest_row_cap(&config), DEFAULT_ROW_CAP);
         // And the setting the spec declares is the setting this reads.
         let spec = rest_config_spec();
-        assert_eq!(spec.len(), 1);
-        assert_eq!(spec[0].name(), CFG_ROW_CAP);
+        assert!(spec.iter().any(|f| f.name() == CFG_ROW_CAP));
     }
 }

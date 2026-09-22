@@ -389,6 +389,9 @@ pub(super) fn exposed_tables<'a>(tables: &'a [Table], endpoints: &EndpointSet) -
 
 /// Whether this application can sign anyone in.
 ///
+/// The name of the endpoint an application that offers sign-up projects.
+const SIGNUP_ENDPOINT: &str = "signup";
+
 /// The scaffold's auth layer is generated code calling `login` / `logout` /
 /// `whoami` through the typed client, so it can only exist when the application
 /// exposes them — which today means the REST provider (§13.4). An app that does
@@ -828,11 +831,55 @@ fn runtime_readme(ctx: &ProjectContext<'_>) -> String {
          decide what the statement can see. A `get` query runs in a read-only \
          transaction. Open the hole deliberately.\n\
          \n\
+         {accounts}\
          {testing}",
         name = ctx.app.name,
         subdomain = ctx.app.subdomain,
         command = add_query_command(ctx),
+        accounts = accounts_section(ctx.endpoints),
         testing = testing_section(ctx),
+    )
+}
+
+/// The README's section on signing in and **signing up**, or nothing for an
+/// application that cannot sign anyone in.
+///
+/// Rewritten with the rest of the README, so it says what the application does
+/// *now*: whether `api.signup` exists is a setting the admin can flip at any
+/// time, and an agent asked for a sign-up form has to know which of the two
+/// answers it is building against — a form posting to a route the server does
+/// not serve fails only when somebody fills it in.
+fn accounts_section(endpoints: &EndpointSet) -> String {
+    if !has_auth(endpoints) {
+        return String::new();
+    }
+    let signup = if endpoints.find(SIGNUP_ENDPOINT).is_some() {
+        "**Sign-up is on.** `api.signup({ email, password })` makes an account with \
+         the role the application's settings name, and signs it in: it answers the \
+         new user exactly as `login` does, so a sign-up form can set the user \
+         `src/auth.tsx` holds from its result. An address that already has an \
+         account is refused with `409` — tell the person to sign in instead. The \
+         scaffold's `src/auth.tsx` offers `signIn` and `signOut`; add a `signUp` \
+         beside them rather than calling the client from a page.\n"
+    } else {
+        "**Sign-up is off**, so there is no `api.signup` and no route behind one: \
+         accounts are made by an administrator. Do not build a sign-up form against \
+         a hand-written `fetch` — it would fail only when somebody filled it in. \
+         If the application needs people to make their own accounts, that is a \
+         setting of its REST API (\"Allow sign-up\", in the application's API \
+         settings in the admin UI); once an administrator turns it on, the next \
+         build adds `api.signup` to the client.\n"
+    };
+    format!(
+        "## Signing in and signing up\n\
+         \n\
+         `api.login({{ email, password }})`, `api.logout()` and `api.whoami()` are \
+         the application's own sign-in — `src/auth.tsx` wraps them as `useUser()`. \
+         The session is a cookie the browser carries; nothing here stores a \
+         credential.\n\
+         \n\
+         {signup}\
+         \n"
     )
 }
 
@@ -3865,6 +3912,39 @@ mod tests {
         // Only the login route is public — the default is the locked door.
         assert_eq!(routes.matches("public: true").count(), 1);
         assert!(routes.contains(r#"path: "/login""#));
+    }
+
+    /// The runtime README says whether `api.signup` exists, and is rewritten
+    /// when that changes — so an agent asked for a sign-up form knows which of
+    /// the two it is building against.
+    #[test]
+    fn the_runtime_readme_says_whether_signup_is_on() {
+        let tables = [tasks()];
+        let app = todo();
+        let readme = |eps: &EndpointSet| {
+            file(
+                &project_files(&ctx(&app, &tables, eps, None)),
+                "src/feldspar/README.md",
+            )
+            .to_owned()
+        };
+
+        let off = readme(&endpoints(&tables));
+        assert!(off.contains("**Sign-up is off**"), "{off}");
+        assert!(off.contains("Allow sign-up"), "{off}");
+        assert!(!off.contains("api.signup({"), "{off}");
+
+        let on_eps = RestProvider::project("/api", &tables)
+            .with_signup(Some(80))
+            .endpoints()
+            .clone();
+        let on = readme(&on_eps);
+        assert!(on.contains("**Sign-up is on.**"), "{on}");
+        assert!(on.contains("api.signup({ email, password })"), "{on}");
+
+        // An app that cannot sign anyone in has nothing to say about it.
+        let none = readme(&endpoints_without_auth());
+        assert!(!none.contains("Signing in and signing up"), "{none}");
     }
 
     /// The endpoint set of an app whose provider projects no auth — the GraphQL
