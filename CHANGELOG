@@ -2,6 +2,22 @@
 
 Changes in reverse chronological order.
 
+## Fix: `feldspar i18n translate` against a model that rejects `temperature`
+
+`LlmTranslator` always asked for `temperature: 0.0` (reproducible output), and OpenAI's
+reasoning models — the o-series, gpt-5's reasoning variants, codex — reject the field outright
+rather than ignoring it, so `feldspar i18n translate --domain core --locale de` failed against
+one of those with the host's own "temperature is not supported for this model" error.
+
+- **`ModelCapabilities` gains `supports_temperature`** (`sc-llm::capabilities`), resolved the
+  same way as every other capability: true for Anthropic and for non-reasoning OpenAI models,
+  false for the reasoning ones (`is_openai_reasoning`'s existing pattern — the o-series, gpt-5's
+  reasoning variants, codex — matches saltcorn 1's `NO_TEMP_MODELS` list), and overridable per
+  model row via the new `supports_temperature` setting (`yes`/`no`) in the admin form.
+- **`to_rig_request` drops `temperature` when the model can't take it**, so the fix reaches every
+  caller that builds an `LlmRequest` — the translator, the agent loop, anything else — rather
+  than each one needing to know which models refuse the field.
+
 ## Internationalisation, phase 5: the documentation — and the milestone walked
 
 The fifth and last phase (`docs/I18N.md`, `TODO.md` §5). The facility was built over the four

@@ -27,8 +27,8 @@ use uuid::Uuid;
 
 use crate::capabilities::{
     CFG_CONTEXT_WINDOW, CFG_EDIT_FORMAT, CFG_NATIVE_APPLY_PATCH, CFG_PARALLEL_TOOL_CALLS,
-    CFG_PARALLEL_TOOL_CALLS_DEFAULT, CFG_PROMPT_CACHING, CFG_REASONING_REPLAY, CFG_VISION,
-    CFG_WORKING_BUDGET, ModelCapabilities,
+    CFG_PARALLEL_TOOL_CALLS_DEFAULT, CFG_PROMPT_CACHING, CFG_REASONING_REPLAY,
+    CFG_SUPPORTS_TEMPERATURE, CFG_VISION, CFG_WORKING_BUDGET, ModelCapabilities,
 };
 use crate::def::{
     ANTHROPIC_BACKEND, LlmProviderDefId, OPENAI_CHAT_BACKEND, OPENAI_RESPONSES_BACKEND,
@@ -253,6 +253,11 @@ pub fn model_config_spec(backend: &str) -> Result<Vec<FormField>> {
         other => return Err(unknown_backend(other)),
     }
     spec.push(choice(CFG_VISION, "Images in tool results", &["yes", "no"]));
+    spec.push(choice(
+        CFG_SUPPORTS_TEMPERATURE,
+        "Accepts a temperature setting",
+        &["yes", "no"],
+    ));
     Ok(spec)
 }
 
