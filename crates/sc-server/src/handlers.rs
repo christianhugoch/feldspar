@@ -3971,6 +3971,64 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    /// Serve a **newly created** application without waiting for a restart.
+    ///
+    /// Two shapes, one promise: creating an application is what deploys it.
+    ///
+    /// - A framework that is **constructed** (Saltcorn UI) is mounted here and
+    ///   now, synchronously — there is nothing to build, so there is nothing to
+    ///   wait for.
+    /// - A framework that is **built** (`react`, `code`) has just had its project
+    ///   scaffolded, and its first build is `npm install` plus a bundler: minutes,
+    ///   which is not a thing to hold an HTTP response open for. So it is started
+    ///   in the background and the application mounts when it finishes. The
+    ///   response says `building` so the admin knows to expect it.
+    ///
+    /// This is the same work the boot path does for every stored application
+    /// ([`mount_all`](crate::mount_all)), moved to the moment the application
+    /// comes into existence. Without it, a restart was the only thing that ever
+    /// built a newly created application, which made restarting the server look
+    /// like part of creating one.
+    ///
+    /// Never fatal, in either shape: the row is saved and valid, and a build that
+    /// fails is one the admin fixes in the project and re-runs with the Build
+    /// button.
+    async fn serve_new_application(
+        apps: &Arc<AppMounts>,
+        app: &sc_app::Application,
+        body: &mut Json,
+    ) {
+        if sc_app::framework_factory(&app.framework.name).is_some() {
+            mount_if_constructed(apps, app, body).await;
+            return;
+        }
+        // A framework with no resolvable source has nothing to build and nothing
+        // to serve from — an application of it is a definition, not a deployment,
+        // and the admin's next step is to say where its project is.
+        if sc_app::app_source_from_config(&app.framework).is_err() {
+            return;
+        }
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("building".to_owned(), json!(true));
+        }
+        let apps = apps.clone();
+        let app = app.clone();
+        tokio::spawn(async move {
+            let subdomain = app.subdomain.clone();
+            match build_and_mount(&apps, app).await {
+                Ok(_) => {
+                    eprintln!("feldspar: built and mounted application `{subdomain}` on creation")
+                }
+                // The console, and only the console: the response went out before
+                // the bundler started. The admin's way back in is the Build
+                // button, which reports its own failure in front of them.
+                Err(e) => eprintln!(
+                    "feldspar: application `{subdomain}` was created, but its first build                      failed — fix the project and build it again: {e}"
+                ),
+            }
+        });
+    }
+
     /// Mount an application whose framework has nothing to build (Saltcorn UI)
     /// as part of saving it: there is no Build button for it to wait for, so
     /// saving is the deployment (TODO "Saltcorn UI" §1, 5.7). Not fatal — the
@@ -4046,7 +4104,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         }
                     }
                 }
-                mount_if_constructed(&apps, &app, &mut body).await;
+                serve_new_application(&apps, &app, &mut body).await;
                 Ok(HandlerResponse::ok(body).with_status(201))
             }
         }

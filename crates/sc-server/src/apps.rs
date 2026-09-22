@@ -221,6 +221,17 @@ pub struct AppMounts {
     /// `None` is a binary built without it, where an application whose framework
     /// is `saltcorn-ui` fails to mount — once, naming the bundle.
     saltcorn_ui_dir: Option<PathBuf>,
+    /// The TLS certificate to keep in step with what is mounted (§13.5).
+    ///
+    /// An application is served on a subdomain, and a subdomain a certificate
+    /// does not cover is a name a browser refuses before a single byte of the app
+    /// is read — so mounting one is not finished until the certificate has been
+    /// told. `None` is every server whose certificate is not this process's to
+    /// order: TLS off, or a pasted certificate.
+    ///
+    /// A [`OnceLock`](std::sync::OnceLock) because it is installed by
+    /// [`serve`](crate::serve), after the registry the boot path already filled.
+    certificate: std::sync::OnceLock<Arc<dyn crate::tls::Certificate>>,
     /// Subdomain → the app served there. Behind an `RwLock` for live mutation.
     by_subdomain: RwLock<HashMap<String, Arc<MountedApp>>>,
     /// The second registry: a coding run's **previews** of the applications it
@@ -273,6 +284,7 @@ impl AppMounts {
             streams: None,
             python: None,
             saltcorn_ui_dir: None,
+            certificate: std::sync::OnceLock::new(),
             by_subdomain: RwLock::new(HashMap::new()),
             previews: RwLock::new(Previews::default()),
             base_domain: None,
@@ -532,6 +544,32 @@ impl AppMounts {
         self.python.as_ref()
     }
 
+    /// Say which certificate covers the applications, so mounting one on a new
+    /// subdomain orders a certificate that covers it — with no restart (§13.5).
+    ///
+    /// Installed by [`serve`](crate::serve) rather than built in, because only
+    /// the serving path knows whether this process is the one terminating TLS.
+    /// A second call is ignored: there is one listener, so there is one
+    /// certificate.
+    ///
+    /// Installing one orders nothing. The boot path mounts every stored
+    /// application *before* it builds the serving plan, so the first order — the
+    /// one the serving path starts — already covers them; what this registers for
+    /// is the application mounted after that, which is the one a restart used to
+    /// be needed for.
+    pub fn set_certificate(&self, certificate: Arc<dyn crate::tls::Certificate>) {
+        let _ = self.certificate.set(certificate);
+    }
+
+    /// Tell the certificate what is served now. Cheap and idempotent — the
+    /// implementation compares before it orders anything — so every mutation of
+    /// the registry may call it.
+    fn certificate_changed(&self) {
+        if let Some(certificate) = self.certificate.get() {
+            certificate.subdomains_changed(&self.subdomains());
+        }
+    }
+
     /// Mount an app on its declared subdomain, refusing a collision.
     ///
     /// Two apps may not claim the same subdomain — it is how a request is routed
@@ -547,6 +585,10 @@ impl AppMounts {
             )));
         }
         mounts.insert(subdomain, Arc::new(app));
+        // The lock is dropped first: ordering a certificate must not be done
+        // while every reader of the registry is blocked behind it.
+        drop(mounts);
+        self.certificate_changed();
         Ok(())
     }
 
@@ -558,12 +600,24 @@ impl AppMounts {
     pub fn remount(&self, app: MountedApp) {
         let subdomain = app.app.subdomain.clone();
         self.write().insert(subdomain, Arc::new(app));
+        // A re-mount is usually the same subdomain again, where this is a no-op —
+        // but an application whose subdomain was *edited* arrives here too, and
+        // that is a name nothing has a certificate for.
+        self.certificate_changed();
     }
 
     /// Unmount the app on `subdomain`, so it stops resolving. Returns whether one
     /// was there to remove.
     pub fn unmount(&self, subdomain: &str) -> bool {
-        self.write().remove(subdomain).is_some()
+        let removed = self.write().remove(subdomain).is_some();
+        // Reported, and deliberately not an order: the certificate does not
+        // shrink while the process runs (see [`AcmeCertificate`](crate::tls::AcmeCertificate)).
+        // This is here so a rename — unmount then mount — cannot leave the
+        // certificate behind whichever half runs last.
+        if removed {
+            self.certificate_changed();
+        }
+        removed
     }
 
     /// Re-project the API providers of every mounted app that exposes `table`,

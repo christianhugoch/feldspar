@@ -229,7 +229,7 @@ async fn a_save_stores_what_the_server_then_serves_with() -> sc_error::Result<()
     assert_eq!(settings.https_port, 8443);
     assert!(settings.certificate.contains("BEGIN CERTIFICATE"));
     // ...and it is servable, which is what the save promised.
-    sc_server::TlsSettings::from_ssl(&settings, vec![], None)?;
+    sc_server::TlsSettings::from_ssl(&settings, sc_server::TlsNames::default(), None)?;
     Ok(())
 }
 

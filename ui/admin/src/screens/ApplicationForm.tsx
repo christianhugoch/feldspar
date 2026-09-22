@@ -262,9 +262,13 @@ export function ApplicationForm({
         // handed to it rather than shown here on a screen about to unmount.
         const done: string[] = [];
         const refused: string[] = [];
-        if (created.scaffolded) {
+        if (created.scaffolded) done.push(created.scaffolded);
+        // The server starts the first build itself, so the application serves on
+        // its subdomain without anybody pressing anything — the Build button is
+        // for the build after that, and for one that failed.
+        if (created.building) {
           done.push(
-            `${created.scaffolded}. Build it to install its dependencies and serve it.`,
+            "Its first build has started; it serves on its subdomain when that finishes.",
           );
         }
         if (created.scaffold_error) refused.push(created.scaffold_error);

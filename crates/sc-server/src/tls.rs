@@ -24,15 +24,29 @@
 //! needs RFC 8441's extended CONNECT, which axum's `ws` does not implement.
 //! Advertising `h2` would therefore trade two working features for a
 //! multiplexing win on an admin console. If HTTP/2 is wanted for an
-//! application's API, that is a reverse proxy's job today.
+//! application's API, that is a reverse proxy's job today. In ACME mode
+//! `acme-tls/1` is advertised beside it, because the same listener answers the
+//! CA's validation handshake: a client that offers only that protocol is the CA,
+//! and it is served the challenge certificate the resolver holds.
 //!
 //! **The certificates are checked where they are pasted.** [`check_certificate`]
 //! is what the settings endpoint calls before saving: a key that does not match
 //! its chain fails in front of the admin, not at the next restart when nobody is
 //! watching and the symptom is a server that will not bind.
+//!
+//! **The ACME name set is live.** A certificate covers the base domain, every
+//! mounted application's subdomain and whatever else the admin listed — and an
+//! application is created while the server runs, so that set changes while the
+//! server runs. [`AcmeCertificate`] is what makes it a new order rather than a
+//! restart: [`AppMounts`](crate::AppMounts) reports every mount and unmount to
+//! it (through the [`Certificate`] seam), and a name that is not covered yet
+//! starts a fresh order for the union of the old names and the new one. Until
+//! that order finishes the **previous certificate keeps serving**, so adding an
+//! application never takes the ones already up off the air.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use axum::Router;
 use axum::extract::Request;
@@ -81,16 +95,11 @@ pub enum TlsSettings {
     },
     /// Certificates obtained and renewed from an ACME CA.
     Acme {
-        /// Every name the certificate must cover, in the order it is ordered in
-        /// (which is part of the cache key — see [`sc_config::acme`]).
-        domains: Vec<String>,
-        /// The account contact, without the `mailto:` scheme.
-        contact_email: String,
-        /// The CA's directory URL.
-        directory_url: String,
-        /// Where the account key and the issued certificates are kept, so a
-        /// renewal survives a restart and a second node does not order its own.
-        cache: AcmeCache,
+        /// The live certificate: the ACME client, the names it currently covers,
+        /// and the resolver the listener hands every handshake to. Shared rather
+        /// than owned, because the mount registry holds the same handle and adds
+        /// a name to it when an application is mounted.
+        certificate: Arc<AcmeCertificate>,
         /// The port TLS is served on. Reaching the ACME CA's TLS-ALPN-01
         /// validation means this must be **443** on a public address.
         port: u16,
@@ -112,16 +121,12 @@ impl std::fmt::Debug for TlsSettings {
                 .field("private_key", &"<redacted>")
                 .finish(),
             TlsSettings::Acme {
-                domains,
-                contact_email,
-                directory_url,
-                port,
-                ..
+                certificate, port, ..
             } => f
                 .debug_struct("TlsSettings::Acme")
-                .field("domains", domains)
-                .field("contact_email", contact_email)
-                .field("directory_url", directory_url)
+                .field("domains", &certificate.domains())
+                .field("contact_email", &certificate.contact_email)
+                .field("directory_url", &certificate.directory_url)
                 .field("port", port)
                 .finish(),
         }
@@ -155,15 +160,20 @@ impl TlsSettings {
 
     /// Build the serving plan from the stored settings.
     ///
-    /// `domains` is what the ACME order will cover — see [`tls_domains`] — and
+    /// `names` is where the ACME order's names come from — the base domain, the
+    /// mounted subdomains and the admin's extras (see [`TlsNames`]) — and
     /// `cache` is where its results are kept. Both are ignored outside
     /// `letsencrypt` mode, and both are **required** in it: an order with no
     /// names is not an order, and a client with no cache would order a fresh
     /// certificate on every boot, which is how a deployment meets Let's
     /// Encrypt's rate limits.
+    ///
+    /// The names are kept rather than flattened, because the set is live: the
+    /// [`AcmeCertificate`] this builds is what a later mount adds a subdomain
+    /// to, and it needs the base domain to make a name out of one.
     pub fn from_ssl(
         settings: &SslSettings,
-        domains: Vec<String>,
+        names: TlsNames,
         cache: Option<AcmeCache>,
     ) -> Result<TlsSettings> {
         settings.check()?;
@@ -179,7 +189,7 @@ impl TlsSettings {
                 })
             }
             SslMode::LetsEncrypt => {
-                if domains.is_empty() {
+                if names.domains().is_empty() {
                     return Err(Error::config(
                         "TLS is set to `letsencrypt` but this server has no domain to certify: \
                          set a base domain (`--base-domain`) or list the names in \
@@ -190,15 +200,62 @@ impl TlsSettings {
                     Error::config("ACME needs a database to cache its account and certificates in")
                 })?;
                 Ok(TlsSettings::Acme {
-                    domains,
-                    contact_email: settings.contact_email.clone(),
-                    directory_url: settings.directory_url.clone(),
-                    cache,
+                    certificate: AcmeCertificate::new(
+                        names,
+                        settings.contact_email.clone(),
+                        settings.directory_url.clone(),
+                        cache,
+                    ),
                     port: settings.https_port,
                     redirect_http: settings.redirect_http,
                 })
             }
         }
+    }
+}
+
+/// Where a certificate's names come from, kept apart so the set can be
+/// recomputed while the server runs.
+///
+/// The admin lists only `extra`. The base domain is where the admin UI is and
+/// every application is a subdomain of it (§13.2), so those two are derived from
+/// what the server is configured with and from what it currently serves — and
+/// *what it currently serves* is the part that changes without a restart, which
+/// is why this keeps the three sources rather than the one flat list
+/// [`tls_domains`] makes of them.
+#[derive(Clone, Debug, Default)]
+pub struct TlsNames {
+    /// The domain applications are subdomains of, if this deployment has one.
+    base_domain: Option<String>,
+    /// The application subdomains mounted when the plan was built.
+    subdomains: Vec<String>,
+    /// The names the admin listed in `ssl_extra_domains`.
+    extra: Vec<String>,
+}
+
+impl TlsNames {
+    /// The three sources, as the boot path has them.
+    pub fn new(
+        base_domain: Option<String>,
+        subdomains: Vec<String>,
+        extra: Vec<String>,
+    ) -> TlsNames {
+        TlsNames {
+            base_domain,
+            subdomains,
+            extra,
+        }
+    }
+
+    /// Every name, flattened — what an ACME order covers.
+    pub fn domains(&self) -> Vec<String> {
+        tls_domains(self.base_domain.as_deref(), &self.subdomains, &self.extra)
+    }
+
+    /// Every name, with `subdomains` in place of the ones this was built with —
+    /// what the certificate should cover now that the mount registry holds these.
+    pub fn domains_for(&self, subdomains: &[String]) -> Vec<String> {
+        tls_domains(self.base_domain.as_deref(), subdomains, &self.extra)
     }
 }
 
@@ -324,26 +381,18 @@ pub async fn serve_https(
                 .await
                 .map_err(|e| Error::msg(format!("TLS server error: {e}")))
         }
-        TlsSettings::Acme {
-            domains,
-            contact_email,
-            directory_url,
-            cache,
-            ..
-        } => {
-            install_crypto_provider();
-            let state = acme_state(domains, contact_email, directory_url, cache.clone());
-            let mut server_config = ServerConfig::builder()
-                .with_no_client_auth()
-                .with_cert_resolver(state.resolver());
-            server_config.alpn_protocols = vec![ALPN_HTTP11.to_vec()];
-            let acceptor = state.axum_acceptor(Arc::new(server_config));
-            // The state is a stream of ACME events, and it only makes progress
-            // while something polls it: this task *is* the certificate
-            // provisioning and renewal. Its outcomes are logged rather than
-            // fatal — a CA that is briefly unreachable must not take the server
-            // with it, and a cached certificate keeps serving meanwhile.
-            tokio::spawn(drive_acme(state));
+        TlsSettings::Acme { certificate, .. } => {
+            // The first order. The ACME state is a stream of events that only
+            // makes progress while something polls it, so `start` spawns the task
+            // that *is* the certificate's provisioning and renewal. Its outcomes
+            // are logged rather than fatal — a CA that is briefly unreachable
+            // must not take the server with it, and a cached certificate keeps
+            // serving meanwhile — and a later mount replaces that task with one
+            // ordering a certificate that also covers the new subdomain.
+            certificate.start();
+            let acceptor = RustlsAcceptor::new(RustlsConfig::from_config(Arc::new(
+                certificate.server_config(),
+            )));
             axum_server::from_tcp(listener)
                 .map_err(|e| Error::msg(format!("serving TLS: {e}")))?
                 .acceptor(acceptor)
@@ -352,6 +401,348 @@ pub async fn serve_https(
                 .await
                 .map_err(|e| Error::msg(format!("TLS server error: {e}")))
         }
+    }
+}
+
+/// The seam a live certificate is kept in step through: what the mount registry
+/// tells the thing holding the certificate when the set of served subdomains
+/// changes.
+///
+/// A trait rather than the concrete [`AcmeCertificate`] because most servers have
+/// no certificate at all — TLS off, or a pasted one, which covers whatever names
+/// the admin's certificate covers and has nothing to reorder — and because
+/// [`AppMounts`](crate::AppMounts) must be testable without an ACME client.
+pub trait Certificate: Send + Sync {
+    /// These are the subdomains served now. A name among them that the
+    /// certificate does not cover should be ordered.
+    ///
+    /// **Called from a mount**, so it must not block: the implementation decides
+    /// and spawns, it does not wait for a CA.
+    fn subdomains_changed(&self, subdomains: &[String]);
+}
+
+/// An ACME certificate whose **name set is live** (design §13.5).
+///
+/// One of these exists per TLS server in `letsencrypt` mode. It owns the ACME
+/// client — and replaces it when a name is added, because `rustls_acme` takes its
+/// domain list at construction and the list is part of the cache key — while the
+/// listener keeps the one resolver it was built with. That indirection is the
+/// whole trick: the [`LiveAcmeResolver`] the handshake asks is stable, and what
+/// it delegates to is swapped underneath.
+///
+/// **A new order never interrupts the old certificate.** The previous client's
+/// resolver is kept as the fallback and answers every handshake until the new
+/// one has deployed a certificate, which is a minute of ACME traffic away. So an
+/// admin who creates an application does not take the running ones off the air.
+///
+/// **The name set only grows while the process runs.** A deleted application's
+/// name stays on the certificate until the next restart, where the set is
+/// recomputed from what is actually mounted. Ordering a smaller certificate buys
+/// nothing — the name resolves to nothing either way — and each order is charged
+/// against the CA's rate limits.
+pub struct AcmeCertificate {
+    /// Where the names come from, so a new subdomain can be made into one.
+    names: TlsNames,
+    /// The account contact, without the `mailto:` scheme.
+    contact_email: String,
+    /// The CA's directory URL.
+    directory_url: String,
+    /// Where the account key and the issued certificates are kept, so a renewal
+    /// survives a restart and a second node does not order its own.
+    cache: AcmeCache,
+    /// What every handshake resolves against, for the life of the listener.
+    resolver: Arc<LiveAcmeResolver>,
+    /// The order in force, and the one before it.
+    orders: Mutex<Orders>,
+}
+
+/// The ACME clients this certificate is running.
+///
+/// Two, briefly: the one ordering the names that are wanted now, and the one
+/// whose certificate is keeping the server up while it does. Both are **driven**
+/// — the previous client's task is not aborted when it is replaced, because it is
+/// the thing that renews the certificate still being served. A new order that
+/// never succeeds (a subdomain whose DNS was never pointed here, say) therefore
+/// costs an ACME client, not the expiry of the certificate that works.
+#[derive(Default)]
+struct Orders {
+    /// The order in force.
+    current: Option<Order>,
+    /// The task driving the client before it, kept alive for its renewal. Only
+    /// one: an older generation is no longer consulted by the resolver, so its
+    /// renewals would be work nobody reads.
+    previous: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// One ACME client: what it covers, and the task that is its progress.
+struct Order {
+    /// The names ordered, in the order they were ordered in (the cache key).
+    domains: Vec<String>,
+    /// The task polling the ACME state — dropping it would stop the renewal, so
+    /// it is held here and aborted only when it is replaced.
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl AcmeCertificate {
+    /// The certificate for these names, with nothing ordered yet: an ACME client
+    /// is built by [`start`](Self::start), which the serving path calls once it
+    /// is inside a runtime.
+    pub fn new(
+        names: TlsNames,
+        contact_email: String,
+        directory_url: String,
+        cache: AcmeCache,
+    ) -> Arc<AcmeCertificate> {
+        Arc::new(AcmeCertificate {
+            names,
+            contact_email,
+            directory_url,
+            cache,
+            resolver: Arc::new(LiveAcmeResolver::default()),
+            orders: Mutex::new(Orders::default()),
+        })
+    }
+
+    /// Order the names this was built with — the boot path's first order.
+    pub fn start(&self) {
+        self.order(self.names.domains());
+    }
+
+    /// The names the certificate in force covers, sorted as they were ordered.
+    /// Empty before [`start`](Self::start).
+    pub fn domains(&self) -> Vec<String> {
+        self.lock()
+            .current
+            .as_ref()
+            .map(|order| order.domains.clone())
+            .unwrap_or_default()
+    }
+
+    /// The server configuration the listener serves with: one resolver for the
+    /// life of the process, and `acme-tls/1` beside `http/1.1` so the CA's
+    /// validation handshake reaches the same resolver (see the module docs).
+    pub fn server_config(&self) -> ServerConfig {
+        install_crypto_provider();
+        let mut config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(self.resolver.clone());
+        config.alpn_protocols = vec![
+            ALPN_HTTP11.to_vec(),
+            rustls_acme::acme::ACME_TLS_ALPN_NAME.to_vec(),
+        ];
+        config
+    }
+
+    /// Order `domains` (canonicalised), replacing whatever was in force.
+    ///
+    /// Silently does nothing outside a tokio runtime: the ACME client *is* the
+    /// task that polls it, so with nowhere to spawn there is no client to build.
+    /// That is the case in a unit test, not in a server.
+    fn order(&self, domains: Vec<String>) {
+        let domains = canonical_domains(domains);
+        if domains.is_empty() {
+            return;
+        }
+        // Idempotent: the same names again are the certificate already in force,
+        // and re-ordering them would spend a rate limit on a certificate the
+        // cache is holding.
+        if self
+            .lock()
+            .current
+            .as_ref()
+            .is_some_and(|o| o.domains == domains)
+        {
+            return;
+        }
+        let runtime = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle,
+            Err(_) => {
+                eprintln!(
+                    "feldspar: acme: no runtime to order a certificate for {} in",
+                    domains.join(", ")
+                );
+                return;
+            }
+        };
+        let state = acme_state(
+            &domains,
+            &self.contact_email,
+            &self.directory_url,
+            self.cache.clone(),
+        );
+        // Installed *before* the task is spawned, so no event can land on a
+        // generation the resolver has not heard of.
+        let ready = self.resolver.install(state.resolver());
+        let task = runtime.spawn(drive_acme(state, ready));
+        eprintln!(
+            "feldspar: acme: ordering a certificate for {}",
+            domains.join(", ")
+        );
+        let mut orders = self.lock();
+        if let Some(replaced) = orders.current.replace(Order { domains, task }) {
+            // Its resolver is still the fallback and its client still renews what
+            // that resolver is serving, so its task is kept — see [`Orders`]. The
+            // generation *before* it is not consulted any more, so that one's is
+            // dropped.
+            if let Some(stale) = orders.previous.replace(replaced.task) {
+                stale.abort();
+            }
+        }
+    }
+
+    /// The order lock, recovering from a poisoned one: a panic while ordering
+    /// must not stop the server serving the certificate it already has.
+    fn lock(&self) -> MutexGuard<'_, Orders> {
+        self.orders.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Certificate for AcmeCertificate {
+    fn subdomains_changed(&self, subdomains: &[String]) {
+        let wanted = self.names.domains_for(subdomains);
+        let covered = self.domains();
+        let missing: Vec<&String> = wanted.iter().filter(|n| !covered.contains(n)).collect();
+        if missing.is_empty() {
+            return;
+        }
+        eprintln!(
+            "feldspar: acme: {} {} not on the certificate yet",
+            missing
+                .iter()
+                .map(|n| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            if missing.len() == 1 { "is" } else { "are" }
+        );
+        // The union, not the wanted set: a name that has stopped being served
+        // stays on the certificate until the next restart (see the type docs).
+        let mut names = covered;
+        for name in wanted {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        self.order(names);
+    }
+}
+
+impl std::fmt::Debug for AcmeCertificate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcmeCertificate")
+            .field("domains", &self.domains())
+            .field("directory_url", &self.directory_url)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One name set in one order, whatever order the names arrived in.
+///
+/// The first name is left where it is — it is the base domain, the one a
+/// certificate is *about* — and the rest are sorted and de-duplicated. The point
+/// is the **cache key**: `rustls_acme` digests the list, so two ways of arriving
+/// at the same set must produce the same list or a restart would order a
+/// certificate it already has cached.
+fn canonical_domains(domains: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(domains.len());
+    let mut names = domains.into_iter();
+    if let Some(first) = names.next() {
+        out.push(first);
+    }
+    let mut rest: Vec<String> = names.collect();
+    rest.sort();
+    rest.dedup();
+    for name in rest {
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// The certificate resolver the listener is built with, whose ACME client can be
+/// replaced under it.
+///
+/// It holds two generations. `current` is the newest client — the one whose
+/// challenge the CA is validating right now — and `previous` is the one that was
+/// serving before it, kept because the new one has no certificate for the first
+/// minute of its life.
+#[derive(Debug, Default)]
+struct LiveAcmeResolver {
+    generations: RwLock<Generations>,
+}
+
+/// The two ACME clients a handshake may be answered from.
+#[derive(Debug, Default)]
+struct Generations {
+    current: Option<Generation>,
+    previous: Option<Generation>,
+}
+
+/// One ACME client's resolver, and whether it has deployed a certificate yet.
+#[derive(Debug)]
+struct Generation {
+    resolver: Arc<rustls_acme::ResolvesServerCertAcme>,
+    /// Set by the driving task on the first `DeployedCachedCert`/`DeployedNewCert`.
+    /// Until then this generation has no certificate and asking it would answer a
+    /// handshake with nothing.
+    ready: Arc<AtomicBool>,
+}
+
+impl LiveAcmeResolver {
+    /// Make `resolver` the current generation, keeping the one it replaces as the
+    /// fallback. Returns the flag its driving task sets when it has a certificate.
+    fn install(&self, resolver: Arc<rustls_acme::ResolvesServerCertAcme>) -> Arc<AtomicBool> {
+        let ready = Arc::new(AtomicBool::new(false));
+        let mut generations = self.write();
+        let previous = generations.current.take();
+        generations.current = Some(Generation {
+            resolver,
+            ready: ready.clone(),
+        });
+        // Only one fallback is kept: two orders in a row before either deployed
+        // would otherwise pile up, and the oldest is the one whose certificate is
+        // closest to expiring.
+        if previous.is_some() {
+            generations.previous = previous;
+        }
+        ready
+    }
+
+    fn read(&self) -> RwLockReadGuard<'_, Generations> {
+        self.generations.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write(&self) -> RwLockWriteGuard<'_, Generations> {
+        self.generations.write().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl rustls::server::ResolvesServerCert for LiveAcmeResolver {
+    /// **One generation answers**, chosen before the hello is handed over: a
+    /// [`ClientHello`](rustls::server::ClientHello) cannot be cloned, so this
+    /// cannot ask one resolver and then the other.
+    ///
+    /// The CA's validation handshake goes to the newest client, because the
+    /// challenge it is answering is that client's. Ordinary traffic goes to the
+    /// newest client that has a certificate, which during an order is the
+    /// previous one.
+    fn resolve(
+        &self,
+        client_hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        let generations = self.read();
+        let challenge = rustls_acme::is_tls_alpn_challenge(&client_hello);
+        let current = generations.current.as_ref();
+        let previous = generations.previous.as_ref();
+        let answering = if challenge {
+            current.or(previous)
+        } else {
+            match current {
+                Some(generation) if generation.ready.load(Ordering::Relaxed) => Some(generation),
+                current => previous.or(current),
+            }
+        };
+        answering?.resolver.resolve(client_hello)
     }
 }
 
@@ -371,16 +762,28 @@ fn acme_state(
     config.state()
 }
 
-/// Poll the ACME state forever, reporting what it does.
+/// Poll the ACME state forever, reporting what it does and marking its
+/// generation ready the moment it has a certificate to serve.
 ///
 /// Every line here is an operator's answer to "is my certificate coming?", which
 /// is otherwise unanswerable from outside: the handshake either works or does
 /// not, and the reason lives in the CA's response.
-async fn drive_acme(mut state: AcmeState<Error, Error>) {
+async fn drive_acme(mut state: AcmeState<Error, Error>, ready: Arc<AtomicBool>) {
     use futures::StreamExt;
     while let Some(event) = state.next().await {
         match event {
-            Ok(ok) => eprintln!("feldspar: acme: {ok:?}"),
+            Ok(ok) => {
+                if matches!(
+                    ok,
+                    rustls_acme::EventOk::DeployedCachedCert
+                        | rustls_acme::EventOk::DeployedNewCert
+                ) {
+                    // From here this generation answers ordinary handshakes, and
+                    // the one it replaced stops being asked.
+                    ready.store(true, Ordering::Relaxed);
+                }
+                eprintln!("feldspar: acme: {ok:?}");
+            }
             Err(err) => eprintln!("feldspar: acme error: {err}"),
         }
     }
@@ -515,7 +918,8 @@ mod tests {
 
     #[test]
     fn tls_off_is_the_default_and_serves_nothing_extra() {
-        let plan = TlsSettings::from_ssl(&settings(SslMode::Off), vec![], None).unwrap();
+        let plan =
+            TlsSettings::from_ssl(&settings(SslMode::Off), TlsNames::default(), None).unwrap();
         assert!(!plan.enabled());
         assert_eq!(plan.port(), None);
         assert!(!plan.redirect_http());
@@ -547,14 +951,18 @@ mod tests {
     fn acme_without_a_domain_or_a_cache_is_refused() {
         let mut acme = settings(SslMode::LetsEncrypt);
         acme.contact_email = "admin@example.com".to_owned();
-        let err = TlsSettings::from_ssl(&acme, vec![], None)
+        let err = TlsSettings::from_ssl(&acme, TlsNames::default(), None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("domain"), "{err}");
 
-        let err = TlsSettings::from_ssl(&acme, vec!["example.com".to_owned()], None)
-            .unwrap_err()
-            .to_string();
+        let err = TlsSettings::from_ssl(
+            &acme,
+            TlsNames::new(Some("example.com".to_owned()), vec![], vec![]),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("cache"), "{err}");
     }
 

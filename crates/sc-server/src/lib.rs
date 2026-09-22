@@ -155,8 +155,8 @@ pub use serve::{serve, serve_browser};
 pub use streams::{StreamServices, TriggerBridge, install_streams, install_streams_with};
 pub use systemd::ServiceManager;
 pub use tls::{
-    TlsHandle, TlsSettings, check_certificate, https_addr, install_crypto_provider,
-    redirect_router, serve_https, tls_domains,
+    AcmeCertificate, Certificate, TlsHandle, TlsNames, TlsSettings, check_certificate, https_addr,
+    install_crypto_provider, redirect_router, serve_https, tls_domains,
 };
 pub use translations::{LlmTranslator, parse_answer};
 pub use triggers::{

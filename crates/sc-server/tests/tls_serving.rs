@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use axum::Router;
 use axum::routing::get;
 use sc_config::{SslMode, SslSettings};
-use sc_server::TlsSettings;
+use sc_server::{TlsNames, TlsSettings};
 
 /// A self-signed certificate for `localhost`, and its key.
 fn self_signed() -> (String, String) {
@@ -58,7 +58,7 @@ async fn a_pasted_certificate_terminates_a_real_handshake() {
 
     let tls = TlsSettings::from_ssl(
         &custom_settings(certificate.clone(), private_key, addr.port()),
-        vec![],
+        TlsNames::default(),
         None,
     )
     .expect("a pasted certificate is a serving plan");
@@ -103,7 +103,7 @@ async fn a_client_that_does_not_trust_the_certificate_is_refused() {
 
     let tls = TlsSettings::from_ssl(
         &custom_settings(certificate, private_key, addr.port()),
-        vec![],
+        TlsNames::default(),
         None,
     )
     .unwrap();
