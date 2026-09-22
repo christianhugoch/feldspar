@@ -37,7 +37,13 @@ export type References = ViewReferencesResponse;
 
 export type PageReferences = PageReferencesResponse;
 
-export type AppTab = "settings" | "views" | "pages" | "library" | "app-settings";
+export type AppTab =
+  | "settings"
+  | "views"
+  | "pages"
+  | "library"
+  | "translations"
+  | "app-settings";
 
 /** Where the page is, as much of `window.location` as a link needs. */
 export type Here = { protocol: string; host: string };
@@ -60,6 +66,9 @@ export function appTabs(
   const base = `#/applications/${encodeURIComponent(app.id)}`;
   const tabs: { id: AppTab; label: string; href: string }[] = [
     { id: "settings", label: "Settings", href: `${base}/edit` },
+    // Every application has strings a person reads, whatever its framework
+    // writes them in, so this tab is not conditional on one (§16.1, 4.4).
+    { id: "translations", label: "Translations", href: `${base}/translations` },
   ];
   if (app.has_views) {
     tabs.push({ id: "views", label: "Views", href: `${base}/views` });

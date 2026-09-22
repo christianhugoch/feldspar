@@ -44,6 +44,7 @@ import {
 } from "../dbConnection";
 import { IconPlus } from "../icons";
 import { PageBody, PageHeader, StatusBadge } from "../layout";
+import { T, useT } from "../i18n";
 
 type ConnectionItem = ListDatabaseConnectionsResponse[number];
 
@@ -51,6 +52,7 @@ type ConnectionItem = ListDatabaseConnectionsResponse[number];
 type TestResult = { connected: boolean; error?: string | null; tables: number };
 
 export function DbConnections() {
+  const { t } = useT();
   const [connections, setConnections] = useState<ConnectionItem[] | null>(null);
   const [editing, setEditing] = useState<DbConnectionForm | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -89,8 +91,10 @@ export function DbConnections() {
   const remove = async (connection: ConnectionItem) => {
     if (
       !window.confirm(
-        `Remove the database connection "${connection.name}"?\n\n` +
-          "Its tables leave the tables list. Nothing in that database is changed or deleted.",
+        t(
+          'Remove the database connection "{name}"?\n\nIts tables leave the tables list. Nothing in that database is changed or deleted.',
+          { name: connection.name },
+        ),
       )
     ) {
       return;
@@ -108,11 +112,11 @@ export function DbConnections() {
     <>
       <PageHeader
         pretitle="Data"
-        title="Database connections"
+        title={t("Database connections")}
         actions={
           <Button onClick={() => setEditing({ ...EMPTY_DB_CONNECTION_FORM })}>
             <IconPlus className="icon-2" />
-            New connection
+            <T text="New connection" />
           </Button>
         }
       />
@@ -123,19 +127,17 @@ export function DbConnections() {
           <Table hover responsive className="card-table table-vcenter">
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Connects to</th>
-                <th>State</th>
-                <th className="text-end">Actions</th>
+                <th><T text="Name" /></th>
+                <th><T text="Connects to" /></th>
+                <th><T text="State" /></th>
+                <th className="text-end"><T text="Actions" /></th>
               </tr>
             </thead>
             <tbody>
               {connections?.length === 0 && (
                 <tr>
                   <td colSpan={4} className="text-muted">
-                    No database connections. Saltcorn is using its own database only; add a
-                    connection to list another PostgreSQL database's tables — or a SQLite file
-                    from one of the file stores — beside it.
+                    <T text="No database connections. Saltcorn is using its own database only; add a connection to list another PostgreSQL database's tables — or a SQLite file from one of the file stores — beside it." />
                   </td>
                 </tr>
               )}
@@ -155,8 +157,10 @@ export function DbConnections() {
                     <div className="text-muted small">{connectionSummary(connection)}</div>
                     {connection.shadowed.length > 0 && (
                       <div className="text-muted small">
-                        Not listed, because Saltcorn's own database already has a table of that
-                        name: {connection.shadowed.join(", ")}
+                        {t(
+                          "Not listed, because Saltcorn’s own database already has a table of that name: {names}",
+                          { names: connection.shadowed.join(", ") },
+                        )}
                       </div>
                     )}
                   </td>
@@ -167,14 +171,14 @@ export function DbConnections() {
                         variant="outline-secondary"
                         onClick={() => setEditing(formFromConnection(connection))}
                       >
-                        Edit
+                        <T text="Edit" />
                       </Button>
                       <Button
                         size="sm"
                         variant="outline-danger"
                         onClick={() => void remove(connection)}
                       >
-                        Remove
+                        <T text="Remove" />
                       </Button>
                     </div>
                   </td>
@@ -185,12 +189,7 @@ export function DbConnections() {
         </div>
 
         <p className="text-muted small mt-3">
-          A connected database's tables appear in the tables list with the connection's name
-          beside them. Saltcorn reads and writes their rows; it never changes their schema, and
-          removing a connection changes nothing in the database it pointed at. Passwords are
-          stored in the Saltcorn database and are never sent back to this screen — an existing
-          one shows as ••••••••. They are not encrypted at rest, so treat database access as
-          password access.
+          <T text="A connected database's tables appear in the tables list with the connection's name beside them. Saltcorn reads and writes their rows; it never changes their schema, and removing a connection changes nothing in the database it pointed at. Passwords are stored in the Saltcorn database and are never sent back to this screen — an existing one shows as ••••••••. They are not encrypted at rest, so treat database access as password access." />
         </p>
       </PageBody>
 
@@ -226,6 +225,7 @@ function ConnectionModal({
   onCancel: () => void;
   onSubmit: (form: DbConnectionForm) => void;
 }) {
+  const { t } = useT();
   const [tested, setTested] = useState<TestResult | null>(null);
   const [testing, setTesting] = useState(false);
 
@@ -268,20 +268,20 @@ function ConnectionModal({
         </Modal.Header>
         <Modal.Body>
           <Form.Group className="mb-3">
-            <Form.Label>Name</Form.Label>
+            <Form.Label><T text="Name" /></Form.Label>
             <Form.Control
               autoFocus
               value={form.name}
               onChange={(e) => set({ name: e.target.value })}
-              placeholder="reporting"
+              placeholder={t("reporting")}
             />
             <Form.Text className="text-muted">
-              Shown beside every table this connection brings into the tables list.
+              <T text="Shown beside every table this connection brings into the tables list." />
             </Form.Text>
           </Form.Group>
 
           <Form.Group className="mb-3">
-            <Form.Label>Description</Form.Label>
+            <Form.Label><T text="Description" /></Form.Label>
             <Form.Control
               value={form.description}
               onChange={(e) => set({ description: e.target.value })}
@@ -289,7 +289,7 @@ function ConnectionModal({
           </Form.Group>
 
           <Form.Group className="mb-3">
-            <Form.Label>Kind</Form.Label>
+            <Form.Label><T text="Kind" /></Form.Label>
             <Form.Select
               value={form.backend}
               onChange={(e) =>
@@ -300,8 +300,8 @@ function ConnectionModal({
               // name at a different database.
               disabled={!!form.id}
             >
-              <option value="postgres">PostgreSQL server</option>
-              <option value="sqlite">SQLite file</option>
+              <option value="postgres"><T text="PostgreSQL server" /></option>
+              <option value="sqlite"><T text="SQLite file" /></option>
             </Form.Select>
             <Form.Text className="text-muted">
               {form.backend === "sqlite"
@@ -316,7 +316,7 @@ function ConnectionModal({
           <>
           <div className="row">
             <Form.Group className="mb-3 col-8">
-              <Form.Label>Host</Form.Label>
+              <Form.Label><T text="Host" /></Form.Label>
               <Form.Control
                 value={form.host}
                 onChange={(e) => set({ host: e.target.value })}
@@ -324,7 +324,7 @@ function ConnectionModal({
               />
             </Form.Group>
             <Form.Group className="mb-3 col-4">
-              <Form.Label>Port</Form.Label>
+              <Form.Label><T text="Port" /></Form.Label>
               <Form.Control
                 value={form.port}
                 onChange={(e) => set({ port: e.target.value })}
@@ -334,7 +334,7 @@ function ConnectionModal({
           </div>
 
           <Form.Group className="mb-3">
-            <Form.Label>Database</Form.Label>
+            <Form.Label><T text="Database" /></Form.Label>
             <Form.Control
               value={form.database}
               onChange={(e) => set({ database: e.target.value })}
@@ -343,14 +343,14 @@ function ConnectionModal({
 
           <div className="row">
             <Form.Group className="mb-3 col-6">
-              <Form.Label>Username</Form.Label>
+              <Form.Label><T text="Username" /></Form.Label>
               <Form.Control
                 value={form.username}
                 onChange={(e) => set({ username: e.target.value })}
               />
             </Form.Group>
             <Form.Group className="mb-3 col-6">
-              <Form.Label>Password</Form.Label>
+              <Form.Label><T text="Password" /></Form.Label>
               <Form.Control
                 type="password"
                 value={form.password}
@@ -360,14 +360,14 @@ function ConnectionModal({
           </div>
 
           <Form.Group className="mb-3">
-            <Form.Label>Schema</Form.Label>
+            <Form.Label><T text="Schema" /></Form.Label>
             <Form.Control
               value={form.schema}
               onChange={(e) => set({ schema: e.target.value })}
-              placeholder="public"
+              placeholder={t("public")}
             />
             <Form.Text className="text-muted">
-              One schema per connection: its tables are the ones that join the tables list.
+              <T text="One schema per connection: its tables are the ones that join the tables list." />
             </Form.Text>
           </Form.Group>
           </>
@@ -385,7 +385,7 @@ function ConnectionModal({
         </Modal.Body>
         <Modal.Footer>
           <Button variant="secondary" onClick={onCancel} disabled={busy}>
-            Cancel
+            <T text="Cancel" />
           </Button>
           <Button
             variant="outline-secondary"
@@ -469,7 +469,7 @@ function SqliteFilePicker({
   return (
     <>
       <Form.Group className="mb-3">
-        <Form.Label>File store</Form.Label>
+        <Form.Label><T text="File store" /></Form.Label>
         <Form.Select
           value={form.fileStore}
           onChange={(e) => {
@@ -477,7 +477,7 @@ function SqliteFilePicker({
             set({ fileStore: e.target.value, filePath: "" });
           }}
         >
-          <option value="">Choose a file store…</option>
+          <option value=""><T text="Choose a file store…" /></option>
           {stores?.map((name) => (
             <option key={name} value={name}>
               {name}
@@ -486,14 +486,13 @@ function SqliteFilePicker({
         </Form.Select>
         {stores?.length === 0 && (
           <Form.Text className="text-muted">
-            No file store is connected. Add one under Files first — a SQLite database is a file,
-            and this is where Saltcorn keeps files.
+            <T text="No file store is connected. Add one under Files first — a SQLite database is a file, and this is where Saltcorn keeps files." />
           </Form.Text>
         )}
       </Form.Group>
 
       <Form.Group className="mb-3">
-        <Form.Label>File</Form.Label>
+        <Form.Label><T text="File" /></Form.Label>
         <Form.Control
           value={form.filePath}
           onChange={(e) => set({ filePath: e.target.value })}
@@ -534,7 +533,7 @@ function SqliteFilePicker({
             </button>
           ))}
           {entries.length === 0 && (
-            <div className="px-2 py-1 small text-muted">This folder is empty.</div>
+            <div className="px-2 py-1 small text-muted"><T text="This folder is empty." /></div>
           )}
         </div>
       )}

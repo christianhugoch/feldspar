@@ -31,6 +31,7 @@ use sc_api::{
 use sc_app::AppRequest;
 use sc_auth::{SessionStore, User};
 use sc_error::{Error, ErrorKind, Repr, Result};
+use sc_i18n::t;
 use serde_json::Value;
 use tower::ServiceExt;
 use tower_http::services::ServeDir;
@@ -421,6 +422,10 @@ async fn upload(
         query: Vec::new(),
         body: serde_json::Value::Null,
         user,
+        // A route outside the endpoint set that serves bytes, not prose: the
+        // installation default is the honest answer, and nothing here renders a
+        // message for a person to read.
+        locale: sc_i18n::active().default_locale().clone(),
     };
     match handler(ctx).await {
         Ok(resp) => apply_response(&state, jar, session_token, resp).await,
@@ -472,6 +477,8 @@ async fn create_backup(State(state): State<AppState>, jar: CookieJar, body: Byte
         query: Vec::new(),
         body: selection,
         user,
+        // As `upload_file`: this route's response is an archive.
+        locale: sc_i18n::active().default_locale().clone(),
     };
     match handler(ctx).await {
         Ok(resp) => apply_response(&state, jar, session_token, resp).await,
@@ -523,6 +530,8 @@ async fn upload_backup(State(state): State<AppState>, jar: CookieJar, body: Body
         query: Vec::new(),
         body: Value::Null,
         user,
+        // As `upload_file`: this route takes an archive and answers a manifest.
+        locale: sc_i18n::active().default_locale().clone(),
     };
     match handler(ctx).await {
         Ok(resp) => apply_response(&state, jar, session_token, resp).await,
@@ -758,7 +767,7 @@ async fn dispatch(
                 return json_error(StatusCode::METHOD_NOT_ALLOWED, "unsupported method");
             };
             match endpoints.iter().find(|e| e.method == api_method) {
-                Some(ep) => handle_api(&state, ep, params, &uri, jar, &body).await,
+                Some(ep) => handle_api(&state, ep, params, &uri, &headers, jar, &body).await,
                 None => json_error(
                     StatusCode::METHOD_NOT_ALLOWED,
                     "method not allowed for this route",
@@ -865,6 +874,17 @@ async fn dispatch_app(
     // by the provider's "no such endpoint" (TODO "Streams" §10).
     if let Some(name) = sc_app::stream_in_path(&app.app, path) {
         return with_csp(app_stream_observe(state, app, name, &jar, ws).await, &csp);
+    }
+
+    // The app's catalogue, in the same place and for the same reason
+    // (`{mount}/i18n/{locale}.json`, §16.1 D7). An application with no locales
+    // never reaches the store: the guard is the first thing
+    // [`app_i18n_catalog`] does, which is what D11 costs.
+    if let Some(tag) = sc_app::i18n_locale_in_path(&app.app, path) {
+        return with_csp(
+            app_i18n_catalog(state, app, tag, &method, headers).await,
+            &csp,
+        );
     }
 
     // The app's data: an API provider that claims this path.
@@ -1011,10 +1031,18 @@ async fn dispatch_app(
         },
         None => None,
     };
+    // The locale, negotiated once for this request (§16.1, D8): an application's
+    // own pages, its view runtime and anything it fires are served in one
+    // language, and it is the one this response's `Content-Language` names.
+    // Against the *application's* locales when it declares any: they belong to
+    // the thing the admin built, not to the installation serving it.
+    let settings = crate::i18n::app_settings(&app.app, &sc_i18n::active());
+    let negotiated = crate::i18n::negotiate(&settings, uri, headers, &jar, user.as_ref());
     let mut req = match app_request(state, api_method, uri, headers, body, user.clone()) {
         Ok(req) => req,
         Err(rejection) => return with_csp(*rejection, &csp),
     };
+    req.locale = crate::i18n::locale_or_default(&settings, negotiated.as_ref());
     // The token the CSRF middleware checked this request against, or minted for
     // it: what a rendered form carries, and what `req.csrfToken()` answers.
     req.csrf_token = csrf
@@ -1041,21 +1069,171 @@ async fn dispatch_app(
                     out.headers_mut().append(name, value);
                 }
             }
-            with_csp(out, &csp)
+            with_csp(crate::i18n::with_language(out, negotiated.as_ref()), &csp)
         }
         Err(e) => with_csp(
-            error_out(
-                state,
-                &e,
-                Audience::App,
-                api_method.as_str(),
-                path,
-                user.as_ref(),
-            )
-            .await,
+            crate::i18n::with_language(
+                error_out(
+                    state,
+                    &e,
+                    Audience::App,
+                    api_method.as_str(),
+                    path,
+                    user.as_ref(),
+                )
+                .await,
+                negotiated.as_ref(),
+            ),
             &csp,
         ),
     }
+}
+
+/// An application's catalogue: `GET {mount}/i18n/{locale}.json` (§16.1, D7).
+///
+/// Served rather than bundled, which is the decision this route exists to keep:
+/// an admin who fixes a mistranslation must not have to wait for a bundler, and
+/// "translate this application into Spanish" must not be a deploy. The file
+/// still lives in the admin's repository (or, for a Saltcorn UI app, in
+/// `_fd_translations`) — it is just read at request time instead of compiled in.
+///
+/// Three things make that affordable:
+///
+/// - **The per-mount cache.** The store is read once per locale per mount, and
+///   the mount's cache is dropped when a translation is saved and is born empty
+///   on a remount, so a `SIGHUP` re-reads without knowing this cache exists.
+/// - **The ETag.** The catalogue is a static file to the browser, so the second
+///   page load is a 304 with no body.
+/// - **The locale guard.** An application with no locales answers 404 without
+///   touching a file store or the database, which is what D11 promises. There is
+///   no loading state to design around either: the key is the English source
+///   text (D1), so the application renders correct English before the fetch
+///   lands.
+async fn app_i18n_catalog(
+    state: &AppState,
+    app: &MountedApp,
+    tag: &str,
+    method: &axum::http::Method,
+    headers: &axum::http::HeaderMap,
+) -> Response {
+    if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
+        return json_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "a catalogue is read, not written; save a translation through the admin API",
+        );
+    }
+    // Every refusal below is the same 404, deliberately: a locale this
+    // application does not serve and a locale that is not a locale are both
+    // "there is nothing here", and neither is worth a sentence that tells a
+    // stranger which locales an application has.
+    let missing = || {
+        json_error(
+            StatusCode::NOT_FOUND,
+            format!("this application has no `{tag}` catalogue"),
+        )
+    };
+    // The zero-cost check, first (D11).
+    if !sc_app::app_is_translated(&app.app) {
+        return missing();
+    }
+    let Ok(locale) = sc_i18n::Locale::parse(tag) else {
+        return missing();
+    };
+    let enabled = match sc_app::app_locales(&app.app) {
+        Ok(locales) => locales,
+        Err(e) => {
+            log_failure("reading an application's locales", &e);
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "this application's locales are misconfigured",
+            );
+        }
+    };
+    if !enabled.iter().any(|l| l.as_str() == locale.as_str()) {
+        return missing();
+    }
+
+    let served = match app.cached_catalog(locale.as_str()) {
+        Some(served) => served,
+        None => {
+            let Some(catalog) = state.apps.catalog() else {
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "no catalog");
+            };
+            let store = match sc_app::app_catalog_store(&app.app) {
+                Ok(store) => store,
+                Err(e) => {
+                    log_failure("resolving an application's catalogue store", &e);
+                    return json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "this application's catalogue store is misconfigured",
+                    );
+                }
+            };
+            let messages = match store.load(catalog, &locale).await {
+                Ok(Some(messages)) => messages,
+                // Enabled but not yet translated is an *empty* catalogue rather
+                // than a 404: the locale is one the application serves, and the
+                // runtime that asked has a well-formed answer to cache. English
+                // renders either way.
+                Ok(None) => sc_i18n::Catalog::new(locale.clone()),
+                Err(e) => {
+                    log_failure("reading an application's catalogue", &e);
+                    return json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "this application's catalogue could not be read",
+                    );
+                }
+            };
+            let body = match serde_json::to_vec(&messages.to_json()) {
+                Ok(body) => Bytes::from(body),
+                Err(e) => {
+                    log_failure(
+                        "serialising an application's catalogue",
+                        &sc_error::Error::msg(e.to_string()),
+                    );
+                    return json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "this application's catalogue could not be read",
+                    );
+                }
+            };
+            let served = crate::apps::ServedCatalog::new(body);
+            app.cache_catalog(locale.as_str(), served.clone());
+            served
+        }
+    };
+
+    let matched = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == served.etag));
+
+    let mut response = if matched {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else if method == axum::http::Method::HEAD {
+        StatusCode::OK.into_response()
+    } else {
+        (StatusCode::OK, served.body.clone()).into_response()
+    };
+    let out = response.headers_mut();
+    if let Ok(etag) = HeaderValue::from_str(&served.etag) {
+        out.insert(header::ETAG, etag);
+    }
+    out.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    if let Ok(lang) = HeaderValue::from_str(locale.as_str()) {
+        out.insert(header::CONTENT_LANGUAGE, lang);
+    }
+    // A catalogue changes when an admin saves one, and the ETag is what
+    // notices. Caching it without revalidation would be the bundling this route
+    // exists to avoid, one layer out.
+    out.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, must-revalidate"),
+    );
+    response
 }
 
 /// An application's Observe socket: `GET {mount}/streams/{name}/observe` (TODO
@@ -1222,6 +1400,7 @@ async fn handle_api(
     ep: &Endpoint,
     path_params: HashMap<String, String>,
     uri: &Uri,
+    headers: &axum::http::HeaderMap,
     jar: CookieJar,
     body: &Bytes,
 ) -> Response {
@@ -1269,6 +1448,13 @@ async fn handle_api(
         }
     };
 
+    // The locale, negotiated once for this request now that the user is known
+    // (§16.1, D8), and `None` on a monolingual installation — which is what makes
+    // this cost nothing there (D11).
+    let settings = sc_i18n::active();
+    let negotiated = crate::i18n::negotiate(&settings, uri, headers, &jar, user.as_ref());
+    let locale = crate::i18n::locale_or_default(&settings, negotiated.as_ref());
+
     // As above: the event reports the route and the caller, and both move into
     // the handler's context.
     let caller = user.clone();
@@ -1278,9 +1464,13 @@ async fn handle_api(
         query: parse_query(uri),
         body: parsed_body,
         user,
+        locale,
     };
 
-    match handler(ctx).await {
+    // Both arms carry the language headers: a refusal an admin reads is text in
+    // a language too, and a cache in front of this must vary on the same things
+    // whether the answer was a 200 or a 403.
+    let out = match handler(ctx).await {
         Ok(resp) => apply_response(state, jar, session_token, resp).await,
         Err(e) => {
             error_out(
@@ -1293,20 +1483,39 @@ async fn handle_api(
             )
             .await
         }
-    }
+    };
+    crate::i18n::with_language(out, negotiated.as_ref())
 }
 
 /// Check a user against an [`AuthRequirement`]. Returns `Some(rejection)` when
 /// the request is not authorized, `None` when it may proceed.
 fn enforce_auth(auth: &AuthRequirement, user: Option<&User>) -> Option<Response> {
-    let unauthenticated = || json_error(StatusCode::UNAUTHORIZED, "authentication required");
+    // `Public` decides nothing and says nothing, so it is answered before the
+    // locale is asked for: the overwhelmingly common call costs what it always
+    // did.
+    if matches!(auth, AuthRequirement::Public) {
+        return None;
+    }
+    // Two sentences a person reads, in the language that person reads (§16.1,
+    // D5). The locale is the signed-in user's, which is all this function is
+    // given and all a refusal needs — see `i18n::locale_for_user`.
+    let locale = crate::i18n::locale_for_user(user);
+    let unauthenticated = || {
+        json_error(
+            StatusCode::UNAUTHORIZED,
+            t!(locale, "authentication required"),
+        )
+    };
     match auth {
         AuthRequirement::Public => None,
         AuthRequirement::LoggedIn => user.is_none().then(unauthenticated),
         AuthRequirement::MinRole(min) => match user {
             None => Some(unauthenticated()),
             Some(u) if u.meets_role(*min) => None,
-            Some(_) => Some(json_error(StatusCode::FORBIDDEN, "insufficient privilege")),
+            Some(_) => Some(json_error(
+                StatusCode::FORBIDDEN,
+                t!(locale, "insufficient privilege"),
+            )),
         },
     }
 }

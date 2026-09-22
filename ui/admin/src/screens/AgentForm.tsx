@@ -52,6 +52,7 @@ import {
   type RoleKey,
 } from "../agentForm";
 import { SettingsFields, buildConfig, readConfig, type FieldSpec } from "../settings";
+import { T, useT } from "../i18n";
 
 type TraitInfo = ListAgentTraitsResponse[number];
 type AgentItem = ListAgentsResponse[number];
@@ -62,6 +63,7 @@ type ProviderItem = ListLlmProvidersResponse[number];
 type Enabled = { trait: string; config: Record<string, string> };
 
 export function AgentForm({ agentId }: { agentId?: string }) {
+  const { t } = useT();
   const roles = useRoles();
   const [traits, setTraits] = useState<TraitInfo[] | null>(null);
   const [providers, setProviders] = useState<ProviderItem[]>([]);
@@ -217,7 +219,7 @@ export function AgentForm({ agentId }: { agentId?: string }) {
         actions={
           <Button variant="outline-secondary" onClick={() => navigate("/agents")}>
             <IconArrowLeft className="icon-2" />
-            Back
+            <T text="Back" />
           </Button>
         }
       />
@@ -225,8 +227,8 @@ export function AgentForm({ agentId }: { agentId?: string }) {
         {error && <Alert variant="danger">{error}</Alert>}
         {providers.length === 0 && (
           <Alert variant="warning">
-            No LLM providers are configured, so this agent will have nothing to talk to.{" "}
-            <Alert.Link href="#/llm-providers/new">Connect one first.</Alert.Link>
+            <T text="No LLM providers are configured, so this agent will have nothing to talk to." />{" "}
+            <Alert.Link href="#/llm-providers/new"><T text="Connect one first." /></Alert.Link>
           </Alert>
         )}
 
@@ -235,7 +237,7 @@ export function AgentForm({ agentId }: { agentId?: string }) {
             <Col md={6}>
               <Form.Group className="mb-3" controlId="agentName">
                 <Form.Label>
-                  Name<span className="text-danger"> *</span>
+                  <T text="Name" /><span className="text-danger"> *</span>
                 </Form.Label>
                 <Form.Control value={name} required onChange={(e) => setName(e.target.value)} />                
               </Form.Group>
@@ -243,7 +245,7 @@ export function AgentForm({ agentId }: { agentId?: string }) {
             <Col md={6}>
               <OptionalRoleSelect
                 id="agentMinRole"
-                label="Minimum role"
+                label={t("Minimum role")}
                 value={minRole}
                 roles={roles}
                 blank="Admin only"
@@ -254,7 +256,7 @@ export function AgentForm({ agentId }: { agentId?: string }) {
           </Row>
 
           <Form.Group className="mb-3" controlId="agentDescription">
-            <Form.Label>Description</Form.Label>
+            <Form.Label><T text="Description" /></Form.Label>
             <Form.Control
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -262,13 +264,13 @@ export function AgentForm({ agentId }: { agentId?: string }) {
           </Form.Group>
 
           <Card className="mb-3">
-            <Card.Header>Model</Card.Header>
+            <Card.Header><T text="Model" /></Card.Header>
             <Card.Body>
               <Row>
                 <Col md={6}>
                   <Form.Group className="mb-3" controlId="agentProvider">
                     <Form.Label>
-                      LLM provider<span className="text-danger"> *</span>
+                      <T text="LLM provider" /><span className="text-danger"> *</span>
                     </Form.Label>
                     <Form.Select
                       value={provider}
@@ -283,7 +285,9 @@ export function AgentForm({ agentId }: { agentId?: string }) {
                           agent still has to be shown, or saving this form would
                           silently repoint the agent at another one. */}
                       {providers.every((p) => p.name !== provider) && provider !== "" && (
-                        <option value={provider}>{provider} (missing)</option>
+                        <option value={provider}>
+                          {t("{name} (missing)", { name: provider })}
+                        </option>
                       )}
                       {providers.map((p) => (
                         <option key={p.id} value={p.name}>
@@ -295,7 +299,7 @@ export function AgentForm({ agentId }: { agentId?: string }) {
                 </Col>
                 <Col md={6}>
                   <Form.Group className="mb-3" controlId="agentModel">
-                    <Form.Label>Model</Form.Label>
+                    <Form.Label><T text="Model" /></Form.Label>
                     <Form.Select value={model} onChange={(e) => setModel(e.target.value)}>
                       {modelOptions(models, model).map((o) => (
                         <option key={o.value} value={o.value}>
@@ -304,15 +308,14 @@ export function AgentForm({ agentId }: { agentId?: string }) {
                       ))}
                     </Form.Select>
                     <Form.Text muted>
-                      One of the provider's models. Models, their prices and the default are
-                      set on the provider.
+                      <T text="One of the provider's models. Models, their prices and the default are set on the provider." />
                     </Form.Text>
                   </Form.Group>
                 </Col>
               </Row>
 
               <Form.Group className="mb-3" controlId="agentPrompt">
-                <Form.Label>System prompt</Form.Label>
+                <Form.Label><T text="System prompt" /></Form.Label>
                 <Form.Control
                   as="textarea"
                   rows={5}
@@ -320,7 +323,7 @@ export function AgentForm({ agentId }: { agentId?: string }) {
                   onChange={(e) => setSystemPrompt(e.target.value)}
                 />
                 <Form.Text muted>
-                  What the agent is told it is, before anything the conversation adds.
+                  <T text="What the agent is told it is, before anything the conversation adds." />
                 </Form.Text>
               </Form.Group>
 
@@ -339,12 +342,10 @@ export function AgentForm({ agentId }: { agentId?: string }) {
           </Card>
 
           <Card className="mb-3">
-            <Card.Header>Roles</Card.Header>
+            <Card.Header><T text="Roles" /></Card.Header>
             <Card.Body>
               <p className="text-muted small">
-                The model above is the <strong>executor</strong>, which does the work. A planned
-                coding agent plans on the strong model and hands small jobs to the cheap one; an
-                agent with neither set uses its own model for everything.
+                <T text="The model above is the" /> <strong><T text="executor" /></strong><T text=", which does the work. A planned coding agent plans on the strong model and hands small jobs to the cheap one; an agent with neither set uses its own model for everything." />
               </p>
               <Row>
                 {ROLES.map((role) => (
@@ -364,11 +365,10 @@ export function AgentForm({ agentId }: { agentId?: string }) {
           </Card>
 
           <Card className="mb-3">
-            <Card.Header>Budgets</Card.Header>
+            <Card.Header><T text="Budgets" /></Card.Header>
             <Card.Body>
               <p className="text-muted small">
-                Per run. A run that reaches one stops and says which; the conversation can be
-                continued. Blank is no limit unless it says otherwise.
+                <T text="Per run. A run that reaches one stops and says which; the conversation can be continued. Blank is no limit unless it says otherwise." />
               </p>
               <Row>
                 {BUDGETS.map((attr) => (
@@ -385,12 +385,11 @@ export function AgentForm({ agentId }: { agentId?: string }) {
           </Card>
 
           <Card className="mb-3">
-            <Card.Header>Traits</Card.Header>
+            <Card.Header><T text="Traits" /></Card.Header>
             <Card.Body>
               {enabled.length === 0 && (
                 <p className="text-muted">
-                  No traits: this agent can talk, and can do nothing else. Each trait you add
-                  is one deliberate grant.
+                  <T text="No traits: this agent can talk, and can do nothing else. Each trait you add is one deliberate grant." />
                 </p>
               )}
 
@@ -409,7 +408,7 @@ export function AgentForm({ agentId }: { agentId?: string }) {
                       variant="outline-danger"
                       onClick={() => setEnabled((list) => list.filter((_, i) => i !== index))}
                     >
-                      Remove
+                      <T text="Remove" />
                     </Button>
                   </Card.Header>
                   <Card.Body>
@@ -436,7 +435,7 @@ export function AgentForm({ agentId }: { agentId?: string }) {
                 <Form.Select
                   value={adding}
                   onChange={(e) => setAdding(e.target.value)}
-                  aria-label="Trait to add"
+                  aria-label={t("Trait to add")}
                   className="w-auto"
                 >
                   {traits.map((t) => (
@@ -452,13 +451,11 @@ export function AgentForm({ agentId }: { agentId?: string }) {
                     setEnabled((list) => [...list, { trait: adding, config: {} }])
                   }
                 >
-                  Add trait
+                  <T text="Add trait" />
                 </Button>
               </div>
               <p className="text-muted small mt-3 mb-0">
-                A trait can be added more than once — one <code>query_table</code> for each
-                table it may read. Two that would produce the same tool name are refused when
-                you save.
+                <T text="A trait can be added more than once — one" /> <code>query_table</code> <T text="for each table it may read. Two that would produce the same tool name are refused when you save." />
               </p>
             </Card.Body>
           </Card>
@@ -515,6 +512,7 @@ function RolePicker({
   value: RoleChoice;
   onChange: (value: RoleChoice) => void;
 }) {
+  const { t } = useT();
   const [models, setModels] = useState<ModelItem[]>([]);
   useEffect(() => {
     const chosen = providers.find((p) => p.name === value.provider);
@@ -546,9 +544,11 @@ function RolePicker({
           value={value.provider}
           onChange={(e) => onChange({ provider: e.target.value, model: "" })}
         >
-          <option value="">Same as the agent</option>
+          <option value=""><T text="Same as the agent" /></option>
           {providers.every((p) => p.name !== value.provider) && value.provider !== "" && (
-            <option value={value.provider}>{value.provider} (missing)</option>
+            <option value={value.provider}>
+              {t("{name} (missing)", { name: value.provider })}
+            </option>
           )}
           {providers.map((p) => (
             <option key={p.id} value={p.name}>
@@ -596,10 +596,9 @@ function TraitSettings({
       <SettingsFields spec={own} values={values} onChange={onChange} idPrefix={idPrefix} />
       {shell.length > 0 && (
         <fieldset className="border rounded p-3 mt-2">
-          <legend className="float-none w-auto px-2 mb-0 fs-5">Shell</legend>
+          <legend className="float-none w-auto px-2 mb-0 fs-5"><T text="Shell" /></legend>
           <p className="text-muted small">
-            A shell is every permission above at once. It is offered only when an admin is
-            chatting, and it is off unless you tick it.
+            <T text="A shell is every permission above at once. It is offered only when an admin is chatting, and it is off unless you tick it." />
           </p>
           <SettingsFields
             spec={shell}

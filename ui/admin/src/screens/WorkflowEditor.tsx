@@ -47,6 +47,7 @@ import {
 } from "../workflowGraph";
 import { WorkflowCanvas, type Positions } from "./WorkflowCanvas";
 import { StepInspector } from "./WorkflowInspector";
+import { T, useT } from "../i18n";
 
 type ActionInfo = ListActionsResponse[number];
 
@@ -55,6 +56,7 @@ type ActionInfo = ListActionsResponse[number];
 const HISTORY = 50;
 
 export function WorkflowEditor({ triggerId }: { triggerId: string }) {
+  const { t } = useT();
   const roles = useRoles();
   const [meta, setMeta] = useState<GetWorkflowResponse | null>(null);
   const [trigger, setTrigger] = useState<{ when: string; channel: string | null } | null>(null);
@@ -313,7 +315,15 @@ export function WorkflowEditor({ triggerId }: { triggerId: string }) {
   };
 
   const revert = async (version: number) => {
-    if (!window.confirm(`Restore version ${version}? It is saved as a new version.`)) return;
+    if (
+      !window.confirm(
+        t("Restore version {version}? It is saved as a new version.", {
+          version,
+        }),
+      )
+    ) {
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -356,25 +366,25 @@ export function WorkflowEditor({ triggerId }: { triggerId: string }) {
           <>
             <Button variant="outline-secondary" onClick={() => navigate("/triggers")}>
               <IconArrowLeft className="icon-2" />
-              Back
+              <T text="Back" />
             </Button>
             <Button
               variant="outline-secondary"
               href={`#/triggers/${encodeURIComponent(triggerId)}/runs`}
             >
-              Runs
+              <T text="Runs" />
             </Button>
             <Button variant="outline-secondary" disabled={past.length === 0} onClick={undo}>
-              Undo
+              <T text="Undo" />
             </Button>
             <Button variant="outline-secondary" disabled={future.length === 0} onClick={redo}>
-              Redo
+              <T text="Redo" />
             </Button>
             <Button
               variant="outline-secondary"
               onClick={() => setPositions(positionsOf(layout(graph)))}
             >
-              Tidy up
+              <T text="Tidy up" />
             </Button>
             <Button disabled={busy || !dirty} onClick={() => void save()}>
               {busy ? "Saving…" : "Save a new version"}
@@ -397,7 +407,7 @@ export function WorkflowEditor({ triggerId }: { triggerId: string }) {
           <Alert variant="warning">
             <AlertBody>
               <div className="mb-1">
-                This workflow will not run until these are fixed:
+                <T text="This workflow will not run until these are fixed:" />
               </div>
               <ul className="mb-0">
                 {shown.map((issue, index) => (
@@ -412,7 +422,7 @@ export function WorkflowEditor({ triggerId }: { triggerId: string }) {
           <div className="col-12 col-xl-8">
             <Card>
               <Card.Header className="d-flex flex-wrap gap-2 align-items-center">
-                <span className="me-2">Add a step:</span>
+                <span className="me-2"><T text="Add a step:" /></span>
                 {STEP_KINDS.map((kind) => (
                   <Button
                     key={kind}
@@ -441,10 +451,7 @@ export function WorkflowEditor({ triggerId }: { triggerId: string }) {
                 />
               </Card.Body>
               <Card.Footer className="text-muted small">
-                Drag from the bottom of a step onto another to say what runs next; a
-                loop&apos;s body hangs off its right-hand side. Select an edge and press
-                Delete to remove it. A step is deleted from its inspector, which is
-                where the refusal naming what points at it belongs.
+                <T text="Drag from the bottom of a step onto another to say what runs next; a loop's body hangs off its right-hand side. Select an edge and press Delete to remove it. A step is deleted from its inspector, which is where the refusal naming what points at it belongs." />
               </Card.Footer>
             </Card>
           </div>
@@ -486,13 +493,14 @@ function WorkflowSettings({
   workflow: Workflow;
   onChange: (workflow: Workflow) => void;
 }) {
+  const { t } = useT();
   const policy = workflow.error_policy ?? { type: "fail" as const };
   return (
     <Card className="mb-3">
-      <Card.Header>This workflow</Card.Header>
+      <Card.Header><T text="This workflow" /></Card.Header>
       <Card.Body>
         <Form.Group className="mb-3" controlId="workflowStart">
-          <Form.Label>Starts at</Form.Label>
+          <Form.Label><T text="Starts at" /></Form.Label>
           <Form.Select
             value={workflow.start}
             onChange={(e) => onChange({ ...workflow, start: e.target.value })}
@@ -506,7 +514,7 @@ function WorkflowSettings({
           </Form.Select>
         </Form.Group>
         <Form.Group className="mb-3" controlId="workflowPolicy">
-          <Form.Label>When a step fails and says nothing itself</Form.Label>
+          <Form.Label><T text="When a step fails and says nothing itself" /></Form.Label>
           <Form.Select
             value={policy.type}
             onChange={(e) =>
@@ -521,14 +529,14 @@ function WorkflowSettings({
               })
             }
           >
-            <option value="fail">Fail the run</option>
-            <option value="retry">Retry, then fail</option>
-            <option value="handler">Jump to a step</option>
+            <option value="fail"><T text="Fail the run" /></option>
+            <option value="retry"><T text="Retry, then fail" /></option>
+            <option value="handler"><T text="Jump to a step" /></option>
           </Form.Select>
         </Form.Group>
         {policy.type === "handler" && (
           <Form.Group className="mb-3" controlId="workflowHandler">
-            <Form.Label>Handled by</Form.Label>
+            <Form.Label><T text="Handled by" /></Form.Label>
             <Form.Select
               value={policy.step}
               onChange={(e) =>
@@ -545,7 +553,7 @@ function WorkflowSettings({
           </Form.Group>
         )}
         <Form.Group className="mb-3" controlId="workflowMaxSteps">
-          <Form.Label>Step budget</Form.Label>
+          <Form.Label><T text="Step budget" /></Form.Label>
           <Form.Control
             type="number"
             min={1}
@@ -553,22 +561,18 @@ function WorkflowSettings({
             onChange={(e) => onChange({ ...workflow, max_steps: Number(e.target.value) })}
           />
           <Form.Text muted>
-            How many steps one run may take before the engine stops it. A branch that
-            points back at itself is a loop with no exit, and a run that spins forever
-            is worse than one that stops with a reason.
+            <T text="How many steps one run may take before the engine stops it. A branch that points back at itself is a loop with no exit, and a run that spins forever is worse than one that stops with a reason." />
           </Form.Text>
         </Form.Group>
         <Form.Check
           type="checkbox"
           id="workflowTrace"
-          label="Record a trace"
+          label={t("Record a trace")}
           checked={workflow.trace ?? false}
           onChange={(e) => onChange({ ...workflow, trace: e.target.checked })}
         />
         <Form.Text muted>
-          Writes the context after every step, which is what the run detail screen
-          draws its timeline from. Off by default: a trace is a copy of the whole
-          context per step.
+          <T text="Writes the context after every step, which is what the run detail screen draws its timeline from. Off by default: a trace is a copy of the whole context per step." />
         </Form.Text>
       </Card.Body>
     </Card>
@@ -586,9 +590,10 @@ function VersionHistory({
   busy: boolean;
   onRevert: (version: number) => void;
 }) {
+  const { t } = useT();
   return (
     <Card>
-      <Card.Header>Versions</Card.Header>
+      <Card.Header><T text="Versions" /></Card.Header>
       <div className="list-group list-group-flush">
         {meta.versions.map((version) => (
           <div
@@ -596,9 +601,9 @@ function VersionHistory({
             className="list-group-item d-flex align-items-center justify-content-between"
           >
             <div>
-              <strong>Version {version.version}</strong>
+              <strong>{t("Version {version}", { version: version.version })}</strong>
               {version.version === meta.version && (
-                <span className="badge bg-blue-lt ms-2">current</span>
+                <span className="badge bg-blue-lt ms-2"><T text="current" /></span>
               )}
               <div className="text-muted small">
                 {new Date(version.created_at).toLocaleString()}
@@ -612,7 +617,7 @@ function VersionHistory({
                 disabled={busy}
                 onClick={() => onRevert(version.version)}
               >
-                Restore
+                <T text="Restore" />
               </Button>
             )}
           </div>

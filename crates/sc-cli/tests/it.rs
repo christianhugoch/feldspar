@@ -31,6 +31,8 @@ mod config_file;
 mod config_values;
 #[path = "core_deps.rs"]
 mod core_deps;
+#[path = "i18n.rs"]
+mod i18n;
 #[path = "repo_hygiene.rs"]
 mod repo_hygiene;
 #[path = "serve.rs"]

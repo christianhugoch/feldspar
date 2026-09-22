@@ -36,6 +36,7 @@ import {
   type StreamItem,
   type StreamStatusValue,
 } from "../streams";
+import { T, useT } from "../i18n";
 
 /** How often the list re-reads each row's live status.
  *
@@ -49,6 +50,7 @@ const POLL_MS = 2000;
 type Live = Record<string, { status: StreamStatusValue | null; counters: Counters }>;
 
 export function Streams() {
+  const { t } = useT();
   const [streams, setStreams] = useState<StreamItem[] | null>(null);
   const [live, setLive] = useState<Live>({});
   const [notice, setNotice] = useState<string | null>(null);
@@ -117,10 +119,10 @@ export function Streams() {
   const remove = async (stream: StreamItem) => {
     if (
       !window.confirm(
-        `Remove the stream "${stream.name}"?\n\n` +
-          "Nothing that has already arrived is lost — an element is not stored — but anything " +
-          "observing this stream stops, and a trigger that names it will have to be pointed " +
-          "somewhere else.",
+        t(
+          'Remove the stream "{name}"?\n\nNothing that has already arrived is lost — an element is not stored — but anything observing this stream stops, and a trigger that names it will have to be pointed somewhere else.',
+          { name: stream.name },
+        ),
       )
     ) {
       return;
@@ -140,11 +142,11 @@ export function Streams() {
     <>
       <PageHeader
         pretitle="Dataflows"
-        title="Streams"
+        title={t("Streams")}
         actions={
           <Button onClick={() => navigate("/streams/new")}>
             <IconPlus className="icon-2" />
-            New stream
+            <T text="New stream" />
           </Button>
         }
       />
@@ -156,21 +158,19 @@ export function Streams() {
           <Table hover responsive className="card-table table-vcenter">
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Provider</th>
-                <th>Elements</th>
-                <th>Status</th>
-                <th>Last element</th>
-                <th className="text-end">Actions</th>
+                <th><T text="Name" /></th>
+                <th><T text="Provider" /></th>
+                <th><T text="Elements" /></th>
+                <th><T text="Status" /></th>
+                <th><T text="Last element" /></th>
+                <th className="text-end"><T text="Actions" /></th>
               </tr>
             </thead>
             <tbody>
               {streams?.length === 0 && (
                 <tr>
                   <td colSpan={6} className="text-muted">
-                    No streams yet. A stream is a provider — an MQTT broker, a polled feed — with
-                    its settings filled in, and what arrives on it is not stored: a trigger that
-                    writes a row is what makes a flow durable.
+                    <T text="No streams yet. A stream is a provider — an MQTT broker, a polled feed — with its settings filled in, and what arrives on it is not stored: a trigger that writes a row is what makes a flow durable." />
                   </td>
                 </tr>
               )}
@@ -191,7 +191,7 @@ export function Streams() {
                           a sentence in a table cell would push the row apart. */}
                       {stream.error && (
                         <StatusBadge tone="red" title={stream.error} className="mt-1">
-                          Cannot be started
+                          <T text="Cannot be started" />
                         </StatusBadge>
                       )}
                     </td>
@@ -223,21 +223,21 @@ export function Streams() {
                           variant="primary"
                           href={`#/streams/${encodeURIComponent(stream.id)}/observe`}
                         >
-                          Observe
+                          <T text="Observe" />
                         </Button>
                         <Button
                           size="sm"
                           variant="outline-secondary"
                           href={`#/streams/${encodeURIComponent(stream.id)}/edit`}
                         >
-                          Edit
+                          <T text="Edit" />
                         </Button>
                         <Button
                           size="sm"
                           variant="outline-danger"
                           onClick={() => void remove(stream)}
                         >
-                          Delete
+                          <T text="Delete" />
                         </Button>
                       </div>
                     </td>

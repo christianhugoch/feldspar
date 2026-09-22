@@ -46,6 +46,7 @@ import {
   type StepItem,
   type ViewItem,
 } from "../views";
+import { T } from "../i18n";
 
 export function ViewEditor({
   appId,
@@ -180,7 +181,7 @@ export function ViewEditor({
           onClick={() => navigate(`/applications/${encodeURIComponent(appId)}/views`)}
         >
           <IconArrowLeft className="icon-2" />
-          Views
+          <T text="Views" />
         </Button>
       }
     />
@@ -236,7 +237,7 @@ export function ViewEditor({
         )}
         {saved && (
           <Alert variant="success" dismissible onClose={() => setSaved(false)}>
-            Saved. The view serves this configuration from its next request.
+            <T text="Saved. The view serves this configuration from its next request." />
           </Alert>
         )}
 
@@ -262,10 +263,10 @@ export function ViewEditor({
                     disabled={busy || builderAvailable === null}
                     onClick={() => void openInBuilder()}
                   >
-                    Open in builder
+                    <T text="Open in builder" />
                   </Button>
                   <details className="mt-3">
-                    <summary className="text-muted">The layout as saved (JSON)</summary>
+                    <summary className="text-muted"><T text="The layout as saved (JSON)" /></summary>
                     <pre className="small mb-0 mt-2">{layoutJson(configuration)}</pre>
                   </details>
                 </>
@@ -283,7 +284,7 @@ export function ViewEditor({
                   </Alert>
                 )}
                 {step.fields.length === 0 ? (
-                  <p className="text-muted mb-0">This step has nothing to set for this view.</p>
+                  <p className="text-muted mb-0"><T text="This step has nothing to set for this view." /></p>
                 ) : (
                   <SettingsFields
                     spec={step.fields}
@@ -301,17 +302,17 @@ export function ViewEditor({
               disabled={busy || !step || step.index === 0}
               onClick={() => void go(-1)}
             >
-              Back
+              <T text="Back" />
             </Button>
             <Button
               variant="outline-primary"
               disabled={busy || !step || step.index + 1 >= step.count}
               onClick={() => void go(1)}
             >
-              Next
+              <T text="Next" />
             </Button>
             <Button className="ms-auto" disabled={busy || !step} onClick={() => void save()}>
-              Save view
+              <T text="Save view" />
             </Button>
           </div>
         </div>

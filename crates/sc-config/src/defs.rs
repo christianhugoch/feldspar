@@ -75,6 +75,7 @@ pub fn config_sections() -> &'static [ConfigSection] {
             crate::ssl::ssl_section(),
             crate::email::email_section(),
             crate::development::development_section(),
+            crate::localisation::localisation_section(),
         ]
     })
 }

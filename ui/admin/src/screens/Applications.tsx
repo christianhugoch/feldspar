@@ -29,6 +29,7 @@ import {
   type BuildStatus,
 } from "../appActions";
 import { takeNotice } from "../notice";
+import { T, useT } from "../i18n";
 
 type AppItem = ListApplicationsResponse[number];
 
@@ -46,6 +47,7 @@ function filesUrl(store: string, path: string): string {
 }
 
 export function Applications() {
+  const { t } = useT();
   const [apps, setApps] = useState<AppItem[] | null>(null);
   // Builds, client updates and the news they leave behind live in a store the
   // sidebar shares (`appActions.ts`): the same buttons are there, for the
@@ -74,8 +76,10 @@ export function Applications() {
   const remove = async (app: AppItem) => {
     if (
       !window.confirm(
-        `Delete application "${app.name}"? The agent created to build it is deleted ` +
-          `with it. This cannot be undone.`,
+        t(
+          'Delete application "{name}"? The agent created to build it is deleted with it. This cannot be undone.',
+          { name: app.name },
+        ),
       )
     ) {
       return;
@@ -103,11 +107,11 @@ export function Applications() {
     <>
       <PageHeader
         pretitle="Deploy"
-        title="Applications"
+        title={t("Applications")}
         actions={
           <Button onClick={() => navigate("/applications/new")}>
             <IconPlus className="icon-2" />
-            New application
+            <T text="New application" />
           </Button>
         }
       />
@@ -130,18 +134,18 @@ export function Applications() {
           <Table hover responsive className="card-table table-vcenter">
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Subdomain</th>
-                <th>Framework</th>
-                <th>Build</th>
-                <th className="text-end">Actions</th>
+                <th><T text="Name" /></th>
+                <th><T text="Subdomain" /></th>
+                <th><T text="Framework" /></th>
+                <th><T text="Build" /></th>
+                <th className="text-end"><T text="Actions" /></th>
               </tr>
             </thead>
             <tbody>
               {apps?.length === 0 && (
                 <tr>
                   <td colSpan={5} className="text-muted">
-                    No applications yet.
+                    <T text="No applications yet." />
                   </td>
                 </tr>
               )}
@@ -173,7 +177,7 @@ export function Applications() {
                           <a href={filesUrl(app.source.store, app.source.path)}>
                             {app.source.store}/{app.source.path || ""}
                           </a>{" "}
-                          <a href={ideUrl(app.source.store)}>(edit code)</a>
+                          <a href={ideUrl(app.source.store)}><T text="(edit code)" /></a>
                         </div>
                       )}
                     </td>
@@ -184,7 +188,7 @@ export function Applications() {
                         // Constructed rather than built (Saltcorn UI): saving
                         // is the deployment, so there is no unbuilt state to
                         // show.
-                        <span className="text-muted small">Nothing to build</span>
+                        <span className="text-muted small"><T text="Nothing to build" /></span>
                       )}
                     </td>
                     <td className="text-end">
@@ -197,9 +201,9 @@ export function Applications() {
                             size="sm"
                             variant="outline-secondary"
                             href={`#/applications/${encodeURIComponent(app.id)}/graphql`}
-                            title="Run GraphQL queries against this application"
+                            title={t("Run GraphQL queries against this application")}
                           >
-                            GraphQL
+                            <T text="GraphQL" />
                           </Button>
                         )}
                         {app.has_views && (
@@ -208,7 +212,7 @@ export function Applications() {
                             variant="outline-secondary"
                             href={`#/applications/${encodeURIComponent(app.id)}/views`}
                           >
-                            Views
+                            <T text="Views" />
                           </Button>
                         )}
                         <Button
@@ -216,7 +220,7 @@ export function Applications() {
                           variant="outline-secondary"
                           href={`#/applications/${encodeURIComponent(app.id)}/edit`}
                         >
-                          Edit
+                          <T text="Edit" />
                         </Button>
                         {/* Neither has anything to do for an application with
                             no build: it has no generated client and no
@@ -228,7 +232,7 @@ export function Applications() {
                               variant="outline-secondary"
                               disabled={Boolean(actions.updating[app.id])}
                               onClick={() => void updateApplicationClient(app)}
-                              title="Rewrite this application's generated client, hooks and schema from its current definition — no build"
+                              title={t("Rewrite this application's generated client, hooks and schema from its current definition — no build")}
                             >
                               {actions.updating[app.id] ? "Updating…" : "Update code"}
                             </Button>
@@ -243,7 +247,7 @@ export function Applications() {
                           </>
                         )}
                         <Button size="sm" variant="outline-danger" onClick={() => void remove(app)}>
-                          Delete
+                          <T text="Delete" />
                         </Button>
                       </div>
                     </td>
@@ -263,12 +267,12 @@ export function Applications() {
 function BuildBadge({ status }: { status: BuildStatus }) {
   switch (status) {
     case "built":
-      return <StatusBadge tone="green">Built</StatusBadge>;
+      return <StatusBadge tone="green"><T text="Built" /></StatusBadge>;
     case "building":
-      return <StatusBadge tone="blue">Building…</StatusBadge>;
+      return <StatusBadge tone="blue"><T text="Building…" /></StatusBadge>;
     case "failed":
-      return <StatusBadge tone="red">Build failed</StatusBadge>;
+      return <StatusBadge tone="red"><T text="Build failed" /></StatusBadge>;
     default:
-      return <StatusBadge tone="secondary">Not built yet</StatusBadge>;
+      return <StatusBadge tone="secondary"><T text="Not built yet" /></StatusBadge>;
   }
 }

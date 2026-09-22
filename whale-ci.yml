@@ -14,13 +14,14 @@
 # `#[ignore]`d or gated behind an environment variable. `network_tests`,
 # `python` and `ui` are where those opt-ins are turned on — so a registry
 # outage fails those steps and leaves the verdict on the commit's own code
-# (`test`, `fmt`, `clippy`) intact.
+# (`test`, `fmt`, `clippy`, `i18n`) intact.
 
 build:
   dockerfile: ./deploy/whale-ci/Dockerfile.build
 
 # ---------------------------------------------------------------------------
-# Lints. Both are cheap to *run* and reuse the image the build already made.
+# Lints. All three are cheap to *run* and reuse the image the build already
+# made.
 # ---------------------------------------------------------------------------
 
 fmt:
@@ -35,6 +36,21 @@ clippy:
   # the way it stays clean is by failing here.
   command: cargo clippy --workspace --all-targets -- -D warnings
   timeout-minutes: 45
+
+i18n:
+  image: build
+  # The catalogues, against the sources they were extracted from (§16.x, task
+  # 2.5). It reads this checkout and nothing else — no database, no network —
+  # so it belongs with the lints rather than with the suite.
+  #
+  # **Coverage is not a gate.** What this fails on is a translation whose
+  # placeholders or plural forms no longer match its key, and a `t!` / `t()`
+  # call site whose message is not a literal: the first renders wrongly in
+  # front of a person, the second is a string that will never reach a
+  # catalogue at all. A locale that is 40% translated is a work in progress,
+  # and a new English string must not break anybody's build.
+  command: cargo run --quiet --locked -p sc-cli --bin feldspar -- i18n check
+  timeout-minutes: 30
 
 # ---------------------------------------------------------------------------
 # The workspace suite, against a real Postgres (TECHNICAL_DESIGN §16).

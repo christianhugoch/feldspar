@@ -20,6 +20,9 @@ sc-catalog.workspace = true
 # V8 engine behind it is constructed by the server and injected.
 sc-expr.workspace = true
 sc-auth.workspace = true
+# The negotiated locale a request is served in, carried on the admin handler
+# context and on an application request (§16.x, D8).
+sc-i18n.workspace = true
 # An application exposes a subset of the server's triggers as endpoints (§10.2,
 # §13.4): this crate projects them and runs them through the dispatcher. The
 # layering is the one `sc-action`'s own docs state — it is layer 6, this is layer

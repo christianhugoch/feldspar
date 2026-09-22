@@ -14,6 +14,9 @@ autotests = false
 
 [dependencies]
 sc-error.workspace = true
+# Saltcorn UI's own sentences — a sign-in form's labels, a 404's one line — are
+# the product's strings (population A), translated against the request's locale.
+sc-i18n.workspace = true
 sc-query.workspace = true
 sc-db.workspace = true
 sc-types.workspace = true

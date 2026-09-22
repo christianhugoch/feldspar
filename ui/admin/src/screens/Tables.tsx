@@ -48,8 +48,10 @@ import {
 } from "../newTable";
 import { roleLabel, useRoles } from "../roles";
 import { SettingsFields, buildConfig, initialValues } from "../settings";
+import { T, useT } from "../i18n";
 
 export function Tables() {
+  const { t } = useT();
   const [tables, setTables] = useState<ListTablesResponse | null>(null);
   const [orphans, setOrphans] = useState<ListOrphanTableSettingsResponse>([]);
   const [connections, setConnections] = useState<ListDatabaseConnectionsResponse>([]);
@@ -169,13 +171,13 @@ export function Tables() {
     <>
       <PageHeader
         pretitle="Data"
-        title="Tables"
+        title={t("Tables")}
         actions={
           <>
             <Button variant="outline-secondary" onClick={() => navigate("/db-connections")}>
-              Connections
+              <T text="Connections" />
             </Button>
-            <Button onClick={() => setCreating({ ...EMPTY_NEW_TABLE_FORM })}>+ New table</Button>
+            <Button onClick={() => setCreating({ ...EMPTY_NEW_TABLE_FORM })}><T text="+ New table" /></Button>
           </>
         }
       />
@@ -190,19 +192,19 @@ export function Tables() {
         {orphans.length > 0 && (
           <Alert variant="warning">
             <AlertBody>
-              <Alert.Heading className="h6">Settings without a table</Alert.Heading>
+              <Alert.Heading className="h6"><T text="Settings without a table" /></Alert.Heading>
               <p className="mb-2">
-                These stored settings name tables that are not in the database. They are kept in
-                case the table comes back — recreating it restores its access rules — but
-                nothing is using them right now.
+                <T text="These stored settings name tables that are not in the database. They are kept in case the table comes back — recreating it restores its access rules — but nothing is using them right now." />
               </p>
               <ul className="mb-0 list-unstyled">
                 {orphans.map((o) => (
                   <li key={o.name} className="d-flex align-items-center gap-2 mb-1">
                     <code>{o.name}</code>
                     <span className="text-muted small">
-                      read {roleLabel(o.min_role_read, roles)}, write{" "}
-                      {roleLabel(o.min_role_write, roles)}
+                      {t("read {read}, write {write}", {
+                        read: roleLabel(o.min_role_read, roles),
+                        write: roleLabel(o.min_role_write, roles),
+                      })}
                     </span>
                     <Button
                       size="sm"
@@ -210,7 +212,7 @@ export function Tables() {
                       disabled={busy}
                       onClick={() => void forget(o.name)}
                     >
-                      Forget
+                      <T text="Forget" />
                     </Button>
                   </li>
                 ))}
@@ -223,54 +225,54 @@ export function Tables() {
           <Table hover responsive className="card-table table-vcenter">
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Read</th>
-                <th>Write</th>
-                <th className="text-end">Actions</th>
+                <th><T text="Name" /></th>
+                <th><T text="Read" /></th>
+                <th><T text="Write" /></th>
+                <th className="text-end"><T text="Actions" /></th>
               </tr>
             </thead>
             <tbody>
               {tables?.length === 0 && (
                 <tr>
                   <td colSpan={4} className="text-muted">
-                    No tables yet.
+                    <T text="No tables yet." />
                   </td>
                 </tr>
               )}
-              {tables?.map((t) => (
-                <tr key={t.name}>
+              {tables?.map((table) => (
+                <tr key={table.name}>
                   <td>
-                    {t.label && t.label !== t.name ? (
+                    {table.label && table.label !== table.name ? (
                       <>
-                        {t.label} <span className="text-muted small">({t.name})</span>
+                        {table.label} <span className="text-muted small">({table.name})</span>
                       </>
                     ) : (
-                      t.name
+                      table.name
                     )}
                     {/* Ownership marks: the roles alone no longer tell the whole
                         access story for a table with a formula, so say so here. */}
-                    {t.ownership_formula && !t.ownership_error && (
-                      <StatusBadge tone="blue" className="ms-2" title={t.ownership_formula}>
-                        formula
+                    {table.ownership_formula && !table.ownership_error && (
+                      <StatusBadge tone="blue" className="ms-2" title={table.ownership_formula}>
+                        <T text="formula" />
                       </StatusBadge>
                     )}
-                    {t.ownership_error && (
-                      <StatusBadge tone="yellow" className="ms-2" title={t.ownership_error}>
-                        formula error
+                    {table.ownership_error && (
+                      <StatusBadge tone="yellow" className="ms-2" title={table.ownership_error}>
+                        <T text="formula error" />
                       </StatusBadge>
                     )}
-                    {t.rls_enabled && (
+                    {table.rls_enabled && (
                       <StatusBadge tone="secondary" className="ms-2">
-                        RLS
+                        <T text="RLS" />
                       </StatusBadge>
                     )}
-                    {t.metadata && (
+                    {table.metadata && (
                       <StatusBadge
                         tone="secondary"
                         className="ms-2"
-                        title="One of Saltcorn's own metadata tables. Its rows and settings can be edited; its fields cannot."
+                        title={t("One of Saltcorn's own metadata tables. Its rows and settings can be edited; its fields cannot.")}
                       >
-                        metadata
+                        <T text="metadata" />
                       </StatusBadge>
                     )}
                     {/* Which database it came from, whenever that is not
@@ -278,25 +280,25 @@ export function Tables() {
                         and the one an installation with no connections is
                         entirely made of, so badging it would put a mark on every
                         row and tell nobody anything. */}
-                    {t.database !== PRIMARY_DATABASE && (
+                    {table.database !== PRIMARY_DATABASE && (
                       <StatusBadge
                         tone="blue"
                         className="ms-2"
-                        title={`This table lives in the database connection "${t.database}". Saltcorn reads and writes its rows but does not change its schema.`}
+                        title={`This table lives in the database connection "${table.database}". Saltcorn reads and writes its rows but does not change its schema.`}
                       >
-                        {t.database}
+                        {table.database}
                       </StatusBadge>
                     )}
                   </td>
-                  <td>{roleLabel(t.min_role_read, roles)}</td>
-                  <td>{roleLabel(t.min_role_write, roles)}</td>
+                  <td>{roleLabel(table.min_role_read, roles)}</td>
+                  <td>{roleLabel(table.min_role_write, roles)}</td>
                   <td className="text-end">
                     <Button
                       size="sm"
                       variant="outline-primary"
-                      href={`#/tables/${encodeURIComponent(t.name)}`}
+                      href={`#/tables/${encodeURIComponent(table.name)}`}
                     >
-                      Open
+                      <T text="Open" />
                     </Button>
                   </td>
                 </tr>
@@ -348,6 +350,7 @@ function NewTableModal({
   onCancel: () => void;
   onSubmit: (e: FormEvent) => void;
 }) {
+  const { t } = useT();
   const problem = form ? newTableError(form) : null;
   const chosen = form ? splitProviderKey(form.provider) : null;
   const spec =
@@ -358,17 +361,17 @@ function NewTableModal({
       {form && (
         <Form onSubmit={onSubmit}>
           <Modal.Header closeButton>
-            <Modal.Title className="h4">New table</Modal.Title>
+            <Modal.Title className="h4"><T text="New table" /></Modal.Title>
           </Modal.Header>
           <Modal.Body>
             {/* A metadata table already has a name; a label can be given on its
                 settings page. */}
             {form.source !== "metadata" && (
               <Form.Group className="mb-3" controlId="new-table-name">
-                <Form.Label>Name</Form.Label>
+                <Form.Label><T text="Name" /></Form.Label>
                 <Form.Control
                   autoFocus
-                  placeholder="e.g. invoice"
+                  placeholder={t("e.g. invoice")}
                   value={form.name}
                   onChange={(e) => onChange({ ...form, name: e.target.value })}
                 />
@@ -381,7 +384,7 @@ function NewTableModal({
                 CSV file input appears only for the CSV choice. */}
             {databases.length > 1 && form.source !== "provider" && form.source !== "metadata" && (
               <Form.Group className="mb-3" controlId="new-table-database">
-                <Form.Label>Database</Form.Label>
+                <Form.Label><T text="Database" /></Form.Label>
                 <Form.Select
                   value={form.database}
                   onChange={(e) => onChange({ ...form, database: e.target.value })}
@@ -394,40 +397,39 @@ function NewTableModal({
                 </Form.Select>
                 {form.database !== PRIMARY_DATABASE && (
                   <Form.Text className="text-muted">
-                    The table is created in the <code>{form.database}</code> connection&rsquo;s
-                    schema, in that database — not in Saltcorn&rsquo;s own.
+                    <T text="The table is created in the" /> <code>{form.database}</code> <T text="connection’s schema, in that database — not in Saltcorn’s own." />
                   </Form.Text>
                 )}
               </Form.Group>
             )}
 
             <Form.Group className="mb-3" controlId="new-table-source">
-              <Form.Label>Type</Form.Label>
+              <Form.Label><T text="Type" /></Form.Label>
               <Form.Select
                 value={form.source}
                 onChange={(e) =>
                   onChange({ ...form, source: e.target.value as NewTableForm["source"] })
                 }
               >
-                <option value="blank">New database table</option>
-                <option value="csv">Create from CSV</option>
+                <option value="blank"><T text="New database table" /></option>
+                <option value="csv"><T text="Create from CSV" /></option>
                 {/* Offered only when a module supplies one. A chooser whose one
                     entry is "there are none" is a question with no answer, and
                     an installation with no modules is most of them. */}
-                {providers.length > 0 && <option value="provider">From a table provider</option>}
+                {providers.length > 0 && <option value="provider"><T text="From a table provider" /></option>}
                 {/* On the same terms: offered while there is one left to add. */}
-                {metadataTables.length > 0 && <option value="metadata">Metadata table</option>}
+                {metadataTables.length > 0 && <option value="metadata"><T text="Metadata table" /></option>}
               </Form.Select>
             </Form.Group>
 
             {form.source === "metadata" && (
               <Form.Group className="mb-3" controlId="new-table-metadata">
-                <Form.Label>Metadata table</Form.Label>
+                <Form.Label><T text="Metadata table" /></Form.Label>
                 <Form.Select
                   value={form.metadataTable}
                   onChange={(e) => onChange({ ...form, metadataTable: e.target.value })}
                 >
-                  <option value="">Choose a metadata table…</option>
+                  <option value=""><T text="Choose a metadata table…" /></option>
                   {metadataTables.map((name) => (
                     <option key={name} value={name}>
                       {name}
@@ -435,9 +437,7 @@ function NewTableModal({
                   ))}
                 </Form.Select>
                 <Form.Text className="text-muted">
-                  One of Saltcorn&rsquo;s own tables, added to this list so its rows and
-                  settings can be edited. It starts admin-only. Its fields are Saltcorn&rsquo;s
-                  and cannot be changed, and removing it from the list never drops it.
+                  <T text="One of Saltcorn’s own tables, added to this list so its rows and settings can be edited. It starts admin-only. Its fields are Saltcorn’s and cannot be changed, and removing it from the list never drops it." />
                 </Form.Text>
               </Form.Group>
             )}
@@ -445,7 +445,7 @@ function NewTableModal({
             {form.source === "provider" && (
               <>
                 <Form.Group className="mb-3" controlId="new-table-provider">
-                  <Form.Label>Table provider</Form.Label>
+                  <Form.Label><T text="Table provider" /></Form.Label>
                   <Form.Select
                     value={form.provider}
                     onChange={(e) =>
@@ -465,7 +465,7 @@ function NewTableModal({
                       })
                     }
                   >
-                    <option value="">Choose a provider…</option>
+                    <option value=""><T text="Choose a provider…" /></option>
                     {providers.map((p) => (
                       <option
                         key={providerKey(p.module, p.provider)}
@@ -476,9 +476,7 @@ function NewTableModal({
                     ))}
                   </Form.Select>
                   <Form.Text className="text-muted">
-                    The rows come from the module, not from a database. Saltcorn reads them; it
-                    does not create, change or delete them, and the columns are the
-                    provider&rsquo;s to decide.
+                    <T text="The rows come from the module, not from a database. Saltcorn reads them; it does not create, change or delete them, and the columns are the provider’s to decide." />
                   </Form.Text>
                 </Form.Group>
 
@@ -501,7 +499,7 @@ function NewTableModal({
 
             {form.source === "csv" && (
               <Form.Group controlId="new-table-csv">
-                <Form.Label>CSV file</Form.Label>
+                <Form.Label><T text="CSV file" /></Form.Label>
                 <Form.Control
                   type="file"
                   accept=".csv,text/csv"
@@ -516,9 +514,7 @@ function NewTableModal({
                   }}
                 />
                 <Form.Text className="text-muted">
-                  The columns become the table&rsquo;s fields — named and typed from the header
-                  and the values under it — and every row is imported. A row the file&rsquo;s own
-                  columns will not take is reported and no table is created.
+                  <T text="The columns become the table’s fields — named and typed from the header and the values under it — and every row is imported. A row the file’s own columns will not take is reported and no table is created." />
                 </Form.Text>
               </Form.Group>
             )}
@@ -526,10 +522,10 @@ function NewTableModal({
           <Modal.Footer>
             {problem && <span className="text-muted small me-auto">{problem}</span>}
             <Button variant="outline-secondary" onClick={onCancel} disabled={busy}>
-              Cancel
+              <T text="Cancel" />
             </Button>
             <Button type="submit" disabled={busy || problem !== null}>
-              Create
+              <T text="Create" />
             </Button>
           </Modal.Footer>
         </Form>

@@ -356,6 +356,8 @@ async fn the_request_and_response_shims_have_v1s_shape() {
         base_url: "https://books.example".into(),
         csrf_token: "tok".into(),
         wrap: None,
+        locale: None,
+        messages: Default::default(),
     })
     .unwrap();
     let out = host

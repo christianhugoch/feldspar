@@ -67,6 +67,11 @@ feldspar/
 │  ├─ sc-dns/                     # 0. the process's resolver: a hickory-backed getaddrinfo
 │  │                              #    linked in front of glibc's, so no NSS module is
 │  │                              #    dlopened into the static binary (§13.5)
+│  ├─ sc-i18n/                    # 0. Locale, negotiation, the Catalog, the message format,
+│  │                              #    CLDR plurals, `t!`/`tc!`, the `Translator` seam, and the
+│  │                              #    `core` catalogues. Layer 0 because sc-auth and sc-types
+│  │                              #    must be able to translate a sentence (§16.1); the
+│  │                              #    tree-sitter extractor is behind an `extract` feature
 │  ├─ sc-query/                   # 1. universal query language (enum AST) + SQL rendering trait
 │  ├─ sc-repomap/                 # 1. the coding agent's repo map: tree-sitter tags, personalised
 │  │                              #    PageRank, rendering to a token budget. No store, no deps
@@ -203,6 +208,8 @@ graph TD
   python --> expr
   files --> types["sc-types"]
   types --> query
+  types --> i18n["sc-i18n"]
+  i18n --> error
   query --> error["sc-error"]
   log["sc-log"] --> error
   cfgfile --> error
@@ -218,14 +225,15 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-dns` | `sc-error` |
 | `sc-query` | `sc-error` |
 | `sc-repomap` | — (nothing in the workspace) |
-| `sc-types` | `sc-error` `sc-query` |
+| `sc-i18n` | `sc-error` |
+| `sc-types` | `sc-error` `sc-i18n` `sc-query` |
 | `sc-db` | `sc-error` `sc-query` |
 | `sc-db-postgres` | `sc-db` `sc-error` `sc-log` `sc-query` |
 | `sc-db-sqlite` | `sc-db` `sc-error` `sc-log` `sc-query` |
 | `sc-expr` | `sc-error` `sc-query` |
 | `sc-files` | `sc-error` `sc-types` |
 | `sc-catalog` | `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
-| `sc-config` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
+| `sc-config` | `sc-catalog` `sc-db` `sc-error` `sc-i18n` `sc-log` `sc-query` `sc-types` |
 | `sc-email` | `sc-catalog` `sc-config` `sc-error` |
 | `sc-auth` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-llm` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
@@ -234,15 +242,15 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-stream` | `sc-catalog` `sc-db` `sc-error` `sc-query` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
 | `sc-workflow` | `sc-action` `sc-agent` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
-| `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-query` `sc-types` |
-| `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-stream` `sc-types` |
+| `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-llm` `sc-query` `sc-types` |
+| `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-query` `sc-stream` `sc-types` |
 | `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-model` `sc-query` `sc-types` |
-| `sc-viewpattern` | `sc-action` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
+| `sc-viewpattern` | `sc-action` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-query` `sc-types` |
 | `sc-module` | `sc-action` `sc-app` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-model` `sc-query` `sc-stream` `sc-types` `sc-viewpattern` |
 | `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-model` `sc-module` `sc-types` |
 | `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-repomap` `sc-types` |
-| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-stream` `sc-types` `sc-viewpattern` `sc-workflow` |
-| `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-types` `sc-viewpattern` |
+| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-stream` `sc-types` `sc-viewpattern` `sc-workflow` |
+| `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-types` `sc-viewpattern` |
 
 Four things the graph is worth reading for:
 
@@ -318,6 +326,8 @@ bundle that registers zero or more implementations of these into the catalog at 
 | `Framework` | `sc-app` | any | Own an application's primary UI (React/Next/Svelte/v1); declares its settings for the admin UI |
 | `BusDriver` | `sc-bus` | Rust | Publish/subscribe transport for the message bus |
 | `CodeAdapter` | `sc-expr` (trait); `sc-module`, `sc-python` (adapters) | Rust | Host a guest-language interpreter exposing the catalog |
+| `Translator` | `sc-i18n` | Rust | Fill a catalogue's missing messages — implemented over `sc-llm`'s configured provider in `sc-server` (and re-exported by `sc-cli`), so layer 0 never names an LLM (§16.1) |
+| `CatalogStore` | `sc-app` | Rust | Where *one application's* catalogue lives: files under `<project>/locales/` for an app with a source tree, `_fd_translations` rows for one without (§16.1) |
 
 Object-safety and dynamic dispatch (`Box<dyn Trait>`) are the default, because
 implementations are chosen at runtime from config and may be provided by guest languages
@@ -356,10 +366,16 @@ through a single Rust shim per adapter.
                     │ Postgres (primary) + …   │   │ sc-module JS / sc-python │
                     └────────────┬─────────────┘   └──────────────────────────┘
                                  │
-                    ┌────────────▼─────────────┐
-                    │   sc-query (enum AST)     │
-                    └──────────────────────────┘
+                    ┌────────────▼─────────────┐   ┌──────────────────────────┐
+                    │   sc-query (enum AST)     │   │ sc-i18n (layer 0)        │
+                    └──────────────────────────┘   │ Locale · negotiate · t!  │
+                                                   └──────────────────────────┘
 ```
+
+`sc-i18n` is drawn off to the side because it is under *everything*, not under the query
+layer: it sits at layer 0 beside `sc-error`, and every box above it — the router that
+negotiates a locale, `sc-types` translating a form field's label, `sc-auth` phrasing a refusal
+— reaches it directly (§16.1).
 
 The **Catalog** is the hub. It owns the connected database drivers, the in-memory cache of
 tables/fields/config/triggers/etc., and is the object every higher layer is handed to do
@@ -837,6 +853,15 @@ Per GOALS, the `users` table lives in the primary database and is deliberately m
 - Passwords are stored hashed with a modern KDF (argon2id).
 - A `legacy_id` field MAY be added when importing v1 apps (v1 user ids were autoincrement
   integers).
+- **`language`** is a nullable text column holding a BCP-47 tag — the locale this user reads in
+  (§16.1, D8). A **system column** despite being a user preference, because it has a type
+  nothing else on the form has (a select over the enabled locales) and because an admin who
+  added a column called `language` would otherwise be editing this one through a text box. It
+  is writable from two places at once: the user form, where an admin sets it when creating an
+  account for somebody who reads French, and the user menu's locale picker, where that somebody
+  changes it without needing an admin. `NULL` — the usual value — means "negotiate", and it is
+  what lets a trigger emailing a customer translate against *that customer's* language rather
+  than the admin's.
 - `role` is an integer **1–100**; 1 = admin (full access), 100 = public (not logged in).
   Admins MAY add arbitrary fields to the user table. `role` is a **foreign key onto
   `_fd_roles`** (§7.4): a role is a row carrying a name and role-specific settings, so
@@ -1223,6 +1248,7 @@ a sparse value goes into `attributes`.**
 | `_fd_views` | a Saltcorn UI application's views | **not an overlay**, and **per application** (§13.3): `(application, name)` is unique, so two applications may each have a `List Books` over one table. The pattern name, the table (which must be in the application's subset), `min_role`, `slug`, and a `configuration` that is **v1's shape, stored untouched** — it is what v1's own `list.ts` reads. `application` is by value, so deleting an application deletes its views itself |
 | `_fd_pages` | a Saltcorn UI application's pages | the same rules as `_fd_views`: per application, unique by name, a v1-shaped `layout` stored untouched, `min_role`, and `root_page_for_roles`, `no_menu` and `request_fluid_layout` in `attributes` |
 | `_fd_library` | a Saltcorn UI application's library ("shared components" in current v1) | the same rules again: per application, unique by name, deleted with the application. `icon` and a v1-shaped `layout` stored untouched. A layout places an item as `{ type: "library", library_id, slots }`, with `library_id` this table's UUID. Only a `saltcorn-ui` application may write one, and only the admin API writes it; the worker reads it from the view snapshot (§13.3, "The library") |
+| `_fd_translations` | an application's catalogue, for an application with no project tree (§16.1) | the same rules as `_fd_library`: per application, unique by `name` — which is the **locale tag** — and deleted with the application. `messages` is the flat catalogue of §16.1, keyed by the **English source text**. It is the home of a *Saltcorn UI* application's translations, because a Saltcorn UI application's definition is rows; a code application's are files in its repository (`<project>/locales/{locale}.json`), because that is where *its* definition is. Both are behind one `CatalogStore`, so the admin API, the Translations screen and the LLM fill are written once |
 | `_fd_models` | model definitions | **not an overlay** — the row is the model's only definition (§14.2): the provider, the `dataset` (which rows and which derived values, as a list of `sc-expr` formulas), the provider's configuration, the hyperparameter *space* (per key a value or a list to search over) and the split's fractions and seed. `table_name` is derived from the dataset on the way out and checked against it on the way in, so the list can be filtered by table without reading every dataset |
 | `_fd_model_instances` | one fit each | the provider's serialised `state`, its `parameters` (structured for display), the **host's** `metrics` per split, and the `encoding` the fit was made with — which is the load-bearing one: a prediction is encoded the way its fit was, or it fails. `status` is a column because every row has one and it is what the list filters on; the failure **sentence** is in `attributes`, because it is present only on the rows that failed. `active` is a column and at most one row per model carries it |
 | `_fd_streams` | streams: dataflows as an entity | **not an overlay** — there is nothing to introspect a stream from, so the row is its only definition (§14.3): the provider, the `configuration` its `config_spec` declares (secrets stored as given, redacted on the way to a form), `min_role` (the floor for **observing** it through an application; `None` is admin-only, the trigger rule for the trigger reason), and in `attributes` the sparse `enabled` flag. The **element type is not a column**: it is a pure function of `provider` + `configuration`, computed on read, because a stored copy would be a second answer that drifts the day a provider's declaration changes. Nor are the elements — a flow is made durable by a trigger that writes a row, and there is no `_fd_stream_elements` |
@@ -1559,6 +1585,14 @@ erDiagram
     json layout "v1-shaped, untouched"
     json attributes
   }
+  TRANSLATIONS["_fd_translations"] {
+    uuid id PK
+    uuid application "the app, by value; UNIQUE (application, name)"
+    text name "the locale tag -- fr, pt-BR"
+    text description
+    json messages "the flat catalogue: English source text -> translation"
+    json attributes
+  }
   STREAMS["_fd_streams"] {
     uuid id PK
     text name UK "a trigger's channel, an app's StreamRef, a socket path segment"
@@ -1608,6 +1642,7 @@ erDiagram
   APPS ||--o{ VIEWS : "application -- by value, deleted with the app"
   APPS ||--o{ PAGES : "application -- by value, deleted with the app"
   APPS ||--o{ LIBRARY : "application -- by value, deleted with the app"
+  APPS ||--o{ TRANSLATIONS : "application -- by value, deleted with the app"
   VIEWS }o--o{ LIBRARY : "library_id -- inside configuration JSON"
   PAGES }o--o{ LIBRARY : "library_id -- inside layout JSON"
   VIEWS }o--o| TABLES : "table_name -- by name"
@@ -4677,6 +4712,26 @@ a browser cannot read the body of a failed upgrade. After it, the frames are the
 (§14.3). The generated client gets an `observeStream_{name}()` per exposed stream, typed from
 the element type — which is where the element type earns its keep, and it costs nothing to keep
 in step because an app's client is emitted at build time (§13.1).
+
+**The catalogue route, mounted the same way.** `GET {mount}/i18n/{locale}.json` answers an
+application's own catalogue (§16.1, D7) and is mounted beside the endpoint sets for the reason
+above: a catalogue is a file, and an `EndpointSet` is a typed request/response model with no
+shape for one. It is **served rather than bundled**, which is the decision the route exists to
+keep — an admin who fixes a mistranslation must not wait for a bundler, and "translate this
+application into Spanish" must not be a deploy. Three things make that affordable: a per-mount
+cache, dropped when a translation is saved and born empty on a remount, so `SIGHUP` and a
+rebuild re-read it without knowing the cache exists; an ETag, so the second page load is a 304
+with no body; and a locale guard that answers 404 for an application with no locales before
+touching a file store or the database (D11). An enabled locale with nothing translated yet
+answers an **empty** catalogue rather than a 404 — it is a locale the application serves, and
+the runtime that asked has a well-formed answer to cache. There is no loading state to design
+around, because the key is the English source text: the application renders correct English
+before the fetch lands.
+
+A request *to an application* is negotiated against the locales **that application** declares
+(`Application.attributes`), falling back to the installation's `enabled_locales` when it
+declares none. An admin who translates their application into French should not also have to
+enable French for the admin UI before a visitor can read it.
 
 ### 13.3 Frameworks
 
@@ -7840,6 +7895,268 @@ dependency — both detailed in §13.5.
 (no inline handlers) rather than a server markup model; framework-level XSS escaping in the
 React layer; structural SQL-injection safety in `sc-query`; per-CRUD authorization enforced
 at the query layer or via RLS; passwords argon2id; optional OAuth2 IdP; new-device detection.
+
+### 16.1 Internationalisation
+
+Every string this product puts in front of a person starts out English, and there are three
+populations of them, distinguished by **who wrote the string and when** rather than by any
+technology:
+
+| | Who wrote it | When | Where it lives | Who translates it |
+|---|---|---|---|---|
+| **A** | us | at release | the source tree | us, once, shipped |
+| **B** | the admin (or their coding agent) | while building an application | the application's definition | the admin, per installation |
+| **C** | the end user | while using the application | a table row | nobody, usually |
+
+One facility covers **A** and **B** on both sides of the Rust/TypeScript split. **C** is out of
+scope: v1's `localizes_field` becomes a field attribute whose column the row layer projects in
+place of the base one, and that belongs with the projection work rather than bolted onto it. The
+argument for every decision below is in [I18N.md](./I18N.md); this section is what the code is.
+
+#### The catalogue
+
+One flat JSON object per locale per domain, **keyed by the English source text**:
+
+```json
+{
+  "Incorrect password": "Mot de passe incorrect",
+  "Delete {name}?": "Supprimer {name} ?",
+  "{count} rows": { "one": "{count} ligne", "other": "{count} lignes" },
+  "verb\u0004Order": "Commander"
+}
+```
+
+A value is a string, or an object keyed by **CLDR plural category** selected on the argument
+named `count` (`icu_plurals` in Rust with `compiled_data`, `Intl.PluralRules` in the browser —
+the same CLDR data on both sides). A plain string where plurals were expected is used as
+written, because a locale with one form is a locale with one form. `\u0004` separates a
+disambiguating context from the source text — gettext's `msgctxt`, so the file stays flat and a
+non-programmer can open it — and is what `tc!(loc, "verb", "Order")` writes. There is **no
+`en.json`**: the key is the English.
+
+The id being the source text is the load-bearing decision. A missing translation renders correct
+English rather than `auth.bad_password`, which for a facility whose normal state is "the admin
+has translated 60% of their application" makes the failure mode the design; an LLM translating
+`"Delete {name}?"` has the context that an LLM translating a dotted key does not; extraction is
+mechanical, because the literal at the call site *is* the record; and the vendored v1 view
+patterns already call `req.__("Preset %s")`, so keys would mean rewriting code we deliberately
+do not own. The cost is real and accepted: **changing the English orphans the translation.** The
+answer is not deletion — the Translations screen shows orphans under "no longer used" and keeps
+them in the file.
+
+#### The format, stated once
+
+`{identifier}` is a placeholder; `{{` is a literal `{`; anything else between braces is a
+literal run. An identifier with no argument **renders as written** — a visible `{name}` is a bug
+report and an empty string is a mystery. A message is never HTML: it is escaped by whatever
+renders it, exactly as any other string is.
+
+A message is deliberately **not** a `{{ }}` template (§10.1). The product already has one of
+those, and in a Saltcorn UI layout a text element's content is simultaneously a translatable B
+string *and* a template: if the sigils matched, a translator's `{{ user.email }}` would be
+indistinguishable from an interpolation the renderer is supposed to evaluate, and the difference
+between "data from a translator" and "an expression this server executes" is not one to leave to
+a parser. Single braces keep them visibly different, and they are what ICU, MF2, Fluent and
+every LLM already expect.
+
+The format is implemented **twice** — `sc_i18n::format` and the generated `messages.ts` — and
+the two are held to each other by `crates/sc-i18n/fixtures/format.json`, a corpus of (message,
+args, expected) triples that a Rust test and a vitest test both run. Two implementations of one
+thing disagree by the third bug fixed in one of them; a shared fixture is what makes this
+instance affordable.
+
+**v1's positional `%s` survives inside the Saltcorn UI shim only.** The key in the catalogue is
+the string with `%s` in it, and nothing else in the system sees that form.
+
+#### The domains, and their two homes
+
+| Domain | Catalogue | Why there |
+|---|---|---|
+| `core` | `crates/sc-i18n/locales/{locale}.json`, embedded with `include_str!` | ships with the binary; a server with no database still has its messages |
+| `admin` | `ui/admin/src/locales/{locale}.json`, `import()`-ed per locale | ships with the bundle, code-split so one locale is downloaded |
+| `builder` | `ui/builder/src/locales/{locale}.json` | same, separate bundle |
+| per application | **files** for an application with a project tree — `<project>/locales/{locale}.json`; **rows** in `_fd_translations` (§9) for one without | *an application's translations live wherever that application's definition lives* |
+
+The last row is the one worth arguing. A code application's definition is its git repository;
+putting its translations anywhere else means a clone that does not carry them, a coding agent
+that cannot read them with the file tools it already has, and a backup story that has to
+remember them separately. A Saltcorn UI application's definition is `_fd_views` and `_fd_pages`
+— it has no tree, so its catalogue is a row, deleted with the application exactly as
+`_fd_library` is. Both are behind one `CatalogStore` (§2.1), chosen by asking whether the
+framework builds from a source tree — the same question the build already asks — so the admin
+API, the Translations screen and the LLM fill are written once.
+
+Which locales an application serves, and which one it falls back to, are **sparse values in
+`Application.attributes`** (§9's column-vs-attributes rule): most applications have neither, and
+an application that has neither answers an empty set without touching a file store or the
+database.
+
+#### The locale on a request
+
+In order: an explicit `?lang=`; the signed-in user's `language` column (§7.1); the `lang` cookie
+— how an anonymous visitor to an application chooses; `Accept-Language` with its quality values;
+the application's default locale; the installation's `default_locale`. Every candidate is
+matched against `enabled_locales` through a real fallback chain (`pt-BR` → `pt` → default), and
+an unknown tag never escapes the enabled set. Negotiation happens **once, in the router**, and
+the result is carried on `AppRequest`, `ViewRequest` and the admin handler context; the response
+carries `Content-Language` and `Vary: Accept-Language, Cookie`.
+
+**A locale is a value, never ambient** — `t!(loc, "…")`, not a thread-local and not a
+task-local. This server does work for a person on a task no request owns (a trigger emailing a
+customer), and an ambient locale is exactly the mechanism that would silently send that mail in
+the admin's language. The recipient's own `language` is the locale for that message, which is a
+bug class v1 had and this does not. Two settings configure it, in a `localisation` section of
+`_fd_config`: `default_locale` and `enabled_locales`, both stored as text for the reason
+`ssl_extra_domains` is — a settings screen has a text box, and one typo should be one error
+naming the typo rather than a locale that silently never matches.
+
+**Zero cost when unused.** With one enabled locale, `I18nSettings::is_multilingual` is false and
+the router does not parse `Accept-Language`, does not read the cookie and does not set the
+response headers; an application with no locales fetches no catalogue and its generated `t()` is
+`format` and nothing else. i18n is a thing an admin turns on, not a tax on every installation,
+and that is asserted in tests rather than hoped.
+
+#### The server translates everything the server says
+
+An admin's browser shows two kinds of English: literals in `ui/admin/src/*.tsx`, and text that
+*arrived from the server* — an error sentence, a `FormField` label out of a provider's
+`config_spec`, a settings section heading, a stream provider's one-line description. The rule is
+that **anything the server sends as human-readable text is translated by the server, against the
+request's negotiated locale, before it is serialised**; the SPA's catalogue covers the SPA's own
+literals and nothing else. Concretely that is `sc_types::translate_spec(&mut spec, loc)` on the
+admin API paths that serve declared specs — settings sections, and the `config_spec` of every
+extension point (actions, agents and their traits, file stores, LLM providers, model providers,
+stream providers, table providers, frameworks) together with the provider and framework
+descriptions — and `t!(loc, …)` where a message is produced for a human.
+
+The alternative, shipping the core catalogue to the browser, fails on the first message with a
+value computed server-side and makes every other client of the API — the MCP server, the
+`feldspar` CLI, a generated application client — responsible for a job the server already has
+the locale for.
+
+`translate_spec` lives in `sc-types` rather than `sc-i18n`, because a function that walks a
+`FormField` cannot live in the crate `sc-types` depends on. It translates the **label** and
+nothing else: a `FormField` has no sublabel (a settings field's help text hangs off
+`sc_config::ConfigDef` and is translated at the API edge beside it), and an option is a *value*
+whose translation would fail its own validation.
+
+#### Extraction is a Rust pass, not a step in anybody's build
+
+`sc_i18n::extract` (behind the `extract` feature, mirroring `sc-repomap`'s `grammars`
+arrangement) parses `.ts`, `.tsx`, `.js` and `.jsx` with tree-sitter and reports every `t(…)`,
+`tc(…)` and `<T text="…">` call site with its key, file and line. A call whose first argument is
+not a string literal — or a substitution-free template literal — is an **error naming file and
+line**: `t(label)` cannot be translated, and silently skipping it is how an application ends up
+half-translated with nobody knowing. Rust-side keys are found by a scanner over `t!(`/`tc!(`
+call sites, a macro rather than a grammar, so a scan is honest there and the test that it agrees
+with the shipped `core` catalogues is what keeps it so.
+
+This is the one constraint no JS i18n library satisfies, and it is why none is adopted: the
+admin UI has to show "here are the strings your application uses" for an application it has
+never built, whose `package.json` we do not control, whose framework might be Vue, and which may
+be mid-edit by an agent. Every other extraction story is a plugin in *that project's* bundler.
+
+Two things fall out of the same parse:
+
+- **The lint.** JSX *text nodes* and `label` / `title` / `placeholder` / `aria-label` attributes
+  holding a bare English literal that no `t` wraps. `feldspar i18n lint` reports them and an
+  application's Translations screen shows the count, which is what makes "wrap this UI's
+  strings" a finishable job with a test at the end of it rather than a sweep somebody eyeballs.
+  A text node inside `<code>`, `<kbd>`, `<samp>`, `<pre>` or `<var>` is not reported: `npm
+  install` is a command, not a sentence.
+- **`feldspar i18n extract | lint | check | translate`**, with `--domain` and `--locale`.
+  `check` reports coverage per locale and **fails on exactly one thing**: a placeholder or
+  plural mismatch between a translation and its key. Coverage is a number, not a gate — a new
+  English string must not break the build. `whale-ci.yml` runs `check` beside `fmt` and
+  `clippy`.
+
+#### The LLM translates; the machine checks the placeholders
+
+`translate_missing(catalog, source, translator, keys)` batches keys into one `Translator` call
+each. The target locale is the catalogue's own; the keys to fill are passed alongside, since a
+catalogue holds translations and not the set of messages that want one. `Translator` is declared
+in `sc-i18n` at layer 0 and implemented over `sc-llm`'s configured provider in `sc-server`
+(re-exported by `sc-cli`, so one prompt has one implementation), which is how every other seam
+in this tree is arranged.
+
+The validation is the part that matters and it is **not in the prompt**: a returned message
+whose placeholder set or plural categories differ from the source's is rejected and left
+untranslated, with the key in the warning. An LLM that renames `{count}` to `{nombre}` produces
+a string that renders a literal `{nombre}` in front of a user, and no amount of prompt
+engineering substitutes for checking. Two surfaces, one function: `feldspar i18n translate
+--domain core --locale fr` at development time, committed to git; a **Translate missing** button
+on an application's Translations screen at run time, writing that application's own catalogue.
+
+#### What each population gets
+
+**A, in Rust.** Every sentence a *person* reads on a request path is wrapped: authentication and
+sign-up, validation messages that reach a form, the application-facing 4xx pages, the admin
+API's refusals. **System errors are not wrapped** (see the error classification above): they go
+to the error log and to an admin reading a stack, and a translated one loses the string you
+would search for. The same line is drawn one level up — a message to a *programmer* about the
+shape of a request is not a message to a person, and stays English.
+
+**A, in the admin SPA.** `ui/admin/src/i18n.tsx` gives an `I18nProvider`, `useT()` and `<T>`
+over a lazily `import()`-ed `src/locales/{locale}.json`; the locale picker in the user menu
+writes the user's `language`; `<html lang>` and `<html dir>` follow the locale, and an RTL
+locale swaps in `bootstrap.rtl.min.css`. The SPA does **not** negotiate: `authStatus` answers
+`locales.current`, the locale the *server* negotiated, because a browser negotiating a second
+time from `navigator.languages` would disagree with the `Content-Language` already promised, on
+exactly the requests where it matters. `<T>` carries a `values` prop whose value may be a React
+node, because a third of these sentences have a `<code>` or a link in the middle of them and
+without it each becomes three fragments no translator can reorder.
+
+**A, in the builder.** `ui/builder`'s vendored `useTranslation` is already
+`translations[phrase] || phrase` — D1 arrived at independently by v1 — and what was empty is the
+map. It is filled from the `builder` domain in the boot data the server assembles. The phrases
+live in the vendored tree, so the `builder` domain has a *vendored* source list: its messages
+count, its lint findings and its unreadable call sites do not, because there is nothing to be
+done about what a vendored file says.
+
+**B, in a code application.** The admin or the agent writes `t("Add a task")`, importing from
+`./feldspar/i18n`. The runtime is **generated, not depended on** (no new npm package):
+`messages.ts` in the common runtime files — the format, the negotiation and the catalogue fetch,
+framework-neutral, so a framework a module declares gets it unchanged — and `i18n.tsx` in
+React's, with `I18nProvider`, `useT`, a module-level `t()` and `<T>`. The scaffold wires the
+provider into `main.tsx` and uses `t()` in everything it writes; `AGENTS.md`, `SKILL.md` and the
+runtime `README.md` say that user-visible text goes through `t()`. The Translations screen lists
+every extracted key with its coverage per locale, the unwrapped literals the lint found and the
+orphans; saving writes through the `CatalogStore` and drops the mount's cache, so the running
+application serves the change on the next reload **with no rebuild**. The server puts the
+orphans back on a save rather than the screen: a key the source no longer uses never appears in
+the grid, so a save from the grid cannot have been asked to delete one.
+
+**B, in a Saltcorn UI application.** v1's `getStringsForI18n` is vendored and intact on every
+view pattern, so `ViewRuntime::strings_for_i18n` (§13.3) collects an admin's own strings across
+the existing seam exactly as `references` does. `translate` in `module-host.mjs` — the identity
+until now — becomes a catalogue lookup that keeps v1's positional `%s`, and `getLocale()`
+answers the request's locale instead of `"en"`. Same screen, same button, rows instead of files.
+The catalogue lives on the *call's* async-local context inside the worker, **not** on
+`getState()`: that state is built once per snapshot and read by every visitor, so a locale
+cached there would serve the second visitor the first visitor's language. `getState().i18n.__`,
+which is what `translateLayout` calls, reads through to it. What is sent to the worker is
+**strings only** — v1's `__` has no plural forms, so a plural entry is left out and its English
+renders.
+
+#### What is deliberately not translated
+
+- **Type C**, the end user's own data (above).
+- **System errors**, and messages to a programmer about the shape of a request.
+- **What a module declares.** A v1 plugin's field labels are its own strings in its own package;
+  the server translating them would be the server claiming authorship of text it did not write.
+  They pass through.
+- **Numbers, dates and currencies in Rust.** The browser has `Intl`; the server has little
+  reason to format a number for a human, and Saltcorn UI's date fieldviews keep doing what they
+  do.
+- **`ui/ide`.** The VS Code workbench brings its own localisation machinery and its own language
+  packs.
+- **The URL.** The locale is negotiated, not routed: there is no `/fr/tasks`.
+- **MessageFormat 2, XLIFF/PO export and a TMS integration.** The flat JSON object is
+  convertible to any of them the day the Rust implementation exists or somebody wants the
+  converter.
+
+Translation is **per installation, not per tenant**, because applications are the multi-tenancy
+(§13.2) and an application's catalogue is per application.
 
 ---
 

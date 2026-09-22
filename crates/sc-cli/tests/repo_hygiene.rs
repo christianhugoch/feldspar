@@ -1051,6 +1051,143 @@ fn the_design_records_what_the_constraints_milestone_actually_built() {
     }
 }
 
+/// The i18n milestone, held to what it built (§16.1). The section has to carry
+/// the things a reader would otherwise have to reconstruct from four crates:
+/// the three populations and which of them is out of scope, the catalogue's
+/// shape and its one load-bearing decision, the format and the fixture that
+/// keeps its two implementations honest, the four domains and the two homes an
+/// application's catalogue has, the negotiation order, the rule that the server
+/// translates what the server says, and what is deliberately left in English.
+#[test]
+fn the_design_records_what_the_i18n_milestone_actually_built() {
+    let root = workspace_root();
+    let design = read(&root, "docs/TECHNICAL_DESIGN.md");
+    for fragment in [
+        // The section itself, and the three populations.
+        "### 16.1 Internationalisation",
+        "who wrote the string and when",
+        // The catalogue: the key is the English, and the two shapes of a value.
+        "keyed by the English source text",
+        "CLDR plural category",
+        "`en.json`**: the key is the English",
+        "orphans the translation",
+        // The format, and the reason it is not the template language.
+        "renders as written",
+        "crates/sc-i18n/fixtures/format.json",
+        "positional `%s` survives inside the Saltcorn UI shim only",
+        // The domains, and where an application's catalogue lives.
+        "`<project>/locales/{locale}.json`",
+        "_fd_translations",
+        "`CatalogStore`",
+        "**sparse values in",
+        // Negotiation: the order, and the rule that keeps it out of a global.
+        "the `lang` cookie",
+        "`pt-BR` → `pt` → default",
+        "Vary: Accept-Language, Cookie",
+        "never ambient",
+        "Zero cost when unused",
+        // D5, and where the spec walk actually lives.
+        "The server translates everything the server says",
+        "`sc_types::translate_spec",
+        // Extraction, the lint and the CLI.
+        "tree-sitter",
+        "error naming file and",
+        "feldspar i18n extract | lint | check | translate",
+        "Coverage is a number, not a gate",
+        // The translator seam, and the check that is not in the prompt.
+        "`Translator` is declared",
+        "**not in the prompt**",
+        "`{nombre}`",
+        // The two runtimes an application gets, and the Saltcorn UI half.
+        "generated, not depended on",
+        "ViewRuntime::strings_for_i18n",
+        "async-local context inside the worker",
+        // What stays English.
+        "What is deliberately not translated",
+        "System errors",
+        "negotiated, not routed",
+    ] {
+        assert!(
+            design.contains(fragment),
+            "the design should record `{fragment}`"
+        );
+    }
+}
+
+/// The i18n tutorial has to walk the milestone's own definition of done — two
+/// locales turned on, the admin UI in French, a React application translated end
+/// to end, the same for a Saltcorn UI application — and then say the two things
+/// a reader would otherwise meet in production: that the first argument to `t()`
+/// must be a literal, and that a translation is live without a rebuild. Each
+/// fragment below is one step or one rule that would be invisibly lost if the
+/// page were rewritten, because the tutorial would still read fine without it.
+#[test]
+fn the_i18n_tutorial_walks_the_definition_of_done() {
+    let root = workspace_root();
+    let tutorial = read(&root, "docs/tutorial-i18n.md");
+    for fragment in [
+        // Turning it on, and the language picker that appears when you do.
+        "Settings → Localisation",
+        "`en, fr`",
+        "language select appears in the account row",
+        "`language` column",
+        // The two catalogues behind "the admin UI in French", which ship
+        // differently — the reason this tutorial has a command in it.
+        "feldspar i18n translate --domain admin --locale fr",
+        "the server translates everything the server",
+        // Negotiation, from the outside.
+        "content-language: fr",
+        "vary: accept-language, cookie",
+        // The call shapes, and the rule a reader is most harmed by losing.
+        "must be a string literal",
+        "renders as written",
+        "tc(\"verb\", \"Order\")",
+        "<T>",
+        // The screen, the button, and the check that is not in the prompt.
+        "Applications → your application → Translations",
+        "Translate missing",
+        "rejected and left in English",
+        "No longer used",
+        "Not wrapped in `t()`",
+        // Where it was written, and that it is live without a build.
+        "locales/fr.json",
+        "with no rebuild",
+        "/i18n/fr.json",
+        // The command line, and what CI fails on.
+        "feldspar i18n lint",
+        "feldspar i18n check",
+        "Coverage is reported, not",
+        // The Saltcorn UI half, and its two differences.
+        "_fd_translations",
+        "getStringsForI18n",
+        "`%s` is preserved",
+        // And what stays English.
+        "System errors",
+        "negotiated, not routed",
+    ] {
+        assert!(
+            tutorial.contains(fragment),
+            "the i18n tutorial should cover `{fragment}`"
+        );
+    }
+}
+
+/// The i18n tutorial is reachable from the two tutorials whose applications it
+/// translates — a page nothing links to is a page nobody finds.
+#[test]
+fn the_i18n_tutorial_is_linked_from_the_applications_it_translates() {
+    let root = workspace_root();
+    for doc in [
+        "docs/tutorial-react-todo.md",
+        "docs/tutorial-saltcorn-ui.md",
+    ] {
+        assert!(
+            read(&root, doc).contains("tutorial-i18n.md"),
+            "{doc} should link to the i18n tutorial"
+        );
+    }
+}
+
 /// The constraints tutorial has to reach all four kinds *and* the two things a
 /// reader would otherwise meet in production: a rule refusing a write that never
 /// went near Saltcorn, and a formula refused for asking a question the database

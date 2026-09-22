@@ -11,6 +11,7 @@ import Form from "react-bootstrap/Form";
 import { api } from "../api";
 import { SaltcornLogo } from "../icons";
 import { CenteredPage } from "../layout";
+import { T } from "../i18n";
 
 export function FirstUser({ onCreated }: { onCreated: () => void }) {
   const [email, setEmail] = useState("");
@@ -37,23 +38,23 @@ export function FirstUser({ onCreated }: { onCreated: () => void }) {
         <span className="navbar-brand d-inline-flex align-items-center gap-2">
           <SaltcornLogo className="h-6" />
             <div className="ms-2 login-logo">
-              <div className="saltcorn-label">Saltcorn</div>
-              <div className="feldspar-label">Feldspar</div>
+              <div className="saltcorn-label"><T text="Saltcorn" /></div>
+              <div className="feldspar-label"><T text="Feldspar" /></div>
             </div>
         </span>
       </div>
       <Card className="card-md">
         <Card.Body>
           <Card.Title as="h1" className="h3 text-center mb-2">
-            Welcome to Saltcorn
+            <T text="Welcome to Saltcorn" />
           </Card.Title>
           <p className="text-secondary text-center mb-4">
-            Create the first administrator to get started.
+            <T text="Create the first administrator to get started." />
           </p>
           {error && <Alert variant="danger">{error}</Alert>}
           <Form onSubmit={submit}>
             <Form.Group className="mb-3" controlId="firstUserEmail">
-              <Form.Label>Email</Form.Label>
+              <Form.Label><T text="Email" /></Form.Label>
               <Form.Control
                 type="email"
                 value={email}
@@ -63,7 +64,7 @@ export function FirstUser({ onCreated }: { onCreated: () => void }) {
               />
             </Form.Group>
             <Form.Group className="mb-3" controlId="firstUserPassword">
-              <Form.Label>Password</Form.Label>
+              <Form.Label><T text="Password" /></Form.Label>
               <Form.Control
                 type="password"
                 value={password}

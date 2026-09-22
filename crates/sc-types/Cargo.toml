@@ -10,6 +10,10 @@ rust-version.workspace = true
 
 [dependencies]
 sc-error.workspace = true
+# `translate_spec` (§16.x, D5): the server translates every label it sends, and
+# `FormField` is the vocabulary those labels are declared in. `sc-i18n` is layer
+# 0 precisely so this dependency can point this way.
+sc-i18n.workspace = true
 sc-query.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -35,6 +35,7 @@ use sc_types::BasicType;
 
 use crate::api::AppGraphql;
 use crate::application::Application;
+use crate::i18n::{app_default_locale, app_locales, i18n_catalog_path_template};
 use crate::react::{REACT_CLIENT_FILE, REACT_RUNTIME_SUBDIR};
 
 /// A generated file: a path relative to the project directory, and its contents.
@@ -83,6 +84,16 @@ const RUNTIME_README_FILE: &str = "README.md";
 /// The generated `CREATE TABLE` description of the app's tables, so a coding
 /// agent in this project can write SQL against something real.
 const RUNTIME_SCHEMA_FILE: &str = "schema.sql";
+
+/// The generated message runtime: the format, the negotiation and the catalogue
+/// fetch (§16.1, D10 — the runtime is generated rather than depended on).
+const RUNTIME_MESSAGES_FILE: &str = "messages.ts";
+
+/// React's i18n layer over it: the provider, the hook and `<T>`.
+const RUNTIME_I18N_FILE: &str = "i18n.tsx";
+
+/// The same file as an import specifier, which carries no extension.
+const RUNTIME_I18N_FILE_STEM: &str = "i18n";
 
 /// The generated map of the *other* half of the application: the administration
 /// MCP tools that reach the configuration this project cannot see
@@ -284,6 +295,10 @@ pub fn runtime_files(ctx: &ProjectContext<'_>) -> Vec<GeneratedFile> {
             store_ts(ctx.tables, ctx.endpoints),
         ),
         GeneratedFile::new(
+            format!("{REACT_RUNTIME_SUBDIR}/{RUNTIME_I18N_FILE}"),
+            format!("{GENERATED_HEADER}{I18N_TSX}"),
+        ),
+        GeneratedFile::new(
             format!("{REACT_RUNTIME_SUBDIR}/{RUNTIME_README_FILE}"),
             runtime_readme(ctx),
         ),
@@ -338,6 +353,7 @@ pub fn common_runtime_files(
             at(RUNTIME_SCHEMA_FILE),
             format!("{GENERATED_SQL_HEADER}{}", ctx.schema_sql),
         ),
+        GeneratedFile::new(at(RUNTIME_MESSAGES_FILE), messages_ts(ctx)),
         GeneratedFile::new(at(RUNTIME_SKILL_FILE), ctx.skill.to_owned()),
     ];
     if let Some(graphql) = ctx.graphql {
@@ -736,6 +752,15 @@ fn runtime_readme(ctx: &ProjectContext<'_>) -> String {
          types a read's `select`, `filter` and `order` are expressed in.\n\
          - `{RUNTIME_SCHEMA_FILE}` — the `CREATE TABLE` definitions of the tables \
          this application declares. A description, not a migration.\n\
+         - `{RUNTIME_MESSAGES_FILE}` — the message runtime: the format, the \
+         locale negotiation and the catalogue fetch. It holds this application's \
+         locales, which are rewritten on every build.\n\
+         - `{RUNTIME_I18N_FILE}` — React's half of it: `I18nProvider` (already \
+         wired into `src/main.tsx`), `useT()`, a module-level `t()` for code \
+         that is not a component, and `<T>` for a sentence with an element in \
+         the middle of it. **Every string a person reads goes through one of \
+         them** — `feldspar i18n lint` reports the ones that do not, and a \
+         literal nothing wraps can never be translated.\n\
          - `{RUNTIME_SKILL_FILE}` — for a coding agent: the half of this \
          application that is **not** in this repository, and the administration \
          MCP tools that reach it. Read it before adding a field or a trigger.\n"
@@ -862,6 +887,31 @@ fn agents_md(ctx: &ProjectContext<'_>) -> String {
          Everything else in this project is yours. The pages under `src/pages/`, \
          the routes, the shell and the styling were generated once, when the \
          project was scaffolded, and are never rewritten.\n\
+         \n\
+         ## Every string a person reads goes through `t()`\n\
+         \n\
+         Not a style rule — a build one. `feldspar i18n extract` reads the \
+         `t(\"…\")` call sites out of this project, the admin translates them on \
+         the application's Translations screen, and the catalogue is served from \
+         the server. A literal that is not wrapped is invisible to all three, \
+         and `feldspar i18n lint` reports it.\n\
+         \n\
+         ```tsx\n\
+         import {{ useT }} from \"./{REACT_RUNTIME_SUBDIR}/{RUNTIME_I18N_FILE_STEM}\";\n\
+         \n\
+         const {{ t }} = useT();          // inside a component\n\
+         t(\"Add a task\")\n\
+         t(\"Delete {{name}}?\", {{ name: row.title }})   // `{{name}}`, not a template\n\
+         ```\n\
+         \n\
+         The message id **is the English source text**, so an untranslated \
+         message renders correct English rather than a key. Two rules follow \
+         from that and both matter: the first argument must be a **string \
+         literal** — `t(label)` cannot be extracted and is an error — and a \
+         sentence with an element in the middle of it stays **one** message, \
+         written `<T text=\"Read the {{guide}} first.\" values={{{{ guide: <a … /> }}}} />` \
+         rather than cut into three fragments no translator can reorder. \
+         Outside a component, import `t` itself rather than the hook.\n\
          \n\
          ## The half of this application that is not in this project\n\
          \n\
@@ -1042,8 +1092,8 @@ fn main_tsx(auth: bool) -> String {
     let (import, open, close) = if auth {
         (
             "import { AuthProvider } from \"./auth\";\n",
-            "    <AuthProvider>\n",
-            "    </AuthProvider>\n",
+            "      <AuthProvider>\n",
+            "      </AuthProvider>\n",
         )
     } else {
         ("", "", "")
@@ -1054,22 +1104,626 @@ fn main_tsx(auth: bool) -> String {
         r#"import {{ StrictMode }} from "react";
 import {{ createRoot }} from "react-dom/client";
 import {{ BrowserRouter }} from "react-router-dom";
+import {{ I18nProvider }} from "./feldspar/i18n";
 {import}import App from "./App";
 import "./app.css";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("no #root element in index.html");
 
+// `I18nProvider` outermost, with no props: it negotiates the locale itself —
+// `?lang=`, the `lang` cookie, the browser's preferences, this application's
+// default — and fetches that locale's catalogue. An application with no locales
+// pays nothing for it.
 createRoot(root).render(
   <StrictMode>
-{open}{pad}    <BrowserRouter>
-{pad}      <App />
-{pad}    </BrowserRouter>
-{close}  </StrictMode>,
+    <I18nProvider>
+{open}{pad}      <BrowserRouter>
+{pad}        <App />
+{pad}      </BrowserRouter>
+{close}    </I18nProvider>
+  </StrictMode>,
 );
 "#
     )
 }
+
+/// The generated message runtime, with this application's own locales at the top
+/// of it.
+///
+/// Three constants are generated and the rest is invariant: the locales this
+/// application serves, the one it falls back to, and the path its catalogues are
+/// served at. The path comes from
+/// [`i18n_catalog_path_template`](crate::i18n::i18n_catalog_path_template) —
+/// the same function the router reads a request's path back against — so the
+/// bundle and the server cannot disagree about where a catalogue is.
+///
+/// The locales are a snapshot, refreshed on every build, and that is the right
+/// trade: *which* locales an application offers is part of its configuration and
+/// changes when an admin adds one, whereas *what they say* is the catalogue and
+/// is live (D7). The expensive half is the one that is served.
+fn messages_ts(ctx: &ProjectContext<'_>) -> String {
+    let locales: Vec<String> = app_locales(ctx.app)
+        .unwrap_or_default()
+        .iter()
+        .map(|l| l.as_str().to_owned())
+        .collect();
+    let default = app_default_locale(ctx.app)
+        .ok()
+        .flatten()
+        .map(|l| l.as_str().to_owned())
+        .or_else(|| locales.first().cloned())
+        .unwrap_or_else(|| "en".to_owned());
+    let list = locales
+        .iter()
+        .map(|l| format!("{l:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let note = if locales.is_empty() {
+        "//\n\
+         // This application serves one language, so nothing below does any\n\
+         // work: `negotiate()` answers `en` and `loadCatalogue()` fetches\n\
+         // nothing. Enable a locale on the application's Translations screen\n\
+         // and rebuild.\n"
+    } else {
+        ""
+    };
+    let path = i18n_catalog_path_template(ctx.app);
+    format!(
+        "{GENERATED_HEADER}\
+{note}//
+// Every string a person reads goes through `t()` (see `{RUNTIME_I18N_FILE}`).
+// The message id **is the English source text**, so an untranslated message
+// renders correct English rather than a key — which, for a facility whose
+// normal state is \"60% translated\", is the design rather than the failure.
+//
+// `feldspar i18n extract` reads these call sites out of the source, the
+// Translations screen fills them in, and the catalogue is **served** from
+// `{path}` — so a fixed mistranslation is live without a rebuild.
+
+/** The locales this application serves, as its record declares them. */
+export const LOCALES: readonly string[] = [{list}];
+
+/** The locale to fall back to when nothing else matches. */
+export const DEFAULT_LOCALE = {default:?};
+
+/** Where a catalogue is served, with `{{locale}}` where the tag goes. */
+export const CATALOGUE_PATH = {path:?};
+{MESSAGES_TS_BODY}"
+    )
+}
+
+/// The framework-neutral half of the generated i18n runtime: the message
+/// format, the negotiation and the catalogue fetch.
+///
+/// **No new npm dependency** (D10). There is no i18next here and no react-intl:
+/// what a message format needs is one scanner, what a plural needs is
+/// `Intl.PluralRules`, and both are eighty lines. The same eighty lines are in
+/// `ui/admin/src/i18n.tsx`, and the two are held to each other by
+/// `crates/sc-i18n/fixtures/format.json` — the corpus a Rust test and a vitest
+/// both run.
+///
+/// It is in [`common_runtime_files`] rather than React's own because none of it
+/// is React: a framework a module declares gets this file unchanged and writes
+/// its own provider over it.
+const MESSAGES_TS_BODY: &str = r#"
+/** The `\u0004` that separates a disambiguating context from the source text. */
+export const CONTEXT_SEPARATOR = "\u0004";
+
+/** The source language, which is also every key in every catalogue. */
+export const SOURCE_LOCALE = "en";
+
+/** A message's arguments: `{name}` is replaced by `args.name`. */
+export type Args = Record<string, string | number>;
+
+/**
+ * One catalogue entry: a string, or the CLDR plural categories of one.
+ *
+ * Which categories a locale has is CLDR's answer and not a choice — French has
+ * `one` and `other`, Russian has four — so this is a partial record and the
+ * selection falls back rather than asserting.
+ */
+export type Message = string | Partial<Record<Intl.LDMLPluralRule, string>>;
+
+/** One locale's catalogue: key = the English source text. */
+export type Catalogue = Record<string, Message>;
+
+/**
+ * Render `message` with `args`.
+ *
+ * - `{identifier}` is a placeholder, where an identifier is an ASCII letter or
+ *   `_` followed by letters, digits and `_`.
+ * - `{{` is a literal `{`.
+ * - Anything else between braces is a literal run, copied out as written.
+ * - A closing brace is never ambiguous and therefore never escaped.
+ * - **A placeholder with no argument renders as written.** A visible `{name}`
+ *   is a bug report; an empty string is a mystery.
+ *
+ * A message is never HTML: it is escaped by whatever renders it, exactly as any
+ * other string is.
+ */
+export function format(message: string, args: Args = {}): string {
+  // The fast path, and the one almost every message takes: no braces at all.
+  if (!message.includes("{")) return message;
+  return parts(message, (name) =>
+    Object.prototype.hasOwnProperty.call(args, name) ? String(args[name]) : null,
+  ).join("");
+}
+
+/**
+ * The message, scanned once, with each placeholder handed to `resolve`.
+ *
+ * The one implementation of the format's rules: `format` joins what it returns
+ * and `<T values={…}>` interleaves elements into it. `resolve` answers `null`
+ * for a name it has no value for, and a placeholder with no value renders as
+ * written — the same rule in both callers, because it is written once.
+ */
+export function parts<V>(
+  message: string,
+  resolve: (name: string) => V | null,
+): (string | V)[] {
+  const out: (string | V)[] = [];
+  let literal = "";
+  let i = 0;
+  const flush = () => {
+    if (literal) out.push(literal);
+    literal = "";
+  };
+  while (i < message.length) {
+    const ch = message[i];
+    if (ch === "{" && message[i + 1] === "{") {
+      literal += "{";
+      i += 2;
+      continue;
+    }
+    if (ch === "{") {
+      const close = message.indexOf("}", i + 1);
+      if (close === -1) {
+        // Never closed: the rest of the message is text.
+        literal += message.slice(i);
+        break;
+      }
+      const run = message.slice(i + 1, close);
+      const value = isIdentifier(run) ? resolve(run) : null;
+      if (value === null) {
+        literal += `{${run}}`;
+      } else if (typeof value === "string") {
+        literal += value;
+      } else {
+        flush();
+        out.push(value);
+      }
+      i = close + 1;
+      continue;
+    }
+    literal += ch;
+    i += 1;
+  }
+  flush();
+  return out;
+}
+
+/** Whether `run` is an identifier — a letter or `_`, then letters, digits, `_`. */
+function isIdentifier(run: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(run);
+}
+
+/**
+ * The string a catalogue entry renders to, selecting a plural form on `count`.
+ *
+ * A plain string where plural forms were expected is used as written — a
+ * translator who wrote one form meant one form. A category the entry does not
+ * have falls back to `other`, because a message in the wrong plural form still
+ * says something and a blank says nothing.
+ */
+export function selectMessage(
+  message: Message,
+  locale: string,
+  args: Args,
+): string {
+  if (typeof message === "string") return message;
+  const count = args.count;
+  let category: Intl.LDMLPluralRule = "other";
+  if (typeof count === "number") {
+    try {
+      category = new Intl.PluralRules(locale).select(count);
+    } catch {
+      category = "other";
+    }
+  }
+  return message[category] ?? message.other ?? Object.values(message)[0] ?? "";
+}
+
+/** The key a `tc("verb", "Order")` is filed under. */
+export function contextKey(context: string, text: string): string {
+  return `${context}${CONTEXT_SEPARATOR}${text}`;
+}
+
+/**
+ * One lookup: the catalogue, then the key itself.
+ *
+ * `fallback` is what `tc` renders when nothing is translated — the source text
+ * without its context, because the context is a note to the translator and
+ * never something a reader sees.
+ */
+export function lookup(
+  catalogue: Catalogue,
+  locale: string,
+  key: string,
+  args: Args = {},
+  fallback?: string,
+): string {
+  const entry = catalogue[key];
+  if (entry === undefined) return format(fallback ?? key, args);
+  return format(selectMessage(entry, locale, args), args);
+}
+
+/** The languages written right to left, by their BCP-47 language subtag. */
+const RTL_LANGUAGES = new Set([
+  "ar", "arc", "ckb", "dv", "fa", "ha", "he", "khw",
+  "ks", "ps", "sd", "syr", "ug", "ur", "yi",
+]);
+
+/** Which way `tag` is written. */
+export function direction(tag: string): "ltr" | "rtl" {
+  const language = tag.split("-")[0]?.toLowerCase() ?? "";
+  return RTL_LANGUAGES.has(language) ? "rtl" : "ltr";
+}
+
+/**
+ * The locale a preference resolves to, or `null` if none of them is one this
+ * application serves.
+ *
+ * The fallback chain is real: `pt-BR` matches a catalogue for `pt`, and `pt`
+ * matches `pt-BR` only if nothing better is on offer — a regional catalogue is
+ * a better answer than no answer.
+ */
+export function match(preferred: readonly string[]): string | null {
+  for (const raw of preferred) {
+    const tag = raw.trim();
+    if (!tag) continue;
+    const exact = LOCALES.find((l) => l.toLowerCase() === tag.toLowerCase());
+    if (exact) return exact;
+    // `pt-BR` → `pt`, one subtag at a time.
+    const parts = tag.split("-");
+    while (parts.length > 1) {
+      parts.pop();
+      const shorter = parts.join("-").toLowerCase();
+      const found = LOCALES.find((l) => l.toLowerCase() === shorter);
+      if (found) return found;
+    }
+    // `pt` → `pt-BR`, when that is all this application has.
+    const regional = LOCALES.find((l) =>
+      l.toLowerCase().startsWith(`${tag.toLowerCase()}-`),
+    );
+    if (regional) return regional;
+  }
+  return null;
+}
+
+/**
+ * The locale to serve this page in.
+ *
+ * In order: an explicit `?lang=`, the `lang` cookie (how a visitor with no
+ * account chooses), then the browser's own preferences, then this application's
+ * default. The order is the server's, deliberately: an application and the
+ * server it is served from should not disagree about what language a visitor
+ * reads.
+ *
+ * An application with no locales answers `en` without looking at anything,
+ * which is what makes internationalisation free for an application that has
+ * not turned it on.
+ */
+export function negotiate(): string {
+  if (LOCALES.length === 0) return SOURCE_LOCALE;
+  const wanted: string[] = [];
+  if (typeof location !== "undefined") {
+    const asked = new URLSearchParams(location.search).get("lang");
+    if (asked) wanted.push(asked);
+  }
+  const cookie = readCookie("lang");
+  if (cookie) wanted.push(cookie);
+  if (typeof navigator !== "undefined") {
+    wanted.push(...(navigator.languages ?? [navigator.language]));
+  }
+  return match(wanted) ?? DEFAULT_LOCALE;
+}
+
+/** Remember `locale` as this visitor's choice, the way the server reads it. */
+export function rememberLocale(locale: string): void {
+  if (typeof document === "undefined") return;
+  const year = 365 * 24 * 60 * 60;
+  document.cookie = `lang=${encodeURIComponent(locale)};path=/;max-age=${year};samesite=lax`;
+}
+
+function readCookie(name: string): string | null {
+  if (typeof document === "undefined") return null;
+  for (const pair of document.cookie.split(";")) {
+    const [key, ...rest] = pair.trim().split("=");
+    if (key === name) return decodeURIComponent(rest.join("="));
+  }
+  return null;
+}
+
+/**
+ * This locale's catalogue, fetched from the server.
+ *
+ * **Served, not bundled.** The catalogue is a file in this repository, but the
+ * running application reads it over HTTP, so fixing a mistranslation is a save
+ * rather than a deploy. The browser caches it under its ETag, so the second
+ * page load costs a 304.
+ *
+ * A missing or unreadable catalogue is **not an error**: the key is the English
+ * source text, so a locale with no file renders correct English. There is no
+ * loading state to design around and no flash of message ids.
+ */
+export async function loadCatalogue(locale: string): Promise<Catalogue> {
+  if (locale === SOURCE_LOCALE || !LOCALES.includes(locale)) return {};
+  try {
+    const response = await fetch(
+      CATALOGUE_PATH.replace("{locale}", encodeURIComponent(locale)),
+      { credentials: "same-origin" },
+    );
+    if (!response.ok) return {};
+    const body: unknown = await response.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) return {};
+    return body as Catalogue;
+  } catch {
+    return {};
+  }
+}
+"#;
+
+/// React's half: the provider, the hook, the module-level `t`, and `<T>`.
+const I18N_TSX: &str = r#"import {
+  createContext,
+  Fragment,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
+import {
+  CATALOGUE_PATH,
+  DEFAULT_LOCALE,
+  LOCALES,
+  SOURCE_LOCALE,
+  contextKey,
+  direction,
+  format,
+  loadCatalogue,
+  lookup,
+  match,
+  negotiate,
+  parts,
+  rememberLocale,
+  type Args,
+  type Catalogue,
+} from "./messages";
+
+export {
+  CATALOGUE_PATH,
+  DEFAULT_LOCALE,
+  LOCALES,
+  SOURCE_LOCALE,
+  direction,
+  match,
+  negotiate,
+  rememberLocale,
+  type Args,
+  type Catalogue,
+};
+
+/** What `useT` hands a component. */
+export type Translator = {
+  /** The locale this page is being rendered in. */
+  locale: string;
+  /** `ltr` or `rtl`, the same answer `<html dir>` was given. */
+  dir: "ltr" | "rtl";
+  /** Translate a message. The English *is* the key. */
+  t: (text: string, args?: Args) => string;
+  /** Translate a message that needs disambiguating from another with the same English. */
+  tc: (context: string, text: string, args?: Args) => string;
+};
+
+/**
+ * The untranslated translator: English, left to right, no catalogue.
+ *
+ * The default context value, so a component rendered outside a provider — in a
+ * unit test, say — still renders its English rather than throwing. There is
+ * nothing a catalogue could add to a message whose key is already the answer.
+ */
+const SOURCE_TRANSLATOR: Translator = {
+  locale: SOURCE_LOCALE,
+  dir: "ltr",
+  t: (text, args) => format(text, args),
+  tc: (_context, text, args) => format(text, args),
+};
+
+const I18nContext = createContext<Translator>(SOURCE_TRANSLATOR);
+
+/**
+ * The active translator, for code that is not a component.
+ *
+ * A hook cannot be called from an event handler, a store, or the function that
+ * builds a `window.confirm` question, and those sentences are read by a person
+ * too. The provider keeps this in step with what the tree is rendering, so the
+ * two never disagree about the locale.
+ */
+let active: Translator = SOURCE_TRANSLATOR;
+
+/** Translate a message outside a component. Inside one, prefer `useT()`. */
+export function t(text: string, args?: Args): string {
+  return active.t(text, args);
+}
+
+/** `t` for a message that needs disambiguating from another with the same English. */
+export function tc(context: string, text: string, args?: Args): string {
+  return active.tc(context, text, args);
+}
+
+/** The locale the application is currently being rendered in. */
+export function currentLocale(): string {
+  return active.locale;
+}
+
+/**
+ * Make a locale's catalogue available to everything below, and tell the
+ * document what language it is in.
+ *
+ * `locale` defaults to what `negotiate()` works out — `?lang=`, the `lang`
+ * cookie, the browser's preferences, this application's default — so the usual
+ * wiring is `<I18nProvider>` with no props at all.
+ *
+ * `<html lang>` and `<html dir>` are set here because they are one fact about
+ * the page and this is the one component that knows it: `lang` is what a screen
+ * reader picks a voice from, and `dir` is what makes a right-to-left page a
+ * right-to-left page rather than a left-to-right page full of Arabic.
+ *
+ * Children render **immediately**, in English, while the catalogue is in
+ * flight. The alternative — a spinner over the whole application until a JSON
+ * file lands — would make a translation cost a paint, and English appearing for
+ * 40ms is not worse than nothing appearing for 40ms.
+ */
+export function I18nProvider({
+  locale,
+  children,
+}: {
+  locale?: string;
+  children: ReactNode;
+}): ReactElement {
+  const [chosen, setChosen] = useState<string>(() => locale ?? negotiate());
+  const [catalogue, setCatalogue] = useState<Catalogue>({});
+  const dir = direction(chosen);
+
+  useEffect(() => {
+    if (locale) setChosen(locale);
+  }, [locale]);
+
+  useEffect(() => {
+    let live = true;
+    setCatalogue({});
+    void loadCatalogue(chosen).then((loaded) => {
+      if (live) setCatalogue(loaded);
+    });
+    return () => {
+      live = false;
+    };
+  }, [chosen]);
+
+  useEffect(() => {
+    document.documentElement.lang = chosen;
+    document.documentElement.dir = dir;
+  }, [chosen, dir]);
+
+  const value = useMemo<Translator>(
+    () => ({
+      locale: chosen,
+      dir,
+      t: (text, args) => lookup(catalogue, chosen, text, args),
+      tc: (context, text, args) =>
+        lookup(catalogue, chosen, contextKey(context, text), args, text),
+    }),
+    [catalogue, chosen, dir],
+  );
+  active = value;
+
+  return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
+}
+
+/** The translator for the current locale. */
+export function useT(): Translator {
+  return useContext(I18nContext);
+}
+
+/**
+ * A translated message as an element: `<T text="Add a task" />`.
+ *
+ * The same thing `t()` does, for the places where a call is awkward — a JSX
+ * child beside other elements — and the thing `feldspar i18n lint` reports a
+ * bare English literal against.
+ *
+ * # Element values
+ *
+ * `values` maps a placeholder to a React node:
+ *
+ * ```tsx
+ * <T
+ *   text="Read the {guide} before adding a field."
+ *   values={{ guide: <a href="/docs">guide</a> }}
+ * />
+ * ```
+ *
+ * Without it, a sentence with a link in the middle has to be cut into three
+ * messages, and a translator handed those three fragments cannot move the link,
+ * cannot reorder the clause, and in half the languages cannot produce a
+ * grammatical sentence at all. `args` and `values` are looked up in that order,
+ * so a name in both is a string.
+ */
+export function T({
+  text,
+  context,
+  args,
+  values,
+}: {
+  text: string;
+  context?: string;
+  args?: Args;
+  values?: Record<string, ReactNode>;
+}): ReactElement {
+  const { t: translate, tc: translateWith } = useT();
+  const rendered = context ? translateWith(context, text, args) : translate(text, args);
+  if (!values) return <>{rendered}</>;
+  // `t` has already substituted `args` and left every other placeholder as
+  // written, so what is left to find here is exactly the element holes.
+  const pieces = parts<ReactNode>(rendered, (name) =>
+    Object.prototype.hasOwnProperty.call(values, name) ? values[name] : null,
+  );
+  return (
+    <>
+      {pieces.map((piece, index) => (
+        <Fragment key={index}>{piece}</Fragment>
+      ))}
+    </>
+  );
+}
+
+/**
+ * A locale picker, for an application that serves more than one.
+ *
+ * Renders nothing when there is only one locale to pick, which is the usual
+ * case and the reason this can sit in a layout unconditionally.
+ */
+export function LocalePicker({
+  className,
+}: {
+  className?: string;
+}): ReactElement | null {
+  const { locale } = useT();
+  const [, force] = useState(0);
+  if (LOCALES.length < 2) return null;
+  return (
+    <select
+      className={className}
+      value={locale}
+      aria-label={t("Language")}
+      onChange={(event) => {
+        rememberLocale(event.target.value);
+        location.reload();
+        force((n) => n + 1);
+      }}
+    >
+      {LOCALES.map((tag) => (
+        <option key={tag} value={tag}>
+          {new Intl.DisplayNames([tag], { type: "language" }).of(tag) ?? tag}
+        </option>
+      ))}
+    </select>
+  );
+}
+"#;
 
 /// The auth layer: a provider, a `useUser` hook and a gate.
 ///
@@ -1139,9 +1793,11 @@ export function useUser(): AuthState {
 "#;
 
 const LOGIN_TSX: &str = r#"import { useState, type FormEvent } from "react";
+import { useT } from "./feldspar/i18n";
 import { useUser } from "./auth";
 
 export default function Login() {
+  const { t } = useT();
   const { signIn } = useUser();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -1163,9 +1819,9 @@ export default function Login() {
 
   return (
     <form className="card sc-login" onSubmit={submit}>
-      <h1>Sign in</h1>
+      <h1>{t("Sign in")}</h1>
       <label>
-        Email
+        {t("Email")}
         <input
           type="email"
           value={email}
@@ -1174,7 +1830,7 @@ export default function Login() {
         />
       </label>
       <label>
-        Password
+        {t("Password")}
         <input
           type="password"
           value={password}
@@ -1184,7 +1840,7 @@ export default function Login() {
       </label>
       {error && <p className="sc-error">{error}</p>}
       <button type="submit" disabled={busy}>
-        {busy ? "Signing in…" : "Sign in"}
+        {busy ? t("Signing in…") : t("Sign in")}
       </button>
     </form>
   );
@@ -1202,15 +1858,18 @@ export default function Login() {
 fn app_tsx(project: &str, auth: bool) -> String {
     let (auth_imports, user_hook, user_cell, element) = if auth {
         (
-            "import { useUser } from \"./auth\";\nimport Login from \"./Login\";\n",
-            "  const { user, signOut } = useUser();\n",
+            "import { useT } from \"./feldspar/i18n\";\n\
+             import { useUser } from \"./auth\";\n\
+             import Login from \"./Login\";\n",
+            "  const { t } = useT();\n  const { user, signOut } = useUser();\n",
             r#"        <span className="sc-user">
           {user ? (
             <>
-              {user.email} <button onClick={() => void signOut()}>Sign out</button>
+              {user.email}{" "}
+              <button onClick={() => void signOut()}>{t("Sign out")}</button>
             </>
           ) : (
-            "not signed in"
+            t("not signed in")
           )}
         </span>
 "#,
@@ -1239,7 +1898,7 @@ export default function App() {{
                 to={{r.path}}
                 className={{location.pathname === r.path ? "active" : ""}}
               >
-                {{r.label}}
+                {{r.label?.()}}
               </Link>
             ))}}
         </nav>
@@ -1271,6 +1930,12 @@ export default function App() {{
 /// about a gate that is not there.
 fn routes_tsx(tables: &[&Table], auth: bool) -> String {
     let mut imports = String::from("import type { ReactNode } from \"react\";\n");
+    // Only when there is a label to translate: the project type-checks with
+    // `noUnusedLocals`, so an import nothing calls is a build failure in
+    // generated code — and an application with no tables has no nav.
+    if !tables.is_empty() {
+        imports.push_str("import { t } from \"./feldspar/i18n\";\n");
+    }
     if auth {
         imports.push_str("import Login from \"./Login\";\n");
     }
@@ -1282,7 +1947,7 @@ fn routes_tsx(tables: &[&Table], auth: bool) -> String {
             pascal(&table.name)
         ));
         entries.push_str(&format!(
-            "  {{ path: \"{}\", label: \"{}\", element: <{component} /> }},\n",
+            "  {{ path: \"{}\", label: () => t(\"{}\"), element: <{component} /> }},\n",
             route_path(&table.name, tables),
             title(&table.name)
         ));
@@ -1290,7 +1955,7 @@ fn routes_tsx(tables: &[&Table], auth: bool) -> String {
     let (public_field, login_route) = if auth {
         (
             "  /** Reachable without signing in. Absent means: sign-in required. */\n  public?: boolean;\n",
-            "  { path: \"/login\", label: \"\", element: <Login />, public: true },\n",
+            "  { path: \"/login\", label: null, element: <Login />, public: true },\n",
         )
     } else {
         ("", "")
@@ -1300,8 +1965,14 @@ fn routes_tsx(tables: &[&Table], auth: bool) -> String {
 export type AppRoute = {{
   /** The path within the app. */
   path: string;
-  /** Shown in the nav; an empty label hides the route from it. */
-  label: string;
+  /**
+   * Shown in the nav; `null` hides the route from it.
+   *
+   * A function, not a string, because it is translated: a message evaluated
+   * when this module is imported would be resolved before the catalogue had
+   * loaded, and would stay English for the life of the page.
+   */
+  label: (() => string) | null;
   element: ReactNode;
 {public_field}}};
 
@@ -1345,7 +2016,7 @@ fn page_tsx(table: &Table, endpoints: &EndpointSet) -> String {
     let headers = table
         .fields
         .iter()
-        .map(|f| format!("            <th>{}</th>", f.base.label))
+        .map(|f| format!("            <th>{{t({:?})}}</th>", f.base.label))
         .collect::<Vec<_>>()
         .join("\n");
     let cells = table
@@ -1379,6 +2050,11 @@ fn page_tsx(table: &Table, endpoints: &EndpointSet) -> String {
     head.push_str(&format!(
         "import {{ {hook_imports}, type {row_type} }} from \"../feldspar/hooks\";\n"
     ));
+    // Every generated page has user-visible text in it — a heading and a column
+    // header at the very least — so this import is never unused, which
+    // `noUnusedLocals` would otherwise make a build failure in code the admin
+    // did not write.
+    head.push_str("import { useT } from \"../feldspar/i18n\";\n");
 
     let (empty_const, create_form) = if can_create {
         let form = CreateForm::of(table, endpoints);
@@ -1397,7 +2073,7 @@ fn page_tsx(table: &Table, endpoints: &EndpointSet) -> String {
       >
 {form_fields}
         <button type="submit" disabled={{create.pending}}>
-          Add
+          {{t("Add")}}
         </button>
         {{create.error && <p className="sc-error">{{create.error.message}}</p>}}
       </form>
@@ -1408,7 +2084,10 @@ fn page_tsx(table: &Table, endpoints: &EndpointSet) -> String {
         (String::new(), String::new())
     };
 
-    let mut hooks = format!("  const {{ data, loading, error }} = use{pascal}();\n");
+    let mut hooks = String::from("  const { t } = useT();\n");
+    hooks.push_str(&format!(
+        "  const {{ data, loading, error }} = use{pascal}();\n"
+    ));
     if can_create {
         hooks.push_str(&format!("  const create = useCreate{pascal}();\n"));
         hooks.push_str("  const [form, setForm] = useState(empty);\n");
@@ -1423,7 +2102,9 @@ fn page_tsx(table: &Table, endpoints: &EndpointSet) -> String {
             "            <th />\n".to_owned(),
             format!(
                 r#"              <td>
-                <button onClick={{() => void remove.run(row.{pk})}}>Delete</button>
+                <button onClick={{() => void remove.run(row.{pk})}}>
+                  {{t("Delete")}}
+                </button>
               </td>
 "#
             ),
@@ -1440,9 +2121,9 @@ export default function {pascal}Page() {{
 
   return (
     <section>
-      <h1>{title}</h1>
+      <h1>{{t({title:?})}}</h1>
 {create_form}      {{loading && !data ? (
-        <p>Loading…</p>
+        <p>{{t("Loading…")}}</p>
       ) : (
         <table>
           <thead>
@@ -1482,7 +2163,7 @@ fn store_page_tsx(table: &Table, endpoints: &EndpointSet) -> String {
     let headers = table
         .fields
         .iter()
-        .map(|f| format!("            <th>{}</th>", f.base.label))
+        .map(|f| format!("            <th>{{t({:?})}}</th>", f.base.label))
         .collect::<Vec<_>>()
         .join("\n");
     let cells = table
@@ -1504,6 +2185,7 @@ fn store_page_tsx(table: &Table, endpoints: &EndpointSet) -> String {
 
     format!(
         r#"import {{ useState }} from "react";
+import {{ useT }} from "../feldspar/i18n";
 import {{ use{pascal}Store }} from "../feldspar/store";
 
 const empty = {{
@@ -1511,6 +2193,7 @@ const empty = {{
 }};
 
 export default function {pascal}Page() {{
+  const {{ t }} = useT();
   const {name} = use{pascal}Store();
   const [form, setForm] = useState(empty);
 
@@ -1518,7 +2201,7 @@ export default function {pascal}Page() {{
 
   return (
     <section>
-      <h1>{title}</h1>
+      <h1>{{t({title:?})}}</h1>
       <form
         className="card"
         onSubmit={{(e) => {{
@@ -1530,11 +2213,11 @@ export default function {pascal}Page() {{
         }}}}
       >
 {form_fields}
-        <button type="submit">Add</button>
+        <button type="submit">{{t("Add")}}</button>
       </form>
       {{{name}.writeError && <p className="sc-error">{{{name}.writeError.message}}</p>}}
       {{{name}.loading ? (
-        <p>Loading…</p>
+        <p>{{t("Loading…")}}</p>
       ) : (
         <table>
           <thead>
@@ -1548,7 +2231,9 @@ export default function {pascal}Page() {{
               <tr key={{String(row.{pk})}} style={{{{ opacity: row.$pending ? 0.5 : 1 }}}}>
 {cells}
               <td>
-                <button onClick={{() => void {name}.remove(row.{pk})}}>Delete</button>
+                <button onClick={{() => void {name}.remove(row.{pk})}}>
+                  {{t("Delete")}}
+                </button>
               </td>
               </tr>
             ))}}
@@ -1677,10 +2362,15 @@ pub(super) fn has_op(endpoints: &EndpointSet, op: &str, table: &str) -> bool {
 
 /// A labelled input bound into the create form's state, typed by the column.
 fn form_control(name: &str, ty: BasicType) -> String {
+    // The label is a word a person reads, so it goes through `t()` like every
+    // other one. The key is the column's name, which is the English the form
+    // shows today; a translator renaming it in French does not rename the
+    // column.
+    let label = format!("{{t({name:?})}}");
     match ty {
         BasicType::Bool => format!(
             r#"        <label>
-          {name}
+          {label}
           <input
             type="checkbox"
             checked={{form.{name}}}
@@ -1690,7 +2380,7 @@ fn form_control(name: &str, ty: BasicType) -> String {
         ),
         BasicType::Int | BasicType::Float | BasicType::Decimal => format!(
             r#"        <label>
-          {name}
+          {label}
           <input
             type="number"
             value={{form.{name}}}
@@ -1700,7 +2390,7 @@ fn form_control(name: &str, ty: BasicType) -> String {
         ),
         _ => format!(
             r#"        <label>
-          {name}
+          {label}
           <input
             value={{form.{name}}}
             onChange={{(e) => setForm({{ ...form, {name}: e.target.value }})}}
@@ -2644,7 +3334,7 @@ mod tests {
         let tables = [tasks()];
         let app = todo();
         let files = runtime_files(&ctx(&app, &tables, &endpoints(&tables), None));
-        assert_eq!(files.len(), 7);
+        assert_eq!(files.len(), 9);
         // Every regenerated file says so, each in a syntax its own reader can
         // parse; nothing outside the directory does, because nothing outside it
         // is overwritten.
@@ -2652,6 +3342,8 @@ mod tests {
         assert!(file(&files, "src/feldspar/store.ts").contains("DO NOT EDIT"));
         assert!(file(&files, "src/feldspar/client.ts").contains("DO NOT EDIT"));
         assert!(file(&files, "src/feldspar/helper.ts").contains("DO NOT EDIT"));
+        assert!(file(&files, "src/feldspar/messages.ts").contains("DO NOT EDIT"));
+        assert!(file(&files, "src/feldspar/i18n.tsx").contains("DO NOT EDIT"));
         assert!(file(&files, "src/feldspar/schema.sql").starts_with("-- Schema generated"));
         assert!(
             file(&files, "src/feldspar/README.md").contains("overwritten without warning"),
@@ -3002,6 +3694,88 @@ mod tests {
         assert!(store.contains("export {};"), "{store}");
     }
 
+    /// The generated i18n runtime: what is in it, what the project wires it
+    /// into, and what an application with no locales pays for it (D11).
+    #[test]
+    fn the_generated_i18n_runtime_is_wired_into_the_project() {
+        let tables = [tasks()];
+        let app = todo();
+        let files = project_files(&ctx(&app, &tables, &endpoints(&tables), None));
+
+        // The two files, in the two places: the format and the fetch are
+        // framework-neutral and go in the common half, React's provider does
+        // not.
+        let messages = file(&files, "src/feldspar/messages.ts");
+        let i18n = file(&files, "src/feldspar/i18n.tsx");
+        for wanted in [
+            "export function format(",
+            "export function negotiate(",
+            "export async function loadCatalogue(",
+        ] {
+            assert!(messages.contains(wanted), "{wanted}");
+        }
+        for wanted in [
+            "export function I18nProvider(",
+            "export function useT(",
+            "export function t(",
+            "export function T(",
+        ] {
+            assert!(i18n.contains(wanted), "{wanted}");
+        }
+        // React's half is built on the neutral half rather than repeating it.
+        assert!(i18n.contains(r#"from "./messages""#), "{i18n}");
+
+        // The catalogue path is the one the router reads a request back
+        // against, not a second spelling of it.
+        assert!(
+            messages.contains(&format!(
+                "export const CATALOGUE_PATH = {:?};",
+                crate::i18n::i18n_catalog_path_template(&app)
+            )),
+            "{messages}"
+        );
+
+        // D11: an application with no locales serves one language, and the
+        // runtime says so rather than fetching anything.
+        assert!(messages.contains("export const LOCALES: readonly string[] = [];"));
+        assert!(messages.contains("serves one language"), "{messages}");
+
+        // The provider is wired in, outermost, with no props: it negotiates.
+        let main = file(&files, "src/main.tsx");
+        assert!(main.contains(r#"import { I18nProvider } from "./feldspar/i18n";"#));
+        assert!(
+            main.find("<I18nProvider>").unwrap() < main.find("<BrowserRouter>").unwrap(),
+            "{main}"
+        );
+
+        // And the pages it writes use it. Every user-visible string in a
+        // generated page is a `t()` call site the extractor can find.
+        let page = file(&files, "src/pages/Tasks.tsx");
+        assert!(page.contains(r#"import { useT } from "../feldspar/i18n";"#));
+        assert!(page.contains("const { t } = useT();"), "{page}");
+        assert!(page.contains(r#"<h1>{t("Tasks")}</h1>"#), "{page}");
+        assert!(page.contains(r#"{t("Add")}"#), "{page}");
+        assert!(page.contains(r#"{t("Loading…")}"#), "{page}");
+        // A column header is the column's label, as a key.
+        assert!(page.contains(r##"<th>{t("title")}</th>"##), "{page}");
+        // Nothing user-visible is left bare.
+        assert!(!page.contains("<p>Loading…</p>"), "{page}");
+
+        // A nav label is a *function*, because a message resolved at import
+        // time would be resolved before the catalogue had loaded.
+        let routes = file(&files, "src/routes.tsx");
+        assert!(routes.contains(r#"label: () => t("Tasks")"#), "{routes}");
+        assert!(routes.contains(r#"import { t } from "./feldspar/i18n";"#));
+
+        // The three documents say the rule.
+        for (path, needle) in [
+            ("AGENTS.md", "goes through `t()`"),
+            ("src/feldspar/README.md", "goes through one of"),
+        ] {
+            assert!(file(&files, path).contains(needle), "{path}");
+        }
+    }
+
     #[test]
     fn the_runtime_declares_nothing_it_does_not_export() {
         // The generated project type-checks with `noUnusedLocals`, so a helper
@@ -3081,8 +3855,13 @@ mod tests {
         let exposed = exposed_tables(&tables, &eps);
         let routes = routes_tsx(&exposed, has_auth(&eps));
         // The first table owns `/`; later ones get their own path.
-        assert!(routes.contains(r#"{ path: "/", label: "Tasks", element: <TasksPage /> }"#));
-        assert!(routes.contains(r#"{ path: "/notes", label: "Notes", element: <NotesPage /> }"#));
+        assert!(
+            routes.contains(r#"{ path: "/", label: () => t("Tasks"), element: <TasksPage /> }"#)
+        );
+        assert!(
+            routes
+                .contains(r#"{ path: "/notes", label: () => t("Notes"), element: <NotesPage /> }"#)
+        );
         // Only the login route is public — the default is the locked door.
         assert_eq!(routes.matches("public: true").count(), 1);
         assert!(routes.contains(r#"path: "/login""#));
@@ -3133,7 +3912,9 @@ mod tests {
         // Every route renders, and none carries a flag about a gate that does not
         // exist.
         let routes = file(&files, "src/routes.tsx");
-        assert!(routes.contains(r#"{ path: "/", label: "Tasks", element: <TasksPage /> }"#));
+        assert!(
+            routes.contains(r#"{ path: "/", label: () => t("Tasks"), element: <TasksPage /> }"#)
+        );
         assert!(!routes.contains("public"), "{routes}");
         assert!(!routes.contains("/login"), "{routes}");
         let app = file(&files, "src/App.tsx");

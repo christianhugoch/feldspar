@@ -58,6 +58,14 @@ pub fn admin_endpoints() -> EndpointSet {
             .output(TypeSchema::struct_of([
                 StructField::new("any_user_exists", TypeSchema::bool()),
                 StructField::new("current_user", TypeSchema::optional(user_summary_schema())),
+                // Which languages this installation serves (§16.1). Here rather
+                // than on the settings payload because this is the call the SPA
+                // makes before it renders anything, and three screens need the
+                // list: the user menu's locale picker, the user form's language
+                // select, and whatever chooses the SPA's own catalogue. It is
+                // public for the same reason the rest of this response is — the
+                // sign-in page is a page too, and it has a language.
+                StructField::new("locales", locales_schema()),
             ]))
             .auth(AuthRequirement::Public),
     );
@@ -2110,6 +2118,88 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- Translations (§16.1, task 4.4) -----------------------------------------
+    // An application's own strings — type B, the admin's, written while they
+    // built the application. One read and three writes, because the screen is
+    // one table: what the source says, what each locale has, what nobody
+    // wrapped, and what is left over.
+
+    // The whole screen in one call. Untyped `messages` and `locales` because a
+    // catalogue is a *map* whose keys are English sentences: there is no struct
+    // to declare, and an endpoint schema that pretended otherwise would be
+    // describing a shape that does not exist.
+    set.register(
+        Endpoint::new(
+            "getTranslations",
+            Method::Get,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("translations"),
+        )
+        .output(TypeSchema::json())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Which locales the application serves, and which one it falls back to.
+    // Turning one off does **not** delete its catalogue.
+    set.register(
+        Endpoint::new(
+            "setApplicationLocales",
+            Method::Put,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("locales"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("locales", TypeSchema::array(TypeSchema::text())),
+            StructField::new("default_locale", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .output(TypeSchema::json())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Save one locale's catalogue, whole. Refused — naming the key — for a
+    // translation whose placeholders or plural categories differ from its
+    // key's, which is the same check the LLM's answers get: the admin typing
+    // one by hand is owed the same guarantee.
+    set.register(
+        Endpoint::new(
+            "saveTranslations",
+            Method::Put,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("translations")
+                .param("locale", ValueType::Text),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "messages",
+            TypeSchema::json(),
+        )]))
+        .output(TypeSchema::json())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // **Translate missing**: fill everything this locale has not got through
+    // the configured LLM, and save it. The answer names every message the
+    // placeholder check rejected (D9).
+    set.register(
+        Endpoint::new(
+            "translateMissing",
+            Method::Post,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("translations")
+                .param("locale", ValueType::Text)
+                .lit("fill"),
+        )
+        .output(TypeSchema::json())
+        .auth(AuthRequirement::admin()),
+    );
+
     // v1's `/field/preview/:table/:field/:fieldview`: a fieldview rendered over
     // the first row the admin can read, as HTML for the canvas.
     set.register(
@@ -3549,11 +3639,32 @@ fn role_schema() -> TypeSchema {
 /// `extra` carries the columns the admin has added to the users table (§7.1),
 /// keyed by column name; the system's own columns are refused there, since each
 /// has its own way in.
+/// What languages this installation serves: the default, and the enabled set
+/// (§16.1). `enabled` always contains `default`, and a one-element `enabled` is
+/// an installation that negotiates nothing.
+fn locales_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("default", TypeSchema::text()),
+        StructField::new("enabled", TypeSchema::array(TypeSchema::text())),
+        // The locale **this request** was negotiated into (§16.1, D8), so the
+        // SPA loads the catalogue the server has already committed to in
+        // `Content-Language` rather than negotiating a second time from the
+        // browser's own idea of the order. Two negotiations of one request is
+        // how a page ends up with a French navbar and English tables.
+        StructField::new("current", TypeSchema::text()),
+    ])
+}
+
 fn user_input_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("email", TypeSchema::text()),
         StructField::new("password", TypeSchema::optional(TypeSchema::text())),
         StructField::new("role", TypeSchema::int()),
+        // A BCP-47 tag, or null/absent for "whatever the request negotiates".
+        // On an **update** the two are not the same: an absent `language` leaves
+        // the stored one alone, and an explicit `null` clears it, which is what
+        // the form's "Site default" option sends (§16.1).
+        StructField::new("language", TypeSchema::optional(TypeSchema::text())),
         StructField::new("extra", TypeSchema::optional(TypeSchema::json())),
     ])
 }

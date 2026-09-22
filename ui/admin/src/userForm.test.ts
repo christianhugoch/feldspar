@@ -20,6 +20,7 @@ import {
   defaultUserRole,
   editUserForm,
   newUserForm,
+  SYSTEM_USER_COLUMNS,
   userBody,
 } from "./userForm";
 import type { ListFieldsResponse, ListUsersResponse } from "./client";
@@ -47,6 +48,7 @@ const fields: ListFieldsResponse = [
   field("email"),
   field("password_hash"),
   field("disabled", { sql_type: "bool" }),
+  field("language"),
   field("nickname"),
   field("full_name", { kind: { type: "calc", expression: "nickname" } }),
 ];
@@ -56,12 +58,20 @@ const user: ListUsersResponse[number] = {
   email: "sam@example.com",
   role: 40,
   disabled: false,
+  language: null,
   extra: { nickname: "Sam" },
 };
 
 describe("adminUserFields", () => {
   it("is the admin's columns and nothing the system owns", () => {
     expect(adminUserFields(fields).map((f) => f.name)).toEqual(["nickname"]);
+  });
+
+  // `language` is the system's (§16.1): it has a select of its own, so it must
+  // not also appear as a generic text box.
+  it("does not offer the language column as a text box", () => {
+    expect(SYSTEM_USER_COLUMNS).toContain("language");
+    expect(adminUserFields(fields).map((f) => f.name)).not.toContain("language");
   });
 
   it("leaves out calculated fields, which have no column to write", () => {
@@ -115,7 +125,7 @@ describe("the form", () => {
       { role: 1, name: "Admin", description: "", builtin: true },
       { role: 75, name: "Member", description: "", builtin: false },
     ]);
-    expect(form).toEqual({ email: "", password: "", role: 75, extra: {} });
+    expect(form).toEqual({ email: "", password: "", role: 75, language: "", extra: {} });
   });
 
   it("carries an existing user's values, and never a password", () => {
@@ -123,6 +133,7 @@ describe("the form", () => {
       email: "sam@example.com",
       password: "",
       role: 40,
+      language: "",
       extra: { nickname: "Sam" },
     });
   });
@@ -140,12 +151,28 @@ describe("the form", () => {
       email: "  new@example.com ",
       password: "chosen",
       role: 40,
+      language: "",
       extra: { nickname: "", age: "37", member: "true" },
     });
     expect(body.email).toBe("new@example.com");
     // An empty box is null, not the empty string: a field nobody filled in has
     // no value rather than a blank one.
     expect(body.extra).toEqual({ nickname: null, age: 37, member: true });
+  });
+
+  // §16.1: the language box has three states and the body has to distinguish
+  // two of them, because the server reads an absent `language` as "leave it
+  // alone" and an explicit null as "back to the site default".
+  it("sends null for the site default and the tag otherwise", () => {
+    const base = { email: "a@example.com", password: "", role: 40, extra: {} };
+    expect(userBody({ ...base, language: "" }).language).toBeNull();
+    expect(userBody({ ...base, language: "   " }).language).toBeNull();
+    expect(userBody({ ...base, language: " pt-BR " }).language).toBe("pt-BR");
+  });
+
+  it("carries a stored language onto the form", () => {
+    const french = { ...user, language: "fr" };
+    expect(editUserForm(french, fields).language).toBe("fr");
   });
 });
 

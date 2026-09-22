@@ -41,6 +41,7 @@ import { IconArrowLeft } from "../icons";
 import { PageBody, PageHeader } from "../layout";
 import { SettingsFields, buildConfig, readConfig } from "../settings";
 import { LlmModels } from "./LlmModels";
+import { T } from "../i18n";
 
 type BackendInfo = ListLlmProviderBackendsResponse[number];
 type ProviderItem = ListLlmProvidersResponse[number];
@@ -142,7 +143,7 @@ export function LlmProviderForm({ providerId }: { providerId?: string }) {
         actions={
           <Button variant="outline-secondary" onClick={() => navigate("/llm-providers")}>
             <IconArrowLeft className="icon-2" />
-            Back
+            <T text="Back" />
           </Button>
         }
       />
@@ -150,13 +151,13 @@ export function LlmProviderForm({ providerId }: { providerId?: string }) {
         {error && <Alert variant="danger">{error}</Alert>}
         <Form onSubmit={submit}>
           <Form.Group className="mb-3" controlId="providerName">
-            <Form.Label>Name</Form.Label>
+            <Form.Label><T text="Name" /></Form.Label>
             <Form.Control value={name} required onChange={(e) => setName(e.target.value)} />
-            <Form.Text muted>How an agent refers to this provider.</Form.Text>
+            <Form.Text muted><T text="How an agent refers to this provider." /></Form.Text>
           </Form.Group>
 
           <Form.Group className="mb-3" controlId="providerDescription">
-            <Form.Label>Description</Form.Label>
+            <Form.Label><T text="Description" /></Form.Label>
             <Form.Control
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -164,10 +165,10 @@ export function LlmProviderForm({ providerId }: { providerId?: string }) {
           </Form.Group>
 
           <Card className="mb-3">
-            <Card.Header>Backend</Card.Header>
+            <Card.Header><T text="Backend" /></Card.Header>
             <Card.Body>
               <Form.Group className="mb-3" controlId="providerBackend">
-                <Form.Label>Backend</Form.Label>
+                <Form.Label><T text="Backend" /></Form.Label>
                 <Form.Select
                   value={backendName}
                   onChange={(e) => setBackendName(e.target.value)}
@@ -179,8 +180,7 @@ export function LlmProviderForm({ providerId }: { providerId?: string }) {
                   ))}
                 </Form.Select>
                 <Form.Text muted>
-                  Any endpoint speaking the same API is reached by changing the base URL —
-                  a gateway, a local server, another vendor.
+                  <T text="Any endpoint speaking the same API is reached by changing the base URL — a gateway, a local server, another vendor." />
                 </Form.Text>
               </Form.Group>
 
@@ -214,8 +214,7 @@ export function LlmProviderForm({ providerId }: { providerId?: string }) {
             />
           ) : (
             <p className="text-muted small">
-              Save the provider to add its models. Each model it serves is a row of its own,
-              with its own prices and settings.
+              <T text="Save the provider to add its models. Each model it serves is a row of its own, with its own prices and settings." />
             </p>
           )}
         </div>

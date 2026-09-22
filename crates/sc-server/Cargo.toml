@@ -91,6 +91,9 @@ sc-types.workspace = true
 # serves. The ACME cache is a table there too, because it is *what this
 # deployment serves TLS with* rather than anything this crate should own.
 sc-config.workspace = true
+# Locale negotiation on a request, the response headers it answers with, and the
+# `Translator` the admin API's translate button runs over (§16.x).
+sc-i18n = { workspace = true, features = ["extract"] }
 # The mail transport (§18.2), for the one message this crate sends itself: the
 # Email settings tab's test message, built from what is stored so it tests the
 # configuration rather than the form.

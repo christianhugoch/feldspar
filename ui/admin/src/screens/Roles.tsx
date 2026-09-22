@@ -25,8 +25,10 @@ import Table from "react-bootstrap/Table";
 import { api } from "../api";
 import type { ListRolesResponse } from "../client";
 import { PageBody, PageHeader } from "../layout";
+import { T, useT } from "../i18n";
 
 export function Roles() {
+  const { t } = useT();
   const [roles, setRoles] = useState<ListRolesResponse | null>(null);
   const [number, setNumber] = useState(40);
   const [name, setName] = useState("");
@@ -82,7 +84,7 @@ export function Roles() {
 
   return (
     <>
-      <PageHeader pretitle="Users" title="Roles" />
+      <PageHeader pretitle="Users" title={t("Roles")} />
       <PageBody>
         {error && <Alert variant="danger">{error}</Alert>}
 
@@ -90,15 +92,15 @@ export function Roles() {
           <Col lg={7} className="mb-4">
             <div className="card">
               <div className="card-header">
-                <h3 className="card-title">Roles</h3>
+                <h3 className="card-title"><T text="Roles" /></h3>
               </div>
               <Table hover responsive className="card-table table-vcenter">
                 <thead>
                   <tr>
-                    <th>Number</th>
-                    <th>Name</th>
-                    <th>Description</th>
-                    <th className="text-end">Actions</th>
+                    <th><T text="Number" /></th>
+                    <th><T text="Name" /></th>
+                    <th><T text="Description" /></th>
+                    <th className="text-end"><T text="Actions" /></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -109,7 +111,7 @@ export function Roles() {
                       <td className="text-muted">{r.description}</td>
                       <td className="text-end">
                         {r.builtin ? (
-                          <span className="text-muted small">built in</span>
+                          <span className="text-muted small"><T text="built in" /></span>
                         ) : (
                           <Button
                             size="sm"
@@ -117,7 +119,7 @@ export function Roles() {
                             disabled={busy}
                             onClick={() => void remove(r.role)}
                           >
-                            Delete
+                            <T text="Delete" />
                           </Button>
                         )}
                       </td>
@@ -127,17 +129,16 @@ export function Roles() {
               </Table>
             </div>
             <p className="text-muted small mt-3">
-              Lower numbers are more privileged: 1 is the administrator, 100 is anyone at all. A
-              table&rsquo;s access rules name the least-privileged role still allowed.
+              <T text="Lower numbers are more privileged: 1 is the administrator, 100 is anyone at all. A table’s access rules name the least-privileged role still allowed." />
             </p>
           </Col>
           <Col lg={5} className="mb-4">
             <Card>
-              <Card.Header>Add role</Card.Header>
+              <Card.Header><T text="Add role" /></Card.Header>
               <Card.Body>
                 <Form onSubmit={create}>
                   <Form.Group className="mb-2" controlId="roleNumber">
-                    <Form.Label>Number</Form.Label>
+                    <Form.Label><T text="Number" /></Form.Label>
                     <Form.Control
                       type="number"
                       min={1}
@@ -145,21 +146,21 @@ export function Roles() {
                       value={number}
                       onChange={(e) => setNumber(Number(e.target.value))}
                     />
-                    <Form.Text muted>Between 1 and 100, and not already taken.</Form.Text>
+                    <Form.Text muted><T text="Between 1 and 100, and not already taken." /></Form.Text>
                   </Form.Group>
                   <Form.Group className="mb-2" controlId="roleName">
-                    <Form.Label>Name</Form.Label>
+                    <Form.Label><T text="Name" /></Form.Label>
                     <Form.Control value={name} onChange={(e) => setName(e.target.value)} />
                   </Form.Group>
                   <Form.Group className="mb-3" controlId="roleDescription">
-                    <Form.Label>Description</Form.Label>
+                    <Form.Label><T text="Description" /></Form.Label>
                     <Form.Control
                       value={description}
                       onChange={(e) => setDescription(e.target.value)}
                     />
                   </Form.Group>
                   <Button type="submit" disabled={busy || !name.trim()}>
-                    Create role
+                    <T text="Create role" />
                   </Button>
                 </Form>
               </Card.Body>

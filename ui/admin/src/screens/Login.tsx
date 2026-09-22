@@ -10,6 +10,7 @@ import Form from "react-bootstrap/Form";
 import { api, errorStatus } from "../api";
 import { SaltcornLogo } from "../icons";
 import { CenteredPage } from "../layout";
+import { T } from "../i18n";
 
 export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [email, setEmail] = useState("");
@@ -40,20 +41,20 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
         <span className="navbar-brand d-inline-flex align-items-center gap-2">
           <SaltcornLogo className="h-6" />
             <div className="ms-2 login-logo">
-              <div className="saltcorn-label">Saltcorn</div>
-              <div className="feldspar-label">Feldspar</div>
+              <div className="saltcorn-label"><T text="Saltcorn" /></div>
+              <div className="feldspar-label"><T text="Feldspar" /></div>
             </div>
         </span>
       </div>
       <Card className="card-md">
         <Card.Body>
           <Card.Title as="h1" className="h3 text-center mb-4">
-            Sign in
+            <T text="Sign in" />
           </Card.Title>
           {error && <Alert variant="danger">{error}</Alert>}
           <Form onSubmit={submit}>
             <Form.Group className="mb-3" controlId="loginEmail">
-              <Form.Label>Email</Form.Label>
+              <Form.Label><T text="Email" /></Form.Label>
               <Form.Control
                 type="email"
                 value={email}
@@ -63,7 +64,7 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
               />
             </Form.Group>
             <Form.Group className="mb-3" controlId="loginPassword">
-              <Form.Label>Password</Form.Label>
+              <Form.Label><T text="Password" /></Form.Label>
               <Form.Control
                 type="password"
                 value={password}

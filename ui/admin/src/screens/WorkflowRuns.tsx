@@ -23,6 +23,7 @@ import { navigate } from "../App";
 import type { ListWorkflowRunsResponse } from "../client";
 import { IconArrowLeft } from "../icons";
 import { PageBody, PageHeader, StatusBadge, type Tone } from "../layout";
+import { T, useT } from "../i18n";
 
 type RunItem = ListWorkflowRunsResponse[number];
 
@@ -57,6 +58,7 @@ export function when(at: string | null | undefined): string {
 }
 
 export function WorkflowRuns({ triggerId }: { triggerId: string }) {
+  const { t } = useT();
   const [runs, setRuns] = useState<RunItem[] | null>(null);
   const [name, setName] = useState<string>("");
   const [state, setState] = useState("");
@@ -102,16 +104,16 @@ export function WorkflowRuns({ triggerId }: { triggerId: string }) {
           <>
             <Button variant="outline-secondary" onClick={() => navigate("/triggers")}>
               <IconArrowLeft className="icon-2" />
-              Back
+              <T text="Back" />
             </Button>
             <Button
               variant="outline-secondary"
               href={`#/triggers/${encodeURIComponent(triggerId)}/workflow`}
             >
-              Edit the workflow
+              <T text="Edit the workflow" />
             </Button>
             <Button variant="outline-secondary" onClick={() => void load()}>
-              Refresh
+              <T text="Refresh" />
             </Button>
           </>
         }
@@ -122,7 +124,7 @@ export function WorkflowRuns({ triggerId }: { triggerId: string }) {
         <div className="card">
           <div className="card-body border-bottom py-2 d-flex align-items-center gap-2">
             <Form.Label htmlFor="runState" className="mb-0 text-muted">
-              State
+              <T text="State" />
             </Form.Label>
             <Form.Select
               id="runState"
@@ -133,7 +135,7 @@ export function WorkflowRuns({ triggerId }: { triggerId: string }) {
                 setState(e.target.value);
               }}
             >
-              <option value="">All</option>
+              <option value=""><T text="All" /></option>
               {STATES.map((s) => (
                 <option key={s} value={s}>
                   {s}
@@ -144,12 +146,12 @@ export function WorkflowRuns({ triggerId }: { triggerId: string }) {
           <Table hover responsive className="card-table table-vcenter">
             <thead>
               <tr>
-                <th>Started</th>
-                <th>State</th>
-                <th>Step</th>
-                <th>Version</th>
-                <th>Wakes</th>
-                <th>Started by</th>
+                <th><T text="Started" /></th>
+                <th><T text="State" /></th>
+                <th><T text="Step" /></th>
+                <th><T text="Version" /></th>
+                <th><T text="Wakes" /></th>
+                <th><T text="Started by" /></th>
                 <th className="text-end" />
               </tr>
             </thead>
@@ -178,7 +180,7 @@ export function WorkflowRuns({ triggerId }: { triggerId: string }) {
                       point: nothing but an answer will move it. */}
                   <td className="small">
                     {run.state === "waiting" && !run.wake_at ? (
-                      <span className="text-muted">waiting for someone</span>
+                      <span className="text-muted"><T text="waiting for someone" /></span>
                     ) : (
                       when(run.wake_at)
                     )}
@@ -190,7 +192,7 @@ export function WorkflowRuns({ triggerId }: { triggerId: string }) {
                       variant="outline-secondary"
                       href={`#/runs/${encodeURIComponent(run.id)}`}
                     >
-                      Open
+                      <T text="Open" />
                     </Button>
                   </td>
                 </tr>
@@ -198,7 +200,9 @@ export function WorkflowRuns({ triggerId }: { triggerId: string }) {
             </tbody>
           </Table>
           <div className="card-footer d-flex align-items-center justify-content-between">
-            <span className="text-muted small">Page {page + 1}</span>
+            <span className="text-muted small">
+              {t("Page {page}", { page: page + 1 })}
+            </span>
             <div className="btn-list">
               <Button
                 size="sm"
@@ -206,7 +210,7 @@ export function WorkflowRuns({ triggerId }: { triggerId: string }) {
                 disabled={page === 0}
                 onClick={() => setPage((p) => Math.max(0, p - 1))}
               >
-                Previous
+                <T text="Previous" />
               </Button>
               <Button
                 size="sm"
@@ -214,7 +218,7 @@ export function WorkflowRuns({ triggerId }: { triggerId: string }) {
                 disabled={(runs?.length ?? 0) < PAGE}
                 onClick={() => setPage((p) => p + 1)}
               >
-                Next
+                <T text="Next" />
               </Button>
             </div>
           </div>

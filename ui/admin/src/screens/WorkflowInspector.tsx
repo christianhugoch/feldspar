@@ -38,6 +38,7 @@ import {
   type StepKindName,
   type Workflow,
 } from "../workflowGraph";
+import { T, useT } from "../i18n";
 
 type ActionInfo = ListActionsResponse[number];
 
@@ -81,6 +82,7 @@ export function StepInspector({
   onDelete: () => void;
   onMakeStart: () => void;
 }) {
+  const { t } = useT();
   const isStart = workflow.start === step.name;
   const others = workflow.steps.filter((s) => s.name !== step.name).map((s) => s.name);
   const all = workflow.steps.map((s) => s.name);
@@ -90,13 +92,13 @@ export function StepInspector({
       <Card className="mb-3">
         <Card.Header className="d-flex align-items-center justify-content-between">
           <span>
-            {KIND_INFO[step.kind.type].label} step
-            {isStart && <span className="badge bg-green-lt ms-2">start</span>}
+            {t("{kind} step", { kind: KIND_INFO[step.kind.type].label })}
+            {isStart && <span className="badge bg-green-lt ms-2"><T text="start" /></span>}
           </span>
           <div className="btn-list">
             {!isStart && (
               <Button size="sm" variant="outline-secondary" onClick={onMakeStart}>
-                Start here
+                <T text="Start here" />
               </Button>
             )}
             <Button size="sm" variant="outline-danger" onClick={onDelete}>
@@ -107,27 +109,25 @@ export function StepInspector({
         <Card.Body>
           <Form.Group className="mb-3" controlId="stepName">
             <Form.Label>
-              Name<span className="text-danger"> *</span>
+              <T text="Name" /><span className="text-danger"> *</span>
             </Form.Label>
             <Form.Control
               value={step.name}
               onChange={(e) => onChange({ ...step, name: e.target.value })}
             />
             <Form.Text muted>
-              What a step points at, what the run&apos;s cursor holds, and — for an
-              action step — the context key its result is stored under. Renaming one
-              repoints everything that named it.
+              <T text="What a step points at, what the run's cursor holds, and — for an action step — the context key its result is stored under. Renaming one repoints everything that named it." />
             </Form.Text>
           </Form.Group>
           <Form.Group className="mb-3" controlId="stepDescription">
-            <Form.Label>Description</Form.Label>
+            <Form.Label><T text="Description" /></Form.Label>
             <Form.Control
               value={step.description ?? ""}
               onChange={(e) => onChange({ ...step, description: e.target.value })}
             />
           </Form.Group>
           <Form.Group className="mb-0" controlId="stepKind">
-            <Form.Label>Does</Form.Label>
+            <Form.Label><T text="Does" /></Form.Label>
             <Form.Select
               value={step.kind.type}
               onChange={(e) =>
@@ -163,7 +163,7 @@ export function StepInspector({
       </Card>
 
       <Card className="mb-3">
-        <Card.Header>Then</Card.Header>
+        <Card.Header><T text="Then" /></Card.Header>
         <Card.Body>
           <NextEditor
             next={step.next}
@@ -174,7 +174,7 @@ export function StepInspector({
       </Card>
 
       <Card className="mb-3">
-        <Card.Header>If it fails</Card.Header>
+        <Card.Header><T text="If it fails" /></Card.Header>
         <Card.Body>
           <ErrorPolicyEditor
             policy={step.error_policy ?? null}
@@ -206,6 +206,7 @@ function KindEditor({
   steps: string[];
   onChange: (step: Step) => void;
 }) {
+  const { t } = useT();
   const kind = step.kind;
   const set = (next: Step["kind"]) => onChange({ ...step, kind: next });
 
@@ -217,7 +218,7 @@ function KindEditor({
       <>
         <Form.Group className="mb-3" controlId="stepAction">
           <Form.Label>
-            Action<span className="text-danger"> *</span>
+            <T text="Action" /><span className="text-danger"> *</span>
           </Form.Label>
           <Form.Select
             value={kind.action}
@@ -251,10 +252,29 @@ function KindEditor({
             which the engine hands it — so `context` here means what it means in
             a `Set` (§10.3). Say what is in scope where the admin is typing. */}
         <Form.Text muted>
-          Values are formulas over the <strong>event</strong> and the{" "}
-          <strong>run</strong>: <code>row.title</code>, <code>user.email</code>,{" "}
-          <code>context.total</code> — the same <code>context</code> a{" "}
-          <code>Set</code> step writes.
+          <T
+            text="Values are formulas over the {event} and the {run}: {examples} — the same {context} a {set} step writes."
+            values={{
+              event: (
+                <strong>
+                  <T text="event" />
+                </strong>
+              ),
+              run: (
+                <strong>
+                  <T text="run" />
+                </strong>
+              ),
+              examples: (
+                <>
+                  <code>row.title</code>, <code>user.email</code>,{" "}
+                  <code>context.total</code>
+                </>
+              ),
+              context: <code>context</code>,
+              set: <code>Set</code>,
+            }}
+          />
         </Form.Text>
       </>
     );
@@ -264,14 +284,14 @@ function KindEditor({
     return (
       <>
         {kind.assignments.length === 0 && (
-          <p className="text-muted small">This step writes nothing into the context.</p>
+          <p className="text-muted small"><T text="This step writes nothing into the context." /></p>
         )}
         {kind.assignments.map((assignment, index) => (
           <Row key={index} className="g-2 mb-2 align-items-start">
             <Col md={4}>
               <Form.Control
                 aria-label={`Assignment ${index + 1} key`}
-                placeholder="context key"
+                placeholder={t("context key")}
                 value={assignment.target}
                 onChange={(e) =>
                   set({
@@ -287,7 +307,7 @@ function KindEditor({
               <Form.Control
                 aria-label={`Assignment ${index + 1} formula`}
                 className="font-monospace"
-                placeholder="formula"
+                placeholder={t("formula")}
                 value={assignment.formula}
                 onChange={(e) =>
                   set({
@@ -327,10 +347,10 @@ function KindEditor({
           }
         >
           <IconPlus className="icon-2" />
-          Add an assignment
+          <T text="Add an assignment" />
         </Button>
         <Form.Text muted className="d-block mt-2">
-          Applied in order, so a later formula may read what an earlier one wrote.
+          <T text="Applied in order, so a later formula may read what an earlier one wrote." />
         </Form.Text>
       </>
     );
@@ -341,7 +361,7 @@ function KindEditor({
       <>
         <Form.Group className="mb-3" controlId="stepOver">
           <Form.Label>
-            Over<span className="text-danger"> *</span>
+            <T text="Over" /><span className="text-danger"> *</span>
           </Form.Label>
           <Form.Control
             className="font-monospace"
@@ -349,27 +369,27 @@ function KindEditor({
             value={kind.over}
             onChange={(e) => set({ ...kind, over: e.target.value })}
           />
-          <Form.Text muted>A formula yielding the collection to loop over.</Form.Text>
+          <Form.Text muted><T text="A formula yielding the collection to loop over." /></Form.Text>
         </Form.Group>
         <Row>
           <Col md={6}>
             <Form.Group className="mb-3" controlId="stepVar">
               <Form.Label>
-                Item name<span className="text-danger"> *</span>
+                <T text="Item name" /><span className="text-danger"> *</span>
               </Form.Label>
               <Form.Control
                 value={kind.var}
                 onChange={(e) => set({ ...kind, var: e.target.value })}
               />
               <Form.Text muted>
-                The body reads it as <code>context.{kind.var || "item"}</code>.
+                <T text="The body reads it as" /> <code>context.{kind.var || "item"}</code>.
               </Form.Text>
             </Form.Group>
           </Col>
           <Col md={6}>
             <Form.Group className="mb-3" controlId="stepBody">
               <Form.Label>
-                Body<span className="text-danger"> *</span>
+                <T text="Body" /><span className="text-danger"> *</span>
               </Form.Label>
               <StepSelect
                 value={kind.body}
@@ -378,8 +398,7 @@ function KindEditor({
                 onChange={(body) => set({ ...kind, body })}
               />
               <Form.Text muted>
-                The first step of the body. A path through it that ends comes back
-                here for the next item.
+                <T text="The first step of the body. A path through it that ends comes back here for the next item." />
               </Form.Text>
             </Form.Group>
           </Col>
@@ -392,7 +411,7 @@ function KindEditor({
     return (
       <Form.Group className="mb-0" controlId="stepUntil">
         <Form.Label>
-          Until<span className="text-danger"> *</span>
+          <T text="Until" /><span className="text-danger"> *</span>
         </Form.Label>
         <Form.Control
           className="font-monospace"
@@ -401,9 +420,7 @@ function KindEditor({
           onChange={(e) => set({ ...kind, until: e.target.value })}
         />
         <Form.Text muted>
-          A formula yielding either a number of milliseconds to wait or an instant to
-          wait until. The run leaves the engine&apos;s reach until then and survives any
-          number of restarts.
+          <T text="A formula yielding either a number of milliseconds to wait or an instant to wait until. The run leaves the engine's reach until then and survives any number of restarts." />
         </Form.Text>
       </Form.Group>
     );
@@ -416,51 +433,49 @@ function KindEditor({
         <Col md={6}>
           <Form.Group className="mb-3" controlId="stepAssignTo">
             <Form.Label>
-              Answers go to<span className="text-danger"> *</span>
+              <T text="Answers go to" /><span className="text-danger"> *</span>
             </Form.Label>
             <Form.Control
               value={kind.assign_to}
-              placeholder="approval"
+              placeholder={t("approval")}
               onChange={(e) => set({ ...kind, assign_to: e.target.value })}
             />
             <Form.Text muted>
-              The context key the answers are merged in under.
+              <T text="The context key the answers are merged in under." />
             </Form.Text>
           </Form.Group>
         </Col>
         <Col md={6}>
           <OptionalRoleSelect
             id="stepMinRole"
-            label="Who may answer"
+            label={t("Who may answer")}
             value={kind.min_role ?? null}
             roles={roles}
             blank="Admin only"
             onChange={(min_role) => set({ ...kind, min_role })}
           >
-            The least privileged role still allowed to answer this form.
+            <T text="The least privileged role still allowed to answer this form." />
           </OptionalRoleSelect>
         </Col>
       </Row>
       <Form.Group className="mb-3" controlId="stepTimeout">
-        <Form.Label>Give up after</Form.Label>
+        <Form.Label><T text="Give up after" /></Form.Label>
         <Form.Control
           className="font-monospace"
-          placeholder="leave blank to wait indefinitely"
+          placeholder={t("leave blank to wait indefinitely")}
           value={kind.timeout ?? ""}
           onChange={(e) => set({ ...kind, timeout: e.target.value === "" ? null : e.target.value })}
         />
         <Form.Text muted>
-          A formula yielding when to stop waiting. The run then wakes and its error
-          policy decides — which is how an abandoned approval branches instead of
-          waiting forever.
+          <T text="A formula yielding when to stop waiting. The run then wakes and its error policy decides — which is how an abandoned approval branches instead of waiting forever." />
         </Form.Text>
       </Form.Group>
 
       <Form.Label>
-        Ask for<span className="text-danger"> *</span>
+        <T text="Ask for" /><span className="text-danger"> *</span>
       </Form.Label>
       {kind.fields.length === 0 && (
-        <p className="text-muted small">This form asks for nothing yet.</p>
+        <p className="text-muted small"><T text="This form asks for nothing yet." /></p>
       )}
       {kind.fields.map((field, index) => (
         <FormFieldRow
@@ -481,7 +496,7 @@ function KindEditor({
         }
       >
         <IconPlus className="icon-2" />
-        Add a field
+        <T text="Add a field" />
       </Button>
     </>
   );
@@ -503,11 +518,12 @@ function FormFieldRow({
   onChange: (field: FieldDecl) => void;
   onRemove: () => void;
 }) {
+  const { t } = useT();
   return (
     <div className="border rounded p-2 mb-2">
       <Row className="g-2 align-items-end">
         <Col md={4}>
-          <Form.Label className="small mb-1">Name</Form.Label>
+          <Form.Label className="small mb-1"><T text="Name" /></Form.Label>
           <Form.Control
             size="sm"
             aria-label={`Field ${index + 1} name`}
@@ -516,7 +532,7 @@ function FormFieldRow({
           />
         </Col>
         <Col md={4}>
-          <Form.Label className="small mb-1">Label</Form.Label>
+          <Form.Label className="small mb-1"><T text="Label" /></Form.Label>
           <Form.Control
             size="sm"
             aria-label={`Field ${index + 1} label`}
@@ -526,7 +542,7 @@ function FormFieldRow({
           />
         </Col>
         <Col md={3}>
-          <Form.Label className="small mb-1">Type</Form.Label>
+          <Form.Label className="small mb-1"><T text="Type" /></Form.Label>
           <Form.Select
             size="sm"
             aria-label={`Field ${index + 1} type`}
@@ -555,14 +571,14 @@ function FormFieldRow({
         <Form.Check
           type="checkbox"
           id={`field-${index}-required`}
-          label="Required"
+          label={t("Required")}
           checked={field.required ?? false}
           onChange={(e) => onChange({ ...field, required: e.target.checked })}
         />
         <Form.Check
           type="checkbox"
           id={`field-${index}-multiline`}
-          label="Many lines"
+          label={t("Many lines")}
           checked={field.multiline ?? false}
           onChange={(e) => onChange({ ...field, multiline: e.target.checked })}
         />
@@ -585,6 +601,7 @@ export function NextEditor({
   steps: string[];
   onChange: (next: Next) => void;
 }) {
+  const { t } = useT();
   const changeType = (type: Next["type"]) => {
     if (type === next.type) return;
     switch (type) {
@@ -603,10 +620,10 @@ export function NextEditor({
     <>
       <Form.Group className="mb-3" controlId="stepNextType">
         <Form.Select value={next.type} onChange={(e) => changeType(e.target.value as Next["type"])}>
-          <option value="end">End the run</option>
-          <option value="step">Go to one step</option>
-          <option value="branch">Branch on a condition</option>
-          <option value="formula">A formula names the step</option>
+          <option value="end"><T text="End the run" /></option>
+          <option value="step"><T text="Go to one step" /></option>
+          <option value="branch"><T text="Branch on a condition" /></option>
+          <option value="formula"><T text="A formula names the step" /></option>
         </Form.Select>
       </Form.Group>
 
@@ -627,7 +644,7 @@ export function NextEditor({
                 <Form.Control
                   className="font-monospace"
                   aria-label={`Arm ${index + 1} condition`}
-                  placeholder="context.total > 100"
+                  placeholder={t("context.total > 100")}
                   value={arm.when}
                   onChange={(e) =>
                     onChange({
@@ -675,10 +692,10 @@ export function NextEditor({
             }
           >
             <IconPlus className="icon-2" />
-            Add an arm
+            <T text="Add an arm" />
           </Button>
           <Form.Group controlId="stepOtherwise">
-            <Form.Label>Otherwise</Form.Label>
+            <Form.Label><T text="Otherwise" /></Form.Label>
             <StepSelect
               value={next.otherwise ?? ""}
               steps={steps}
@@ -687,7 +704,7 @@ export function NextEditor({
                 onChange({ ...next, otherwise: step === "" ? null : step })
               }
             />
-            <Form.Text muted>Arms are tried in order; the first true one wins.</Form.Text>
+            <Form.Text muted><T text="Arms are tried in order; the first true one wins." /></Form.Text>
           </Form.Group>
         </>
       )}
@@ -699,13 +716,11 @@ export function NextEditor({
             rows={2}
             className="font-monospace"
             value={next.formula}
-            placeholder="context.total > 100 ? 'approve' : 'ship'"
+            placeholder={t("context.total > 100 ? 'approve' : 'ship'")}
             onChange={(e) => onChange({ type: "formula", formula: e.target.value })}
           />
           <Form.Text muted>
-            A formula yielding the <strong>name</strong> of the next step. The canvas
-            draws it as a dashed edge to a computed marker, because which step it
-            reaches is the run&apos;s answer rather than the editor&apos;s.
+            <T text="A formula yielding the" /> <strong><T text="name" /></strong> <T text="of the next step. The canvas draws it as a dashed edge to a computed marker, because which step it reaches is the run's answer rather than the editor" />&apos;s.
           </Form.Text>
         </Form.Group>
       )}
@@ -727,6 +742,7 @@ function ErrorPolicyEditor({
   inherited: ErrorPolicy;
   onChange: (policy: ErrorPolicy | null) => void;
 }) {
+  const { t } = useT();
   const kind = policy?.type ?? "inherit";
   const change = (value: string) => {
     switch (value) {
@@ -745,11 +761,13 @@ function ErrorPolicyEditor({
       <Form.Group className="mb-3" controlId="stepPolicy">
         <Form.Select value={kind} onChange={(e) => change(e.target.value)}>
           <option value="inherit">
-            Whatever the workflow says ({policyLabel(inherited)})
+            {t("Whatever the workflow says ({policy})", {
+              policy: policyLabel(inherited),
+            })}
           </option>
-          <option value="retry">Retry, then fall through</option>
-          <option value="handler">Jump to a step</option>
-          <option value="fail">Fail the run</option>
+          <option value="retry"><T text="Retry, then fall through" /></option>
+          <option value="handler"><T text="Jump to a step" /></option>
+          <option value="fail"><T text="Fail the run" /></option>
         </Form.Select>
       </Form.Group>
       {policy?.type === "retry" && <RetryFields policy={policy} onChange={onChange} />}
@@ -762,7 +780,7 @@ function ErrorPolicyEditor({
             onChange={(step) => onChange({ type: "handler", step })}
           />
           <Form.Text muted>
-            The error arrives in the context under <code>context.error</code>.
+            <T text="The error arrives in the context under" /> <code>context.error</code>.
           </Form.Text>
         </>
       )}
@@ -778,6 +796,7 @@ function RetryFields({
   policy: Extract<ErrorPolicy, { type: "retry" }>;
   onChange: (policy: ErrorPolicy) => void;
 }) {
+  const { t } = useT();
   const backoff = policy.backoff ?? {
     initial_ms: 1000,
     factor: 2,
@@ -790,7 +809,7 @@ function RetryFields({
     <Row className="g-2">
       <Col md={3}>
         <Form.Group controlId="retryMax">
-          <Form.Label className="small mb-1">Attempts</Form.Label>
+          <Form.Label className="small mb-1"><T text="Attempts" /></Form.Label>
           <Form.Control
             type="number"
             min={1}
@@ -801,7 +820,7 @@ function RetryFields({
       </Col>
       <Col md={3}>
         <Form.Group controlId="retryInitial">
-          <Form.Label className="small mb-1">First wait (ms)</Form.Label>
+          <Form.Label className="small mb-1"><T text="First wait (ms)" /></Form.Label>
           <Form.Control
             type="number"
             min={0}
@@ -812,7 +831,7 @@ function RetryFields({
       </Col>
       <Col md={3}>
         <Form.Group controlId="retryFactor">
-          <Form.Label className="small mb-1">Multiply by</Form.Label>
+          <Form.Label className="small mb-1"><T text="Multiply by" /></Form.Label>
           <Form.Control
             type="number"
             step="0.1"
@@ -824,7 +843,7 @@ function RetryFields({
       </Col>
       <Col md={3}>
         <Form.Group controlId="retryMaxMs">
-          <Form.Label className="small mb-1">Longest wait (ms)</Form.Label>
+          <Form.Label className="small mb-1"><T text="Longest wait (ms)" /></Form.Label>
           <Form.Control
             type="number"
             min={0}
@@ -837,13 +856,12 @@ function RetryFields({
         <Form.Check
           type="checkbox"
           id="retryJitter"
-          label="Spread the waits out randomly"
+          label={t("Spread the waits out randomly")}
           checked={backoff.jitter}
           onChange={(e) => set({ jitter: e.target.checked })}
         />
         <Form.Text muted>
-          On by default: a hundred runs that failed on one outage would otherwise
-          retry at the same instant, which is the outage&apos;s second wave.
+          <T text="On by default: a hundred runs that failed on one outage would otherwise retry at the same instant, which is the outage's second wave." />
         </Form.Text>
       </Col>
     </Row>
@@ -875,6 +893,7 @@ function StepSelect({
   blank: string;
   onChange: (step: string) => void;
 }) {
+  const { t } = useT();
   return (
     <Form.Select value={value} onChange={(e) => onChange(e.target.value)}>
       <option value="">{blank}</option>
@@ -882,7 +901,7 @@ function StepSelect({
           still shown, so the inspector says what is wrong rather than silently
           reading as "—". Validation names it too. */}
       {value !== "" && !steps.includes(value) && (
-        <option value={value}>{value} (missing)</option>
+        <option value={value}>{t("{name} (missing)", { name: value })}</option>
       )}
       {steps.map((s) => (
         <option key={s} value={s}>

@@ -23,6 +23,7 @@ import type { ListTriggersResponse } from "../client";
 import { navigate } from "../App";
 import { IconPlus } from "../icons";
 import { AlertBody, PageBody, PageHeader, StatusBadge } from "../layout";
+import { T, useT } from "../i18n";
 
 type TriggerItem = ListTriggersResponse[number];
 
@@ -93,6 +94,7 @@ export function targetSummary(trigger: TriggerItem): string {
 }
 
 export function Triggers() {
+  const { t } = useT();
   const [triggers, setTriggers] = useState<TriggerItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** The result of the last Run, or its failure — shown until the next one. */
@@ -113,9 +115,10 @@ export function Triggers() {
   const remove = async (trigger: TriggerItem) => {
     if (
       !window.confirm(
-        `Delete the trigger "${trigger.name}"?\n\n` +
-          "Its configuration is deleted with it. Switch it off instead if you " +
-          "only want it to stop firing.",
+        t(
+          'Delete the trigger "{name}"?\n\nIts configuration is deleted with it. Switch it off instead if you only want it to stop firing.',
+          { name: trigger.name },
+        ),
       )
     ) {
       return;
@@ -149,11 +152,11 @@ export function Triggers() {
     <>
       <PageHeader
         pretitle="Automation"
-        title="Triggers"
+        title={t("Triggers")}
         actions={
           <Button onClick={() => navigate("/triggers/new")}>
             <IconPlus className="icon-2" />
-            New trigger
+            <T text="New trigger" />
           </Button>
         }
       />
@@ -163,7 +166,7 @@ export function Triggers() {
           <Alert variant="success" onClose={() => setRan(null)} dismissible>
             <AlertBody>
               <div className="mb-1">
-                <strong>{ran.name}</strong> ran. Result:
+                <strong>{ran.name}</strong> <T text="ran. Result:" />
               </div>
               <pre className="mb-0 small text-break text-pre-wrap">{ran.result}</pre>
             </AlertBody>
@@ -174,19 +177,19 @@ export function Triggers() {
           <Table hover responsive className="card-table table-vcenter">
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Event</th>
-                <th>Runs</th>
-                <th>Last run</th>
-                <th>Status</th>
-                <th className="text-end">Actions</th>
+                <th><T text="Name" /></th>
+                <th><T text="Event" /></th>
+                <th><T text="Runs" /></th>
+                <th><T text="Last run" /></th>
+                <th><T text="Status" /></th>
+                <th className="text-end"><T text="Actions" /></th>
               </tr>
             </thead>
             <tbody>
               {triggers?.length === 0 && (
                 <tr>
                   <td colSpan={6} className="text-muted">
-                    No triggers yet.
+                    <T text="No triggers yet." />
                   </td>
                 </tr>
               )}
@@ -201,14 +204,16 @@ export function Triggers() {
                   <td>
                     {trigger.when}
                     {trigger.channel && (
-                      <div className="text-muted small">on {trigger.channel}</div>
+                      <div className="text-muted small">
+                        {t("on {channel}", { channel: trigger.channel })}
+                      </div>
                     )}
                     {scheduleSummary(trigger) && (
                       <div className="text-muted small">{scheduleSummary(trigger)}</div>
                     )}
                     {trigger.only_if && (
                       <div className="text-muted small font-monospace text-break">
-                        if {trigger.only_if}
+                        {t("if {condition}", { condition: trigger.only_if })}
                       </div>
                     )}
                   </td>
@@ -229,7 +234,7 @@ export function Triggers() {
                         variant="outline-secondary"
                         href={`#/triggers/${encodeURIComponent(trigger.id)}/edit`}
                       >
-                        Edit
+                        <T text="Edit" />
                       </Button>
                       {/* A workflow's steps are not on the trigger form: they
                           are a version of their own, drawn on a canvas, and its
@@ -242,14 +247,14 @@ export function Triggers() {
                             variant="outline-secondary"
                             href={`#/triggers/${encodeURIComponent(trigger.id)}/workflow`}
                           >
-                            Steps
+                            <T text="Steps" />
                           </Button>
                           <Button
                             size="sm"
                             variant="outline-secondary"
                             href={`#/triggers/${encodeURIComponent(trigger.id)}/runs`}
                           >
-                            Runs
+                            <T text="Runs" />
                           </Button>
                         </>
                       )}
@@ -264,7 +269,7 @@ export function Triggers() {
                           disabled={!!trigger.error || !trigger.enabled}
                           onClick={() => void run(trigger)}
                         >
-                          Run
+                          <T text="Run" />
                         </Button>
                       )}
                       <Button
@@ -272,7 +277,7 @@ export function Triggers() {
                         variant="outline-danger"
                         onClick={() => void remove(trigger)}
                       >
-                        Delete
+                        <T text="Delete" />
                       </Button>
                     </div>
                   </td>
@@ -292,13 +297,13 @@ function StatusCell({ trigger }: { trigger: TriggerItem }) {
   if (trigger.error) {
     return (
       <>
-        <StatusBadge tone="red">Not usable</StatusBadge>
+        <StatusBadge tone="red"><T text="Not usable" /></StatusBadge>
         <div className="text-danger small text-break mt-1">{trigger.error}</div>
       </>
     );
   }
   if (!trigger.enabled) {
-    return <StatusBadge tone="secondary">Off</StatusBadge>;
+    return <StatusBadge tone="secondary"><T text="Off" /></StatusBadge>;
   }
-  return <StatusBadge tone="green">Enabled</StatusBadge>;
+  return <StatusBadge tone="green"><T text="Enabled" /></StatusBadge>;
 }

@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use sc_auth::{
-    COL_DISABLED, COL_EMAIL, COL_ID, COL_PASSWORD_HASH, COL_ROLE, USERS_TABLE, bootstrap,
+    COL_DISABLED, COL_EMAIL, COL_ID, COL_LANGUAGE, COL_PASSWORD_HASH, COL_ROLE, USERS_TABLE,
+    bootstrap,
 };
 use sc_catalog::Catalog;
 use sc_db::DatabaseDriver;
@@ -68,6 +69,12 @@ async fn bootstrap_creates_users_table() -> sc_error::Result<()> {
     assert!(!disabled.required);
     assert_eq!(disabled.base.type_, TypeRef::Basic(BasicType::Bool));
 
+    // The chosen language (§16.1): nullable text, since `NULL` is "whatever the
+    // request negotiates" and most accounts never state one.
+    let language = users.field(COL_LANGUAGE).expect("language field");
+    assert!(!language.required);
+    assert_eq!(language.base.type_, TypeRef::Basic(BasicType::Text));
+
     // The table is reflected in a fresh driver introspection.
     let introspected = driver.introspect().await?;
     let physical = introspected
@@ -77,7 +84,14 @@ async fn bootstrap_creates_users_table() -> sc_error::Result<()> {
     let cols: Vec<&str> = physical.columns.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(
         cols,
-        [COL_ID, COL_ROLE, COL_EMAIL, COL_PASSWORD_HASH, COL_DISABLED]
+        [
+            COL_ID,
+            COL_ROLE,
+            COL_EMAIL,
+            COL_PASSWORD_HASH,
+            COL_DISABLED,
+            COL_LANGUAGE
+        ]
     );
     assert_eq!(physical.primary_key, vec![COL_ID.to_string()]);
 

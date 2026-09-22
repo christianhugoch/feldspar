@@ -37,6 +37,7 @@ import { PageBody, PageHeader } from "../layout";
 import { OptionalRoleSelect } from "../roleSelect";
 import { useRoles } from "../roles";
 import { SettingsFields, buildConfig, readConfig } from "../settings";
+import { T, useT } from "../i18n";
 
 type ActionInfo = ListActionsResponse[number];
 type TriggerItem = ListTriggersResponse[number];
@@ -152,6 +153,7 @@ function timingFields(kind: string): TimingField[] {
  * one's table is its own, and the form reads it from the stored trigger.
  */
 export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: string }) {
+  const { t } = useT();
   const roles = useRoles();
   const [actions, setActions] = useState<ActionInfo[] | null>(null);
   const [tables, setTables] = useState<string[]>([]);
@@ -351,7 +353,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
         actions={
           <Button variant="outline-secondary" onClick={() => navigate("/triggers")}>
             <IconArrowLeft className="icon-2" />
-            Back
+            <T text="Back" />
           </Button>
         }
       />
@@ -363,7 +365,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
             <Col md={6}>
               <Form.Group className="mb-3" controlId="triggerName">
                 <Form.Label>
-                  Name<span className="text-danger"> *</span>
+                  <T text="Name" /><span className="text-danger"> *</span>
                 </Form.Label>
                 <Form.Control
                   value={name}
@@ -375,7 +377,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
             <Col md={6}>
               <OptionalRoleSelect
                 id="triggerMinRole"
-                label="Minimum role"
+                label={t("Minimum role")}
                 value={minRole}
                 roles={roles}
                 blank="Admin only"
@@ -386,7 +388,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
           </Row>
 
           <Form.Group className="mb-3" controlId="triggerDescription">
-            <Form.Label>Description</Form.Label>
+            <Form.Label><T text="Description" /></Form.Label>
             <Form.Control
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -394,12 +396,12 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
           </Form.Group>
 
           <Card className="mb-3">
-            <Card.Header>When</Card.Header>
+            <Card.Header><T text="When" /></Card.Header>
             <Card.Body>
               <Row>
                 <Col md={channelEvent ? 6 : 12}>
                   <Form.Group className="mb-3" controlId="triggerWhen">
-                    <Form.Label>Event</Form.Label>
+                    <Form.Label><T text="Event" /></Form.Label>
                     <Form.Select
                       value={when}
                       onChange={(e) => {
@@ -440,8 +442,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                       </Form.Select>
                       {streamEvent && streams.length === 0 && (
                         <Form.Text muted>
-                          No streams yet. A stream is created in Streams, and a trigger
-                          naming one that does not exist is refused on save.
+                          <T text="No streams yet. A stream is created in Streams, and a trigger naming one that does not exist is refused on save." />
                         </Form.Text>
                       )}
                     </Form.Group>
@@ -454,7 +455,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                   {timingUsed.includes("day_of_week") && (
                     <Col md={4}>
                       <Form.Group className="mb-3" controlId="triggerDayOfWeek">
-                        <Form.Label>Day</Form.Label>
+                        <Form.Label><T text="Day" /></Form.Label>
                         <Form.Select
                           value={timing.day_of_week}
                           onChange={(e) =>
@@ -473,7 +474,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                   {timingUsed.includes("hour") && (
                     <Col md={4}>
                       <Form.Group className="mb-3" controlId="triggerHour">
-                        <Form.Label>Hour (UTC)</Form.Label>
+                        <Form.Label><T text="Hour (UTC)" /></Form.Label>
                         <Form.Control
                           type="number"
                           min={0}
@@ -490,7 +491,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                   {timingUsed.includes("minute") && (
                     <Col md={4}>
                       <Form.Group className="mb-3" controlId="triggerMinute">
-                        <Form.Label>Minute past the hour</Form.Label>
+                        <Form.Label><T text="Minute past the hour" /></Form.Label>
                         <Form.Control
                           type="number"
                           min={0}
@@ -506,9 +507,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                   )}
                   <Col xs={12}>
                     <Form.Text muted>
-                      Schedules are in <strong>UTC</strong>, so they mean the same
-                      instant wherever the server runs and are not moved by daylight
-                      saving. An empty box is 0.
+                      <T text="Schedules are in" /> <strong><T text="UTC" /></strong><T text=", so they mean the same instant wherever the server runs and are not moved by daylight saving. An empty box is 0." />
                     </Form.Text>
                   </Col>
                 </Row>
@@ -516,7 +515,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
 
               {channelEvent && (
                 <Form.Group className="mb-0" controlId="triggerOnlyIf">
-                  <Form.Label>Only if</Form.Label>
+                  <Form.Label><T text="Only if" /></Form.Label>
                   <Form.Control
                     as="textarea"
                     rows={2}
@@ -530,16 +529,26 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                   <Form.Text muted>
                     {streamEvent ? (
                       <>
-                        A JavaScript expression over the element&apos;s envelope. An element is
-                        not a row, so there is no <code>row</code> or <code>old</code> here:
-                        the element is <code>payload.value</code>, and the provider&apos;s own
-                        metadata is <code>payload.source</code>. Leave blank to always run.
+                        <T
+                          text="A JavaScript expression over the element’s envelope. An element is not a row, so there is no {row} or {old} here: the element is {value}, and the provider’s own metadata is {source}. Leave blank to always run."
+                          values={{
+                            row: <code>row</code>,
+                            old: <code>old</code>,
+                            value: <code>payload.value</code>,
+                            source: <code>payload.source</code>,
+                          }}
+                        />
                       </>
                     ) : (
                       <>
-                        A JavaScript expression over the affected row&apos;s fields,{" "}
-                        <code>row</code>, <code>old</code> and <code>user</code>. The action runs
-                        only when it is true. Leave blank to always run.
+                        <T
+                          text="A JavaScript expression over the affected row’s fields, {row}, {old} and {user}. The action runs only when it is true. Leave blank to always run."
+                          values={{
+                            row: <code>row</code>,
+                            old: <code>old</code>,
+                            user: <code>user</code>,
+                          }}
+                        />
                       </>
                     )}
                   </Form.Text>
@@ -549,19 +558,19 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
           </Card>
 
           <Card className="mb-3">
-            <Card.Header>Do</Card.Header>
+            <Card.Header><T text="Do" /></Card.Header>
             <Card.Body>
               <Form.Group className="mb-3" controlId="triggerBody">
-                <Form.Label>Runs</Form.Label>
+                <Form.Label><T text="Runs" /></Form.Label>
                 <Form.Select
                   value={body}
                   onChange={(e) => setBody(e.target.value as "action" | "workflow")}
                 >
-                  <option value="action">One action</option>
-                  <option value="workflow">A workflow</option>
+                  <option value="action"><T text="One action" /></option>
+                  <option value="workflow"><T text="A workflow" /></option>
                 </Form.Select>
                 <Form.Text muted>
-                  A workflow is a graphical representation of a durable program
+                  <T text="A workflow is a graphical representation of a durable program" />
                 </Form.Text>
               </Form.Group>
 
@@ -569,23 +578,23 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                 <div className="text-muted">
                   {triggerId ? (
                     <>
-                      The steps live on the canvas.{" "}
+                      <T text="The steps live on the canvas." />{" "}
                       <Button
                         size="sm"
                         variant="outline-primary"
                         href={`#/triggers/${encodeURIComponent(triggerId)}/workflow`}
                       >
-                        Open the workflow editor
+                        <T text="Open the workflow editor" />
                       </Button>
                     </>
                   ) : (
-                    "Saving opens the editor, on an empty canvas with one start step."
+                    t("Saving opens the editor, on an empty canvas with one start step.")
                   )}
                 </div>
               ) : (
               <>
               <Form.Group className="mb-3" controlId="triggerAction">
-                <Form.Label>Action</Form.Label>
+                <Form.Label><T text="Action" /></Form.Label>
                 <Form.Select
                   value={actionName}
                   onChange={(e) => {
@@ -620,7 +629,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
                 }
               />
               <Form.Text muted>
-                Values are formulas over the event: <code>row.title</code>,{" "}
+                <T text="Values are formulas over the event:" /> <code>row.title</code>,{" "}
                 <code>user.email</code>, <code>payload.n</code>.
               </Form.Text>
               </>
@@ -632,7 +641,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
             type="checkbox"
             id="triggerEnabled"
             className="mb-3"
-            label="Enabled"
+            label={t("Enabled")}
             checked={enabled}
             onChange={(e) => setEnabled(e.target.checked)}
           />
@@ -646,7 +655,7 @@ export function TriggerForm({ triggerId, table }: { triggerId?: string; table?: 
               disabled={busy}
               onClick={() => navigate("/triggers")}
             >
-              Cancel
+              <T text="Cancel" />
             </Button>
           </div>
         </Form>

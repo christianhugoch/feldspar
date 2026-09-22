@@ -39,6 +39,9 @@ pub const CFG_CONTEXT_WINDOW: &str = "context_window";
 pub const CFG_WORKING_BUDGET: &str = "working_budget";
 /// Model setting: whether a tool result may carry an image (`yes`/`no`).
 pub const CFG_VISION: &str = "vision";
+/// Model setting: whether the model accepts a `temperature` on the request
+/// (`yes`/`no`).
+pub const CFG_SUPPORTS_TEMPERATURE: &str = "supports_temperature";
 
 /// The context window assumed for a model no rule recognises.
 pub const UNKNOWN_CONTEXT_WINDOW: u64 = 32_000;
@@ -139,6 +142,12 @@ pub struct ModelCapabilities {
     pub working_budget: u64,
     /// A tool result may carry an image.
     pub vision: bool,
+    /// The model accepts a `temperature` on the request. OpenAI's reasoning
+    /// models (the o-series, gpt-5's reasoning variants, codex) reject the
+    /// field outright rather than ignoring it, so a caller that always sets
+    /// one (§9's translator, for reproducible output) needs to know before it
+    /// builds the request, not from the error the host sends back.
+    pub supports_temperature: bool,
 }
 
 impl ModelCapabilities {
@@ -180,6 +189,7 @@ impl ModelCapabilities {
                 context_window,
                 working_budget,
                 vision: name.starts_with("claude") && !name.starts_with("claude-2"),
+                supports_temperature: true,
             },
             OPENAI_RESPONSES_BACKEND => ModelCapabilities {
                 parallel_tool_calls: true,
@@ -199,6 +209,7 @@ impl ModelCapabilities {
                 context_window,
                 working_budget,
                 vision: openai_vision(&name),
+                supports_temperature: !is_openai_reasoning(&name),
             },
             OPENAI_CHAT_BACKEND => ModelCapabilities {
                 parallel_tool_calls: true,
@@ -219,6 +230,7 @@ impl ModelCapabilities {
                 context_window,
                 working_budget,
                 vision: openai_vision(&name) || open_weight_vision(&name),
+                supports_temperature: !is_openai_reasoning(&name),
             },
             // An unknown backend cannot be connected, so what it "can do" is
             // never used. The most conservative answer is still an answer.
@@ -232,6 +244,7 @@ impl ModelCapabilities {
                 context_window,
                 working_budget,
                 vision: false,
+                supports_temperature: false,
             },
         }
     }
@@ -270,6 +283,9 @@ impl ModelCapabilities {
         if let Some(v) = yes_no(config, CFG_VISION) {
             self.vision = v;
         }
+        if let Some(v) = yes_no(config, CFG_SUPPORTS_TEMPERATURE) {
+            self.supports_temperature = v;
+        }
         // Parallel calls a model cannot make are never on by default.
         if !self.parallel_tool_calls {
             self.parallel_tool_calls_default = false;
@@ -292,10 +308,24 @@ fn is_o_series(name: &str) -> bool {
 }
 
 /// The OpenAI models that produce encrypted reasoning.
+///
+/// `gpt-5` was the generation where reasoning became the default rather than
+/// a separate `o`-series; nothing says a later generation reverses that, so
+/// this treats `gpt-5` and up as reasoning-by-default rather than
+/// hardcoding `5` and needing an edit every time OpenAI ships a new one.
 fn is_openai_reasoning(name: &str) -> bool {
-    (name.starts_with("gpt-5") && !name.contains("chat"))
+    (gpt_generation(name).is_some_and(|n| n >= 5) && !name.contains("chat"))
         || is_o_series(name)
         || name.contains("codex")
+}
+
+/// The numeral in a `gpt-N…` name (`5` from `gpt-5.1`, `6` from
+/// `gpt-6-astra`), so a rule can compare generations instead of matching one
+/// literal string.
+fn gpt_generation(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("gpt-")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
 }
 
 /// OpenAI models that accept images.
@@ -382,7 +412,7 @@ mod tests {
         value.as_object().cloned().unwrap_or_default()
     }
 
-    /// (backend, model, native apply_patch, replay, caching, edit, window, vision)
+    /// (backend, model, native apply_patch, replay, caching, edit, window, vision, temperature)
     type Row = (
         &'static str,
         &'static str,
@@ -391,6 +421,7 @@ mod tests {
         PromptCaching,
         EditFormat,
         u64,
+        bool,
         bool,
     );
 
@@ -406,6 +437,7 @@ mod tests {
                 EditFormat::StrReplace,
                 200_000,
                 true,
+                true,
             ),
             (
                 ANTHROPIC_BACKEND,
@@ -415,6 +447,7 @@ mod tests {
                 PromptCaching::Explicit,
                 EditFormat::StrReplace,
                 200_000,
+                true,
                 true,
             ),
             (
@@ -426,6 +459,21 @@ mod tests {
                 EditFormat::ApplyPatch,
                 400_000,
                 true,
+                false,
+            ),
+            (
+                // A generation past the one the rule names literally:
+                // reasoning-by-default has to be inferred from the number,
+                // not a `gpt-5`-only match.
+                OPENAI_RESPONSES_BACKEND,
+                "gpt-6-astra",
+                false,
+                true,
+                PromptCaching::Automatic,
+                EditFormat::ApplyPatch,
+                UNKNOWN_CONTEXT_WINDOW,
+                false,
+                false,
             ),
             (
                 OPENAI_RESPONSES_BACKEND,
@@ -435,6 +483,7 @@ mod tests {
                 PromptCaching::Automatic,
                 EditFormat::ApplyPatch,
                 1_000_000,
+                true,
                 true,
             ),
             (
@@ -446,6 +495,7 @@ mod tests {
                 EditFormat::ApplyPatch,
                 200_000,
                 true,
+                false,
             ),
             (
                 OPENAI_RESPONSES_BACKEND,
@@ -456,6 +506,7 @@ mod tests {
                 EditFormat::StrReplace,
                 UNKNOWN_CONTEXT_WINDOW,
                 false,
+                true,
             ),
             (
                 OPENAI_CHAT_BACKEND,
@@ -466,6 +517,7 @@ mod tests {
                 EditFormat::ApplyPatch,
                 400_000,
                 true,
+                false,
             ),
             (
                 OPENAI_CHAT_BACKEND,
@@ -476,6 +528,7 @@ mod tests {
                 EditFormat::StrReplace,
                 128_000,
                 false,
+                true,
             ),
             (
                 OPENAI_CHAT_BACKEND,
@@ -485,6 +538,7 @@ mod tests {
                 PromptCaching::None,
                 EditFormat::StrReplace,
                 UNKNOWN_CONTEXT_WINDOW,
+                true,
                 true,
             ),
             (
@@ -496,9 +550,10 @@ mod tests {
                 EditFormat::StrReplace,
                 UNKNOWN_CONTEXT_WINDOW,
                 false,
+                true,
             ),
         ];
-        for (backend, model, patch, replay, caching, edit, window, vision) in table {
+        for (backend, model, patch, replay, caching, edit, window, vision, temperature) in table {
             let caps = ModelCapabilities::built_in(backend, model);
             let at = format!("{backend}/{model}");
             assert_eq!(caps.native_apply_patch, *patch, "{at}: native apply_patch");
@@ -507,6 +562,10 @@ mod tests {
             assert_eq!(caps.edit_format, *edit, "{at}: edit format");
             assert_eq!(caps.context_window, *window, "{at}: window");
             assert_eq!(caps.vision, *vision, "{at}: vision");
+            assert_eq!(
+                caps.supports_temperature, *temperature,
+                "{at}: supports temperature"
+            );
             assert!(caps.parallel_tool_calls, "{at}: parallel calls supported");
             assert!(
                 !caps.parallel_tool_calls_default,
@@ -535,11 +594,13 @@ mod tests {
             CFG_CONTEXT_WINDOW: 64_000,
             CFG_PARALLEL_TOOL_CALLS_DEFAULT: "on",
             CFG_PROMPT_CACHING: "automatic",
+            CFG_SUPPORTS_TEMPERATURE: "no",
             // Blank means the built-in default, not "no".
             CFG_REASONING_REPLAY: "",
         }));
         let caps = ModelCapabilities::resolve(OPENAI_CHAT_BACKEND, "llama3.2", &config);
         assert!(caps.vision);
+        assert!(!caps.supports_temperature);
         assert_eq!(caps.edit_format, EditFormat::WholeFile);
         assert_eq!(caps.context_window, 64_000);
         assert_eq!(caps.working_budget, UNKNOWN_WORKING_BUDGET);
@@ -557,5 +618,11 @@ mod tests {
             attrs(json!({ CFG_PARALLEL_TOOL_CALLS: "no", CFG_PARALLEL_TOOL_CALLS_DEFAULT: "on" }));
         let caps = ModelCapabilities::resolve(ANTHROPIC_BACKEND, "claude-sonnet-5", &off);
         assert!(!caps.parallel_tool_calls && !caps.parallel_tool_calls_default);
+
+        // An override can also turn temperature back on for a reasoning model
+        // the built-in rule refuses it for.
+        let on = attrs(json!({ CFG_SUPPORTS_TEMPERATURE: "yes" }));
+        let caps = ModelCapabilities::resolve(OPENAI_RESPONSES_BACKEND, "gpt-5.1", &on);
+        assert!(caps.supports_temperature);
     }
 }

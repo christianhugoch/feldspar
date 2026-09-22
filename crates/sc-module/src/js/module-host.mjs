@@ -1945,10 +1945,38 @@ function currentViews() {
   return store.views;
 }
 
-/** v1's `__`: the identity translation, with v1's `%s` substitution. */
+/** The catalogue this call is being served with, or an empty one (TODO "i18n"
+ * 4.5). Empty is the ordinary case and costs a property read. */
+function currentMessages() {
+  const store = running.getStore();
+  return (store && store.messages) || EMPTY_MESSAGES;
+}
+
+const EMPTY_MESSAGES = Object.freeze({});
+
+/** The locale this call is being served in. `en` when nothing negotiated one,
+ * which is what v1 answered unconditionally before. */
+function currentLocale() {
+  const store = running.getStore();
+  return (store && store.locale) || "en";
+}
+
+/** v1's `__`: the application's catalogue, with v1's positional `%s`.
+ *
+ * The lookup is the change and the substitution is not: v1's `__` has no
+ * placeholders and no plural forms, only `%s` filled in order, and a phrase the
+ * catalogue has not got renders as written — which is correct English, because
+ * the key **is** the English (D1).
+ *
+ * The substitution happens *after* the lookup, so a translator moving a `%s`
+ * is not a thing they can do — v1's format is positional, and that is the format
+ * these strings were written in. */
 function translate(text, ...args) {
+  const phrase = String(text);
+  const translated = currentMessages()[phrase];
+  const source = typeof translated === "string" ? translated : phrase;
   let next = 0;
-  return String(text).replace(/%s/g, () => (next < args.length ? String(args[next++]) : "%s"));
+  return source.replace(/%s/g, () => (next < args.length ? String(args[next++]) : "%s"));
 }
 
 /** v1's `req` and `res` for one call (TODO "Saltcorn UI" 4.4), built from the
@@ -1998,7 +2026,7 @@ function viewRequest(incoming, set) {
       response.flashes.push({ kind: String(kind), message: String(message) });
       return response.flashes.length;
     },
-    getLocale: () => "en",
+    getLocale: () => (typeof r.locale === "string" && r.locale ? r.locale : currentLocale()),
     __: translate,
     get_base_url: () =>
       r.base_url || (set && set.application && set.application.base_url) || "/",
@@ -3353,8 +3381,19 @@ function makeState(set) {
     auth_methods: Object.freeze({}),
     getLayout: () => builtInLayout(),
     log: stateLog,
-    // i18n is the identity (TODO, Explicitly OUT).
-    i18n: Object.freeze({ __: (phrase) => (phrase && typeof phrase === "object" ? phrase.phrase : phrase) }),
+    // v1's `appState.i18n.__({ phrase, locale })`, which is what
+    // `translateLayout` calls for every string in a page's or a view's layout.
+    // It answers out of the **request's** catalogue rather than out of a
+    // per-application one, for the reason the store carries it: this state is
+    // built once per snapshot and read by every visitor (TODO "i18n" 4.5).
+    i18n: Object.freeze({
+      __: (phrase) => {
+        const text = phrase && typeof phrase === "object" ? phrase.phrase : phrase;
+        if (typeof text !== "string") return text;
+        const translated = currentMessages()[text];
+        return typeof translated === "string" ? translated : text;
+      },
+    }),
     __: translate,
   };
   return installV1Refusals(state, "state.");
@@ -3676,6 +3715,17 @@ async function viewInitialConfig({ pattern, table, view }) {
 }
 
 /** What refers to the view `view` in the call's application (10.4). */
+/** v1's `getStringsForI18n` for one view: the strings its configuration puts
+ * in front of a person (TODO "i18n" 4.5). Asked of the pattern, because only
+ * the pattern knows which of its configuration's values are sentences. */
+async function viewStringsForI18n({ view: name }) {
+  const runtime = await requireViewRuntime();
+  const set = currentViews();
+  const view = (set.views || []).find((v) => v.name === name);
+  if (!view) return [];
+  return runtime.stringsForI18n(view.viewtemplate, view.configuration || {});
+}
+
 async function viewReferences({ view: name }) {
   const runtime = await requireViewRuntime();
   const set = currentViews();
@@ -3803,6 +3853,8 @@ async function handle(request) {
       return await viewInitialConfig(request);
     case "view_references":
       return await viewReferences(request);
+    case "view_strings_for_i18n":
+      return await viewStringsForI18n(request);
     default:
       throw new Error(`unknown module-host operation ${request.op}`);
   }
@@ -3849,7 +3901,21 @@ globalThis.__scModuleHost = (id, request) => {
     // what is built over them the first time a view asks.
     moduleFunctions: request && Array.isArray(request.moduleFunctions) ? request.moduleFunctions : null,
     fns: null,
+    // The locale this call is served in, and the application's catalogue for
+    // it (TODO "i18n" 4.5, D8). On the call's own context rather than on the
+    // state, because the state is built once per *snapshot* and a locale is
+    // per *request* — a cached state carrying one would serve the second
+    // visitor the first visitor's language.
+    locale: null,
+    messages: null,
   };
+  const viewRequestOf = request && request.request;
+  if (viewRequestOf && typeof viewRequestOf === "object") {
+    if (typeof viewRequestOf.locale === "string") context.locale = viewRequestOf.locale;
+    if (viewRequestOf.messages && typeof viewRequestOf.messages === "object") {
+      context.messages = viewRequestOf.messages;
+    }
+  }
   running.run(context, () => {
     let pending;
     try {

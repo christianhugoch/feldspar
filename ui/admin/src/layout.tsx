@@ -13,6 +13,7 @@
 // column centred in the viewport, used by the login and first-user screens.
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useT } from "./i18n";
 
 /** The page header: pre-title, title, and the screen's primary actions.
  *
@@ -27,8 +28,9 @@ export function PageHeader({
   pretitle?: ReactNode;
   actions?: ReactNode;
 }) {
+  const { t } = useT();
   return (
-    <div className="page-header d-print-none" aria-label="Page header">
+    <div className="page-header d-print-none" aria-label={t("Page header")}>
       <div className="container-xl">
         <div className="row g-2 align-items-center">
           <div className="col">

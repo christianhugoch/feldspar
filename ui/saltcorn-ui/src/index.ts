@@ -436,6 +436,28 @@ export async function initialConfig(pattern: string, context: Obj): Promise<Obj>
   return configuration && typeof configuration === "object" ? configuration : {};
 }
 
+/** v1's `getStringsForI18n`: the strings a view's own configuration puts in
+ * front of a person — a column's header, a link's text, an action's label
+ * (§16.1, task 4.5).
+ *
+ * The pattern's own method, untouched: only the pattern knows which of its
+ * configuration's values are sentences and which are column names. A pattern
+ * that declares none contributes nothing, exactly as in v1. Duplicates and
+ * blanks are dropped here rather than in the caller, because the same phrase on
+ * two columns is one message to translate. */
+export async function stringsForI18n(pattern: string, configuration: Obj): Promise<string[]> {
+  const vt = viewtemplates[pattern];
+  if (typeof vt?.getStringsForI18n !== "function") return [];
+  const found = (await vt.getStringsForI18n(configuration ?? {})) ?? [];
+  const out: string[] = [];
+  for (const each of found) {
+    if (typeof each !== "string") continue;
+    const text = each.trim();
+    if (text && !out.includes(text)) out.push(text);
+  }
+  return out;
+}
+
 /** Which views and pages refer to the view `name` — v1's
  * `View.inbound_connected_objects`, over each pattern's own `connectedObjects`,
  * and the same walk over a page's layout. A pattern without `connectedObjects`

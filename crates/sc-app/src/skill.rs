@@ -214,6 +214,21 @@ pub fn generate_skill(catalog: &Catalog, app: &Application, client_file: &str) -
          by hand does not add it to the database — it makes a file that the next \
          build deletes.\n\
          \n\
+         ## Every string a person reads goes through `t()`\n\
+         \n\
+         The catalogue is the third generated thing, and the one you are \
+         expected to feed: `feldspar i18n extract` reads the `t(\"…\")` call \
+         sites out of this repository, the admin translates them on the \
+         application's Translations screen, and the server serves the result. \
+         A user-visible literal that no `t()` wraps is invisible to all three \
+         and can never be translated, which is why `feldspar i18n lint` \
+         reports it.\n\
+         \n\
+         The message id **is the English source text** (`t(\"Add a task\")`, not \
+         `t(\"tasks.add\")`), the first argument must be a **string literal**, \
+         and placeholders are `{{name}}` rather than a template. The project's \
+         `AGENTS.md` has the call shapes.\n\
+         \n\
          ## Whether you have the tools\n\
          \n\
          They arrive from an MCP server this project may or may not be connected \

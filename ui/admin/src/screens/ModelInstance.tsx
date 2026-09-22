@@ -62,6 +62,7 @@ import {
   type SplitMetrics,
 } from "../models";
 import { fitTone } from "./Models";
+import { T, useT } from "../i18n";
 
 /** How often a fit still running is re-read (§8). */
 const POLL_MS = 1500;
@@ -70,6 +71,7 @@ const POLL_MS = 1500;
 const PARTS = ["train", "validation", "test"] as const;
 
 export function ModelInstance({ instanceId }: { instanceId: string }) {
+  const { t } = useT();
   const [instance, setInstance] = useState<InstanceDetail | null>(null);
   const [modelName, setModelName] = useState("");
   const [dataset, setDataset] = useState<Dataset | null>(null);
@@ -115,7 +117,13 @@ export function ModelInstance({ instanceId }: { instanceId: string }) {
 
   const remove = async () => {
     if (!instance) return;
-    if (!window.confirm(`Remove the fit "${instanceLabel(instance)}"?`)) return;
+    if (
+      !window.confirm(
+        t('Remove the fit "{name}"?', { name: instanceLabel(instance) }),
+      )
+    ) {
+      return;
+    }
     try {
       await api.deleteModelInstance(instanceId);
       navigate(`/models/${encodeURIComponent(instance.model)}`);
@@ -159,13 +167,13 @@ export function ModelInstance({ instanceId }: { instanceId: string }) {
               onClick={() => navigate(`/models/${encodeURIComponent(instance.model)}`)}
             >
               <IconArrowLeft className="icon-2" />
-              Back to the model
+              <T text="Back to the model" />
             </Button>
             {instance.status === "fitted" && !instance.active && (
-              <Button onClick={() => void activate()}>Activate</Button>
+              <Button onClick={() => void activate()}><T text="Activate" /></Button>
             )}
             <Button variant="outline-danger" onClick={() => void remove()}>
-              Remove
+              <T text="Remove" />
             </Button>
           </>
         }
@@ -175,15 +183,14 @@ export function ModelInstance({ instanceId }: { instanceId: string }) {
 
         <div className="d-flex align-items-center gap-2 mb-3 flex-wrap">
           <StatusBadge tone={fitTone(instance.status)}>{instance.status}</StatusBadge>
-          {instance.active && <StatusBadge tone="green">active</StatusBadge>}
+          {instance.active && <StatusBadge tone="green"><T text="active" /></StatusBadge>}
           <StatusBadge tone="blue">{outcomeSummary(outcome)}</StatusBadge>
           <span className="text-muted small">{formatTimestamp(instance.created)}</span>
         </div>
 
         {instance.status === "fitting" && (
           <Alert variant="info">
-            This fit is running on the server. The screen is asking again every second or so —
-            there is nothing to wait on, because the row is the only record of the job.
+            <T text="This fit is running on the server. The screen is asking again every second or so — there is nothing to wait on, because the row is the only record of the job." />
           </Alert>
         )}
         {/* The failure sentence is on the row, because the request that started
@@ -192,19 +199,24 @@ export function ModelInstance({ instanceId }: { instanceId: string }) {
 
         {rows && (
           <Card className="mb-3">
-            <Card.Header>Rows</Card.Header>
+            <Card.Header><T text="Rows" /></Card.Header>
             <Card.Body className="d-flex flex-wrap gap-4">
-              <Counted label="Selected" value={rows.selected} />
-              <Counted label="Train" value={rows.train} />
-              <Counted label="Validation" value={rows.validation} />
-              <Counted label="Test" value={rows.test} />
-              <Counted label="Dropped" value={rows.dropped} />
+              <Counted label={t("Selected")} value={rows.selected} />
+              <Counted label={t("Train")} value={rows.train} />
+              <Counted label={t("Validation")} value={rows.validation} />
+              <Counted label={t("Test")} value={rows.test} />
+              <Counted label={t("Dropped")} value={rows.dropped} />
             </Card.Body>
             {rows.dropped > 0 && (
               <Card.Footer className="text-muted small">
-                {rows.dropped} rows could not be represented by the encoding — a null in a
-                feature, most often — and were dropped. A fit over {rows.selected - rows.dropped}{" "}
-                of {rows.selected} rows is a different claim from a fit over {rows.selected}.
+                {t(
+                  "{dropped} rows could not be represented by the encoding — a null in a feature, most often — and were dropped. A fit over {kept} of {selected} rows is a different claim from a fit over {selected}.",
+                  {
+                    dropped: rows.dropped,
+                    kept: rows.selected - rows.dropped,
+                    selected: rows.selected,
+                  },
+                )}
               </Card.Footer>
             )}
           </Card>
@@ -212,12 +224,20 @@ export function ModelInstance({ instanceId }: { instanceId: string }) {
 
         {hasMetrics(metrics) && (
           <Card className="mb-3">
-            <Card.Header>Metrics</Card.Header>
+            <Card.Header><T text="Metrics" /></Card.Header>
             <MetricsTable metrics={metrics} />
             <Card.Footer className="text-muted small">
-              These are computed by the host, by scoring this fit back over each split — so the
-              same numbers mean the same thing for every provider. Read the <strong>test</strong>{" "}
-              column: the training one is measured on the rows the fit was computed from.
+              <T text="These are computed by the host, by scoring this fit back over each split — so the same numbers mean the same thing for every provider." />{" "}
+              <T
+                text="Read the {column} column: the training one is measured on the rows the fit was computed from."
+                values={{
+                  column: (
+                    <strong>
+                      <T text="test" />
+                    </strong>
+                  ),
+                }}
+              />
             </Card.Footer>
           </Card>
         )}
@@ -226,21 +246,21 @@ export function ModelInstance({ instanceId }: { instanceId: string }) {
 
         {parameters.length > 0 && (
           <Card className="mb-3">
-            <Card.Header>Parameters</Card.Header>
+            <Card.Header><T text="Parameters" /></Card.Header>
             <Card.Body>
               {parameters.map((block, index) => (
                 <ParameterView key={`${block.name}-${index}`} block={block} />
               ))}
             </Card.Body>
             <Card.Footer className="text-muted small">
-              These are the provider&apos;s own — what it fitted, in its own vocabulary.
+              <T text="These are the provider's own — what it fitted, in its own vocabulary." />
             </Card.Footer>
           </Card>
         )}
 
         {search.length > 0 && (
           <Card className="mb-3">
-            <Card.Header>Hyperparameter search</Card.Header>
+            <Card.Header><T text="Hyperparameter search" /></Card.Header>
             <div className="table-responsive">
               <Table size="sm" className="card-table table-vcenter">
                 <thead>
@@ -248,7 +268,7 @@ export function ModelInstance({ instanceId }: { instanceId: string }) {
                     {searchKeys(search).map((key) => (
                       <th key={key}>{key}</th>
                     ))}
-                    <th>Validation score</th>
+                    <th><T text="Validation score" /></th>
                     <th />
                   </tr>
                 </thead>
@@ -276,8 +296,7 @@ export function ModelInstance({ instanceId }: { instanceId: string }) {
               </Table>
             </div>
             <Card.Footer className="text-muted small">
-              Every point tried, scored on the validation rows. The chosen one was refitted and
-              is what the metrics above are of.
+              <T text="Every point tried, scored on the validation rows. The chosen one was refitted and is what the metrics above are of." />
             </Card.Footer>
           </Card>
         )}
@@ -355,24 +374,27 @@ function MetricsTable({ metrics }: { metrics: SplitMetrics }) {
  * Support is beside precision and recall on purpose: a recall of 1.0 over three
  * rows reads like a recall of 1.0 over three thousand without it. */
 function ClassificationDetail({ metrics }: { metrics: SplitMetrics }) {
+  const { t } = useT();
   const set = firstOf(metrics);
   if (!set || set.metrics.metrics !== "classification") return null;
   const classification = set.metrics;
   return (
     <Card className="mb-3">
-      <Card.Header className="text-capitalize">Classes ({set.part})</Card.Header>
+      <Card.Header className="text-capitalize">
+        {t("Classes ({part})", { part: set.part })}
+      </Card.Header>
       <div className="table-responsive">
         <Table size="sm" className="card-table table-vcenter">
           <thead>
             <tr>
-              <th>Class</th>
-              <th>Precision</th>
-              <th>Recall</th>
+              <th><T text="Class" /></th>
+              <th><T text="Precision" /></th>
+              <th><T text="Recall" /></th>
               <th>F1</th>
-              <th>Support</th>
+              <th><T text="Support" /></th>
               {classification.classes.map((klass: ClassMetrics) => (
                 <th key={`predicted-${klass.class}`} className="text-muted fw-normal">
-                  predicted {klass.class}
+                  {t("predicted {class_}", { class_: klass.class })}
                 </th>
               ))}
             </tr>
@@ -401,8 +423,7 @@ function ClassificationDetail({ metrics }: { metrics: SplitMetrics }) {
         </Table>
       </div>
       <Card.Footer className="text-muted small">
-        The right-hand block is the confusion matrix: each row is what the rows actually were,
-        each column what this fit said they are.
+        <T text="The right-hand block is the confusion matrix: each row is what the rows actually were, each column what this fit said they are." />
       </Card.Footer>
     </Card>
   );
@@ -555,7 +576,7 @@ function TryARow({
 
   return (
     <Card className="mb-3">
-      <Card.Header>Try a row</Card.Header>
+      <Card.Header><T text="Try a row" /></Card.Header>
       <Card.Body>
         <Row>
           {features.map((feature) => (

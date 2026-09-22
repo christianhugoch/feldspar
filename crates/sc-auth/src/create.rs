@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::password::{hash_password, random_password};
 use crate::user::User;
 use crate::users::USERS_TABLE;
-use crate::users::{COL_EMAIL, COL_ID, COL_PASSWORD_HASH, COL_ROLE};
+use crate::users::{COL_EMAIL, COL_ID, COL_LANGUAGE, COL_PASSWORD_HASH, COL_ROLE};
 
 /// What an admin supplies when creating a user.
 #[derive(Debug, Clone, Default)]
@@ -33,6 +33,11 @@ pub struct NewUser {
     pub password: String,
     /// The role, `1..=100`, which must already exist in `_fd_roles`.
     pub role: u8,
+    /// The language this account reads the product in — a BCP-47 tag, or `None`
+    /// for "whatever the request negotiates" (§16.1). A system column with its
+    /// own field for [`role`](NewUser::role)'s reason: it has a select of its
+    /// own, not a text box.
+    pub language: Option<String>,
     /// Admin-added columns, keyed by column name and already coerced to each
     /// column's type. System columns ([`SYSTEM_USER_COLUMNS`](crate::SYSTEM_USER_COLUMNS))
     /// are refused here: they are set by the fields above, not through the bag.
@@ -94,6 +99,17 @@ pub async fn create_user_with(catalog: &Catalog, new: NewUser) -> Result<Created
         Expr::lit(email),
         Expr::lit(password_hash),
     ];
+    // Only when it was chosen: a `NULL` language is the ordinary state, and
+    // writing an explicit one would be the same thing said louder.
+    let language = new
+        .language
+        .as_deref()
+        .map(str::trim)
+        .filter(|l| !l.is_empty());
+    if let Some(language) = language {
+        columns.push(COL_LANGUAGE.to_owned());
+        values.push(Expr::lit(language));
+    }
     for (column, value) in &new.extra {
         columns.push(column.clone());
         values.push(Expr::lit(value.clone()));
@@ -110,6 +126,10 @@ pub async fn create_user_with(catalog: &Catalog, new: NewUser) -> Result<Created
     let mut user = User::new(id, new.role)?;
     user.extra
         .insert(COL_EMAIL.to_owned(), Value::Text(email.to_owned()));
+    if let Some(language) = language {
+        user.extra
+            .insert(COL_LANGUAGE.to_owned(), Value::Text(language.to_owned()));
+    }
     user.extra.extend(new.extra);
     Ok(CreatedUser {
         user,
@@ -134,6 +154,7 @@ pub async fn create_user(catalog: &Catalog, email: &str, password: &str, role: u
             email: email.to_owned(),
             password: password.to_owned(),
             role,
+            language: None,
             extra: BTreeMap::new(),
         },
     )

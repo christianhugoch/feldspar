@@ -37,6 +37,7 @@ import {
   type QueryRow,
 } from "../customQueries";
 import { roleOptions, useRoles } from "../roles";
+import { T, useT } from "../i18n";
 
 /** The queries of one API row, edited in place.
  *
@@ -54,6 +55,7 @@ export function CustomQueries({
   idPrefix: string;
   onChange: (queries: QueryRow[]) => void;
 }) {
+  const { t } = useT();
   const roles = useRoles();
   // Keyed by index rather than held on the row: a check result is about this
   // editing session, not part of what gets saved.
@@ -85,26 +87,41 @@ export function CustomQueries({
   return (
     <Card className="mb-3">
       <Card.Header className="d-flex justify-content-between align-items-center">
-        <span>Custom SQL queries</span>
+        <span><T text="Custom SQL queries" /></span>
         <Button
           size="sm"
           variant="outline-primary"
           onClick={() => onChange([...queries, blankQueryRow()])}
         >
-          Add query
+          <T text="Add query" />
         </Button>
       </Card.Header>
       <Card.Body>
         <p className="text-muted small">
-          Each query becomes one endpoint on this API and one typed method on the
-          app's generated client, with the return type taken from the columns
-          Postgres reports. <strong>A custom query's authority is its own:</strong>{" "}
-          raw SQL does not go through the row layer, so ownership formulae,
-          rich-type coercion and File-field rules do not apply to it, and a write
-          inside one raises no table event. What still applies is the role floor
-          below — <em>admin unless you say otherwise</em> — and the caller's
-          database context, so a row-level-security policy still decides what the
-          query can see.
+          <T text="Each query becomes one endpoint on this API and one typed method on the app’s generated client, with the return type taken from the columns Postgres reports." />{" "}
+          {/* Two sentences, each whole, each with its emphasis as a hole: a
+            translator can move the emphasised clause, which is the thing three
+            fragments would have made impossible. */}
+          <T
+            text="{claim} raw SQL does not go through the row layer, so ownership formulae, rich-type coercion and File-field rules do not apply to it, and a write inside one raises no table event."
+            values={{
+              claim: (
+                <strong>
+                  <T text="A custom query’s authority is its own:" />
+                </strong>
+              ),
+            }}
+          />{" "}
+          <T
+            text="What still applies is the role floor below — {default} — and the caller’s database context, so a row-level-security policy still decides what the query can see."
+            values={{
+              default: (
+                <em>
+                  <T text="admin unless you say otherwise" />
+                </em>
+              ),
+            }}
+          />
         </p>
         {queries.length === 0 && <div className="text-muted">None.</div>}
         {queries.map((query, index) => (
@@ -112,18 +129,18 @@ export function CustomQueries({
             <Row className="mb-2 align-items-end">
               <Col md={4}>
                 <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-name`}>
-                  Name
+                  <T text="Name" />
                 </Form.Label>
                 <Form.Control
                   id={`${idPrefix}-q${index}-name`}
                   value={query.name}
-                  placeholder="topAuthors"
+                  placeholder={t("topAuthors")}
                   onChange={(e) => setQuery(index, { ...query, name: e.target.value })}
                 />
               </Col>
               <Col md={2}>
                 <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-method`}>
-                  Method
+                  <T text="Method" />
                 </Form.Label>
                 <Form.Select
                   id={`${idPrefix}-q${index}-method`}
@@ -150,7 +167,7 @@ export function CustomQueries({
               </Col>
               <Col md={3}>
                 <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-role`}>
-                  Minimum role
+                  <T text="Minimum role" />
                 </Form.Label>
                 <Form.Select
                   id={`${idPrefix}-q${index}-role`}
@@ -170,19 +187,19 @@ export function CustomQueries({
 
             <Form.Group className="mb-2">
               <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-desc`}>
-                Description
+                <T text="Description" />
               </Form.Label>
               <Form.Control
                 id={`${idPrefix}-q${index}-desc`}
                 value={query.description}
-                placeholder="What this query is for — it becomes the client method's doc comment."
+                placeholder={t("What this query is for — it becomes the client method's doc comment.")}
                 onChange={(e) => setQuery(index, { ...query, description: e.target.value })}
               />
             </Form.Group>
 
             <Form.Group className="mb-2">
               <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-sql`}>
-                SQL
+                <T text="SQL" />
               </Form.Label>
               <Form.Control
                 as="textarea"
@@ -190,18 +207,17 @@ export function CustomQueries({
                 className="font-monospace"
                 id={`${idPrefix}-q${index}-sql`}
                 value={query.sql}
-                placeholder="select author, count(*) as n from books where year > :since group by author"
+                placeholder={t("select author, count(*) as n from books where year > :since group by author")}
                 onChange={(e) => setQuery(index, { ...query, sql: e.target.value })}
               />
               <Form.Text muted>
-                One statement. Write a parameter as <code>:name</code> and declare it
-                below; arguments are always bound, never pasted into the text.
+                <T text="One statement. Write a parameter as" /> <code>:name</code> <T text="and declare it below; arguments are always bound, never pasted into the text." />
               </Form.Text>
             </Form.Group>
 
             <div className="mb-2">
               <div className="d-flex justify-content-between align-items-center mb-1">
-                <span className="small fw-semibold">Parameters</span>
+                <span className="small fw-semibold"><T text="Parameters" /></span>
                 <Button
                   size="sm"
                   variant="outline-secondary"
@@ -209,7 +225,7 @@ export function CustomQueries({
                     setQuery(index, { ...query, params: [...query.params, blankParamRow()] })
                   }
                 >
-                  Add parameter
+                  <T text="Add parameter" />
                 </Button>
               </div>
               {query.params.length === 0 && (
@@ -219,9 +235,9 @@ export function CustomQueries({
                 <Row key={pi} className="mb-2 align-items-end">
                   <Col md={5}>
                     <Form.Control
-                      aria-label="Parameter name"
+                      aria-label={t("Parameter name")}
                       value={param.name}
-                      placeholder="since"
+                      placeholder={t("since")}
                       onChange={(e) =>
                         setQuery(index, {
                           ...query,
@@ -234,7 +250,7 @@ export function CustomQueries({
                   </Col>
                   <Col md={3}>
                     <Form.Select
-                      aria-label="Parameter type"
+                      aria-label={t("Parameter type")}
                       value={param.type}
                       onChange={(e) =>
                         setQuery(index, {
@@ -256,7 +272,7 @@ export function CustomQueries({
                     <Form.Check
                       type="checkbox"
                       id={`${idPrefix}-q${index}-p${pi}-req`}
-                      label="Required"
+                      label={t("Required")}
                       checked={param.required}
                       onChange={(e) =>
                         setQuery(index, {
@@ -279,15 +295,13 @@ export function CustomQueries({
                         })
                       }
                     >
-                      Remove
+                      <T text="Remove" />
                     </Button>
                   </Col>
                 </Row>
               ))}
               <Form.Text muted>
-                An optional parameter binds SQL <code>NULL</code> when it is left out,
-                which is what makes <code>(:q is null or name = :q)</code> an optional
-                filter.
+                <T text="An optional parameter binds SQL" /> <code>NULL</code> <T text="when it is left out, which is what makes" /> <code>(:q is null or name = :q)</code> <T text="an optional filter." />
               </Form.Text>
             </div>
 
@@ -298,7 +312,7 @@ export function CustomQueries({
                 disabled={status[index]?.kind === "checking"}
                 onClick={() => void check(index)}
               >
-                Check
+                <T text="Check" />
               </Button>
               <Button
                 size="sm"
@@ -308,7 +322,7 @@ export function CustomQueries({
                   setStatus({});
                 }}
               >
-                Remove query
+                <T text="Remove query" />
               </Button>
               <CheckResult status={status[index] ?? { kind: "idle" }} query={query} />
             </div>
@@ -339,7 +353,7 @@ function CheckResult({ status, query }: { status: CheckStatus; query: QueryRow }
   if (query.columns.length === 0) {
     return (
       <span className="text-muted small">
-        Not checked yet — Check prepares it and shows what it returns.
+        <T text="Not checked yet — Check prepares it and shows what it returns." />
       </span>
     );
   }

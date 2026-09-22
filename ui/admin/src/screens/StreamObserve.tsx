@@ -50,8 +50,10 @@ import {
   type Envelope,
   type ObserveState,
 } from "../streams";
+import { T, useT } from "../i18n";
 
 export function StreamObserve({ streamId }: { streamId: string }) {
+  const { t } = useT();
   const [state, setState] = useState<ObserveState>(emptyObserve());
   const [name, setName] = useState("");
   const [enabled, setEnabled] = useState(true);
@@ -157,11 +159,11 @@ export function StreamObserve({ streamId }: { streamId: string }) {
               }}
             >
               <IconTrash className="icon-2" />
-              Clear
+              <T text="Clear" />
             </Button>
             <Button variant="outline-secondary" href="#/streams">
               <IconArrowLeft className="icon-2" />
-              Streams
+              <T text="Streams" />
             </Button>
           </div>
         }
@@ -178,7 +180,9 @@ export function StreamObserve({ streamId }: { streamId: string }) {
               {elementTypeSummary(state.elementType)}
             </span>
             <span className="text-muted">
-              {formatCount(state.counters.elements)} elements since this server started
+              {t("{count} elements since this server started", {
+                count: formatCount(state.counters.elements),
+              })}
             </span>
             {notes.length > 0 && <span className="text-warning">{notes.join(" · ")}</span>}
           </div>
@@ -187,22 +191,24 @@ export function StreamObserve({ streamId }: { streamId: string }) {
         {/* §7: told, never hidden. */}
         {state.lagged > 0 && (
           <Alert variant="warning">
-            This screen fell behind and lost {formatCount(state.lagged)} elements. Nothing
-            back-pressures a stream: a consumer that cannot keep up is skipped rather than made to
-            wait, and the elements that were skipped are gone.
+            {t(
+              "This screen fell behind and lost {count} elements. Nothing back-pressures a stream: a consumer that cannot keep up is skipped rather than made to wait, and the elements that were skipped are gone.",
+              { count: formatCount(state.lagged) },
+            )}
           </Alert>
         )}
         {paused && (
           <Alert variant="info">
-            Paused — {formatCount(held)} elements have arrived and are not shown. Pausing stops
-            this screen, not the stream.
+            {t(
+              "Paused — {count} elements have arrived and are not shown. Pausing stops this screen, not the stream.",
+              { count: formatCount(held) },
+            )}
           </Alert>
         )}
 
         {state.ready && tail.length === 0 && !state.error && (
           <Alert variant="info">
-            Nothing yet. Elements appear here as they arrive; there is no history beyond what this
-            server has seen since it started, because an element is not stored.
+            <T text="Nothing yet. Elements appear here as they arrive; there is no history beyond what this server has seen since it started, because an element is not stored." />
           </Alert>
         )}
 
@@ -235,13 +241,13 @@ function ElementTail({
     <Table hover responsive className="card-table table-vcenter">
       <thead>
         <tr>
-          <th>Received</th>
+          <th><T text="Received" /></th>
           {type?.kind === "json" ? (
             columns.map((column) => <th key={column}>{column}</th>)
           ) : (
-            <th>Value</th>
+            <th><T text="Value" /></th>
           )}
-          <th>Source</th>
+          <th><T text="Source" /></th>
         </tr>
       </thead>
       <tbody>
@@ -251,7 +257,7 @@ function ElementTail({
               {formatTime(envelope.received_at)}
               {/* The whole truth about what this row is (§9). */}
               {isHistory(index) && (
-                <div className="small">since this server started</div>
+                <div className="small"><T text="since this server started" /></div>
               )}
             </td>
             <ValueCells envelope={envelope} type={type} columns={columns} />

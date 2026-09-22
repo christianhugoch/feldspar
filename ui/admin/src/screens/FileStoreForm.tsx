@@ -55,6 +55,7 @@ import {
   readConfig,
   type FieldSpec,
 } from "../settings";
+import { T, useT } from "../i18n";
 
 type BackendInfo = ListFileStoreBackendsResponse[number];
 type OperationInfo = BackendInfo["operations"][number];
@@ -64,6 +65,7 @@ type StoreItem = ListFileStoresResponse[number];
 type OperationInputs = Record<string, Record<string, string>>;
 
 export function FileStoreForm({ storeId }: { storeId?: string }) {
+  const { t } = useT();
   const roles = useRoles();
   const [backends, setBackends] = useState<BackendInfo[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -176,7 +178,7 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
         actions={
           <Button variant="outline-secondary" onClick={() => navigate("/file-stores")}>
             <IconArrowLeft className="icon-2" />
-            Back
+            <T text="Back" />
           </Button>
         }
       />
@@ -185,12 +187,11 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
         {warning && (
           <Alert variant="warning" onClose={() => setWarning(null)} dismissible>
             <AlertBody>
-              <Alert.Heading className="h6">Saved, but not connected</Alert.Heading>
+              <Alert.Heading className="h6"><T text="Saved, but not connected" /></Alert.Heading>
               <div className="text-break">{warning}</div>
               <hr />
               <div className="mb-0 small">
-                The definition is stored and you can keep editing it. Fix the settings and save
-                again, or go back to the list.
+                <T text="The definition is stored and you can keep editing it. Fix the settings and save again, or go back to the list." />
               </div>
             </AlertBody>
           </Alert>
@@ -200,7 +201,7 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
           <Row>
             <Col md={6}>
               <Form.Group className="mb-3" controlId="storeName">
-                <Form.Label>Name</Form.Label>
+                <Form.Label><T text="Name" /></Form.Label>
                 <Form.Control
                   value={name}
                   required
@@ -212,7 +213,7 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
             <Col md={6}>
               <OptionalRoleSelect
                 id="storeMinRole"
-                label="Minimum role to access"
+                label={t("Minimum role to access")}
                 value={minRole}
                 roles={roles}
                 blank="Unrestricted"
@@ -223,7 +224,7 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
           </Row>
 
           <Form.Group className="mb-3" controlId="storeDescription">
-            <Form.Label>Description</Form.Label>
+            <Form.Label><T text="Description" /></Form.Label>
             <Form.Control
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -231,10 +232,10 @@ export function FileStoreForm({ storeId }: { storeId?: string }) {
           </Form.Group>
 
           <Card className="mb-3">
-            <Card.Header>Backend</Card.Header>
+            <Card.Header><T text="Backend" /></Card.Header>
             <Card.Body>
               <Form.Group className="mb-3" controlId="storeBackend">
-                <Form.Label>Backend</Form.Label>
+                <Form.Label><T text="Backend" /></Form.Label>
                 <Form.Select
                   value={backendName}
                   onChange={(e) => setBackendName(e.target.value)}
@@ -445,7 +446,7 @@ function InstanceOperations({
 
   return (
     <Card className="mb-3">
-      <Card.Header>Operations</Card.Header>
+      <Card.Header><T text="Operations" /></Card.Header>
       <Card.Body>
         {error && <Alert variant="danger">{error}</Alert>}
         <OperationOutput output={output} onClose={() => setOutput(null)} />
@@ -491,10 +492,10 @@ function InstanceOperations({
         <div className="btn-list">
           <Button variant="outline-primary" href={`#/files/${encodeURIComponent(storeName)}`}>
             <IconFolder className="icon-2" />
-            Change files
+            <T text="Change files" />
           </Button>
           <Button variant="outline-secondary" onClick={() => void refresh()}>
-            Refresh
+            <T text="Refresh" />
           </Button>
         </div>
       </Card.Body>

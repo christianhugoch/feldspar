@@ -548,6 +548,10 @@ impl AdminTool for EndpointTool {
             // A projected tool never carries bytes: the endpoints that do are
             // tier 3, and a JSON arguments object has no shape for them.
             raw_body: None,
+            // An MCP call is a coding agent's, not a browser's: there is no
+            // `Accept-Language` and no cookie to negotiate from, so it is served
+            // in the installation's default language (§16.1).
+            locale: sc_i18n::active().default_locale().clone(),
         })
         .await;
         match (outcome, self.projection.is_a_build()) {

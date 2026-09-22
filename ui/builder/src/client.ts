@@ -5,7 +5,7 @@ import { clientError, requestHeaders, type ClientOptions } from "./helper";
 
 export type { ClientOptions } from "./helper";
 
-export type AuthStatusResponse = { any_user_exists: boolean; current_user?: { id: string; email: string; role: number } | null };
+export type AuthStatusResponse = { any_user_exists: boolean; current_user?: { id: string; email: string; role: number } | null; locales: { default: string; enabled: Array<string>; current: string } };
 export type CreateFirstUserRequest = { email: string; password: string };
 export type CreateFirstUserResponse = { id: string; email: string; role: number };
 export type LoginRequest = { email: string; password: string };
@@ -169,6 +169,12 @@ export type SaveLibraryUpdatesRequest = { libraryUpdates: Array<{ library_id: st
 export type SaveLibraryUpdatesResponse = { updated: number };
 export type DeleteLibraryItemQuery = { confirm?: boolean };
 export type DeleteLibraryItemResponse = { deleted: boolean; references: { views: Array<string>; pages: Array<string>; library: Array<string> } };
+export type GetTranslationsResponse = unknown;
+export type SetApplicationLocalesRequest = { locales: Array<string>; default_locale?: string | null };
+export type SetApplicationLocalesResponse = unknown;
+export type SaveTranslationsRequest = { messages: unknown };
+export type SaveTranslationsResponse = unknown;
+export type TranslateMissingResponse = unknown;
 export type BuilderFieldPreviewRequest = { table: string; field: string; fieldview: string; configuration?: unknown | null; row_id?: unknown | null };
 export type BuilderFieldPreviewResponse = { html: string };
 export type BuilderFieldviewConfigFormRequest = { table: string; field_name?: string | null; fieldview?: string | null; type?: string | null; join_field?: string | null; join_fieldview?: string | null; agg_outcome_type?: string | null; agg_fieldview?: string | null; agg_field?: string | null; mode?: string | null; _columndef?: string | null };
@@ -184,14 +190,14 @@ export type ListFrameworksResponse = Array<{ name: string; label: string; descri
 export type ListApiProvidersResponse = Array<{ name: string; label: string; description: string; default_mount: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; supports_custom_queries: boolean }>;
 export type DescribeCustomQueryRequest = { name: string; description?: string | null; method: string; path: string; sql: string; params: Array<{ name: string; type: string; required?: boolean | null }>; min_role?: number | null; tables?: Array<string> | null };
 export type DescribeCustomQueryResponse = { columns: Array<{ name: string; type: string }> };
-export type ListUsersResponse = Array<{ id: string; email: string; role: number; disabled: boolean; extra: unknown }>;
-export type CreateUserRequest = { email: string; password?: string | null; role: number; extra?: unknown | null };
-export type CreateUserResponse = { user: { id: string; email: string; role: number; disabled: boolean; extra: unknown }; generated_password?: string | null };
-export type UpdateUserRequest = { email: string; password?: string | null; role: number; extra?: unknown | null };
-export type UpdateUserResponse = { id: string; email: string; role: number; disabled: boolean; extra: unknown };
+export type ListUsersResponse = Array<{ id: string; email: string; role: number; disabled: boolean; language?: string | null; extra: unknown }>;
+export type CreateUserRequest = { email: string; password?: string | null; role: number; language?: string | null; extra?: unknown | null };
+export type CreateUserResponse = { user: { id: string; email: string; role: number; disabled: boolean; language?: string | null; extra: unknown }; generated_password?: string | null };
+export type UpdateUserRequest = { email: string; password?: string | null; role: number; language?: string | null; extra?: unknown | null };
+export type UpdateUserResponse = { id: string; email: string; role: number; disabled: boolean; language?: string | null; extra: unknown };
 export type DeleteUserResponse = { deleted: boolean };
 export type SetUserDisabledRequest = { disabled: boolean };
-export type SetUserDisabledResponse = { id: string; email: string; role: number; disabled: boolean; extra: unknown };
+export type SetUserDisabledResponse = { id: string; email: string; role: number; disabled: boolean; language?: string | null; extra: unknown };
 export type ForceLogoutUserResponse = { ok: boolean };
 export type BecomeUserResponse = { id: string; email: string; role: number };
 export type SetRandomPasswordResponse = { email: string; password: string };
@@ -369,6 +375,10 @@ export interface ApiClient {
   saveLibraryItem(id: string, item: string, body: SaveLibraryItemRequest): Promise<SaveLibraryItemResponse>;
   saveLibraryUpdates(id: string, body: SaveLibraryUpdatesRequest): Promise<SaveLibraryUpdatesResponse>;
   deleteLibraryItem(id: string, item: string, query?: DeleteLibraryItemQuery): Promise<DeleteLibraryItemResponse>;
+  getTranslations(id: string): Promise<GetTranslationsResponse>;
+  setApplicationLocales(id: string, body: SetApplicationLocalesRequest): Promise<SetApplicationLocalesResponse>;
+  saveTranslations(id: string, locale: string, body: SaveTranslationsRequest): Promise<SaveTranslationsResponse>;
+  translateMissing(id: string, locale: string): Promise<TranslateMissingResponse>;
   builderFieldPreview(id: string, body: BuilderFieldPreviewRequest): Promise<BuilderFieldPreviewResponse>;
   builderFieldviewConfigForm(id: string, body: BuilderFieldviewConfigFormRequest): Promise<BuilderFieldviewConfigFormResponse>;
   builderViewPreview(id: string, body: BuilderViewPreviewRequest): Promise<BuilderViewPreviewResponse>;
@@ -1377,6 +1387,40 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("deleteLibraryItem", res);
       return (await res.json()) as DeleteLibraryItemResponse;
+    },
+    async getTranslations(id) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/translations`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getTranslations", res);
+      return (await res.json()) as GetTranslationsResponse;
+    },
+    async setApplicationLocales(id, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/locales`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("setApplicationLocales", res);
+      return (await res.json()) as SetApplicationLocalesResponse;
+    },
+    async saveTranslations(id, locale, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/translations/${locale}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("saveTranslations", res);
+      return (await res.json()) as SaveTranslationsResponse;
+    },
+    async translateMissing(id, locale) {
+      const res = await doFetch(`${baseUrl}/api/applications/${id}/translations/${locale}/fill`, {
+        method: "POST",
+        headers: requestHeaders("POST", false),
+      });
+      if (!res.ok) throw await clientError("translateMissing", res);
+      return (await res.json()) as TranslateMissingResponse;
     },
     async builderFieldPreview(id, body) {
       const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/field-preview`, {

@@ -29,6 +29,7 @@ import {
   type Prices,
 } from "../llmModels";
 import { SettingsFields, buildConfig, readConfig } from "../settings";
+import { T, useT } from "../i18n";
 
 type FieldSpec = ListLlmModelSettingsResponse[number];
 
@@ -52,6 +53,7 @@ export function LlmModels({
    * test sends, so an unsaved change to the key or URL is what is tested. */
   providerConfig: Record<string, unknown>;
 }) {
+  const { t } = useT();
   const [models, setModels] = useState<ModelItem[] | null>(null);
   const [spec, setSpec] = useState<FieldSpec[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -133,7 +135,7 @@ export function LlmModels({
   };
 
   const remove = async (m: ModelItem) => {
-    if (!window.confirm(`Delete the model ${m.name}?`)) return;
+    if (!window.confirm(t("Delete the model {name}?", { name: m.name }))) return;
     setError(null);
     try {
       await api.deleteLlmModel(m.id);
@@ -204,7 +206,7 @@ export function LlmModels({
   return (
     <Card className="mb-3">
       <Card.Header className="d-flex align-items-center">
-        <Card.Title className="mb-0">Models</Card.Title>
+        <Card.Title className="mb-0"><T text="Models" /></Card.Title>
         <div className="ms-auto btn-list">
           <Button
             size="sm"
@@ -226,7 +228,7 @@ export function LlmModels({
               })
             }
           >
-            Add model
+            <T text="Add model" />
           </Button>
         </div>
       </Card.Header>
@@ -255,8 +257,7 @@ export function LlmModels({
         {offered && offered.length > 0 && (
           <div className="mb-3">
             <div className="small text-muted mb-1">
-              The host lists these models. Each is added with blank settings, which means the
-              built-in defaults.
+              <T text="The host lists these models. Each is added with blank settings, which means the built-in defaults." />
             </div>
             <div className="d-flex flex-wrap gap-1">
               {offered.map((name) => (
@@ -279,15 +280,15 @@ export function LlmModels({
           </div>
         ) : models.length === 0 ? (
           <p className="text-muted mb-0">
-            No models yet. An agent needs a model to call: add one, or fetch the host's list.
+            <T text="No models yet. An agent needs a model to call: add one, or fetch the host's list." />
           </p>
         ) : (
           <Table responsive className="card-table table-vcenter mb-0">
             <thead>
               <tr>
-                <th>Model</th>
-                <th>Resolves to</th>
-                <th>Input / output</th>
+                <th><T text="Model" /></th>
+                <th><T text="Resolves to" /></th>
+                <th><T text="Input / output" /></th>
                 <th />
               </tr>
             </thead>
@@ -301,7 +302,7 @@ export function LlmModels({
                       <span className="font-monospace">{m.name}</span>
                       {m.is_default && (
                         <Badge bg="primary-lt" className="ms-2">
-                          default
+                          <T text="default" />
                         </Badge>
                       )}
                       {m.description && <div className="small text-muted">{m.description}</div>}
@@ -318,7 +319,7 @@ export function LlmModels({
                             variant="outline-secondary"
                             onClick={() => void update(m, { is_default: true })}
                           >
-                            Make default
+                            <T text="Make default" />
                           </Button>
                         )}
                         <Button
@@ -342,10 +343,10 @@ export function LlmModels({
                             })
                           }
                         >
-                          Edit
+                          <T text="Edit" />
                         </Button>
                         <Button size="sm" variant="outline-danger" onClick={() => void remove(m)}>
-                          Delete
+                          <T text="Delete" />
                         </Button>
                       </div>
                     </td>
@@ -356,8 +357,7 @@ export function LlmModels({
           </Table>
         )}
         <p className="text-muted small mt-3 mb-0">
-          Testing sends one short prompt to the model, which counts against your account like any
-          other request.
+          <T text="Testing sends one short prompt to the model, which counts against your account like any other request." />
         </p>
       </Card.Body>
 
@@ -370,7 +370,7 @@ export function LlmModels({
             <Modal.Body>
               <Form.Group className="mb-3" controlId="modelName">
                 <Form.Label>
-                  Model name<span className="text-danger"> *</span>
+                  <T text="Model name" /><span className="text-danger"> *</span>
                 </Form.Label>
                 <Form.Control
                   className="font-monospace"
@@ -378,10 +378,10 @@ export function LlmModels({
                   required
                   onChange={(e) => setEditing({ ...editing, name: e.target.value })}
                 />
-                <Form.Text muted>The vendor's model id, exactly as the API takes it.</Form.Text>
+                <Form.Text muted><T text="The vendor's model id, exactly as the API takes it." /></Form.Text>
               </Form.Group>
               <Form.Group className="mb-3" controlId="modelDescription">
-                <Form.Label>Description</Form.Label>
+                <Form.Label><T text="Description" /></Form.Label>
                 <Form.Control
                   value={editing.description}
                   onChange={(e) => setEditing({ ...editing, description: e.target.value })}
@@ -390,18 +390,16 @@ export function LlmModels({
               <Form.Group className="mb-3" controlId="modelDefault">
                 <Form.Check
                   type="checkbox"
-                  label="The provider's default model"
+                  label={t("The provider's default model")}
                   checked={editing.isDefault}
                   onChange={(e) => setEditing({ ...editing, isDefault: e.target.checked })}
                 />
                 <Form.Text muted>
-                  What an agent that names this provider and no model calls. Making this the
-                  default takes it from any other model.
+                  <T text="What an agent that names this provider and no model calls. Making this the default takes it from any other model." />
                 </Form.Text>
               </Form.Group>
               <p className="text-muted small">
-                Leave a setting blank to use the built-in default. A blank price is unknown, not
-                free, so a cost budget cannot be set on an agent using this model.
+                <T text="Leave a setting blank to use the built-in default. A blank price is unknown, not free, so a cost budget cannot be set on an agent using this model." />
               </p>
               <SettingsFields
                 spec={spec}
@@ -414,7 +412,7 @@ export function LlmModels({
             </Modal.Body>
             <Modal.Footer>
               <Button variant="outline-secondary" onClick={() => setEditing(null)}>
-                Cancel
+                <T text="Cancel" />
               </Button>
               <Button type="submit" disabled={saving}>
                 {saving ? "Saving…" : editing.id ? "Save changes" : "Add model"}

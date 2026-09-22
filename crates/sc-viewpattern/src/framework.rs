@@ -41,6 +41,7 @@
 //! surfaces a call carries are built from the request's user, exactly as a code
 //! body's are built from its event's caller (§11).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -57,6 +58,7 @@ use sc_auth::User;
 use sc_catalog::Catalog;
 use sc_error::{Error, ErrorKind, Repr, Result};
 use sc_expr::{CodeHosts, JsEvaluator, ModuleFnHost, TriggerHost};
+use sc_i18n::t;
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Map, Value as Json};
 
@@ -283,6 +285,7 @@ impl FrameworkFactory for SaltcornUiFactory {
             public_dir: bundle.join("public"),
             runtime,
             snapshot: RwLock::new(None),
+            catalogues: RwLock::new(std::collections::HashMap::new()),
         }))
     }
 }
@@ -297,6 +300,52 @@ pub struct SaltcornUiFramework {
     runtime: Arc<dyn ViewRuntime>,
     /// The snapshot of the view set's current generation, built once for it.
     snapshot: RwLock<Option<Arc<ViewSnapshot>>>,
+    /// The application's catalogue per locale, flat (§16.1, task 4.5).
+    ///
+    /// This framework renders **server-side**, so the phrases are looked up as
+    /// the HTML is built and the catalogue has to be here rather than in the
+    /// browser. It is read once per locale and dropped by
+    /// [`forget_catalogues`](Framework::forget_catalogues) when a translation
+    /// is saved, which is what makes a fix live without a remount (D7).
+    ///
+    /// An application with no locales never populates it: the load is behind
+    /// the same `app_is_translated` guard every other path uses (D11).
+    catalogues: RwLock<std::collections::HashMap<String, Arc<BTreeMap<String, String>>>>,
+}
+
+impl SaltcornUiFramework {
+    /// The catalogue for this request's locale, read once and remembered.
+    ///
+    /// Flat strings only: v1's `__` has no plural forms, only positional `%s`,
+    /// so a plural entry is left out and its English renders — which is right,
+    /// because a message with plural forms was not one of v1's to begin with.
+    async fn catalogue(&self, cat: &Catalog, locale: &str) -> Arc<BTreeMap<String, String>> {
+        // The zero-cost case, first and without a lock on the slow path (D11).
+        if !sc_app::app_is_translated(&self.app) {
+            return Arc::new(BTreeMap::new());
+        }
+        if let Ok(held) = self.catalogues.read()
+            && let Some(found) = held.get(locale)
+        {
+            return found.clone();
+        }
+        let mut flat = BTreeMap::new();
+        if let Ok(parsed) = sc_i18n::Locale::parse(locale)
+            && let Ok(store) = sc_app::app_catalog_store(&self.app)
+            && let Ok(Some(catalogue)) = store.load(cat, &parsed).await
+        {
+            for (key, message) in catalogue.messages() {
+                if let sc_i18n::Message::Simple(text) = message {
+                    flat.insert(key.clone(), text.clone());
+                }
+            }
+        }
+        let held = Arc::new(flat);
+        if let Ok(mut cache) = self.catalogues.write() {
+            cache.insert(locale.to_owned(), held.clone());
+        }
+        held
+    }
 }
 
 #[async_trait]
@@ -309,7 +358,16 @@ impl Framework for SaltcornUiFramework {
         saltcorn_ui_config_spec()
     }
 
+    fn forget_catalogues(&self) {
+        if let Ok(mut cache) = self.catalogues.write() {
+            cache.clear();
+        }
+    }
+
     async fn handle(&self, req: AppRequest, cat: &Catalog) -> Result<AppResponse> {
+        // The request's catalogue, read once here so the six places that build
+        // a `ViewRequest` can pick it up synchronously (§16.1, task 4.5).
+        let _ = self.catalogue(cat, req.locale.as_str()).await;
         let path = req.path.clone();
         let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
         if let ["auth", action] = segments.as_slice() {
@@ -335,8 +393,8 @@ impl Framework for SaltcornUiFramework {
                     _ => Ok(self.message(
                         &req,
                         404,
-                        "Not found",
-                        "There is nothing to post to at this address.",
+                        &t!(req.locale, "Not found"),
+                        &t!(req.locale, "There is nothing to post to at this address."),
                     )),
                 };
             }
@@ -353,7 +411,12 @@ impl Framework for SaltcornUiFramework {
             ["plugins", "public", plugin, rest @ ..] if !rest.is_empty() => {
                 Ok(plugin_asset(&percent_decode(plugin), rest))
             }
-            _ => Ok(self.message(&req, 404, "Not found", "There is nothing at this address.")),
+            _ => Ok(self.message(
+                &req,
+                404,
+                &t!(req.locale, "Not found"),
+                &t!(req.locale, "There is nothing at this address."),
+            )),
         }
     }
 
@@ -480,7 +543,11 @@ impl SaltcornUiFramework {
         let Some(view) = set.view(name) else {
             return Ok(self.no_view(req, name));
         };
-        if let Some(refused) = self.refused(req, &format!("the view {name}"), view.min_role) {
+        if let Some(refused) = self.refused(
+            req,
+            &t!(req.locale, "the view {name}", name = name),
+            view.min_role,
+        ) {
             return Ok(refused);
         }
         let state = state_of(req, view, slug);
@@ -516,7 +583,11 @@ impl SaltcornUiFramework {
         let Some(view) = set.view(name) else {
             return Ok(self.no_view(req, name));
         };
-        if let Some(refused) = self.refused(req, &format!("the view {name}"), view.min_role) {
+        if let Some(refused) = self.refused(
+            req,
+            &t!(req.locale, "the view {name}", name = name),
+            view.min_role,
+        ) {
             return Ok(refused);
         }
         if let [route] = rest {
@@ -606,7 +677,11 @@ impl SaltcornUiFramework {
         let Some(page) = set.page(name) else {
             return json_response(404, &serde_json::json!({ "error": "Action not found" }));
         };
-        if let Some(refused) = self.refused(req, &format!("the page {name}"), page.min_role) {
+        if let Some(refused) = self.refused(
+            req,
+            &t!(req.locale, "the page {name}", name = name),
+            page.min_role,
+        ) {
             return Ok(refused);
         }
         let request = self.view_request(req, None);
@@ -727,13 +802,18 @@ impl SaltcornUiFramework {
             ("signup", _) if !self.signup_allowed() => Ok(self.message(
                 req,
                 404,
-                "Not found",
-                "This application does not offer sign-up.",
+                &t!(req.locale, "Not found"),
+                &t!(req.locale, "This application does not offer sign-up."),
             )),
             ("signup", Method::Get) => Ok(self.auth_form(req, AuthForm::Signup, 200, "", None)),
             ("signup", Method::Post) => self.signup(req, cat, &dest).await,
             ("login" | "logout" | "signup", _) => Ok(AppResponse::method_not_allowed()),
-            _ => Ok(self.message(req, 404, "Not found", "There is nothing at this address.")),
+            _ => Ok(self.message(
+                req,
+                404,
+                &t!(req.locale, "Not found"),
+                &t!(req.locale, "There is nothing at this address."),
+            )),
         }
     }
 
@@ -754,7 +834,7 @@ impl SaltcornUiFramework {
                 AuthForm::Login,
                 401,
                 email.trim(),
-                Some("Incorrect email or password."),
+                Some(&t!(req.locale, "Incorrect email or password.")),
             )),
         }
     }
@@ -768,16 +848,19 @@ impl SaltcornUiFramework {
         let again =
             |problem: &str| Ok(self.auth_form(req, AuthForm::Signup, 400, &email, Some(problem)));
         if email.is_empty() {
-            return again("An email address is required.");
+            return again(&t!(req.locale, "An email address is required."));
         }
         if password.is_empty() {
-            return again("A password is required.");
+            return again(&t!(req.locale, "A password is required."));
         }
         if has_field(req, "passwordRepeat") && field_of(req, "passwordRepeat") != password {
-            return again("The two passwords are not the same.");
+            return again(&t!(req.locale, "The two passwords are not the same."));
         }
         if sc_auth::load_user_by_email(cat, &email).await?.is_some() {
-            return again("There is already an account with this email address.");
+            return again(&t!(
+                req.locale,
+                "There is already an account with this email address."
+            ));
         }
         match sc_auth::create_user(cat, &email, &password, self.new_user_role()).await {
             Ok(user) => Ok(signed_in(user, dest)),
@@ -831,11 +914,16 @@ impl SaltcornUiFramework {
             format!("?dest={}", percent_encode(&dest))
         };
         let (heading, action, button, password_autocomplete) = match kind {
-            AuthForm::Login => ("Sign in", "/auth/login", "Sign in", "current-password"),
+            AuthForm::Login => (
+                t!(req.locale, "Sign in"),
+                "/auth/login",
+                t!(req.locale, "Sign in"),
+                "current-password",
+            ),
             AuthForm::Signup => (
-                "Create an account",
+                t!(req.locale, "Create an account"),
                 "/auth/signup",
-                "Sign up",
+                t!(req.locale, "Sign up"),
                 "new-password",
             ),
         };
@@ -849,23 +937,36 @@ impl SaltcornUiFramework {
             .unwrap_or_default();
         let repeat = match kind {
             AuthForm::Login => String::new(),
-            AuthForm::Signup => "<div class=\"mb-3\"><label class=\"form-label\" \
-                                 for=\"passwordRepeat\">Password again</label><input \
-                                 class=\"form-control\" type=\"password\" id=\"passwordRepeat\" \
-                                 name=\"passwordRepeat\" autocomplete=\"new-password\" \
-                                 required></div>"
-                .to_owned(),
+            AuthForm::Signup => format!(
+                "<div class=\"mb-3\"><label class=\"form-label\" for=\"passwordRepeat\">{}\
+                 </label><input class=\"form-control\" type=\"password\" id=\"passwordRepeat\" \
+                 name=\"passwordRepeat\" autocomplete=\"new-password\" required></div>",
+                escape(&t!(req.locale, "Password again"))
+            ),
         };
         let other = match kind {
+            // The link is *inside* the sentence, so the sentence is the message
+            // and the anchor is two of its arguments: a translator who has to
+            // move "Sign up" to the front of the clause can, which is the whole
+            // reason a message is not three concatenated fragments.
             AuthForm::Login if self.signup_allowed() => format!(
-                "<p class=\"mt-3\">No account yet? <a href=\"/auth/signup{}\">Sign up</a></p>",
-                escape(&back)
+                "<p class=\"mt-3\">{}</p>",
+                t!(
+                    req.locale,
+                    "No account yet? {link_start}Sign up{link_end}",
+                    link_start = format!("<a href=\"/auth/signup{}\">", escape(&back)),
+                    link_end = "</a>"
+                )
             ),
             AuthForm::Login => String::new(),
             AuthForm::Signup => format!(
-                "<p class=\"mt-3\">Already have an account? <a href=\"/auth/login{}\">Sign \
-                 in</a></p>",
-                escape(&back)
+                "<p class=\"mt-3\">{}</p>",
+                t!(
+                    req.locale,
+                    "Already have an account? {link_start}Sign in{link_end}",
+                    link_start = format!("<a href=\"/auth/login{}\">", escape(&back)),
+                    link_end = "</a>"
+                )
             ),
         };
         let body = format!(
@@ -876,10 +977,11 @@ impl SaltcornUiFramework {
              <form action=\"{action}\" method=\"post\">\
              <input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\">\
              <input type=\"hidden\" name=\"dest\" value=\"{dest}\">\
-             <div class=\"mb-3\"><label class=\"form-label\" for=\"email\">Email</label>\
+             <div class=\"mb-3\"><label class=\"form-label\" for=\"email\">{email_label}</label>\
              <input class=\"form-control\" type=\"email\" id=\"email\" name=\"email\" \
              value=\"{email}\" autocomplete=\"username\" required autofocus></div>\
-             <div class=\"mb-3\"><label class=\"form-label\" for=\"password\">Password</label>\
+             <div class=\"mb-3\"><label class=\"form-label\" \
+             for=\"password\">{password_label}</label>\
              <input class=\"form-control\" type=\"password\" id=\"password\" name=\"password\" \
              autocomplete=\"{password_autocomplete}\" required></div>\
              {repeat}\
@@ -889,8 +991,10 @@ impl SaltcornUiFramework {
             csrf = escape(&req.csrf_token),
             dest = escape(&dest),
             email = escape(email),
+            email_label = escape(&t!(req.locale, "Email")),
+            password_label = escape(&t!(req.locale, "Password")),
         );
-        AppResponse::html(status, self.document(req, heading, &body, &[]))
+        AppResponse::html(status, self.document(req, &heading, &body, &[]))
     }
 
     /// `/page/:name`.
@@ -900,8 +1004,12 @@ impl SaltcornUiFramework {
             return Ok(self.message(
                 req,
                 404,
-                "Not found",
-                &format!("This application has no page named {name}."),
+                &t!(req.locale, "Not found"),
+                &t!(
+                    req.locale,
+                    "This application has no page named {name}.",
+                    name = name
+                ),
             ));
         };
         self.render_page(req, cat, &set, page).await
@@ -914,8 +1022,11 @@ impl SaltcornUiFramework {
         set: &ViewSet,
         page: &Page,
     ) -> Result<AppResponse> {
-        if let Some(refused) = self.refused(req, &format!("the page {}", page.name), page.min_role)
-        {
+        if let Some(refused) = self.refused(
+            req,
+            &t!(req.locale, "the page {name}", name = &page.name),
+            page.min_role,
+        ) {
             return Ok(refused);
         }
         let title = if page.title.trim().is_empty() {
@@ -1017,6 +1128,16 @@ impl SaltcornUiFramework {
 
     /// v1's `req`, for this request.
     fn view_request(&self, req: &AppRequest, wrap: Option<Wrap>) -> ViewRequest {
+        let locale = req.locale.as_str().to_owned();
+        // Already in the cache: `handle` reads it once, before dispatching, so
+        // every call site below gets the catalogue without being async.
+        let messages = self
+            .catalogues
+            .read()
+            .ok()
+            .and_then(|held| held.get(&locale).cloned())
+            .map(|held| held.as_ref().clone())
+            .unwrap_or_default();
         ViewRequest {
             method: req.method.as_str().to_owned(),
             path: req.path.clone(),
@@ -1027,6 +1148,8 @@ impl SaltcornUiFramework {
             base_url: req.base_url.clone(),
             csrf_token: req.csrf_token.clone(),
             wrap,
+            locale: Some(locale),
+            messages,
         }
     }
 
@@ -1062,8 +1185,12 @@ impl SaltcornUiFramework {
         self.message(
             req,
             404,
-            "Not found",
-            &format!("This application has no view named {name}."),
+            &t!(req.locale, "Not found"),
+            &t!(
+                req.locale,
+                "This application has no view named {name}.",
+                name = name
+            ),
         )
     }
 
@@ -1156,14 +1283,18 @@ impl SaltcornUiFramework {
             None => self.message(
                 req,
                 401,
-                "Please sign in",
-                &format!("You need to sign in to see {what}."),
+                &t!(req.locale, "Please sign in"),
+                &t!(
+                    req.locale,
+                    "You need to sign in to see {what}.",
+                    what = what
+                ),
             ),
             Some(_) => self.message(
                 req,
                 403,
-                "Not permitted",
-                &format!("Your role may not see {what}."),
+                &t!(req.locale, "Not permitted"),
+                &t!(req.locale, "Your role may not see {what}.", what = what),
             ),
         })
     }

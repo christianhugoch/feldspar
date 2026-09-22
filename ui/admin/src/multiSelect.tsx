@@ -23,6 +23,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import Button from "react-bootstrap/Button";
 import Form from "react-bootstrap/Form";
+import { T, useT } from "./i18n";
 
 /** One thing that can be chosen. `label` defaults to the value, which is what a
  * table or file store wants: the name *is* the label, and the description is the
@@ -120,6 +121,7 @@ export function MultiSelect({
   /** Shown in the menu when the server offered nothing and nothing is stored. */
   emptyText?: string;
 }) {
+  const { t } = useT();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const box = useRef<HTMLDivElement>(null);
@@ -195,9 +197,9 @@ export function MultiSelect({
             <Form.Control
               size="sm"
               value={query}
-              placeholder="Filter…"
+              placeholder={t("Filter…")}
               autoFocus
-              aria-label="Filter the choices"
+              aria-label={t("Filter the choices")}
               onChange={(e) => setQuery(e.target.value)}
             />
             <div className="d-flex align-items-center gap-2 mt-2">
@@ -206,13 +208,16 @@ export function MultiSelect({
                 variant="outline-secondary"
                 onClick={() => onChange(allValues(entries))}
               >
-                All
+                <T text="All" />
               </Button>
               <Button size="sm" variant="outline-secondary" onClick={() => onChange([])}>
-                None
+                <T text="None" />
               </Button>
               <span className="text-muted small ms-auto">
-                {selected.length} of {entries.length}
+                {t("{selected} of {total}", {
+                  selected: selected.length,
+                  total: entries.length,
+                })}
               </span>
             </div>
           </div>
@@ -220,7 +225,9 @@ export function MultiSelect({
           <div className="multiselect-options px-3">
             {entries.length === 0 && <div className="text-muted small py-1">{emptyText}</div>}
             {entries.length > 0 && shown.length === 0 && (
-              <div className="text-muted small py-1">Nothing matches “{query.trim()}”.</div>
+              <div className="text-muted small py-1">
+                {t("Nothing matches “{query}”.", { query: query.trim() })}
+              </div>
             )}
             {shown.map((e) => (
               <Form.Check
@@ -238,8 +245,7 @@ export function MultiSelect({
                     {e.description && <div className="text-muted small">{e.description}</div>}
                     {e.missing && (
                       <div className="text-danger small">
-                        Not on this server — this application will not mount until it is
-                        removed.
+                        <T text="Not on this server — this application will not mount until it is removed." />
                       </div>
                     )}
                   </>

@@ -1,0 +1,173 @@
+{
+  "//": "The message format, as a corpus. Run by a Rust test (crates/sc-i18n/tests/format_fixture.rs) and by a vitest over the generated messages.ts. Two implementations of one thing disagree by the third bug fixed in one of them; this file is what makes that instance affordable. Add a case here before fixing a bug in either half.",
+  "cases": [
+    {
+      "name": "no placeholders at all",
+      "message": "Incorrect password",
+      "args": {},
+      "expected": "Incorrect password"
+    },
+    {
+      "name": "one placeholder",
+      "message": "Delete {name}?",
+      "args": { "name": "Tasks" },
+      "expected": "Delete Tasks?"
+    },
+    {
+      "name": "two placeholders",
+      "message": "Moved {count} rows from {source} to {target}",
+      "args": { "count": 3, "source": "Inbox", "target": "Done" },
+      "expected": "Moved 3 rows from Inbox to Done"
+    },
+    {
+      "name": "the same placeholder twice",
+      "message": "{name} is not {name}",
+      "args": { "name": "x" },
+      "expected": "x is not x"
+    },
+    {
+      "name": "a placeholder at the very start and end",
+      "message": "{a}-{b}",
+      "args": { "a": "1", "b": "2" },
+      "expected": "1-2"
+    },
+    {
+      "name": "a missing argument renders as written",
+      "message": "Delete {name}?",
+      "args": {},
+      "expected": "Delete {name}?"
+    },
+    {
+      "name": "one argument given, one missing",
+      "message": "{a} then {b}",
+      "args": { "a": "first" },
+      "expected": "first then {b}"
+    },
+    {
+      "name": "an extra argument nothing uses is ignored",
+      "message": "Save",
+      "args": { "name": "x" },
+      "expected": "Save"
+    },
+    {
+      "name": "double brace is a literal brace",
+      "message": "{{name}",
+      "args": { "name": "x" },
+      "expected": "{name}"
+    },
+    {
+      "name": "a literal brace beside a real placeholder",
+      "message": "{{{name}}",
+      "args": { "name": "x" },
+      "expected": "{x}"
+    },
+    {
+      "name": "two escaped braces in a row",
+      "message": "{{{{",
+      "args": {},
+      "expected": "{{"
+    },
+    {
+      "name": "a run that is not an identifier is literal",
+      "message": "{not an identifier}",
+      "args": {},
+      "expected": "{not an identifier}"
+    },
+    {
+      "name": "an empty brace pair is literal",
+      "message": "{}",
+      "args": {},
+      "expected": "{}"
+    },
+    {
+      "name": "an identifier that is never closed is literal",
+      "message": "{name",
+      "args": { "name": "x" },
+      "expected": "{name"
+    },
+    {
+      "name": "a stray closing brace is literal",
+      "message": "a } b",
+      "args": {},
+      "expected": "a } b"
+    },
+    {
+      "name": "an identifier may not start with a digit",
+      "message": "{1st}",
+      "args": { "1st": "x" },
+      "expected": "{1st}"
+    },
+    {
+      "name": "an identifier may contain digits and underscores",
+      "message": "{user_name_2}",
+      "args": { "user_name_2": "ada" },
+      "expected": "ada"
+    },
+    {
+      "name": "an identifier may start with an underscore",
+      "message": "{_private}",
+      "args": { "_private": "yes" },
+      "expected": "yes"
+    },
+    {
+      "name": "a dotted path is not a placeholder",
+      "message": "{user.email}",
+      "args": { "user.email": "ada@example.com" },
+      "expected": "{user.email}"
+    },
+    {
+      "name": "only the opening brace is ever escaped: `}}` is two literal braces",
+      "message": "Hello {{ user.email }}",
+      "args": {},
+      "expected": "Hello { user.email }}"
+    },
+    {
+      "name": "a single closing brace needs no escape",
+      "message": "{{a}",
+      "args": {},
+      "expected": "{a}"
+    },
+    {
+      "name": "an integer renders without decoration",
+      "message": "{count} rows",
+      "args": { "count": 0 },
+      "expected": "0 rows"
+    },
+    {
+      "name": "a negative integer keeps its sign",
+      "message": "{delta} today",
+      "args": { "delta": -4 },
+      "expected": "-4 today"
+    },
+    {
+      "name": "a fractional number renders in full",
+      "message": "{ratio} of them",
+      "args": { "ratio": 0.5 },
+      "expected": "0.5 of them"
+    },
+    {
+      "name": "an argument whose value contains braces is not re-scanned",
+      "message": "Search for {term}",
+      "args": { "term": "{name}" },
+      "expected": "Search for {name}"
+    },
+    {
+      "name": "an empty message",
+      "message": "",
+      "args": {},
+      "expected": ""
+    },
+    {
+      "name": "non-ascii text is untouched",
+      "message": "Supprimer {name} ?",
+      "args": { "name": "Tâches" },
+      "expected": "Supprimer Tâches ?"
+    },
+    {
+      "name": "an emoji is one character, not two bytes to split",
+      "message": "{name} 🎉",
+      "args": { "name": "Ada" },
+      "expected": "Ada 🎉"
+    }
+  ]
+}

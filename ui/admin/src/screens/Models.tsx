@@ -32,6 +32,7 @@ import {
   readOutcome,
   type ModelItem,
 } from "../models";
+import { T, useT } from "../i18n";
 
 /** How a fit's status is coloured: the one still running is *blue* rather than
  * green, because it has not answered anything yet. */
@@ -44,7 +45,7 @@ export function fitTone(status: string): Tone {
 /** One model's last fit as a cell: what it is called, what it scored, and when. */
 function LastFit({ model }: { model: ModelItem }) {
   const fit = model.active_instance ?? model.last_fit;
-  if (!fit) return <span className="text-muted">Never fitted</span>;
+  if (!fit) return <span className="text-muted"><T text="Never fitted" /></span>;
   const headline = headlineMetric(readMetrics(fit.metrics));
   return (
     <>
@@ -52,7 +53,7 @@ function LastFit({ model }: { model: ModelItem }) {
         <StatusBadge tone={fitTone(fit.status)} title={fit.error ?? undefined}>
           {fit.status}
         </StatusBadge>
-        {fit.active && <StatusBadge tone="green">active</StatusBadge>}
+        {fit.active && <StatusBadge tone="green"><T text="active" /></StatusBadge>}
       </div>
       <div className="text-muted small">
         {instanceLabel(fit)}
@@ -68,6 +69,7 @@ function LastFit({ model }: { model: ModelItem }) {
 }
 
 export function Models() {
+  const { t } = useT();
   const [models, setModels] = useState<ModelItem[] | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -97,9 +99,10 @@ export function Models() {
   const remove = async (model: ModelItem) => {
     if (
       !window.confirm(
-        `Remove the model "${model.name}"?\n\n` +
-          "Its fits go with it: an instance is not a record of what happened, it is a fit of " +
-          "this model, and its parameters mean nothing without the dataset they were fitted over.",
+        t(
+          'Remove the model "{name}"?\n\nIts fits go with it: an instance is not a record of what happened, it is a fit of this model, and its parameters mean nothing without the dataset they were fitted over.',
+          { name: model.name },
+        ),
       )
     ) {
       return;
@@ -117,11 +120,11 @@ export function Models() {
     <>
       <PageHeader
         pretitle="Models"
-        title="Models"
+        title={t("Models")}
         actions={
           <Button onClick={() => navigate("/models/new")}>
             <IconPlus className="icon-2" />
-            New model
+            <T text="New model" />
           </Button>
         }
       />
@@ -133,20 +136,19 @@ export function Models() {
           <Table hover responsive className="card-table table-vcenter">
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Table</th>
-                <th>Provider</th>
-                <th>Outcome</th>
-                <th>Last fit</th>
-                <th className="text-end">Actions</th>
+                <th><T text="Name" /></th>
+                <th><T text="Table" /></th>
+                <th><T text="Provider" /></th>
+                <th><T text="Outcome" /></th>
+                <th><T text="Last fit" /></th>
+                <th className="text-end"><T text="Actions" /></th>
               </tr>
             </thead>
             <tbody>
               {models?.length === 0 && (
                 <tr>
                   <td colSpan={6} className="text-muted">
-                    No models yet. A model is a table, some columns computed from it, and a
-                    provider that answers a question about them.
+                    <T text="No models yet. A model is a table, some columns computed from it, and a provider that answers a question about them." />
                   </td>
                 </tr>
               )}
@@ -163,7 +165,7 @@ export function Models() {
                           a sentence in a table cell would push the row apart. */}
                       {model.error && (
                         <StatusBadge tone="red" title={model.error} className="mt-1">
-                          Cannot be fitted
+                          <T text="Cannot be fitted" />
                         </StatusBadge>
                       )}
                     </td>
@@ -188,14 +190,14 @@ export function Models() {
                           variant="primary"
                           href={`#/models/${encodeURIComponent(model.id)}`}
                         >
-                          Open
+                          <T text="Open" />
                         </Button>
                         <Button
                           size="sm"
                           variant="outline-danger"
                           onClick={() => void remove(model)}
                         >
-                          Remove
+                          <T text="Remove" />
                         </Button>
                       </div>
                     </td>

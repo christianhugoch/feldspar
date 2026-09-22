@@ -36,6 +36,7 @@ General:
 - Error handling: Log every error into an error log in the database. Distinguish between 
 Application errors (errors in the configuration, for instance the person building an app has entered an invalid equation somewhere) and System errors (something crashed, there is likely an error in the Saltcorn code somewhere)
 - streams - a new entity type representing dataflows
+- internationalisation: one translation facility covering the core's own messages, the admin UI, and the applications built here. Three populations of string: ours (shipped translated), the admin's (translated per installation, with an LLM to do the work), and the end user's data (later)
 
 Auth:
 
@@ -170,6 +171,8 @@ Tags can be created in the admin UI any created entity gave have a tag applied t
 Applications can be created in the admin UI. When creating an application, the admin picks the Framework. Different frameworks have different settings, for instance a React application will need a file store or a subdirectory in a filestore to be the react code. The application also is configured with the subdomain on which it is served, any number of APIs that are created under an application, and any number of subdirectories that are served statically.
 
 Streams: created from stream providers. Can be observed in the admin UI, by applications through their API (e.g. with an authenticated websocket interface the application can connect to), or can become the triggering event of a trigger. In the Data Layer part of the admin UI, there is a Streams link, linking to a list of the created streams, each with links to Editing, Observing and Deleting. At the top is a link to create a new stream.
+
+Translations: each application declares which locales it offers. The strings an admin wrote when building the application - labels in a code application's source, text in a builder layout - are collected and listed per locale in the admin UI, where they can be typed in or filled in by an LLM. The core's own strings and the admin UI's are translated by us and shipped. A user has a language, and everything they are shown is in it: an admin sees the admin UI in their own language, and an application's visitor sees the application in theirs.
 
 ## Authorization
 

@@ -5,6 +5,13 @@ members = [
     "crates/sc-error",
     "crates/sc-log",
     "crates/sc-config-file",
+    # Internationalisation (TODO "one catalogue, two runtimes"): the `Locale`,
+    # the negotiation, the catalogue, the message format, the `t!` macros and
+    # the `Translator` seam. Layer 0, beside the error type and for the same
+    # reason: `sc-types` and `sc-auth` have to be able to translate a sentence
+    # they are about to hand to a person, and the dependency cannot point the
+    # other way.
+    "crates/sc-i18n",
     # Name resolution for the whole process, glibc's NSS taken out of the path
     # (§13.5): layer 0 because it is linked in front of libc rather than called.
     "crates/sc-dns",
@@ -95,6 +102,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 sc-error = { path = "crates/sc-error" }
 sc-log = { path = "crates/sc-log" }
+sc-i18n = { path = "crates/sc-i18n" }
 # `feldspar.toml` — the deployment file naming this machine's databases. Layer 0
 # because both ends of the workspace read it: the binary, to know where the
 # primary database is, and the integration-test harness, to know which database
@@ -185,6 +193,17 @@ toml = { version = "1.1", default-features = false, features = [
     "serde",
 ] }
 uuid = { version = "1", features = ["v4", "serde"] }
+# The two ICU4X primitives `sc-i18n` is built on, and deliberately only those
+# two. `icu_locale_core` is the BCP-47 parser and the canonical `Locale` value —
+# a language tag is a grammar, not a string to split on hyphens — and
+# `icu_plurals` selects the CLDR plural category for a count, which is the same
+# data `Intl.PluralRules` gives the browser half of this facility, so the two
+# runtimes agree by construction rather than by a table somebody maintains.
+# `compiled_data` (both crates' default) bakes the CLDR data into the binary:
+# there is no provider to configure and no data directory to ship, which is what
+# keeps a layer-0 crate a layer-0 crate.
+icu_locale_core = "2"
+icu_plurals = "2"
 # argon2id password hashing. Pinned to the stable 0.5 line (0.6 is only an RC).
 # `std` pulls in `getrandom` (via rand_core) so a random salt can be drawn from
 # the OS CSPRNG (`OsRng`) when hashing.

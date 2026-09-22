@@ -80,6 +80,7 @@ import { keyStorage, reconcileKey, type KeyKind } from "../keyField";
 import { RoleSelect } from "../roleSelect";
 import { useRoles } from "../roles";
 import { SettingsFields, buildConfig, initialValues } from "../settings";
+import { T, useT } from "../i18n";
 
 /** A one-line description of a field's kind for the fields table. */
 function kindLabel(kind: unknown): string {
@@ -147,7 +148,7 @@ function KindCell({ kind }: { kind: unknown }) {
   if (!target) return <>{kindLabel(kind)}</>;
   return (
     <>
-      key &rarr; <a href={tableHref(target)}>{target}</a>
+      <T text="key" /> &rarr; <a href={tableHref(target)}>{target}</a>
     </>
   );
 }
@@ -244,7 +245,7 @@ export function TableDetail({ table }: { table: string }) {
         actions={
           <Button variant="outline-secondary" onClick={() => navigate("/tables")}>
             <IconArrowLeft className="icon-2" />
-            Tables
+            <T text="Tables" />
           </Button>
         }
       />
@@ -332,6 +333,7 @@ function TableData({
   configured: boolean;
   onChange: () => void;
 }) {
+  const { t } = useT();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -436,8 +438,10 @@ function TableData({
   const forget = async () => {
     if (
       !window.confirm(
-        `Forget the settings for "${table}"?\n\n` +
-          "It returns to admin-only. The table and its rows are not touched.",
+        t(
+          'Forget the settings for "{name}"?\n\nIt returns to admin-only. The table and its rows are not touched.',
+          { name: table },
+        ),
       )
     ) {
       return;
@@ -453,7 +457,7 @@ function TableData({
 
   return (
     <Card className="mb-4">
-      <Card.Header>Table data</Card.Header>
+      <Card.Header><T text="Table data" /></Card.Header>
       <Card.Body>
         {error && <Alert variant="danger">{error}</Alert>}
         {notice && (
@@ -487,7 +491,7 @@ function TableData({
           />
 
           <Tile
-            label="Download CSV"
+            label={t("Download CSV")}
             icon={<IconDownload />}
             disabled={busy}
             onClick={() => void download()}
@@ -505,7 +509,7 @@ function TableData({
               size="sm"
               className="data-menu-toggle btn-icon"
               id="table-data-menu"
-              aria-label="More table actions"
+              aria-label={t("More table actions")}
             >
               <IconDots className="icon-2" />
             </Dropdown.Toggle>
@@ -517,7 +521,7 @@ function TableData({
               {/* Nor for a metadata table, whose row is what puts it on the
                   list: forgetting it is the "remove" below. */}
               {configured && !provided && !metadata && (
-                <Dropdown.Item onClick={() => void forget()}>Forget settings</Dropdown.Item>
+                <Dropdown.Item onClick={() => void forget()}><T text="Forget settings" /></Dropdown.Item>
               )}
               <Dropdown.Item className="text-danger" onClick={() => void dropTable()}>
                 {metadata ? "Remove from tables list" : provided ? "Delete table" : "Drop table"}
@@ -568,7 +572,7 @@ function UploadTile({
   return (
     <label className="data-tile mb-0">
       <IconUpload />
-      <span>Upload CSV</span>
+      <span><T text="Upload CSV" /></span>
       <input
         type="file"
         accept=".csv,text/csv"
@@ -623,6 +627,7 @@ function Constraints({
   constraints: ListConstraintsResponse | null;
   onChange: () => void;
 }) {
+  const { t } = useT();
   const [form, setForm] = useState<ConstraintForm | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -665,10 +670,13 @@ function Constraints({
   const remove = async (constraint: ConstraintItem) => {
     if (
       !window.confirm(
-        `Delete the ${constraintTypeLabel(constraint.type).toLowerCase()} ` +
-          `"${constraint.name}"?\n\n` +
-          "The rows already in the table are not changed; only the rule is " +
-          "removed, and rows that would have been refused will be accepted.",
+        t(
+          'Delete the {kind} "{name}"?\n\nThe rows already in the table are not changed; only the rule is removed, and rows that would have been refused will be accepted.',
+          {
+            kind: constraintTypeLabel(constraint.type).toLowerCase(),
+            name: constraint.name,
+          },
+        ),
       )
     ) {
       return;
@@ -685,17 +693,17 @@ function Constraints({
   const listed = constraints ?? [];
   return (
     <Card className="mb-4">
-      <Card.Header>Constraints and indexes</Card.Header>
+      <Card.Header><T text="Constraints and indexes" /></Card.Header>
       <Card.Body>
         {error && <Alert variant="danger">{error}</Alert>}        
         {listed.length > 0 && (
           <Table size="sm" hover responsive className="table-vcenter">
             <thead>
               <tr>
-                <th>Type</th>
-                <th>What</th>
-                <th>Message</th>
-                <th className="text-end">Actions</th>
+                <th><T text="Type" /></th>
+                <th><T text="What" /></th>
+                <th><T text="Message" /></th>
+                <th className="text-end"><T text="Actions" /></th>
               </tr>
             </thead>
             <tbody>
@@ -716,8 +724,8 @@ function Constraints({
                       {!constraint.managed && (
                         // Not made here, so it is somebody else's migration —
                         // deletable, but said so before it is deleted.
-                        <StatusBadge tone="secondary" title="Not created by Saltcorn">
-                          External
+                        <StatusBadge tone="secondary" title={t("Not created by Saltcorn")}>
+                          <T text="External" />
                         </StatusBadge>
                       )}
                       <Button
@@ -725,7 +733,7 @@ function Constraints({
                         variant="outline-danger"
                         onClick={() => void remove(constraint)}
                       >
-                        Delete
+                        <T text="Delete" />
                       </Button>
                     </div>
                   </td>
@@ -737,11 +745,11 @@ function Constraints({
         <div className="btn-list">
           <Button size="sm" onClick={() => open("unique")}>
             <IconPlus className="icon-2" />
-            Jointly unique
+            <T text="Jointly unique" />
           </Button>
           <Button size="sm" variant="outline-secondary" onClick={() => open("index")}>
             <IconPlus className="icon-2" />
-            Index
+            <T text="Index" />
           </Button>
           <Button
             size="sm"
@@ -749,11 +757,11 @@ function Constraints({
             onClick={() => open("full_text_search")}
           >
             <IconPlus className="icon-2" />
-            Full-text search
+            <T text="Full-text search" />
           </Button>
           <Button size="sm" variant="outline-secondary" onClick={() => open("formula")}>
             <IconPlus className="icon-2" />
-            Row constraint
+            <T text="Row constraint" />
           </Button>
         </div>
 
@@ -768,7 +776,7 @@ function Constraints({
               {formError && <Alert variant="danger">{formError}</Alert>}
               {form?.type === "unique" && (
                 <Form.Group className="mb-2">
-                  <Form.Label>Fields that are unique together</Form.Label>
+                  <Form.Label><T text="Fields that are unique together" /></Form.Label>
                   {columns.map((field) => (
                     <Form.Check
                       key={field.name}
@@ -786,18 +794,18 @@ function Constraints({
                     />
                   ))}
                   <Form.Text muted>
-                    No two rows may share the same combination of these fields.
+                    <T text="No two rows may share the same combination of these fields." />
                   </Form.Text>
                 </Form.Group>
               )}
               {form?.type === "index" && (
                 <Form.Group className="mb-2" controlId="constraintIndexField">
-                  <Form.Label>Field</Form.Label>
+                  <Form.Label><T text="Field" /></Form.Label>
                   <Form.Select
                     value={form.fields[0] ?? ""}
                     onChange={(e) => update({ fields: e.target.value ? [e.target.value] : [] })}
                   >
-                    <option value="">Choose a field…</option>
+                    <option value=""><T text="Choose a field…" /></option>
                     {columns.map((field) => (
                       <option key={field.name} value={field.name}>
                         {field.label || field.name}
@@ -805,14 +813,13 @@ function Constraints({
                     ))}
                   </Form.Select>
                   <Form.Text muted>
-                    An index makes searching and joining on this field faster, and writes a
-                    little slower.
+                    <T text="An index makes searching and joining on this field faster, and writes a little slower." />
                   </Form.Text>
                 </Form.Group>
               )}
               {form?.type === "full_text_search" && (
                 <Form.Group className="mb-2" controlId="constraintLanguage">
-                  <Form.Label>Language</Form.Label>
+                  <Form.Label><T text="Language" /></Form.Label>
                   <Form.Select
                     value={form.language}
                     onChange={(e) => update({ language: e.target.value })}
@@ -824,15 +831,14 @@ function Constraints({
                     ))}
                   </Form.Select>
                   <Form.Text muted>
-                    Indexes every text field of the table together. The language decides how
-                    words are reduced to their stems, so it has to match the one a search uses.
+                    <T text="Indexes every text field of the table together. The language decides how words are reduced to their stems, so it has to match the one a search uses." />
                   </Form.Text>
                 </Form.Group>
               )}
               {form?.type === "formula" && (
                 <>
                   <Form.Group className="mb-2" controlId="constraintName">
-                    <Form.Label>Name</Form.Label>
+                    <Form.Label><T text="Name" /></Form.Label>
                     <Form.Control
                       value={form.name}
                       autoFocus
@@ -840,48 +846,56 @@ function Constraints({
                       onChange={(e) => update({ name: e.target.value })}
                     />
                     <Form.Text muted>
-                      A short name for this rule. It appears in the error when no message is
-                      given.
+                      <T text="A short name for this rule. It appears in the error when no message is given." />
                     </Form.Text>
                   </Form.Group>
                   <Form.Group className="mb-2" controlId="constraintFormula">
-                    <Form.Label>Formula</Form.Label>
+                    <Form.Label><T text="Formula" /></Form.Label>
                     <Form.Control
                       as="textarea"
                       rows={2}
                       className="font-monospace"
                       value={form.formula}
-                      placeholder="salary > 0"
+                      placeholder={t("salary > 0")}
                       onChange={(e) => update({ formula: e.target.value })}
                     />
                     <Form.Text muted>
-                      Must be true of every row. In scope:{" "}
-                      {columns.map((f) => f.name).join(", ") || "no fields yet"}. Join fields
-                      (<code>authorⱵname</code>) and aggregations
-                      (<code>reviewsↃbook.length</code>) may be used;{" "}
-                      <code>user</code> may not, because the database checks this and has no
-                      session.
+                      <T
+                        text="Must be true of every row. In scope: {fields}."
+                        args={{
+                          fields:
+                            columns.map((f) => f.name).join(", ") ||
+                            t("no fields yet"),
+                        }}
+                      />{" "}
+                      <T
+                        text="Join fields ({join}) and aggregations ({aggregation}) may be used; {user} may not, because the database checks this and has no session."
+                        values={{
+                          join: <code>authorⱵname</code>,
+                          aggregation: <code>reviewsↃbook.length</code>,
+                          user: <code>user</code>,
+                        }}
+                      />
                     </Form.Text>
                   </Form.Group>
                 </>
               )}
               {form && form.type !== "index" && form.type !== "full_text_search" && (
                 <Form.Group className="mb-2" controlId="constraintMessage">
-                  <Form.Label>Error message</Form.Label>
+                  <Form.Label><T text="Error message" /></Form.Label>
                   <Form.Control
                     value={form.errorMessage}
                     onChange={(e) => update({ errorMessage: e.target.value })}
                   />
                   <Form.Text muted>
-                    Shown to whoever breaks the rule. Left blank, they see the database&apos;s
-                    own message, which names the constraint.
+                    <T text="Shown to whoever breaks the rule. Left blank, they see the database's own message, which names the constraint." />
                   </Form.Text>
                 </Form.Group>
               )}
             </Modal.Body>
             <Modal.Footer>
               <Button variant="outline-secondary" onClick={() => setForm(null)}>
-                Cancel
+                <T text="Cancel" />
               </Button>
               <Button type="submit" disabled={busy}>
                 {busy ? "Adding…" : "Add constraint"}
@@ -912,15 +926,17 @@ function Triggers({
   triggers: TriggerItem[] | null;
   onChange: () => void;
 }) {
+  const { t } = useT();
   const [error, setError] = useState<string | null>(null);
   const mine = useMemo(() => triggersOnTable(triggers ?? [], table), [triggers, table]);
 
   const remove = async (trigger: TriggerItem) => {
     if (
       !window.confirm(
-        `Delete the trigger "${trigger.name}"?\n\n` +
-          "Its configuration is deleted with it. Switch it off instead if you " +
-          "only want it to stop firing.",
+        t(
+          'Delete the trigger "{name}"?\n\nIts configuration is deleted with it. Switch it off instead if you only want it to stop firing.',
+          { name: trigger.name },
+        ),
       )
     ) {
       return;
@@ -936,19 +952,19 @@ function Triggers({
 
   return (
     <Card className="mb-4">
-      <Card.Header>Triggers on this table</Card.Header>
+      <Card.Header><T text="Triggers on this table" /></Card.Header>
       <Card.Body>
         {error && <Alert variant="danger">{error}</Alert>}
-        <p className="text-muted">Triggers run actions in response to events on this table.</p>
+        <p className="text-muted"><T text="Triggers run actions in response to events on this table." /></p>
         {mine.length > 0 && (
           <Table size="sm" hover responsive className="table-vcenter">
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Event</th>
-                <th>Runs</th>
-                <th>Status</th>
-                <th className="text-end">Actions</th>
+                <th><T text="Name" /></th>
+                <th><T text="Event" /></th>
+                <th><T text="Runs" /></th>
+                <th><T text="Status" /></th>
+                <th className="text-end"><T text="Actions" /></th>
               </tr>
             </thead>
             <tbody>
@@ -964,7 +980,7 @@ function Triggers({
                     {trigger.when}
                     {trigger.only_if && (
                       <div className="text-muted small font-monospace text-break">
-                        if {trigger.only_if}
+                        {t("if {condition}", { condition: trigger.only_if })}
                       </div>
                     )}
                   </td>
@@ -973,12 +989,12 @@ function Triggers({
                   <td>
                     {trigger.error ? (
                       <StatusBadge tone="red" title={trigger.error}>
-                        Not usable
+                        <T text="Not usable" />
                       </StatusBadge>
                     ) : trigger.enabled ? (
-                      <StatusBadge tone="green">Enabled</StatusBadge>
+                      <StatusBadge tone="green"><T text="Enabled" /></StatusBadge>
                     ) : (
-                      <StatusBadge tone="secondary">Off</StatusBadge>
+                      <StatusBadge tone="secondary"><T text="Off" /></StatusBadge>
                     )}
                   </td>
                   <td className="text-end">
@@ -988,14 +1004,14 @@ function Triggers({
                         variant="outline-secondary"
                         href={`#/triggers/${encodeURIComponent(trigger.id)}/edit`}
                       >
-                        Edit
+                        <T text="Edit" />
                       </Button>
                       <Button
                         size="sm"
                         variant="outline-danger"
                         onClick={() => void remove(trigger)}
                       >
-                        Delete
+                        <T text="Delete" />
                       </Button>
                     </div>
                   </td>
@@ -1009,7 +1025,7 @@ function Triggers({
           onClick={() => navigate(`/triggers/new/${encodeURIComponent(table)}`)}
         >
           <IconPlus className="icon-2" />
-          Create trigger
+          <T text="Create trigger" />
         </Button>
       </Card.Body>
     </Card>
@@ -1074,7 +1090,7 @@ function ProviderSettings({
   return (
     <Card className="mb-4">
       <Card.Header>
-        Table provider
+        <T text="Table provider" />
         <StatusBadge tone="blue" className="ms-2">
           {provider.provider}
         </StatusBadge>
@@ -1084,7 +1100,7 @@ function ProviderSettings({
         {error && <Alert variant="danger">{error}</Alert>}
         {saved && (
           <Alert variant="success" dismissible onClose={() => setSaved(false)}>
-            Saved. The columns below are what the provider reports for these settings.
+            <T text="Saved. The columns below are what the provider reports for these settings." />
           </Alert>
         )}
         {/* Why this table has no columns, when it has none. The module may be
@@ -1093,7 +1109,7 @@ function ProviderSettings({
         {provider.issues.length > 0 && (
           <Alert variant="warning">
             <AlertBody>
-              <Alert.Heading className="h6">This provider is not answering</Alert.Heading>
+              <Alert.Heading className="h6"><T text="This provider is not answering" /></Alert.Heading>
               <ul className="mb-0">
                 {provider.issues.map((issue) => (
                   <li key={issue}>{issue}</li>
@@ -1103,12 +1119,11 @@ function ProviderSettings({
           </Alert>
         )}
         <p className="text-muted">
-          The rows of this table come from <code>{provider.module}</code>, not from a database.
-          Saltcorn reads them; it does not create, change or delete them.
+          <T text="The rows of this table come from" /> <code>{provider.module}</code><T text=", not from a database. Saltcorn reads them; it does not create, change or delete them." />
         </p>
         <Form onSubmit={save}>
           {spec.length === 0 ? (
-            <p className="text-muted mb-3">This provider asks for no settings.</p>
+            <p className="text-muted mb-3"><T text="This provider asks for no settings." /></p>
           ) : (
             <SettingsFields
               spec={spec}
@@ -1118,7 +1133,7 @@ function ProviderSettings({
             />
           )}
           <Button type="submit" disabled={busy || spec.length === 0}>
-            Save provider settings
+            <T text="Save provider settings" />
           </Button>
         </Form>
       </Card.Body>
@@ -1145,6 +1160,7 @@ function Settings({
   settings: TableSummary | null;
   onChange: () => void;
 }) {
+  const { t } = useT();
   const roles = useRoles();
   const [label, setLabel] = useState("");
   const [description, setDescription] = useState("");
@@ -1194,30 +1210,30 @@ function Settings({
 
   return (
     <Card className="mb-4">
-      <Card.Header>Edit table properties</Card.Header>
+      <Card.Header><T text="Edit table properties" /></Card.Header>
       <Card.Body>
         {error && <Alert variant="danger">{error}</Alert>}
         {saved && !error && (
           <Alert variant="success" className="py-2">
-            Saved. The new rules apply immediately — no restart.
+            <T text="Saved. The new rules apply immediately — no restart." />
           </Alert>
         )}
         <Form onSubmit={save}>
           <Row>
             <Col md={6}>
               <Form.Group className="mb-3" controlId="tableLabel">
-                <Form.Label>Label</Form.Label>
+                <Form.Label><T text="Label" /></Form.Label>
                 <Form.Control
                   value={label}
                   placeholder={table}
                   onChange={(e) => setLabel(e.target.value)}
                 />
-                <Form.Text muted>Shown instead of the table name. Blank uses the name.</Form.Text>
+                <Form.Text muted><T text="Shown instead of the table name. Blank uses the name." /></Form.Text>
               </Form.Group>
             </Col>
             <Col md={6}>
               <Form.Group className="mb-3" controlId="tableDescription">
-                <Form.Label>Description</Form.Label>
+                <Form.Label><T text="Description" /></Form.Label>
                 <Form.Control
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
@@ -1229,7 +1245,7 @@ function Settings({
             <Col md={6}>
               <RoleSelect
                 id="tableReadRole"
-                label="Minimum role for full read access"
+                label={t("Minimum role for full read access")}
                 value={read}
                 roles={roles}
                 onChange={setRead}
@@ -1238,7 +1254,7 @@ function Settings({
             <Col md={6}>
               <RoleSelect
                 id="tableWriteRole"
-                label="Minimum role for full write access"
+                label={t("Minimum role for full write access")}
                 value={write}
                 roles={roles}
                 onChange={setWrite}
@@ -1246,24 +1262,30 @@ function Settings({
             </Col>
           </Row>
           <Form.Group className="mb-3" controlId="tableOwnershipFormula">
-            <Form.Label>Ownership formula</Form.Label>
+            <Form.Label><T text="Ownership formula" /></Form.Label>
             <Form.Control
               as="textarea"
               rows={2}
               className="font-monospace"
               value={formula}
-              placeholder="Example: owner === user.id"
+              placeholder={t("Example: owner === user.id")}
               onChange={(e) => setFormula(e.target.value)}
             />
             <Form.Text muted>
-              A JavaScript expression over the row&apos;s fields, <code>user</code>, the
-              operation flags (<code>_read</code>, <code>_write</code>, …) and Ⱶ-joinfields.
-              Rows it grants are reachable below the roles above. Blank means roles only.
+              <T
+                text="A JavaScript expression over the row’s fields, {user}, the operation flags ({read}, {write}, …) and Ⱶ-joinfields. Rows it grants are reachable below the roles above. Blank means roles only."
+                values={{
+                  user: <code>user</code>,
+                  read: <code>_read</code>,
+                  write: <code>_write</code>,
+                }}
+              />
             </Form.Text>
             {settings?.ownership_error && (
               <Alert variant="warning" className="py-2 mt-2 mb-0">
-                Stored formula is not in effect (it grants nothing):{" "}
-                {settings.ownership_error}
+                {t("Stored formula is not in effect (it grants nothing): {problem}", {
+                  problem: settings.ownership_error,
+                })}
               </Alert>
             )}
           </Form.Group>
@@ -1271,23 +1293,21 @@ function Settings({
             <Form.Group className="mb-3" controlId="tableRlsEnabled">
               <Form.Check
                 type="switch"
-                label="Enforce with database row-level security"
+                label={t("Enforce with database row-level security")}
                 checked={rls}
                 onChange={(e) => setRls(e.target.checked)}
               />
               <Form.Text muted>
-                The formula becomes Postgres RLS policies enforced by the database itself.
-                Needs a formula the database can evaluate.
+                <T text="The formula becomes Postgres RLS policies enforced by the database itself. Needs a formula the database can evaluate." />
               </Form.Text>
             </Form.Group>
           )}
           <Button type="submit" size="sm" disabled={busy}>
-            Save settings
+            <T text="Save settings" />
           </Button>
           {settings?.configured && (
             <Form.Text muted className="d-block mt-2">
-              &ldquo;Forget settings&rdquo;, on the table-data menu above, returns the table to
-              admin-only. It never touches the table or its rows.
+              &ldquo;<T text="Forget settings”, on the table-data menu above, returns the table to admin-only. It never touches the table or its rows." />
             </Form.Text>
           )}
         </Form>
@@ -1349,6 +1369,7 @@ function Fields({
   metadata?: boolean;
   onChange: () => void;
 }) {
+  const { t } = useT();
   // Either way the columns are someone else's to decide.
   const readOnly = provided || metadata;
   /** What the modal is open on, or `null` when it is closed. */
@@ -1480,7 +1501,13 @@ function Fields({
    * "no" that says what to do next.
    */
   const drop = async (field: string) => {
-    if (!window.confirm(`Drop the field "${field}" and the data in it? This cannot be undone.`)) {
+    if (
+      !window.confirm(
+        t('Drop the field "{name}" and the data in it? This cannot be undone.', {
+          name: field,
+        }),
+      )
+    ) {
       return;
     }
     setBusy(true);
@@ -1508,15 +1535,15 @@ function Fields({
 
   return (
     <Card className="mb-4">
-      <Card.Header>Fields</Card.Header>
+      <Card.Header><T text="Fields" /></Card.Header>
       <Card.Body>
         {error && <Alert variant="danger">{error}</Alert>}
         {!hasPrimaryKey && (
           <Alert variant="danger">
             <AlertBody>
-              <Alert.Heading className="h6">This table has no primary key</Alert.Heading>
+              <Alert.Heading className="h6"><T text="This table has no primary key" /></Alert.Heading>
               <p className="mb-0">
-                Create a field and tick <strong>Primary key</strong> to enable table edits and keys fields ferencing this table.
+                <T text="Create a field and tick" /> <strong><T text="Primary key" /></strong> <T text="to enable table edits and keys fields ferencing this table." />
               </p>
             </AlertBody>
           </Alert>
@@ -1524,19 +1551,19 @@ function Fields({
         <Table size="sm" hover responsive className="table-vcenter mb-3">
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Type</th>
-              <th>Kind</th>
-              <th>Nullable</th>
-              <th>Key</th>
-              <th className="text-end">Actions</th>
+              <th><T text="Name" /></th>
+              <th><T text="Type" /></th>
+              <th><T text="Kind" /></th>
+              <th><T text="Nullable" /></th>
+              <th><T text="Key" /></th>
+              <th className="text-end"><T text="Actions" /></th>
             </tr>
           </thead>
           <tbody>
             {fields?.length === 0 && (
               <tr>
                 <td colSpan={6} className="text-muted">
-                  No fields yet.
+                  <T text="No fields yet." />
                 </td>
               </tr>
             )}
@@ -1552,8 +1579,8 @@ function Fields({
                 <td>{f.nullable ? "yes" : "no"}</td>
                 <td>
                   {f.primary_key && (
-                    <StatusBadge tone="blue" title="Part of the primary key">
-                      key
+                    <StatusBadge tone="blue" title={t("Part of the primary key")}>
+                      <T text="key" />
                     </StatusBadge>
                   )}
                 </td>
@@ -1566,7 +1593,7 @@ function Fields({
                         disabled={busy}
                         onClick={() => openEdit(f)}
                       >
-                        Edit
+                        <T text="Edit" />
                       </Button>
                       <Button
                         size="sm"
@@ -1574,7 +1601,7 @@ function Fields({
                         disabled={busy}
                         onClick={() => void drop(f.name)}
                       >
-                        Delete
+                        <T text="Delete" />
                       </Button>
                     </div>
                   )}
@@ -1585,18 +1612,16 @@ function Fields({
         </Table>
         {metadata ? (
           <div className="text-muted small">
-            This is one of Saltcorn&rsquo;s own metadata tables. Its rows and settings can be
-            edited; its columns are Saltcorn&rsquo;s and cannot be.
+            <T text="This is one of Saltcorn’s own metadata tables. Its rows and settings can be edited; its columns are Saltcorn’s and cannot be." />
           </div>
         ) : provided ? (
           <div className="text-muted small">
-            These columns are the table provider&rsquo;s. Change what it presents in its settings
-            above, or in the module itself.
+            <T text="These columns are the table provider’s. Change what it presents in its settings above, or in the module itself." />
           </div>
         ) : (
           <Button size="sm" onClick={openAdd}>
             <IconPlus className="icon-2" />
-            Add field
+            <T text="Add field" />
           </Button>
         )}
 
@@ -1607,7 +1632,7 @@ function Fields({
             and an empty heading is noise. */}
         {groups.length > 0 && (
           <div className="mt-4">
-            <div className="fw-bold mb-1">Referenced by</div>
+            <div className="fw-bold mb-1"><T text="Referenced by" /></div>
             <ul className="list-unstyled mb-0 small">
               {groups.map((g) => (
                 <li key={g.table}>
@@ -1633,7 +1658,7 @@ function Fields({
               <Row>
                 <Col md={6}>
                   <Form.Group className="mb-2" controlId="fieldName">
-                    <Form.Label>Name</Form.Label>
+                    <Form.Label><T text="Name" /></Form.Label>
                     <Form.Control
                       value={form.name}
                       autoFocus={!isEdit}
@@ -1643,23 +1668,23 @@ function Fields({
                       disabled={isEdit}
                       onChange={(e) => update({ name: e.target.value })}
                     />
-                    {isEdit && <Form.Text muted>A field cannot be renamed.</Form.Text>}
+                    {isEdit && <Form.Text muted><T text="A field cannot be renamed." /></Form.Text>}
                   </Form.Group>
                 </Col>
                 <Col md={6}>
                   <Form.Group className="mb-2" controlId="fieldLabel">
-                    <Form.Label>Label</Form.Label>
+                    <Form.Label><T text="Label" /></Form.Label>
                     <Form.Control
                       value={form.label}
                       placeholder={form.name}
                       onChange={(e) => update({ label: e.target.value })}
                     />
-                    <Form.Text muted>Shown instead of the name. Blank uses the name.</Form.Text>
+                    <Form.Text muted><T text="Shown instead of the name. Blank uses the name." /></Form.Text>
                   </Form.Group>
                 </Col>
               </Row>
               <Form.Group className="mb-2" controlId="fieldDescription">
-                <Form.Label>Description</Form.Label>
+                <Form.Label><T text="Description" /></Form.Label>
                 <Form.Control
                   value={form.description}
                   onChange={(e) => update({ description: e.target.value })}
@@ -1690,13 +1715,12 @@ function Fields({
                 </Form.Select>
                 {form.calculated ? (
                   <Form.Text muted>
-                    How the computed value is shown. Its real type comes from the expression.
+                    <T text="How the computed value is shown. Its real type comes from the expression." />
                   </Form.Text>
                 ) : (
                   isEdit && (
                     <Form.Text muted>
-                      The column&apos;s storage is unchanged — this is how its value is read
-                      and shown.
+                      <T text="The column's storage is unchanged — this is how its value is read and shown." />
                     </Form.Text>
                   )
                 )}
@@ -1706,7 +1730,7 @@ function Fields({
                 className="mb-2"
                 id="fieldCalculated"
                 type="checkbox"
-                label="Calculated (computed on read, no stored column)"
+                label={t("Calculated (computed on read, no stored column)")}
                 checked={form.calculated}
                 // Whether a field has a column is settled when it is made:
                 // turning this on would leave a column nothing reads, and off
@@ -1717,19 +1741,17 @@ function Fields({
 
               {form.calculated ? (
                 <Form.Group className="mb-1" controlId="fieldExpression">
-                  <Form.Label>Formula</Form.Label>
+                  <Form.Label><T text="Formula" /></Form.Label>
                   <Form.Control
                     as="textarea"
                     rows={2}
                     className="font-monospace"
                     value={form.expression}
-                    placeholder="pages * 2"
+                    placeholder={t("pages * 2")}
                     onChange={(e) => update({ expression: e.target.value })}
                   />
                   <Form.Text muted>
-                    A JavaScript expression over the row&apos;s fields, Ⱶ-joinfields,
-                    Ↄ-aggregations and other calculated fields — never <code>user</code> or the
-                    operation flags.
+                    <T text="A JavaScript expression over the row's fields, Ⱶ-joinfields, Ↄ-aggregations and other calculated fields — never" /> <code>user</code> <T text="or the operation flags." />
                   </Form.Text>
                 </Form.Group>
               ) : (
@@ -1758,7 +1780,7 @@ function Fields({
                     className="mb-1"
                     id="fieldNullable"
                     type="checkbox"
-                    label="Nullable"
+                    label={t("Nullable")}
                     checked={form.nullable && !form.primaryKey}
                     // A NOT NULL is the column's, and changing one on a table
                     // with rows in it is a migration (§3.3). A key column is
@@ -1768,7 +1790,7 @@ function Fields({
                   />
                   {isEdit && (
                     <Form.Text muted className="d-block">
-                      Whether the column accepts nulls cannot be changed here.
+                      <T text="Whether the column accepts nulls cannot be changed here." />
                     </Form.Text>
                   )}
 
@@ -1779,7 +1801,7 @@ function Fields({
                     className="mt-2 mb-1"
                     id="fieldPrimaryKey"
                     type="checkbox"
-                    label="Primary key"
+                    label={t("Primary key")}
                     checked={form.primaryKey}
                     onChange={(e) => update({ primaryKey: e.target.checked })}
                   />
@@ -1793,7 +1815,7 @@ function Fields({
             </Modal.Body>
             <Modal.Footer>
               <Button variant="secondary" type="button" onClick={() => setEditing(null)}>
-                Cancel
+                <T text="Cancel" />
               </Button>
               <Button type="submit" disabled={busy || !form.name.trim() || !selected}>
                 {isEdit ? "Save field" : "Add field"}
@@ -1833,7 +1855,7 @@ function KeyFields({
     <>
       <Form.Group className="mb-2" controlId="fieldKeyTable">
         <Form.Label>
-          Target table<span className="text-danger"> *</span>
+          <T text="Target table" /><span className="text-danger"> *</span>
         </Form.Label>
         <Form.Select
           value={value.target_table}
@@ -1843,7 +1865,7 @@ function KeyFields({
             onChange({ target_table: e.target.value, target_field: "", summary_field: "" })
           }
         >
-          <option value="">Choose a table…</option>
+          <option value=""><T text="Choose a table…" /></option>
           {(tables ?? []).map((t) => (
             <option key={t.name} value={t.name}>
               {t.label || t.name}
@@ -1854,14 +1876,14 @@ function KeyFields({
 
       <Form.Group className="mb-2" controlId="fieldKeyField">
         <Form.Label>
-          Target field<span className="text-danger"> *</span>
+          <T text="Target field" /><span className="text-danger"> *</span>
         </Form.Label>
         <Form.Select
           value={value.target_field}
           disabled={!value.target_table || !targetFields}
           onChange={(e) => onChange({ ...value, target_field: e.target.value })}
         >
-          {!value.target_table && <option value="">Choose a table first</option>}
+          {!value.target_table && <option value=""><T text="Choose a table first" /></option>}
           {(targetFields ?? []).map((f) => (
             <option key={f.name} value={f.name}>
               {f.name}
@@ -1870,18 +1892,21 @@ function KeyFields({
           ))}
         </Form.Select>
         <Form.Text muted>
-          The column this key points at — it must be unique.
+          <T text="The column this key points at — it must be unique." />
           {storage && (
             <>
               {" "}
-              Stored as <code>{storage}</code>, to match it.
+              <T
+                text="Stored as {type}, to match it."
+                values={{ type: <code>{storage}</code> }}
+              />
             </>
           )}
         </Form.Text>
       </Form.Group>
 
       <Form.Group className="mb-3" controlId="fieldKeySummary">
-        <Form.Label>Summary field</Form.Label>
+        <Form.Label><T text="Summary field" /></Form.Label>
         <Form.Select
           value={value.summary_field}
           disabled={!value.target_table || !targetFields}
@@ -1894,7 +1919,7 @@ function KeyFields({
             </option>
           ))}
         </Form.Select>
-        <Form.Text muted>How a referenced row is shown. Optional.</Form.Text>
+        <Form.Text muted><T text="How a referenced row is shown. Optional." /></Form.Text>
       </Form.Group>
     </>
   );

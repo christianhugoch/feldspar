@@ -123,7 +123,11 @@ pub(crate) fn to_rig_request(
                 parameters: tool.parameters,
             })
             .collect(),
-        temperature: req.temperature,
+        // A reasoning model that rejects `temperature` outright (o-series,
+        // gpt-5's reasoning variants, codex) gets the field dropped here
+        // rather than from the caller — nothing that builds an [`LlmRequest`]
+        // should need to know which models refuse it.
+        temperature: req.temperature.filter(|_| caps.supports_temperature),
         max_tokens: req.max_tokens.map(u64::from),
         tool_choice: None,
         additional_params,
@@ -681,6 +685,32 @@ mod tests {
 
     fn caps(backend: &str, model: &str) -> ModelCapabilities {
         ModelCapabilities::built_in(backend, model)
+    }
+
+    #[test]
+    fn temperature_is_dropped_for_a_model_that_rejects_it() {
+        let request = LlmRequest::prompt("hi").temperature(0.0);
+
+        // gpt-5.1 is an OpenAI reasoning model: the host rejects the field
+        // outright rather than ignoring it, so it must not be sent.
+        let rig_request = to_rig_request(
+            request.clone(),
+            Wire::Responses,
+            "gpt-5.1",
+            &caps(OPENAI_RESPONSES_BACKEND, "gpt-5.1"),
+        )
+        .unwrap();
+        assert_eq!(rig_request.temperature, None);
+
+        // A model that does accept it keeps the caller's value.
+        let rig_request = to_rig_request(
+            request,
+            Wire::Chat,
+            "claude-sonnet-5",
+            &caps(ANTHROPIC_BACKEND, "claude-sonnet-5"),
+        )
+        .unwrap();
+        assert_eq!(rig_request.temperature, Some(0.0));
     }
 
     #[test]

@@ -44,6 +44,23 @@ pub const COL_EMAIL: &str = "email";
 /// carried on the [`User`](crate::User), because every session lookup has to ask
 /// the question ([`User::is_disabled`](crate::User::is_disabled)).
 pub const COL_DISABLED: &str = "disabled";
+/// The language this user reads the product in — a BCP-47 tag, or `NULL`.
+///
+/// Nullable, and `NULL` reads as *whatever the request would otherwise negotiate
+/// to*: a preference is a thing somebody states, and most people never do. It is
+/// the second source a request's locale is taken from (§16.1, D8), after an
+/// explicit `?lang=` and before the cookie.
+///
+/// It is also the one column here that is **the user's own**, which is why it is
+/// on the user form and on the user menu's locale picker at once: an admin sets
+/// it when they create an account for somebody who reads French, and that
+/// somebody changes it afterwards without needing an admin.
+///
+/// A system column despite that, because it has a type nothing else on the form
+/// has — a select over the enabled locales — and an admin who added a column
+/// called `language` to the users table would otherwise be editing this one
+/// through a text box.
+pub const COL_LANGUAGE: &str = "language";
 
 /// The most-privileged role: full access.
 pub const ROLE_ADMIN: u8 = 1;
@@ -73,6 +90,7 @@ fn users_fields() -> Vec<DataField> {
         DataField::plain(COL_EMAIL, text()).required().unique(),
         DataField::plain(COL_PASSWORD_HASH, text()),
         DataField::plain(COL_DISABLED, bool_()),
+        DataField::plain(COL_LANGUAGE, text()),
     ]
 }
 
@@ -84,8 +102,14 @@ fn users_fields() -> Vec<DataField> {
 /// know which of them are not theirs to type into: the generated id, the role
 /// (its own select), the identifier, the hash (never shown), and the disabled
 /// flag (an action on the users screen, not a text box).
-pub const SYSTEM_USER_COLUMNS: [&str; 5] =
-    [COL_ID, COL_ROLE, COL_EMAIL, COL_PASSWORD_HASH, COL_DISABLED];
+pub const SYSTEM_USER_COLUMNS: [&str; 6] = [
+    COL_ID,
+    COL_ROLE,
+    COL_EMAIL,
+    COL_PASSWORD_HASH,
+    COL_DISABLED,
+    COL_LANGUAGE,
+];
 
 /// Whether `column` is one of the columns the system owns
 /// ([`SYSTEM_USER_COLUMNS`]) rather than an admin-added field.
@@ -131,7 +155,14 @@ mod tests {
         let names: Vec<&str> = fields.iter().map(|f| f.base.name.as_str()).collect();
         assert_eq!(
             names,
-            [COL_ID, COL_ROLE, COL_EMAIL, COL_PASSWORD_HASH, COL_DISABLED]
+            [
+                COL_ID,
+                COL_ROLE,
+                COL_EMAIL,
+                COL_PASSWORD_HASH,
+                COL_DISABLED,
+                COL_LANGUAGE
+            ]
         );
 
         // Every column the schema declares is the system's; an admin-added one

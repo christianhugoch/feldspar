@@ -61,6 +61,7 @@ import { IconDots, IconFile, IconFolder, IconSearch } from "../icons";
 import { PageBody, PageHeader, StatusBadge } from "../layout";
 import { OptionalRoleSelect } from "../roleSelect";
 import { roleLabel, useRoles, type Roles } from "../roles";
+import { T, useT } from "../i18n";
 
 type Entry = FileEntry;
 
@@ -89,6 +90,7 @@ export function FileManager({
   /** The directory to open in; `""` is the store root. */
   initialDir?: string;
 }) {
+  const { t } = useT();
   const [dir, setDir] = useState(initialDir);
   const [entries, setEntries] = useState<Entry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -352,25 +354,25 @@ export function FileManager({
         pretitle="Storage"
         title={
           <>
-            Files <span className="text-muted">— {store}</span>
+            <T text="Files" /> <span className="text-muted">— {store}</span>
           </>
         }
         actions={
           <>
             <Button variant="outline-secondary" onClick={() => navigate("/file-stores")}>
-              File stores
+              <T text="File stores" />
             </Button>
             {/* The same store, opened as a project instead of a folder of files
                 (§12.1). One file at a time and a textarea is the wrong
                 instrument for a source tree, and this is where the admin goes
                 when that becomes obvious. */}
             <Button variant="outline-primary" href={ideUrl(store)}>
-              Edit code
+              <T text="Edit code" />
             </Button>
             <Button variant="outline-primary" onClick={makeFolder}>
-              New folder
+              <T text="New folder" />
             </Button>
-            <Button onClick={() => uploadInput.current?.click()}>Upload</Button>
+            <Button onClick={() => uploadInput.current?.click()}><T text="Upload" /></Button>
             <input
               ref={uploadInput}
               type="file"
@@ -418,7 +420,7 @@ export function FileManager({
               className="file-search-input"
               value={search}
               placeholder={dir ? `Search in ${dir}` : `Search ${store}`}
-              aria-label="Search files by name"
+              aria-label={t("Search files by name")}
               onChange={(e) => setSearch(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Escape") setSearch("");
@@ -464,7 +466,7 @@ export function FileManager({
             className="text-muted"
             onClick={() => setSelection(NOTHING_SELECTED)}
           >
-            Clear
+            <T text="Clear" />
           </Button>
         </div>
 
@@ -490,11 +492,11 @@ export function FileManager({
             <Table hover responsive className="card-table table-vcenter file-table">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>Owner</th>
-                  <th>Modified</th>
-                  <th className="text-end">Size</th>
-                  <th>Access</th>
+                  <th><T text="Name" /></th>
+                  <th><T text="Owner" /></th>
+                  <th><T text="Modified" /></th>
+                  <th className="text-end"><T text="Size" /></th>
+                  <th><T text="Access" /></th>
                   <th className="w-1"></th>
                 </tr>
               </thead>
@@ -515,7 +517,7 @@ export function FileManager({
                 {entries.length === 0 && !searched && (
                   <tr>
                     <td colSpan={columns} className="text-muted">
-                      This folder is empty.
+                      <T text="This folder is empty." />
                     </td>
                   </tr>
                 )}
@@ -606,7 +608,7 @@ export function FileManager({
  * restriction everything under it has. */
 function AccessCell({ entry, roles }: { entry: Entry; roles: Roles }) {
   const effective = entry.effective_min_role ?? null;
-  if (effective == null) return <span className="text-muted">Unrestricted</span>;
+  if (effective == null) return <span className="text-muted"><T text="Unrestricted" /></span>;
   const own = entry.min_role != null;
   return (
     <span className={own ? undefined : "text-muted"} title={own ? "Set here" : "Inherited"}>
@@ -673,15 +675,15 @@ function EntryMenu({
             {one.is_dir ? "Open folder" : "Open"}
           </Dropdown.Item>
         )}
-        {one && !one.is_dir && <Dropdown.Item onClick={() => onEdit(one)}>Edit text</Dropdown.Item>}
+        {one && !one.is_dir && <Dropdown.Item onClick={() => onEdit(one)}><T text="Edit text" /></Dropdown.Item>}
         {files.length > 0 && (
           <Dropdown.Item onClick={onDownload}>
             {files.length === 1 ? "Download" : `Download ${files.length} files`}
           </Dropdown.Item>
         )}
-        {one && <Dropdown.Item onClick={() => onRename(one)}>Rename</Dropdown.Item>}
+        {one && <Dropdown.Item onClick={() => onRename(one)}><T text="Rename" /></Dropdown.Item>}
         {one && (
-          <Dropdown.Item onClick={() => onPermissions(one)}>Permissions</Dropdown.Item>
+          <Dropdown.Item onClick={() => onPermissions(one)}><T text="Permissions" /></Dropdown.Item>
         )}
         <Dropdown.Divider />
         <Dropdown.Item className="text-danger" onClick={onDelete}>
@@ -722,7 +724,7 @@ function EditorModal({
       </Modal.Body>
       <Modal.Footer>
         <Button variant="outline-secondary" onClick={onCancel}>
-          Cancel
+          <T text="Cancel" />
         </Button>
         <Button onClick={onSave} disabled={busy}>
           {busy ? "Saving…" : "Save"}
@@ -751,6 +753,7 @@ function PermissionsModal({
   onSaved: (saved: GetFileMetaResponse) => void;
   onError: (message: string) => void;
 }) {
+  const { t } = useT();
   const roles = useRoles();
   const [value, setValue] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
@@ -786,41 +789,45 @@ function PermissionsModal({
   return (
     <Modal show onHide={onClose}>
       <Modal.Header closeButton>
-        <Modal.Title className="h6">Permissions — {meta.path}</Modal.Title>
+        <Modal.Title className="h6">
+          {t("Permissions — {path}", { path: meta.path })}
+        </Modal.Title>
       </Modal.Header>
       <Modal.Body>
         <OptionalRoleSelect
           id="metaMinRole"
-          label="Minimum role"
+          label={t("Minimum role")}
           value={value}
           roles={roles}
           blank="Unrestricted"
           onChange={setValue}
         >
-          The least privileged role still allowed. Unrestricted sets no rule here.
+          <T text="The least privileged role still allowed. Unrestricted sets no rule here." />
         </OptionalRoleSelect>
 
         <div className="mb-0">
-          <span className="me-2">Effective:</span>
+          <span className="me-2">
+            <T text="Effective:" />
+          </span>
           {meta.effective_min_role == null ? (
-            <StatusBadge tone="secondary">Unrestricted</StatusBadge>
+            <StatusBadge tone="secondary"><T text="Unrestricted" /></StatusBadge>
           ) : (
             <StatusBadge tone="blue">
-              {roleLabel(meta.effective_min_role, roles)} or lower
+              {t("{role} or lower", {
+                role: roleLabel(meta.effective_min_role, roles),
+              })}
             </StatusBadge>
           )}
           {inherited && (
             <div className="text-muted small mt-2">
-              Stricter than the rule set here, because a parent folder or the store itself
-              restricts it. Access is cumulative down the path, so a rule here can only ever
-              tighten it further.
+              <T text="Stricter than the rule set here, because a parent folder or the store itself restricts it. Access is cumulative down the path, so a rule here can only ever tighten it further." />
             </div>
           )}
         </div>
       </Modal.Body>
       <Modal.Footer>
         <Button variant="outline-secondary" onClick={onClose}>
-          Cancel
+          <T text="Cancel" />
         </Button>
         <Button onClick={() => void save()} disabled={busy}>
           {busy ? "Saving…" : "Save"}

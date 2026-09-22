@@ -24,6 +24,8 @@
 //!   entry of it.
 //! - [`catchall`] — the reduced display/edit path (value → text, text → value)
 //!   that stands in for the full `FieldView` trait until post-MVP.
+//! - [`translate_spec`] — the labels of a declared spec, translated against a
+//!   request's locale before the admin API serialises them (§16.1, [`i18n`]).
 //!
 //! `BaseField` and `Attrs` live here rather than in `sc-catalog`, where they
 //! started: neither is a catalog concept, and `FormField` needs both while
@@ -36,6 +38,7 @@ mod attrs;
 mod basic;
 pub mod catchall;
 mod field;
+pub mod i18n;
 mod json;
 mod operation;
 mod rich;
@@ -48,6 +51,7 @@ pub use field::{
     BaseField, FormField, OptionsSource, SECRET_SENTINEL, merge_secrets, preserve_create_only,
     redact_attrs, validate_attrs,
 };
+pub use i18n::{translate_field, translate_spec};
 pub use json::{json_to_value, value_to_json};
 pub use operation::{Operation, OperationScope};
 pub use rich::{RichType, RichTypeRef, registered_rich_types, rich_type, rich_type_config_spec};

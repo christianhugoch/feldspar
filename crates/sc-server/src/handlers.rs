@@ -61,6 +61,8 @@ use sc_files::{
     backend_operations, check_access, display_config, effective_min_role, registered_backends,
     run_backend_operation, visible_entries,
 };
+use sc_i18n::Locale;
+use sc_i18n::t;
 use sc_llm::{
     LlmModelDef, LlmModelDefId, LlmProviderDef, LlmProviderDefId, LlmRequest, connect_model,
     delete_llm_model, delete_llm_provider, fetch_host_models, list_llm_models, list_llm_providers,
@@ -137,9 +139,19 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             async move {
                 let exists = any_user_exists(&catalog).await?;
                 let current = ctx.user.as_ref().map_or(Json::Null, user_summary_json);
+                let locales = sc_i18n::active();
                 Ok(HandlerResponse::ok(json!({
                     "any_user_exists": exists,
                     "current_user": current,
+                    "locales": {
+                        "default": locales.default_locale().as_str(),
+                        "current": ctx.locale.as_str(),
+                        "enabled": locales
+                            .enabled()
+                            .iter()
+                            .map(|l| l.as_str())
+                            .collect::<Vec<_>>(),
+                    },
                 })))
             }
         }
@@ -171,7 +183,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         let body = user_summary_json(&user);
                         Ok(HandlerResponse::start_session(user, body))
                     }
-                    None => Err(Error::auth("invalid credentials")),
+                    None => Err(Error::auth(t!(ctx.locale, "invalid credentials"))),
                 }
             }
         }
@@ -185,7 +197,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("listTables", {
         let catalog = catalog.clone();
-        move |_ctx| {
+        move |ctx| {
             let catalog = catalog.clone();
             async move {
                 let rls = catalog.primary().capabilities().row_level_security;
@@ -193,7 +205,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let out: Vec<Json> = tables
                     .iter()
                     .filter(|t| !t.is_hidden())
-                    .map(|t| table_json(&catalog, t, rls))
+                    .map(|t| table_json(&catalog, t, rls, &ctx.locale))
                     .collect();
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
@@ -225,10 +237,13 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 )
                 .await?;
                 let rls = catalog.primary().capabilities().row_level_security;
-                Ok(
-                    HandlerResponse::ok(table_json(&catalog, &catalog.require(&name)?, rls))
-                        .with_status(201),
-                )
+                Ok(HandlerResponse::ok(table_json(
+                    &catalog,
+                    &catalog.require(&name)?,
+                    rls,
+                    &ctx.locale,
+                ))
+                .with_status(201))
             }
         }
     });
@@ -260,7 +275,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 .await?;
                 let rls = catalog.primary().capabilities().row_level_security;
                 Ok(HandlerResponse::ok(json!({
-                    "table": table_json(&catalog, &table, rls),
+                    "table": table_json(&catalog, &table, rls, &ctx.locale),
                     "inserted": outcome.inserted,
                 }))
                 .with_status(201))
@@ -339,6 +354,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     &catalog,
                     &catalog.require(&table.name)?,
                     rls,
+                    &ctx.locale,
                 )))
             }
         }
@@ -368,7 +384,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // writes the row that puts it in the list.
                 let table = sc_api::metadata_tables::add(&catalog, &name).await?;
                 let rls = catalog.primary().capabilities().row_level_security;
-                Ok(HandlerResponse::ok(table_json(&catalog, &table, rls)).with_status(201))
+                Ok(
+                    HandlerResponse::ok(table_json(&catalog, &table, rls, &ctx.locale))
+                        .with_status(201),
+                )
             }
         }
     });
@@ -377,7 +396,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("listTableProviders", {
         let catalog = catalog.clone();
-        move |_ctx| {
+        move |ctx| {
             let catalog = catalog.clone();
             async move {
                 // A property of the **installed modules**, not of any table, and
@@ -391,10 +410,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         json!({
                             "module": kind.module,
                             "provider": kind.provider,
-                            "config_spec": kind.config_spec
-                                .iter()
-                                .map(form_field_json)
-                                .collect::<Vec<_>>(),
+                            "config_spec": spec_json(&kind.config_spec, &ctx.locale),
                         })
                     })
                     .collect();
@@ -424,7 +440,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 )
                 .await?;
                 let rls = catalog.primary().capabilities().row_level_security;
-                Ok(HandlerResponse::ok(table_json(&catalog, &table, rls)).with_status(201))
+                Ok(
+                    HandlerResponse::ok(table_json(&catalog, &table, rls, &ctx.locale))
+                        .with_status(201),
+                )
             }
         }
     });
@@ -460,7 +479,12 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let table =
                     sc_api::provided_tables::configure(&catalog, &name, configuration).await?;
                 let rls = catalog.primary().capabilities().row_level_security;
-                Ok(HandlerResponse::ok(table_json(&catalog, &table, rls)))
+                Ok(HandlerResponse::ok(table_json(
+                    &catalog,
+                    &table,
+                    rls,
+                    &ctx.locale,
+                )))
             }
         }
     });
@@ -788,7 +812,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("listFieldTypes", {
         let catalog = catalog.clone();
-        move |_ctx| {
+        move |ctx| {
             let catalog = catalog.clone();
             async move {
                 let mut out = Vec::new();
@@ -796,11 +820,11 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // attribute specs, then the Key/File kinds — one list the field
                 // editor assembles its picker from (§3.4).
                 for basic in schema_edit::basic_field_types() {
-                    out.push(field_type_json(basic.name(), "basic", &[]));
+                    out.push(field_type_json(basic.name(), "basic", &[], &ctx.locale));
                 }
                 for name in registered_rich_types() {
                     let spec = rich_type_config_spec(&name)?;
-                    out.push(field_type_json(&name, "rich", &spec));
+                    out.push(field_type_json(&name, "rich", &spec, &ctx.locale));
                 }
                 for (name, spec) in [
                     ("key", key_kind_config_spec()),
@@ -809,7 +833,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     // Resolve any `server_query` (the File store pick-list) to a
                     // static list before the spec leaves the server.
                     let resolved = resolve_options(&catalog, spec).await?;
-                    out.push(field_type_json(name, "kind", &resolved));
+                    out.push(field_type_json(name, "kind", &resolved, &ctx.locale));
                 }
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
@@ -1260,7 +1284,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("listFileStoreBackends", {
         let catalog = catalog.clone();
-        move |_ctx| {
+        move |ctx| {
             let catalog = catalog.clone();
             async move {
                 let mut out = Vec::new();
@@ -1268,13 +1292,13 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     let spec = resolve_options(&catalog, backend_config_spec(&name)?).await?;
                     out.push(json!({
                         "name": name,
-                        "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                        "config_spec": spec_json(&spec, &ctx.locale),
                         // What the backend can *do*, declared the same way as
                         // what it can be told — so the form renders a button per
                         // operation without knowing what any of them mean.
                         "operations": backend_operations(&name)?
                             .iter()
-                            .map(operation_json)
+                            .map(|op| operation_json(op, &ctx.locale))
                             .collect::<Vec<_>>(),
                     }));
                 }
@@ -1448,7 +1472,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("listLlmProviderBackends", {
         let catalog = catalog.clone();
-        move |_ctx| {
+        move |ctx| {
             let catalog = catalog.clone();
             async move {
                 let mut out = Vec::new();
@@ -1456,7 +1480,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     let spec = resolve_options(&catalog, provider_config_spec(&name)?).await?;
                     out.push(json!({
                         "name": name,
-                        "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                        "config_spec": spec_json(&spec, &ctx.locale),
                     }));
                 }
                 Ok(HandlerResponse::ok(Json::Array(out)))
@@ -1571,9 +1595,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             async move {
                 let backend = ctx.path_param("backend")?;
                 let spec = resolve_options(&catalog, model_config_spec(backend)?).await?;
-                Ok(HandlerResponse::ok(Json::Array(
-                    spec.iter().map(form_field_json).collect(),
-                )))
+                Ok(HandlerResponse::ok(Json::Array(spec_json(
+                    &spec,
+                    &ctx.locale,
+                ))))
             }
         }
     });
@@ -1719,12 +1744,16 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("listModules", {
         let apps = apps.clone();
-        move |_ctx| {
+        move |ctx| {
             let apps = apps.clone();
             async move {
                 let services = modules_of(&apps)?;
                 let set = services.modules();
-                let modules: Vec<Json> = set.modules().iter().map(module_json).collect();
+                let modules: Vec<Json> = set
+                    .modules()
+                    .iter()
+                    .map(|m| module_json(m, &ctx.locale))
+                    .collect();
                 // Installed is by **package name**, which is what the row is
                 // keyed by: a bundled module installed from a checkout, from a
                 // tarball, or from the registry it was also published to is one
@@ -1862,7 +1891,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let loaded = set
                     .get(&module.name)
                     .ok_or_else(|| Error::msg("the installed module is not in the loaded set"))?;
-                Ok(HandlerResponse::ok(module_json(loaded)).with_status(201))
+                Ok(HandlerResponse::ok(module_json(loaded, &ctx.locale)).with_status(201))
             }
         }
     });
@@ -1917,7 +1946,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let loaded = set
                     .get(&module.name)
                     .ok_or_else(|| Error::msg("the saved module is not in the loaded set"))?;
-                Ok(HandlerResponse::ok(module_json(loaded)))
+                Ok(HandlerResponse::ok(module_json(loaded, &ctx.locale)))
             }
         }
     });
@@ -2074,7 +2103,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
     reg.register("listAgentTraits", {
         let catalog = catalog.clone();
         let apps = apps.clone();
-        move |_ctx| {
+        move |ctx| {
             let catalog = catalog.clone();
             let apps = apps.clone();
             async move {
@@ -2087,8 +2116,8 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     let spec = resolve_options(&catalog, trait_.config_spec()).await?;
                     out.push(json!({
                         "name": trait_.name(),
-                        "description": trait_.description(),
-                        "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                        "description": say(trait_.description(), &ctx.locale),
+                        "config_spec": spec_json(&spec, &ctx.locale),
                     }));
                 }
                 Ok(HandlerResponse::ok(Json::Array(out)))
@@ -2122,7 +2151,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let id = sc_agent::RunId(parse_uuid(ctx.path_param("id")?, "run")?);
                 let run = sc_agent::require_run(&catalog, id).await?;
                 Ok(HandlerResponse::ok(
-                    run_json_with_workflow(&catalog, &run).await?,
+                    run_json_with_workflow(&catalog, &run, &ctx.locale).await?,
                 ))
             }
         }
@@ -2677,11 +2706,8 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         resolve_model_options(action.config_spec_for(&catalog, channel), &models);
                     out.push(json!({
                         "name": action.name(),
-                        "description": action.description(),
-                        "config_spec": spec
-                            .iter()
-                            .map(form_field_json)
-                            .collect::<Vec<_>>(),
+                        "description": say(action.description(), &ctx.locale),
+                        "config_spec": spec_json(&spec, &ctx.locale),
                         // Whether the step palette may offer it here (§10.3,
                         // phase 5.4). Decided from the declaration this same
                         // call is answering with, so the flag and the form
@@ -2901,7 +2927,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 )
                 .await?;
                 Ok(HandlerResponse::ok(
-                    run_json_with_workflow(&catalog, &run).await?,
+                    run_json_with_workflow(&catalog, &run, &ctx.locale).await?,
                 ))
             }
         }
@@ -2925,7 +2951,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 )
                 .await?;
                 Ok(HandlerResponse::ok(
-                    run_json_with_workflow(&catalog, &run).await?,
+                    run_json_with_workflow(&catalog, &run, &ctx.locale).await?,
                 ))
             }
         }
@@ -2944,7 +2970,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     sc_workflow::retry_run(&catalog, &dispatcher, &sc_workflow::SystemClock, id)
                         .await?;
                 Ok(HandlerResponse::ok(
-                    run_json_with_workflow(&catalog, &run).await?,
+                    run_json_with_workflow(&catalog, &run, &ctx.locale).await?,
                 ))
             }
         }
@@ -3018,14 +3044,14 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     };
                     providers.push(json!({
                         "name": kind.name,
-                        "description": kind.description,
+                        "description": say_unless_module(
+                            &kind.description,
+                            kind.module.as_ref(),
+                            &ctx.locale,
+                        ),
                         "module": kind.module,
-                        "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
-                        "hyperparameters": provider
-                            .hyperparameters()
-                            .iter()
-                            .map(form_field_json)
-                            .collect::<Vec<_>>(),
+                        "config_spec": spec_json(&spec, &ctx.locale),
+                        "hyperparameters": spec_json(&provider.hyperparameters(), &ctx.locale),
                         "outcome_spec": serde_json::to_value(&kind.outcome)
                             .unwrap_or(Json::Null),
                         "outcome": outcome,
@@ -3439,10 +3465,14 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     };
                     providers.push(json!({
                         "name": kind.name,
-                        "label": kind.label,
-                        "description": kind.description,
+                        "label": say_unless_module(&kind.label, kind.module.as_ref(), &ctx.locale),
+                        "description": say_unless_module(
+                            &kind.description,
+                            kind.module.as_ref(),
+                            &ctx.locale,
+                        ),
                         "module": kind.module,
-                        "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                        "config_spec": spec_json(&spec, &ctx.locale),
                         "element_type": element_type,
                         "element_type_error": element_type_error,
                     }));
@@ -3624,9 +3654,13 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
     // than at the next restart (§13.5).
     reg.register("getSettings", {
         let catalog = catalog.clone();
-        move |_ctx| {
+        move |ctx| {
             let catalog = catalog.clone();
-            async move { Ok(HandlerResponse::ok(settings_json(&catalog).await?)) }
+            async move {
+                Ok(HandlerResponse::ok(
+                    settings_json(&catalog, &ctx.locale).await?,
+                ))
+            }
         }
     });
 
@@ -3676,6 +3710,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // verbosity that is not a level is refused here rather than
                 // stored and discovered at the next boot.
                 let development = sc_config::development_settings_from(&merged)?;
+                // The Localisation section's own reading, on the same footing: a
+                // tag that is not a language tag is refused here, where the
+                // admin can see which box they typed it into (§16.1).
+                let localisation = sc_config::localisation_settings_from(&merged)?;
 
                 sc_config::set_config_many(&catalog, &values).await?;
                 // The two switches this process runs under move **now**, not at
@@ -3683,7 +3721,13 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // something is happening in the server they are looking at, and
                 // a switch that needed a restart would have thrown that away.
                 development.apply();
-                Ok(HandlerResponse::ok(settings_json(&catalog).await?))
+                // And the enabled locales move now too, for the same reason:
+                // an admin who has just turned French on reloads the page to
+                // see it, not the server.
+                sc_i18n::set_active(localisation);
+                Ok(HandlerResponse::ok(
+                    settings_json(&catalog, &ctx.locale).await?,
+                ))
             }
         }
     });
@@ -4281,7 +4325,11 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     .await?
                     .step(pattern, table, name, index, &context)
                     .await?;
-                Ok(HandlerResponse::ok(config_step_json(index, &step)))
+                Ok(HandlerResponse::ok(config_step_json(
+                    index,
+                    &step,
+                    &ctx.locale,
+                )))
             }
         }
     });
@@ -4675,6 +4723,100 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    // --- Translations (§16.1, task 4.4) -----------------------------------------
+    //
+    // The screen is one table, so the read is one call: the keys the source
+    // actually uses, what each enabled locale has for them, what the lint found
+    // that nobody wrapped, and the orphans. Every write goes through the
+    // `CatalogStore` — files for an application with a project tree, rows for
+    // one without — and then drops the mount's cached catalogues, so the
+    // running application serves the change on the next reload with no build
+    // (D7).
+
+    reg.register("getTranslations", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let app = require_app(&catalog, ctx.path_param("id")?).await?;
+                Ok(HandlerResponse::ok(
+                    crate::translations::translations_json(&catalog, &app).await?,
+                ))
+            }
+        }
+    });
+
+    reg.register("setApplicationLocales", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let id = parse_app_id(ctx.path_param("id")?)?;
+                let obj = require_object(&ctx.body)?;
+                let tags: Vec<String> = match obj.get("locales") {
+                    Some(Json::Array(items)) => items
+                        .iter()
+                        .map(|v| {
+                            v.as_str().map(str::to_owned).ok_or_else(|| {
+                                Error::invalid("`locales` should be a list of locale tags")
+                            })
+                        })
+                        .collect::<Result<_>>()?,
+                    _ => {
+                        return Err(Error::invalid("`locales` should be a list of locale tags"));
+                    }
+                };
+                let default = obj.get("default_locale").and_then(Json::as_str);
+                Ok(HandlerResponse::ok(
+                    crate::translations::set_locales(&catalog, &apps, id, &tags, default).await?,
+                ))
+            }
+        }
+    });
+
+    reg.register("saveTranslations", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let app = require_app(&catalog, ctx.path_param("id")?).await?;
+                let locale =
+                    sc_i18n::Locale::parse(&crate::router::path_decode(ctx.path_param("locale")?))?;
+                let obj = require_object(&ctx.body)?;
+                let messages = obj
+                    .get("messages")
+                    .ok_or_else(|| Error::invalid("`messages` is required"))?;
+                Ok(HandlerResponse::ok(
+                    crate::translations::save_catalogue(&catalog, &apps, &app, &locale, messages)
+                        .await?,
+                ))
+            }
+        }
+    });
+
+    reg.register("translateMissing", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let app = require_app(&catalog, ctx.path_param("id")?).await?;
+                let locale =
+                    sc_i18n::Locale::parse(&crate::router::path_decode(ctx.path_param("locale")?))?;
+                let translator = crate::translations::configured_translator(&catalog, None).await?;
+                Ok(HandlerResponse::ok(
+                    crate::translations::fill_missing(&catalog, &apps, &app, &locale, &translator)
+                        .await?,
+                ))
+            }
+        }
+    });
+
     // The canvas's calls: v1's server routes, run in the worker as the admin by
     // the configuration calls' `Configurer`. What they may name — a table in the
     // subset, a view or page of the application — is checked here first, so a
@@ -4961,7 +5103,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
     // `store` setting become a pick-list without waiting for `ui/form-runtime`.
     reg.register("listFrameworks", {
         let catalog = catalog.clone();
-        move |_ctx| {
+        move |ctx| {
             let catalog = catalog.clone();
             async move {
                 let mut out = Vec::new();
@@ -4974,9 +5116,9 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         resolve_options(&catalog, framework_config_spec(&info.name)?).await?;
                     out.push(json!({
                         "name": info.name,
-                        "label": info.label,
-                        "description": info.description,
-                        "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                        "label": say(&info.label, &ctx.locale),
+                        "description": say(&info.description, &ctx.locale),
+                        "config_spec": spec_json(&spec, &ctx.locale),
                         "has_views": info.name == sc_viewpattern::SALTCORN_UI_FRAMEWORK,
                     }));
                 }
@@ -4991,20 +5133,20 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
     // asking the admin to remember them. This is the *same* list
     // `app_providers_with` switches on, so a name offered here is a name that
     // mounts — which is the whole point of listing them from the server.
-    reg.register("listApiProviders", |_ctx| async move {
+    reg.register("listApiProviders", |ctx| async move {
         let out: Vec<Json> = registered_api_provider_info()
             .into_iter()
             .map(|info| {
                 json!({
                     "name": info.name,
-                    "label": info.label,
-                    "description": info.description,
+                    "label": say(&info.label, &ctx.locale),
+                    "description": say(&info.description, &ctx.locale),
                     "default_mount": info.default_mount,
                     // The provider's own settings, in the same vocabulary a
                     // framework's arrive in — so the application form renders
                     // GraphQL's aggregation switch and its four bounds without
                     // knowing that GraphQL is what it is rendering.
-                    "config_spec": info.config_spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                    "config_spec": spec_json(&info.config_spec, &ctx.locale),
                     // …and whether it takes custom SQL queries, which are not a
                     // settings field and so have an editor of their own.
                     "supports_custom_queries": info.supports_custom_queries,
@@ -5089,6 +5231,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         // comes back in this response and nowhere else.
                         password: optional_str(obj, "password"),
                         role: user_role_field(obj)?,
+                        language: user_language_field(obj)?,
                         extra: user_extra_values(&users, obj)?,
                     },
                 )
@@ -5120,6 +5263,12 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         // box is empty because the admin is not changing it, not
                         // because they want the account to have no password.
                         password: Some(optional_str(obj, "password")).filter(|p| !p.is_empty()),
+                        // Absent leaves it alone; present-and-empty is the
+                        // form's "Site default" option, which is a change.
+                        language: match obj.contains_key("language") {
+                            true => Some(user_language_field(obj)?),
+                            false => None,
+                        },
                         extra: user_extra_values(&users, obj)?,
                     },
                 )
@@ -5276,7 +5425,12 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let user = ctx
                     .user
                     .as_ref()
-                    .ok_or_else(|| Error::auth("minting an API token needs a signed-in admin"))?;
+                    .ok_or_else(|| {
+                        Error::auth(t!(
+                            ctx.locale,
+                            "minting an API token needs a signed-in admin"
+                        ))
+                    })?;
 
                 // The six flags, read and written back through `sc-api::mcp` —
                 // the one place that knows what they are called and what they
@@ -5510,12 +5664,12 @@ fn field_kind_json(kind: &DataFieldKind) -> Json {
 }
 
 /// One `listFieldTypes` entry.
-fn field_type_json(name: &str, category: &str, spec: &[FormField]) -> Json {
+fn field_type_json(name: &str, category: &str, spec: &[FormField], locale: &Locale) -> Json {
     json!({
         "name": name,
         "label": name,
         "category": category,
-        "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+        "config_spec": spec_json(spec, locale),
     })
 }
 
@@ -6899,7 +7053,7 @@ fn llm_model_from_body(
 /// [`sc_module::config_fields_to_form_fields`] — and a module that failed to
 /// register an action (a name clash) still has settings the tab should show
 /// beside the reason it is not available.
-fn module_json(loaded: &sc_module::LoadedModule) -> Json {
+fn module_json(loaded: &sc_module::LoadedModule, locale: &Locale) -> Json {
     let module = &loaded.module;
     let actions: Vec<Json> = loaded
         .manifest
@@ -6916,7 +7070,7 @@ fn module_json(loaded: &sc_module::LoadedModule) -> Json {
                     json!({
                         "name": action.name,
                         "description": action.description,
-                        "config_spec": spec.iter().map(form_field_json).collect::<Vec<_>>(),
+                        "config_spec": spec_json(&spec, locale),
                     })
                 })
                 .collect()
@@ -6961,11 +7115,7 @@ fn module_json(loaded: &sc_module::LoadedModule) -> Json {
         // Not redacted, and nothing here is a secret: a permission set is what
         // an admin granted, and the point of the screen is that it can be read.
         "permissions": Json::Object(module.permissions.to_json()),
-        "config_spec": loaded
-            .config_spec
-            .iter()
-            .map(form_field_json)
-            .collect::<Vec<_>>(),
+        "config_spec": spec_json(&loaded.config_spec, locale),
         "actions": actions,
         "functions": functions,
         // The table providers it supplies (§8.3): what the "new table" screen
@@ -7238,7 +7388,11 @@ fn scope_diff_json(scope: &sc_core_traits::ScopeDiff) -> Json {
 /// unconditionally for a workflow run because a workflow with tracing off simply
 /// has none — asking is one query, and branching on the pinned version's `trace`
 /// flag would be a second read to save the first.
-async fn run_json_with_workflow(catalog: &Catalog, run: &sc_agent::Run) -> Result<Json> {
+async fn run_json_with_workflow(
+    catalog: &Catalog,
+    run: &sc_agent::Run,
+    locale: &Locale,
+) -> Result<Json> {
     let mut out = run_json(run);
     if run.kind != sc_agent::RunKind::Workflow {
         return Ok(out);
@@ -7256,7 +7410,7 @@ async fn run_json_with_workflow(catalog: &Catalog, run: &sc_agent::Run) -> Resul
         fields.insert(
             "pending_form".to_owned(),
             match form {
-                Some(form) => pending_form_json(&form)?,
+                Some(form) => pending_form_json(&form, locale)?,
                 None => Json::Null,
             },
         );
@@ -7286,14 +7440,14 @@ fn run_trace_json(trace: &sc_workflow::RunTrace) -> Json {
 /// renders an approval form with no knowledge that workflows exist — and so a
 /// field whose declared type nothing recognises is reported *here*, where the
 /// admin can read it, rather than as a control nobody can fill in.
-fn pending_form_json(form: &sc_workflow::PendingForm) -> Result<Json> {
+fn pending_form_json(form: &sc_workflow::PendingForm, locale: &Locale) -> Result<Json> {
     let fields = form
         .fields
         .iter()
         .map(|f| f.to_form_field())
         .collect::<Result<Vec<_>>>()?;
     Ok(json!({
-        "fields": fields.iter().map(form_field_json).collect::<Vec<_>>(),
+        "fields": spec_json(&fields, locale),
         "assign_to": form.assign_to,
         "min_role": form.min_role,
     }))
@@ -7680,7 +7834,7 @@ async fn view_configurer<'a>(
 }
 
 /// One configuration step on the wire (`view_config_step_schema`).
-fn config_step_json(index: usize, step: &sc_viewpattern::ConfigStep) -> Json {
+fn config_step_json(index: usize, step: &sc_viewpattern::ConfigStep, locale: &Locale) -> Json {
     json!({
         "index": index,
         "name": step.name,
@@ -7690,7 +7844,7 @@ fn config_step_json(index: usize, step: &sc_viewpattern::ConfigStep) -> Json {
         "skip": step.skip,
         "context_field": step.context_field,
         "blurb": step.blurb,
-        "fields": step.fields.iter().map(form_field_json).collect::<Vec<_>>(),
+        "fields": spec_json(&step.fields, locale),
         "values": Json::Object(step.values.clone()),
         "issues": step.issues,
     })
@@ -7881,6 +8035,31 @@ fn user_role_field(obj: &Map<String, Json>) -> Result<u8> {
     u8::try_from(role).map_err(|_| Error::invalid(format!("role {role} is not in 1..=100")))
 }
 
+/// The `language` of a user body: a BCP-47 tag, canonicalised, or `None` for
+/// "whatever the request negotiates" (§16.1).
+///
+/// Parsed rather than trusted, so `pt-br` is stored as `pt-BR` and a value that
+/// is not a language tag is refused where the admin can fix it. It is **not**
+/// checked against the enabled set: an admin setting up an account for somebody
+/// who reads French before enabling French is doing the two halves of one job in
+/// the order they thought of them, and a stored tag nothing enables simply falls
+/// through the negotiation.
+fn user_language_field(obj: &Map<String, Json>) -> Result<Option<String>> {
+    let tag = match obj.get("language") {
+        None | Some(Json::Null) => return Ok(None),
+        Some(Json::String(tag)) => tag.trim(),
+        Some(other) => {
+            return Err(Error::invalid(format!(
+                "`language` should be a language tag, got {other}"
+            )));
+        }
+    };
+    if tag.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(sc_i18n::Locale::parse(tag)?.as_str().to_owned()))
+}
+
 /// The `extra` bag of a user body: the columns the admin has added to the users
 /// table, coerced to each column's type.
 ///
@@ -7953,21 +8132,34 @@ fn build_log(report: &sc_app::BuildReport) -> String {
 /// they are serialised, so a secret setting cannot leak through a second reader
 /// added later — the rule §11.1 states for an API key, applied to the private
 /// key an admin pastes into the TLS section.
-async fn settings_json(catalog: &Catalog) -> Result<Json> {
+async fn settings_json(catalog: &Catalog, locale: &Locale) -> Result<Json> {
+    // Three kinds of English on this screen and all three are the server's, so
+    // all three are translated here (§16.1, D5): the section's heading, its one
+    // sentence, and each setting's label and help text. The help is the one
+    // `translate_spec` cannot reach — it hangs off `ConfigDef` rather than off
+    // `FormField` — so it is translated where it is serialised, which is here.
     let sections: Vec<Json> = sc_config::config_sections()
         .iter()
         .map(|section| {
             json!({
                 "name": section.name,
-                "label": section.label,
-                "description": section.description,
+                // Not `t!`: the heading is *data* in `sc-config`, so the key is
+                // the declared English and the lookup is the same one
+                // `translate_spec` makes. The scanner reads `label:` and
+                // `description:` where they are declared, which is what puts
+                // them in the catalogue in the first place.
+                "label": sc_i18n::core::translate(locale, section.label, &[]),
+                "description": sc_i18n::core::translate(locale, section.description, &[]),
                 "fields": section
                     .fields
                     .iter()
                     .map(|def| {
-                        let mut field = form_field_json(&def.field);
+                        let mut declared = def.field.clone();
+                        sc_types::translate_field(&mut declared, locale);
+                        let mut field = form_field_json(&declared);
                         if let Json::Object(map) = &mut field {
-                            map.insert("help".to_owned(), Json::from(def.help));
+                            let help = sc_i18n::core::translate(locale, def.help, &[]);
+                            map.insert("help".to_owned(), Json::from(help));
                         }
                         field
                     })
@@ -8528,6 +8720,47 @@ async fn prediction_target(
     Ok((model, instance))
 }
 
+/// A declared spec as the admin API returns it — **translated** (§16.1, D5).
+///
+/// The one place a `config_spec` becomes JSON, and therefore the one place the
+/// rule lives: the server translates everything the server says, so a stream
+/// provider's `Broker URL` reaches a French admin as `URL du courtier` without
+/// the SPA holding a catalogue of labels it did not write. The clone is the
+/// price of translating a declaration that is borrowed from a registry and
+/// shared by every request; it is one small `Vec` per form.
+///
+/// On a monolingual installation this is one failed lookup per field and the
+/// labels come back unchanged (D11).
+/// A declared sentence — a framework's one-line pitch, a provider's label, an
+/// action's description — in the request's locale (§16.1, D5).
+///
+/// [`spec_json`]'s companion, and the same rule with the same key: the declared
+/// English. The extractor reads a `label:`/`description:` where it is written,
+/// so these reach the catalogue by the same route a `FormField`'s label does.
+fn say(text: &str, locale: &Locale) -> String {
+    sc_i18n::core::translate(locale, text, &[])
+}
+
+/// The same, for a sentence a **module** declared.
+///
+/// Which is to say: not translated. A module's strings are its own, in its own
+/// package, and this server translating them would be it claiming authorship of
+/// text it did not write — the one exclusion the milestone states outright. The
+/// declaration carries `module: Some(_)` exactly when that is the case, so the
+/// test is the data rather than a convention.
+fn say_unless_module(text: &str, module: Option<&String>, locale: &Locale) -> String {
+    match module {
+        Some(_) => text.to_owned(),
+        None => say(text, locale),
+    }
+}
+
+fn spec_json(spec: &[FormField], locale: &Locale) -> Vec<Json> {
+    let mut spec = spec.to_vec();
+    sc_types::translate_spec(&mut spec, locale);
+    spec.iter().map(form_field_json).collect()
+}
+
 fn form_field_json(field: &FormField) -> Json {
     let type_name = field
         .base
@@ -8552,16 +8785,16 @@ fn form_field_json(field: &FormField) -> Json {
 /// An [`Operation`] as the API returns it (matching `operation_schema`): what a
 /// backend can be asked to *do*, in the same declared-as-data shape its settings
 /// use.
-fn operation_json(op: &Operation) -> Json {
+fn operation_json(op: &Operation, locale: &Locale) -> Json {
     json!({
         "name": op.name,
-        "label": op.label,
-        "description": op.description,
+        "label": say(&op.label, locale),
+        "description": say(&op.description, locale),
         "scope": match op.scope {
             OperationScope::Configure => "configure",
             OperationScope::Instance => "instance",
         },
-        "input_spec": op.input_spec.iter().map(form_field_json).collect::<Vec<_>>(),
+        "input_spec": spec_json(&op.input_spec, locale),
         "on_create": op.on_create,
         "automatic": op.automatic,
     })
@@ -8731,7 +8964,12 @@ fn file_body_bytes(obj: &Map<String, Json>) -> Result<Bytes> {
 /// `configured` is the overlay's *presence*, not its content. A table an admin
 /// deliberately set to admin-only and one nobody has ever opened both report
 /// `1`/`1`; only the first has a row, and only the first can be "forgotten".
-pub(crate) fn table_json(catalog: &Catalog, table: &Table, rls_available: bool) -> Json {
+pub(crate) fn table_json(
+    catalog: &Catalog,
+    table: &Table,
+    rls_available: bool,
+    locale: &Locale,
+) -> Json {
     json!({
         "name": table.name,
         "label": table.label,
@@ -8766,7 +9004,7 @@ pub(crate) fn table_json(catalog: &Catalog, table: &Table, rls_available: bool) 
         "database": table.database.0,
         "metadata": table.is_metadata(),
         // The table provider serving its rows, or null (§8.3).
-        "provider": provided_json(catalog, table),
+        "provider": provided_json(catalog, table, locale),
     })
 }
 
@@ -8780,7 +9018,7 @@ pub(crate) fn table_json(catalog: &Catalog, table: &Table, rls_available: bool) 
 /// the declaration is not stored anywhere: it is read from the package at load,
 /// so a module upgraded this morning asks for what it asks for now rather than
 /// for what it asked for when the table was made.
-fn provided_json(catalog: &Catalog, table: &Table) -> Json {
+fn provided_json(catalog: &Catalog, table: &Table, locale: &Locale) -> Json {
     let Some((module, provider)) = table.provider() else {
         return Json::Null;
     };
@@ -8815,7 +9053,7 @@ fn provided_json(catalog: &Catalog, table: &Table) -> Json {
             &config_spec,
             &provided_configuration(table),
         )),
-        "config_spec": config_spec.iter().map(form_field_json).collect::<Vec<_>>(),
+        "config_spec": spec_json(&config_spec, locale),
         "issues": issues,
     })
 }

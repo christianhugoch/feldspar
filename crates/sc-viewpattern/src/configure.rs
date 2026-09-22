@@ -148,6 +148,23 @@ impl<'a> Configurer<'a> {
         self.runtime.references(view, ctx).await
     }
 
+    /// The strings a view's own configuration puts in front of a person — v1's
+    /// `getStringsForI18n`, asked of the pattern (§16.1, task 4.5).
+    ///
+    /// This is a Saltcorn UI application's half of "what does this application
+    /// say?": a code application's strings are `t()` call sites a parser finds,
+    /// and these are values in a configuration only the pattern can read.
+    pub async fn strings_for_i18n(&self, view: &View) -> Result<Vec<String>> {
+        let schema = schema_snapshot(self.catalog)?;
+        let ctx = ViewContext {
+            snapshot: &self.snapshot,
+            request: &self.request,
+            hosts: self.hosts(),
+            schema: Some(&schema),
+        };
+        self.runtime.strings_for_i18n(view, ctx).await
+    }
+
     /// The options v1's builder is opened with for `page` (TODO "The builder"
     /// 5.5), computed in the worker as the admin, over the same snapshot and
     /// surfaces a builder step's options are.

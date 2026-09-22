@@ -1,0 +1,57 @@
+[package]
+name = "sc-i18n"
+description = "Locale negotiation, message catalogues, the message format and the `t!` macros (layer 0)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# One integration-test binary per crate rather than one per file: every test
+# target in this workspace statically links V8, so ~400 MB of binary and a
+# multi-second link were being paid per *file*. `tests/it.rs` aggregates them.
+autotests = false
+
+[dependencies]
+sc-error.workspace = true
+# BCP-47 and CLDR plural categories; see the workspace manifest for why these
+# two and nothing else of ICU4X.
+icu_locale_core.workspace = true
+icu_plurals.workspace = true
+# A catalogue *is* JSON (a flat object of English source → translation), so this
+# crate parses and serialises one rather than handing bytes to a caller that
+# would have to know the format anyway.
+serde_json.workspace = true
+# The `Translator` seam: filling a catalogue is a network call, so the trait
+# that declares it is async — the arrangement `Mailer` and `StreamProvider`
+# already have.
+async-trait.workspace = true
+# Extraction only (`feldspar i18n extract|lint|check`): the `.ts`/`.tsx` parse
+# behind the `extract` feature. Off by default and for `sc-repomap`'s reason —
+# every layer above this crate depends on it, and a server *serving* a
+# translated page has no use for a parser. `sc-cli` turns it on.
+tree-sitter = { workspace = true, optional = true }
+tree-sitter-javascript = { workspace = true, optional = true }
+tree-sitter-typescript = { workspace = true, optional = true }
+
+[features]
+extract = [
+    "dep:tree-sitter",
+    "dep:tree-sitter-javascript",
+    "dep:tree-sitter-typescript",
+]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# This crate's own integration tests exercise the extractor, so the test
+# binary needs the feature even when the crate under test is built without it
+# (`cargo test -p sc-i18n`). A workspace-wide run gets it through `sc-cli`
+# anyway; this is what makes the crate testable on its own.
+sc-i18n = { workspace = true, features = ["extract"] }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it.rs"

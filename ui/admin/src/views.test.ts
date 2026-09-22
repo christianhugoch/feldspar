@@ -89,21 +89,24 @@ describe("appTabs", () => {
     const tabs = appTabs({ id: "a1", has_views: true });
     expect(tabs.map((t) => t.id)).toEqual([
       "settings",
+      "translations",
       "views",
       "pages",
       "library",
       "app-settings",
     ]);
-    expect(tabs[1].href).toBe("#/applications/a1/views");
     expect(tabs[0].href).toBe("#/applications/a1/edit");
-    expect(tabs[3].href).toBe("#/applications/a1/library");
-    expect(tabs[4].href).toBe("#/applications/a1/app-settings");
+    expect(tabs[2].href).toBe("#/applications/a1/views");
+    expect(tabs[4].href).toBe("#/applications/a1/library");
+    expect(tabs[5].href).toBe("#/applications/a1/app-settings");
   });
 
-  it("gives any other application only Settings", () => {
-    expect(appTabs({ id: "a1", has_views: false }).map((t) => t.id)).toEqual([
-      "settings",
-    ]);
+  it("gives any other application Settings and Translations", () => {
+    // Every application has strings a person reads, whatever its framework
+    // writes them in, so this tab is not conditional on one.
+    const tabs = appTabs({ id: "a1", has_views: false });
+    expect(tabs.map((t) => t.id)).toEqual(["settings", "translations"]);
+    expect(tabs[1].href).toBe("#/applications/a1/translations");
   });
 });
 

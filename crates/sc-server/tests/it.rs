@@ -35,6 +35,8 @@ mod api_token_admin_api;
 mod app_builder_agent;
 #[path = "app_file_access.rs"]
 mod app_file_access;
+#[path = "app_i18n.rs"]
+mod app_i18n;
 #[path = "app_serving.rs"]
 mod app_serving;
 #[path = "app_streams.rs"]
@@ -75,6 +77,8 @@ mod ide_typecheck;
 mod live_mounting;
 #[path = "llm_provider_admin_api.rs"]
 mod llm_provider_admin_api;
+#[path = "locale_negotiation.rs"]
+mod locale_negotiation;
 #[path = "mcp_server.rs"]
 mod mcp_server;
 #[path = "metadata_tables_api.rs"]
