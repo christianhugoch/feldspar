@@ -71,11 +71,30 @@ describe("the request a query becomes", () => {
     expect(request.glob).toBe("*.ts");
   });
 
-  it("sends no glob when several were typed, so none of them is dropped", () => {
+  it("sends several includes as one union, so none of them is dropped", () => {
     // The endpoint narrows by one glob. Sending the first of two would silently
     // lose every `.tsx` match, which is a wrong answer rather than a slow one.
-    const request = searchRequest(query({ includePattern: { "*.ts": true, "*.tsx": true } }));
+    // A typed `*.ts` arrives as two globs, so this is the common case.
+    const request = searchRequest(
+      query({ includePattern: { "**/*.ts": true, "**/*.ts/**": true } }),
+    );
+    expect(request.glob).toBe("{**/*.ts,**/*.ts/**}");
+    expect(globMatches(request.glob!, "src/deep/app.ts")).toBe(true);
+    expect(globMatches(request.glob!, "src/app.tsx")).toBe(false);
+  });
+
+  it("sends no glob when the includes cannot be put in a union", () => {
+    const request = searchRequest(query({ includePattern: { "*.{ts,tsx}": true, "*.js": true } }));
     expect(request.glob).toBeNull();
+  });
+
+  it("searches one folder below the store's root as the endpoint's dir", () => {
+    const folder = (path: string) => ({ folder: { path } });
+    expect(searchRequest(query({ folderQueries: [folder("/apps/src")] }), "apps").dir).toBe("src");
+    expect(searchRequest(query({ folderQueries: [folder("/apps")] }), "apps").dir).toBeNull();
+    expect(
+      searchRequest(query({ folderQueries: [folder("/apps/a"), folder("/apps/b")] }), "apps").dir,
+    ).toBeNull();
   });
 
   it("ignores a glob that is switched off or is a sibling clause", () => {
@@ -101,6 +120,58 @@ describe("the glob rule", () => {
     // `**` matching nothing at all is the case a monorepo path depends on.
     expect(globMatches("src/**/*.ts", "src/app.ts")).toBe(true);
     expect(globMatches("web/**", "src/app.ts")).toBe(false);
+  });
+
+  it("expands braces as the server does, and honours VS Code's escapes", () => {
+    expect(globMatches("*.{ts,tsx}", "src/app.tsx")).toBe(true);
+    expect(globMatches("*.{ts,tsx}", "src/app.js")).toBe(false);
+    // An open editor's path, as VS Code escapes it into a glob.
+    expect(globMatches("src/a[*]b.ts", "src/a*b.ts")).toBe(true);
+    expect(globMatches("src/a[*]b.ts", "src/axb.ts")).toBe(false);
+  });
+});
+
+describe("the folder queries", () => {
+  it("apply the configured excludes, relative to the folder", () => {
+    // Where `search.exclude` arrives: on the folder, not the query.
+    const files = groupByFile(
+      [match("src/app.ts"), match("web/node_modules/x/index.js"), match("dist/app.js")],
+      query({
+        folderQueries: [
+          {
+            folder: { path: "/apps" },
+            excludePattern: [{ pattern: { "**/node_modules": true, "**/dist": true } }],
+          },
+        ],
+      }),
+      "apps",
+    );
+    // `**/node_modules` names the directory; what is excluded is what is in it.
+    expect(files.map((f) => f.path)).toEqual(["src/app.ts"]);
+  });
+
+  it("narrow to a search path, and to the open editors", () => {
+    const matches = [match("src/app.ts"), match("src/list.ts"), match("web/app.ts")];
+    // `./src` in "files to include".
+    const searchPath = groupByFile(
+      matches,
+      query({ folderQueries: [{ folder: { path: "/apps" }, includePattern: { "src/**": true } }] }),
+      "apps",
+    );
+    expect(searchPath.map((f) => f.path)).toEqual(["src/app.ts", "src/list.ts"]);
+
+    // "Search only in open editors", with one open.
+    const open = groupByFile(
+      matches,
+      query({
+        folderQueries: [{ folder: { path: "/apps" }, includePattern: { "src/list.ts": true } }],
+      }),
+      "apps",
+    );
+    expect(open.map((f) => f.path)).toEqual(["src/list.ts"]);
+
+    // …and with none open: no folders, so nothing.
+    expect(groupByFile(matches, query({ folderQueries: [] }), "apps")).toEqual([]);
   });
 });
 
@@ -147,6 +218,21 @@ describe("a whole search", () => {
     // A view that dropped this would present a truncated answer as a complete
     // one, which is wrong exactly when it matters.
     expect(found.limitHit).toBe(true);
+  });
+
+  it("reports every file as it goes, not only in the result", async () => {
+    // The Search view draws what is reported as progress. Files in no open
+    // editor are only ever seen this way, so a search that skipped it found
+    // nothing outside the open tabs.
+    const { api } = stubApi({
+      matches: [match("src/app.ts"), match("src/closed/never-opened.ts"), match("src/app.ts", 7)],
+    });
+    const reported: string[] = [];
+
+    const found = await searchStore(api, "apps", query(), (file) => reported.push(file.path));
+
+    expect(reported).toEqual(["src/app.ts", "src/closed/never-opened.ts"]);
+    expect(found.files.map((f) => f.path)).toEqual(reported);
   });
 
   it("comes back empty rather than failing when nothing matched", async () => {

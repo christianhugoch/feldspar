@@ -2,6 +2,36 @@
 
 Changes in reverse chronological order.
 
+## The IDE's find-in-files searches the whole store, not only the open tabs
+
+Searching in the IDE's Search view found matches only in files already open in an editor tab. The
+store-backed search provider (`ui/ide/src/searchProvider.ts`) did run the server-side search, but
+it returned its matches only in the completed result. VS Code's Search view builds its tree from
+the matches a provider reports through `onProgress`, and takes only the statistics from the
+result. So the one request found every match, and the view drew only the open-editor matches that
+VS Code finds by itself.
+
+- **Matches are streamed.** `searchStore` takes an `onFile` callback and calls it for each file
+  with matches. `StoreSearchProvider.textSearch` passes each one to `onProgress` as a `FileMatch`,
+  and stops reporting once the search's cancellation token fires, so a replaced search does not
+  write into the new one's view.
+- **The folder queries are honoured.** VS Code puts part of a query on its `folderQueries`, which
+  the provider ignored. That covers `search.exclude`/`files.exclude` (`node_modules`, `dist`, `.git`),
+  a `./src` search path, and "search only in open editors". `selectedByFolders` applies each folder's
+  include and exclude globs relative to the folder. A single folder below the store root becomes
+  the endpoint's `dir`.
+- **Excludes work the way VS Code's do.** An exclude glob now drops a file when it matches the file
+  *or any directory it is in* (`excludedBy`). So the default `**/node_modules` hides everything under
+  it, not just a file with that name.
+- **Several includes are narrowed server-side.** VS Code turns a typed `*.ts` into two globs
+  (`**/*.ts`, `**/*.ts/**`). Until now that sent no glob, so the server searched every file and the
+  2000-match ceiling could be spent on files that were then filtered out. Several includes are now
+  sent as one `{a,b}` union, which the server's `glob_matches` already expands. They fall back to
+  client-side filtering only when a glob has its own braces, commas or `[…]` classes.
+- The client glob matcher now expands `{a,b}` like the server, and accepts `[…]` classes, which is
+  how VS Code escapes an open editor's path in a query. New tests in `ui/ide/src/search.test.ts`
+  cover the progress reporting, unions, `dir`, directory excludes, search paths and open-editors mode.
+
 ## An application's REST API can offer sign-up
 
 A React application had a sign-up form but nowhere to post it. The app's REST API projected

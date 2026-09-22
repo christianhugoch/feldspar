@@ -22,6 +22,7 @@ import {
   TextSearchMatch,
   type IFileQuery,
   type ISearchComplete,
+  type ISearchProgressItem,
   type ISearchResultProvider,
   type ITextQuery,
 } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search";
@@ -29,6 +30,7 @@ import { Schemas } from "@codingame/monaco-vscode-api/vscode/vs/base/common/netw
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
 import { getService } from "@codingame/monaco-vscode-api";
 import type { IDisposable } from "@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle";
+import type { CancellationToken } from "@codingame/monaco-vscode-api/vscode/vs/base/common/cancellation";
 
 import type { ApiClient } from "./client";
 import { searchStore, type FileMatches } from "./search";
@@ -51,13 +53,26 @@ export class StoreSearchProvider implements ISearchResultProvider {
     private readonly api: ApiClient,
   ) {}
 
-  async textSearch(query: ITextQuery): Promise<ISearchComplete> {
-    const found = await searchStore(this.api, this.store, query);
-    return {
-      results: found.files.map((file) => this.fileMatch(file)),
-      messages: [],
-      limitHit: found.limitHit,
-    };
+  /**
+   * Every file with matches is reported through `onProgress` as well as in the
+   * result, and the first is the one that shows: the Search view draws its tree
+   * from progress and keeps only the statistics of the result. Without it the
+   * view showed the matches VS Code finds itself, in the open editors, and
+   * nothing from the rest of the store (`search.ts` says more).
+   */
+  async textSearch(
+    query: ITextQuery,
+    onProgress?: (item: ISearchProgressItem) => void,
+    token?: CancellationToken,
+  ): Promise<ISearchComplete> {
+    const results: FileMatch[] = [];
+    const found = await searchStore(this.api, this.store, query, (file) => {
+      const match = this.fileMatch(file);
+      results.push(match);
+      // A search the user has replaced is not reported into the new one's view.
+      if (token?.isCancellationRequested !== true) onProgress?.(match);
+    });
+    return { results, messages: [], limitHit: found.limitHit };
   }
 
   /** One file's matches, as the Search view's tree renders them. */
