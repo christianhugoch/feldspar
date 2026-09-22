@@ -20,8 +20,8 @@ use std::time::Duration;
 use sc_api::code_host::{FileStoreHost, TableHost, TriggerRunHost, schema_snapshot};
 use sc_error::{Error, Result};
 use sc_expr::{
-    CodeCall, CodeHosts, DEFAULT_CODE_TIMEOUT, JsEvaluator, MAX_CODE_TIMEOUT, ModuleFnHost,
-    SchemaSnapshot, TriggerHost,
+    CodeCall, CodeHosts, ConsoleSink, DEFAULT_CODE_TIMEOUT, JsEvaluator, MAX_CODE_TIMEOUT,
+    ModuleFnHost, SchemaSnapshot, TriggerHost,
 };
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::Value as Json;
@@ -162,6 +162,11 @@ pub struct Hosts<'a> {
     triggers: Option<TriggerRunHost<'a>>,
     module_fns: Option<Arc<dyn ModuleFnHost>>,
     schema: Option<Arc<SchemaSnapshot>>,
+    /// Where this run's `console.*` lines go, when the context is collecting
+    /// them (the admin's Test run). Not one of the five surfaces and not a
+    /// capability: every body has a console, and this is only whether anybody
+    /// is reading it.
+    console: Option<ConsoleSink>,
 }
 
 impl<'a> Hosts<'a> {
@@ -232,6 +237,8 @@ impl<'a> Hosts<'a> {
             // finding an empty handle. The catalog is where they are because a
             // formula's hoisted call needs them too, from three other crates.
             module_fns: ctx.catalog.module_functions(),
+            // Whoever asked for the transcript, if anyone did.
+            console: ctx.console().cloned(),
         }
     }
 
@@ -272,6 +279,7 @@ impl<'a> Hosts<'a> {
             triggers: surfaces.triggers,
             module_fns: surfaces.module_fns,
             schema: self.schema(),
+            console: self.console.clone(),
             timeout,
             ..CodeCall::default()
         }

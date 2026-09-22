@@ -11,6 +11,9 @@
 //! broken trigger stays listed with its reason (the badge the SPA renders is not
 //! a guess); `runTrigger` returns the action's result, and an action that fails
 //! comes back as an **error** rather than a 200 carrying a failure nobody reads;
+//! `testRunTrigger` — the admin's Test run — answers **200 either way**, with
+//! the failure as a value, with what a code body printed, and, for a trigger on
+//! a table, run against a row of that table picked at random;
 //! and `listActions` describes each action's settings, which is what lets the
 //! trigger form render a configuration form for an action it has never heard of.
 
@@ -571,6 +574,217 @@ async fn run_returns_the_actions_result_and_reports_its_failures() -> sc_error::
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+/// The admin's **Test run**: a 200 either way, with what the body printed.
+#[tokio::test]
+async fn a_test_run_answers_with_the_console_and_with_the_failure() -> sc_error::Result<()> {
+    let mut server = setup().await?;
+
+    let (status, created) = server
+        .client
+        .send(
+            "POST",
+            "/api/triggers",
+            Some(trigger_body(
+                "chatty",
+                "none",
+                "run_js_code",
+                json!({
+                    "code": "console.log('starting', { n: payload.n });\n\
+                             console.error('nearly');\n\
+                             return payload.n * 2;",
+                }),
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().unwrap().to_owned();
+
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            &format!("/api/triggers/{id}/test-run"),
+            Some(json!({ "n": 21 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], json!(true));
+    assert_eq!(body["result"], json!(42));
+    // Every console method, in order, with its level — and the arguments
+    // formatted by the guest, which is the only side that can tell an object
+    // from a string.
+    assert_eq!(body["console"][0]["level"], json!("log"));
+    assert_eq!(body["console"][0]["text"], json!("starting {\"n\":21}"));
+    assert_eq!(body["console"][1]["level"], json!("error"));
+    assert_eq!(body["console"][1]["text"], json!("nearly"));
+    // A `none` trigger has no row, and none is invented for it.
+    assert_eq!(body["row"], Value::Null);
+
+    // A failing action is a **200 carrying the failure**, not an error status:
+    // the message is the answer, and what the body printed before it threw is
+    // what explains it.
+    let (status, created) = server
+        .client
+        .send(
+            "POST",
+            "/api/triggers",
+            Some(trigger_body(
+                "boom",
+                "none",
+                "run_js_code",
+                json!({
+                    "code": "console.log('about to fail');\n\
+                             throw new Error('the service is down');",
+                }),
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let boom = created["id"].as_str().unwrap().to_owned();
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            &format!("/api/triggers/{boom}/test-run"),
+            Some(Value::Null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], json!(false));
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(message.contains("the service is down"), "{message}");
+    assert!(message.contains("boom"), "the trigger is named: {message}");
+    assert_eq!(body["console"][0]["text"], json!("about to fail"));
+
+    // A switched-off trigger is not run, however it is asked — and that, too,
+    // is news rather than an error status.
+    let (status, body) = server
+        .client
+        .send(
+            "PUT",
+            &format!("/api/triggers/{boom}"),
+            Some({
+                let mut off = trigger_body(
+                    "boom",
+                    "none",
+                    "run_js_code",
+                    json!({ "code": "return 1;" }),
+                );
+                off["enabled"] = json!(false);
+                off
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            &format!("/api/triggers/{boom}/test-run"),
+            Some(Value::Null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], json!(false));
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("disabled"),
+        "{body}"
+    );
+
+    // A trigger that is not there is still a not-found: nothing ran, so there
+    // is no outcome to carry.
+    let (status, _) = server
+        .client
+        .send(
+            "POST",
+            &format!("/api/triggers/{}/test-run", uuid::Uuid::new_v4()),
+            Some(Value::Null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+/// A trigger on a table has no occurrence of its own when a person presses a
+/// button, so the test run borrows one: a row of that table, picked at random,
+/// bound to `row` — and to `old` as well on an update.
+#[tokio::test]
+async fn a_table_triggers_test_run_is_given_a_random_row() -> sc_error::Result<()> {
+    let mut server = setup().await?;
+
+    let (status, created) = server
+        .client
+        .send(
+            "POST",
+            "/api/triggers",
+            Some({
+                let mut body = trigger_body(
+                    "on update",
+                    "update",
+                    "run_js_code",
+                    json!({ "code": "return { title: row.title, same: old.title === row.title };" }),
+                );
+                body["channel"] = json!("books");
+                body
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().unwrap().to_owned();
+
+    // An empty table is not an error: the trigger still runs, with no row, and
+    // the answer says which row it got — none.
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            &format!("/api/triggers/{id}/test-run"),
+            Some(Value::Null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["row"], Value::Null);
+
+    for title in ["Dune", "Emma", "Ulysses"] {
+        let (status, body) = server
+            .client
+            .send(
+                "POST",
+                "/api/tables/books/rows",
+                Some(json!({ "title": title, "pages": 100 })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+
+    // Now there are rows, and the run is given one of them — the same one it
+    // reports, and the same one `old` sees.
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..12 {
+        let (status, body) = server
+            .client
+            .send(
+                "POST",
+                &format!("/api/triggers/{id}/test-run"),
+                Some(Value::Null),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["ok"], json!(true), "{body}");
+        let title = body["result"]["title"].as_str().unwrap().to_owned();
+        assert_eq!(body["row"]["title"], json!(title), "the row is reported");
+        assert_eq!(body["result"]["same"], json!(true), "`old` is bound too");
+        seen.insert(title);
+    }
+    // Random, not "the first row" — twelve draws from three rows finding one
+    // title would be a one-in-2.8-million coincidence.
+    assert!(seen.len() > 1, "always the same row: {seen:?}");
     Ok(())
 }
 

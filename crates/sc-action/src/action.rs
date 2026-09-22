@@ -20,7 +20,7 @@ use std::sync::Arc;
 use sc_catalog::{Catalog, SharedTx};
 use sc_email::Mailer;
 use sc_error::{Error, Result};
-use sc_expr::{Ambient, CodeAdapter, JsEvaluator, SchemaShape, value_from_json};
+use sc_expr::{Ambient, CodeAdapter, ConsoleSink, JsEvaluator, SchemaShape, value_from_json};
 use sc_query::Value;
 use sc_types::{Attrs, FormField};
 use serde_json::Value as Json;
@@ -198,6 +198,15 @@ pub struct ActionContext<'a> {
     /// The run context: a JSON object the action may read and write — what the
     /// steps before this one left behind, and what this one contributes to.
     pub context: Attrs,
+    /// Where this run's code body sends what it prints, when somebody is
+    /// collecting it — the admin's **Test run**, which shows the transcript
+    /// beside the result (or beside the failure, which is the case it is for).
+    ///
+    /// `None` for every ordinary firing: `console.log` still works there and
+    /// goes to the server's log. Only `run_js_code` reads it, and it hands it
+    /// straight to the engine — nothing between here and the isolate has to
+    /// know the admin is watching.
+    console: Option<ConsoleSink>,
     /// Whether this action is a **workflow step** rather than a trigger's own
     /// body, which is what puts [`context`](ActionContext::context) in scope for
     /// its settings.
@@ -233,6 +242,7 @@ impl<'a> ActionContext<'a> {
             adapters: None,
             triggers: None,
             tx: None,
+            console: None,
             context: Attrs::new(),
             in_run: false,
         }
@@ -259,6 +269,23 @@ impl<'a> ActionContext<'a> {
     ) -> ActionContext<'a> {
         self.adapters = Some(adapters);
         self
+    }
+
+    /// Collect what this action's code body prints — the admin's **Test run**.
+    ///
+    /// The sink is filled as the lines happen, so the caller reads it whether
+    /// the action answered or failed. It reaches this action's own body and no
+    /// further: a trigger this one runs is a firing of its own, logged where
+    /// every other firing is, and folding its output into this transcript would
+    /// have an admin reading another trigger's lines as their own.
+    pub fn with_console(mut self, console: ConsoleSink) -> ActionContext<'a> {
+        self.console = Some(console);
+        self
+    }
+
+    /// Where this action's code body should send what it prints, if anywhere.
+    pub fn console(&self) -> Option<&ConsoleSink> {
+        self.console.as_ref()
     }
 
     /// Supply the dispatcher, so this action can run another trigger.

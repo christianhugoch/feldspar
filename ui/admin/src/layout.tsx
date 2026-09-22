@@ -99,6 +99,53 @@ export function AlertBody({ children }: { children: ReactNode }) {
   return <div className="flex-fill">{children}</div>;
 }
 
+/** A message over whatever screen the admin is on: Tabler's toast, top right,
+ * until dismissed.
+ *
+ * It does **not** time out, and that is the point of using one here: what a
+ * toast carries on these screens is the outcome of something the admin asked
+ * for — a build's diagnostics, a test run's error and what the body printed —
+ * and a message that disappears while it is being read is a message that has to
+ * be produced again. The dismissal is the admin saying they have finished with
+ * it.
+ *
+ * `children` is the body, so a caller may show more than a line of text (a
+ * transcript, a result) while the heading and the colour stay the same
+ * everywhere. */
+export function NoticeToast({
+  ok,
+  title,
+  onClose,
+  children,
+}: {
+  ok: boolean;
+  title: ReactNode;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const { t } = useT();
+  return (
+    <div className="toast-container position-fixed top-0 end-0 p-3">
+      <div
+        className={`toast show app-outcome-toast border-${ok ? "success" : "danger"}`}
+        role={ok ? "status" : "alert"}
+        aria-live={ok ? "polite" : "assertive"}
+      >
+        <div className="toast-header">
+          <strong className={`me-auto text-${ok ? "success" : "danger"}`}>{title}</strong>
+          <button
+            type="button"
+            className="btn-close"
+            aria-label={t("Close")}
+            onClick={onClose}
+          />
+        </div>
+        <div className="toast-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
 /** The signed-out page shape: a narrow, vertically centred column. */
 export function CenteredPage({ children }: { children: ReactNode }) {
   return (

@@ -2635,6 +2635,54 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // Run one trigger as a **test**, from the admin's list. Everything about it
+    // that differs from `runTrigger` is there because a person is watching:
+    //
+    //   - a failing action is a **200 carrying the failure**, not an error
+    //     status. A test run that failed did its job; the message is the
+    //     answer, and it arrives beside everything else the run produced
+    //     rather than in place of it.
+    //   - what the body **printed** comes back with it. An admin debugging a
+    //     `run_js_code` adds a `console.log` and expects to see it — in v1 they
+    //     read it off the server's terminal, which a hosted deployment does not
+    //     have.
+    //   - a trigger on `insert`/`update`/`delete` is run against a **row picked
+    //     at random** from its table, because a table trigger has no occurrence
+    //     of its own when a person presses a button, and a body that reads
+    //     `row.title` against nothing fails for a reason about the test rather
+    //     than about the trigger. Which row it was comes back, so a surprising
+    //     result is traceable to the row that produced it.
+    set.register(
+        Endpoint::new(
+            "testRunTrigger",
+            Method::Post,
+            api()
+                .lit("triggers")
+                .param("id", ValueType::Uuid)
+                .lit("test-run"),
+        )
+        .input(TypeSchema::json())
+        .output(TypeSchema::struct_of([
+            StructField::new("ok", TypeSchema::bool()),
+            StructField::new("result", TypeSchema::json()),
+            // The failure, when there was one: the action's own message, which
+            // is the whole point of a test run.
+            StructField::new("error", TypeSchema::optional(TypeSchema::text())),
+            StructField::new(
+                "console",
+                TypeSchema::array(TypeSchema::struct_of([
+                    StructField::new("level", TypeSchema::text()),
+                    StructField::new("text", TypeSchema::text()),
+                ])),
+            ),
+            // The row this was run against, for a table event, and `null` for
+            // every other kind — including a table trigger whose table is empty,
+            // which the screen says rather than pretending a row was chosen.
+            StructField::new("row", TypeSchema::optional(TypeSchema::json())),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- actions ------------------------------------------------------------
     // The registered actions with the settings each declares, so the trigger
     // form renders a configuration form for an action it knows nothing about

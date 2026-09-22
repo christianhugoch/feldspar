@@ -706,6 +706,57 @@ impl SchemaSnapshot {
     }
 }
 
+/// One line a code body wrote to the console: the method it called and what it
+/// printed.
+///
+/// Kept as two fields rather than one formatted string because the two readers
+/// want different things of it: the admin's **Test run** toast colours a
+/// `console.error` differently from a `console.log`, and the server's log wants
+/// the level to decide whether the line is worth keeping. Formatting the
+/// arguments is the *guest's* job — it is the only side that can tell an object
+/// from a string — so `text` arrives ready to show.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConsoleLine {
+    /// The console method: `log`, `info`, `warn`, `error`, `debug` or `trace`.
+    pub level: String,
+    /// The arguments, already formatted and joined with spaces.
+    pub text: String,
+}
+
+/// Where a run's console output is collected, when somebody is collecting it.
+///
+/// Shared rather than returned with the result, and for one reason: a run that
+/// **failed** is exactly the run whose `console.log`s matter, and an error is not
+/// a place to carry a second value. The sink is filled as the lines happen, so a
+/// body that threw on its last line, or one the watchdog stopped halfway, still
+/// leaves everything it printed behind it.
+pub type ConsoleSink = Arc<std::sync::Mutex<Vec<ConsoleLine>>>;
+
+/// A fresh, empty [`ConsoleSink`].
+pub fn console_sink() -> ConsoleSink {
+    Arc::new(std::sync::Mutex::new(Vec::new()))
+}
+
+/// Take what a sink collected, leaving it empty. A poisoned lock answers nothing
+/// rather than panicking: console output is never worth failing a run over.
+pub fn take_console(sink: &ConsoleSink) -> Vec<ConsoleLine> {
+    match sink.lock() {
+        Ok(mut lines) => std::mem::take(&mut *lines),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The most lines one run's sink keeps, and the longest any one of them is.
+///
+/// A bound rather than none: a body that logs inside a loop over ten thousand
+/// rows would otherwise hold ten thousand strings for a toast nobody can read.
+/// What is dropped is the *excess*, at the end, and the sink says so with one
+/// final line — a truncated transcript that admits it is truncated is the only
+/// honest kind.
+pub const MAX_CONSOLE_LINES: usize = 200;
+/// The longest one console line is kept as, in characters.
+pub const MAX_CONSOLE_LINE_CHARS: usize = 2000;
+
 /// One run of a JavaScript **code body**: the source, the values in scope, and
 /// what it is allowed to reach and for how long.
 ///
@@ -771,6 +822,15 @@ pub struct CodeCall<'a> {
     /// schema. What crosses to the isolate is the generation — and the JSON
     /// only when that isolate has not got it yet.
     pub schema: Option<&'a SchemaSnapshot>,
+    /// Where this run's `console.log` lines go, when somebody is collecting
+    /// them — the admin's **Test run**, which shows them beside the result.
+    ///
+    /// `None` is the ordinary firing, where `console` is still in scope and
+    /// still works: the lines go to the server's log instead of into a sink
+    /// nobody would read. What is never an option is `console` not existing,
+    /// because a `ReferenceError` on the line an admin added to find out what
+    /// their body was doing is the worst answer of the three.
+    pub console: Option<ConsoleSink>,
     /// The wall clock allowed for this run, clamped to [`MAX_CODE_TIMEOUT`];
     /// `None` is [`DEFAULT_CODE_TIMEOUT`].
     pub timeout: Option<Duration>,
@@ -800,6 +860,7 @@ impl Default for CodeCall<'_> {
             triggers: None,
             module_fns: None,
             schema: None,
+            console: None,
             timeout: None,
             max_calls: DEFAULT_MAX_HOST_CALLS,
             max_fetches: DEFAULT_MAX_FETCHES,
@@ -948,6 +1009,24 @@ pub(crate) const V1_TABLE: &str = "Table";
 /// terms. It travels with `Table` because v1's own `require` pair does.
 #[cfg(feature = "eval")]
 pub(crate) const V1_FIELD: &str = "Field";
+
+/// The name the console binds under. Bound for **every** body, with or without
+/// a host, because `console.log` is what an author reaches for first and the
+/// sandbox has no ambient one of its own.
+///
+/// Not reserved the way [`DB`] is: a caller that binds a `console` of its own
+/// keeps it, exactly as one that binds `process` does, and the parameter is
+/// simply not added. Refusing the binding would be refusing a body the right to
+/// its own variable in order to give it ours.
+#[cfg(feature = "eval")]
+pub(crate) const CONSOLE: &str = "console";
+
+/// The console methods a body may call. Everything else on `console` — `table`,
+/// `time`, `group` — is deliberately absent: a method that silently did nothing
+/// would be worse than one that is not there, and what a code body's console is
+/// for is a line of text.
+#[cfg(feature = "eval")]
+pub(crate) const CONSOLE_METHODS: [&str; 6] = ["log", "info", "warn", "error", "debug", "trace"];
 
 /// The Node globals a code body sees as `undefined`, shadowed as parameters of
 /// the wrapper it is compiled into (TODO "Modules in-process", §1a).
@@ -2486,6 +2565,7 @@ const SETUP: &str = r#"
   const disk = Deno.core.ops.op_sc_files;
   const runs = Deno.core.ops.op_sc_trigger;
   const mods = Deno.core.ops.op_sc_modfn;
+  const logline = Deno.core.ops.op_sc_log;
   const done = Deno.core.ops.op_sc_done;
   const fail = Deno.core.ops.op_sc_fail;
   const mark = Deno.core.ops.op_sc_mark;
@@ -2665,15 +2745,44 @@ const SETUP: &str = r#"
     if (e instanceof Error) return e.stack ? e.stack : String(e);
     try { return String(e); } catch (_) { return "the code threw a value it cannot describe"; }
   };
+  // `console`, for this run. One argument is formatted the way a developer tool
+  // shows it — a string as itself, an Error with its stack, anything else as
+  // JSON — because the transcript is read by a person and `[object Object]` is
+  // never what they wanted to know.
+  //
+  // Per run, over this run's token, for the reason `db` is: many bodies are
+  // resident on one isolate and a shared console would file one body's lines
+  // under another's test run.
+  const show = (v) => {
+    if (typeof v === "string") return v;
+    if (v instanceof Error) return v.stack ? v.stack : String(v);
+    if (v === undefined) return "undefined";
+    try {
+      const text = JSON.stringify(v);
+      return text === undefined ? String(v) : text;
+    } catch (_) {
+      try { return String(v); } catch (__) { return "[unprintable]"; }
+    }
+  };
+  fixed("__scMakeConsole", (token, methods) => {
+    const console = {};
+    for (const level of methods) {
+      console[level] = (...args) => {
+        logline(token, level, args.map(show).join(" "));
+      };
+    }
+    return Object.freeze(console);
+  });
   // The compiled bodies of this isolate, by content key. A trigger that fires a
   // thousand times is one compile: the Rust side knows what it has defined here,
   // so a run's script carries the source only the first time and is
   // `__scInvoke(token, key, bindings)` every time after.
   const bodies = new Map();
-  fixed("__scDefine", (key, wantsDb, wantsFetch, wantsFs, wantsTrigger, wantsModFn, wantsV1, body) => {
+  fixed("__scDefine", (key, wantsDb, wantsFetch, wantsFs, wantsTrigger, wantsModFn, wantsV1, wantsConsole, body) => {
     bodies.set(key, {
       body: body, wantsDb: wantsDb, wantsFetch: wantsFetch, wantsFs: wantsFs,
       wantsTrigger: wantsTrigger, wantsModFn: wantsModFn, wantsV1: wantsV1,
+      wantsConsole: wantsConsole,
     });
   });
   // The schema snapshot this isolate holds, keyed by the catalog generation it
@@ -2741,7 +2850,7 @@ const SETUP: &str = r#"
   // this run's alone. A body with no host is defined to take one argument, so
   // there is no `db` in its scope to name — a ReferenceError, as it has always
   // been, rather than a handle that fails on use.
-  fixed("__scInvoke", (token, key, bindings, stores, triggers, functions, schemaGeneration) => {
+  fixed("__scInvoke", (token, key, bindings, stores, triggers, functions, schemaGeneration, consoleMethods) => {
     const entry = bodies.get(key);
     if (entry === undefined) {
       // Unreachable while the Rust side and this map agree, which they do
@@ -2801,6 +2910,9 @@ const SETUP: &str = r#"
         );
         handles.push(v1.Table, v1.Field);
       }
+      // Last in the list, because it is the one handle every body may have:
+      // appending it keeps every other parameter where it was.
+      if (entry.wantsConsole) handles.push(__scMakeConsole(token, consoleMethods));
       running = entry.body(...handles);
     } catch (e) {
       fail(token, describe(e));
@@ -2847,6 +2959,11 @@ struct RunState {
     /// The file stores, when this run has them — a third capability, held apart
     /// from the other two for the same reason they are held apart.
     files: Option<Arc<dyn FileHost>>,
+    /// Where this run's console lines go, when anyone asked for them. The run
+    /// holds it so that `op_sc_log` can find it by token, and the caller holds
+    /// the other end — so what a failed body printed is already there when the
+    /// failure comes back.
+    console: Option<ConsoleSink>,
     /// Wall clock: when this run may make no further host calls.
     deadline: Instant,
     /// What the deadline was, for the message.
@@ -3461,6 +3578,60 @@ fn op_sc_mark(state: &mut OpState, #[string] token: &str) {
     }
 }
 
+/// One `console.*` line from a body.
+///
+/// Synchronous and cheap on purpose: a body that logs in a loop must not be
+/// awaiting the host to do it, and a line is never worth failing a run over —
+/// a token that names nothing (a run already reaped) is dropped in silence.
+///
+/// Where the line goes depends on who is listening. A run with a sink is one
+/// somebody is watching — the admin's **Test run** — and the line is kept for
+/// them, bounded by [`MAX_CONSOLE_LINES`]. A run without one is an ordinary
+/// firing, and its line goes to the server's own log, which is where a
+/// `console.log` in a module already goes.
+#[cfg(feature = "eval")]
+#[deno_core::op2(fast)]
+fn op_sc_log(
+    state: &mut OpState,
+    #[string] token: &str,
+    #[string] level: &str,
+    #[string] text: &str,
+) {
+    let Some(table) = state.try_borrow_mut::<RunTable>() else {
+        return;
+    };
+    let Some(run) = table.runs.get(token) else {
+        return;
+    };
+    let Some(sink) = run.console.as_ref() else {
+        eprintln!("feldspar: code body console.{level}: {text}");
+        return;
+    };
+    let Ok(mut lines) = sink.lock() else {
+        return;
+    };
+    match lines.len() {
+        n if n < MAX_CONSOLE_LINES => {
+            let text = match text.char_indices().nth(MAX_CONSOLE_LINE_CHARS) {
+                Some((cut, _)) => format!("{}…", &text[..cut]),
+                None => text.to_owned(),
+            };
+            lines.push(ConsoleLine {
+                level: level.to_owned(),
+                text,
+            });
+        }
+        // Exactly once, as the line that replaces the first one dropped: a
+        // transcript that stops without saying it stopped would have the admin
+        // believe their loop ran two hundred times.
+        n if n == MAX_CONSOLE_LINES => lines.push(ConsoleLine {
+            level: "warn".to_owned(),
+            text: format!("… further console output dropped after {MAX_CONSOLE_LINES} lines"),
+        }),
+        _ => {}
+    }
+}
+
 /// A run answered. The JSON text is what `JSON.stringify` made of the body's
 /// result, parsed back here so the caller gets a `Json` and not a string.
 #[cfg(feature = "eval")]
@@ -3509,7 +3680,8 @@ deno_core::extension!(
         op_sc_modfn,
         op_sc_done,
         op_sc_fail,
-        op_sc_mark
+        op_sc_mark,
+        op_sc_log
     ]
 );
 
@@ -3695,6 +3867,9 @@ struct CodeRun {
     /// of the schema. `None` for a run nobody gave one to, whose guest then has
     /// no `Table` to name.
     schema: Option<SchemaSnapshot>,
+    /// Where this run's console lines are collected, when anyone is collecting
+    /// them ([`CodeCall::console`]).
+    console: Option<ConsoleSink>,
     /// Already defaulted and clamped, so the worker has no policy left to apply.
     timeout: Duration,
     max_calls: u32,
@@ -4095,6 +4270,7 @@ impl CodeRuntime {
                     module_fns: mods,
                     module_functions,
                     schema: call.schema.cloned(),
+                    console: call.console.clone(),
                     timeout,
                     max_calls: call.max_calls,
                     max_fetches: call.max_fetches,
@@ -4809,6 +4985,7 @@ fn start_run(
                 host: run.host.clone(),
                 fetch: run.fetch.clone(),
                 files: run.files.clone(),
+                console: run.console.clone(),
                 deadline: started + run.timeout,
                 timeout: run.timeout,
                 calls_left: run.max_calls,
@@ -4941,6 +5118,10 @@ struct RunScripts {
     /// list and the isolate's definition record cannot drift apart if it ever
     /// stops being.
     wants_v1: bool,
+    /// Whether it takes `console`. True for every body that has not bound a
+    /// `console` of its own — the console is not a capability, it is the way a
+    /// body says what it is doing.
+    wants_console: bool,
 }
 
 /// Build one code body's definition and one run's arguments: the bindings as
@@ -5022,6 +5203,10 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
     // ReferenceError it already gets for `db`, rather than a class that fails on
     // use.
     let wants_v1 = call.host.is_some();
+    // Every body, whatever it can reach — unless the caller bound the name
+    // itself, in which case the binding is already a `const` of this scope and a
+    // parameter beside it would be a redeclaration.
+    let wants_console = !call.bindings.contains_key(CONSOLE);
     // [`REQUIRE`]: bound as a `const` of the wrapper rather than a parameter,
     // because unlike the handles it is the same function on every run and
     // carries no authority — there is nothing per-run in a refusal. A caller
@@ -5059,6 +5244,11 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
         names.push(V1_TABLE);
         names.push(V1_FIELD);
     }
+    // Last, so that adding it moved nothing: the guest pushes its handle last
+    // too, and the two lists are the same list.
+    if wants_console {
+        names.push(CONSOLE);
+    }
     // §1a: the node globals, shadowed as parameters nobody passes. A binding of
     // the same name wins — it is already a `const` in this function's body, and
     // a parameter beside it would be a redeclaration and so a body that will not
@@ -5085,6 +5275,7 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
         wants_triggers,
         wants_module_fns,
         wants_v1,
+        wants_console,
     })
 }
 
@@ -5261,6 +5452,7 @@ fn build_script(
         wants_triggers,
         wants_module_fns,
         wants_v1,
+        wants_console,
     } = scripts;
     let mut script = String::new();
     // Before the definition, because a body's very first run is also the run
@@ -5281,7 +5473,8 @@ fn build_script(
     if !held {
         script.push_str(&format!(
             "__scDefine(\"{key:016x}\", {wants_db}, {wants_fetch}, {wants_files}, \
-             {wants_triggers}, {wants_module_fns}, {wants_v1}, {definition});\n"
+             {wants_triggers}, {wants_module_fns}, {wants_v1}, {wants_console}, \
+             {definition});\n"
         ));
     }
     // The token is 32 hex characters this crate minted and the key is 16 this
@@ -5290,9 +5483,13 @@ fn build_script(
         Some(generation) => generation.to_string(),
         None => "null".to_owned(),
     };
+    // The method names the guest builds its `console` from: this crate's list,
+    // crossing as data rather than being written twice.
+    let console_methods =
+        serde_json::to_string(&CONSOLE_METHODS).unwrap_or_else(|_| "[]".to_owned());
     script.push_str(&format!(
         "__scInvoke(\"{token}\", \"{key:016x}\", {args}, {stores}, {triggers}, {functions}, \
-         {generation});"
+         {generation}, {console_methods});"
     ));
     script
 }
@@ -5440,6 +5637,76 @@ mod tests {
         // author's own and the parameter is only a default of `undefined`.
         let mut c = call("return module.answer;");
         c.bindings.insert("module".into(), json!({ "answer": 42 }));
+        assert_eq!(rt.run(c).await.unwrap(), json!(42));
+    }
+
+    /// `console.log` is in scope for every body, and what it prints is kept for
+    /// whoever asked for it — the admin's Test run.
+    #[tokio::test]
+    async fn the_console_is_bound_and_what_it_prints_is_collected() {
+        let rt = CodeRuntime::new();
+        let sink = console_sink();
+        let mut c = call(
+            "console.log('hello', 42, { a: [1, 2] });\n\
+             console.error(new Error('bad'));\n\
+             console.warn('and', undefined);\n\
+             return 'done';",
+        );
+        c.console = Some(Arc::clone(&sink));
+        assert_eq!(rt.run(c).await.unwrap(), json!("done"));
+        let lines = take_console(&sink);
+        let said: Vec<(&str, &str)> = lines
+            .iter()
+            .map(|l| (l.level.as_str(), l.text.as_str()))
+            .collect();
+        assert_eq!(said[0], ("log", "hello 42 {\"a\":[1,2]}"));
+        assert_eq!(said[1].0, "error");
+        assert!(said[1].1.contains("Error: bad"), "{:?}", said[1]);
+        assert_eq!(said[2], ("warn", "and undefined"));
+        // Taking the lines empties the sink: a second test run starts blank.
+        assert!(take_console(&sink).is_empty());
+    }
+
+    /// The lines a **failing** body printed are the ones worth having, so they
+    /// are in the sink whether it answered or threw — and the excess is dropped
+    /// with a line that says so.
+    #[tokio::test]
+    async fn a_failed_body_leaves_its_console_behind_and_the_transcript_is_bounded() {
+        let rt = CodeRuntime::new();
+        let sink = console_sink();
+        let mut c = call("console.log('before'); throw new Error('boom');");
+        c.console = Some(Arc::clone(&sink));
+        let err = rt.run(c).await.unwrap_err().to_string();
+        assert!(err.contains("boom"), "{err}");
+        let lines = take_console(&sink);
+        assert_eq!(lines[0].text, "before");
+
+        let mut c = call("for (let i = 0; i < 500; i++) console.log(i); return null;");
+        c.console = Some(Arc::clone(&sink));
+        rt.run(c).await.unwrap();
+        let lines = take_console(&sink);
+        assert_eq!(lines.len(), MAX_CONSOLE_LINES + 1);
+        assert!(
+            lines[MAX_CONSOLE_LINES].text.contains("dropped"),
+            "{lines:?}"
+        );
+    }
+
+    /// No sink is not no console: an ordinary firing still runs, and a body that
+    /// binds its own `console` keeps it.
+    #[tokio::test]
+    async fn a_body_with_no_sink_still_has_a_console_and_a_binding_still_wins() {
+        let rt = CodeRuntime::new();
+        assert_eq!(
+            rt.run(call(
+                "console.log('to the log'); return typeof console.info;"
+            ))
+            .await
+            .unwrap(),
+            json!("function")
+        );
+        let mut c = call("return console.answer;");
+        c.bindings.insert("console".into(), json!({ "answer": 42 }));
         assert_eq!(rt.run(c).await.unwrap(), json!(42));
     }
 
@@ -6856,6 +7123,7 @@ mod tests {
             max_trigger_runs: 10,
             max_module_calls: 10,
             schema: None,
+            console: None,
             started: None,
         };
         for (name, value) in bindings {
@@ -6950,19 +7218,24 @@ mod tests {
         );
         assert!(miss.contains("__scDefineSchema(5, \""), "{miss}");
         assert!(miss.contains("books"), "{miss}");
-        assert!(miss.contains(", 5);"), "the generation travels too: {miss}");
+        // The generation, then the console's method names, which are the last
+        // argument every invocation carries.
+        assert!(
+            miss.contains(", 5, [\"log\""),
+            "the generation travels too: {miss}"
+        );
 
         // A hit carries one integer and no JSON at all — the whole reason a
         // generation exists rather than a hash of the schema.
         let hit = build_script(&scripts, "bb", key, true, "[]", "[]", "[]", None, Some(5));
         assert!(!hit.contains("__scDefineSchema"), "{hit}");
         assert!(!hit.contains("books"), "the schema travelled: {hit}");
-        assert!(hit.contains(", 5);"), "{hit}");
+        assert!(hit.contains(", 5, [\"log\""), "{hit}");
 
         // And a run with no snapshot at all names none, so the guest resolves
         // nothing rather than the last schema some other run left behind.
         let none = build_script(&scripts, "cc", key, true, "[]", "[]", "[]", None, None);
-        assert!(none.contains(", null);"), "{none}");
+        assert!(none.contains(", null, [\"log\""), "{none}");
     }
 
     #[test]

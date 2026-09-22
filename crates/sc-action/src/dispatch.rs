@@ -57,7 +57,10 @@ use sc_catalog::{
 };
 use sc_email::Mailer;
 use sc_error::{Error, Result};
-use sc_expr::{Ambient, CodeAdapter, Formula, JsEvaluator, Operation, value_from_json};
+use sc_expr::{
+    Ambient, CodeAdapter, ConsoleLine, ConsoleSink, Formula, JsEvaluator, Operation,
+    value_from_json,
+};
 use sc_query::Value;
 use serde_json::Value as Json;
 
@@ -477,6 +480,96 @@ impl TriggerDispatcher {
         let result = fire_trigger_in(self, catalog, trigger, &event, tx).await?;
         Ok(result.unwrap_or(Json::Null))
     }
+
+    /// Run one trigger **as a test**: the admin pressed Test run, and what comes
+    /// back is everything they need to read — the result or the failure, and
+    /// what the body printed on its way to either.
+    ///
+    /// Three things make it a different call from
+    /// [`run_trigger`](TriggerDispatcher::run_trigger) rather than an argument
+    /// to it:
+    ///
+    /// - the **failure is a value**, not an `Err`. A test run that failed is a
+    ///   test run that succeeded at its job, and the console lines that explain
+    ///   the failure have to come back with it;
+    /// - the **console is collected**, into a sink this call owns and empties;
+    /// - a **row may be supplied**. An `insert`/`update`/`delete` trigger has no
+    ///   occurrence of its own here, and a body that reads `row.title` against
+    ///   nothing would fail for a reason that is about the test and not about
+    ///   the trigger. The caller picks the row — a row is read through the row
+    ///   layer, which is above this crate — and an `update` sees it as both
+    ///   `row` and `old`, which is the shape of an update that changed nothing.
+    ///
+    /// The console reaches this trigger's own body and no further: a trigger
+    /// this one runs logs where every other firing does.
+    pub async fn test_run_trigger(
+        &self,
+        catalog: &Catalog,
+        name: &str,
+        payload: Json,
+        row: Option<Json>,
+        caller: Option<&CallerContext>,
+    ) -> TestRun {
+        let console = sc_expr::console_sink();
+        let result = self
+            .test_run_inner(catalog, name, payload, row, caller, &console)
+            .await;
+        TestRun {
+            result,
+            console: sc_expr::take_console(&console),
+        }
+    }
+
+    /// [`test_run_trigger`](TriggerDispatcher::test_run_trigger)'s fallible half,
+    /// so the sink is read on both paths from one place.
+    async fn test_run_inner(
+        &self,
+        catalog: &Catalog,
+        name: &str,
+        payload: Json,
+        row: Option<Json>,
+        caller: Option<&CallerContext>,
+        console: &ConsoleSink,
+    ) -> Result<Json> {
+        let triggers = self.triggers()?;
+        let trigger = triggers.require(name)?;
+        if !trigger.is_enabled() {
+            return Err(Error::invalid(format!("trigger `{name}` is disabled")));
+        }
+        let mut event = Event::new(trigger.when).payload(payload);
+        if let Some(channel) = &trigger.channel {
+            event = event.on(channel.clone());
+        }
+        if let Some(row) = row.filter(|_| trigger.when.is_table_event()) {
+            // `old` as well on an update, because a body that names it must not
+            // find `undefined` where a real firing would have had a row.
+            if trigger.when == EventKind::Update {
+                event = event.old_row(row.clone());
+            }
+            event = event.row(row);
+        }
+        if let Some(caller) = caller {
+            event = event
+                .caller(caller.role, caller.user.clone())
+                .chained(caller.chain.clone());
+        }
+        let result = fire_trigger_with(self, catalog, trigger, &event, None, Some(console)).await?;
+        Ok(result.unwrap_or(Json::Null))
+    }
+}
+
+/// What a [`test_run_trigger`](TriggerDispatcher::test_run_trigger) came back
+/// with: the outcome, and the transcript either way.
+///
+/// One value rather than a `Result` with the lines hidden in the error, because
+/// the caller renders both halves the same way whichever half it got — and the
+/// lines a *failing* body printed are the ones an admin is looking for.
+pub struct TestRun {
+    /// What the action returned, or why it did not run or did not finish.
+    pub result: Result<Json>,
+    /// What the body printed, in order, bounded by
+    /// [`sc_expr::MAX_CONSOLE_LINES`].
+    pub console: Vec<ConsoleLine>,
 }
 
 tokio::task_local! {
@@ -586,6 +679,23 @@ pub async fn fire_trigger_in(
     event: &Event,
     tx: Option<&SharedTx>,
 ) -> Result<Option<Json>> {
+    fire_trigger_with(dispatcher, catalog, trigger, event, tx, None).await
+}
+
+/// [`fire_trigger_in`] **collecting what the action's code body prints**, for
+/// the admin's Test run ([`TriggerDispatcher::test_run_trigger`]).
+///
+/// The one place the three arguments meet, so that a firing with a transcript
+/// and one without are the same firing: everything below here — the depth
+/// check, the `only_if`, the workflow branch — is written once.
+pub async fn fire_trigger_with(
+    dispatcher: &TriggerDispatcher,
+    catalog: &Catalog,
+    trigger: &Trigger,
+    event: &Event,
+    tx: Option<&SharedTx>,
+    console: Option<&ConsoleSink>,
+) -> Result<Option<Json>> {
     let services = &dispatcher.services;
     // The cascade bound, checked before anything else runs: past it, the trigger
     // does not fire and the error names the whole chain (§10.2).
@@ -628,6 +738,9 @@ pub async fn fire_trigger_in(
         ctx = ctx.with_mailer(mailer);
     }
     ctx = ctx.with_adapters(&services.adapters);
+    if let Some(console) = console {
+        ctx = ctx.with_console(Arc::clone(console));
+    }
     action.run(&mut ctx).await.map(Some)
 }
 

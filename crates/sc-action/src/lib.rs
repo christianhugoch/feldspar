@@ -63,7 +63,10 @@ mod triggers;
 mod validate;
 
 pub use action::{Action, ActionContext, ConfigCheck};
-pub use dispatch::{ActionServices, TriggerDispatcher, TriggerRun, fire_trigger, fire_trigger_in};
+pub use dispatch::{
+    ActionServices, TestRun, TriggerDispatcher, TriggerRun, fire_trigger, fire_trigger_in,
+    fire_trigger_with,
+};
 pub use engine::{WorkflowEngine, WorkflowStarted};
 pub use event::{EVENT_KINDS, Event, EventKind, MAX_DEPTH, ROLE_PUBLIC};
 pub use observer::TriggerObserver;

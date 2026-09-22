@@ -2,6 +2,47 @@
 
 Changes in reverse chronological order.
 
+## Test run: every trigger runnable from the list, with its console output and a real row
+
+The triggers list had a **Run** button on exactly one kind of trigger — a `none` one — and what it
+showed was the action's return value. Everything an admin actually presses that button to find out
+was missing from it: a trigger on a table could not be run at all without writing a row and
+watching; a failure came back as an HTTP error, so the SPA showed the message in a red banner and
+threw away everything else the run produced; and a `run_js_code` body's `console.log` went nowhere
+a hosted deployment could read.
+
+**Every trigger now has a Test run** (`ui/admin/src/screens/Triggers.tsx`), and what comes back is
+a toast rather than a banner: the result or the failure, the row it was given, and the transcript.
+
+- **A code body has a `console`.** `console.log`, `info`, `warn`, `error`, `debug` and `trace` are
+  bound for every JavaScript body, with or without a `db` — naming one used to be a
+  `ReferenceError`, which is the worst of the three possible answers to "what is this body doing?".
+  Arguments are formatted by the guest (a string as itself, an `Error` with its stack, anything
+  else as JSON), so `[object Object]` is not a thing the transcript can say. A run nobody is
+  watching still has its console: those lines go to the server's log, where a module's already go.
+- **Somebody watching gets the lines** (`sc_expr::ConsoleSink`, `CodeCall::console`,
+  `op_sc_log`). The sink is shared and filled as the lines happen, so a body that threw on its last
+  line — which is exactly the body whose logging matters — leaves everything it printed behind it.
+  Bounded at `MAX_CONSOLE_LINES` (200), with a final line saying the rest was dropped, because a
+  truncated transcript that does not admit it is truncated is a lie about a loop.
+- **`POST /api/triggers/:id/test-run`** (`testRunTrigger`, `TriggerDispatcher::test_run_trigger`)
+  answers **200 either way**: `{ ok, result, error, console, row }`. A failing action is the answer
+  an admin asked for, not an error status that discards half of it. `runTrigger` is unchanged — an
+  API caller and an agent still get a failure as a failure.
+- **A table trigger is run against a real row.** `insert`, `update` and `delete` have no occurrence
+  of their own when a person presses a button, so one is borrowed: a row picked at random from the
+  trigger's table (`random_row` in `crates/sc-server/src/handlers.rs` — a count and an offset
+  through the row layer, so ownership and RLS apply as they do to every other read), bound to `row`
+  and, on an update, to `old` as well. Which row it was comes back with the result, because a
+  result computed from a row nobody can identify is a result nobody can check. An empty table is
+  not an error: the trigger runs with no row and the toast says so.
+
+Tests: the console's binding, formatting, bound and survival of a failure (`sc-expr`, three unit
+tests); the endpoint's two answers, its transcript, a disabled trigger and a missing one, and a
+table trigger drawing more than one distinct row out of three across twelve runs
+(`crates/sc-server/tests/trigger_admin_api.rs`); and the toast's arithmetic
+(`ui/admin/src/triggerTestRun.test.ts`).
+
 ## Creating an application deploys it: its first build, and its certificate name, with no restart
 
 Adding an application and then restarting the server to see it were the same operation in

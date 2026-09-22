@@ -9,9 +9,14 @@
 //     not in the live set and will not fire, but it is still here, with the
 //     reason, and still editable, because editing it is the repair.
 //   - A trigger with **no intrinsic event** (`none`) only ever runs because
-//     something asks it to, so this is where the asking happens: Run posts a
-//     payload and shows the action's result — or its error, which is the point
-//     of testing one.
+//     something asks it to, so this is where the asking happens. But every
+//     trigger can be **test run** from here, not only that one: a trigger on a
+//     table is run against a row picked at random from it, so "does this
+//     actually work?" is a question about any row of them rather than a
+//     question an admin has to answer by writing a row and watching. What comes
+//     back is the result, or the failure, and what a code body **printed** on
+//     its way to either — which is the answer to the next question, and the one
+//     a hosted deployment has no terminal to read off.
 
 import { useEffect, useState } from "react";
 import Alert from "react-bootstrap/Alert";
@@ -22,8 +27,13 @@ import { api, errorMessage } from "../api";
 import type { ListTriggersResponse } from "../client";
 import { navigate } from "../App";
 import { IconPlus } from "../icons";
-import { AlertBody, PageBody, PageHeader, StatusBadge } from "../layout";
+import { NoticeToast, PageBody, PageHeader, StatusBadge } from "../layout";
 import { T, useT } from "../i18n";
+import {
+  testRunFailure,
+  testRunOutcome,
+  type TestRunOutcome,
+} from "../triggerTestRun";
 
 type TriggerItem = ListTriggersResponse[number];
 
@@ -97,8 +107,14 @@ export function Triggers() {
   const { t } = useT();
   const [triggers, setTriggers] = useState<TriggerItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  /** The result of the last Run, or its failure — shown until the next one. */
-  const [ran, setRan] = useState<{ name: string; result: string } | null>(null);
+  /** The last test run, shown in a toast until it is dismissed or another one
+   * replaces it. A toast rather than a banner because it is news about
+   * something that has finished, not a state of this screen — and it does not
+   * time out, because a transcript that vanishes while it is being read has to
+   * be produced again. */
+  const [ran, setRan] = useState<TestRunOutcome | null>(null);
+  /** The trigger a test run is in flight for, so its own button says so. */
+  const [running, setRunning] = useState<string | null>(null);
 
   const load = async () => {
     try {
@@ -132,19 +148,30 @@ export function Triggers() {
     }
   };
 
+  /** Run one trigger now and show what happened.
+   *
+   * The action's own failure is **not** an error of this screen: it comes back
+   * as a 200 saying so, and it goes in the same toast the success goes in,
+   * because it is the answer the admin asked for. Only a request that never
+   * reached the action is caught here — and it is shown the same way, since
+   * from where the admin is sitting the question was the same.
+   *
+   * A workflow body answers a run id and its state (§10.3) rather than a value,
+   * so the toast carries that and the Runs button beside it is where the admin
+   * goes next. It does not navigate: doing so would close the toast over the
+   * news it was showing. */
   const run = async (trigger: TriggerItem) => {
     setError(null);
     setRan(null);
+    setRunning(trigger.id);
     try {
-      const { result } = await api.runTrigger(trigger.id, {});
-      setRan({ name: trigger.name, result: JSON.stringify(result, null, 2) });
-      // A workflow body does not return a value: it answers a run id and its
-      // state (§10.3, phase 3.4), and what an admin wants next is to watch it.
-      if (trigger.body === "workflow") navigate(`/triggers/${encodeURIComponent(trigger.id)}/runs`);
+      setRan(testRunOutcome(trigger, await api.testRunTrigger(trigger.id, {})));
     } catch (err) {
-      // The action's own failure, which is what a test run is for — surfaced as
-      // the error it is, not as a result that happens to be empty.
-      setError(errorMessage(err, `Running "${trigger.name}" failed.`));
+      setRan(
+        testRunFailure(trigger, errorMessage(err, "The trigger could not be run.")),
+      );
+    } finally {
+      setRunning(null);
     }
   };
 
@@ -162,16 +189,7 @@ export function Triggers() {
       />
       <PageBody>
         {error && <Alert variant="danger">{error}</Alert>}
-        {ran && (
-          <Alert variant="success" onClose={() => setRan(null)} dismissible>
-            <AlertBody>
-              <div className="mb-1">
-                <strong>{ran.name}</strong> <T text="ran. Result:" />
-              </div>
-              <pre className="mb-0 small text-break text-pre-wrap">{ran.result}</pre>
-            </AlertBody>
-          </Alert>
-        )}
+        {ran && <TestRunToast outcome={ran} onClose={() => setRan(null)} />}
 
         <div className="card">
           <Table hover responsive className="card-table table-vcenter">
@@ -258,20 +276,28 @@ export function Triggers() {
                           </Button>
                         </>
                       )}
-                      {/* Only a `none` trigger is meaningful to run by hand:
-                          every other kind needs its own occurrence (a row, a
-                          login) to say anything about, and would fail on the
-                          row it does not have. */}
-                      {trigger.when === "none" && (
-                        <Button
-                          size="sm"
-                          variant="outline-primary"
-                          disabled={!!trigger.error || !trigger.enabled}
-                          onClick={() => void run(trigger)}
-                        >
-                          <T text="Run" />
-                        </Button>
-                      )}
+                      {/* Every trigger, not only a `none` one: a table
+                          trigger is run against a row picked at random from its
+                          table, and the rest are run against the event they
+                          would have had minus what only a real occurrence can
+                          supply. A trigger that is broken or switched off is
+                          not run — the switch wins however it is asked, and
+                          testing an unusable trigger would only re-report the
+                          reason already beside it. */}
+                      <Button
+                        size="sm"
+                        variant="outline-primary"
+                        disabled={
+                          !!trigger.error || !trigger.enabled || running !== null
+                        }
+                        onClick={() => void run(trigger)}
+                      >
+                        {running === trigger.id ? (
+                          <T text="Running…" />
+                        ) : (
+                          <T text="Test run" />
+                        )}
+                      </Button>
                       <Button
                         size="sm"
                         variant="outline-danger"
@@ -288,6 +314,54 @@ export function Triggers() {
         </div>
       </PageBody>
     </>
+  );
+}
+
+/** What a test run produced: the result or the failure, the row it was given,
+ * and the transcript.
+ *
+ * The transcript is **below** the result and always present when there is one,
+ * because the two answer different questions — "what did it return?" and "what
+ * did it do?" — and an admin who added a `console.log` is asking the second. A
+ * `console.error` is coloured as one: a body that logged an error and then
+ * returned a value is a body whose result is not the whole story.
+ */
+function TestRunToast({
+  outcome,
+  onClose,
+}: {
+  outcome: TestRunOutcome;
+  onClose: () => void;
+}) {
+  return (
+    <NoticeToast ok={outcome.ok} title={outcome.title} onClose={onClose}>
+      {outcome.row && (
+        <div className="text-muted small mb-1">
+          <T text="ran on" /> {outcome.row}
+        </div>
+      )}
+      <pre className="mb-0 small text-break text-pre-wrap app-outcome-log">
+        {outcome.text}
+      </pre>
+      {outcome.console.length > 0 && (
+        <>
+          <div className="text-muted small mt-2 mb-1">
+            <T text="Console" />
+          </div>
+          <pre className="mb-0 small text-break text-pre-wrap app-outcome-log">
+            {outcome.console.map((line, n) => (
+              <div
+                key={n}
+                className={line.level === "error" ? "text-danger" : undefined}
+              >
+                {line.level === "log" ? "" : `${line.level}: `}
+                {line.text}
+              </div>
+            ))}
+          </pre>
+        </>
+      )}
+    </NoticeToast>
   );
 }
 

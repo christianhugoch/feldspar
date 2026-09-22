@@ -58,12 +58,14 @@ pub use ast::{Ast, BinaryOp, MemberProp, UnaryOp};
 #[cfg(feature = "eval")]
 pub use code::CodeRuntime;
 pub use code::{
-    CodeAdapter, CodeCall, CodeHost, CodeHosts, DEFAULT_CODE_TIMEOUT, DEFAULT_CODE_WORKERS,
-    DEFAULT_FETCH_TIMEOUT, DEFAULT_MAX_FETCHES, DEFAULT_MAX_FILE_OPS, DEFAULT_MAX_HOST_CALLS,
-    DEFAULT_MAX_INFLIGHT, DEFAULT_MAX_MODULE_CALLS, DEFAULT_MAX_TRIGGER_RUNS, FETCH_MARGIN,
-    FetchHost, FileHost, MAX_CODE_TIMEOUT, MIN_FETCH_WINDOW, MIN_MODULE_FN_WINDOW,
-    MIN_TRIGGER_WINDOW, MODULE_FN_MARGIN, ModuleFnArg, ModuleFnHost, ModuleFnHosts, ModuleFunction,
-    PYTHON, SchemaSnapshot, TRIGGER_MARGIN, TriggerHost, V1_API_JS, set_isolate_prime,
+    CodeAdapter, CodeCall, CodeHost, CodeHosts, ConsoleLine, ConsoleSink, DEFAULT_CODE_TIMEOUT,
+    DEFAULT_CODE_WORKERS, DEFAULT_FETCH_TIMEOUT, DEFAULT_MAX_FETCHES, DEFAULT_MAX_FILE_OPS,
+    DEFAULT_MAX_HOST_CALLS, DEFAULT_MAX_INFLIGHT, DEFAULT_MAX_MODULE_CALLS,
+    DEFAULT_MAX_TRIGGER_RUNS, FETCH_MARGIN, FetchHost, FileHost, MAX_CODE_TIMEOUT,
+    MAX_CONSOLE_LINES, MIN_FETCH_WINDOW, MIN_MODULE_FN_WINDOW, MIN_TRIGGER_WINDOW,
+    MODULE_FN_MARGIN, ModuleFnArg, ModuleFnHost, ModuleFnHosts, ModuleFunction, PYTHON,
+    SchemaSnapshot, TRIGGER_MARGIN, TriggerHost, V1_API_JS, console_sink, set_isolate_prime,
+    take_console,
 };
 #[cfg(feature = "eval")]
 pub use eval::DenoEvaluator;

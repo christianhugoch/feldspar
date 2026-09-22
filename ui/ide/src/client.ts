@@ -213,6 +213,8 @@ export type UpdateTriggerResponse = { id: string; name: string; description: str
 export type DeleteTriggerResponse = { deleted: boolean };
 export type RunTriggerRequest = unknown;
 export type RunTriggerResponse = { result: unknown };
+export type TestRunTriggerRequest = unknown;
+export type TestRunTriggerResponse = { ok: boolean; result: unknown; error?: string | null; console: Array<{ level: string; text: string }>; row?: unknown | null };
 export type ListActionsQuery = { table?: string };
 export type ListActionsResponse = Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; workflow_step: boolean }>;
 export type GetWorkflowQuery = { version?: number };
@@ -405,6 +407,7 @@ export interface ApiClient {
   updateTrigger(id: string, body: UpdateTriggerRequest): Promise<UpdateTriggerResponse>;
   deleteTrigger(id: string): Promise<DeleteTriggerResponse>;
   runTrigger(id: string, body: RunTriggerRequest): Promise<RunTriggerResponse>;
+  testRunTrigger(id: string, body: TestRunTriggerRequest): Promise<TestRunTriggerResponse>;
   listActions(query?: ListActionsQuery): Promise<ListActionsResponse>;
   getWorkflow(id: string, query?: GetWorkflowQuery): Promise<GetWorkflowResponse>;
   saveWorkflow(id: string, body: SaveWorkflowRequest): Promise<SaveWorkflowResponse>;
@@ -1641,6 +1644,15 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("runTrigger", res);
       return (await res.json()) as RunTriggerResponse;
+    },
+    async testRunTrigger(id, body) {
+      const res = await doFetch(`${baseUrl}/api/triggers/${id}/test-run`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("testRunTrigger", res);
+      return (await res.json()) as TestRunTriggerResponse;
     },
     async listActions(query) {
       const search = new URLSearchParams();

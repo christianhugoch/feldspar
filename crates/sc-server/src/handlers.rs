@@ -2667,6 +2667,61 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    reg.register("testRunTrigger", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let dispatcher = triggers_of(&apps)?;
+                let id = parse_trigger_id(ctx.path_param("id")?)?;
+                let trigger = load_trigger(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no trigger with id {id}")))?;
+                let caller = admin_caller(ctx.user.as_ref());
+                // A table trigger has no occurrence of its own when a person
+                // presses a button, so one is borrowed: a row picked at random
+                // from the table it fires on. Read *before* the run and sent
+                // back with the result, because "which row was that?" is the
+                // first question a surprising answer raises.
+                let row = match trigger.when.is_table_event() {
+                    true => random_row(&catalog, trigger.channel.as_deref(), &caller).await?,
+                    false => None,
+                };
+                let run = dispatcher
+                    .test_run_trigger(
+                        &catalog,
+                        &trigger.name,
+                        ctx.body.clone(),
+                        row.clone(),
+                        Some(&caller),
+                    )
+                    .await;
+                // The failure is the answer here, not an error status: an admin
+                // testing a trigger is asking what happens, and "it failed, with
+                // this message, having printed this" is a complete answer that a
+                // 400 would have thrown half of away.
+                let console: Vec<Json> = run
+                    .console
+                    .iter()
+                    .map(|line| json!({ "level": line.level, "text": line.text }))
+                    .collect();
+                let (ok, result, error) = match run.result {
+                    Ok(result) => (true, result, Json::Null),
+                    Err(e) => (false, Json::Null, Json::String(sc_error::format_chain(&e))),
+                };
+                Ok(HandlerResponse::ok(json!({
+                    "ok": ok,
+                    "result": result,
+                    "error": error,
+                    "console": console,
+                    "row": row.unwrap_or(Json::Null),
+                })))
+            }
+        }
+    });
+
     reg.register("listActions", {
         let apps = apps.clone();
         let catalog = catalog.clone();
@@ -9055,6 +9110,43 @@ fn provided_json(catalog: &Catalog, table: &Table, locale: &Locale) -> Json {
         )),
         "config_spec": spec_json(&config_spec, locale),
         "issues": issues,
+    })
+}
+
+/// One row of `table`, chosen at random — what a **test run** of an
+/// `insert`/`update`/`delete` trigger is given to work on.
+///
+/// `None` rather than an error when there is nothing to choose from: a trigger
+/// on an empty table is a trigger an admin can still test (its body may never
+/// touch `row`), and "this table has no rows" is something the screen says
+/// beside the result rather than something that stops the run.
+///
+/// Random by **offset**, not by a `random()` in the statement: the ordering
+/// functions differ between the backends this server speaks to, and a count plus
+/// an offset is one shape that works on all of them and goes through the same
+/// row layer — ownership, RLS and provided tables included — as every other read.
+/// The entropy is a v4 UUID's, which is the operating system's, because this
+/// crate already mints those and a test row worth trusting is one nobody can
+/// predict from the clock.
+async fn random_row(
+    catalog: &Catalog,
+    table: Option<&str>,
+    caller: &sc_catalog::CallerContext,
+) -> Result<Option<Json>> {
+    let Some(name) = table else {
+        return Ok(None);
+    };
+    let table = catalog.require(name)?;
+    let count = rows::count_rows_where(catalog, &table, None, Some(caller)).await?;
+    if count <= 0 {
+        return Ok(None);
+    }
+    let offset = (uuid::Uuid::new_v4().as_u128() % count as u128) as u64;
+    let query = rows::RowQuery::new().limit(1).offset(offset);
+    let read = rows::list_rows_query(catalog, &table, &query, Some(caller)).await?;
+    Ok(match read {
+        Json::Array(rows) => rows.into_iter().next(),
+        _ => None,
     })
 }
 
