@@ -54,8 +54,11 @@ use sc_catalog::{
     load_file_store, load_file_store_by_name, orphan_table_meta, resolve_options,
     save_db_connection, save_file_store,
 };
+use sc_catalog::{
+    NEW_LOCAL_FILE_STORE, choosable_file_stores, file_store_settings, unique_file_store_name,
+};
 use sc_email::Mailer;
-use sc_error::{Error, Result};
+use sc_error::{Context as _, Error, Result};
 use sc_files::{
     Entry, FileMeta, FileStore, FileStoreDef, FileStoreDefId, VisibleEntry, backend_config_spec,
     backend_operations, check_access, display_config, effective_min_role, registered_backends,
@@ -4158,7 +4161,20 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // list the caller sent.
                 let mut created = application_from_body(AppId::new(), &ctx.body)?;
                 framable_by_the_admin(&mut created, &ctx.body, &apps);
-                let app = save_application(&catalog, &created).await?;
+                // A store setting that asked for a new local store gets one
+                // before the application is validated, since validation checks
+                // the store exists. If the application is then refused, the
+                // stores made for it go too: the admin corrects the form and
+                // presses Create again, and a leftover store would make that
+                // second attempt create `todo1` beside an orphaned `todo`.
+                let new_stores = create_requested_file_stores(&catalog, &mut created).await?;
+                let app = match save_application(&catalog, &created).await {
+                    Ok(app) => app,
+                    Err(e) => {
+                        discard_file_stores(&catalog, &new_stores).await;
+                        return Err(e);
+                    }
+                };
                 // A `react` app's project is the server's to create (§2.3): this
                 // is the step that removes the SSH requirement, so it happens on
                 // the first save rather than waiting for an admin to ask. It is
@@ -4167,6 +4183,12 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // directory is a thing the admin fixes and re-tries, not a reason
                 // to lose the application they just configured.
                 let mut body = application_json(&app);
+                if !new_stores.is_empty()
+                    && let Some(obj) = body.as_object_mut()
+                {
+                    let names: Vec<&str> = new_stores.iter().map(|d| d.name.as_str()).collect();
+                    obj.insert("created_file_stores".to_owned(), json!(names));
+                }
                 // The scaffolded project's generated client is typed against the
                 // app's endpoints, exposed triggers included, so the scaffold
                 // resolves them against the same live set a mount would.
@@ -5205,14 +5227,18 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // label and sentence the picker shows — so the screen presents
                 // two very different propositions while knowing neither (§2.4).
                 for info in registered_framework_info() {
-                    let spec =
-                        resolve_options(&catalog, framework_config_spec(&info.name)?).await?;
+                    let declared = framework_config_spec(&info.name)?;
+                    // Read before resolving: afterwards a store picker is just a
+                    // list of names, and the form can no longer tell it is one.
+                    let store_settings = file_store_settings(&declared);
+                    let spec = resolve_options(&catalog, declared).await?;
                     out.push(json!({
                         "name": info.name,
                         "label": say(&info.label, &ctx.locale),
                         "description": say(&info.description, &ctx.locale),
                         "config_spec": spec_json(&spec, &ctx.locale),
                         "has_views": info.name == sc_viewpattern::SALTCORN_UI_FRAMEWORK,
+                        "file_store_settings": store_settings,
                     }));
                 }
                 Ok(HandlerResponse::ok(Json::Array(out)))
@@ -6506,6 +6532,104 @@ fn unredacted_config(
             &sc_types::merge_secrets(&spec, stored, submitted),
         ),
         Err(_) => submitted.clone(),
+    }
+}
+
+/// Create a local file store for every framework setting of `app` that names a
+/// file store and holds [`NEW_LOCAL_FILE_STORE`], and put the new store's name in
+/// its place.
+///
+/// This is the admin UI's "Create a new local file store" choice on a new
+/// application's store picker: an admin creating their first application should
+/// not have to leave the form to define a store it will be the only user of. The
+/// store is named after the application's subdomain — with 1, 2, … appended when
+/// that name is taken — and put where the local backend's "Suggest a directory"
+/// operation would put it, by running that very operation, so the two can never
+/// disagree about where Saltcorn keeps a store nobody chose a directory for.
+///
+/// Created the way `createFileStore` creates one, except that a store that will
+/// not connect is an error rather than a warning: the admin asked Saltcorn to
+/// pick the directory, so a directory Saltcorn cannot create is Saltcorn's
+/// problem to report now, not a broken store to find later. Anything created
+/// before a failure is removed again.
+async fn create_requested_file_stores(
+    catalog: &Catalog,
+    app: &mut sc_app::Application,
+) -> Result<Vec<FileStoreDef>> {
+    let settings = file_store_settings(&framework_config_spec(&app.framework.name)?);
+    let requested: Vec<String> = settings
+        .into_iter()
+        .filter(|name| {
+            app.framework.config.get(name).and_then(Json::as_str) == Some(NEW_LOCAL_FILE_STORE)
+        })
+        .collect();
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut taken = choosable_file_stores(catalog).await?;
+    let mut created: Vec<FileStoreDef> = Vec::new();
+    for setting in requested {
+        let name = unique_file_store_name(app.subdomain.trim(), &taken);
+        match create_local_file_store(catalog, &name, &app.name).await {
+            Ok(def) => {
+                taken.push(def.name.clone());
+                app.framework
+                    .config
+                    .insert(setting, Json::String(def.name.clone()));
+                created.push(def);
+            }
+            Err(e) => {
+                discard_file_stores(catalog, &created).await;
+                return Err(e).context(format!(
+                    "creating a new local file store `{name}` for this application"
+                ));
+            }
+        }
+    }
+    Ok(created)
+}
+
+/// One local store named `name`, in its suggested directory, saved and connected.
+async fn create_local_file_store(
+    catalog: &Catalog,
+    name: &str,
+    app_name: &str,
+) -> Result<FileStoreDef> {
+    let mut def = FileStoreDef::new(name, sc_files::LOCAL_BACKEND);
+    def.description = format!("Created for the application {app_name}");
+    run_backend_operation(&mut def, sc_files::OP_SUGGEST_DIR, &sc_types::Attrs::new()).await?;
+    check_file_store_saveable(catalog, &def).await?;
+    create_backend_resources(&mut def).await?;
+    save_file_store(catalog, &def).await?;
+    if let Err(e) = connect_file_store_def(catalog, &def) {
+        discard_file_stores(catalog, std::slice::from_ref(&def)).await;
+        return Err(e);
+    }
+    Ok(def)
+}
+
+/// Undo [`create_local_file_store`] for each of `defs`: the row, the connection,
+/// and the directory if it is still empty.
+///
+/// Best-effort, because it only ever runs while another error is on its way to
+/// the admin — that error is the one worth reporting, so a failure here is
+/// logged rather than put in its place.
+async fn discard_file_stores(catalog: &Catalog, defs: &[FileStoreDef]) {
+    for def in defs {
+        if let Err(e) = delete_file_store(catalog, def.id, &[]).await {
+            sc_log::log_error!(
+                "feldspar: could not remove the file store `{}` created for an application \
+                 that was not saved: {}",
+                def.name,
+                sc_error::format_chain(&e)
+            );
+        }
+        let _ = catalog.disconnect_file_store(&def.name);
+        // `remove_dir` only removes an empty directory, which is the one this
+        // create made; anything with files in it is left alone.
+        if let Some(dir) = def.setting(sc_files::CFG_PATH) {
+            let _ = tokio::fs::remove_dir(dir).await;
+        }
     }
 }
 

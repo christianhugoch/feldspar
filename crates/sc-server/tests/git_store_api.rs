@@ -1144,6 +1144,113 @@ async fn a_local_store_can_be_given_a_suggested_directory() -> sc_error::Result<
     Ok(())
 }
 
+/// **"Create a new local file store"** on a new application's store picker, end
+/// to end: the framework says which of its settings names a store, the sentinel
+/// posted in one becomes a real local store named after the subdomain — with a
+/// number appended when that name is taken — in the directory "Suggest a
+/// directory" picks, and the React project is scaffolded into it.
+///
+/// In this binary for the reason the `suggest_dir` test above is: the new store
+/// lives under the data directory, and this is the binary that owns it.
+#[tokio::test]
+async fn a_new_application_can_ask_for_a_new_local_store() -> sc_error::Result<()> {
+    let (mut client, catalog, _db) = setup().await?;
+
+    // The picker the form needs to extend is named by the framework — the
+    // resolved spec alone no longer says it is a store picker.
+    let (status, frameworks) = client.send("GET", "/api/frameworks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let react = frameworks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == json!("react"))
+        .unwrap();
+    assert_eq!(react["file_store_settings"], json!(["store"]));
+
+    // The subdomain's own name is taken, so the new store gets the next one.
+    let taken = data_dir().join("already-there");
+    let (status, res) = client
+        .send(
+            "POST",
+            "/api/file-stores",
+            Some(json!({
+                "name": "notebook",
+                "backend": "local",
+                "config": { "path": taken.to_string_lossy(), "create": true },
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{res}");
+
+    let app = |subdomain: &str| {
+        json!({
+            "name": "Notebook",
+            "subdomain": subdomain,
+            "framework": {
+                "name": "react",
+                "config": { "store": sc_catalog::NEW_LOCAL_FILE_STORE, "project": "" }
+            },
+            "tables": [],
+            "file_stores": [],
+            "apis": [{ "provider": "rest", "mount": "/api" }],
+        })
+    };
+    let (status, created) = client
+        .send("POST", "/api/applications", Some(app("notebook")))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["created_file_stores"], json!(["notebook1"]));
+    // The application names the store, never the sentinel.
+    assert_eq!(created["framework"]["config"]["store"], json!("notebook1"));
+
+    // Where "Suggest a directory" would have put it, connected, and holding the
+    // scaffolded project.
+    let dir = data_dir().join("local-stores/notebook1");
+    let def = sc_catalog::load_file_store_by_name(&catalog, "notebook1")
+        .await?
+        .expect("the new store is defined");
+    assert_eq!(def.backend, "local");
+    assert_eq!(
+        def.setting(sc_files::CFG_PATH),
+        Some(dir.to_string_lossy().as_ref())
+    );
+    assert!(catalog.file_store("notebook1")?.is_some());
+    assert!(dir.join("package.json").is_file(), "{created}");
+
+    // An application that is refused takes its new store with it: otherwise the
+    // admin's corrected second attempt would leave an orphaned store behind.
+    let (status, err) = client
+        .send("POST", "/api/applications", Some(app("notebook")))
+        .await;
+    assert!(status.is_client_error(), "{status} {err}");
+    assert!(err.to_string().contains("already used"), "{err}");
+    assert!(
+        sc_catalog::load_file_store_by_name(&catalog, "notebook2")
+            .await?
+            .is_none()
+    );
+    assert!(catalog.file_store("notebook2")?.is_none());
+    assert!(!data_dir().join("local-stores/notebook2").exists());
+
+    // And the sentinel can never be a store's real name.
+    let (status, err) = client
+        .send(
+            "POST",
+            "/api/file-stores",
+            Some(json!({
+                "name": sc_catalog::NEW_LOCAL_FILE_STORE,
+                "backend": "local",
+                "config": { "path": taken.to_string_lossy() },
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+    assert!(err.to_string().contains("reserved"), "{err}");
+
+    Ok(())
+}
+
 /// The "Working copy: …" line of a git status report — where the clone actually
 /// is, which is what a rename must not change.
 fn working_copy_line(report: &str) -> String {

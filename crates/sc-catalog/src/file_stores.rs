@@ -167,6 +167,11 @@ pub async fn check_file_store_saveable(catalog: &Catalog, def: &FileStoreDef) ->
             "file store `{name}` needs a backend"
         )));
     }
+    if name == NEW_LOCAL_FILE_STORE {
+        return Err(Error::invalid(format!(
+            "`{name}` is reserved: it is how the admin UI asks for a new store"
+        )));
+    }
     validate_file_store_config(def)?;
 
     if let Some(other) = load_file_store_by_name(catalog, name).await?
@@ -330,6 +335,47 @@ pub async fn connect_all_file_stores(catalog: &Catalog) -> Result<FileStoreConne
 /// ([`resolve_options`]) — the two are in different crates and, eventually,
 /// different languages.
 pub const QUERY_FILE_STORES: &str = "file_stores";
+
+/// The value a setting answered by [`QUERY_FILE_STORES`] carries to mean "no
+/// store yet — create a local one for me", in place of a store's name.
+///
+/// Offered by the admin UI as the last choice in a new application's store
+/// picker, and replaced by the server with the name of the store it creates
+/// before anything is validated or saved, so no stored configuration ever holds
+/// it. It is a *protocol* value — it travels in the JSON, and the UI's copy has to
+/// match — and it is reserved as a store name ([`check_file_store_saveable`]), so
+/// it can never be mistaken for a store that exists.
+pub const NEW_LOCAL_FILE_STORE: &str = "__new_local_file_store__";
+
+/// The settings in `spec` whose value names a file store — the ones answered by
+/// [`QUERY_FILE_STORES`].
+///
+/// Read off the **unresolved** spec: [`resolve_options`] replaces the query with
+/// the list it answers, and after that a store picker is indistinguishable from
+/// any other select.
+pub fn file_store_settings(spec: &[FormField]) -> Vec<String> {
+    spec.iter()
+        .filter(|field| field.query() == Some(QUERY_FILE_STORES))
+        .map(|field| field.base.name.clone())
+        .collect()
+}
+
+/// A store name that is not in `taken`: `base` itself when it is free, otherwise
+/// `base` with the first of 1, 2, 3, … appended that makes it free.
+///
+/// Used to name a store created on an application's behalf after the
+/// application's subdomain, so the second app called `todo` gets `todo1` rather
+/// than a refusal.
+pub fn unique_file_store_name(base: &str, taken: &[String]) -> String {
+    let free = |name: &str| !taken.iter().any(|t| t == name);
+    if free(base) {
+        return base.to_owned();
+    }
+    (1u64..)
+        .map(|n| format!("{base}{n}"))
+        .find(|candidate| free(candidate))
+        .unwrap_or_else(|| base.to_owned())
+}
 
 /// Resolve every [`ServerQuery`](sc_types::OptionsSource::ServerQuery) in a
 /// settings spec to a concrete list, leaving the rest untouched.
@@ -580,6 +626,32 @@ mod tests {
         );
         // A description is optional; NULL reads back as "".
         assert!(!by_name(COL_DESCRIPTION).required);
+    }
+
+    #[test]
+    fn a_taken_name_gets_the_first_free_number_appended() {
+        let taken = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        assert_eq!(unique_file_store_name("todo", &taken(&[])), "todo");
+        assert_eq!(unique_file_store_name("todo", &taken(&["apps"])), "todo");
+        assert_eq!(unique_file_store_name("todo", &taken(&["todo"])), "todo1");
+        assert_eq!(
+            unique_file_store_name("todo", &taken(&["todo", "todo1", "todo3"])),
+            "todo2"
+        );
+    }
+
+    #[test]
+    fn the_store_settings_are_the_ones_the_file_store_query_answers() {
+        let spec = [
+            FormField::new("store", BasicType::Text).server_query(QUERY_FILE_STORES),
+            FormField::new("project", BasicType::Text),
+            FormField::new("other", BasicType::Text).server_query("something_else"),
+        ];
+        assert_eq!(file_store_settings(&spec), ["store"]);
+        // Once resolved, a picker is just a select — which is why this reads the
+        // spec before `resolve_options` does.
+        let resolved = spec[0].clone().with_resolved_options(["apps"]);
+        assert!(file_store_settings(&[resolved]).is_empty());
     }
 
     #[test]

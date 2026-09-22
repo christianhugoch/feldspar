@@ -5030,6 +5030,14 @@ fn created_application_schema() -> TypeSchema {
         "building",
         TypeSchema::optional(TypeSchema::bool()),
     ));
+    // The local file stores created for this application because a store
+    // setting asked for a new one (`sc_catalog::NEW_LOCAL_FILE_STORE`) — named
+    // after the subdomain, in the directory "Suggest a directory" would have
+    // picked. Absent when nothing was created.
+    fields.push(StructField::new(
+        "created_file_stores",
+        TypeSchema::optional(TypeSchema::array(TypeSchema::text())),
+    ));
     TypeSchema::Struct(fields)
 }
 
@@ -5167,6 +5175,12 @@ fn framework_info_schema() -> TypeSchema {
         // form, the languages — so the screen keeps them off the create form
         // and edits them on the application's App settings tab.
         StructField::new("has_views", TypeSchema::bool()),
+        // The settings whose value names a file store. `config_spec` cannot say
+        // so — by the time it is sent, a store picker has been resolved to a
+        // plain list of names — and a new application's form needs to know,
+        // because on those pickers it offers to create a local store rather
+        // than making the admin leave the form to define one first.
+        StructField::new("file_store_settings", TypeSchema::array(TypeSchema::text())),
     ])
 }
 

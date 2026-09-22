@@ -48,6 +48,7 @@ import {
   type ApiRow,
 } from "../apiRows";
 import { MultiSelect } from "../multiSelect";
+import { createdStoresText, newStoreOptions } from "../newFileStore";
 import {
   blankStaticRow,
   staticDirsToRequest,
@@ -267,6 +268,8 @@ export function ApplicationForm({
         // handed to it rather than shown here on a screen about to unmount.
         const done: string[] = [];
         const refused: string[] = [];
+        const stores = createdStoresText(created.created_file_stores);
+        if (stores) done.push(stores);
         if (created.scaffolded) done.push(created.scaffolded);
         // The server starts the first build itself, so the application serves on
         // its subdomain without anybody pressing anything — the Build button is
@@ -478,6 +481,14 @@ export function ApplicationForm({
                     onChange={(name, v) =>
                       setConfig((c) => ({ ...c, [name]: v }))
                     }
+                    // A new application's store picker ends with "create one":
+                    // the server names it after the subdomain and puts it in
+                    // the directory "Suggest a directory" would pick.
+                    extraOptions={newStoreOptions(
+                      selected?.file_store_settings ?? [],
+                      !appId,
+                      t("Create a new local file store"),
+                    )}
                   />
                 )}
               </Card.Body>

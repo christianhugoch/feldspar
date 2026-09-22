@@ -17,6 +17,7 @@ import Form from "react-bootstrap/Form";
 import { CodeEditor } from "./CodeEditor";
 import type { CodeScope } from "./codeTypes";
 import { T } from "./i18n";
+import type { ExtraOption } from "./newFileStore";
 
 /** One settings field, structurally matching the API's `form_field_schema`.
  *
@@ -156,12 +157,18 @@ export function SettingField({
   idPrefix = "cfg",
   locked = false,
   codeScope,
+  extraOptions = [],
 }: {
   field: FieldSpec;
   value: string;
   onChange: (value: string) => void;
   idPrefix?: string;
   locked?: boolean;
+  /** Choices the *screen* adds after the field's own, each with its own label —
+   * "Create a new local file store" at the end of a new application's store
+   * picker. Passed in because the field only knows the values it may hold; what
+   * else the screen can do with the answer is the screen's to offer. */
+  extraOptions?: ExtraOption[];
   /** What a *code* setting's editor should declare in scope — the event a
    * trigger's body will run in. Passed in because the screen knows the event and
    * the field knows it is code, and neither knows both. */
@@ -173,7 +180,7 @@ export function SettingField({
   const fixedHint = fixed ? (
     <Form.Text muted><T text="Chosen when this was created; it cannot be changed." /></Form.Text>
   ) : null;
-  if (field.options.length > 0) {
+  if (field.options.length > 0 || extraOptions.length > 0) {
     return (
       <Form.Group className="mb-3" controlId={controlId}>
         <Form.Label>
@@ -194,6 +201,11 @@ export function SettingField({
               </option>
             );
           })}
+          {extraOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
         </Form.Select>
         {fixedHint}
       </Form.Group>
@@ -318,6 +330,7 @@ export function SettingsFields({
   idPrefix,
   locked = false,
   codeScope,
+  extraOptions = {},
 }: {
   spec: FieldSpec[];
   values: Record<string, string>;
@@ -329,6 +342,9 @@ export function SettingsFields({
   /** What a code setting's editor declares in scope (see [`SettingField`]).
    * Ignored by every spec that declares no code setting. */
   codeScope?: CodeScope;
+  /** Screen-supplied choices appended to a setting's own, by setting name (see
+   * [`SettingField`]). */
+  extraOptions?: Record<string, ExtraOption[]>;
 }) {
   return (
     <>
@@ -341,6 +357,7 @@ export function SettingsFields({
           idPrefix={idPrefix}
           locked={locked}
           codeScope={codeScope}
+          extraOptions={extraOptions[field.name]}
         />
       ))}
     </>

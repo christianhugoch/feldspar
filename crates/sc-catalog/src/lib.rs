@@ -67,10 +67,11 @@ pub use field_meta::{
     save_field_meta, save_field_meta_row,
 };
 pub use file_stores::{
-    FILE_STORES_TABLE, FileStoreConnections, QUERY_FILE_STORES, bootstrap_file_stores,
-    check_file_store_saveable, choosable_file_stores, connect_all_file_stores,
-    connect_file_store_def, delete_file_store, file_store_field_references, list_file_stores,
-    load_file_store, load_file_store_by_name, resolve_options, save_file_store,
+    FILE_STORES_TABLE, FileStoreConnections, NEW_LOCAL_FILE_STORE, QUERY_FILE_STORES,
+    bootstrap_file_stores, check_file_store_saveable, choosable_file_stores,
+    connect_all_file_stores, connect_file_store_def, delete_file_store,
+    file_store_field_references, file_store_settings, list_file_stores, load_file_store,
+    load_file_store_by_name, resolve_options, save_file_store, unique_file_store_name,
 };
 pub use observer::{ReprojectedApp, SchemaChanged, SchemaObserver};
 pub use origin::PublicOrigin;

@@ -2,6 +2,49 @@
 
 Changes in reverse chronological order.
 
+## A new application can create its own local file store
+
+The admin UI's **new application** form offered only existing stores in the framework's store
+picker, so an admin making a first React application had to leave the form, define a store, and
+come back. The picker now ends with **"Create a new local file store"**. The server names the
+store after the application's subdomain, appending 1, 2, … when that name is taken by a defined
+or connected store. Its directory is the one the local backend's **Suggest a directory**
+operation picks: the handler runs `OP_SUGGEST_DIR` itself, so the two cannot disagree. The React
+project is then scaffolded into that directory as usual.
+
+How it fits together:
+
+- **`sc_catalog::NEW_LOCAL_FILE_STORE`** (`"__new_local_file_store__"`) is what the setting
+  carries instead of a store name. It is a protocol constant, duplicated in
+  `ui/admin/src/newFileStore.ts` the same way `SECRET_SENTINEL` is. It is also **reserved**:
+  `check_file_store_saveable` refuses it as a store name, so it cannot mean a store that exists.
+- **`listFrameworks` returns `file_store_settings`**, the settings answered by
+  `QUERY_FILE_STORES` (`sc_catalog::file_store_settings`). The form needs this because
+  `config_spec` arrives already resolved to a plain list of names. That leaves a store picker
+  looking like any other select. The choice is therefore generic: `code` gets it too, and so does
+  any declared framework whose store setting uses the query.
+- **`createApplication`** replaces the sentinel before validating (`create_requested_file_stores`).
+  It saves and connects the store the way `createFileStore` does, with one difference: a store
+  that will not connect is an error here, because the admin asked Saltcorn to choose the
+  directory. **If the application is then refused**, the new store is removed again: its row, its
+  connection, and its directory if still empty. Otherwise a corrected second attempt would create
+  `todo1` next to an orphaned `todo`. The response lists what it made in `created_file_stores`,
+  and the applications list banner names it.
+- The choice appears **only on create**. `SettingField`/`SettingsFields` take `extraOptions`, which
+  are screen-supplied choices with their own labels appended after a field's own options. The edit
+  form passes none, because moving an existing application's code to a new empty store is not
+  something Save should do as a side effect.
+
+Tested: `sc-catalog` unit tests for `unique_file_store_name` and `file_store_settings`. The
+`sc-server` test `git_store_api::a_new_application_can_ask_for_a_new_local_store` checks that
+React's `file_store_settings` is `["store"]` and that a taken `notebook` yields `notebook1`. It
+also checks that the store is defined at the suggested path under the data directory, connected,
+and holding the scaffolded `package.json`; that an application refused for a duplicate subdomain
+leaves no `notebook2` row, connection or directory; and that the sentinel is refused as a store
+name. The test lives in `git_store_api.rs` because that binary owns `SC_DATA_DIR`. Also
+`ui/admin/src/newFileStore.test.ts` (the choice is offered only on create, only on store settings,
+with the server's value) and `tsc --noEmit`.
+
 ## Every application's builder agent can read the web
 
 `sc_app::framework_builder_agent` now declares three traits: `coding`, **`http`**, and
