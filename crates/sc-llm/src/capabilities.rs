@@ -308,10 +308,24 @@ fn is_o_series(name: &str) -> bool {
 }
 
 /// The OpenAI models that produce encrypted reasoning.
+///
+/// `gpt-5` was the generation where reasoning became the default rather than
+/// a separate `o`-series; nothing says a later generation reverses that, so
+/// this treats `gpt-5` and up as reasoning-by-default rather than
+/// hardcoding `5` and needing an edit every time OpenAI ships a new one.
 fn is_openai_reasoning(name: &str) -> bool {
-    (name.starts_with("gpt-5") && !name.contains("chat"))
+    (gpt_generation(name).is_some_and(|n| n >= 5) && !name.contains("chat"))
         || is_o_series(name)
         || name.contains("codex")
+}
+
+/// The numeral in a `gpt-N…` name (`5` from `gpt-5.1`, `6` from
+/// `gpt-6-astra`), so a rule can compare generations instead of matching one
+/// literal string.
+fn gpt_generation(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("gpt-")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
 }
 
 /// OpenAI models that accept images.
@@ -445,6 +459,20 @@ mod tests {
                 EditFormat::ApplyPatch,
                 400_000,
                 true,
+                false,
+            ),
+            (
+                // A generation past the one the rule names literally:
+                // reasoning-by-default has to be inferred from the number,
+                // not a `gpt-5`-only match.
+                OPENAI_RESPONSES_BACKEND,
+                "gpt-6-astra",
+                false,
+                true,
+                PromptCaching::Automatic,
+                EditFormat::ApplyPatch,
+                UNKNOWN_CONTEXT_WINDOW,
+                false,
                 false,
             ),
             (
