@@ -2,6 +2,179 @@
 
 Changes in reverse chronological order.
 
+## Static directories, walked by hand: an edit now reaches the running mount
+
+The last phase of the static-directories milestone is its documentation and its definition of
+done, run against a real server. **Design §13.2** gained the rule the code has been keeping: an
+application request resolves API → static directory → framework, in that order and for the
+reason the order is forced; a mount is **not a grant**, so every path is read through the same
+`sc_files::check_access` as the request's role and every refusal — an escape, a closed file, a
+store outside the app's subset, a missing file — is the one 404; the declared store subset is the
+whole truth, which is why `save_application` refuses a directory outside it and why the admin
+form's `store` column is a drop-down; and what *describes* a URL (`list_assets_*`, the agent's
+session header) builds it with `StaticDir::url_for`, `resolve`'s inverse, so it cannot describe a
+URL the router does not answer. `docs/tutorial-code-framework.md` gained **Step 7**: put an image
+in a store, mount it at `/img`, write `<img src="/img/hero.png">`, and note that the next file is
+live with no rebuild because the server serves the store rather than the bundler.
+
+**What the walk found, and what it fixed.** Everything the definition of done names happened
+against a running `feldspar serve` — the bytes, the content type, the ETag and its 304, the two
+`..` spellings, the role-gated folder, both save refusals, and an API at `/api` still winning
+over a directory at `/` — except one thing:
+
+**A static directory added by an *edit* did not serve until a build or a `SIGHUP`.**
+`updateApplication` re-mounted only a **constructed** framework (Saltcorn UI). A built one — every
+`code` and `react` application — went on serving with the `Application` record its mount was made
+with, and the router resolves static directories off that record. So the new mount's path was
+answered by the framework's SPA fallback: **200 with `index.html`**, which is worse than the 404
+this milestone set out to remove, because it looks like it worked. The same staleness covered the
+app's CSP.
+
+The fix is the mechanism the locale set already had: `AppMounts::refresh_mount` rebuilds the
+record and the API providers and **keeps the bundle**. `updateApplication` now calls it for every
+framework (`refresh_mounted_app`) instead of re-mounting only the constructed ones — a save is
+not a build, and re-running a bundler on every edit would be the bug this is the cheap
+alternative to. An application nobody has built yet is not mounted, and that stays a no-op.
+
+Tested in `crates/sc-server/tests/admin_applications_api.rs`
+(`a_static_directory_added_by_an_edit_serves_without_a_rebuild`): create, serve, edit in a
+directory, fetch it — asserting the **bytes**, not the status, because the bug's signature is a
+200. The file's fixture now bootstraps `_fd_file_stores`, which a static directory reads a
+store's floor from before it serves anything.
+
+**Carried:** the agent half of the definition of done. This machine has no LLM provider — the
+create response said so — so a model reading the session header and writing the `<img>` itself is
+unwalked. What it would be told is pinned by `app_static_dirs.rs`, which fetches every URL
+`list_assets` hands the model through the real router.
+
+## The coding agent is told the URLs of the application's images
+
+An application's images are in a file store; the page that shows them is in the source tree the
+agent edits. `find_files` walks the **coding scope**, so it cannot see them — and it could not
+answer the question even if it could, because **a path is not a URL**. A model handed
+`media/hero.png` invents `/media/hero.png`, or `/files/serve/Assets/media/hero.png`, and the page
+404s. That was the last thing standing between "the server serves static directories" (last
+entry) and an agent that can put the hero image on the landing page without a human typing the
+URL for it.
+
+**`list_assets_<scope>`** (`sc_core_traits::coding::assets`) walks the **application's** static
+directories — not the coding scope — and returns, per file, the app-root-relative URL, the store
+path, the store, the content type, the size and the modification time, newest first and capped
+like `find_files`, with `pattern` and `dir` to narrow it. It is offered when the `coding` trait's
+`application` setting names one, in every mode, and is not behind `may_edit`: it reads names and
+sizes. Reading only — uploading an image through an agent is a grant an admin gives on purpose.
+
+**The URL is built by `StaticDir::url_for`, the inverse of the `resolve` the router serves
+through** — so the tool cannot describe a URL the router does not answer. `app_static_dirs`
+pins the two against **one fixture**: every URL the tool hands the model is then fetched through
+the real router and must come back with the bytes and the content type the tool described.
+
+**A mount is not a grant on the way in either.** The walk goes through the same
+`sc_files::check_access`, as the run's caller, so a folder closed to a guest is not *named* to a
+guest — the same rule that refuses to serve it. A directory naming a store outside the
+application's declared subset is skipped, because the router refuses it too.
+
+**And the mounts open the session** (`coding/header.rs`), beside `AGENTS.md` and the repo map:
+
+```
+<static_dirs>
+These URLs are served by `blog`; use them as they are.
+/img → store "media" (images), 2 files
+/docs → store "media" (handbook), 1 file
+</static_dirs>
+```
+
+A model that does not know the tool exists will not call it, and finding out costs a turn and
+the admin's money. Nothing here fails a run: an application that cannot be read, a store that is
+not connected or a directory this caller may not open leaves the section out.
+
+**The stable-prefix budget went from 1 500 tokens to 1 600.** R§4's 1 500 was spent to the last
+token — `act` measured 1 496 — and a tenth tool costs about a hundred. `list_assets` is the
+smallest spec in the set at 279 characters, and the number went up rather than an existing tool
+losing its description. It is still a test, and the next tool has the same argument to make.
+
+Tested in `crates/sc-core-traits/tests/coding_assets.rs` (the listing, the glob, the header's
+lines, an application with no directories, a store closed to the caller, and the tool's absence
+without an `application` setting), `crates/sc-server/tests/app_static_dirs.rs` (the tool and the
+router over one fixture, plus the cap), `sc-app`'s `url_for`/`resolve` round trip, and
+`ui/ide/src/chat.test.ts` for the progress line.
+
+## A static directory's store is picked, and checked on save
+
+`Static directories` was three text inputs, and one of them — the store — was a store's name typed
+from memory. Nothing validated it: a misspelled store was saved in silence, and the first sign of
+it was a 404. Worse, a typed name quietly widened what the application reached, because
+`applications_using_file_store` counts a static directory as a reference that blocks deleting a
+store — so a name the application was never granted could pin a store, and the declared subset
+stopped being the whole truth about which stores an application touches.
+
+**The store is now a drop-down over the application's own declared file stores**
+(`ui/admin/src/staticDirs.ts`, `ApplicationForm.tsx`). The subset is ticked twenty lines above on
+the same screen, so the fix for an empty drop-down is visible without scrolling, and the empty
+state says so: *"Tick a file store above to serve a directory from it."* Options come from the
+form's **live** state rather than from the server's full list, so ticking a store makes it
+pickable immediately, and a stored value the subset no longer offers is still shown and still
+selected — marked `(not a declared store)` — because a form must never silently discard what it
+was given to edit. It is the pattern the framework picker on this same form already uses.
+`RepeatableRows` grew the column kind that makes this possible: a column that declares `options`
+renders a `<select>`, everything else stays the text box it was.
+
+**And `save_application` refuses two things it used to store** (`sc_app::validate_static_dirs`,
+beside `validate_api_mounts`):
+
+- a static directory whose store is **not in the application's `file_stores`**, naming the store
+  and the application — the subset is the bound, and a typo is the same mistake by accident;
+- a mount at or under an **API provider's mount**. A request resolves to a provider first, so a
+  directory at `/api/img` behind an API at `/api` is answered by an API that has no endpoint
+  there and is never served. Same reasoning as the API-at-`/` refusal: the admin is standing in
+  front of the form, which is where they can be told.
+
+Tested in `crates/sc-app/src/api.rs` (each refusal, including an API-only app whose root mount
+claims every directory there is) and `ui/admin/src/staticDirs.test.ts` (the drop-down offers the
+declared subset, follows a change to it, and keeps a value outside it through a render and a save).
+
+## An application's static directories are served
+
+`Application::static_dirs` has been stored, edited and validated-on-delete since the first
+milestone, and nothing served it. An admin could mount `/img` on a store's `media` folder, save it,
+and get a 404 — so the field was a promise the server did not keep, and an application's pages had
+no URL they could truthfully put in an `<img src>`.
+
+**They are served now.** A request against an application resolves in three steps rather than two:
+an API provider by longest matching mount, then a **static directory** by longest matching mount,
+then the framework, whose SPA fallback claims `/*` and so must stay last.
+
+- **The match is in `sc-app`** (`Application::static_dir_for`), beside the mount rule
+  `MountedApp::provider_for` applies to providers, so the longest-mount rule has one implementation
+  and is testable without a server. It returns the directory and the remainder of the path;
+  `StaticDir::resolve` turns that remainder into a path within the store.
+- **A path cannot leave the directory.** The remainder is *resolved*, not string-matched: each
+  segment is percent-decoded first, `.` is dropped and `..` pops what precedes it, so an escape
+  spelled `%2e%2e` is the same escape as `..` and popping past the directory's own root is a 404.
+- **A mount is not a grant** (`serve_static_dir`, `sc-server/src/router.rs`). It says where in the
+  URL space a store's subdirectory appears; it does not say that everything under it is public.
+  Every read goes through the same `sc_files::check_access` the file manager and the REST provider
+  go through, as the request's own user — a file or a folder closed to a guest is not served to a
+  guest, and the refusal is the same 404 an unknown path gets, because a 403 would confirm to a
+  stranger that the file exists. A directory naming a store outside the application's declared
+  subset serves nothing either: the declared subset is the whole truth about which stores an
+  application touches.
+- **The response** carries `sc_app::asset_content_type` — the code framework's own answer, so a
+  `.png` in a bundle and a `.png` in a static directory are served identically — an ETag over the
+  bytes (`apps::etag_of`, now shared with the application catalogue route), a `304` on a matching
+  `If-None-Match`, `no-cache, must-revalidate`, and the application's own CSP via `with_csp`. A
+  static directory is on the application's own origin, which `default-src 'self'` already allows.
+  Anything but `GET`/`HEAD` is a 405: a static directory is read, not written.
+- **Previews come free.** A preview is a `MountedApp` over the same `Application` record, so
+  `view_app` sees the images without anything further.
+
+Tested in `crates/sc-server/tests/app_static_dirs.rs` against the real router and a real Postgres:
+a file is served with its content type and an ETag, the second request is a 304, three spellings of
+`..` are all 404, a folder restricted to role 40 is 404 for a visitor and served to the admin, an
+API provider mounted on the same prefix still wins, the SPA fallback still answers a path no
+directory claims, and a directory whose store the application no longer declares serves nothing.
+Unit tests in `sc-app` cover the longest-mount rule and the escape resolution.
+
 ## Test run: every trigger runnable from the list, with its console output and a real row
 
 The triggers list had a **Run** button on exactly one kind of trigger — a `none` one — and what it
