@@ -147,6 +147,8 @@ mod table_csv_import;
 mod table_settings_api;
 #[path = "table_triggers.rs"]
 mod table_triggers;
+#[path = "tls_live_domains.rs"]
+mod tls_live_domains;
 #[path = "tls_serving.rs"]
 mod tls_serving;
 #[path = "trigger_admin_api.rs"]

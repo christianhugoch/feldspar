@@ -435,8 +435,8 @@ naming the target, rather than booting half-working (§10).
    service; the server then binds 443 beside the plain listener and redirects to it.
    Validation is TLS-ALPN-01, so port 443 must be reachable from the internet, and the
    certificate covers the base domain plus every mounted application's subdomain —
-   **adding an application adds a name at the next restart**. Try the Let's Encrypt
-   *staging* directory first if you are iterating.
+   **an application created later adds its name without a restart**. Try the Let's
+   Encrypt *staging* directory first if you are iterating.
 4. **Firewall.** Only 80 and 443 need to be open. Postgres stays on its Unix socket,
    and nothing else listens.
 
@@ -1072,8 +1072,12 @@ ACME notes:
   must reach `https_port` on a public address (443 for Let's Encrypt), and there is no
   HTTP challenge route to keep clear.
 - The certificate covers the base domain, every mounted application's subdomain, and
-  anything listed in `ssl_extra_domains`. **Adding an application adds a name at the
-  next restart**, which is when the order is built.
+  anything listed in `ssl_extra_domains`. **Creating an application orders a new
+  certificate covering its subdomain, with no restart**: the previous certificate keeps
+  serving until the new one is issued, so the applications already up are not disturbed.
+  The name set only grows while the server runs — a deleted application's name is
+  dropped at the next restart, since ordering a smaller certificate buys nothing and
+  every order is charged against the CA's rate limits.
 - The account key and the issued certificates are cached in the database
   (`_fd_acme_cache`), so a renewal survives a restart and a second node serves what the
   first one ordered instead of ordering its own.

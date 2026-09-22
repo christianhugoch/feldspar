@@ -241,6 +241,50 @@ async fn setup(tmp: &TempDir) -> sc_error::Result<(Router, Arc<Catalog>, TestDb)
     Ok((router, catalog, db))
 }
 
+/// **Creating an application deploys it**: the server runs its first build and
+/// mounts it, so the subdomain serves without anybody pressing Build and without
+/// a restart (the boot path built every stored application, which is what made
+/// restarting look like part of creating one).
+///
+/// The build is deliberately in the background — a first build is `npm install`
+/// plus a bundler — so this waits for the subdomain rather than reading it once.
+#[tokio::test]
+async fn a_created_application_builds_itself_and_serves_without_a_restart() -> sc_error::Result<()>
+{
+    let tmp = TempDir::new("first-build");
+    let (router, catalog, _db) = setup(&tmp).await?;
+    create_user(&catalog, "admin@example.com", "correct-horse", ROLE_ADMIN).await?;
+    let mut admin = Client::new(router.clone(), BASE_DOMAIN);
+    admin.login("admin@example.com", "correct-horse").await;
+
+    // The project is on disk before the application exists — the state a
+    // scaffold leaves behind for a framework whose project the server writes.
+    write_bundler(tmp.path(), "first", true);
+
+    let (status, created) = admin
+        .send("POST", "/api/applications", Some(blog_body()))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // Said on the response, because the build outlives it.
+    assert_eq!(created["building"], json!(true), "{created}");
+
+    let mut app = Client::new(router.clone(), APP_HOST);
+    let mut serving = false;
+    for _ in 0..200 {
+        let (status, body) = app.raw("GET", "/", None).await;
+        if status == StatusCode::OK && body == b"<!doctype html><div id=root>first</div>" {
+            serving = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        serving,
+        "the created application built itself and serves on its subdomain"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn applications_are_managed_over_http_and_serve_without_a_restart() -> sc_error::Result<()> {
     let tmp = TempDir::new("story");

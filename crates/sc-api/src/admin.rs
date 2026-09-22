@@ -4833,7 +4833,9 @@ fn app_source_schema() -> TypeSchema {
 /// scaffold that was refused (an occupied directory, an unreachable store) on an
 /// application that was nonetheless created, since the row is valid either way.
 /// `agent` and `agent_error` report the builder agent the same way: its name, or
-/// why the deployment could not create one (no LLM provider connected).
+/// why the deployment could not create one (no LLM provider connected). `building`
+/// says the server started the application's first build itself, so its subdomain
+/// will serve without a restart and without the Build button.
 fn created_application_schema() -> TypeSchema {
     let TypeSchema::Struct(mut fields) = application_schema() else {
         unreachable!("application_schema is a struct")
@@ -4857,6 +4859,17 @@ fn created_application_schema() -> TypeSchema {
     fields.push(StructField::new(
         "agent_error",
         TypeSchema::optional(TypeSchema::text()),
+    ));
+    // Whether the server started the application's **first build** as part of
+    // creating it (§13.2). Creating an application is what deploys it — the boot
+    // path built every stored application, so anything else made a restart part
+    // of creating one — but a first build is `npm install` plus a bundler, which
+    // is not a thing to hold this response open for. So it runs in the background
+    // and this says to expect the subdomain to start serving shortly. Absent for
+    // an application with nothing to build.
+    fields.push(StructField::new(
+        "building",
+        TypeSchema::optional(TypeSchema::bool()),
     ));
     TypeSchema::Struct(fields)
 }

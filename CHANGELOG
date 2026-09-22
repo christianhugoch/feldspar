@@ -2,6 +2,72 @@
 
 Changes in reverse chronological order.
 
+## Creating an application deploys it: its first build, and its certificate name, with no restart
+
+Adding an application and then restarting the server to see it were the same operation in
+practice. Two separate reasons, one symptom:
+
+- **Nothing built it.** A `react` or `code` application's project is scaffolded on save, and the
+  thing that turned it into a mounted bundle was the Build button — or `mount_all`, which builds
+  every stored application at boot. So the reliable way to serve a new application was to restart,
+  and the admin UI said as much ("Build it to install its dependencies and serve it").
+- **Nothing certified it.** `rustls-acme` takes its domain list when the client is built, and the
+  client was built once, at boot, from the base domain plus the subdomains mounted at that
+  moment. An application created afterwards was served on a name the certificate did not cover,
+  which a browser refuses before it reads a byte of the app — and a restart was what put the name
+  on the next order. The README said so in two places, which is the sound of a design admitting a
+  gap.
+
+**The first build now happens on creation** (`serve_new_application` in
+`crates/sc-server/src/handlers.rs`). A framework that is *constructed* (Saltcorn UI) still mounts
+synchronously inside the create; one that is *built* has its bundler started in the background and
+mounts when it finishes, because `npm install` plus a bundler is minutes and not a thing to hold an
+HTTP response open for. The create response carries `building: true` (declared on
+`created_application_schema`, so the generated clients have it) and the form's banner says the
+subdomain will start serving shortly. A build that fails is one line on the console and the Build
+button, which reports in front of the admin — never the loss of the application they just created.
+
+**The ACME name set is live** (`tls::AcmeCertificate`, `tls::TlsNames`, `tls::Certificate`).
+
+- The listener is built with **one certificate resolver for the life of the process**
+  (`LiveAcmeResolver`) and the ACME client behind it is replaced. `AppMounts` now reports every
+  mount, re-mount and unmount through the `Certificate` seam `serve` installs into it, and a name
+  that is not covered yet starts a fresh order for the **union** of what is covered and what is
+  served.
+- **The previous certificate keeps serving** until the new one is issued: the old client's resolver
+  stays as the fallback, and ordinary handshakes are answered from it until the new generation
+  reports `DeployedNewCert`. Creating an application therefore cannot take the applications
+  already up off the air. The old client's *task* is kept alive too, so it goes on renewing the
+  certificate that works even if the new order never succeeds — a subdomain whose DNS was never
+  pointed at the host costs an ACME client, not an expiry.
+- The set only **grows** while the process runs. A deleted application's name is dropped at the
+  next boot, where it is recomputed from what is mounted: ordering a smaller certificate buys
+  nothing, and every order is charged against the CA's rate limits. Re-ordering the names already
+  in force is a no-op for the same reason, which is what makes it safe to report every re-mount.
+- One name list per set, whatever order the names arrive in (`canonical_domains`): the base domain
+  first — it is what the certificate is *about* — then the rest sorted. The ACME cache is keyed by
+  the digest of the list, so two ways of reaching one set have to produce one list or a restart
+  would order a certificate the cache is already holding.
+- **`acme-tls/1` is advertised beside `http/1.1`**, and the challenge handshake is served by the
+  ordinary acceptor rather than `rustls-acme`'s. That is what lets the resolver be swappable:
+  `AcmeAcceptor` holds its own challenge configuration, built from the client that existed when
+  the listener was, which a later order would never reach. A client offering only that protocol is
+  the CA, and the resolver hands it the challenge certificate of the client whose challenge it is.
+- `TlsSettings::from_ssl` takes a `TlsNames` (base domain, subdomains, extras) rather than the
+  flattened list, because the middle one is live and a new subdomain needs the base domain to
+  become a name.
+
+Not covered, and unchanged: a **preview** mount (`label--app.example.com`) is not a name an ACME
+order can cover one at a time, so previews over HTTPS still want the wildcard certificate §7b
+assumes — pasted, since TLS-ALPN-01 cannot issue one.
+
+Tests: `crates/sc-server/tests/tls_live_domains.rs` — every mount and unmount tells the
+certificate what is served (and installing one orders nothing), and the ACME name set grows with
+the mounts, is a no-op on the set it already covers, and does not shrink when an application goes.
+`admin_applications_api::a_created_application_builds_itself_and_serves_without_a_restart` drives
+the other half over HTTP: create an application and wait for its subdomain to serve its first
+build, with nobody pressing Build.
+
 ## The preview pane: the application beside the conversation
 
 An agent's chat screen can now split in two — the conversation in a column on the left, the thing

@@ -4593,8 +4593,16 @@ one, so mounting is a runtime operation, not a boot-time one:
 Because a build runs a bundler, which is slow and can fail, "save the configuration" and
 "build and mount it" are distinct operations with distinct outcomes: an app can be saved but
 unbuilt, and the admin UI shows that state rather than pretending a save deployed anything.
-A saved-but-unbuilt app is a normal state, not an error — it is what a newly created app is
-until its first build.
+A saved-but-unbuilt app is a normal state, not an error.
+
+**A newly created application does not stay in it, though.** Creating one starts its first
+build in the background — `npm install` plus a bundler is minutes, which is not a thing to
+hold an HTTP response open for — and mounts it when that finishes, so the subdomain serves
+without a restart and without anybody pressing Build (the create response says `building`).
+This is the same work the boot path does for every stored application; before it, a restart
+was the only thing that ever built a newly created one, which made restarting the server
+look like part of creating an application. The Build button is what a *later* build, and a
+failed first one, goes through.
 
 **Reload on `SIGHUP`: the third path, which builds nothing.** What a mounted app serves is
 the `AssetBundle` the server read out of the build's output directory *when it last built*,
@@ -5915,17 +5923,30 @@ remains available.
 `off`/`letsencrypt`/`custom`, the pasted chain and key, the ACME contact and directory URL,
 extra domains, `https_port`, `redirect_http_to_https`); `sc-server::tls` turns those into a
 serving plan and an `axum-server` acceptor — a fixed `rustls::ServerConfig` for a pasted
-certificate, `rustls-acme`'s acceptor for an ACME one — and `sc-cli` reads the settings at
+certificate, `rustls-acme`'s resolver for an ACME one — and `sc-cli` reads the settings at
 boot, after the mounts, so the certificate covers the base domain plus every mounted app's
-subdomain. Five decisions worth stating:
+subdomain. Six decisions worth stating:
 
 - **TLS-ALPN-01, not HTTP-01.** Validation happens inside the handshake the server already
   terminates, so no `/.well-known/acme-challenge` route exists to be shadowed by an
   application's own routes or forgotten behind a redirect. The cost is that the CA must reach
   the TLS port itself.
-- **ALPN advertises `http/1.1` only.** WebSockets over HTTP/2 need RFC 8441 extended CONNECT,
-  which axum's `ws` does not implement; advertising `h2` would trade the agent chat (§11.4)
-  and the IDE's language server (§12.1) for multiplexing on an admin console.
+- **ALPN advertises `http/1.1` only** (plus `acme-tls/1` in ACME mode, which is the CA's
+  validation handshake arriving on the same listener). WebSockets over HTTP/2 need RFC 8441
+  extended CONNECT, which axum's `ws` does not implement; advertising `h2` would trade the
+  agent chat (§11.4) and the IDE's language server (§12.1) for multiplexing on an admin
+  console.
+- **The ACME name set is live** (`tls::AcmeCertificate`). An application is created while the
+  server runs and is served on a subdomain, so the set of names the certificate must cover
+  changes while the server runs — and `rustls-acme` takes its domain list at construction.
+  So the listener is built with **one resolver for the life of the process** and the ACME
+  client behind it is replaced: `AppMounts` reports every mount and unmount through a
+  `tls::Certificate` seam, a name that is not covered yet starts a fresh order for the union,
+  and the **previous certificate keeps serving until the new one is issued**, so creating an
+  application never takes the running ones off the air. The set only grows while the process
+  runs: a deleted application's name is dropped at the next boot, where it is recomputed from
+  what is actually mounted, because ordering a smaller certificate buys nothing and every
+  order is charged against the CA's rate limits.
 - **The ACME cache is a table** (`_fd_acme_cache`), keyed by the digest of the domain list and
   the directory URL, so a renewal survives a restart, a second node serves what the first
   ordered, and pointing a deployment at the staging directory misses rather than serving the

@@ -58,6 +58,14 @@ pub async fn serve(
     // The coding agent's headless browser, and the loopback listener it reaches
     // previews through (TODO §7b), where this host has a browser.
     let browser = serve_browser(&config, &endpoints, &handlers, &sessions, &apps).await?;
+    // An application mounted from here on is served on a subdomain the
+    // certificate has to cover, so the mount registry is given the certificate
+    // before the first request can arrive (§13.5). Only ACME has anything to do
+    // with this: a pasted certificate covers the names the admin's certificate
+    // covers, and there is nothing for this process to order.
+    if let TlsSettings::Acme { certificate, .. } = &config.tls {
+        apps.set_certificate(certificate.clone());
+    }
     let app = build_router_with_apps(&endpoints, handlers, sessions, &config, apps)?;
 
     // The service manager that started this process, if one did. Read here

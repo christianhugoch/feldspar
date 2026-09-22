@@ -325,16 +325,18 @@ async fn serve_command(args: &[String]) -> Result<()> {
 
     // The certificate's names, now that the mounts are known: the base domain,
     // every mounted application's subdomain, and whatever else the admin listed
-    // (§13.5). Adding an application therefore adds a name to the next order —
-    // at the next restart, which is when the ACME client is built. A settings
-    // mistake stops the boot rather than quietly serving plain HTTP: an admin
-    // who configured TLS and got HTTP would not find out from the server.
+    // (§13.5). The three are kept apart rather than flattened because the middle
+    // one is live — an application created while the server runs adds a name, and
+    // `serve` hands the mount registry the certificate so that becomes a new
+    // order rather than something a restart fixes. A settings mistake stops the
+    // boot rather than quietly serving plain HTTP: an admin who configured TLS
+    // and got HTTP would not find out from the server.
     config.tls = sc_server::TlsSettings::from_ssl(
         &ssl,
-        sc_server::tls_domains(
-            config.base_domain.as_deref(),
-            &apps.subdomains(),
-            &ssl.extra_domains,
+        sc_server::TlsNames::new(
+            config.base_domain.clone(),
+            apps.subdomains(),
+            ssl.extra_domains.clone(),
         ),
         Some(sc_config::AcmeCache::new(catalog.clone())),
     )?;
