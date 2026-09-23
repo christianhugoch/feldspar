@@ -2,6 +2,15 @@
 
 Changes in reverse chronological order.
 
+## Release builds are tuned for build speed
+
+`Cargo.toml` had no `[profile.release]`, so `cargo build --release -p sc-cli` and
+`scripts/build-static.sh` (native and docker) used cargo's defaults: `opt-level = 3`, 16 codegen
+units, no incremental compilation. The new release profile uses `opt-level = 0`,
+`codegen-units = 256`, `incremental = true`, no debug info, and `strip = true`. The binary is slower
+and larger, which does not matter while the project is a prototype. Switch this back before a
+release whose performance matters.
+
 ## Admin UI UX tweaks
 
 Reorder and relabel the menu, remove translation link for applications, fix CSS for button menu items.

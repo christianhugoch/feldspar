@@ -669,3 +669,20 @@ debug = "line-tables-only"
 # removed.
 [profile.dev.package."*"]
 debug = false
+
+# Release is tuned for build time, not run time, while the project is a
+# prototype: `cargo build --release -p sc-cli` and `scripts/build-static.sh`
+# (native and docker) both use this profile. Cargo's release defaults
+# (`opt-level = 3`, 16 codegen units, no incremental) spent most of a build in
+# LLVM's optimiser, for a speed-up nobody needs yet. The test suite already runs
+# unoptimised code (`dev`), so `opt-level = 0` is not new territory. V8 is a
+# prebuilt archive either way and is unaffected.
+#
+# Switch this back to optimising builds before a release anyone relies on the
+# performance of.
+[profile.release]
+opt-level = 0
+codegen-units = 16
+incremental = true
+debug = false
+strip = true
