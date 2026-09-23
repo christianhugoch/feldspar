@@ -229,7 +229,9 @@ export function AgentChat({
 
   const loadRuns = useCallback(async () => {
     try {
-      setRuns(await api.listRuns(agent));
+      // A subagent's run is read nested inside the run that delegated it, not
+      // as a conversation of its own.
+      setRuns((await api.listRuns(agent)).filter((run) => !run.parent_run));
     } catch (err) {
       setError(errorMessage(err, "Could not load this agent's history."));
     }

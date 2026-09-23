@@ -7515,6 +7515,8 @@ fn run_summary_json(run: &sc_agent::Run) -> Json {
         // run, which share the `done` state. Null while running and for a
         // workflow run.
         "conclusion": run.conclusion(),
+        // The run that delegated this one, null on a run somebody started.
+        "parent_run": run.attributes.get(sc_agent::ATTR_PARENT_RUN),
     })
 }
 

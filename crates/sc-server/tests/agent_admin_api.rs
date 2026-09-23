@@ -24,7 +24,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use sc_agent::{Agent, AgentLoop, EnabledTrait, Run, RunCaller, save_run};
+use sc_agent::{ATTR_PARENT_RUN, Agent, AgentLoop, EnabledTrait, Run, RunCaller, save_run};
 use sc_auth::SessionStore;
 use sc_catalog::{Catalog, DataField};
 use sc_db::DatabaseDriver;
@@ -381,7 +381,9 @@ async fn the_traits_endpoint_declares_each_traits_configuration() -> sc_error::R
     // Its form is four grants, each with a default, and a blank one is a
     // meaningful (read-only) configuration rather than an incomplete one — which
     // the wire shape has to be able to express, or the admin UI would refuse to
-    // save a valid agent.
+    // save a valid agent. `http` is the other, for the same reason: the web is
+    // not a target it could name, and a blank form is `fetch_web`, read-only,
+    // over public hosts.
     for trait_ in traits {
         let spec = trait_["config_spec"].as_array().unwrap();
         assert!(!spec.is_empty(), "{trait_}");
@@ -390,6 +392,9 @@ async fn the_traits_endpoint_declares_each_traits_configuration() -> sc_error::R
                 spec.iter().all(|f| f["type"] == json!("bool")),
                 "the trait with no target is configured entirely by grants: {trait_}"
             );
+            continue;
+        }
+        if trait_["name"] == json!("http") {
             continue;
         }
         assert!(
@@ -433,9 +438,36 @@ async fn runs_are_listed_read_and_deleted_and_outlive_their_agent() -> sc_error:
     assert!(runs[0].get("context").is_none(), "{}", runs[0]);
     assert!(!runs[0]["description"].as_str().unwrap_or("").is_empty());
 
+    // A run somebody started has no parent: it is a conversation of its own.
+    assert_eq!(runs[0]["parent_run"], Value::Null);
+
     // A run of another agent is not in this agent's history.
     let (_, none) = client.send("GET", "/api/agent-runs/other", None).await;
     assert!(none.as_array().unwrap().is_empty());
+
+    // A subagent's run is listed with the run that delegated it, which is how
+    // the chat history leaves it out: its transcript is read nested inside the
+    // parent's, not as a conversation of its own.
+    let mut delegated = AgentLoop::new(20);
+    delegated.push_user("count the books")?;
+    let mut child =
+        Run::new("librarian", &RunCaller::system(), &delegated).description("delegated by `librarian`");
+    child
+        .attributes
+        .insert(ATTR_PARENT_RUN.to_owned(), newer.id.to_string().into());
+    save_run(&catalog, &child).await?;
+    let (_, runs) = client.send("GET", "/api/agent-runs/librarian", None).await;
+    let runs = runs.as_array().unwrap();
+    assert_eq!(runs.len(), 3);
+    let listed = runs
+        .iter()
+        .find(|r| r["id"] == json!(child.id.0.to_string()))
+        .unwrap();
+    assert_eq!(listed["parent_run"], json!(newer.id.0.to_string()));
+    let (status, _) = client
+        .send("DELETE", &format!("/api/runs/{}", child.id.0), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
 
     let (status, whole) = client
         .send("GET", &format!("/api/runs/{}", newer.id.0), None)

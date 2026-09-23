@@ -2,6 +2,22 @@
 
 Changes in reverse chronological order.
 
+## Subagent runs no longer show up in the agent chat history
+
+A subagent's run is saved as a run of the agent it delegated to, so `listRuns` returned it along with
+the conversations people started. The admin chat history then listed each delegated run as a chat of
+its own, even though its transcript already appears nested inside the parent run. The run summary now has
+`parent_run`, which comes from the run's `parent_run` attribute and is null on a run a person
+started. `AgentChat` drops runs that have one when it loads the history. The endpoint still
+returns every run, so MCP clients can still find a subagent's run. The generated clients are
+regenerated, and `agent_admin_api.rs` checks that a delegated run is listed with its parent and a
+normal run with none.
+
+`the_traits_endpoint_declares_each_traits_configuration` failed because it required every trait
+except `admin_copilot` to have a required setting. The `http` trait has none on purpose. The
+registry's own test in `sc-core-traits` already skips `http` for this reason, and the server test
+now skips it too.
+
 ## Popping out an agent chat keeps the unsent message
 
 Popping out an agent chat cleared anything typed in the entry box, because the draft was the page's

@@ -4306,6 +4306,10 @@ fn run_summary_schema() -> TypeSchema {
         // and a stuck run alike, and this is what tells them apart. Null while
         // running and for a workflow run.
         StructField::new("conclusion", TypeSchema::optional(TypeSchema::json())),
+        // The run that delegated this one — set on a subagent's run, null on a
+        // run somebody started. The chat history lists only the latter: a
+        // child's transcript is read nested inside its parent's.
+        StructField::new("parent_run", TypeSchema::optional(TypeSchema::uuid())),
     ])
 }
 
