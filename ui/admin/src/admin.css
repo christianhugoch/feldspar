@@ -422,6 +422,22 @@ div.navbar-brand>a:hover {
   overflow-wrap: anywhere;
 }
 
+.chat-tool-count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The calls of a group, each its own badge, indented under the one that
+   counts them. */
+.chat-tool-group {
+  margin-top: 0.5rem;
+  padding-left: 0.75rem;
+  border-left: var(--tblr-border-width) solid var(--tblr-border-color);
+}
+
+.chat-tool-group .chat-tool {
+  margin-bottom: 0.375rem;
+}
+
 .chat-tool-head .chat-tool-caret {
   transition: transform 0.15s ease;
 }

@@ -2,6 +2,27 @@
 
 Changes in reverse chronological order.
 
+## Repeated tool calls in the agent chat collapse into one badge
+
+When an agent called the same tool several times in a row, the admin chat drew one badge per call.
+Now `groupTranscript` in `agentChat.ts` folds two or more consecutive calls to the same tool into one
+item, and the transcript draws it as a single badge that ends in the count, e.g. `read_rows (3)`.
+Clicking the badge lists the individual calls, and each one still opens onto its arguments and
+result. The group badge shows running dots while any of its calls is still running and the warning
+icon if any of them failed. Screenshots stay visible while the group is closed. Calls with text
+between them are not joined. The chat and the run page's transcript both render through the new
+`Transcript` component. `agentChat.test.ts` covers the grouping, including calls that arrive over the stream.
+
+The IDE's chat panel does the same. Each tool call used to be its own progress line. Now each call is a
+VS Code progress task, tracked by a new `ToolRuns` in `chatRelay.ts`. When the next call is to the same
+tool, it joins that task instead of adding a line: the calls become the collapsible items under the
+line, and when the run ends the line reads `read_file (3)`. The label is the tool name without the
+coding trait's scope suffix (`toolName`). A single call settles as the line it always was. Text,
+reasoning, a failed result or an error ends a run, and the participant closes any run still open when
+the turn ends. One visible change: VS Code hid a plain progress line once text followed it, but a
+task line stays, so tool calls now remain in the IDE transcript as they do in the admin one.
+`chat.test.ts` covers joining, ending a run, and the label.
+
 ## Subagent runs no longer show up in the agent chat history
 
 A subagent's run is saved as a run of the agent it delegated to, so `listRuns` returned it along with

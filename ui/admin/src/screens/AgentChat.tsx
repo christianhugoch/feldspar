@@ -63,6 +63,7 @@ import {
   conclusionLabel,
   conclusionNotice,
   emptyChat,
+  groupTranscript,
   previewPaneOf,
   resolvePaneUrl,
   splitCodeBlocks,
@@ -74,6 +75,7 @@ import {
   type Entry,
   type PreviewPane,
   type SocketLike,
+  type ToolEntry as ToolCall,
 } from "../agentChat";
 import { navigate } from "../App";
 import {
@@ -496,9 +498,7 @@ export function AgentChat({
               </Alert>
             )}
             {entries.length === 0 && !error && <EmptyTranscript agent={agent} />}
-            {entries.map((entry, i) => (
-              <TranscriptEntry key={i} entry={entry} />
-            ))}
+            <Transcript entries={entries} />
             {chat.running && !viewing && (
               <div className="chat-thinking mb-3">
                 <span className="chat-dot" />
@@ -1046,8 +1046,25 @@ function ComposerControlView({
   );
 }
 
+/** The transcript's entries, with a run of calls to one tool drawn as one
+ * badge. */
+export function Transcript({ entries }: { entries: Entry[] }) {
+  const items = useMemo(() => groupTranscript(entries), [entries]);
+  return (
+    <>
+      {items.map((item) =>
+        item.kind === "tools" ? (
+          <ToolGroup key={`tools-${item.index}`} name={item.name} calls={item.calls} />
+        ) : (
+          <TranscriptEntry key={`entry-${item.index}`} entry={item.entry} />
+        ),
+      )}
+    </>
+  );
+}
+
 /** One entry of the transcript. */
-export function TranscriptEntry({ entry }: { entry: Entry }) {
+function TranscriptEntry({ entry }: { entry: Entry }) {
   if (entry.kind === "user") {
     return (
       <div className="chat-turn chat-turn-user">
@@ -1154,8 +1171,61 @@ function CodeBlock({ language, text }: { language: string; text: string }) {
   );
 }
 
+/** Consecutive calls to one tool: one badge with a count, opening onto each
+ * call as its own badge. */
+function ToolGroup({ name, calls }: { name: string; calls: ToolCall[] }) {
+  const [open, setOpen] = useState(false);
+  const running = calls.some((call) => call.result === null);
+  const failed = calls.some((call) => call.isError);
+
+  return (
+    <div className="chat-tool">
+      <button
+        type="button"
+        className="chat-tool-head"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        {failed ? (
+          <IconAlertTriangle className="icon-2 text-danger flex-shrink-0" />
+        ) : (
+          <IconTool className="icon-2 flex-shrink-0" />
+        )}
+        <span className="chat-tool-name">{name}</span>
+        <span className="chat-tool-count">({calls.length})</span>
+        {running && <RunningDots />}
+        <IconChevronDown className="icon-2 chat-tool-caret flex-shrink-0" />
+      </button>
+      {open ? (
+        <div className="chat-tool-group">
+          {calls.map((call) => (
+            <ToolEntry key={call.id} entry={call} />
+          ))}
+        </div>
+      ) : (
+        // Screenshots stay on screen while the calls are folded, as they do
+        // for a single call.
+        calls.flatMap((call) => call.images ?? []).map((src, index) => (
+          <ToolImage key={index} src={src} name={name} />
+        ))
+      )}
+    </div>
+  );
+}
+
+function ToolImage({ src, name }: { src: string; name: string }) {
+  return (
+    <img
+      src={src}
+      alt={`what ${name} saw`}
+      className="chat-tool-image d-block mt-1 border rounded"
+      style={{ maxWidth: "100%" }}
+    />
+  );
+}
+
 /** A tool call: the line, and what it opens onto. */
-function ToolEntry({ entry }: { entry: Extract<Entry, { kind: "tool" }> }) {
+function ToolEntry({ entry }: { entry: ToolCall }) {
   const { t } = useT();
   const [open, setOpen] = useState(false);
   const running = entry.result === null;
@@ -1180,13 +1250,7 @@ function ToolEntry({ entry }: { entry: Extract<Entry, { kind: "tool" }> }) {
       {/* A screenshot is what the agent saw: shown, not folded away with the
           snapshot text (TODO §7b). */}
       {entry.images?.map((src, index) => (
-        <img
-          key={index}
-          src={src}
-          alt={`what ${entry.name} saw`}
-          className="chat-tool-image d-block mt-1 border rounded"
-          style={{ maxWidth: "100%" }}
-        />
+        <ToolImage key={index} src={src} name={entry.name} />
       ))}
       {open && (
         <div className="chat-tool-body">
