@@ -173,7 +173,7 @@ export function AgentChat({
   agent: string;
   /** The conversation this chat opens on — a popped-out window continuing what
    * the page was showing. A fresh chat when absent. */
-  initial?: { runId: string | null; entries: Entry[] };
+  initial?: { runId: string | null; entries: Entry[]; draft?: string };
   frame?: ChatFrame;
 }) {
   const { t } = useT();
@@ -181,7 +181,7 @@ export function AgentChat({
   const [runs, setRuns] = useState<RunItem[]>([]);
   const [viewing, setViewing] = useState<{ run: RunItem; entries: Entry[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(initial?.draft ?? "");
   // The rail starts open where there is room for it beside the transcript, and
   // shut where it would cover it (below Tabler's `lg`, it is a drawer; in a
   // window there is no room for it at all until it goes full screen).
@@ -477,6 +477,7 @@ export function AgentChat({
                   // one would be a window with nothing to do in it.
                   runId: viewing ? viewing.run.id : chat.runId,
                   entries: viewing ? viewing.entries : chat.entries,
+                  draft,
                 })
               }
             />
@@ -753,7 +754,12 @@ function PopOutButton({ running, onPopOut }: { running: boolean; onPopOut: () =>
 }
 
 /** Hand the conversation to the store, and leave the page it was on. */
-function popOut(chat: { agent: string; runId: string | null; entries: Entry[] }): void {
+function popOut(chat: {
+  agent: string;
+  runId: string | null;
+  entries: Entry[];
+  draft: string;
+}): void {
   popOutChat(chat);
   navigate("/agents");
 }

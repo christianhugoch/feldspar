@@ -47,6 +47,9 @@ export type ChatWindow = {
   runId: string | null;
   /** The transcript so far, so the window opens showing what was already said. */
   entries: Entry[];
+  /** What was typed in the entry box and not yet sent. Popping out is a move,
+   * not a new chat, so a half-written message goes with the conversation. */
+  draft: string;
   mode: ChatWindowMode;
 };
 
@@ -63,6 +66,8 @@ export type ChatWindowSeed = {
   agent: string;
   runId: string | null;
   entries: Entry[];
+  /** The unsent message in the entry box, if there was one. */
+  draft?: string;
 };
 
 /**
@@ -88,7 +93,7 @@ export function openChatWindow(windows: ChatWindow[], seed: ChatWindowSeed): Cha
     }
   }
   if (windows.length >= MAX_CHAT_WINDOWS) return windows;
-  return [...windows, { ...seed, mode: "docked" }];
+  return [...windows, { ...seed, draft: seed.draft ?? "", mode: "docked" }];
 }
 
 /**
@@ -154,7 +159,12 @@ export function canPopOutChat(): boolean {
 }
 
 /** Pop a chat out of the page and into the corner. */
-export function popOutChat(chat: { agent: string; runId: string | null; entries: Entry[] }): void {
+export function popOutChat(chat: {
+  agent: string;
+  runId: string | null;
+  entries: Entry[];
+  draft?: string;
+}): void {
   counter += 1;
   publish(openChatWindow(windows, { key: `chat-window-${counter}`, ...chat }));
 }

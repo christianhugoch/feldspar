@@ -2,6 +2,13 @@
 
 Changes in reverse chronological order.
 
+## Popping out an agent chat keeps the unsent message
+
+Popping out an agent chat cleared anything typed in the entry box, because the draft was the page's
+local state and was not handed to the pop-out store. `ChatWindow` now has a `draft` field.
+`popOutChat` takes the draft from the page, and the popped-out `AgentChat` starts with that text in
+its entry box. `chatWindows.test.ts` checks that the draft reaches the window.
+
 ## Release builds are tuned for build speed
 
 `Cargo.toml` had no `[profile.release]`, so `cargo build --release -p sc-cli` and
