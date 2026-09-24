@@ -174,6 +174,18 @@ pub fn render(dialect: &PgDialect, change: &SchemaChange) -> Result<String> {
             }
             sql
         }
+        SchemaChange::SetColumnNullable {
+            table,
+            column,
+            nullable,
+        } => {
+            format!(
+                "ALTER TABLE {} ALTER COLUMN {} {} NOT NULL",
+                dialect.quote_ident(table),
+                dialect.quote_ident(column),
+                if *nullable { "DROP" } else { "SET" }
+            )
+        }
         SchemaChange::AddUniqueConstraint {
             table,
             name,
@@ -470,6 +482,28 @@ mod tests {
             render_ok(&change),
             "ALTER TABLE \"book\" ADD COLUMN \"author\" int8 \
              REFERENCES \"person\" (\"id\") DEFERRABLE INITIALLY IMMEDIATE"
+        );
+    }
+
+    #[test]
+    fn a_column_can_be_made_to_reject_or_accept_nulls() {
+        let change = SchemaChange::SetColumnNullable {
+            table: "book".into(),
+            column: "title".into(),
+            nullable: false,
+        };
+        assert_eq!(
+            render_ok(&change),
+            "ALTER TABLE \"book\" ALTER COLUMN \"title\" SET NOT NULL"
+        );
+        let change = SchemaChange::SetColumnNullable {
+            table: "book".into(),
+            column: "title".into(),
+            nullable: true,
+        };
+        assert_eq!(
+            render_ok(&change),
+            "ALTER TABLE \"book\" ALTER COLUMN \"title\" DROP NOT NULL"
         );
     }
 

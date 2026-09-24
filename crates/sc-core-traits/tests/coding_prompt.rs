@@ -271,9 +271,15 @@ async fn a_store_inside_someone_elses_repository_gets_no_git_log() -> Result<()>
 /// reading the documentation of the library it is writing against instead of
 /// its memory of it. Measured: `act` 1 691 on Claude (`str_replace`), 1 746 on
 /// GPT (`apply_patch`, the larger edit tool); `plan` 1 501 on both.
+///
+/// **2 000 since invitations and forgotten passwords.** The system prompt now
+/// tells the builder about signing in and up, and that emailed links open
+/// `/set-password` — a page it must keep, because nothing else in the project
+/// says a link from outside the application lands there. About 230 tokens.
+/// Measured: `act` 1 919 on Claude, 1 974 on GPT; `plan` 1 729 on both.
 #[tokio::test]
-async fn the_react_builder_agents_stable_prefix_is_at_most_1750_tokens() -> Result<()> {
-    const LIMIT: u64 = 1_750;
+async fn the_react_builder_agents_stable_prefix_is_at_most_2000_tokens() -> Result<()> {
+    const LIMIT: u64 = 2_000;
     let env = Env::new().await?;
     let app = Application::new(
         "Todo",

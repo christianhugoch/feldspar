@@ -671,7 +671,8 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 // The field must exist: this edits a field the admin is looking
-                // at. Overlay-only — nothing here touches the column itself.
+                // at. The overlay, plus the two column properties an edit may
+                // change: whether it is in the key, and whether it takes nulls.
                 let table_name = ctx.path_param("table")?.to_owned();
                 let field_name = ctx.path_param("field")?.to_owned();
                 let obj = require_object(&ctx.body)?;
@@ -690,6 +691,12 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     // admin ticked or unticked the box.
                     primary_key: obj
                         .get("primary_key")
+                        .filter(|v| !v.is_null())
+                        .and_then(Json::as_bool),
+                    // The same reading, for the same reason: omitted leaves the
+                    // column's `NOT NULL` as it is.
+                    required: obj
+                        .get("required")
                         .filter(|v| !v.is_null())
                         .and_then(Json::as_bool),
                 };

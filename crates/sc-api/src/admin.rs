@@ -3814,14 +3814,19 @@ fn create_constraint_schema() -> TypeSchema {
 }
 
 /// The body accepted when **editing** a field — the overlay-only subset, plus
-/// the one column property that must be reachable after the fact. No `name`,
-/// `required`, `unique` or storage type: those are the database's, and changing
-/// them is a schema change out of scope for this milestone.
+/// the two column properties that must be reachable after the fact. No `name`,
+/// `unique` or storage type: those are the database's, and changing them is a
+/// schema change out of scope for this milestone.
 ///
-/// `primary_key` is the exception, and a considered one: since no table is
+/// `primary_key` is one exception, and a considered one: since no table is
 /// created with a key it did not declare, a table that has none — imported from
 /// a CSV with no key column, or built a field at a time — could otherwise only
 /// get one by being dropped and recreated with its rows thrown away.
+///
+/// `required` is the other: whether a field may be left empty is a rule about
+/// the data that changes as an application does. Making one required is refused
+/// while a row has no value in it; a key field is required whatever this says.
+/// Both are **omitted means leave it**, unlike the rest of this body.
 fn field_settings_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("type", TypeSchema::optional(TypeSchema::text())),
@@ -3830,6 +3835,7 @@ fn field_settings_schema() -> TypeSchema {
         StructField::new("label", TypeSchema::optional(TypeSchema::text())),
         StructField::new("description", TypeSchema::optional(TypeSchema::text())),
         StructField::new("primary_key", TypeSchema::optional(TypeSchema::bool())),
+        StructField::new("required", TypeSchema::optional(TypeSchema::bool())),
     ])
 }
 

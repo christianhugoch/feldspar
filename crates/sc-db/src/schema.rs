@@ -270,6 +270,19 @@ pub enum SchemaChange {
         /// The generator to give it; `None` removes whatever it has.
         generator: Option<ColumnGenerator>,
     },
+    /// Make an existing column accept nulls, or reject them.
+    ///
+    /// Making a column `NOT NULL` is a check of the data as well as a change of
+    /// the declaration: a backend refuses it while any row holds a null there,
+    /// and the change fails rather than inventing a value to put in its place.
+    SetColumnNullable {
+        /// The table to alter.
+        table: String,
+        /// The column to alter.
+        column: String,
+        /// `true` drops the `NOT NULL`; `false` adds it.
+        nullable: bool,
+    },
     /// Add a `UNIQUE` constraint over one or more columns — a table-level
     /// constraint, which is what "jointly unique" needs and what
     /// [`ColumnDef::unique`] cannot express.

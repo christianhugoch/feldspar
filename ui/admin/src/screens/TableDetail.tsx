@@ -71,6 +71,7 @@ import {
   fieldFormError,
   keyValueNote,
   newFieldForm,
+  nullableEditable,
   updateFieldBody,
   type FieldForm,
   type FieldItem,
@@ -1782,15 +1783,19 @@ function Fields({
                     type="checkbox"
                     label={t("Nullable")}
                     checked={form.nullable && !form.primaryKey}
-                    // A NOT NULL is the column's, and changing one on a table
-                    // with rows in it is a migration (§3.3). A key column is
-                    // NOT NULL whatever this says, so it shows that way.
-                    disabled={isEdit || form.primaryKey}
+                    // A key column is NOT NULL whatever this says, so it shows
+                    // that way and cannot be changed while it is in the key.
+                    disabled={!nullableEditable(form)}
                     onChange={(e) => update({ nullable: e.target.checked })}
                   />
-                  {isEdit && (
+                  {isEdit && form.primaryKey && (
                     <Form.Text muted className="d-block">
-                      <T text="Whether the column accepts nulls cannot be changed here." />
+                      <T text="A primary key field never accepts nulls." />
+                    </Form.Text>
+                  )}
+                  {isEdit && !form.primaryKey && form.wasNullable && !form.nullable && (
+                    <Form.Text muted className="d-block">
+                      <T text="Saving fails if any row has no value in this field." />
                     </Form.Text>
                   )}
 

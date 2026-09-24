@@ -155,8 +155,10 @@ fn statements(dialect: &SqliteDialect, change: &SchemaChange) -> Result<Option<V
                 dialect.quote_ident(column)
             )]
         }
-        // Both of these change a column's declaration, which SQLite cannot do.
-        SchemaChange::SetPrimaryKey { .. } | SchemaChange::SetColumnGenerator { .. } => {
+        // All of these change a column's declaration, which SQLite cannot do.
+        SchemaChange::SetPrimaryKey { .. }
+        | SchemaChange::SetColumnGenerator { .. }
+        | SchemaChange::SetColumnNullable { .. } => {
             return Ok(None);
         }
         SchemaChange::AddUniqueConstraint {
@@ -489,6 +491,33 @@ fn rebuild_statements(
             }
             (table, existing, key)
         }
+        SchemaChange::SetColumnNullable {
+            table,
+            column,
+            nullable,
+        } => {
+            let mut existing = introspect::columns(conn, table)?;
+            let key = introspect::primary_key(conn, table)?;
+            // Refused rather than quietly undone by the key's `NOT NULL` below,
+            // which is what the rebuild would otherwise do with it.
+            if *nullable && key.contains(column) {
+                return Err(Error::invalid(format!(
+                    "column `{column}` of `{table}` is part of the primary key, \
+                     which never accepts nulls"
+                )));
+            }
+            let target = existing
+                .iter_mut()
+                .find(|c| &c.name == column)
+                .ok_or_else(|| {
+                    Error::invalid(format!("table `{table}` has no column `{column}`"))
+                })?;
+            // A row holding a null fails the copy into the new shape, which
+            // rolls the rebuild back: the column is made `NOT NULL` only over
+            // data that already is.
+            target.not_null = !nullable;
+            (table, existing, key)
+        }
         other => {
             return Err(Error::database(format!(
                 "{} does not need a table rebuild",
@@ -693,6 +722,7 @@ fn change_name(change: &SchemaChange) -> &'static str {
         SchemaChange::DropColumn { .. } => "drop column",
         SchemaChange::SetPrimaryKey { .. } => "set primary key",
         SchemaChange::SetColumnGenerator { .. } => "set column generator",
+        SchemaChange::SetColumnNullable { .. } => "set column nullable",
         SchemaChange::AddUniqueConstraint { .. } => "add unique constraint",
         SchemaChange::DropConstraint { .. } => "drop constraint",
         SchemaChange::CreateIndex { .. } => "create index",

@@ -66,6 +66,7 @@ use sc_catalog::{
 };
 use sc_db::{ColumnGenerator, SchemaChange};
 use sc_error::{Error, Result};
+use sc_query::{Expr, UnOp};
 use sc_types::{BasicType, RichTypeRef, TypeRef};
 
 /// The column default a `uuid` primary-key column is given, so a row can be
@@ -318,8 +319,16 @@ pub struct FieldSettings {
     /// recreated. Setting it emits `SET PRIMARY KEY` over the key's columns plus
     /// this one; clearing it takes this column out, and clearing the last leaves
     /// the table with no key at all. The `NOT NULL` a key column is given is
-    /// **not** taken away again, because that is a retype and this is not.
+    /// **not** taken away again by this; `required: Some(false)` does that,
+    /// once the column is out of the key.
     pub primary_key: Option<bool>,
+    /// Whether the column rejects nulls: `SET NOT NULL` or `DROP NOT NULL`.
+    ///
+    /// Making a field required is refused, by name and before any DDL, while a
+    /// row still holds a null in it — nothing invents a value for those rows.
+    /// A key column is `NOT NULL` whatever this says, so asking for it to be
+    /// optional is refused; a calculated field has no column to constrain.
+    pub required: Option<bool>,
 }
 
 /// One schema operation.
@@ -1283,7 +1292,8 @@ impl Plan {
                 && columns.contains(&field)
             {
                 return Err(Error::invalid(format!(
-                    "`{table}.{field}` is a built-in column of `{table}`; its key is not                      the admin's to change"
+                    "`{table}.{field}` is a built-in column of `{table}`; its key is not \
+                     the admin's to change"
                 )));
             }
             if existing.is_calc() {
@@ -1336,6 +1346,12 @@ impl Plan {
                 });
             }
         }
+        // After the key, which it reads: a field keyed by this very operation is
+        // `NOT NULL` already, and one un-keyed by it may now be made optional.
+        if let Some(required) = settings.required {
+            self.set_required(catalog, &mut projected, &existing, required)
+                .await?;
+        }
         self.projection.insert(projected);
 
         self.metas.push(MetaWrite {
@@ -1345,6 +1361,84 @@ impl Plan {
         });
         self.applied.fields_altered.push(format!("{table}.{field}"));
         self.note_changed(table);
+        Ok(())
+    }
+
+    /// Make an existing column reject nulls, or accept them — the `NOT NULL`
+    /// half of [`alter_field`](Self::alter_field).
+    ///
+    /// `projected` is the table as the operation has left it so far, so a key
+    /// switched on or off by the same operation is already reflected in it.
+    async fn set_required(
+        &mut self,
+        catalog: &Catalog,
+        projected: &mut Table,
+        existing: &DataField,
+        required: bool,
+    ) -> Result<()> {
+        let table = projected.name.clone();
+        let field = existing.base.name.clone();
+        let Some(slot) = projected.fields.iter_mut().find(|f| f.base.name == field) else {
+            return Ok(());
+        };
+        if slot.required == required {
+            return Ok(());
+        }
+        if existing.is_calc() {
+            return Err(Error::invalid(format!(
+                "`{table}.{field}` is calculated and has no column to make {}",
+                if required { "required" } else { "optional" }
+            )));
+        }
+        if slot.primary_key {
+            // Only reachable asking for `false`: a key column is `NOT NULL`
+            // already, so asking for `true` on one is the no-op above.
+            return Err(Error::invalid(format!(
+                "`{table}.{field}` is part of the primary key, which never accepts \
+                 nulls; take it out of the key first"
+            )));
+        }
+        if let Some((_, columns)) = PROTECTED_COLUMNS.iter().find(|(t, _)| *t == table)
+            && columns.contains(&field.as_str())
+        {
+            return Err(Error::invalid(format!(
+                "`{table}.{field}` is a built-in column of `{table}`; whether it \
+                 accepts nulls is not the admin's to change"
+            )));
+        }
+        if required {
+            // The database would refuse too, but with a message about a
+            // constraint rather than about the rows the admin has to fix. Only a
+            // column that exists already can hold a null: one added earlier in
+            // this batch is in a table with no rows yet, or has a null in every
+            // row — and the database says so.
+            if let Some(live) = catalog.get(&table)?
+                && live.field(&field).is_some_and(|f| !f.is_calc())
+            {
+                let nulls = crate::rows::count_rows_where(
+                    catalog,
+                    &live,
+                    Some(Expr::unary(UnOp::IsNull, Expr::col(field.as_str()))),
+                    None,
+                )
+                .await?;
+                if nulls > 0 {
+                    return Err(Error::invalid(format!(
+                        "`{table}.{field}` cannot be made required: {nulls} row{} \
+                         {} no value in it. Fill {} in first.",
+                        if nulls == 1 { "" } else { "s" },
+                        if nulls == 1 { "has" } else { "have" },
+                        if nulls == 1 { "it" } else { "them" },
+                    )));
+                }
+            }
+        }
+        slot.required = required;
+        self.ddl.push(SchemaChange::SetColumnNullable {
+            table,
+            column: field,
+            nullable: !required,
+        });
         Ok(())
     }
 

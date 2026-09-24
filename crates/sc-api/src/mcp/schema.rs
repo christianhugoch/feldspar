@@ -404,7 +404,10 @@ fn edit_parameters() -> Json {
                             "type": "boolean",
                             "description":
                                 "The column rejects nulls (`add_field`, and fields \
-                                 of `create_table`).",
+                                 of `create_table`). On `alter_field` it makes an \
+                                 existing column required, which is refused while \
+                                 any row has no value in it, or optional again. A \
+                                 primary-key field is always required.",
                         },
                         "unique": {
                             "type": "boolean",
@@ -710,6 +713,7 @@ fn parse_field_settings(obj: &Map<String, Json>) -> Result<FieldSettings> {
         kind,
         attributes: None,
         primary_key: optional_bool(obj, "primary_key")?,
+        required: optional_bool(obj, "required")?,
     })
 }
 

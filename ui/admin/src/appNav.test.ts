@@ -29,7 +29,6 @@ describe("the current application's sidebar links", () => {
       "Edit code",
       "Update client",
       "Build",
-      "Translations",
       "Settings",
     ]);
     const edit = links[0];
@@ -40,14 +39,13 @@ describe("the current application's sidebar links", () => {
     expect(links[2].href).toBeUndefined();
   });
 
-  it("adds a new chat when the application has a coding agent", () => {
+  it("adds a link to the coding agent when the application has one", () => {
     const labels = appNavLinks(react, "build-todo").map((l) => l.label);
     expect(labels).toEqual([
       "Edit code",
       "Update client",
       "Build",
-      "New chat",
-      "Translations",
+      "Coding agent",
       "Settings",
     ]);
     expect(appNavLinks(react, "build-todo")[3].href).toBe("#/agents/build-todo/chat");
@@ -71,17 +69,8 @@ describe("the current application's sidebar links", () => {
       "Views",
       "Pages",
       "Library",
-      "Translations",
       "Settings",
     ]);
-  });
-
-  it("offers Translations whatever the framework, because every application has strings", () => {
-    for (const app of [react, saltcornUi]) {
-      const link = appNavLinks(app, null).find((l) => l.id === "translations")!;
-      expect(link.href).toBe(`#/applications/${app.id}/translations`);
-      expect(linkActive(link, `/applications/${app.id}/translations`)).toBe(true);
-    }
   });
 
   it("always ends with settings, and never offers a delete", () => {

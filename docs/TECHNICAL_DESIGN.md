@@ -242,7 +242,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-stream` | `sc-catalog` `sc-db` `sc-error` `sc-query` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
 | `sc-workflow` | `sc-action` `sc-agent` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
-| `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-llm` `sc-query` `sc-types` |
+| `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-llm` `sc-query` `sc-types` |
 | `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-query` `sc-stream` `sc-types` |
 | `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-model` `sc-query` `sc-types` |
 | `sc-viewpattern` | `sc-action` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-query` `sc-types` |
@@ -1254,6 +1254,7 @@ a sparse value goes into `attributes`.**
 | `_fd_streams` | streams: dataflows as an entity | **not an overlay** — there is nothing to introspect a stream from, so the row is its only definition (§14.3): the provider, the `configuration` its `config_spec` declares (secrets stored as given, redacted on the way to a form), `min_role` (the floor for **observing** it through an application; `None` is admin-only, the trigger rule for the trigger reason), and in `attributes` the sparse `enabled` flag. The **element type is not a column**: it is a pure function of `provider` + `configuration`, computed on read, because a stored copy would be a second answer that drifts the day a provider's declaration changes. Nor are the elements — a flow is made durable by a trigger that writes a row, and there is no `_fd_stream_elements` |
 | `_fd_roles` | roles | **not an overlay** — a role is a row carrying a name and role-specific settings; `users.role` is a foreign key onto it (§7.4). Two built-ins (admin, public) seeded at bootstrap |
 | `_fd_sessions` | live sessions | **`UNLOGGED`** where the backend allows it (§7.2): the SHA-256 of the token, the user it names, and when it lapses. Shared by every node, cached per node behind an LRU + freshness TTL. `user_id` is deliberately **not** a foreign key — the schema layer renders no `ON DELETE` action, so one would block deleting a signed-in user; a session resolves by reading the user, so a deleted one's session resolves to nobody |
+| `_fd_password_tokens` | invitation and password-reset links | the SHA-256 of the emailed token (never the token), the user it sets a password for, its purpose (`invite` or `reset`) and when it lapses. Redeemed with `DELETE … RETURNING`, so a link works once. `user_id` is not a foreign key, for the reason `_fd_sessions` gives |
 | `users` | users | UUID PK (not `_fd_`-prefixed; it is user-facing and extensible) |
 
 **Files have no per-file database row.** Per-file metadata is stored in **xattrs** on disk;
@@ -1380,6 +1381,13 @@ erDiagram
     timestamp expires_at "nullable: a token that does not lapse"
     timestamp last_used_at "throttled to one write a minute"
     timestamp revoked_at "nullable while it is live"
+  }
+  PASSWORDTOKENS["_fd_password_tokens"] {
+    text token_hash PK "SHA-256 of the emailed token"
+    uuid user_id "deliberately NOT a foreign key"
+    text purpose "invite | reset"
+    timestamp created_at
+    timestamp expires_at "7 days for an invitation, 1 hour for a reset"
   }
   TABLES["_fd_tables"] {
     uuid id PK
@@ -1623,6 +1631,7 @@ erDiagram
   ROLES ||--o{ USERS : "role -- enforced FK"
   USERS ||--o{ SESSIONS : "user_id -- by value"
   USERS ||--o{ APITOKENS : "user_id -- by value"
+  USERS ||--o{ PASSWORDTOKENS : "user_id -- by value"
   USERS |o--o{ RUNS : "user_id -- by value, nullable"
   TABLES ||--o{ FIELDS : "table_name -- same subject, joined by name"
   FIELDS }o--o| TABLES : "attributes.target_table -- Key fields"
@@ -3495,14 +3504,17 @@ scope, so what it changed enters the change ledger and the model's reads of it g
   `<workflow>`/`<rules>`/`<edit_format>` blocks. The scope is named **once**, in the prompt,
   rather than in fifteen tool descriptions. The size test (8.3) is the reason several of these
   texts are as short as they are: the React builder's stable prefix plus tool definitions is
-  ≤ 1 750 estimated tokens in both `act` and `plan`, and it took cutting every tool description
+  ≤ 2 000 estimated tokens in both `act` and `plan`, and it took cutting every tool description
   and dropping `SHARED_PROMPT`'s workflow to get there. The budget was 1 500 and `act` measured
   1 496 — spent to the last token — until `list_assets` made the set ten tools
   (TODO "Static directories" §6); a tenth tool costs about a hundred, so the number went up
   rather than an existing description coming off. It went up again, to 1 750, when the builder
   gained `http`'s `fetch_web` (TODO W.7): `act` was at 1 596, and `fetch_web`'s description was
-  halved to 676 characters first, so the ~150 it costs is the tool and not its prose. It is
-  still a **test**, and the next tool has the same argument to make.
+  halved to 676 characters first, so the ~150 it costs is the tool and not its prose. It went
+  to 2 000 with invitations and forgotten passwords: the prompt names the `/set-password` page
+  that emailed links open, which nothing else in the project tells the builder to keep (~230
+  tokens; `act` 1 974 on GPT). It is still a **test**, and the next addition has the same
+  argument to make.
 - **`planned` is a workflow setting, not a second trait.** `workflow = planned` starts the run in
   `plan` mode (the new `AgentTrait::starting_mode` hook, read by `Runner::new`), where the tools
   are the read-only four plus `save_plan`, `implement_feature` and `explore`. The plan — an

@@ -25,6 +25,7 @@ import {
   fieldFormError,
   keyValueNote,
   newFieldForm,
+  nullableEditable,
   updateFieldBody,
   type FieldItem,
   type FieldTypeItem,
@@ -233,10 +234,38 @@ describe("saving an edited field", () => {
     });
   });
 
-  it("never sends the name or the nullability, which an edit cannot change", () => {
+  it("never sends the name, which an edit cannot change", () => {
     const body = updateFieldBody(fieldForm(field({ nullable: false })), TEXT);
     expect(body).not.toHaveProperty("name");
-    expect(body).not.toHaveProperty("required");
+  });
+});
+
+describe("whether a field accepts nulls, which an edit may change", () => {
+  it("sends `required` only when the box was changed", () => {
+    // An edit about the label must not be refused because of rows holding
+    // nulls, so an untouched box says nothing and the server leaves it alone.
+    const form = fieldForm(field({ nullable: true }));
+    expect(updateFieldBody(form, TEXT)).not.toHaveProperty("required");
+    expect(updateFieldBody({ ...form, nullable: false }, TEXT).required).toBe(true);
+
+    const required = fieldForm(field({ nullable: false, required: true }));
+    expect(updateFieldBody(required, TEXT)).not.toHaveProperty("required");
+    expect(updateFieldBody({ ...required, nullable: true }, TEXT).required).toBe(false);
+  });
+
+  it("is editable on any stored field except a key or a calculated one", () => {
+    expect(nullableEditable(fieldForm(field({})))).toBe(true);
+    const key = fieldForm(field({ name: "id", primary_key: true, nullable: false }));
+    expect(nullableEditable(key)).toBe(false);
+    // Unticking the key box frees it again, in the same edit.
+    expect(nullableEditable({ ...key, primaryKey: false })).toBe(true);
+    const calc = fieldForm(field({ kind: { type: "calc", expression: "1" } }));
+    expect(nullableEditable(calc)).toBe(false);
+  });
+
+  it("never sends it for a key, whose column is NOT NULL whatever the box says", () => {
+    const key = fieldForm(field({ name: "id", primary_key: true, nullable: false }));
+    expect(updateFieldBody({ ...key, nullable: true }, TEXT)).not.toHaveProperty("required");
   });
 });
 

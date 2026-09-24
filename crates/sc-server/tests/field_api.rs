@@ -679,3 +679,106 @@ async fn inbound_keys_name_the_tables_that_point_here() -> sc_error::Result<()> 
 
     Ok(())
 }
+
+/// Whether a field accepts nulls is editable after the fact, both ways: made
+/// required once its rows all have a value, and optional again. The one refusal
+/// that depends on the data names the rows in the way rather than the database's
+/// constraint, and a key field can never be made optional.
+#[tokio::test]
+async fn a_field_can_be_made_required_and_optional_again() -> sc_error::Result<()> {
+    let (mut client, _catalog, _db) = setup().await?;
+    for body in [
+        json!({ "name": "id", "type": "int", "primary_key": true }),
+        json!({ "name": "title", "type": "text" }),
+        json!({ "name": "pages", "type": "int" }),
+    ] {
+        let (status, body) = client
+            .send("POST", "/api/tables/book/fields", Some(body))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let (status, body) = client
+        .send("POST", "/api/tables/book/rows", Some(json!({ "pages": 1 })))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].clone();
+
+    // A row with no title is in the way, and the message says so.
+    let (status, body) = client
+        .send(
+            "PUT",
+            "/api/tables/book/fields/title",
+            Some(json!({ "type": "text", "required": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string().contains("1 row has no value"),
+        "names the rows: {body}"
+    );
+    let (_, fields) = client.send("GET", "/api/tables/book/fields", None).await;
+    assert_eq!(field(&fields, "title")["nullable"], json!(true));
+
+    // Fill it in, and the same request goes through.
+    let (status, body) = client
+        .send(
+            "PUT",
+            &format!("/api/tables/book/rows/{id}"),
+            Some(json!({ "title": "Dune" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = client
+        .send(
+            "PUT",
+            "/api/tables/book/fields/title",
+            Some(json!({ "type": "text", "required": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["nullable"], json!(false));
+    assert_eq!(body["required"], json!(true));
+    // The database enforces it now.
+    let (status, _) = client
+        .send("POST", "/api/tables/book/rows", Some(json!({ "pages": 1 })))
+        .await;
+    assert_ne!(status, StatusCode::CREATED, "a title-less row is refused");
+
+    // An edit that does not mention it leaves it alone.
+    let (status, body) = client
+        .send(
+            "PUT",
+            "/api/tables/book/fields/title",
+            Some(json!({ "type": "text", "label": "Title" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["nullable"], json!(false));
+
+    // And back again.
+    let (status, body) = client
+        .send(
+            "PUT",
+            "/api/tables/book/fields/title",
+            Some(json!({ "type": "text", "required": false })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["nullable"], json!(true));
+    let (status, body) = client
+        .send("POST", "/api/tables/book/rows", Some(json!({ "pages": 1 })))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // The key is the exception: a key column never takes a null.
+    let (status, body) = client
+        .send(
+            "PUT",
+            "/api/tables/book/fields/id",
+            Some(json!({ "type": "int", "required": false })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("primary key"), "{body}");
+    Ok(())
+}

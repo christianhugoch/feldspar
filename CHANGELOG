@@ -2,6 +2,58 @@
 
 Changes in reverse chronological order.
 
+## Tests brought back in line with the UX tweaks and the invitations work
+
+- `ui/admin/src/appNav.test.ts`: the sidebar no longer has a Translations link, and "New chat"
+  is now "Coding agent". The test that Translations is always offered is removed.
+- `sc-server/tests/admin_theme.rs`: the popped-out-chat check matches the surface-class ternary
+  whatever its line wrapping. The chat now has a third, split, rendering.
+- `sc-core-traits/tests/coding_prompt.rs`: the React builder's prompt budget is now 2 000 tokens,
+  up from 1 750, to pay for the sign-in and `/set-password` paragraphs. The reason is recorded
+  in the test and in TECHNICAL_DESIGN §12.
+- TECHNICAL_DESIGN: `sc-api` → `sc-email` added to §2's dependency table. `_fd_password_tokens`
+  added to §9.2's ER diagram and to the metadata-table list.
+- `docs/TODO-post-mvp-28.md`: fixed the link to `tutorial-agents.md`, which was still relative
+  to the repository root after the file was archived into `docs/`.
+- `ui/builder/package-lock.json` was out of sync with `package.json` (no `yaml`), so `npm ci`
+  refused and the builder's tests could not load `acorn`/`jsdom`. Refreshed with `npm install`.
+
+## A field's "Nullable" can be changed after it is created
+
+Before this, a field's `NOT NULL` was fixed when the field was created: the field editor greyed
+the box out and `updateField` had nowhere to put it. Now it can be switched either way on any
+stored field that is not a key or a built-in column.
+
+- **`sc-db`**: new `SchemaChange::SetColumnNullable { table, column, nullable }`.
+  - Postgres renders it as `ALTER COLUMN … SET NOT NULL` / `DROP NOT NULL`.
+  - SQLite rebuilds the table, like `SetPrimaryKey`. A row holding a null makes the copy fail,
+    which rolls the rebuild back. Asking to make a key column nullable is refused, instead of
+    the rebuild quietly putting the `NOT NULL` back.
+- **`sc-api` schema editor**: `FieldSettings.required: Option<bool>`, applied by `alter_field`
+  after any change to the key in the same operation (so un-keying a field and making it optional
+  can be one edit). It is refused:
+  - on a primary-key field ("take it out of the key first");
+  - on a calculated field, which has no column;
+  - on the built-in columns of `users` and `roles`;
+  - when making a field required while rows hold nulls. That check runs before any DDL and
+    counts the rows, so the message says "3 rows have no value in it. Fill them in first."
+    rather than showing the database's constraint error.
+- **Admin API**: `updateField` takes `required`. Like `primary_key`, **omitted means leave it
+  alone**, unlike the rest of that whole-object body. `client.ts` is regenerated in `ui/admin`,
+  `ui/ide` and `ui/builder`.
+- **MCP `apply_schema`**: `alter_field` reads `required`, and the tool's description says so.
+- **Admin UI**: the field editor's "Nullable" box is enabled when editing, except for a key or
+  calculated field (`nullableEditable`). The form remembers what the box said when it opened and
+  sends `required` only when the admin changed it, so an edit to a label is never refused because
+  of nulls it was not about. A hint under the box warns that saving fails if rows are empty.
+  The five locale files swap the old "cannot be changed here" string for the two new hints.
+- Fixed a pre-existing typo in the "its key is not the admin's to change" message, which had a
+  run of spaces in the middle where a line continuation was missing.
+- Tests: `sc-db-postgres` ddl unit test; `sc-db-sqlite/tests/driver.rs`
+  `a_column_can_be_made_required_and_optional_again` (the refused rebuild keeps the rows);
+  `sc-server/tests/field_api.rs` `a_field_can_be_made_required_and_optional_again` over HTTP
+  against Postgres; `ui/admin/src/fieldForm.test.ts` for when `required` is sent.
+
 ## Invitations, forgotten passwords, and `users` behind an application's API
 
 A signed-in user of one application can now make an account for somebody less powerful and have
