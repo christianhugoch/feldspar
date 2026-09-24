@@ -5905,13 +5905,19 @@ pub(crate) fn application_json(app: &Application) -> Json {
 /// an error here: this is a convenience field on a row that is being listed, and
 /// the *reason* it does not resolve is reported where it belongs — on save, or on
 /// build.
+///
+/// A `none` application has no source to build but does have a directory its
+/// coding agent writes in, and that is the one worth a link.
 fn app_source_json(app: &Application) -> Json {
     match app_source_from_config(&app.framework) {
         Ok(source) => json!({
             "store": source.store.0,
             "path": source.build.source_dir,
         }),
-        Err(_) => Json::Null,
+        Err(_) => match sc_app::none_source_dir(&app.framework) {
+            Some((store, path)) => json!({ "store": store, "path": path }),
+            None => Json::Null,
+        },
     }
 }
 

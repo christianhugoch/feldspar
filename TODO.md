@@ -306,6 +306,22 @@ when nothing changed.
       the stamp kept in the repository's git dir. `build_application_if_changed` uses it;
       `mount_all` calls it, while the Build button, the tools and a restore still always build.
 
+## Interjected — a "None" framework
+
+Asked for directly: picking a framework when creating an application should offer "None" — an
+application of APIs, static directories and streams with no build step — and it should still
+get a coding agent, to write static assets such as HTML and CSS.
+
+- [x] N.1 `sc-app/src/none.rs`: `none` as a compiled-in `FrameworkFactory` (settings `store` and
+      `source`; `serves_ui` false; strict CSP; a framework that 404s everything). Listed after
+      the installed factories.
+- [x] N.2 Its builder agent (`builder_agent_in`): `coding` over the store and directory, naming
+      the application, no checks, and a prompt listing the static directories, APIs and
+      streams. `coding`'s `application` setting now accepts an application with nothing to
+      build: `check` passes the "build", and the preview is mounted through the factory.
+- [x] N.3 A static directory serves `index.html` for a directory request. The admin API's
+      `source` and the sidebar's "Edit code" cover a `none` application's directory.
+
 ## Explicitly OUT of scope for this milestone
 
 - **Uploading or writing assets from the agent.** §6. Reading is what the use case needs, and a

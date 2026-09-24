@@ -779,11 +779,16 @@ mod mount_tests {
     }
 
     #[test]
-    fn every_registered_framework_serves_a_ui_and_an_unknown_one_is_assumed_to() {
+    fn every_registered_framework_but_none_serves_a_ui_and_an_unknown_one_is_assumed_to() {
         for info in crate::framework::registered_framework_info() {
-            assert!(info.serves_ui, "{} should serve a UI", info.name);
-            assert!(framework_serves_ui(&info.name));
+            let headless = info.name == crate::NONE_FRAMEWORK;
+            assert_eq!(info.serves_ui, !headless, "{}", info.name);
+            assert_eq!(framework_serves_ui(&info.name), !headless);
         }
+        // So an application with no framework may put its API at `/`.
+        let root = Application::new("feed", "feed", FrameworkRef::new(crate::NONE_FRAMEWORK))
+            .with_api(ApiConfig::new(REST_PROVIDER, "/"));
+        validate_api_mounts(&root).unwrap();
         // Unknown: assume there is a UI to protect — the safe direction.
         assert!(framework_serves_ui("something-else"));
     }

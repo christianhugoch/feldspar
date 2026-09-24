@@ -53,6 +53,19 @@ describe("the current application's sidebar links", () => {
     expect(appNavLinks(react, "build-todo")[3].href).toBe("#/agents/build-todo/chat");
   });
 
+  it("gives an application with no framework edit code but nothing to build", () => {
+    const none = {
+      id: "a3",
+      subdomain: "landing",
+      builds: false,
+      has_views: false,
+      source: { store: "site", path: "public" },
+    };
+    const links = appNavLinks(none, null);
+    expect(links.map((l) => l.id)).toEqual(["edit-code", "settings"]);
+    expect(links[0].href).toBe("/ide/?store=site");
+  });
+
   it("gives a Saltcorn UI application views, pages and library, then settings", () => {
     expect(appNavLinks(saltcornUi, null).map((l) => l.label)).toEqual([
       "Views",

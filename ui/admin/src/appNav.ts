@@ -68,6 +68,8 @@ export function builderAgentFor(
  *
  * - An application that is **built** from a source tree (React, code) gets the
  *   loop an admin works in: edit the code, update the generated client, build.
+ *   One with no framework has a directory but no build, so it gets only the
+ *   first.
  * - One that is **constructed** from views and pages (Saltcorn UI) gets those,
  *   and the library its views and pages place.
  * - Either gets a new chat with its coding agent, when it has one.
@@ -81,16 +83,18 @@ export function appNavLinks(
 ): AppNavLink[] {
   const base = `/applications/${encodeURIComponent(app.id)}`;
   const links: AppNavLink[] = [];
+  // Any application with a directory of its own — built from it, or (with no
+  // framework) serving it as it is — can have it opened in the IDE.
+  if (app.source) {
+    links.push({
+      id: "edit-code",
+      label: "Edit code",
+      href: ideUrl(app.source.store),
+      external: true,
+      matches: [],
+    });
+  }
   if (app.builds) {
-    if (app.source) {
-      links.push({
-        id: "edit-code",
-        label: "Edit code",
-        href: ideUrl(app.source.store),
-        external: true,
-        matches: [],
-      });
-    }
     links.push({ id: "update-client", label: "Update client", matches: [] });
     links.push({ id: "build", label: "Build", matches: [] });
   }

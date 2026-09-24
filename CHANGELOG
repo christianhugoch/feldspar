@@ -2,6 +2,42 @@
 
 Changes in reverse chronological order.
 
+## A "None" framework: applications with no UI framework and no build
+
+The framework picker on the new-application form now offers **None**, for an application that
+is only its APIs, its static directories and its streams. Nothing is built: saving the
+application deploys it, as with Saltcorn UI, and it serves on its subdomain straight away.
+
+- **`sc-app/src/none.rs`** adds `NONE_FRAMEWORK` (`"none"`). It is a `FrameworkFactory` compiled
+  into `sc-app`, and `framework_factories()` always includes it, after the installed ones. This
+  means every server path that already treats a constructed framework as "nothing to build"
+  (mount on save, no Build button, no generated client to rewrite, restore) handles it without
+  changes. Its `NoneFramework` answers 404 to anything the router has not already served. It
+  declares `serves_ui` false, so an API may be mounted at `/`. Its CSP is the strict baseline.
+- **Its settings are `store` (a file store pick-list, including "create a new local store") and
+  `source` (a directory).** They exist so the application still gets a **coding agent**:
+  `builder_agent_in` declares one over that directory. It has no checks, and its prompt says
+  there is no bundler and lists the static directories (or says there are none yet, and that an
+  admin adds one), the APIs and the stream sockets.
+- **`coding`'s `application` setting accepts an application with nothing to build.** This setting
+  is how the admin UI identifies an application's builder agent, so it has to be set. `check`
+  reports the build as passed ("nothing to build") and mounts the run's preview through the
+  factory. `AppMounts::mount_preview` now constructs a factory framework's preview instead of
+  reading a bundle, so `view_app` looks at the application as it is served. The factory-mount
+  code in `apps.rs` is now one function, `construct`, used by both the mount and the preview.
+- **A static directory serves `index.html` for a directory request** (`/`, `/docs/`), so a site
+  of plain files has a front page.
+- The admin API's `source` for a `none` application is its store and directory, and the sidebar
+  shows "Edit code" for any application with a source rather than only for built ones.
+
+Tests: unit tests in `none.rs`, `builder_agent.rs` (the agent, its prompt, no agent without a
+store) and `api.rs` (`none` is the one headless framework; an API may take `/`). The registry
+order assertions now include `none`. `sc-server/tests/app_none_framework.rs` goes through the
+admin API: `none` is offered with its two settings; creating one mounts it with `builds: false`;
+`/` serves the directory's `index.html`, CSS is served, the API answers beside it, an
+unclaimed path is a 404; the builder agent is stored with no error and names the application;
+a run's preview serves the same page. `appNav.test.ts` covers the sidebar links.
+
 ## Boot skips rebuilding applications that have not changed
 
 At boot, `mount_all` used to run every application's bundler, and that was most of the start-up

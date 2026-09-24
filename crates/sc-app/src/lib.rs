@@ -61,6 +61,8 @@ pub mod i18n;
 // The application third of the administrative tool surface (§13.6), and the one
 // constructor of the whole nine-tool set.
 pub mod mcp;
+// The framework with no UI and no build: APIs, static directories and streams.
+mod none;
 mod react;
 mod scaffold;
 mod skill;
@@ -119,6 +121,7 @@ pub use i18n::{
     app_locales, bootstrap_translations, delete_application_translations, i18n_catalog_path,
     i18n_catalog_path_template, i18n_locale_in_path, set_app_locales,
 };
+pub use none::{NONE_FRAMEWORK, NoneFramework, none_config_spec, none_source_dir};
 pub use react::{
     CFG_PROJECT, REACT_BUILD_ARGS, REACT_BUILD_COMMAND, REACT_CLIENT_FILE, REACT_FRAMEWORK,
     REACT_OUTPUT_SUBDIR, REACT_RUNTIME_SUBDIR, check_project_name, project_description,

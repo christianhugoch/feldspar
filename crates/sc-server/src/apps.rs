@@ -895,6 +895,14 @@ impl AppPreviewer for AppMounts {
         let app = sc_app::load_application_by_subdomain(catalog, subdomain)
             .await?
             .ok_or_else(|| Error::invalid(format!("no application is served at `{subdomain}`")))?;
+        // Nothing was built, so there is no bundle: the preview is constructed
+        // exactly as the live mount is, and serves what it serves.
+        if let Some(factory) = sc_app::framework_factory(&app.framework.name) {
+            let framework = construct(self, &*factory, &app).await?;
+            let mounted =
+                MountedApp::new_with(app, framework, catalog, self.evaluator(), self.triggers())?;
+            return Ok(AppMounts::mount_preview(self, run, mounted));
+        }
         let source = app_source_from_config(&app.framework)?;
         let dir = output_dir.to_owned();
         let bundle = tokio::task::spawn_blocking(move || sc_app::AssetBundle::from_dir(&dir))
@@ -1003,28 +1011,7 @@ async fn mount_with(
         Error::config("this server was built with no catalog, so it cannot mount applications")
     })?;
     if let Some(factory) = sc_app::framework_factory(&app.framework.name) {
-        // A framework with nothing to build (Saltcorn UI) is constructed. What
-        // it needs to serve anything — a bundle, a runtime — is checked by the
-        // factory here, on the mount, so a missing one is one line at boot (or
-        // one error on save) rather than a failure on every request.
-        let framework = factory
-            .mount(
-                &app,
-                sc_app::MountContext {
-                    catalog,
-                    evaluator: apps.evaluator(),
-                    triggers: apps.triggers().cloned(),
-                    bundle_dir: apps.framework_bundle(&app.framework.name),
-                },
-            )
-            .await
-            .map_err(|e| {
-                let reason = match e.repr() {
-                    Repr::Config(m) | Repr::Invalid(m) => m.clone(),
-                    _ => e.to_string(),
-                };
-                Error::config(format!("application `{}`: {reason}", app.subdomain))
-            })?;
+        let framework = construct(apps, &*factory, &app).await?;
         let mounted =
             MountedApp::new_with(app, framework, catalog, apps.evaluator(), apps.triggers())?;
         apps.remount(mounted);
@@ -1061,6 +1048,40 @@ async fn mount_with(
     let mounted = MountedApp::new_with(app, framework, catalog, apps.evaluator(), apps.triggers())?;
     apps.remount(mounted);
     Ok(report)
+}
+
+/// Construct `app`'s framework through `factory` — a framework with nothing to
+/// build (Saltcorn UI, `none`).
+///
+/// What it needs to serve anything — a bundle, a runtime — is checked by the
+/// factory here, on the mount, so a missing one is one line at boot (or one
+/// error on save) rather than a failure on every request.
+async fn construct(
+    apps: &AppMounts,
+    factory: &dyn sc_app::FrameworkFactory,
+    app: &Application,
+) -> Result<Arc<dyn Framework>> {
+    let catalog = apps.catalog().ok_or_else(|| {
+        Error::config("this server was built with no catalog, so it cannot mount applications")
+    })?;
+    factory
+        .mount(
+            app,
+            sc_app::MountContext {
+                catalog,
+                evaluator: apps.evaluator(),
+                triggers: apps.triggers().cloned(),
+                bundle_dir: apps.framework_bundle(&app.framework.name),
+            },
+        )
+        .await
+        .map_err(|e| {
+            let reason = match e.repr() {
+                Repr::Config(m) | Repr::Invalid(m) => m.clone(),
+                _ => e.to_string(),
+            };
+            Error::config(format!("application `{}`: {reason}", app.subdomain))
+        })
 }
 
 /// How much longer one application's build may ask the service manager for.

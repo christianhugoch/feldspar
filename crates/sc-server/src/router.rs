@@ -1135,9 +1135,17 @@ async fn serve_static_dir(
             "a static directory is read, not written",
         );
     }
-    let Some(path) = dir.resolve(rest) else {
+    let Some(mut path) = dir.resolve(rest) else {
         return missing();
     };
+    // A directory is served by its `index.html`, so a site of plain files — a
+    // `none` application's — has a front page at `/`.
+    if rest.is_empty() || rest.ends_with('/') {
+        path = match path.is_empty() {
+            true => "index.html".to_owned(),
+            false => format!("{path}/index.html"),
+        };
+    }
     // The application's declared subset is the whole truth about which stores it
     // touches (§13.2): a directory naming a store outside it serves nothing,
     // whatever the record says. `save_application` refuses to store one.

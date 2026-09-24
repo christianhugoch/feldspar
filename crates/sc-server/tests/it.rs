@@ -125,6 +125,8 @@ pub(crate) fn module_registries() -> &'static tokio::sync::RwLock<()> {
     LOCK.get_or_init(|| tokio::sync::RwLock::new(()))
 }
 
+#[path = "app_none_framework.rs"]
+mod app_none_framework;
 #[path = "app_preview.rs"]
 mod app_preview;
 #[path = "saltcorn_ui_admin_api.rs"]

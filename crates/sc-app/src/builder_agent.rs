@@ -64,6 +64,7 @@ use crate::application::{Application, FrameworkRef};
 use crate::build::app_source_in;
 use crate::declared::{FrameworkDecl, FrameworkSet, installed_frameworks};
 use crate::framework::CODE_FRAMEWORK;
+use crate::none::{NONE_FRAMEWORK, none_source_dir};
 use crate::react::REACT_FRAMEWORK;
 
 /// The trait that reads, searches, edits and checks a file store's contents.
@@ -219,16 +220,24 @@ pub fn builder_agent_in(
     fw: &FrameworkRef,
     app: &Application,
 ) -> Option<BuilderAgentSpec> {
+    let built = || {
+        let source = app_source_in(set, fw).ok()?;
+        Some((source.store.0, source.build.source_dir))
+    };
     match fw.name.as_str() {
         // The type check, then the build that `application` adds.
-        REACT_FRAMEWORK => coding_agent(set, fw, app, vec!["typecheck".to_owned()], react_prompt),
+        REACT_FRAMEWORK => coding_agent(built()?, app, vec!["typecheck".to_owned()], react_prompt),
         // A `code` project is the admin's own: which of its scripts are checks is
         // theirs to say, and until they do `check` tells the model so.
-        CODE_FRAMEWORK => coding_agent(set, fw, app, Vec::new(), code_prompt),
+        CODE_FRAMEWORK => coding_agent(built()?, app, Vec::new(), code_prompt),
+        // Nothing to build, but a directory to write the files its static
+        // directories serve: `check` has no build to run and says so, and its
+        // preview is the application as it is served.
+        NONE_FRAMEWORK => coding_agent(none_source_dir(fw)?, app, Vec::new(), none_prompt),
         other => {
             let decl = set.find(other)?.clone();
             let checks = decl.checks.clone();
-            coding_agent(set, fw, app, checks, move |app, store, root| {
+            coding_agent(built()?, app, checks, move |app, store, root| {
                 declared_prompt(&decl, &fw_config(app, store, root), app, store, root)
             })
         }
@@ -271,22 +280,19 @@ fn declared_prompt(
         })
 }
 
-/// A coding agent over the framework's source tree that checks its work by
-/// building this one application (TODO §12).
+/// A coding agent over `(store, root)` — the framework's source tree — that
+/// checks its work by building this one application (TODO §12).
 ///
-/// `None` when the framework's settings do not resolve to a source tree — which
-/// on a saved application means the config was rejected on save, so there is
-/// nothing to point an agent at and nothing to report either.
+/// The caller answers `None` instead when the framework's settings do not
+/// resolve to a source tree — which on a saved application means the config was
+/// rejected on save, so there is nothing to point an agent at and nothing to
+/// report either.
 fn coding_agent(
-    set: &FrameworkSet,
-    fw: &FrameworkRef,
+    (store, root): (String, String),
     app: &Application,
     checks: Vec<String>,
     prompt: impl FnOnce(&Application, &str, &str) -> String,
 ) -> Option<BuilderAgentSpec> {
-    let source = app_source_in(set, fw).ok()?;
-    let store = source.store.0;
-    let root = source.build.source_dir;
     Some(BuilderAgentSpec {
         name: builder_agent_name(app),
         description: format!("Builds the `{}` application", app.name),
@@ -364,6 +370,75 @@ fn code_prompt(app: &Application, store: &str, root: &str) -> String {
          `/api/logout`, `/api/whoami`); `POST /api/signup` — email and password, \
          answering the new user and signing them in — exists only when its REST \
          API settings allow sign-up. {SIGNUP_SWITCH}",
+        name = app.name,
+        subdomain = app.subdomain.trim(),
+    )
+}
+
+/// The prompt for a `none` application: there is no project, only files a
+/// static directory serves, beside the application's APIs and streams.
+///
+/// What the record says *now* is written in, because it is what tells the model
+/// which of the files it writes anybody will see; the admin changes the record
+/// on the application's Settings, and the model cannot.
+fn none_prompt(app: &Application, store: &str, root: &str) -> String {
+    let root = match root.trim_matches('/') {
+        "" => "its root".to_owned(),
+        r => format!("`{r}`"),
+    };
+    let dirs = if app.static_dirs.is_empty() {
+        "It serves no static directory yet, so nothing you write is served: tell the \
+         user an administrator adds one on the application's Settings, pointing at the \
+         directory you work in."
+            .to_owned()
+    } else {
+        let list = app
+            .static_dirs
+            .iter()
+            .map(|d| {
+                let what = match d.path.trim_matches('/') {
+                    "" => format!("the root of the `{}` file store", d.store.0),
+                    p => format!("`{p}` in the `{}` file store", d.store.0),
+                };
+                format!("- `{}` serves {what}", d.mount)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "Its static directories serve files exactly as they are in the store, and a \
+             request for a directory serves its `index.html`:\n{list}"
+        )
+    };
+    let apis = if app.apis.is_empty() {
+        "It enables no API.".to_owned()
+    } else {
+        format!(
+            "Its APIs: {}.",
+            app.apis
+                .iter()
+                .map(|a| format!("`{}` at `{}`", a.provider, a.mount))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let streams = if app.streams.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Its streams are observed over a WebSocket at {}.",
+            app.streams
+                .iter()
+                .map(|s| format!("`{}`", crate::stream_socket_path(app, &s.0)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    format!(
+        "You work on the `{name}` application, served at the `{subdomain}` subdomain, \
+         in the `{store}` file store under {root}. It has no UI framework and no build \
+         step: what you write is served as it is, so write plain HTML, CSS and \
+         JavaScript that a browser runs without a bundler.\n\n\
+         {dirs}\n\n{apis}{streams}",
         name = app.name,
         subdomain = app.subdomain.trim(),
     )
@@ -510,6 +585,64 @@ mod tests {
         let mut renamed = react_app();
         renamed.name = "To-do list".to_owned();
         assert_eq!(builder_agent_name(&renamed), "build-todo");
+    }
+
+    #[test]
+    fn a_none_app_gets_a_coding_agent_over_its_directory_with_no_build() {
+        use crate::application::{ApiConfig, StaticDir};
+        use sc_catalog::FileStoreId;
+
+        let app = Application::new(
+            "Landing",
+            "landing",
+            FrameworkRef::new(NONE_FRAMEWORK)
+                .with(CFG_STORE, "site")
+                .with(CFG_SOURCE, "public"),
+        )
+        .with_api(ApiConfig::new("rest", "/api"))
+        .with_static_dir(StaticDir::new(
+            "/",
+            FileStoreId("site".to_owned()),
+            "public",
+        ));
+        let spec = framework_builder_agent(&app.framework, &app).expect("none declares one");
+
+        assert_eq!(spec.name, "build-landing");
+        let names: Vec<&str> = spec.traits.iter().map(|t| t.trait_.as_str()).collect();
+        assert_eq!(names, [TRAIT_CODING, TRAIT_HTTP, TRAIT_PREVIEW_PANE]);
+        let coding = &spec.traits[0];
+        assert_eq!(coding.config[TRAIT_CFG_STORE], Json::from("site"));
+        assert_eq!(coding.config[TRAIT_CFG_ROOT], Json::from("public"));
+        assert_eq!(coding.config[TRAIT_CFG_MAY_EDIT], Json::from(true));
+        // Still names the application — it is how the admin finds its builder,
+        // and what `view_app` looks at — but there are no checks to run.
+        assert_eq!(coding.config[TRAIT_CFG_APPLICATION], Json::from("landing"));
+        assert_eq!(coding.config[TRAIT_CFG_CHECKS], serde_json::json!([]));
+
+        // The prompt says there is no build, and where what it writes is served.
+        let prompt = &spec.system_prompt;
+        assert!(prompt.contains("no build"), "{prompt}");
+        assert!(prompt.contains("`/` serves `public`"), "{prompt}");
+        assert!(prompt.contains("`rest` at `/api`"), "{prompt}");
+        assert!(!prompt.contains("src/feldspar/"), "{prompt}");
+
+        // With no static directory, it is told nothing it writes is served yet.
+        let bare = Application::new(
+            "Bare",
+            "bare",
+            FrameworkRef::new(NONE_FRAMEWORK).with(CFG_STORE, "site"),
+        );
+        let spec = framework_builder_agent(&bare.framework, &bare).expect("declares one");
+        assert!(
+            spec.system_prompt.contains("serves no static directory"),
+            "{}",
+            spec.system_prompt
+        );
+        assert_eq!(spec.traits[0].config[TRAIT_CFG_ROOT], Json::from(""));
+
+        // And with no store there is nowhere to work.
+        let unset = Application::new("Api", "api", FrameworkRef::new(NONE_FRAMEWORK));
+        assert_eq!(framework_builder_agent(&unset.framework, &unset), None);
     }
 
     #[test]

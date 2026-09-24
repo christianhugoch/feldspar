@@ -77,7 +77,8 @@ pub struct PreviewInfo {
 pub trait AppPreviewer: Send + Sync {
     /// Mount `run`'s preview of `subdomain`, serving the bundle a green build
     /// just wrote to `output_dir`, or re-mount it under the label it already
-    /// has. The live mount is not touched.
+    /// has. The live mount is not touched. An application with nothing to build
+    /// is previewed as it is served, and `output_dir` is not read.
     async fn mount_preview(
         &self,
         run: RunId,

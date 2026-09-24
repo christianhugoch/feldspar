@@ -4963,6 +4963,18 @@ would make a build fail for a reason unrelated to building.
   and served on its subdomain. No source tree and no build. Layouts are edited in v1's own
   builder (`ui/builder`), and a per-application library holds shared layout fragments. See
   "Saltcorn UI", "The builder" and "The library" below.
+- **The `none` framework** — no UI framework and no build step: the application is its API
+  providers, its static directories and its streams. Its framework serves nothing (every path
+  nothing else claims is a 404) and declares `serves_ui` false, so an API may be mounted at `/`.
+  It is a `FrameworkFactory` compiled into `sc-app` and always registered (last in the picker),
+  so every "nothing to build" path the server has for Saltcorn UI — saving is the deployment, no
+  Build button, no generated client — applies unchanged. Its settings are a `store` and a
+  directory (`source`), for one reason: it is still created with a **coding agent**, which works
+  there — writing the HTML and CSS a static directory serves, for instance. That agent's
+  `coding` trait names the application like any builder's; `check` has no build to run and
+  passes it, and a run's preview is the application constructed as it is served. A static
+  directory serves `index.html` for a request that names a directory (`/`, `/docs/`), so such a
+  site has a front page.
 
 #### Two code frameworks, and why
 

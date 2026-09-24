@@ -121,9 +121,30 @@ pub fn configured_application(config: &Attrs) -> Option<String> {
 pub async fn validate(catalog: &Catalog, config: &Attrs) -> Result<()> {
     configured_checks(config)?;
     if let Some(subdomain) = configured_application(config) {
-        resolve_application(catalog, &subdomain).await?;
+        checked_application(catalog, &subdomain).await?;
     }
     Ok(())
+}
+
+/// The application `check` builds, and the source it builds from — `None` for
+/// one with nothing to build (a `none` application, Saltcorn UI), which is
+/// served as it is and still has a preview to look at.
+///
+/// Unlike `build_application`'s, which exists only to build, this setting is
+/// also how an agent is known as an application's builder, so an application
+/// with no build step is not refused here.
+async fn checked_application(
+    catalog: &Catalog,
+    subdomain: &str,
+) -> Result<(sc_app::Application, Option<sc_app::AppSource>)> {
+    let app = sc_app::load_application_by_subdomain(catalog, subdomain)
+        .await?
+        .ok_or_else(|| Error::invalid(format!("no application is served at `{subdomain}`")))?;
+    if sc_app::framework_factory(&app.framework.name).is_some() {
+        return Ok((app, None));
+    }
+    let (app, source) = resolve_application(catalog, subdomain).await?;
+    Ok((app, Some(source)))
 }
 
 /// The post-turn type-check script's name.
@@ -247,13 +268,31 @@ pub async fn run_script(project: &Project, script: &str, timeout: u64) -> Result
 }
 
 /// Build the configured application, as a check. A green build also says
-/// where its bundle is, for the preview.
+/// where its bundle is, for the preview — an empty path for an application with
+/// nothing to build, whose preview is mounted without one.
 async fn run_build(
     subdomain: &str,
     ctx: &TraitContext<'_>,
 ) -> Result<(CheckRun, Option<std::path::PathBuf>)> {
     let started = Instant::now();
-    let (app, source) = resolve_application(ctx.catalog, subdomain).await?;
+    let (app, source) = checked_application(ctx.catalog, subdomain).await?;
+    // Nothing to build is a pass, and the preview is the application as it is
+    // served — there is no bundle for it to be mounted from.
+    let Some(source) = source else {
+        let run = CheckRun {
+            name: build_name(subdomain),
+            outcome: Outcome::Ran {
+                passed: true,
+                diagnostics: Vec::new(),
+                output: format!(
+                    "`{subdomain}` has nothing to build: it is served from its file stores \
+                     as they are."
+                ),
+            },
+            elapsed: started.elapsed(),
+        };
+        return Ok((run, Some(std::path::PathBuf::new())));
+    };
     // A failed build is news about the build, so it is an outcome, not an error.
     let (outcome, bundle) =
         match sc_app::build_application(ctx.catalog, &app, &source, ctx.triggers).await {
