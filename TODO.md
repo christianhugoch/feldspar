@@ -294,6 +294,18 @@ bound a page's size are in `docs/TECHNICAL_DESIGN.md` §11.3, "The web".
       be covered when agents adopt it; until then an admin reading the agent sees the key.
       (The builder's own `http` carries no headers, so it has no key to show.)
 
+## Interjected — skip unchanged application builds at boot
+
+Asked for directly: every boot re-ran every application's bundler, which is most of the start-up
+time. The boot path now keys each build on git's tree hash of the working directory (staged,
+unstaged and untracked-but-not-ignored changes all included), and reuses the previous output
+when nothing changed.
+
+- [x] B.1 `sc-app/src/build_cache.rs`: the key — the source subtree's tree hash written from a
+      throwaway index, the build spec, the Feldspar version and the generated files' bytes;
+      the stamp kept in the repository's git dir. `build_application_if_changed` uses it;
+      `mount_all` calls it, while the Build button, the tools and a restore still always build.
+
 ## Explicitly OUT of scope for this milestone
 
 - **Uploading or writing assets from the agent.** §6. Reading is what the use case needs, and a

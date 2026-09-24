@@ -23,6 +23,8 @@ mod app_skill;
 mod app_store;
 #[path = "build_app.rs"]
 mod build_app;
+#[path = "build_cache.rs"]
+mod build_cache;
 #[path = "custom_query_store.rs"]
 mod custom_query_store;
 #[path = "declared_framework.rs"]

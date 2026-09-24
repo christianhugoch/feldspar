@@ -46,6 +46,7 @@ mod api;
 mod application;
 mod applications;
 mod build;
+mod build_cache;
 mod builder_agent;
 // The frameworks a module declares (§13.3, §15.1): the same registry answers,
 // written down as data instead of compiled.
@@ -83,7 +84,8 @@ pub use applications::{
 };
 pub use build::{
     AppSource, BuildReport, app_source_from_config, app_source_in, build_app, build_application,
-    build_code_framework, emit_app_client, emit_client, load_app_bundle, run_build,
+    build_application_if_changed, build_code_framework, emit_app_client, emit_client,
+    load_app_bundle, run_build,
 };
 pub use builder_agent::{
     BuilderAgentSpec, BuilderTrait, EDIT_FORMAT_AUTO, HTTP_NAME_WEB, TRAIT_CFG_APPLICATION,

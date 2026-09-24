@@ -28,6 +28,7 @@ use tokio::sync::Mutex;
 
 use crate::api::app_endpoints_with;
 use crate::application::{Application, FrameworkRef};
+use crate::build_cache::build_key;
 use crate::declared::{FrameworkDecl, FrameworkSet, installed_frameworks};
 use crate::framework::{
     AssetBundle, BuildSpec, CFG_CLIENT, CFG_COMMAND, CFG_OUTPUT, CFG_SOURCE, CFG_STORE,
@@ -278,6 +279,10 @@ pub struct BuildReport {
     /// Whether dependencies were installed as part of this build — true only on
     /// the first build of a project (or after its `node_modules` went away).
     pub installed: bool,
+    /// Whether the bundler was skipped because nothing it reads had changed
+    /// since its last successful run, and the bundle is that run's output
+    /// ([`build_application_if_changed`]). Always `false` from a real build.
+    pub reused: bool,
     /// What the installer wrote, when it ran. Kept separate from the bundler's
     /// output because it answers a different question, and because the first
     /// build of a scaffolded app is mostly this.
@@ -336,13 +341,18 @@ pub fn load_app_bundle(cat: &Catalog, source: &AppSource) -> Result<AssetBundle>
     let store = cat.require_file_store(&source.store.0)?;
     let root = store_root(&store, source)?;
     let output_dir = resolve_under(&root, &source.build.output_dir)?;
+    load_output_dir(&output_dir)
+}
+
+/// Load the bundle in `output_dir`, refusing a missing or empty one.
+fn load_output_dir(output_dir: &Path) -> Result<AssetBundle> {
     if !output_dir.is_dir() {
         return Err(Error::config(format!(
             "there is no build output at {} to reload; build the application first",
             output_dir.display()
         )));
     }
-    let bundle = AssetBundle::from_dir(&output_dir)?;
+    let bundle = AssetBundle::from_dir(output_dir)?;
     if bundle.is_empty() {
         return Err(Error::config(format!(
             "the build output directory {} is empty",
@@ -371,10 +381,94 @@ pub async fn build_application(
     source: &AppSource,
     dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
 ) -> Result<BuildReport> {
-    let client_path = emit_client(cat, app, source, &app_endpoints_with(app, cat, dispatcher)?)
-        .await?
-        .into_iter()
-        .next();
+    let (client_path, _) = emit_generated(cat, app, source, dispatcher).await?;
+    let mut report = build_app(cat, source).await?;
+    report.client_path = client_path;
+    Ok(report)
+}
+
+/// [`build_application`], except that the bundler is **skipped** when nothing
+/// it reads has changed since its last successful run here — what the server
+/// does at boot, where rebuilding every application every time was most of the
+/// start-up (design §13.2).
+///
+/// "Nothing changed" is a key over the source directory's git tree as it stands
+/// on disk (staged, unstaged and untracked files included), the build spec and
+/// the generated files, which are emitted first exactly as for a real build; see
+/// [`crate::build_cache`]. A source outside any git repository has no key and is
+/// always built. A skipped build loads the existing output and reports
+/// [`BuildReport::reused`].
+///
+/// A person pressing Build, or an agent's build tool, wants the bundler to run —
+/// to see its output, or to pick up something the key cannot see — so those
+/// paths call [`build_application`].
+pub async fn build_application_if_changed(
+    cat: &Catalog,
+    app: &Application,
+    source: &AppSource,
+    dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
+) -> Result<BuildReport> {
+    let (client_path, generated) = emit_generated(cat, app, source, dispatcher).await?;
+    let store = cat.require_file_store(&source.store.0)?;
+    let root = store_root(&store, source)?;
+    let source_dir = resolve_under(&root, &source.build.source_dir)?;
+    let output_dir = resolve_under(&root, &source.build.output_dir)?;
+    let mut contents = Vec::with_capacity(generated.len());
+    for path in generated {
+        let bytes = std::fs::read(resolve_under(&root, &path)?)?;
+        contents.push((path, bytes));
+    }
+    let key = || build_key(&source.build, &source_dir, &output_dir, &contents);
+
+    let before = key().await;
+    if let Some(before) = &before
+        && before.matches_stamp()
+        && let Ok(bundle) = load_output_dir(&output_dir)
+    {
+        return Ok(BuildReport {
+            bundle,
+            output_dir,
+            git_repo: store.is_git_repo(),
+            stdout: String::new(),
+            stderr: String::new(),
+            client_path,
+            installed: false,
+            install_log: None,
+            reused: true,
+        });
+    }
+    if let Some(before) = &before {
+        before.clear_stamp();
+    }
+
+    let mut report = build_app(cat, source).await?;
+    report.client_path = client_path;
+
+    // Stamped only if the source is as it was when the build started. The first
+    // install rewrites `package-lock.json`, and a file saved mid-build is not in
+    // the bundle: either way the next boot builds again, which settles it.
+    if let Some(before) = before
+        && key().await.is_some_and(|after| after.key == before.key)
+    {
+        before.write_stamp();
+    }
+    Ok(report)
+}
+
+/// Write an application's generated files — its typed client and, for a
+/// framework with a generated runtime, that runtime — ahead of a build.
+///
+/// Returns the client's path, when the app declares one, and every path
+/// written.
+async fn emit_generated(
+    cat: &Catalog,
+    app: &Application,
+    source: &AppSource,
+    dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
+) -> Result<(Option<String>, Vec<String>)> {
+    let mut written =
+        emit_client(cat, app, source, &app_endpoints_with(app, cat, dispatcher)?).await?;
+    let client_path = written.first().cloned();
     // An app whose framework generates a runtime gets more than the client: its
     // hooks (or its composables) are typed from this app's tables, so they are
     // regenerated on the same schedule and for the same reason (§2.1/§2.3).
@@ -383,11 +477,9 @@ pub async fn build_application(
     // rewrites the client too, which is harmless and keeps "the runtime is one
     // directory" true.
     if has_generated_runtime(app) {
-        emit_app_runtime(cat, app, source, dispatcher).await?;
+        written.extend(emit_app_runtime(cat, app, source, dispatcher).await?);
     }
-    let mut report = build_app(cat, source).await?;
-    report.client_path = client_path;
-    Ok(report)
+    Ok((client_path, written))
 }
 
 /// Write `endpoints` as a generated TypeScript client into the app's source
@@ -569,6 +661,7 @@ pub async fn run_build(spec: &BuildSpec, root: &Path) -> Result<BuildReport> {
         client_path: None,
         installed: install_log.is_some(),
         install_log,
+        reused: false,
     })
 }
 

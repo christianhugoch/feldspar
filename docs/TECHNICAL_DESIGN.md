@@ -4745,7 +4745,19 @@ actions registry arrives.
 restart should never be required and that only individual APIs and applications may need
 one, so mounting is a runtime operation, not a boot-time one:
 
-- **At boot**, `sc-server` loads every row of `_fd_applications` and mounts each app.
+- **At boot**, `sc-server` loads every row of `_fd_applications` and mounts each app. An app
+  whose build inputs are unchanged since its last successful build is mounted from that build's
+  output **without running the bundler** (`sc_app::build_application_if_changed`). The key is
+  git's tree hash of the source directory as it stands on disk — written from a throwaway copy
+  of the index, so staged, unstaged and untracked-but-not-ignored files all count and the real
+  index is untouched, with the output directory and install marker left out — plus the build
+  spec, the Feldspar version and the bytes of the generated client and runtime, which are
+  emitted first as for any build. A schema change therefore rebuilds through the client. The
+  stamp lives in the repository's git dir (`feldspar-builds/`), not in the served output; it is
+  written only when the key is the same after the build as before it. A source outside any git
+  repository has no key and is always built. Every other build (create, the Build button, the
+  build tool, a restore) always runs the bundler. Ignored files the bundler reads, such as
+  Vite's `.env.local`, are not in the key.
 - **On create/edit**, the admin UI's call persists the row, then builds (for a framework with
   a build step, §13.3) and mounts or re-mounts *that app alone*. Other apps keep serving; the
   admin never goes away; the process does not restart. An **edit** re-mounts without building:

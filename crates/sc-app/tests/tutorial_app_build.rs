@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use sc_app::{
     ApiConfig, AppRequest, Application, CodeFramework, FrameworkRef, app_source_from_config,
-    build_application, scaffold_app,
+    build_application, build_application_if_changed, scaffold_app,
 };
 use sc_catalog::{Catalog, DataField, FileStoreId, TableId};
 use sc_db::{ColumnGenerator, DatabaseDriver};
@@ -157,6 +157,19 @@ async fn the_tutorial_app_scaffolds_installs_type_checks_builds_and_serves() -> 
     // A second build reuses the installed dependencies.
     let again = build_application(&cat, &app, &source, None).await?;
     assert!(!again.installed);
+
+    // The boot path builds once and then reuses. The scaffold made the project
+    // a git repository and committed nothing, so this is the key of an entirely
+    // untracked tree: the regenerated runtime must come out byte-identical, the
+    // scaffold's `.gitignore` must keep `node_modules` and `dist` out, and the
+    // build must write nothing else into the project.
+    if tmp.path().join("todo").join(".git").is_dir() {
+        let first = build_application_if_changed(&cat, &app, &source, None).await?;
+        assert!(!first.reused, "no stamp yet");
+        let second = build_application_if_changed(&cat, &app, &source, None).await?;
+        assert!(second.reused, "an unchanged project is not rebuilt");
+        assert_eq!(second.bundle.len(), report.bundle.len());
+    }
     Ok(())
 }
 

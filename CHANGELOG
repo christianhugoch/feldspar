@@ -2,6 +2,47 @@
 
 Changes in reverse chronological order.
 
+## Boot skips rebuilding applications that have not changed
+
+At boot, `mount_all` used to run every application's bundler, and that was most of the start-up
+time. It now calls the new `sc_app::build_application_if_changed`, which runs the bundler only
+when a build key differs from the one stamped at the app's last successful build. When the key
+matches, it loads the existing output, and the server logs `mounted application `x` (unchanged
+since its last build)`. `BuildReport` has a new `reused` flag.
+
+The key comes from `sc-app/src/build_cache.rs`. It hashes git's **tree** hash of the source
+directory as it is on disk, rather than the commit hash. The working directory is staged into a
+throwaway copy of the index (`GIT_INDEX_FILE`, so git's stat cache is reused) and written with
+`git write-tree --prefix=<source dir>`. As a result:
+
+- staged, unstaged and untracked-but-not-ignored files all count;
+- a clean checkout gives `HEAD`'s tree;
+- undoing an edit gives back the old key;
+- a change to another app in the same repository doesn't rebuild this one.
+
+The output directory and the install marker are kept out of the key even when `.gitignore`
+doesn't cover them. Excluding a path git already ignores makes `git add` fail, so `git
+check-ignore --no-index` decides which ones need excluding. The key also covers the build
+spec, the Feldspar version and the bytes of the generated client and runtime. Those are emitted
+before the check exactly as for a real build, so a schema change rebuilds the app.
+
+The stamp is kept in the git dir (`.git/feldspar-builds/`), because anything in the output
+directory would be served. It is cleared before a build starts. After the build it is written
+only if the key is the same as it was before, so a first `npm install` that rewrites
+`package-lock.json`, or a file saved during the build, leads to one more build next time rather
+than a stale bundle. A missing output directory always leads to a build. A source outside any
+git repository, or any git failure, gives no key, and the app is built as before.
+
+Only boot uses the cache. Create, the Build button, the build tool and a restore still always
+build, which is how an ignored input the key can't see (Vite's `.env.local`) gets picked up.
+
+Tests: four unit tests in `build_cache` cover the git states, the exclusions, the other inputs
+and the no-repository case. `tests/build_cache.rs` builds through the catalog and checks reuse,
+then a rebuild after an uncommitted edit, a schema change, a deleted `dist` and an explicit build,
+counting bundler runs with a log file. The React tutorial test now checks that a real scaffolded
+project (npm, tsc, vite) is reused on the second boot, which shows the generated runtime comes
+out byte-identical. Design §13.2 describes the boot path.
+
 ## Repeated tool calls in the agent chat collapse into one badge
 
 When an agent called the same tool several times in a row, the admin chat drew one badge per call.

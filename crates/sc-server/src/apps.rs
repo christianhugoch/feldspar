@@ -23,7 +23,7 @@ use sc_agent::{AppPreviewer, PreviewInfo, RunId};
 use sc_api::ApiProvider;
 use sc_app::{
     Application, CodeFramework, Framework, app_source_from_config, build_application,
-    list_applications,
+    build_application_if_changed, list_applications,
 };
 use sc_catalog::{Catalog, ReprojectedApp, SchemaChanged, SchemaObserver};
 use sc_error::{Error, Repr, Result};
@@ -980,6 +980,25 @@ impl sc_action::TriggerObserver for AppMounts {
 /// runs to completion before anything is mounted, so an `Err` here — carrying the
 /// bundler's own diagnostics (§16) — never disturbs what is already up.
 pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_app::BuildReport> {
+    mount_with(apps, app, Build::Always).await
+}
+
+/// Whether a mount runs the bundler.
+#[derive(Clone, Copy)]
+enum Build {
+    /// Every time: someone asked for a build.
+    Always,
+    /// Only when the source or the generated files changed since the last
+    /// build ([`build_application_if_changed`]) — the boot path.
+    IfChanged,
+}
+
+/// [`build_and_mount`], with the choice of whether an unchanged build runs.
+async fn mount_with(
+    apps: &AppMounts,
+    app: Application,
+    build: Build,
+) -> Result<sc_app::BuildReport> {
     let catalog = apps.catalog().ok_or_else(|| {
         Error::config("this server was built with no catalog, so it cannot mount applications")
     })?;
@@ -1020,10 +1039,16 @@ pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_ap
             client_path: None,
             installed: false,
             install_log: None,
+            reused: false,
         });
     }
     let source = app_source_from_config(&app.framework)?;
-    let report = build_application(catalog, &app, &source, apps.triggers()).await?;
+    let report = match build {
+        Build::Always => build_application(catalog, &app, &source, apps.triggers()).await?,
+        Build::IfChanged => {
+            build_application_if_changed(catalog, &app, &source, apps.triggers()).await?
+        }
+    };
     // The build step travels onto the mounted framework, as
     // [`sc_app::build_code_framework`] already does it: `Framework::build()` is
     // how the rest of the process asks "is this application served from a bundle
@@ -1047,6 +1072,12 @@ const APP_BUILD_GRACE: std::time::Duration = std::time::Duration::from_secs(600)
 
 /// Load every stored application and build + mount each — what the server does at
 /// boot (design §13.2).
+///
+/// An application whose source, build spec and generated files are what they
+/// were at its last successful build here is mounted from that build's output
+/// without running the bundler ([`build_application_if_changed`]): a restart
+/// changes none of them, and rebuilding every application on every boot was
+/// most of the start-up time.
 ///
 /// **A single app that fails to build must not stop the server or the other
 /// apps**, so a per-app failure is logged and skipped rather than propagated: the
@@ -1077,7 +1108,10 @@ pub async fn mount_all(apps: &AppMounts) {
         let subdomain = app.subdomain.clone();
         service.notify_status(&format!("building application `{subdomain}`"));
         service.extend_timeout(APP_BUILD_GRACE);
-        match build_and_mount(apps, app).await {
+        match mount_with(apps, app, Build::IfChanged).await {
+            Ok(report) if report.reused => eprintln!(
+                "feldspar: mounted application `{subdomain}` (unchanged since its last build)"
+            ),
             Ok(_) => eprintln!("feldspar: mounted application `{subdomain}`"),
             Err(e) => {
                 eprintln!("feldspar: application `{subdomain}` failed to build, skipping: {e}")
