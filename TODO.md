@@ -322,6 +322,36 @@ get a coding agent, to write static assets such as HTML and CSS.
 - [x] N.3 A static directory serves `index.html` for a directory request. The admin API's
       `source` and the sidebar's "Edit code" cover a `none` application's directory.
 
+## Interjected — invitations, forgotten passwords, and `users` behind an app's API
+
+Asked for directly: a therapist, signed in to a therapists' app, creates an account for a
+patient; the patient is emailed a link that opens the *patients'* app, chooses a password there
+and is signed in. Also asked for: "forgot password" in general, and closing what exposing the
+`users` table to an app opened (the hash was readable, and `role` writable upwards).
+
+- [x] P.1 `sc-auth/src/password_tokens.rs`: `_fd_password_tokens` (SHA-256 of a 256-bit token,
+      purpose, expiry — 7 days for an invitation, 1 hour for a reset), `invite_user` (an account
+      with **no password**, only to a role less powerful than the inviter's; resent to a pending
+      account, `AlreadyActive` for one in use), and `redeem_password_token` (single use by
+      `DELETE … RETURNING`; ends the user's other tokens and sessions).
+- [x] P.2 `sc-api/src/rest/password.rs`: `POST {mount}/invite` (settings `allow_invite` and
+      `invite_min_role`; role, target app, subject, body/html and from-address in the call),
+      and on every app `POST {mount}/forgot-password` (always `{ok: true}`, one link a minute,
+      sent off the request) and `POST {mount}/set-password` (signs in). Links are
+      `{origin}/set-password#token=…`, the origin coming from the router's `AppDirectory`, so
+      only a served application can be linked to.
+- [x] P.3 `sc-api/src/user_rows.rs`: through any app API the users table never reads, filters,
+      orders, embeds or types `password_hash`, and never writes it; below admin, a written role
+      must be less powerful than the caller's (own row: may keep it), and updates/deletes reach
+      only the caller's own row and less powerful accounts'. A signed-in caller refused by
+      `Error::auth` gets `403` from the REST provider.
+- [x] P.4 The React scaffold: `src/SetPassword.tsx` on a public `/set-password` route,
+      "Forgot your password?" in `src/Login.tsx`, `setPassword`/`forgotPassword` in
+      `src/auth.tsx`; the runtime README and the builder agents' prompts describe all three.
+- [x] P.5 Tests: `sc-auth/tests/db_password_tokens.rs`, `sc-server/tests/app_invite.rs` (the
+      therapist → patient flow end to end, the role rules, forgot-password, the `users`
+      table), unit tests in `password_tokens.rs`, `user_rows.rs`, `rest/password.rs`.
+
 ## Explicitly OUT of scope for this milestone
 
 - **Uploading or writing assets from the agent.** §6. Reading is what the use case needs, and a

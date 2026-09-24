@@ -203,23 +203,30 @@ async fn refusal(
     format!("{err}")
 }
 
-/// The message a read refused for **authorization** carries, asserting it is an
-/// `Auth` — the server's 403. The distinction matters: "you may not read
-/// `authors`" is not a malformed request the caller can fix by rewriting it.
+/// The message a read refused for **authorization** carries, asserting it is a
+/// 403 — for a signed-in caller the provider answers that itself — or, for an
+/// anonymous one, an `Auth` error (the server's 401). The distinction matters:
+/// "you may not read `authors`" is not a malformed request the caller can fix
+/// by rewriting it.
 async fn denial(
     api: &RestProvider,
     cat: &Arc<Catalog>,
     user: Option<&User>,
     query: &[(&str, &str)],
 ) -> String {
-    let err = list(api, cat, user, query)
-        .await
-        .expect_err("this read is refused");
-    assert!(
-        matches!(err.repr(), Repr::Auth(_)),
-        "expected a 403, got {err:?}"
-    );
-    format!("{err}")
+    match list(api, cat, user, query).await {
+        Ok(resp) => {
+            assert_eq!(resp.status, 403, "{}", resp.body);
+            resp.body["error"].as_str().unwrap_or_default().to_owned()
+        }
+        Err(err) => {
+            assert!(
+                user.is_none() && matches!(err.repr(), Repr::Auth(_)),
+                "expected a 403, got {err:?}"
+            );
+            format!("{err}")
+        }
+    }
 }
 
 /// The statements run since the log was last cleared.

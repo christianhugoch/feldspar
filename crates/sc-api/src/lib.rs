@@ -57,6 +57,7 @@ mod resource;
 mod rest;
 mod schema;
 mod typescript;
+mod user_rows;
 
 pub use admin::{ADMIN_API_PREFIX, ROW_PAGE_CAP, admin_endpoints};
 pub use endpoint::{
@@ -74,11 +75,17 @@ pub use ownership::{
     caller_context, caller_context_at, delete_row_as, insert_row_as, read_row_values_as,
     read_rows_as, update_row_as,
 };
-pub use provider::{ApiProvider, ApiRequest, ApiResponse, RawBody, SessionAction};
+pub use provider::{
+    ApiProvider, ApiRequest, ApiResponse, AppDirectory, AppLinks, RawBody, SessionAction,
+};
 pub use resource::{ResourceField, ResourceFile, ResourceModel, ResourceOps};
 pub use rest::custom::{
     CFG_QUERIES as REST_CFG_QUERIES, CustomParam, CustomQuery, QueryColumn, custom_queries,
     describe_custom_query, set_custom_queries, validate_custom_queries,
+};
+pub use rest::password::{
+    CFG_ALLOW_INVITE as REST_CFG_ALLOW_INVITE, CFG_INVITE_MIN_ROLE as REST_CFG_INVITE_MIN_ROLE,
+    SET_PASSWORD_PAGE, rest_invite_min_role,
 };
 pub use rest::{
     AUTH_ENDPOINTS, CFG_ALLOW_SIGNUP as REST_CFG_ALLOW_SIGNUP,

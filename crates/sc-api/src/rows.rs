@@ -27,6 +27,7 @@ use sc_types::{BasicType, TypeRef};
 use serde_json::{Map, Value as Json};
 
 use crate::convert::{json_to_value, value_to_json};
+use crate::user_rows;
 
 /// Where a row operation's statement actually runs.
 ///
@@ -475,7 +476,7 @@ pub async fn count_rows_where(
 /// The `SELECT` one [`RowQuery`] renders to: every column plus the calculated
 /// fields and the query's own extra projections, filtered, ordered and bounded.
 pub(crate) fn read_select(catalog: &Catalog, table: &Table, query: &RowQuery) -> Result<Select> {
-    let mut columns = vec![Projection::all()];
+    let mut columns = user_rows::projection(table);
     columns.extend(calc_projections(catalog, table)?);
     columns.extend(query.extra.iter().cloned());
     let Some(partition) = &query.partition else {
@@ -569,7 +570,7 @@ pub async fn select_values_in(
     context: Option<&CallerContext>,
     executor: &Executor,
 ) -> Result<Vec<std::collections::BTreeMap<String, Value>>> {
-    let mut columns = vec![Projection::all()];
+    let mut columns = user_rows::projection(table);
     columns.extend(calc_projections(catalog, table)?);
     let mut select = Select::from(Source::table(table.name.clone())).columns(columns);
     if let Some(filter) = filter {
@@ -609,6 +610,7 @@ pub async fn create_row_in(
 ) -> Result<Json> {
     let obj = require_object(body)?;
     reject_calc_writes(table, obj)?;
+    user_rows::check_insert(table, obj, context)?;
     let mut columns = Vec::with_capacity(obj.len());
     let mut values = Vec::with_capacity(obj.len());
     for (key, json) in obj {
@@ -620,7 +622,7 @@ pub async fn create_row_in(
     if columns.is_empty() {
         return Err(Error::invalid("no fields to insert"));
     }
-    let mut returning = vec![Projection::all()];
+    let mut returning = user_rows::projection(table);
     returning.extend(calc_projections(catalog, table)?);
     let insert = Insert::row(table.name.clone(), columns, values).returning(returning);
     let rows = run_write_in(catalog, table, Statement::from(insert), context, executor).await?;
@@ -688,6 +690,7 @@ pub(crate) async fn update_row_guarded_in(
 ) -> Result<Json> {
     let obj = require_object(body)?;
     reject_calc_writes(table, obj)?;
+    let guard = user_rows::and_guard(guard, user_rows::update_guard(table, id, obj, context)?);
     let pk = single_pk(table)?;
     let mut assignments = Vec::with_capacity(obj.len());
     for (key, json) in obj {
@@ -710,7 +713,7 @@ pub(crate) async fn update_row_guarded_in(
         true => read_row_in(catalog, table, &pk, id, context, executor).await?,
         false => None,
     };
-    let mut returning = vec![Projection::all()];
+    let mut returning = user_rows::projection(table);
     returning.extend(calc_projections(catalog, table)?);
     let update = Update {
         table: table.name.clone(),
@@ -782,6 +785,7 @@ pub(crate) async fn delete_row_guarded_in(
     context: Option<&CallerContext>,
     executor: &Executor,
 ) -> Result<Json> {
+    let guard = user_rows::and_guard(guard, user_rows::delete_guard(table, context)?);
     let pk = single_pk(table)?;
     let delete = Delete {
         table: table.name.clone(),
@@ -791,7 +795,7 @@ pub(crate) async fn delete_row_guarded_in(
         // projections — those are correlated subqueries, and correlating them
         // against a row being deleted in the same statement is a question with no
         // good answer.
-        returning: vec![Projection::all()],
+        returning: user_rows::projection(table),
     };
     let rows = run_write_in(catalog, table, Statement::from(delete), context, executor).await?;
     let Some(row) = rows.first() else {

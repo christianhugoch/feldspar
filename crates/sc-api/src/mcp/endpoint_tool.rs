@@ -275,6 +275,7 @@ impl Projection {
                 // are tier 3 (§13.6), and `binary_input` is not a shape a JSON
                 // arguments object has.
                 raw: None,
+                links: None,
             },
             path_params,
         })

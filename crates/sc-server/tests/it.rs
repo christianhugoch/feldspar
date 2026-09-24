@@ -37,6 +37,8 @@ mod app_builder_agent;
 mod app_file_access;
 #[path = "app_i18n.rs"]
 mod app_i18n;
+#[path = "app_invite.rs"]
+mod app_invite;
 #[path = "app_serving.rs"]
 mod app_serving;
 #[path = "app_signup.rs"]

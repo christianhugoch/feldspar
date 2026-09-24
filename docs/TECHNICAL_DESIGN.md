@@ -5820,6 +5820,42 @@ response. An address that already has an account gets `409`. When the setting is
 and the client's `signup` method do not exist. The generated `src/feldspar/README.md` says which
 of the two cases applies, and the builder agents' prompts point to it.
 
+**Password links** are the other half of an application's own accounts. Every REST API projects
+two public endpoints: `POST /api/forgot-password {email}` and `POST /api/set-password {token,
+password}`. A third, `POST /api/invite`, exists only where `allow_invite` is on, and only for
+callers at `invite_min_role` or more powerful (default: admin). An invitation makes an account
+with **no password**, which cannot sign in, and emails its owner a link. The call supplies the
+new account's `role`, which must be *less powerful than the caller's own* (a greater number),
+its other columns (`fields`), the application the link opens (`app`, a subdomain, defaulting to
+the inviting one), and the message: `subject`, `body`/`html` containing `{{link}}`, and `from`.
+This is so that a therapists' application can invite patients into the patients' application
+with the therapist's own words. If the message cannot be sent, the new account is deleted again.
+An address with a pending invitation is sent a new link; an address whose account is in use gets
+`409`.
+
+A link is `{origin}/set-password#token=…`. The origin is taken from the request's
+`AppDirectory`, which the router fills in: the request's own origin, or that of another
+*served* application under the same scheme, base domain and port, so a link never points at a
+host a caller typed. The token is in the fragment so that it reaches no server log and no
+`Referer`. The token is 256 random bits, stored as its SHA-256 in `_fd_password_tokens`. It
+lasts 7 days for an invitation and 1 hour for a reset. It is spent by `DELETE … RETURNING`, so
+it works exactly once, and spending it ends the user's other tokens and sessions.
+`forgot-password` always answers `{ok: true}`, so it cannot be used to find out which addresses
+have accounts; it sends at most one link a minute per account, sends it off the request, and
+uses the system's sender and wording. The scaffold's `src/SetPassword.tsx` is the page at that
+path.
+
+**`users` behind an application's API.** The users table can be declared by an application like
+any other table (for example, a therapist listing their patients' accounts), so the row layer
+treats it specially for every surface (REST, GraphQL, agent tools, trigger actions).
+`password_hash` is not projected by any read, not accepted by any filter, ordering, `select` or
+GraphQL type, and refused in any write. Below admin, a role written into a row must be less
+powerful than the caller's own; on their own row a caller may keep their role. An update or
+delete reaches only the caller's own row and the rows of less powerful accounts; this rule is
+added to the statement's `WHERE`, so a row out of reach is a 404, exactly like a missing one.
+The table's access rules and ownership formula still decide whether the caller may write the
+table at all.
+
 A **list read takes a query string** in PostgREST's syntax:
 
 ```

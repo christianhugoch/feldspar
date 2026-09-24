@@ -403,6 +403,11 @@ impl SchemaNames {
 fn derive_fields(table: &Table, names: &mut TableNames, diagnostics: &mut Vec<String>) {
     for field in &table.fields {
         let name = &field.base.name;
+        // The password hash is no API's to read or write (see `user_rows`): not
+        // a field of the type, so not a filter, an ordering or an input either.
+        if crate::user_rows::is_hidden_column(table, name) {
+            continue;
+        }
         if !is_graphql_name(name) {
             diagnostics.push(format!(
                 "field `{}`.`{name}` is not exposed over GraphQL: its name is not a valid \

@@ -2,6 +2,90 @@
 
 Changes in reverse chronological order.
 
+## Invitations, forgotten passwords, and `users` behind an application's API
+
+A signed-in user of one application can now make an account for somebody less powerful and have
+them emailed a link to choose its password. The link can open a *different* application: a
+therapist in the therapists' app invites a patient, and the patient sets their password in the
+patients' app. Every application also gets "forgot password". Exposing the `users` table to an
+application is now safe: the password hash cannot be read or written through it, and it cannot
+be used to hand out power.
+
+- **`sc-auth/src/password_tokens.rs`**, new system table `_fd_password_tokens`:
+  - It stores the SHA-256 of a 256-bit token, the user, the purpose and the expiry (7 days for
+    an invitation, 1 hour for a reset).
+  - `invite_user` creates an account with **no password hash**. `authenticate` already refuses
+    such an account, so it cannot sign in until its owner chooses a password.
+    - The role must be a greater number than the inviter's (less powerful), and not public.
+    - An address with a pending invitation gets a fresh token (`Resent`).
+    - An address whose account is in use is refused (`AlreadyActive`).
+  - `redeem_password_token` checks the password first, then spends the token with
+    `DELETE … RETURNING`, so it works exactly once. It sets the password and deletes the user's
+    other tokens and sessions.
+  - `create_user_with` now shares one insert (`insert_user`) with `create_invited_user`.
+- **`sc-api/src/rest/password.rs`**, three REST endpoints:
+  - `POST {mount}/invite` exists only when the new settings `allow_invite` (off by default) and
+    `invite_min_role` (default admin) allow it.
+    - The body carries `email`, `role`, `app` (the subdomain the link opens; defaults to this
+      application), `fields` (the account's other columns), `language`, and the message:
+      `subject`, `body` and/or `html` containing `{{link}}` (and optionally `{{email}}`), and
+      `from`. Unknown keys are refused by name.
+    - It answers `201 {user, created: true}`, or `200` when a pending invitation was resent,
+      and `409` for an address in use.
+    - If sending fails, the new account is deleted again.
+  - `POST {mount}/forgot-password` and `POST {mount}/set-password` are on every REST API.
+    - `forgot-password` always answers `{ok: true}`. It sends at most one link a minute per
+      account, sends it off the request (so the response time reveals nothing), and uses the
+      system's sender and wording.
+    - `set-password` signs the person in; a bad, used or expired link gets `400`.
+  - Links are `{origin}/set-password#token=…`.
+    - The origin comes from the new `sc_api::AppDirectory`, which the router fills in on
+      `ApiRequest::links`: this request's origin, or that of another **served** application
+      under the same scheme, base domain and port.
+    - The token is in the URL fragment, so it appears in no server log or `Referer`.
+  - The mailer is the server's own, taken from the trigger dispatcher (`with_mailer`).
+- **`sc-api/src/user_rows.rs`**: the row layer's rules for the `users` table, applied on every
+  surface.
+  - Reads no longer include `password_hash`: they list the other columns by name instead of
+    `SELECT *`. This covers lists, returned rows, event rows and embeds.
+  - REST `select`, filter and `order` treat `password_hash` as an unknown column.
+  - GraphQL types and the generated TypeScript row type no longer contain it.
+  - Writes naming it are refused.
+  - Below admin:
+    - A written role must be a greater number than the caller's; on their own row a caller may
+      keep their role.
+    - Updates and deletes get `role > caller.role OR id = caller.id` added to their `WHERE`, so
+      a peer's or an admin's account answers 404.
+- **The REST provider answers `403`, not `401`, when a signed-in caller is refused by
+  `Error::auth`.** The router maps `Error::auth` to 401, which was wrong for a caller who is
+  already signed in. The `denial` helper in `sc-api/tests/rest_query.rs` now accepts that 403;
+  its comment had already called it the server's 403.
+- **Scaffold changes:**
+  - `src/SetPassword.tsx` is a new public `/set-password` route. It reads the token from the
+    fragment, asks for the password twice, and signs in.
+  - `src/Login.tsx` has a "Forgot your password?" mode.
+  - `src/auth.tsx` gains `setPassword` and `forgotPassword`.
+  - The runtime README's accounts section and the React and code builder prompts describe the
+    links, and say whether invitations are on.
+  - Existing projects keep their scaffold files: add the page by hand or ask the builder agent.
+
+Tests:
+- `sc-auth/tests/db_password_tokens.rs`: single use, a resend is spent along with the original,
+  expiry, disabled accounts, sessions ended, only a hash stored, and the role rule.
+- `sc-server/tests/app_invite.rs` covers four scenarios through the router with a recording
+  mailer:
+  - A therapist invites into the patients app; the patient sets a password, is signed in, and
+    the link then stops working.
+  - Invitations to an equal or more powerful role, to an unserved app, or without `{{link}}`
+    are refused, as is an invitation from a patient or on an app without invitations.
+  - Forgot-password: an unknown address gets the same answer, the throttle holds, and a blank
+    password does not spend the link.
+  - The `users` table: no hash in reads, hash probes are 400, escalation by insert or update is
+    403, and a peer's or an admin's row is 404.
+- Unit tests in `password_tokens.rs`, `user_rows.rs`, `rest/password.rs`, and `rest/mod.rs` (a
+  table named `invite` cannot shadow the endpoint).
+- Endpoint and scaffold counts are updated for the two new auth endpoints and the new page.
+
 ## A "None" framework: applications with no UI framework and no build
 
 The framework picker on the new-application form now offers **None**, for an application that

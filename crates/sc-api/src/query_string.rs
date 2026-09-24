@@ -105,7 +105,7 @@ pub fn filter_expr(table: &Table, key: &str, spec: &str) -> Result<Expr> {
             table.name
         )));
     }
-    if table.field(key).is_none() {
+    if crate::user_rows::visible_field(table, key).is_none() {
         // `or=(…)`/`and=(…)`/`not.…` are PostgREST's, deliberately not taken
         // (see the module docs). They are named as the features they are —
         // unless the application really does have a column called `or`, in which
@@ -195,7 +195,7 @@ pub fn order_keys(table: &Table, spec: &str) -> Result<Vec<OrderBy>> {
     for item in spec.split(',').filter(|s| !s.trim().is_empty()) {
         let mut parts = item.trim().split('.');
         let column = parts.next().unwrap_or_default();
-        if table.field(column).is_none() {
+        if crate::user_rows::visible_field(table, column).is_none() {
             return Err(Error::invalid(format!(
                 "`{}` has no field `{column}` to order by",
                 table.name

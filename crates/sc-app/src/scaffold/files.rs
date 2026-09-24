@@ -392,6 +392,9 @@ pub(super) fn exposed_tables<'a>(tables: &'a [Table], endpoints: &EndpointSet) -
 /// The name of the endpoint an application that offers sign-up projects.
 const SIGNUP_ENDPOINT: &str = "signup";
 
+/// The invitation endpoint, projected where the REST settings allow it.
+const INVITE_ENDPOINT: &str = "invite";
+
 /// The scaffold's auth layer is generated code calling `login` / `logout` /
 /// `whoami` through the typed client, so it can only exist when the application
 /// exposes them — which today means the REST provider (§13.4). An app that does
@@ -430,6 +433,7 @@ pub fn project_files(ctx: &ProjectContext<'_>) -> Vec<GeneratedFile> {
     if auth {
         files.push(GeneratedFile::new("src/auth.tsx", AUTH_TSX));
         files.push(GeneratedFile::new("src/Login.tsx", LOGIN_TSX));
+        files.push(GeneratedFile::new("src/SetPassword.tsx", SET_PASSWORD_TSX));
     }
     for table in &exposed {
         files.push(GeneratedFile::new(
@@ -870,6 +874,22 @@ fn accounts_section(endpoints: &EndpointSet) -> String {
          settings in the admin UI); once an administrator turns it on, the next \
          build adds `api.signup` to the client.\n"
     };
+    let invite = if endpoints.find(INVITE_ENDPOINT).is_some() {
+        "**Invitations are on.** `api.invite({ email, role, app?, fields?, subject?, \
+         body?, html?, from? })` makes an account for somebody else and emails them \
+         a link to choose its password. `role` must be *less powerful* than the \
+         caller's own (a greater number); `app` is the subdomain of the application \
+         the link opens (this one when absent), `fields` sets the account's other \
+         columns, and `body`/`html` must contain `{{link}}` (and may contain \
+         `{{email}}`). It answers `{ user, created }` — `201` for a new account, \
+         `200` when a pending invitation was sent again — and `409` for an address \
+         whose account is already in use. Link the new `user.id` to your own rows \
+         straight away: the account exists before its owner has chosen a password.\n"
+    } else {
+        "**Invitations are off**, so there is no `api.invite`. Turning on \"Allow \
+         invitations\" in the application's REST API settings adds it, for the roles \
+         the settings name.\n"
+    };
     format!(
         "## Signing in and signing up\n\
          \n\
@@ -879,6 +899,20 @@ fn accounts_section(endpoints: &EndpointSet) -> String {
          credential.\n\
          \n\
          {signup}\
+         \n\
+         ## Passwords: invitations and resets\n\
+         \n\
+         An emailed link opens `/set-password#token=…` in the application — the \
+         scaffold's `src/SetPassword.tsx`, a public route. Keep a page at that path: \
+         invitations and resets both link to it. It reads the token from the URL's \
+         fragment and calls `api.setPassword({{ token, password }})`, which sets the \
+         password, signs the person in and answers the user as `login` does; a used \
+         or expired link is a `400`. `api.forgotPassword({{ email }})` emails a reset \
+         link and always answers `{{ ok: true }}`, whether or not the address has an \
+         account — say \"if there is an account, we have emailed it\", never more. \
+         `src/auth.tsx` wraps both.\n\
+         \n\
+         {invite}\
          \n"
     )
 }
@@ -1774,7 +1808,8 @@ export function LocalePicker({
 
 /// The auth layer: a provider, a `useUser` hook and a gate.
 ///
-/// It talks to the app's own `/api/login`, `/api/logout` and `/api/whoami`
+/// It talks to the app's own `/api/login`, `/api/logout` and `/api/whoami` —
+/// and the password links' `/api/forgot-password` and `/api/set-password` —
 /// through the generated client, so the session is a cookie the browser carries
 /// and nothing here stores a credential. **This is a UI convenience, never the
 /// enforcement point** (§2.1): every request is authorized again server-side, so
@@ -1797,6 +1832,13 @@ export type AuthState = {
   user: User | null | undefined;
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
+  /** Spend an emailed link's token on a new password, and sign in. */
+  setPassword: (token: string, password: string) => Promise<void>;
+  /**
+   * Ask for a password-reset link to be emailed. Resolves the same whether or
+   * not the address has an account, so the page cannot say which.
+   */
+  forgotPassword: (email: string) => Promise<void>;
 };
 
 const AuthContext = createContext<AuthState | undefined>(undefined);
@@ -1825,8 +1867,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   }, []);
 
+  const setPassword = useCallback(async (token: string, password: string) => {
+    setUser(await api.setPassword({ token, password }));
+  }, []);
+
+  const forgotPassword = useCallback(async (email: string) => {
+    await api.forgotPassword({ email });
+  }, []);
+
   return (
-    <AuthContext.Provider value={{ user, signIn, signOut }}>
+    <AuthContext.Provider
+      value={{ user, signIn, signOut, setPassword, forgotPassword }}
+    >
       {children}
     </AuthContext.Provider>
   );
@@ -1845,9 +1897,12 @@ import { useUser } from "./auth";
 
 export default function Login() {
   const { t } = useT();
-  const { signIn } = useUser();
+  const { signIn, forgotPassword } = useUser();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  // "Forgot your password?" swaps the form for one that emails a reset link.
+  const [forgot, setForgot] = useState(false);
+  const [sent, setSent] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState(false);
 
@@ -1856,7 +1911,12 @@ export default function Login() {
     setBusy(true);
     setError(undefined);
     try {
-      await signIn(email, password);
+      if (forgot) {
+        await forgotPassword(email);
+        setSent(true);
+      } else {
+        await signIn(email, password);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1864,9 +1924,15 @@ export default function Login() {
     }
   };
 
+  const toggle = () => {
+    setForgot(!forgot);
+    setSent(false);
+    setError(undefined);
+  };
+
   return (
     <form className="card sc-login" onSubmit={submit}>
-      <h1>{t("Sign in")}</h1>
+      <h1>{forgot ? t("Reset your password") : t("Sign in")}</h1>
       <label>
         {t("Email")}
         <input
@@ -1876,18 +1942,112 @@ export default function Login() {
           onChange={(e) => setEmail(e.target.value)}
         />
       </label>
+      {!forgot && (
+        <label>
+          {t("Password")}
+          <input
+            type="password"
+            value={password}
+            autoComplete="current-password"
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </label>
+      )}
+      {error && <p className="sc-error">{error}</p>}
+      {sent ? (
+        <p>
+          {t(
+            "If there is an account for that address, we have emailed it a link to choose a new password.",
+          )}
+        </p>
+      ) : (
+        <button type="submit" disabled={busy}>
+          {forgot
+            ? t("Email me a link")
+            : busy
+              ? t("Signing in…")
+              : t("Sign in")}
+        </button>
+      )}
+      <button type="button" className="sc-link" onClick={toggle}>
+        {forgot ? t("Back to sign in") : t("Forgot your password?")}
+      </button>
+    </form>
+  );
+}
+"#;
+
+/// The page an emailed **invitation** or **password-reset** link opens:
+/// `/set-password#token=…` (§7.2).
+///
+/// The token is read from the URL's fragment, which the browser never sends to
+/// a server — that is why the link carries it there. Spending it signs the
+/// person in, so the page goes on to the application's first route.
+const SET_PASSWORD_TSX: &str = r#"import { useState, type FormEvent } from "react";
+import { useNavigate } from "react-router-dom";
+import { useT } from "./feldspar/i18n";
+import { useUser } from "./auth";
+
+export default function SetPassword() {
+  const { t } = useT();
+  const { setPassword } = useUser();
+  const navigate = useNavigate();
+  const token =
+    new URLSearchParams(window.location.hash.slice(1)).get("token") ?? "";
+  const [password, setPasswordValue] = useState("");
+  const [repeat, setRepeat] = useState("");
+  const [error, setError] = useState<string | undefined>(undefined);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (password !== repeat) {
+      setError(t("The two passwords are not the same."));
+      return;
+    }
+    setBusy(true);
+    setError(undefined);
+    try {
+      await setPassword(token, password);
+      navigate("/", { replace: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!token) {
+    return (
+      <p className="card sc-error">
+        {t("This link is incomplete: open the link in your email again.")}
+      </p>
+    );
+  }
+  return (
+    <form className="card sc-login" onSubmit={submit}>
+      <h1>{t("Choose a password")}</h1>
       <label>
-        {t("Password")}
+        {t("New password")}
         <input
           type="password"
           value={password}
-          autoComplete="current-password"
-          onChange={(e) => setPassword(e.target.value)}
+          autoComplete="new-password"
+          onChange={(e) => setPasswordValue(e.target.value)}
+        />
+      </label>
+      <label>
+        {t("Repeat it")}
+        <input
+          type="password"
+          value={repeat}
+          autoComplete="new-password"
+          onChange={(e) => setRepeat(e.target.value)}
         />
       </label>
       {error && <p className="sc-error">{error}</p>}
-      <button type="submit" disabled={busy}>
-        {busy ? t("Signing in…") : t("Sign in")}
+      <button type="submit" disabled={busy || !password}>
+        {t("Set password")}
       </button>
     </form>
   );
@@ -1985,6 +2145,7 @@ fn routes_tsx(tables: &[&Table], auth: bool) -> String {
     }
     if auth {
         imports.push_str("import Login from \"./Login\";\n");
+        imports.push_str("import SetPassword from \"./SetPassword\";\n");
     }
     let mut entries = String::new();
     for table in tables {
@@ -2002,7 +2163,8 @@ fn routes_tsx(tables: &[&Table], auth: bool) -> String {
     let (public_field, login_route) = if auth {
         (
             "  /** Reachable without signing in. Absent means: sign-in required. */\n  public?: boolean;\n",
-            "  { path: \"/login\", label: null, element: <Login />, public: true },\n",
+            "  { path: \"/login\", label: null, element: <Login />, public: true },\n  \
+             { path: \"/set-password\", label: null, element: <SetPassword />, public: true },\n",
         )
     } else {
         ("", "")
@@ -2588,6 +2750,14 @@ th {
   align-items: stretch;
   max-width: 22rem;
   margin: 3rem auto;
+}
+
+.sc-link {
+  background: none;
+  border: none;
+  color: var(--muted);
+  text-decoration: underline;
+  cursor: pointer;
 }
 "#;
 
@@ -3909,9 +4079,14 @@ mod tests {
             routes
                 .contains(r#"{ path: "/notes", label: () => t("Notes"), element: <NotesPage /> }"#)
         );
-        // Only the login route is public — the default is the locked door.
-        assert_eq!(routes.matches("public: true").count(), 1);
+        // Only the sign-in and set-password routes are public — the default is
+        // the locked door, and those two are how somebody gets through it.
+        assert_eq!(routes.matches("public: true").count(), 2);
         assert!(routes.contains(r#"path: "/login""#));
+        assert!(routes.contains(
+            r#"{ path: "/set-password", label: null, element: <SetPassword />, public: true }"#
+        ));
+        assert!(routes.contains(r#"import SetPassword from "./SetPassword";"#));
     }
 
     /// The runtime README says whether `api.signup` exists, and is rewritten

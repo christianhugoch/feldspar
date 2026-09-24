@@ -14,6 +14,11 @@
 //! user and resolves to one, which is the whole of that server's authentication
 //! ([`authenticate_api_token`], [`mint_api_token`]).
 //!
+//! **Password tokens** ([`_fd_password_tokens`](PASSWORD_TOKENS_TABLE)) are the
+//! single-use credential behind an invitation and a forgotten password: an
+//! account created with no password ([`invite_user`]) or one whose owner cannot
+//! remember it gets a link, and [`redeem_password_token`] spends it.
+//!
 //! Roles live in [`_fd_roles`](ROLES_TABLE) and `users.role` is a foreign key
 //! onto it (§7.1, §9): a role is a row carrying a name and role-specific
 //! settings, not a bare integer with a convention attached.
@@ -24,6 +29,7 @@ mod login;
 mod lookup;
 mod manage;
 mod password;
+mod password_tokens;
 mod roles;
 mod session;
 mod tokens;
@@ -37,6 +43,16 @@ pub use lookup::{first_user_with_role, load_user, load_user_by_email};
 pub use manage::{UserUpdate, delete_user, set_user_disabled, set_user_password, update_user};
 pub use password::{
     RANDOM_PASSWORD_LENGTH, hash_password, is_valid_hash, random_password, verify_password,
+};
+pub use password_tokens::{
+    COL_CREATED_AT as COL_PASSWORD_TOKEN_CREATED_AT,
+    COL_EXPIRES_AT as COL_PASSWORD_TOKEN_EXPIRES_AT, COL_PURPOSE as COL_PASSWORD_TOKEN_PURPOSE,
+    COL_TOKEN_HASH as COL_PASSWORD_TOKEN_HASH, COL_USER as COL_PASSWORD_TOKEN_USER,
+    INVITE_TTL_DAYS, InviteOutcome, PASSWORD_TOKEN_BYTES, PASSWORD_TOKENS_TABLE,
+    PasswordTokenPurpose, RESET_TTL_MINUTES, bootstrap_password_tokens, create_invited_user,
+    delete_password_tokens_for_user, invite_user, issue_password_token,
+    password_token_issued_within, redeem_password_token, sweep_expired_password_tokens, user_email,
+    user_has_password,
 };
 pub use roles::{
     COL_ATTRIBUTES as COL_ROLE_ATTRIBUTES, COL_DESCRIPTION as COL_ROLE_DESCRIPTION,

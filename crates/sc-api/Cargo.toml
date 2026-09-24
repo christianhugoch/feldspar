@@ -28,6 +28,9 @@ sc-i18n.workspace = true
 # layering is the one `sc-action`'s own docs state — it is layer 6, this is layer
 # 7, and nothing below it may name a trigger.
 sc-action.workspace = true
+# An application's invitation and forgotten-password endpoints send their links
+# by email, through the same `Mailer` a `send_email` action uses (§18.2).
+sc-email.workspace = true
 # The row layer (`rows`) executes table CRUD for every API surface, so it speaks
 # the query language and the type system directly.
 sc-db.workspace = true

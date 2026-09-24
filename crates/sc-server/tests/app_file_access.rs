@@ -467,8 +467,9 @@ async fn a_file_fields_bytes_are_served_at_the_stricter_of_table_and_path_rules(
     let (status, _, _) = reader.download(&path).await;
     assert_eq!(
         status,
-        StatusCode::UNAUTHORIZED,
-        "the folder's min_role 40 refuses role 80 even though the table admits it"
+        StatusCode::FORBIDDEN,
+        "the folder's min_role 40 refuses role 80 even though the table admits it — \
+         a signed-in caller refused is forbidden, as the table's refusal above is"
     );
     let (status, _, bytes) = editor.download(&path).await;
     assert_eq!(status, StatusCode::OK, "role 40 clears the folder's rule");

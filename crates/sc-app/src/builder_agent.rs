@@ -353,7 +353,12 @@ fn react_prompt(app: &Application, store: &str, root: &str) -> String {
          Signing in is `api.login` / `api.logout` / `api.whoami`, wrapped by \
          `src/auth.tsx`. Signing up is `api.signup`, which exists only when the \
          application's REST API settings allow sign-up; `src/feldspar/README.md` says \
-         whether they do. {SIGNUP_SWITCH}",
+         whether they do. {SIGNUP_SWITCH}\n\n\
+         Emailed invitation and password-reset links open `/set-password#token=…` \
+         (`src/SetPassword.tsx`, calling `api.setPassword`): keep a public page at \
+         that path. `api.forgotPassword` sends a reset link; `api.invite` — when \
+         the settings allow invitations — makes an account for somebody less \
+         powerful than the caller and emails them a link. The README has the details.",
         name = app.name,
         subdomain = app.subdomain.trim(),
     )
@@ -369,7 +374,12 @@ fn code_prompt(app: &Application, store: &str, root: &str) -> String {
          The application's REST API signs people in with `POST /api/login` (and \
          `/api/logout`, `/api/whoami`); `POST /api/signup` — email and password, \
          answering the new user and signing them in — exists only when its REST \
-         API settings allow sign-up. {SIGNUP_SWITCH}",
+         API settings allow sign-up. {SIGNUP_SWITCH}\n\n\
+         Password links: `POST /api/forgot-password` (`{{ email }}`) emails a reset \
+         link, `POST /api/invite` (when the settings allow it) makes an account for \
+         somebody less powerful than the caller and emails them one, and both open \
+         `/set-password#token=…` in the application, whose page posts \
+         `{{ token, password }}` to `/api/set-password`. Keep a page at that path.",
         name = app.name,
         subdomain = app.subdomain.trim(),
     )

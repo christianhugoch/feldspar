@@ -537,8 +537,10 @@ pub fn app_providers_with(
                     // The application's own cap on a list read, from its stored
                     // provider configuration.
                     .with_row_cap(rest_row_cap(&api.config))
-                    // Its sign-up endpoint, where its settings offer one…
+                    // Its sign-up endpoint, where its settings offer one, and
+                    // its invitations likewise…
                     .with_signup(sc_api::rest_signup_role(&api.config))
+                    .with_invite(sc_api::rest_invite_min_role(&api.config))
                     // …and its custom SQL queries, one endpoint each (§13.4).
                     .with_queries(sc_api::custom_queries(&api.config)?)
                     .map_err(|e| Error::config(format!("application `{}`: {e}", app.name)))?;
@@ -547,6 +549,11 @@ pub fn app_providers_with(
                 }
                 if let Some(dispatcher) = dispatcher {
                     provider = provider.with_dispatcher(Arc::clone(dispatcher));
+                    // The password links go out through the transport a
+                    // `send_email` action does — the server's one mailer.
+                    if let Some(mailer) = &dispatcher.services().mailer {
+                        provider = provider.with_mailer(Arc::clone(mailer));
+                    }
                 }
                 Ok(Box::new(provider) as Box<dyn ApiProvider>)
             }

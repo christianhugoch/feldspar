@@ -949,6 +949,11 @@ async fn dispatch_app(
             query: parse_query(uri),
             body: parsed_body,
             raw: raw_body,
+            // What an emailed password link is built from: this request's own
+            // origin, and the applications served beside it.
+            links: Some(sc_api::AppLinks(Arc::new(RequestLinks::new(
+                state, headers,
+            )))),
         };
 
         // The provider enforces the endpoint's auth itself (§7), so unlike the
@@ -1518,6 +1523,59 @@ fn app_request(
         format!("{scheme}://{host}")
     };
     Ok(req)
+}
+
+/// The applications an application's API request can link to
+/// ([`sc_api::AppDirectory`]): its own origin, and the origin of any other
+/// application this server serves, reached the way this request was — same
+/// scheme, same base domain, same port.
+///
+/// Only a **served** subdomain has an origin, so a link is never built to a host
+/// a caller made up.
+struct RequestLinks {
+    scheme: &'static str,
+    host: String,
+    base_domain: Option<Arc<String>>,
+    apps: Arc<AppMounts>,
+}
+
+impl RequestLinks {
+    fn new(state: &AppState, headers: &axum::http::HeaderMap) -> RequestLinks {
+        RequestLinks {
+            scheme: if state.secure_cookies {
+                "https"
+            } else {
+                "http"
+            },
+            host: headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_owned(),
+            base_domain: state.base_domain.clone(),
+            apps: state.apps.clone(),
+        }
+    }
+}
+
+impl sc_api::AppDirectory for RequestLinks {
+    fn own_origin(&self) -> String {
+        format!("{}://{}", self.scheme, self.host)
+    }
+
+    fn app_origin(&self, subdomain: &str) -> Option<String> {
+        let base = self.base_domain.as_deref()?;
+        self.apps.get(subdomain)?;
+        let port = self
+            .host
+            .rsplit_once(':')
+            .map(|(_, port)| port)
+            .filter(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()));
+        Some(match port {
+            Some(port) => format!("{}://{subdomain}.{base}:{port}", self.scheme),
+            None => format!("{}://{subdomain}.{base}", self.scheme),
+        })
+    }
 }
 
 /// Stamp an application's own CSP onto its response (design §13.2).

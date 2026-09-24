@@ -5204,6 +5204,8 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     query: Vec::new(),
                     body: ctx.body.clone(),
                     raw: None,
+                    // The admin's GraphQL explorer builds no emailed links.
+                    links: None,
                 };
                 let resp = provider.handle(req, &catalog, ctx.user.as_ref()).await?;
                 Ok(HandlerResponse::ok(resp.body).with_status(resp.status))
