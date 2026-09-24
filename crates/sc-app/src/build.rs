@@ -15,7 +15,9 @@
 //! and [`build_app`] resolves the store through the [`Catalog`] and delegates to
 //! it.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::process::{ExitStatus, Output};
 
 use bytes::Bytes;
 use sc_api::{EndpointSet, generate_client_with_streams};
@@ -321,6 +323,46 @@ fn store_root(
     })
 }
 
+/// Delete an application's installed dependencies — a `react` app's
+/// `node_modules` — so that its next build installs them from scratch: the
+/// first half of the admin's **Deep clean**, of which a build is the second.
+///
+/// For the tree that no build fixes: a `node_modules` from an interrupted
+/// install, from a cache that was corrupted under it (see [`BUILD_LOCK`]), or
+/// from dependencies somebody changed by hand. Returns whether there was
+/// anything to delete. Refused for a framework with no install step, whose
+/// dependencies — if it has any — are not the server's to manage.
+pub async fn remove_app_dependencies(cat: &Catalog, source: &AppSource) -> Result<bool> {
+    let store = cat.require_file_store(&source.store.0)?;
+    let root = store_root(&store, source)?;
+    remove_dependencies(&source.build, &root).await
+}
+
+/// [`remove_app_dependencies`] over a plain directory, as [`run_build`] is to
+/// [`build_app`].
+///
+/// Under [`BUILD_LOCK`], so a build of the same project is never left running
+/// against a tree that is being deleted underneath it.
+pub async fn remove_dependencies(spec: &BuildSpec, root: &Path) -> Result<bool> {
+    let install = spec.install.as_ref().ok_or_else(|| {
+        Error::invalid(
+            "this application's framework does not install its dependencies, \
+             so there is nothing for a deep clean to reinstall",
+        )
+    })?;
+    let marker = resolve_under(&resolve_under(root, &spec.source_dir)?, &install.marker)?;
+    let _serialised = BUILD_LOCK.lock().await;
+    if !marker.exists() {
+        return Ok(false);
+    }
+    let target = marker.clone();
+    tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&target))
+        .await
+        .map_err(|e| Error::config(format!("deleting {}: {e}", marker.display())))?
+        .with_context(|| format!("deleting {}", marker.display()))?;
+    Ok(true)
+}
+
 /// Load an application's **already-built** bundle from its output directory,
 /// running no bundler and no installer.
 ///
@@ -604,20 +646,18 @@ pub async fn run_build(spec: &BuildSpec, root: &Path) -> Result<BuildReport> {
         )));
     }
 
+    // One build at a time, install included; see [`BUILD_LOCK`].
+    let _serialised = BUILD_LOCK.lock().await;
+
     let install_log = run_install(spec, &source_dir).await?;
 
-    let output = Command::new(&spec.command)
-        .args(&spec.args)
-        .current_dir(&source_dir)
-        .output()
-        .await
-        .with_context(|| {
-            format!(
-                "launching build command `{}` in {}",
-                command_line(spec),
-                source_dir.display()
-            )
-        })?;
+    let output = run_bundler(spec, &source_dir).await.with_context(|| {
+        format!(
+            "launching build command `{}` in {}",
+            command_line(spec),
+            source_dir.display()
+        )
+    })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -665,11 +705,171 @@ pub async fn run_build(spec: &BuildSpec, root: &Path) -> Result<BuildReport> {
     })
 }
 
-/// Serialises [`run_install`] across this process; see the comment at its use.
-static INSTALL_LOCK: Mutex<()> = Mutex::const_new(());
+/// Run the build command in `source_dir`: an `npm run <script>` the way npm
+/// would run it but without npm ([`NpmScript`]), anything else as it is.
+async fn run_bundler(spec: &BuildSpec, source_dir: &Path) -> std::io::Result<Output> {
+    match NpmScript::resolve(spec, source_dir) {
+        Some(script) => script.run(source_dir).await,
+        None => {
+            Command::new(&spec.command)
+                .args(&spec.args)
+                .current_dir(source_dir)
+                .output()
+                .await
+        }
+    }
+}
+
+/// An `npm run <script>` that [`run_build`] runs itself instead of through npm.
+///
+/// **Memory.** `npm run build` is a Node process that reads `package.json`,
+/// starts a shell, and then waits — about 60 MB held for the whole of a build
+/// whose own peak is `vite`'s ~220 MB, on servers with 1 GB. Doing its part
+/// here takes that away and changes nothing about what is built.
+///
+/// What npm does for a script and this does too: runs `pre<script>`,
+/// `<script>` and `post<script>`, those that are declared, stopping at the
+/// first that fails; runs each with `sh -c` in the package directory, with
+/// `node_modules/.bin` of that directory and of every directory above it ahead
+/// of `PATH`; and sets the `npm_lifecycle_*`, `npm_package_{name,version,json}`
+/// and `INIT_CWD` variables. It prints npm's `> name@version script` banner
+/// too, so a build log reads as it did.
+///
+/// What it does not do is everything else npm is — `.npmrc`, the
+/// `npm_config_*` variables, workspaces. A build command that is not exactly
+/// `npm run <script>` (extra arguments, a `--`), a `package.json` that is
+/// missing, unreadable or does not declare the script, or a non-Unix host, is
+/// left to npm, which also gives the better error for the broken ones.
+struct NpmScript {
+    /// `(event, command line)` for each of `pre<script>`, `<script>` and
+    /// `post<script>` that the manifest declares, in that order.
+    steps: Vec<(String, String)>,
+    /// The package's `name`, for the environment and the banner.
+    name: String,
+    /// The package's `version`, likewise.
+    version: String,
+    /// The absolute path of the `package.json` the scripts came from.
+    manifest: PathBuf,
+}
+
+impl NpmScript {
+    /// The script `spec` runs in `source_dir`, if it is one this can run.
+    fn resolve(spec: &BuildSpec, source_dir: &Path) -> Option<NpmScript> {
+        if !cfg!(unix) || spec.command != "npm" {
+            return None;
+        }
+        let [run, script] = spec.args.as_slice() else {
+            return None;
+        };
+        if run != "run" && run != "run-script" {
+            return None;
+        }
+        let manifest = std::path::absolute(source_dir.join("package.json")).ok()?;
+        let json: Json = serde_json::from_slice(&std::fs::read(&manifest).ok()?).ok()?;
+        let scripts = json.get("scripts")?.as_object()?;
+        let step = |event: String| {
+            let line = scripts.get(&event)?.as_str()?.to_owned();
+            Some((event, line))
+        };
+        let main = step(script.clone())?;
+        let steps = [
+            step(format!("pre{script}")),
+            Some(main),
+            step(format!("post{script}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let field = |key: &str| {
+            json.get(key)
+                .and_then(Json::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        Some(NpmScript {
+            steps,
+            name: field("name"),
+            version: field("version"),
+            manifest,
+        })
+    }
+
+    /// Run the steps in `dir`, as one process's worth of output: both streams
+    /// concatenated, and the status of the last step that ran.
+    async fn run(&self, dir: &Path) -> std::io::Result<Output> {
+        let dir = std::path::absolute(dir)?;
+        let path = Self::search_path(&dir)?;
+        let mut all = Output {
+            status: ExitStatus::default(),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        for (event, line) in &self.steps {
+            all.stdout.extend_from_slice(
+                format!("\n> {}@{} {event}\n> {line}\n\n", self.name, self.version).as_bytes(),
+            );
+            let step = Command::new("sh")
+                .arg("-c")
+                .arg(line)
+                .current_dir(&dir)
+                .env("PATH", &path)
+                .env("npm_lifecycle_event", event)
+                .env("npm_lifecycle_script", line)
+                .env("npm_package_name", &self.name)
+                .env("npm_package_version", &self.version)
+                .env("npm_package_json", &self.manifest)
+                .env("INIT_CWD", &dir)
+                .output()
+                .await?;
+            all.stdout.extend(step.stdout);
+            all.stderr.extend(step.stderr);
+            all.status = step.status;
+            if !step.status.success() {
+                break;
+            }
+        }
+        Ok(all)
+    }
+
+    /// `PATH` as npm sets it for a script in `dir`: the `node_modules/.bin` of
+    /// `dir` and of each directory above it, nearest first, then the server's.
+    fn search_path(dir: &Path) -> std::io::Result<OsString> {
+        let bins = dir.ancestors().map(|d| d.join("node_modules").join(".bin"));
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        std::env::join_paths(bins.chain(std::env::split_paths(&inherited)))
+            .map_err(std::io::Error::other)
+    }
+}
+
+/// Serialises [`run_build`] — the install and the bundler together — across
+/// this process.
+///
+/// **Memory.** One React build is `npm` waiting on `tsc`, then on `vite`, and
+/// peaks at about 300 MB; the server runs on machines with 1 GB. Builds start
+/// from the Build button, an agent's build and check tools, and the rebuild
+/// that follows a definition change, and nothing else stops those overlapping,
+/// so without this two or three at once push a small machine into swap. The
+/// cost is that a build waits behind another rather than running beside it,
+/// which on such a machine is faster than both of them swapping.
+///
+/// **The installer's cache.** The installs are in *different* directories, so
+/// this is not about the projects — the installer's cache is one directory per
+/// machine and is not safe against concurrent writers. Two `npm install`s
+/// racing on it produce a `node_modules` missing the platform-specific optional
+/// dependency the bundler needs ("Cannot find native binding", npm/cli#4828),
+/// and leave the cache in a state where every later install reproduces the same
+/// broken tree until someone runs `npm cache clean --force` — so the cost of
+/// the race is not one failed build but every build after it.
+///
+/// Per process: `feldspar build` from a shell is another process and does not
+/// wait on the server's builds.
+static BUILD_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// Install the app's dependencies when the [`BuildSpec`]'s install step says to
 /// and its marker directory is absent (TODO §2.3).
+///
+/// Called only with [`BUILD_LOCK`] held, which is what keeps two installs off
+/// the installer's cache at once.
 ///
 /// Returns the installer's output when it ran, `None` when there was nothing to
 /// do. The MVP tutorial made the admin run this over SSH; an admin with no shell
@@ -686,22 +886,6 @@ async fn run_install(spec: &BuildSpec, source_dir: &Path) -> Result<Option<Strin
     if source_dir.join(&install.marker).exists() {
         return Ok(None);
     }
-
-    // One install at a time. The installs are in *different* directories, so
-    // this is not about the projects — it is about the installer's cache, which
-    // is one directory per machine and is not safe against concurrent writers.
-    // Two `npm install`s racing on it produce a `node_modules` missing the
-    // platform-specific optional dependency the bundler needs ("Cannot find
-    // native binding", npm/cli#4828), and leave the cache in a state where every
-    // later install reproduces the same broken tree until someone runs
-    // `npm cache clean --force` — so the cost of the race is not one failed
-    // build but every build after it.
-    //
-    // A lock rather than a retry because installing two applications at once is
-    // not a thing worth going fast at: it happens when a store is restored or a
-    // server boots against several unbuilt projects, and the serial version of
-    // that is correct and only slower.
-    let _serialised = INSTALL_LOCK.lock().await;
 
     let line = format!("{} {}", install.command, install.args.join(" "));
     let output = Command::new(&install.command)
@@ -1233,7 +1417,7 @@ mod tests {
 
     /// The installer's cache is one directory per machine and npm does not
     /// guard it, so two installs running at once corrupt it for every build
-    /// after them. The lock in `run_install` is the guard, and this is what
+    /// after them. [`BUILD_LOCK`] is the guard, and this is what
     /// asserts it is still there: each install writes a marker into a shared
     /// directory on entry and removes it on exit, so an overlap is a file that
     /// is already present — the same shape as the real failure, without needing
@@ -1273,6 +1457,197 @@ mod tests {
         for build in builds {
             // The script's own message travels out with the error (§16), so a
             // regression here names the overlap rather than "install failed".
+            build.await.unwrap().unwrap();
+        }
+    }
+
+    /// An `npm run` spec over a project whose `package.json` declares the
+    /// script.
+    fn npm_project(root: &Path, scripts: Json) -> BuildSpec {
+        let web = root.join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        let manifest =
+            serde_json::json!({ "name": "todo", "version": "0.1.0", "scripts": scripts });
+        std::fs::write(web.join("package.json"), manifest.to_string()).unwrap();
+        BuildSpec {
+            command: "npm".to_owned(),
+            ..spec(&["run", "build"])
+        }
+    }
+
+    /// `npm run build` runs the project's script with no `npm` process: about
+    /// 60 MB less for the length of a build. What npm would have done is still
+    /// done — the hooks in order, the bundler found in a `node_modules/.bin`
+    /// (here the store root's, one level up, as npm searches), and the
+    /// lifecycle variables set — and `npm_config_user_agent`, which npm always
+    /// sets, is not.
+    #[tokio::test]
+    async fn an_npm_run_build_runs_the_package_script_without_npm() {
+        let tmp = TempDir::new("npmscript");
+        let spec = npm_project(
+            tmp.path(),
+            serde_json::json!({
+                "prebuild": "echo pre >> order.log",
+                "build": "fakebundle && echo \"event=$npm_lifecycle_event agent=$npm_config_user_agent\" > dist/env.txt",
+                "postbuild": "echo post >> order.log",
+            }),
+        );
+        let bin = tmp.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_script(
+            &bin,
+            "fakebundle",
+            "#!/bin/sh\nset -e\necho main >> order.log\nmkdir -p dist\nprintf '<!doctype html>' > dist/index.html\n",
+        );
+
+        let report = run_build(&spec, tmp.path()).await.unwrap();
+
+        let web = tmp.path().join("web");
+        let order = std::fs::read_to_string(web.join("order.log")).unwrap();
+        assert_eq!(order, "pre\nmain\npost\n");
+        let env = std::fs::read_to_string(web.join("dist/env.txt")).unwrap();
+        assert_eq!(env.trim(), "event=build agent=", "run by npm? {env}");
+        // The log still says what ran, the way npm's banner did.
+        assert!(
+            report.stdout.contains("> todo@0.1.0 build\n> fakebundle"),
+            "{}",
+            report.stdout
+        );
+    }
+
+    /// A failing step fails the build with its own output, and the steps after
+    /// it do not run — as with npm.
+    #[tokio::test]
+    async fn a_failing_npm_script_step_stops_the_build() {
+        let tmp = TempDir::new("npmfail");
+        let spec = npm_project(
+            tmp.path(),
+            serde_json::json!({
+                "prebuild": "echo 'src/App.tsx(3,7): error TS2322: nope'; exit 2",
+                "build": "echo built > built.txt",
+            }),
+        );
+
+        let err = run_build(&spec, tmp.path()).await.unwrap_err().to_string();
+
+        assert!(err.contains("`npm run build`"), "{err}");
+        assert!(err.contains("src/App.tsx(3,7): error TS2322"), "{err}");
+        assert!(!tmp.path().join("web/built.txt").exists());
+    }
+
+    /// Only exactly `npm run <declared script>` is run without npm; anything
+    /// else goes to npm as written, which is also what reports a broken or
+    /// missing `package.json` best.
+    #[test]
+    fn only_a_plain_run_of_a_declared_script_skips_npm() {
+        let tmp = TempDir::new("npmresolve");
+        let spec = npm_project(tmp.path(), serde_json::json!({ "build": "vite build" }));
+        let web = tmp.path().join("web");
+        let resolves = |spec: &BuildSpec| NpmScript::resolve(spec, &web).is_some();
+
+        assert!(resolves(&spec));
+        assert!(resolves(&BuildSpec {
+            args: vec!["run-script".into(), "build".into()],
+            ..spec.clone()
+        }));
+        // Arguments of its own, another script, another program.
+        assert!(!resolves(&BuildSpec {
+            args: vec!["run".into(), "build".into(), "--".into(), "--watch".into()],
+            ..spec.clone()
+        }));
+        assert!(!resolves(&BuildSpec {
+            args: vec!["run".into(), "test".into()],
+            ..spec.clone()
+        }));
+        assert!(!resolves(&BuildSpec {
+            command: "pnpm".into(),
+            ..spec.clone()
+        }));
+        // No usable manifest.
+        std::fs::write(web.join("package.json"), "{ not json").unwrap();
+        assert!(!resolves(&spec));
+        std::fs::remove_file(web.join("package.json")).unwrap();
+        assert!(!resolves(&spec));
+    }
+
+    /// Deep clean's first half: the marker directory goes, so the next build
+    /// installs again — the install step's own "is it installed?" check is what
+    /// makes the reinstall happen, rather than a flag of its own.
+    #[tokio::test]
+    async fn removing_dependencies_makes_the_next_build_reinstall() {
+        let tmp = TempDir::new("deepclean");
+        good_source(tmp.path());
+        let web = tmp.path().join("web");
+        write_script(
+            &web,
+            "install.sh",
+            "#!/bin/sh\nmkdir -p node_modules/left-pad\necho 'added 1 package'\n",
+        );
+        let mut spec = spec(&["build.sh"]);
+        spec.install = Some(install_step());
+        assert!(run_build(&spec, tmp.path()).await.unwrap().installed);
+        std::fs::write(web.join("node_modules/left-pad/stale.js"), "broken").unwrap();
+
+        assert!(remove_dependencies(&spec, tmp.path()).await.unwrap());
+        assert!(!web.join("node_modules").exists());
+        // Nothing left to remove is not an error.
+        assert!(!remove_dependencies(&spec, tmp.path()).await.unwrap());
+
+        let report = run_build(&spec, tmp.path()).await.unwrap();
+        assert!(report.installed, "the build after a clean installs again");
+        assert!(!web.join("node_modules/left-pad/stale.js").exists());
+    }
+
+    /// A framework with no install step has no dependencies the server
+    /// manages, so there is nothing to clean — said, rather than a silent no-op
+    /// that looks like it worked.
+    #[tokio::test]
+    async fn removing_dependencies_without_an_install_step_is_refused() {
+        let tmp = TempDir::new("deepclean-none");
+        good_source(tmp.path());
+        let err = remove_dependencies(&spec(&["build.sh"]), tmp.path())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not install its dependencies"), "{err}");
+    }
+
+    /// A build is a few hundred megabytes of `tsc` and `vite`, and the server
+    /// runs on machines with 1 GB, so builds started at once — the Build button,
+    /// an agent's check, a rebuild after a definition change — must queue
+    /// rather than run side by side. The same enter-and-refuse shape as the
+    /// install race above, on the bundler this time.
+    #[tokio::test]
+    async fn two_builds_never_run_the_bundler_at_the_same_time() {
+        let tmp = TempDir::new("buildrace");
+        let shared = tmp.path().join("inflight");
+        std::fs::create_dir_all(&shared).unwrap();
+
+        let mut builds = Vec::new();
+        for n in 0..4 {
+            let root = tmp.path().join(format!("app{n}"));
+            let web = root.join("web");
+            std::fs::create_dir_all(&web).unwrap();
+            write_fake_bundler(
+                &web,
+                &format!(
+                    "#!/bin/sh\n\
+                     busy='{shared}/busy'\n\
+                     if [ -e \"$busy\" ]; then echo 'a second build overlapped' >&2; exit 1; fi\n\
+                     : > \"$busy\"\n\
+                     sleep 0.2\n\
+                     rm -f \"$busy\"\n\
+                     mkdir -p dist\n\
+                     printf '<!doctype html>' > dist/index.html\n",
+                    shared = shared.display()
+                ),
+            );
+            builds.push(tokio::spawn(async move {
+                run_build(&spec(&["build.sh"]), &root).await
+            }));
+        }
+
+        for build in builds {
             build.await.unwrap().unwrap();
         }
     }

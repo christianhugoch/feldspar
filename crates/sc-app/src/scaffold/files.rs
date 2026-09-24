@@ -1052,6 +1052,16 @@ fn names_list(tables: &[Table]) -> String {
 /// Dependency versions are **ranges, pinned to a major**: a scaffolded project is
 /// the admin's from the moment it exists, so it should pick up patches without
 /// the server having an opinion, while a major bump stays their deliberate act.
+///
+/// TypeScript is **7**, the native compiler, for the machine the build runs on:
+/// `tsc --noEmit` is half of every build, and on this project TypeScript 5 peaks
+/// at about 220 MB and 2 s where 7 takes about 90 MB and 0.3 s — the difference
+/// between fitting a 1 GB server and swapping on one. Its diagnostics keep the
+/// `file(line,col): error TSnnnn` shape the build's error reporting and the
+/// builder agent's checks read. It ships no `tsserver`, so the IDE's language
+/// server falls back to the TypeScript it was installed with; that one is a
+/// major behind, which can make the editor and the build disagree about an
+/// edge case. The build is the one that decides.
 fn package_json(project: &str) -> String {
     format!(
         r#"{{
@@ -1074,7 +1084,7 @@ fn package_json(project: &str) -> String {
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.0.0",
-    "typescript": "^5.9.0",
+    "typescript": "^7.0.0",
     "vite": "^8.0.0"
   }}
 }}
@@ -3527,6 +3537,11 @@ mod tests {
             "{}",
             file(&files, "package.json")
         );
+        // The native compiler: TypeScript 5's `tsc` is more than twice the memory
+        // of 7's, and the build runs it on servers with 1 GB.
+        let package: serde_json::Value =
+            serde_json::from_str(file(&files, "package.json")).expect("package.json is JSON");
+        assert_eq!(package["devDependencies"]["typescript"], "^7.0.0");
     }
 
     /// `AGENTS.md` names the checks, in the order the builder agent runs them.

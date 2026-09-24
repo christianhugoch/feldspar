@@ -5113,35 +5113,46 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let app = load_application(&catalog, id)
                     .await?
                     .ok_or_else(|| Error::not_found(format!("no application with id {id}")))?;
-                // Bring the generated code up to date first — the same call as
-                // "Update client", so a project directory that was emptied is
-                // scaffolded rather than handed to a bundler with nothing to
-                // build. (The build rewrites the generated files again on its
-                // own; that is cheap, and it is what every other build path
-                // relies on.) An app with nothing to build has no client.
-                let update = if sc_app::framework_factory(&app.framework.name).is_none() {
-                    Some(update_app_client(&catalog, &app, apps.triggers()).await?)
-                } else {
-                    None
-                };
-                // Build and mount live. A build failure propagates as an
-                // Application error (§16) whose message is the bundler's own
-                // diagnostics, and leaves any previously mounted version serving.
-                let report = build_and_mount(&apps, app).await?;
-                let mut log = String::new();
-                if let Some(update @ sc_app::ClientUpdate::Scaffolded(_)) = &update {
-                    // Only a scaffold is news: a regeneration is part of every
-                    // build, and saying so each time would bury the bundler's
-                    // output under a line nobody needs.
-                    log.push_str(&update.summary());
-                    log.push('\n');
+                build_now(&catalog, &apps, app, String::new()).await
+            }
+        }
+    });
+
+    // Deep clean: delete the installed dependencies, then build — which
+    // installs them again because they are missing. The removal waits for any
+    // build in progress (`sc_app::remove_dependencies`), and a build failure
+    // after it is reported as Build reports one; the next build installs again
+    // either way, since nothing was put back.
+    reg.register("deepCleanApplication", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let id = parse_app_id(ctx.path_param("id")?)?;
+                let app = load_application(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no application with id {id}")))?;
+                if sc_app::framework_factory(&app.framework.name).is_some() {
+                    return Err(Error::invalid(
+                        "this application has no build, so there is nothing to deep clean",
+                    ));
                 }
-                log.push_str(&build_log(&report));
-                Ok(HandlerResponse::ok(json!({
-                    "built": true,
-                    "git_repo": report.git_repo,
-                    "log": log,
-                })))
+                let source = app_source_from_config(&app.framework)?;
+                let removed = sc_app::remove_app_dependencies(&catalog, &source).await?;
+                let marker = source
+                    .build
+                    .install
+                    .as_ref()
+                    .map(|i| i.marker.as_str())
+                    .unwrap_or_default();
+                let log = if removed {
+                    format!("Deleted {marker}; reinstalling.\n")
+                } else {
+                    format!("There was no {marker} to delete; installing.\n")
+                };
+                build_now(&catalog, &apps, app, log).await
             }
         }
     });
@@ -5919,6 +5930,8 @@ pub(crate) fn application_json(app: &Application) -> Json {
         // A framework constructed from `sc-app`'s factory registry has nothing
         // to build: saving is its deployment (TODO "Saltcorn UI" 9.3).
         "builds": sc_app::framework_factory(&app.framework.name).is_none(),
+        "installs": sc_app::framework_factory(&app.framework.name).is_none()
+            && app_source_from_config(&app.framework).is_ok_and(|s| s.build.install.is_some()),
         "has_views": app.framework.name == sc_viewpattern::SALTCORN_UI_FRAMEWORK,
     })
 }
@@ -8356,6 +8369,45 @@ fn refuse_self(ctx: &crate::handler::HandlerCtx, id: uuid::Uuid, verb: &str) -> 
         )));
     }
     Ok(())
+}
+
+/// Build an application now and mount it, answering as `buildApplication`
+/// does, with `log` ahead of the build's own — Build's whole body, and the
+/// second half of Deep clean.
+async fn build_now(
+    catalog: &Arc<Catalog>,
+    apps: &Arc<AppMounts>,
+    app: Application,
+    mut log: String,
+) -> Result<HandlerResponse> {
+    // Bring the generated code up to date first — the same call as
+    // "Update client", so a project directory that was emptied is
+    // scaffolded rather than handed to a bundler with nothing to
+    // build. (The build rewrites the generated files again on its
+    // own; that is cheap, and it is what every other build path
+    // relies on.) An app with nothing to build has no client.
+    let update = if sc_app::framework_factory(&app.framework.name).is_none() {
+        Some(update_app_client(catalog, &app, apps.triggers()).await?)
+    } else {
+        None
+    };
+    // Build and mount live. A build failure propagates as an
+    // Application error (§16) whose message is the bundler's own
+    // diagnostics, and leaves any previously mounted version serving.
+    let report = build_and_mount(apps, app).await?;
+    if let Some(update @ sc_app::ClientUpdate::Scaffolded(_)) = &update {
+        // Only a scaffold is news: a regeneration is part of every
+        // build, and saying so each time would bury the bundler's
+        // output under a line nobody needs.
+        log.push_str(&update.summary());
+        log.push('\n');
+    }
+    log.push_str(&build_log(&report));
+    Ok(HandlerResponse::ok(json!({
+        "built": true,
+        "git_repo": report.git_repo,
+        "log": log,
+    })))
 }
 
 /// The bundler's combined output, for the build log: stdout then stderr.

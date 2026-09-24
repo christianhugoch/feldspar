@@ -57,11 +57,14 @@ export function buildStarted(state: AppActionsState, appId: string): AppActionsS
   return { ...state, build: { ...state.build, [appId]: "building" }, outcome: null };
 }
 
-/** A build has finished, one way or the other. */
+/** A build has finished, one way or the other. `action` names what the admin
+ * pressed — a Deep clean is a build too, and ends in the same state, but the
+ * news should say which one it was. */
 export function buildFinished(
   state: AppActionsState,
   app: Pick<AppItem, "id" | "name">,
   result: { ok: true; log: string } | { ok: false; error: string },
+  action = "Build",
 ): AppActionsState {
   return {
     ...state,
@@ -69,10 +72,10 @@ export function buildFinished(
     outcome: result.ok
       ? {
           ok: true,
-          title: `Build succeeded — ${app.name}`,
-          text: result.log.trim() || "Build succeeded.",
+          title: `${action} succeeded — ${app.name}`,
+          text: result.log.trim() || `${action} succeeded.`,
         }
-      : { ok: false, title: `Build failed — ${app.name}`, text: result.error },
+      : { ok: false, title: `${action} failed — ${app.name}`, text: result.error },
   };
 }
 
@@ -147,6 +150,26 @@ export async function buildApplication(app: AppItem): Promise<void> {
     publish(buildFinished(state, app, { ok: true, log: report.log }));
   } catch (err) {
     publish(buildFinished(state, app, { ok: false, error: errorMessage(err, "The build failed.") }));
+  }
+}
+
+/** Deep clean an application: the server deletes its installed dependencies
+ * (`node_modules`) and builds it, which installs them from scratch. Shown as a
+ * build in progress, because that is what most of it is. */
+export async function deepCleanApplication(app: AppItem): Promise<void> {
+  publish(buildStarted(state, app.id));
+  try {
+    const report = await api.deepCleanApplication(app.id);
+    publish(buildFinished(state, app, { ok: true, log: report.log }, "Deep clean"));
+  } catch (err) {
+    publish(
+      buildFinished(
+        state,
+        app,
+        { ok: false, error: errorMessage(err, "The deep clean failed.") },
+        "Deep clean",
+      ),
+    );
   }
 }
 

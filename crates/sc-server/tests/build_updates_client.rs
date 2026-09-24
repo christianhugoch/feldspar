@@ -12,6 +12,9 @@
 //! `npm install`: its scaffold writes a `build.sh` that the build then runs, so
 //! the build succeeding is itself the proof the scaffold came first. The
 //! registry is process-wide, which is why this is its own test binary.
+//!
+//! **Deep clean** is here too, for the same reason: it ends in the same build,
+//! and a second stub framework — one with an install step — is what it needs.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;
@@ -25,7 +28,7 @@ use axum::http::{Request, StatusCode, header};
 use sc_api::admin_endpoints;
 use sc_app::{
     ApiConfig, Application, BuildTemplate, DeclaredFile, FilePhase, FrameworkDecl, FrameworkHost,
-    FrameworkRef, FrameworkSet, bootstrap, install_frameworks, save_application,
+    FrameworkRef, FrameworkSet, InstallSpec, bootstrap, install_frameworks, save_application,
 };
 use sc_auth::SessionStore;
 use sc_catalog::{Catalog, FileStoreId, TableId};
@@ -75,12 +78,25 @@ fn shell_framework() -> FrameworkDecl {
     }
 }
 
+/// [`shell_framework`], installing its dependencies as `react` does: an
+/// `install.sh` that creates `node_modules` and counts how often it ran.
+fn installing_framework() -> FrameworkDecl {
+    let mut decl = shell_framework();
+    decl.name = "shell-installs".to_owned();
+    decl.build.install = Some(InstallSpec {
+        command: "sh".to_owned(),
+        args: vec!["install.sh".to_owned()],
+        marker: "node_modules".to_owned(),
+    });
+    decl
+}
+
 struct StubHost;
 
 #[async_trait]
 impl FrameworkHost for StubHost {
     fn frameworks(&self) -> Vec<FrameworkDecl> {
-        vec![shell_framework()]
+        vec![shell_framework(), installing_framework()]
     }
 
     async fn framework_files(
@@ -99,6 +115,10 @@ impl FrameworkHost for StubHost {
                 path: "build.sh".to_owned(),
                 contents: "mkdir -p dist && echo '<!doctype html>built' > dist/index.html\n"
                     .to_owned(),
+            });
+            files.push(DeclaredFile {
+                path: "install.sh".to_owned(),
+                contents: "mkdir -p node_modules && echo install >> installs.log\n".to_owned(),
             });
         }
         Ok(files)
@@ -149,7 +169,10 @@ impl Client {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 }
 
@@ -161,14 +184,14 @@ impl Drop for TempDir {
     }
 }
 
-#[tokio::test]
-async fn build_scaffolds_an_empty_project_and_regenerates_its_code_before_building()
--> sc_error::Result<()> {
+/// A server with the stub frameworks installed, a `tasks` table, an `apps`
+/// store in a scratch directory, and a signed-in admin.
+async fn serve(tag: &str) -> sc_error::Result<(Client, Arc<Catalog>, TempDir, TestDb)> {
     install_frameworks(FrameworkSet::new(Arc::new(StubHost)))?;
 
     let db = TestDb::new().await?;
     let dir = TempDir(std::env::temp_dir().join(format!(
-        "sc-server-build-updates-client-{}",
+        "sc-server-build-updates-client-{}-{tag}",
         std::process::id()
     )));
     std::fs::remove_dir_all(&dir.0).ok();
@@ -215,6 +238,13 @@ async fn build_scaffolds_an_empty_project_and_regenerates_its_code_before_buildi
             Some(json!({ "email": "admin@example.com", "password": "hunter2pass" })),
         )
         .await;
+    Ok((client, catalog, dir, db))
+}
+
+#[tokio::test]
+async fn build_scaffolds_an_empty_project_and_regenerates_its_code_before_building()
+-> sc_error::Result<()> {
+    let (mut client, catalog, dir, _db) = serve("build").await?;
 
     // Saved, but never scaffolded: the project directory does not exist.
     let app = Application::new(
@@ -238,7 +268,10 @@ async fn build_scaffolds_an_empty_project_and_regenerates_its_code_before_buildi
     assert_eq!(body["built"], json!(true), "{body}");
     // The scaffold is news, so the log leads with it.
     assert!(
-        body["log"].as_str().unwrap_or_default().contains("scaffolded"),
+        body["log"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("scaffolded"),
         "the log should say the project was scaffolded: {body}"
     );
     // The scaffold's own build script ran, so it was written first…
@@ -257,10 +290,94 @@ async fn build_scaffolds_an_empty_project_and_regenerates_its_code_before_buildi
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(
-        !body["log"].as_str().unwrap_or_default().contains("scaffolded"),
+        !body["log"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("scaffolded"),
         "{body}"
     );
     assert!(project.join("src/feldspar/client.ts").is_file());
     assert_eq!(std::fs::read_to_string(project.join("mine.txt"))?, "mine");
+    Ok(())
+}
+
+/// Deep clean deletes the installed dependencies and builds, which installs
+/// them from scratch — the remedy for a `node_modules` no build can fix.
+#[tokio::test]
+async fn deep_clean_reinstalls_the_dependencies_and_builds() -> sc_error::Result<()> {
+    let (mut client, catalog, dir, _db) = serve("deep-clean").await?;
+    let app = Application::new(
+        "Shop",
+        "shop",
+        FrameworkRef::new("shell-installs")
+            .with("store", "apps")
+            .with("project", "shop"),
+    )
+    .with_table(TableId("tasks".to_owned()))
+    .with_file_store(FileStoreId("apps".to_owned()))
+    .with_api(ApiConfig::new("rest", "/api"));
+    save_application(&catalog, &app).await?;
+    let project = dir.0.join("shop");
+
+    // The list says which applications a deep clean applies to.
+    let (_, list) = client.send("GET", "/api/applications", None).await;
+    let listed = list
+        .as_array()
+        .and_then(|apps| apps.iter().find(|a| a["subdomain"] == json!("shop")))
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(listed["installs"], json!(true), "{list}");
+
+    let (status, body) = client
+        .send("POST", &format!("/api/applications/{}/build", app.id), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    std::fs::write(project.join("node_modules/stale.js"), "broken")?;
+
+    let (status, body) = client
+        .send(
+            "POST",
+            &format!("/api/applications/{}/deep-clean", app.id),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["built"], json!(true), "{body}");
+    assert!(
+        body["log"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("Deleted node_modules; reinstalling."),
+        "{body}"
+    );
+    assert!(!project.join("node_modules/stale.js").exists());
+    assert!(project.join("node_modules").is_dir());
+    assert_eq!(
+        std::fs::read_to_string(project.join("installs.log"))?,
+        "install\ninstall\n",
+        "installed by the first build, and again by the deep clean"
+    );
+    assert!(project.join("dist/index.html").is_file());
+
+    // A framework that installs nothing has nothing to deep clean, and says so.
+    let plain = Application::new(
+        "Plain",
+        "plain",
+        FrameworkRef::new("shell")
+            .with("store", "apps")
+            .with("project", "plain"),
+    )
+    .with_table(TableId("tasks".to_owned()))
+    .with_file_store(FileStoreId("apps".to_owned()))
+    .with_api(ApiConfig::new("rest", "/api"));
+    save_application(&catalog, &plain).await?;
+    let (status, body) = client
+        .send(
+            "POST",
+            &format!("/api/applications/{}/deep-clean", plain.id),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     Ok(())
 }

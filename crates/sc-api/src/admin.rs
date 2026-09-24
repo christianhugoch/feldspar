@@ -1687,6 +1687,26 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // **Deep clean**: delete an application's installed dependencies (a `react`
+    // app's `node_modules`) and build it again, which installs them from
+    // scratch. For the tree a plain build cannot fix — an interrupted install,
+    // a corrupted cache, dependencies changed by hand. The result is a build's,
+    // because that is what it ends in; a framework that installs nothing is
+    // refused. Not an MCP tool: it is slow, and it is the admin's remedy for a
+    // broken machine rather than a step in building an application.
+    set.register(
+        Endpoint::new(
+            "deepCleanApplication",
+            Method::Post,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("deep-clean"),
+        )
+        .output(build_result_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
     // Rewrite an application's **generated** code from its current definition —
     // `src/feldspar/**`: the typed client, the hooks, the schema and the README
     // (§13.3). No bundler runs; this is the "if the API definition changes, the
@@ -4697,6 +4717,9 @@ fn application_schema() -> TypeSchema {
     // its deployment, so the list offers no Build button and shows no
     // "not built yet" state.
     fields.push(StructField::new("builds", TypeSchema::bool()));
+    // Whether the build installs the project's dependencies itself (a `react`
+    // app's `npm install`), so the list offers Deep clean.
+    fields.push(StructField::new("installs", TypeSchema::bool()));
     // Whether the application's source is views and pages (Saltcorn UI), so
     // the screen offers the Views and Pages tabs.
     fields.push(StructField::new("has_views", TypeSchema::bool()));

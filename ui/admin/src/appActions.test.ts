@@ -35,6 +35,16 @@ describe("application builds", () => {
     expect(buildStatus(state, "a1")).toBe("failed");
     expect(state.outcome).toEqual({ ok: false, title: "Build failed — Todo", text: "tsc: 2 errors" });
   });
+
+  it("names a deep clean as one, while ending in the same build state", () => {
+    let state = buildStarted(INITIAL_APP_ACTIONS, "a1");
+    state = buildFinished(state, app, { ok: true, log: "Deleted node_modules; reinstalling." }, "Deep clean");
+    expect(buildStatus(state, "a1")).toBe("built");
+    expect(state.outcome?.title).toBe("Deep clean succeeded — Todo");
+    state = buildFinished(state, app, { ok: false, error: "npm ERR! 404" }, "Deep clean");
+    expect(buildStatus(state, "a1")).toBe("failed");
+    expect(state.outcome?.title).toBe("Deep clean failed — Todo");
+  });
 });
 
 describe("client updates", () => {

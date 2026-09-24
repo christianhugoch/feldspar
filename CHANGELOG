@@ -2,6 +2,93 @@
 
 Changes in reverse chronological order.
 
+## Deep clean for React applications
+
+The applications list has a **Deep clean** button next to Build, for a `node_modules` that no
+build can fix: an interrupted install, a corrupted npm cache, or dependencies changed by hand.
+After a confirmation it deletes the project's `node_modules`, then builds and mounts the app
+as Build does. That build reinstalls every dependency, because `node_modules` is missing.
+
+- **Server**: `POST /api/applications/{id}/deep-clean` (`deepCleanApplication`) returns the
+  same result as a build, with its log starting `Deleted node_modules; reinstalling.` The
+  deletion is `sc_app::remove_app_dependencies`. It holds `BUILD_LOCK`, so it never deletes a
+  tree while a build is using it. A framework with no install step is refused with a 400. The
+  Build handler's body moved into a `build_now` helper that both endpoints end in. It is not
+  an MCP tool: it is slow, and it is the admin's fix for a broken machine rather than a step
+  in building an app.
+- **`installs`** on an application says whether its build installs dependencies itself (true
+  for `react`). The list shows Deep clean only where it is true.
+- **Admin UI**: `deepCleanApplication` in `appActions.ts` reuses the build state, so the row
+  shows "Building…" while it runs. `buildFinished` takes an optional action name, so the
+  notice says "Deep clean succeeded" or "Deep clean failed". The three new strings are
+  translated in the five locales. The generated clients in `ui/admin`, `ui/ide` and
+  `ui/builder` are regenerated.
+- **Tests**: in `sc-app`, `removing_dependencies_makes_the_next_build_reinstall` and
+  `removing_dependencies_without_an_install_step_is_refused`. In `sc-server/tests/build_updates_client.rs`,
+  `deep_clean_reinstalls_the_dependencies_and_builds` covers the endpoint end to end with a
+  stub framework whose `install.sh` counts its runs, plus the refusal. The setup that test
+  shares with the Build test is now a `serve` helper. In `appActions.test.ts`, a deep clean's
+  notice is named as one.
+
+## React builds run `npm run <script>` without npm
+
+`run_build` now runs a build command of exactly `npm run <script>` (or `npm run-script`) by
+itself instead of through npm. That saves the ~60 MB `npm` process that sat waiting for the
+whole build. It reads the script from `package.json` and does what npm would:
+- runs `pre<script>`, `<script>` and `post<script>`, whichever are declared, each with `sh -c`
+  in the package directory, stopping at the first failure;
+- puts `node_modules/.bin` of that directory and of every directory above it ahead of `PATH`;
+- sets `npm_lifecycle_event`, `npm_lifecycle_script`, `npm_package_name`,
+  `npm_package_version`, `npm_package_json` and `INIT_CWD`;
+- prints npm's `> name@version script` banner, so build logs read as before.
+
+Anything else still goes to npm as written: extra arguments, a script that isn't declared, a
+missing or invalid `package.json`, or a non-Unix host. npm also reports those broken cases
+best. The build error still names the command as `npm run build`. It no longer carries npm's
+own `npm error Lifecycle script…` lines, only the script's output. `.npmrc` and the
+`npm_config_*` variables are not applied. This affects `react` apps and any `code` or
+module-declared app whose command is `npm run …`.
+
+Measured on the TypeScript 7 `notebook` project, pinned to one core: the build peaks at about
+165 MB, down from about 230 MB through npm. The agent's `run_script` and check tools still run
+`npm run` as before.
+
+- **Tests** (`sc-app` `build::tests`): `an_npm_run_build_runs_the_package_script_without_npm`
+  checks the hook order, a bundler found in the parent directory's `node_modules/.bin`,
+  `npm_lifecycle_event`, the banner, and that `npm_config_user_agent` is unset (npm always
+  sets it). `a_failing_npm_script_step_stops_the_build` checks that a failing `prebuild` stops
+  the build and its output reaches the error. `only_a_plain_run_of_a_declared_script_skips_npm`
+  checks when the build falls back to npm. The real-toolchain tests pass with the new path.
+
+## React builds use less memory: one build at a time, and TypeScript 7
+
+A React app's build could push a 1 GB server into swap (`kswapd0` in `top`). On the
+`notebook` test app, run on one core, `npm run build` peaked at about 330 MB: 59 MB of it is
+the `npm` process waiting on `tsc`, then on `vite`, which peak at about 220 MB each. Nothing
+stopped several builds running at once. Two changes:
+
+- **One build at a time.** The lock in `sc-app/src/build.rs` used to cover only
+  `npm install`. It now covers the whole of `run_build` (install and bundler) and is renamed
+  `BUILD_LOCK`. Builds started by the Build button, by an agent's build and check tools, or by
+  the rebuild after a definition change now wait for each other. The lock is per process, so
+  `feldspar build` run from a shell does not wait for the server's builds.
+- **Scaffolded projects use TypeScript 7** (`"typescript": "^7.0.0"`, the native compiler).
+  On the same project `tsc --noEmit` drops from about 220 MB and 2 s to about 90 MB and 0.3 s.
+  Its errors keep the `file(line,col): error TSnnnn` shape that the build's error reporting
+  and the builder agent's checks read. TypeScript 7 ships no `tsserver.js`, so the IDE's
+  `typescript-language-server` falls back to the TypeScript it was installed with (5.9 in
+  `ui/ide`). This was checked against a real TypeScript 7 project, and the language server
+  still reports its type errors. Projects that were already scaffolded keep their own
+  `package.json`. `tests/agent-eval/fixture` is unchanged, because it has a lockfile of its own.
+- **Measured and rejected:** Node heap flags (`--max-old-space-size`, `--max-semi-space-size`),
+  `MALLOC_ARENA_MAX=2`, and Vite's `minify: false` and `reportCompressedSize: false`. None
+  moved Vite's roughly 215 MB, most of which is its native bundler rather than the JS heap.
+- **Tests**: `build::tests::two_builds_never_run_the_bundler_at_the_same_time` starts four
+  builds at once. Each fake bundler refuses to run if another is already running.
+  `a_project_has_everything_needed_to_build_without_a_shell` asserts the TypeScript range. The
+  real-toolchain tests (`tutorial_app_build`, `graphql_scaffold`, `scaffold_app`) pass with
+  TypeScript 7, including the one where a type error fails the build and names the file and line.
+
 ## Sidebar: an "Application link", and Build does what "Update client" did
 
 The Applications section of the admin sidebar has two changes.

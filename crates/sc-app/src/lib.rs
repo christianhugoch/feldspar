@@ -87,7 +87,7 @@ pub use applications::{
 pub use build::{
     AppSource, BuildReport, app_source_from_config, app_source_in, build_app, build_application,
     build_application_if_changed, build_code_framework, emit_app_client, emit_client,
-    load_app_bundle, run_build,
+    load_app_bundle, remove_app_dependencies, remove_dependencies, run_build,
 };
 pub use builder_agent::{
     BuilderAgentSpec, BuilderTrait, EDIT_FORMAT_AUTO, HTTP_NAME_WEB, TRAIT_CFG_APPLICATION,

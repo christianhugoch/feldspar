@@ -5755,6 +5755,21 @@ empty tree with a `src/feldspar/` and no project around it would produce somethi
 build — using the scaffold's own emptiness check, since a second opinion about what "empty"
 means is how the two would eventually disagree.
 
+`deepCleanApplication` (**Deep clean** on the applications list) is for the dependency tree
+that no build fixes: an interrupted install, a corrupted npm cache, `node_modules` edited by
+hand. It deletes the install step's marker directory (`node_modules`), then builds as Build
+does, and that build installs from scratch because the marker is gone. It is offered only where
+the build installs dependencies itself (`installs` on the application, which is true for
+`react`) and is refused elsewhere.
+
+Builds are **serialised per process** (`sc_app::build::BUILD_LOCK`, covering install, bundler
+and Deep clean's deletion), because one React build peaks at a few hundred MB and the server
+has to fit on a 1 GB machine. For the same reason a build command of exactly
+`npm run <script>` runs the script's own command line with `sh -c`, the way npm would, with the
+`pre`/`post` hooks, `node_modules/.bin` on `PATH` and the `npm_lifecycle_*` variables, but
+without an `npm` process holding ~60 MB for the length of the build. Anything else goes to npm
+as written.
+
 ### 13.4 API providers
 
 ```rust

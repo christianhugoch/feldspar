@@ -450,8 +450,8 @@ async fn runs_are_listed_read_and_deleted_and_outlive_their_agent() -> sc_error:
     // parent's, not as a conversation of its own.
     let mut delegated = AgentLoop::new(20);
     delegated.push_user("count the books")?;
-    let mut child =
-        Run::new("librarian", &RunCaller::system(), &delegated).description("delegated by `librarian`");
+    let mut child = Run::new("librarian", &RunCaller::system(), &delegated)
+        .description("delegated by `librarian`");
     child
         .attributes
         .insert(ATTR_PARENT_RUN.to_owned(), newer.id.to_string().into());
