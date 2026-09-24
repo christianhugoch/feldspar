@@ -78,6 +78,7 @@ function application(
     attributes: {},
     source,
     builds: true,
+    installs: true,
     has_views: false,
   };
 }
