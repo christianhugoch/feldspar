@@ -2,6 +2,23 @@
 
 Changes in reverse chronological order.
 
+## Admin UI checkboxes and radios sit to the left of their labels again
+
+Every `form-check` in the admin UI showed its input to the right of its label, on left-to-right
+pages too. The field editor's "Nullable" and "Primary key" boxes are one example.
+
+- **Cause**: `i18n.tsx` loaded Bootstrap's RTL stylesheet with `import("…/bootstrap.rtl.min.css")`,
+  which was meant to be lazy. The admin build has `cssCodeSplit: false`, so Vite merged that
+  file into the one global stylesheet, after Tabler. Its `.form-check .form-check-input
+  { float: right }` (and the rest of its mirrored margins and floats) then applied to every page.
+- **Fix**: the stylesheet is imported with `?url`, so it is emitted as its own asset.
+  `syncRtlStylesheet` adds a `<link>` to it while `<html dir>` is `rtl` and removes the link
+  when the page goes back to `ltr`. The main stylesheet no longer contains any Bootstrap RTL
+  rules.
+- **Tests**: `ui/admin/src/i18n.rtl.test.ts` checks the link logic against a fake document. It
+  also fails if any admin source file dynamically imports a `.css` file, since under
+  `cssCodeSplit: false` that is the same as a global import.
+
 ## Tests brought back in line with the UX tweaks and the invitations work
 
 - `ui/admin/src/appNav.test.ts`: the sidebar no longer has a Translations link, and "New chat"

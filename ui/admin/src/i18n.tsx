@@ -40,6 +40,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
+// `?url`, not a CSS import: see `syncRtlStylesheet`.
+import bootstrapRtlHref from "bootstrap/dist/css/bootstrap.rtl.min.css?url";
 
 /** The `\u0004` that separates a disambiguating context from the source text. */
 export const CONTEXT_SEPARATOR = "\u0004";
@@ -269,6 +271,37 @@ const SOURCE_TRANSLATOR: Translator = {
 
 const I18nContext = createContext<Translator>(SOURCE_TRANSLATOR);
 
+/** The `id` of the `<link>` that carries Bootstrap's right-to-left stylesheet. */
+export const RTL_STYLESHEET_ID = "sc-bootstrap-rtl";
+
+/**
+ * Link Bootstrap's right-to-left stylesheet while the page is `rtl`, and
+ * unlink it when it is not.
+ *
+ * A `<link>` rather than a lazy CSS `import()`: the build has `cssCodeSplit:
+ * false`, which folds a lazily imported stylesheet into the one global CSS
+ * file, so the "lazy" import put `float: right` on every checkbox of every
+ * left-to-right page. A `?url` import is emitted as its own asset and costs a
+ * left-to-right page nothing but the string.
+ */
+export function syncRtlStylesheet(
+  doc: Document,
+  dir: "ltr" | "rtl",
+  href: string = bootstrapRtlHref,
+): void {
+  const existing = doc.getElementById(RTL_STYLESHEET_ID);
+  if (dir !== "rtl") {
+    existing?.remove();
+    return;
+  }
+  if (existing) return;
+  const link = doc.createElement("link");
+  link.id = RTL_STYLESHEET_ID;
+  link.rel = "stylesheet";
+  link.href = href;
+  doc.head.appendChild(link);
+}
+
 /**
  * Make `locale`'s catalogue available to everything below, and tell the
  * document what language it is in.
@@ -317,8 +350,7 @@ export function I18nProvider({
   // of scope for this milestone; Arabic is in the shipped set precisely so the
   // gaps are visible rather than theoretical.
   useEffect(() => {
-    if (dir !== "rtl") return;
-    void import("bootstrap/dist/css/bootstrap.rtl.min.css");
+    syncRtlStylesheet(document, dir);
   }, [dir]);
 
   const value = useMemo<Translator>(
