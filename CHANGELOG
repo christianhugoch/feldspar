@@ -2,6 +2,28 @@
 
 Changes in reverse chronological order.
 
+## Sidebar: an "Application link", and Build does what "Update client" did
+
+The Applications section of the admin sidebar has two changes.
+
+- **"Application link" comes first.** It opens the current application on its own subdomain
+  in a new tab and has a link-out icon (`IconExternalLink`). The URL comes from `appUrl`, which
+  is now exported from `appNav.ts` and shared with the applications list. `appNavLinks` takes
+  the admin's location as an argument, so tests can check the URL without a browser.
+- **"Update client" is gone from the sidebar.** The `buildApplication` handler now calls
+  `update_app_client` before it builds. The build already rewrote the generated client and
+  runtime. What it did not do was scaffold an emptied project directory, which is the one
+  thing only "Update client" could do. When Build scaffolds, the build log says so on its
+  first line. A plain regeneration is not mentioned, since it happens on every build. The Build
+  link's tooltip now says it rewrites the generated code and then builds. The applications
+  list still has its "Update code" button, for regenerating without a build.
+- **Tests**: `ui/admin/src/appNav.test.ts` checks the new first link and its URL, and that
+  there is no update-client link. `sc-server/tests/build_updates_client.rs` (its own test
+  binary, because it installs a module-declared framework in the process-wide registry)
+  builds an app whose project directory does not exist. The stub framework's scaffold writes
+  the `build.sh` that the build runs, so a successful build shows the scaffold came first. A
+  second build regenerates a deleted `client.ts` and leaves the admin's own files alone.
+
 ## Admin UI checkboxes and radios sit to the left of their labels again
 
 Every `form-check` in the admin UI showed its input to the right of its label, on left-to-right

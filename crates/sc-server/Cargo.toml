@@ -172,14 +172,19 @@ workspace = true
 name = "it"
 path = "tests/it.rs"
 
-# The four that cannot. A binary runs its tests as threads of one process, and
+# The five that cannot. A binary runs its tests as threads of one process, and
 # each of these reaches for something the whole process shares — so in the
 # aggregate they would be changing the world out from under 48 other files.
 #
+#   build_updates_client  installs a module-declared framework in the registry
 #   git_store_api    sets the data-directory variable, once, for all of its tests
 #   modules_no_node  empties `PATH`, to assert what happens with no Node
 #   sighup_reload    raises `SIGHUP` at itself; a signal has no narrower target
 #   systemd_notify   sets `NOTIFY_SOCKET` and the watchdog variables
+[[test]]
+name = "build_updates_client"
+path = "tests/build_updates_client.rs"
+
 [[test]]
 name = "git_store_api"
 path = "tests/git_store_api.rs"

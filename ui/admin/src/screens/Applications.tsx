@@ -16,6 +16,7 @@ import Table from "react-bootstrap/Table";
 import { api, errorMessage } from "../api";
 import type { ListApplicationsResponse } from "../client";
 import { ideUrl, navigate } from "../App";
+import { appUrl } from "../appNav";
 import { graphqlMount } from "../graphqlExplorer";
 import { IconPlus } from "../icons";
 import { AlertBody, PageBody, PageHeader, StatusBadge } from "../layout";
@@ -32,13 +33,6 @@ import { takeNotice } from "../notice";
 import { T, useT } from "../i18n";
 
 type AppItem = ListApplicationsResponse[number];
-
-/** The URL an app is served at: `<subdomain>.<the admin's host>`. The admin runs
- * on the base domain, so its own host (with port) is what the subdomain sits on —
- * `blog.example.com` or, in local dev, `blog.localhost:3032`. */
-function appUrl(subdomain: string): string {
-  return `${window.location.protocol}//${subdomain}.${window.location.host}`;
-}
 
 /** The file-manager route for a directory in a store. */
 function filesUrl(store: string, path: string): string {

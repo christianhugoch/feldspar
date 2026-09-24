@@ -21,7 +21,6 @@ import {
   buildApplication,
   buildStatus,
   showAppOutcome,
-  updateApplicationClient,
   useAppActions,
 } from "./appActions";
 import {
@@ -38,12 +37,12 @@ import {
   IconApps,
   IconBooks,
   IconCode,
+  IconExternalLink,
   IconFile,
   IconHammer,
   IconLanguage,
   IconLayoutDashboard,
   IconMessagePlus,
-  IconRefresh,
   IconSettings,
 } from "./icons";
 import { T, useT } from "./i18n";
@@ -54,8 +53,8 @@ type AgentItem = ListAgentsResponse[number];
 const CURRENT_APP_KEY = "saltcorn-admin-application";
 
 const LINK_ICONS: Record<AppNavLink["id"], ReactNode> = {
+  "app-link": <IconExternalLink />,
   "edit-code": <IconCode />,
-  "update-client": <IconRefresh />,
   build: <IconHammer />,
   chat: <IconMessagePlus />,
   views: <IconLayoutDashboard />,
@@ -136,7 +135,7 @@ export function ApplicationsNav({ route, folded }: { route: string; folded: bool
     : apps && apps.length === 0
       ? "No applications"
       : "Choose application";
-  const links = current ? appNavLinks(current, builderAgentFor(current, agents)) : [];
+  const links = current ? appNavLinks(current, builderAgentFor(current, agents), window.location) : [];
   const listActive = onApplicationsList(path);
 
   const choose = (app: AppItem) => {
@@ -213,21 +212,15 @@ export function ApplicationsNav({ route, folded }: { route: string; folded: bool
             app={current}
             active={linkActive(link, path)}
             folded={folded}
-            busy={
-              link.id === "build"
-                ? buildStatus(actions, current.id) === "building"
-                : link.id === "update-client"
-                  ? Boolean(actions.updating[current.id])
-                  : false
-            }
+            busy={link.id === "build" && buildStatus(actions, current.id) === "building"}
           />
         ))}
     </>
   );
 }
 
-/** One of the current application's links: somewhere to go, or (Build, Update
- * client) something to do, which reports back through `appActions`. */
+/** One of the current application's links: somewhere to go, or (Build)
+ * something to do, which reports back through `appActions`. */
 function AppLink({
   link,
   app,
@@ -241,15 +234,15 @@ function AppLink({
   folded: boolean;
   busy: boolean;
 }) {
-  const text = busy ? (link.id === "build" ? "Building…" : "Updating…") : link.label;
+  const text = busy ? "Building…" : link.label;
   const content = (
     <>
       <span className="nav-link-icon d-md-none d-lg-inline-block">{LINK_ICONS[link.id]}</span>
       <span className="nav-link-title">{text}</span>
     </>
   );
-  const title = folded ? text : link.id === "update-client"
-    ? "Rewrite this application's generated client, hooks and schema from its current definition — no build"
+  const title = folded ? text : link.id === "build"
+    ? "Rewrite this application's generated client, hooks and schema from its current definition, then build it"
     : undefined;
 
   return (
@@ -271,9 +264,7 @@ function AppLink({
           className="nav-link w-100"
           disabled={busy}
           title={title}
-          onClick={() =>
-            void (link.id === "build" ? buildApplication(app) : updateApplicationClient(app))
-          }
+          onClick={() => void buildApplication(app)}
         >
           {content}
         </button>

@@ -17,38 +17,55 @@ const react = {
 
 const saltcornUi = { id: "a2", subdomain: "crm", builds: false, has_views: true, source: null };
 
+/** Where the admin is served; applications sit on subdomains of it. */
+const admin = { protocol: "https:", host: "example.com:3032" };
+
 const builder = {
   name: "build-todo",
   traits: [{ trait: "coding", config: { store: "code", root: "todo", application: "todo" } }],
 };
 
 describe("the current application's sidebar links", () => {
-  it("gives a built application edit code, update client and build, then settings", () => {
-    const links = appNavLinks(react, null);
+  it("gives a built application edit code and build, then settings", () => {
+    const links = appNavLinks(react, null, admin);
     expect(links.map((l) => l.label)).toEqual([
+      "Application link",
       "Edit code",
-      "Update client",
       "Build",
       "Settings",
     ]);
-    const edit = links[0];
+    const edit = links[1];
     expect(edit.href).toBe("/ide/?store=code");
     expect(edit.external).toBe(true);
-    // The two that do something rather than go somewhere have nowhere to go.
-    expect(links[1].href).toBeUndefined();
+    // Build does something rather than going somewhere, and it brings the
+    // generated client up to date itself — there is no separate link for that.
     expect(links[2].href).toBeUndefined();
+    expect(links.map((l) => l.id)).not.toContain("update-client");
+  });
+
+  it("starts with a link out to the application on its own subdomain", () => {
+    for (const app of [react, saltcornUi]) {
+      for (const agent of [null, "x"]) {
+        const first = appNavLinks(app, agent, admin)[0];
+        expect(first.id).toBe("app-link");
+        expect(first.label).toBe("Application link");
+        expect(first.href).toBe(`https://${app.subdomain}.example.com:3032`);
+        expect(first.external).toBe(true);
+        expect(linkActive(first, `/applications/${app.id}/edit`)).toBe(false);
+      }
+    }
   });
 
   it("adds a link to the coding agent when the application has one", () => {
-    const labels = appNavLinks(react, "build-todo").map((l) => l.label);
+    const labels = appNavLinks(react, "build-todo", admin).map((l) => l.label);
     expect(labels).toEqual([
+      "Application link",
       "Edit code",
-      "Update client",
       "Build",
       "Coding agent",
       "Settings",
     ]);
-    expect(appNavLinks(react, "build-todo")[3].href).toBe("#/agents/build-todo/chat");
+    expect(appNavLinks(react, "build-todo", admin)[3].href).toBe("#/agents/build-todo/chat");
   });
 
   it("gives an application with no framework edit code but nothing to build", () => {
@@ -59,13 +76,14 @@ describe("the current application's sidebar links", () => {
       has_views: false,
       source: { store: "site", path: "public" },
     };
-    const links = appNavLinks(none, null);
-    expect(links.map((l) => l.id)).toEqual(["edit-code", "settings"]);
-    expect(links[0].href).toBe("/ide/?store=site");
+    const links = appNavLinks(none, null, admin);
+    expect(links.map((l) => l.id)).toEqual(["app-link", "edit-code", "settings"]);
+    expect(links[1].href).toBe("/ide/?store=site");
   });
 
   it("gives a Saltcorn UI application views, pages and library, then settings", () => {
-    expect(appNavLinks(saltcornUi, null).map((l) => l.label)).toEqual([
+    expect(appNavLinks(saltcornUi, null, admin).map((l) => l.label)).toEqual([
+      "Application link",
       "Views",
       "Pages",
       "Library",
@@ -76,7 +94,7 @@ describe("the current application's sidebar links", () => {
   it("always ends with settings, and never offers a delete", () => {
     for (const app of [react, saltcornUi]) {
       for (const agent of [null, "x"]) {
-        const links = appNavLinks(app, agent);
+        const links = appNavLinks(app, agent, admin);
         expect(links[links.length - 1].id).toBe("settings");
         expect(links.map((l) => l.label.toLowerCase())).not.toContain("delete");
       }
@@ -84,14 +102,14 @@ describe("the current application's sidebar links", () => {
   });
 
   it("lights up settings for both of an application's settings tabs", () => {
-    const settings = appNavLinks(saltcornUi, null).find((l) => l.id === "settings")!;
+    const settings = appNavLinks(saltcornUi, null, admin).find((l) => l.id === "settings")!;
     expect(linkActive(settings, "/applications/a2/edit")).toBe(true);
     expect(linkActive(settings, "/applications/a2/app-settings")).toBe(true);
     expect(linkActive(settings, "/applications/a1/edit")).toBe(false);
   });
 
   it("lights up views for a view's editor, but not pages", () => {
-    const links = appNavLinks(saltcornUi, null);
+    const links = appNavLinks(saltcornUi, null, admin);
     const views = links.find((l) => l.id === "views")!;
     const pages = links.find((l) => l.id === "pages")!;
     expect(linkActive(views, "/applications/a2/views/orders_list")).toBe(true);

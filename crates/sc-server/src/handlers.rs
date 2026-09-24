@@ -5113,14 +5113,34 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let app = load_application(&catalog, id)
                     .await?
                     .ok_or_else(|| Error::not_found(format!("no application with id {id}")))?;
+                // Bring the generated code up to date first — the same call as
+                // "Update client", so a project directory that was emptied is
+                // scaffolded rather than handed to a bundler with nothing to
+                // build. (The build rewrites the generated files again on its
+                // own; that is cheap, and it is what every other build path
+                // relies on.) An app with nothing to build has no client.
+                let update = if sc_app::framework_factory(&app.framework.name).is_none() {
+                    Some(update_app_client(&catalog, &app, apps.triggers()).await?)
+                } else {
+                    None
+                };
                 // Build and mount live. A build failure propagates as an
                 // Application error (§16) whose message is the bundler's own
                 // diagnostics, and leaves any previously mounted version serving.
                 let report = build_and_mount(&apps, app).await?;
+                let mut log = String::new();
+                if let Some(update @ sc_app::ClientUpdate::Scaffolded(_)) = &update {
+                    // Only a scaffold is news: a regeneration is part of every
+                    // build, and saying so each time would bury the bundler's
+                    // output under a line nobody needs.
+                    log.push_str(&update.summary());
+                    log.push('\n');
+                }
+                log.push_str(&build_log(&report));
                 Ok(HandlerResponse::ok(json!({
                     "built": true,
                     "git_repo": report.git_repo,
-                    "log": build_log(&report),
+                    "log": log,
                 })))
             }
         }
