@@ -64,7 +64,7 @@ use sc_catalog::{
     load_field_meta_by_field, load_table_meta_by_name, save_field_meta_row, save_table_meta_row,
     validate_formula,
 };
-use sc_db::{ColumnGenerator, SchemaChange};
+use sc_db::{ColumnGenerator, ColumnRef, SchemaChange};
 use sc_error::{Error, Result};
 use sc_query::{Expr, UnOp};
 use sc_types::{BasicType, RichTypeRef, TypeRef};
@@ -307,6 +307,11 @@ pub struct FieldSettings {
     /// The rich type's name; `Some("")` clears it back to the basic column type.
     pub type_name: Option<String>,
     /// What the field references.
+    ///
+    /// Not overlay-only for a `Key`: the database's foreign key is what the
+    /// merge reads a key's target from, so a changed target (or a field that
+    /// becomes or stops being a key) also replaces the column's foreign key —
+    /// see `Plan::repoint_reference`.
     pub kind: Option<DataFieldKind>,
     /// Rich-type attributes.
     pub attributes: Option<Attrs>,
@@ -1262,6 +1267,9 @@ impl Plan {
         }
         if let Some(kind) = &settings.kind {
             meta.kind = self.resolve_kind(table, field, kind)?;
+            if !existing.is_calc() {
+                self.repoint_reference(table, &existing, &meta.kind)?;
+            }
         }
         if let Some(attributes) = &settings.attributes {
             meta.attributes = attributes.clone();
@@ -1361,6 +1369,74 @@ impl Plan {
         });
         self.applied.fields_altered.push(format!("{table}.{field}"));
         self.note_changed(table);
+        Ok(())
+    }
+
+    /// Bring the column's foreign key into line with the kind an edit gives it —
+    /// the half of changing a `Key`'s target that the overlay cannot carry.
+    ///
+    /// Where a foreign key stands behind a column, the merge takes the target
+    /// from the database and never from the overlay (§3.2), so an edit that
+    /// only rewrote the overlay would be saved and then read back pointing where
+    /// it always did. The reference is therefore changed where it lives: the
+    /// old key dropped and the new one added, in the same transaction as the
+    /// overlay row. A field that stops being a `Key` loses its foreign key, and
+    /// a plain column that becomes one gains the key a field created that way
+    /// would have had.
+    ///
+    /// The column keeps its storage type — retyping one is a migration (§3.3) —
+    /// so a target stored as something else is refused by name rather than left
+    /// for the database to reject with a type error.
+    fn repoint_reference(
+        &mut self,
+        table: &str,
+        existing: &DataField,
+        kind: &DataFieldKind,
+    ) -> Result<()> {
+        fn target(kind: &DataFieldKind) -> Option<(&str, &str)> {
+            match kind {
+                DataFieldKind::Key {
+                    target_table,
+                    target_field,
+                    ..
+                } => Some((target_table.0.as_str(), target_field.0.as_str())),
+                _ => None,
+            }
+        }
+        let wanted = target(kind);
+        if target(&existing.kind) == wanted {
+            return Ok(());
+        }
+        let field = &existing.base.name;
+        let references = match wanted {
+            Some((target_table, target_field)) => {
+                let storage = self.key_storage_type(
+                    &TableId(target_table.to_owned()),
+                    &FieldId(target_field.to_owned()),
+                )?;
+                let column = TypeRef::from_sql_type(existing.base.type_.sql_type());
+                if storage.sql_type() != column.sql_type() {
+                    return Err(Error::invalid(format!(
+                        "field `{table}.{field}` is stored as `{}` and cannot point at \
+                         `{target_table}.{target_field}`, which is stored as `{}`; \
+                         changing a column's type is not supported, so drop the field \
+                         and add it again as a key onto `{target_table}`",
+                        column.sql_type(),
+                        storage.sql_type()
+                    )));
+                }
+                Some(ColumnRef {
+                    table: target_table.to_owned(),
+                    column: target_field.to_owned(),
+                })
+            }
+            None => None,
+        };
+        self.ddl.push(SchemaChange::SetColumnReference {
+            table: table.to_owned(),
+            column: field.clone(),
+            references,
+        });
         Ok(())
     }
 

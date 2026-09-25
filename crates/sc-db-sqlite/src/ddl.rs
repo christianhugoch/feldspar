@@ -158,7 +158,8 @@ fn statements(dialect: &SqliteDialect, change: &SchemaChange) -> Result<Option<V
         // All of these change a column's declaration, which SQLite cannot do.
         SchemaChange::SetPrimaryKey { .. }
         | SchemaChange::SetColumnGenerator { .. }
-        | SchemaChange::SetColumnNullable { .. } => {
+        | SchemaChange::SetColumnNullable { .. }
+        | SchemaChange::SetColumnReference { .. } => {
             return Ok(None);
         }
         SchemaChange::AddUniqueConstraint {
@@ -518,6 +519,18 @@ fn rebuild_statements(
             target.not_null = !nullable;
             (table, existing, key)
         }
+        SchemaChange::SetColumnReference { table, column, .. } => {
+            let existing = introspect::columns(conn, table)?;
+            if !existing.iter().any(|c| &c.name == column) {
+                return Err(Error::invalid(format!(
+                    "table `{table}` has no column `{column}`"
+                )));
+            }
+            // The columns stay as they are; what changes is the foreign keys,
+            // which are written out below.
+            let key = introspect::primary_key(conn, table)?;
+            (table, existing, key)
+        }
         other => {
             return Err(Error::database(format!(
                 "{} does not need a table rebuild",
@@ -535,7 +548,22 @@ fn rebuild_statements(
     }
 
     let temporary = format!("{table}__sc_rebuild");
-    let foreign_keys = introspect::foreign_keys(conn, table)?;
+    let mut foreign_keys = introspect::foreign_keys(conn, table)?;
+    if let SchemaChange::SetColumnReference {
+        column, references, ..
+    } = change
+    {
+        // Every single-column key on the column goes, and the new one — if
+        // there is one — takes its place.
+        foreign_keys.retain(|key| key.columns != [column.clone()]);
+        if let Some(target) = references {
+            foreign_keys.push(sc_db::ForeignKey {
+                columns: vec![column.clone()],
+                referenced_table: target.table.clone(),
+                referenced_columns: vec![target.column.clone()],
+            });
+        }
+    }
     let indexes = introspect::indexes(conn, table)?;
     let rowid_alias = (primary_key.len() == 1
         && columns
@@ -723,6 +751,7 @@ fn change_name(change: &SchemaChange) -> &'static str {
         SchemaChange::SetPrimaryKey { .. } => "set primary key",
         SchemaChange::SetColumnGenerator { .. } => "set column generator",
         SchemaChange::SetColumnNullable { .. } => "set column nullable",
+        SchemaChange::SetColumnReference { .. } => "set column reference",
         SchemaChange::AddUniqueConstraint { .. } => "add unique constraint",
         SchemaChange::DropConstraint { .. } => "drop constraint",
         SchemaChange::CreateIndex { .. } => "create index",

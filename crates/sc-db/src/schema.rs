@@ -283,6 +283,26 @@ pub enum SchemaChange {
         /// `true` drops the `NOT NULL`; `false` adds it.
         nullable: bool,
     },
+    /// Make an existing column a foreign key onto another column, repoint the
+    /// one it is, or stop it being one.
+    ///
+    /// The [`ColumnDef::references`] of a column that already exists: every
+    /// single-column foreign key on `column` is dropped, whatever it was named,
+    /// and — unless `references` is `None` — the new one is added. Replacing
+    /// rather than adding, for the reason [`SetPrimaryKey`](SchemaChange::SetPrimaryKey)
+    /// replaces: a column that is a `Key` points at one thing, and a second
+    /// reference beside the first would be a column no row could satisfy.
+    ///
+    /// Adding the key is a check of the data as well as a declaration: a row
+    /// whose value is not in the new target makes the backend refuse the change.
+    SetColumnReference {
+        /// The table to alter.
+        table: String,
+        /// The referencing column.
+        column: String,
+        /// What it references from now on, or `None` for nothing.
+        references: Option<ColumnRef>,
+    },
     /// Add a `UNIQUE` constraint over one or more columns — a table-level
     /// constraint, which is what "jointly unique" needs and what
     /// [`ColumnDef::unique`] cannot express.

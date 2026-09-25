@@ -782,3 +782,190 @@ async fn a_field_can_be_made_required_and_optional_again() -> sc_error::Result<(
     assert!(body.to_string().contains("primary key"), "{body}");
     Ok(())
 }
+
+/// The table a `Key` field's foreign key in the database points at, or `None`
+/// when the column has none — read off `pg_constraint`, because the field list
+/// is what was wrong when only the overlay changed.
+async fn fk_target(db: &sc_test_harness::TestDb, table: &str, column: &str) -> Option<String> {
+    let rows = db
+        .client()
+        .await
+        .unwrap()
+        .query(
+            "SELECT c.confrelid::regclass::text FROM pg_constraint c \
+             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1] \
+             WHERE c.conrelid = $1::text::regclass AND c.contype = 'f' AND a.attname = $2",
+            &[&table, &column],
+        )
+        .await
+        .unwrap();
+    assert!(
+        rows.len() <= 1,
+        "at most one foreign key on `{table}.{column}`"
+    );
+    rows.first().map(|r| r.get::<_, String>(0))
+}
+
+/// Editing a `Key` onto another table repoints the foreign key itself.
+///
+/// The merge takes a key's target from the database whenever a foreign key
+/// stands behind the column (§3.2), so an edit that wrote only the overlay was
+/// saved without complaint and read straight back pointing where it always
+/// had. The reference has to move where it lives — and a field that stops being
+/// a key has to lose it, and a target stored as something else is refused
+/// rather than retyping the column.
+#[tokio::test]
+async fn a_key_field_can_be_pointed_at_another_table() -> sc_error::Result<()> {
+    let (mut client, _catalog, db) = setup().await?;
+    for table in ["author", "publisher", "code"] {
+        client
+            .send("POST", "/api/tables", Some(json!({ "name": table })))
+            .await;
+    }
+    for (table, body) in [
+        (
+            "author",
+            json!({ "name": "id", "type": "int", "primary_key": true }),
+        ),
+        (
+            "publisher",
+            json!({ "name": "id", "type": "int", "primary_key": true }),
+        ),
+        ("publisher", json!({ "name": "name", "type": "text" })),
+        (
+            "code",
+            json!({ "name": "id", "type": "text", "primary_key": true }),
+        ),
+        (
+            "book",
+            json!({ "name": "id", "type": "int", "primary_key": true }),
+        ),
+        (
+            "book",
+            json!({ "name": "by", "kind": { "type": "key", "target_table": "author",
+                                            "target_field": "id" } }),
+        ),
+    ] {
+        let (status, body) = client
+            .send("POST", &format!("/api/tables/{table}/fields"), Some(body))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    assert_eq!(
+        fk_target(&db, "book", "by").await.as_deref(),
+        Some("author")
+    );
+
+    // What the field editor sends on save: the whole overlay, no `type`.
+    let (status, body) = client
+        .send(
+            "PUT",
+            "/api/tables/book/fields/by",
+            Some(json!({
+                "label": "", "description": "", "primary_key": false,
+                "kind": { "type": "key", "target_table": "publisher",
+                          "target_field": "id", "summary_field": "name" }
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["kind"]["target_table"], json!("publisher"), "{body}");
+    assert_eq!(body["kind"]["summary_field"], json!("name"), "{body}");
+    let (_, fields) = client.send("GET", "/api/tables/book/fields", None).await;
+    assert_eq!(
+        field(&fields, "by")["kind"]["target_table"],
+        json!("publisher")
+    );
+    assert_eq!(
+        fk_target(&db, "book", "by").await.as_deref(),
+        Some("publisher")
+    );
+
+    // A row the new target does not have makes the move fail, and the key
+    // stays where it was — the overlay with it.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/publisher/rows",
+            Some(json!({ "name": "Ace" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/tables/book/rows",
+            Some(json!({ "by": body["id"] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = client
+        .send(
+            "PUT",
+            "/api/tables/book/fields/by",
+            Some(json!({ "kind": { "type": "key", "target_table": "author",
+                                   "target_field": "id" } })),
+        )
+        .await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        fk_target(&db, "book", "by").await.as_deref(),
+        Some("publisher")
+    );
+    let (_, fields) = client.send("GET", "/api/tables/book/fields", None).await;
+    assert_eq!(
+        field(&fields, "by")["kind"]["target_table"],
+        json!("publisher")
+    );
+
+    // A target stored as something else is refused by name.
+    let (status, body) = client
+        .send(
+            "PUT",
+            "/api/tables/book/fields/by",
+            Some(json!({ "kind": { "type": "key", "target_table": "code",
+                                   "target_field": "id" } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("stored as"), "{body}");
+    assert_eq!(
+        fk_target(&db, "book", "by").await.as_deref(),
+        Some("publisher")
+    );
+
+    // No longer a key: the foreign key goes, and the field reads back plain.
+    let (status, body) = client
+        .send(
+            "PUT",
+            "/api/tables/book/fields/by",
+            Some(json!({ "type": "int" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(fk_target(&db, "book", "by").await, None);
+    let (_, fields) = client.send("GET", "/api/tables/book/fields", None).await;
+    assert_ne!(
+        field(&fields, "by")["kind"]["type"],
+        json!("key"),
+        "{fields}"
+    );
+
+    // And a plain column made a key gains one.
+    let (status, body) = client
+        .send(
+            "PUT",
+            "/api/tables/book/fields/by",
+            Some(
+                json!({ "kind": { "type": "key", "target_table": "publisher",
+                                   "target_field": "id" } }),
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        fk_target(&db, "book", "by").await.as_deref(),
+        Some("publisher")
+    );
+    Ok(())
+}

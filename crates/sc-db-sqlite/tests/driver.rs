@@ -605,6 +605,80 @@ async fn a_column_can_be_made_required_and_optional_again() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_column_reference_is_repointed_and_removed() -> Result<()> {
+    let driver = driver();
+    books(&driver).await?;
+    for (name, column) in [
+        ("author", ColumnDef::new("id", "int8").not_null().identity()),
+        (
+            "review",
+            ColumnDef::new("about", "int8").references("book", "id"),
+        ),
+    ] {
+        driver
+            .apply_schema(&SchemaChange::CreateTable {
+                name: name.into(),
+                columns: vec![column],
+                primary_key: if name == "author" {
+                    vec!["id".into()]
+                } else {
+                    vec![]
+                },
+                unlogged: false,
+            })
+            .await?;
+    }
+    let target = |tables: &[sc_db::PhysicalTable]| {
+        let review = tables.iter().find(|t| t.name == "review").expect("review");
+        assert!(review.foreign_keys.len() <= 1, "{:?}", review.foreign_keys);
+        review
+            .foreign_keys
+            .first()
+            .map(|k| (k.referenced_table.clone(), k.columns.clone()))
+    };
+    let repoint = |to: Option<&str>| SchemaChange::SetColumnReference {
+        table: "review".into(),
+        column: "about".into(),
+        references: to.map(|t| sc_db::ColumnRef {
+            table: t.into(),
+            column: "id".into(),
+        }),
+    };
+
+    driver.apply_schema(&repoint(Some("author"))).await?;
+    assert_eq!(
+        target(&driver.introspect().await?),
+        Some(("author".into(), vec!["about".into()]))
+    );
+
+    // A value the new target does not have makes the rebuild fail, and the key
+    // stays where it was.
+    rows(
+        &driver,
+        Insert::row("book", vec!["title".into()], vec![Expr::lit("Dune")]).into(),
+    )
+    .await?;
+    driver.apply_schema(&repoint(None)).await?;
+    assert_eq!(target(&driver.introspect().await?), None);
+    rows(
+        &driver,
+        Insert::row("review", vec!["about".into()], vec![Expr::lit(1_i64)]).into(),
+    )
+    .await?;
+    driver
+        .apply_schema(&repoint(Some("author")))
+        .await
+        .expect_err("no author 1");
+    assert_eq!(target(&driver.introspect().await?), None);
+    driver.apply_schema(&repoint(Some("book"))).await?;
+    assert_eq!(
+        target(&driver.introspect().await?),
+        Some(("book".into(), vec!["about".into()]))
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn columns_are_added_and_dropped() -> Result<()> {
     let driver = driver();
     books(&driver).await?;

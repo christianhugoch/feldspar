@@ -2,6 +2,34 @@
 
 Changes in reverse chronological order.
 
+## A key field's target table can be changed
+
+Editing a `Key` field in the admin UI and choosing a different target table saved without an
+error, but the field read back still pointing at the old table. The edit only rewrote the
+`_fd_fields` overlay. The merge takes a key's target from the database's foreign key whenever
+there is one (§3.2), so the overlay's new target was ignored.
+
+`updateField` now changes the reference in the database, in the same transaction as the overlay
+row. A new `SchemaChange::SetColumnReference { table, column, references }` drops every
+single-column foreign key on the column and, unless `references` is `None`, adds the new one
+(deferrable, checked immediately, like a key created with the field). Postgres finds the old
+constraint through `pg_constraint` rather than by name, so a key on a table built outside
+Saltcorn is replaced too. SQLite rebuilds the table with the new key. The schema editor emits
+the change whenever the field's reference differs from what it was:
+
+- a key pointed at a different table or field has its foreign key replaced;
+- a field that stops being a key loses its foreign key;
+- a plain column made a key gains one.
+
+Rows whose value the new target does not hold make the database refuse the change, and the old
+key and overlay are kept. The column keeps its storage type, so a target stored as a different
+type (an `int` key onto a `text` primary key) is refused by name, saying to drop and re-add
+the field.
+
+Tests: `field_api::a_key_field_can_be_pointed_at_another_table` (sc-server, Postgres),
+`a_column_reference_is_repointed_and_removed` (sc-db-sqlite), and a render test in
+sc-db-postgres's `ddl.rs`.
+
 ## Boot builds no applications
 
 Boot ran every application's build step, or at least keyed the source tree through git to decide
