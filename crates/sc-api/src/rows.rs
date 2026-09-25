@@ -815,6 +815,52 @@ pub(crate) async fn delete_row_guarded_in(
     Ok(row)
 }
 
+/// Delete every row of `table` the caller may delete, returning how many went.
+///
+/// One statement, not a loop over [`delete_row`]: it has no key to address rows
+/// by, so a table with no primary key can be emptied too. The same guards
+/// apply, and a delete event is still raised for each row (§10.2), because a
+/// trigger watching deletes is watching these as well. The whole rows are read
+/// back only when something is listening: otherwise a constant is all the
+/// count needs, and emptying a large table does not ship it to the server.
+pub async fn delete_all_rows_ctx(
+    catalog: &Catalog,
+    table: &Table,
+    context: Option<&CallerContext>,
+) -> Result<u64> {
+    let executor = Executor::Pooled;
+    let observed = catalog.observes_writes(&table.name, WriteOp::Delete);
+    let delete = Delete {
+        table: table.name.clone(),
+        filter: user_rows::delete_guard(table, context)?,
+        returning: if observed {
+            user_rows::projection(table)
+        } else {
+            // Text, because a literal goes out as a bind parameter and a
+            // parameter in a `RETURNING` list has no column to take a type from:
+            // Postgres calls it `text` and would refuse an integer.
+            vec![Projection::expr_as(Expr::lit(""), "deleted")]
+        },
+    };
+    let rows = run_write_in(catalog, table, Statement::from(delete), context, &executor).await?;
+    if observed {
+        for row in &rows {
+            let row = row_to_json(row);
+            emit(
+                catalog,
+                table,
+                WriteOp::Delete,
+                &row,
+                None,
+                context,
+                &executor,
+            )
+            .await;
+        }
+    }
+    Ok(rows.len() as u64)
+}
+
 /// Raise the event one committed write is (§10.2), if anything is listening.
 ///
 /// Two properties this function exists to hold, both of them in the TODO's words:

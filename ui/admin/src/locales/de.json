@@ -880,5 +880,7 @@
   "{translated} of {total} messages translated into {locale} ({percent}%)": "{translated} von {total} Nachrichten in {locale} übersetzt ({percent}%)",
   "— no stream of that name exists here, so this application cannot observe it until it is removed or the stream is recreated.": "— hier gibt es keinen Stream mit diesem Namen. Daher kann diese Anwendung ihn erst überwachen, wenn er entfernt oder neu erstellt wurde.",
   "— no trigger of that name exists here, so this application will not mount until it is removed or the trigger is recreated.": "— hier gibt es keinen Trigger mit diesem Namen. Daher wird diese Anwendung erst eingebunden, wenn er entfernt oder neu erstellt wurde.",
-  "← up": "← nach oben"
+  "← up": "← nach oben",
+  "Delete all rows": "Alle Zeilen löschen",
+  "Delete all {count} rows of \"{name}\"? The table and its fields stay. This cannot be undone.": "Alle {count} Zeilen von „{name}“ löschen? Die Tabelle und ihre Felder bleiben erhalten. Dies kann nicht rückgängig gemacht werden."
 }

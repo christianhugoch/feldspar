@@ -906,5 +906,7 @@
   "{translated} of {total} messages translated into {locale} ({percent}%)": "{translated} de {total} mensajes traducidos al {locale} ({percent}%)",
   "— no stream of that name exists here, so this application cannot observe it until it is removed or the stream is recreated.": "— aquí no existe ningún flujo con ese nombre, por lo que esta aplicación no puede observarlo hasta que se elimine o se vuelva a crear el flujo.",
   "— no trigger of that name exists here, so this application will not mount until it is removed or the trigger is recreated.": "— aquí no existe ningún activador con ese nombre, por lo que esta aplicación no se montará hasta que se elimine o se vuelva a crear el activador.",
-  "← up": "← arriba"
+  "← up": "← arriba",
+  "Delete all rows": "Eliminar todas las filas",
+  "Delete all {count} rows of \"{name}\"? The table and its fields stay. This cannot be undone.": "¿Eliminar las {count} filas de “{name}”? La tabla y sus campos se conservan. Esto no se puede deshacer."
 }

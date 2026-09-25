@@ -610,6 +610,25 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // Empty the table: every row, in one statement, keeping the table, its
+    // fields and its settings. The table page's "Delete all rows". Answers how
+    // many rows went, which is the one thing the admin cannot see afterwards.
+    set.register(
+        Endpoint::new(
+            "deleteAllRows",
+            Method::Delete,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("rows"),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::int(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- rows in bulk, as CSV ----------------------------------------------
     //
     // The document crosses as a **string** in a JSON envelope rather than as a

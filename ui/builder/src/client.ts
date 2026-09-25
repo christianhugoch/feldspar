@@ -52,6 +52,7 @@ export type CreateRowRequest = unknown;
 export type CreateRowResponse = unknown;
 export type UpdateRowRequest = unknown;
 export type UpdateRowResponse = unknown;
+export type DeleteAllRowsResponse = { deleted: number };
 export type ExportTableCsvResponse = { filename: string; csv: string };
 export type ImportTableCsvRequest = { csv: string };
 export type ImportTableCsvResponse = { inserted: number; updated: number; errors: Array<string> };
@@ -301,6 +302,7 @@ export interface ApiClient {
   createRow(table: string, body: CreateRowRequest): Promise<CreateRowResponse>;
   updateRow(table: string, id: string, body: UpdateRowRequest): Promise<UpdateRowResponse>;
   deleteRow(table: string, id: string): Promise<void>;
+  deleteAllRows(table: string): Promise<DeleteAllRowsResponse>;
   exportTableCsv(table: string): Promise<ExportTableCsvResponse>;
   importTableCsv(table: string, body: ImportTableCsvRequest): Promise<ImportTableCsvResponse>;
   listDatabaseConnections(): Promise<ListDatabaseConnectionsResponse>;
@@ -734,6 +736,14 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("deleteRow", res);
       return;
+    },
+    async deleteAllRows(table) {
+      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteAllRows", res);
+      return (await res.json()) as DeleteAllRowsResponse;
     },
     async exportTableCsv(table) {
       const res = await doFetch(`${baseUrl}/api/tables/${table}/csv`, {

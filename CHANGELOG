@@ -2,6 +2,27 @@
 
 Changes in reverse chronological order.
 
+## Delete all rows
+
+The Table data card's menu on the table page has a new **Delete all rows** item, next to Forget
+settings and Drop table. It asks for confirmation, naming how many rows will go, and then empties
+the table. The table, its fields and its settings stay. It is offered wherever the table allows
+deletes: every database table, and a provided table whose provider deletes. It is not offered on
+a metadata table, whose rows are Saltcorn's own (the users table among them). It is disabled when
+the table is already empty.
+
+Behind it is a new admin endpoint, `deleteAllRows` (`DELETE /api/tables/{table}/rows`), which
+answers `{ "deleted": n }`. It calls the new `sc_api::rows::delete_all_rows_ctx`. That is one
+`DELETE` with the same guards a single-row delete has, so a table with no primary key can be
+emptied too. A delete event is still raised for every row, so delete triggers fire for each. The
+rows are read back only when something listens for deletes. Otherwise the statement returns a
+constant, and emptying a large table does not load it into memory. Rows that another table's key
+still points at make the database refuse the whole delete, and the error is shown on the card.
+The generated clients (`ui/admin`, `ui/ide`, `ui/builder`) are regenerated. The new strings are
+translated in the five admin locales.
+
+Test: `table_triggers::deleting_all_rows_empties_the_table_and_fires_each_delete` (sc-server).
+
 ## A key field's target table can be changed
 
 Editing a `Key` field in the admin UI and choosing a different target table saved without an

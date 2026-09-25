@@ -957,6 +957,26 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    reg.register("deleteAllRows", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let table = catalog.require(ctx.path_param("table")?)?;
+                let deleted = rows::delete_all_rows_ctx(
+                    &catalog,
+                    &table,
+                    Some(&admin_caller(ctx.user.as_ref())),
+                )
+                .await?;
+                if deleted > 0 {
+                    sc_api::metadata_tables::after_row_write(&catalog, &table).await?;
+                }
+                Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
+            }
+        }
+    });
+
     // --- rows in bulk, as CSV ----------------------------------------------
 
     reg.register("exportTableCsv", {
