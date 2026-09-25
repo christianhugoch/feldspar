@@ -306,6 +306,15 @@ when nothing changed.
       the stamp kept in the repository's git dir. `build_application_if_changed` uses it;
       `mount_all` calls it, while the Build button, the tools and a restore still always build.
 
+## Interjected — build no applications at boot
+
+Asked for directly: building every application at startup was still slowing boot down. Boot now
+mounts each application from what its last build left on disk, as a `SIGHUP` reload does.
+
+- [x] B.2 `mount_all` builds nothing: it and `reload_all` share `apps::mount_from_disk`. An
+      application that has never been built is logged and skipped. The Build button, the tools
+      and a restore still always build.
+
 ## Interjected — a "None" framework
 
 Asked for directly: picking a framework when creating an application should offer "None" — an

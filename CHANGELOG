@@ -2,6 +2,26 @@
 
 Changes in reverse chronological order.
 
+## Boot builds no applications
+
+Boot ran every application's build step, or at least keyed the source tree through git to decide
+whether to, and that was most of the start-up time. `mount_all` now builds nothing. It mounts
+each application from its output directory, the same way a `SIGHUP` reload does: both call the
+new `apps::mount_from_disk`. A Saltcorn UI or `none` application is still constructed by its
+factory. An application that has never been built is logged
+(`application `x` not mounted, skipping: … build the application first`) and skipped, and the
+Build button mounts it without a restart. The per-application systemd timeout extension at boot
+is gone because there is no longer a long step to extend it for.
+
+The shared mount also fixes a small `SIGHUP` gap. The reload's own `remount` mounted a
+`CodeFramework` without its build step, so `Framework::build()` returned nothing for a reloaded
+app. It now carries the build step, as a built mount does.
+
+`sc_app::build_application_if_changed` and its build cache are no longer on the boot path. They
+are still there and still tested. The boot test in `sc-server/tests/live_mounting.rs` now checks
+that boot serves the output already on disk rather than what the bundler would write, and
+that an application with no build is skipped.
+
 ## Endpoints at the public role are open to anybody
 
 An application endpoint whose role floor is 100 (public) refused every caller who was not

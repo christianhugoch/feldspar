@@ -2,7 +2,7 @@
 //! (design §13.2, "the mount registry is live; a full restart should never be
 //! required").
 //!
-//! What a mounted application serves is a **snapshot**: [`CodeFramework`] holds
+//! What a mounted application serves is a **snapshot**: [`CodeFramework`](sc_app::CodeFramework) holds
 //! the bytes [`AssetBundle::from_dir`](sc_app::AssetBundle) read out of the
 //! build's output directory, and every later request is answered from that map.
 //! So a developer — or a coding agent working inside the project directory — who
@@ -54,13 +54,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sc_app::{
-    Application, CodeFramework, app_source_from_config, list_applications, load_app_bundle,
-};
-use sc_catalog::Catalog;
-use sc_error::Result;
+use sc_app::{Application, list_applications};
 
-use crate::apps::{AppMounts, MountedApp};
+use crate::apps::AppMounts;
 
 /// What one [`reload_all`] did, and how long each half of it took.
 ///
@@ -204,7 +200,7 @@ pub async fn reload_all(apps: &AppMounts) -> ReloadReport {
 
     let phase = Instant::now();
     match list_applications(&catalog).await {
-        Ok(stored) => reload_applications(apps, &catalog, stored, &mut report).await,
+        Ok(stored) => reload_applications(apps, stored, &mut report).await,
         // The catalog is reloaded either way — half a reload is better than none,
         // and the operator is told which half.
         Err(e) => report.applications_error = Some(e.to_string()),
@@ -235,7 +231,6 @@ pub async fn reload_all(apps: &AppMounts) -> ReloadReport {
 /// others down, and it keeps serving what it was serving.
 async fn reload_applications(
     apps: &AppMounts,
-    catalog: &Catalog,
     stored: Vec<Application>,
     report: &mut ReloadReport,
 ) {
@@ -245,7 +240,7 @@ async fn reload_applications(
     for app in stored {
         let subdomain = app.subdomain.clone();
         present.push(subdomain.clone());
-        match remount(apps, catalog, app).await {
+        match crate::apps::mount_from_disk(apps, app).await {
             Ok(assets) => {
                 report.assets += assets;
                 report.reloaded.push(subdomain);
@@ -262,30 +257,6 @@ async fn reload_applications(
             report.unmounted.push(gone);
         }
     }
-}
-
-/// Mount one application from its stored row and its build output, replacing
-/// whatever was on its subdomain. Returns how many assets were read.
-///
-/// The mount this produces is indistinguishable from the one a build produces —
-/// same [`CodeFramework`], same providers from the same
-/// [`MountedApp::new_with`] — because the only difference between the two paths
-/// is who ran the bundler.
-async fn remount(apps: &AppMounts, catalog: &Catalog, app: Application) -> Result<usize> {
-    // A framework with nothing on disk to re-read (Saltcorn UI) is mounted again
-    // by its factory, which re-reads the application's views and pages under a
-    // new generation — the reload of a rendered application.
-    if sc_app::framework_factory(&app.framework.name).is_some() {
-        crate::apps::build_and_mount(apps, app).await?;
-        return Ok(0);
-    }
-    let source = app_source_from_config(&app.framework)?;
-    let bundle = load_app_bundle(catalog, &source)?;
-    let assets = bundle.len();
-    let framework = Arc::new(CodeFramework::new(app.framework.name.clone(), bundle));
-    let mounted = MountedApp::new_with(app, framework, catalog, apps.evaluator(), apps.triggers())?;
-    apps.remount(mounted);
-    Ok(assets)
 }
 
 /// Listen for `SIGHUP` for the lifetime of the process, reloading on each one.
