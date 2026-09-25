@@ -171,8 +171,9 @@ pub enum AuthRequirement {
     Public,
     /// Any authenticated user.
     LoggedIn,
-    /// A user whose role is at least as privileged as `min_role` (i.e. a role
-    /// number `<= min_role`), per `User::meets_role`.
+    /// A caller whose role is at least as privileged as `min_role` (i.e. a role
+    /// number `<= min_role`). A caller nobody is logged in as holds the public
+    /// role, so `MinRole(100)` admits everybody — see [`admits`](Self::admits).
     MinRole(u8),
 }
 
@@ -180,6 +181,32 @@ impl AuthRequirement {
     /// Requires the administrator role (role `1`).
     pub fn admin() -> AuthRequirement {
         AuthRequirement::MinRole(sc_auth::ROLE_ADMIN)
+    }
+
+    /// Whether `user` — `None` for a caller nobody is logged in as — passes.
+    ///
+    /// The one statement of the rule every surface enforces. An anonymous
+    /// caller is not refused a role floor for being anonymous: they hold
+    /// [`ROLE_PUBLIC`](sc_auth::ROLE_PUBLIC), so they pass a floor at the
+    /// public role and fail every other one.
+    pub fn admits(&self, user: Option<&sc_auth::User>) -> bool {
+        match self {
+            AuthRequirement::Public => true,
+            AuthRequirement::LoggedIn => user.is_some(),
+            AuthRequirement::MinRole(min) => user.map_or(sc_auth::ROLE_PUBLIC, |u| u.role) <= *min,
+        }
+    }
+
+    /// Whether this is a role floor the administrator set at the **public**
+    /// role: data or an action opened to anybody at all.
+    ///
+    /// Such an endpoint needs no session, and so no CSRF token either — a
+    /// request without one is served as the anonymous caller it then is
+    /// (`sc-server`'s CSRF middleware). [`Public`](Self::Public) is *not* this:
+    /// it marks the auth plumbing (`login`, `signup`, …) and the endpoints whose
+    /// handler decides for itself who the caller is, and those keep the check.
+    pub fn is_public_role(&self) -> bool {
+        matches!(self, AuthRequirement::MinRole(min) if *min >= sc_auth::ROLE_PUBLIC)
     }
 }
 

@@ -46,8 +46,9 @@ use crate::lsp::{LSP_ROUTE, ServerSlots, language_server_upgrade, server_slots};
 use crate::mcp::MCP_ROUTE;
 use crate::observe::{STREAM_OBSERVE_ROUTE, stream_observe_by_name, stream_observe_upgrade};
 use crate::security::{
-    CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, IDE_CONTENT_SECURITY_POLICY, SESSION_COOKIE,
-    admin_content_security_policy, build_cookie, csrf_middleware,
+    AnonymousCaller, CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, CsrfPolicy,
+    IDE_CONTENT_SECURITY_POLICY, SESSION_COOKIE, admin_content_security_policy, build_cookie,
+    csrf_middleware,
 };
 
 /// A WebSocket upgrade, **if this request is one** — the extractor the fallback
@@ -301,11 +302,16 @@ pub fn build_router_with_apps(
         // the whole of the confused-deputy story rather than belt-and-braces.
         .route(MCP_ROUTE, axum::routing::post(crate::mcp::mcp))
         .fallback(dispatch)
-        .with_state(state)
+        .with_state(state.clone())
         // CSRF runs outside dispatch so it guards every route and can mint the
-        // double-submit cookie on the way out.
+        // double-submit cookie on the way out. It asks the live app registry
+        // whether a failing request is for an endpoint open to the public role,
+        // which it lets through as an anonymous caller.
         .layer(axum::middleware::from_fn_with_state(
-            config.secure_cookies,
+            CsrfPolicy {
+                secure: config.secure_cookies,
+                open_to_public: Arc::new(move |request| open_to_public(&state, request)),
+            },
             csrf_middleware,
         ))
         // Strict security headers on every response (design §16). CSP is
@@ -735,6 +741,7 @@ async fn dispatch(
     headers: axum::http::HeaderMap,
     jar: CookieJar,
     csrf: Option<axum::Extension<crate::security::CsrfToken>>,
+    anonymous: Option<axum::Extension<AnonymousCaller>>,
     // Before `body`, and it has to be: an upgrade lives in the request's
     // extensions and must be taken while the parts are still in hand.
     MaybeUpgrade(ws): MaybeUpgrade,
@@ -745,7 +752,11 @@ async fn dispatch(
     match resolve_app(&state, &headers, &jar) {
         Resolved::App(app) => {
             let csrf = csrf.map(|axum::Extension(token)| token.0);
-            return dispatch_app(&state, &app, method, &uri, &headers, jar, csrf, ws, &body).await;
+            let anonymous = anonymous.is_some();
+            return dispatch_app(
+                &state, &app, method, &uri, &headers, jar, csrf, anonymous, ws, &body,
+            )
+            .await;
         }
         // A run's preview, asked for without that run's session: the answer is
         // the one a host that serves nothing gets, so a preview shows nobody
@@ -793,6 +804,22 @@ async fn dispatch(
             }
         }
     }
+}
+
+/// Whether `request` goes to an application API endpoint open to the public
+/// role — the question [`csrf_middleware`] asks of a mutating request that
+/// failed its check. Only an API provider's endpoints qualify: an
+/// application's own pages and everything on the admin host keep the check.
+fn open_to_public(state: &AppState, request: &axum::extract::Request) -> bool {
+    let jar = CookieJar::from_headers(request.headers());
+    let Resolved::App(app) = resolve_app(state, request.headers(), &jar) else {
+        return false;
+    };
+    let path = request.uri().path();
+    map_method(request.method().as_str()).is_some_and(|method| {
+        app.provider_for(path)
+            .is_some_and(|provider| provider.open_to_public(method, path))
+    })
 }
 
 /// The application a request's `Host` names, if any.
@@ -856,6 +883,7 @@ async fn dispatch_app(
     headers: &axum::http::HeaderMap,
     jar: CookieJar,
     csrf: Option<String>,
+    anonymous: bool,
     ws: Option<axum::extract::ws::WebSocketUpgrade>,
     body: &Bytes,
 ) -> Response {
@@ -901,7 +929,13 @@ async fn dispatch_app(
             );
         };
 
-        let session_token = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+        // A request the CSRF middleware let through without a token, for an
+        // endpoint open to the public role, is nobody's: its cookie is not
+        // read, so the session it may carry lends it no authority.
+        let session_token = jar
+            .get(SESSION_COOKIE)
+            .filter(|_| !anonymous)
+            .map(|c| c.value().to_owned());
         let user = match &session_token {
             Some(token) => match state.sessions.user_for(token).await {
                 Ok(u) => u,
@@ -986,7 +1020,14 @@ async fn dispatch_app(
                     HandlerResponse {
                         body: resp.body,
                         status: resp.status,
-                        session: resp.session,
+                        // Nor may it change one: an endpoint open to the public
+                        // role does not log anybody in or out, and a forged
+                        // request is exactly the one that must not.
+                        session: if anonymous {
+                            sc_api::SessionAction::Keep
+                        } else {
+                            resp.session
+                        },
                         // A provider's raw body is served above, before this
                         // point: an application's download never reaches here.
                         download: None,
@@ -1684,34 +1725,22 @@ async fn handle_api(
 /// Check a user against an [`AuthRequirement`]. Returns `Some(rejection)` when
 /// the request is not authorized, `None` when it may proceed.
 fn enforce_auth(auth: &AuthRequirement, user: Option<&User>) -> Option<Response> {
-    // `Public` decides nothing and says nothing, so it is answered before the
-    // locale is asked for: the overwhelmingly common call costs what it always
-    // did.
-    if matches!(auth, AuthRequirement::Public) {
+    // A caller who passes is answered before the locale is asked for: the
+    // overwhelmingly common call costs what it always did.
+    if auth.admits(user) {
         return None;
     }
     // Two sentences a person reads, in the language that person reads (§16.1,
     // D5). The locale is the signed-in user's, which is all this function is
     // given and all a refusal needs — see `i18n::locale_for_user`.
     let locale = crate::i18n::locale_for_user(user);
-    let unauthenticated = || {
-        json_error(
+    Some(match user {
+        None => json_error(
             StatusCode::UNAUTHORIZED,
             t!(locale, "authentication required"),
-        )
-    };
-    match auth {
-        AuthRequirement::Public => None,
-        AuthRequirement::LoggedIn => user.is_none().then(unauthenticated),
-        AuthRequirement::MinRole(min) => match user {
-            None => Some(unauthenticated()),
-            Some(u) if u.meets_role(*min) => None,
-            Some(_) => Some(json_error(
-                StatusCode::FORBIDDEN,
-                t!(locale, "insufficient privilege"),
-            )),
-        },
-    }
+        ),
+        Some(_) => json_error(StatusCode::FORBIDDEN, t!(locale, "insufficient privilege")),
+    })
 }
 
 /// Turn a [`HandlerResponse`] into an HTTP response, applying its session action

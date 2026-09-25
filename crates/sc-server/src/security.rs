@@ -21,6 +21,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::{Cookie, SameSite};
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Name of the session cookie (opaque token → [`SessionStore`](sc_auth::SessionStore)).
@@ -273,6 +274,23 @@ const MAX_CSRF_FORM_BODY: usize = 2 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CsrfToken(pub String);
 
+/// What [`csrf_middleware`] is configured with.
+#[derive(Clone)]
+pub(crate) struct CsrfPolicy {
+    /// Whether the minted cookie carries the `Secure` flag.
+    pub secure: bool,
+    /// Whether a request goes to an endpoint anybody may call with no session
+    /// — an application API endpoint whose role floor is the public role. Asked
+    /// only of a mutating request that failed the check.
+    pub open_to_public: Arc<dyn Fn(&Request) -> bool + Send + Sync>,
+}
+
+/// Marks a mutating request [`csrf_middleware`] let through **without** a valid
+/// token, because it is going to an endpoint open to the public role. The
+/// dispatcher must serve it as nobody: no session read, none started or ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AnonymousCaller;
+
 /// CSRF middleware implementing the double-submit-cookie check.
 ///
 /// On a mutating request the token must equal the existing `sc_csrf` cookie,
@@ -287,15 +305,23 @@ pub struct CsrfToken(pub String);
 /// A cross-site page can make the browser send the cookie but cannot read it,
 /// so it can put the token in none of them. Every response ensures the cookie is
 /// set (minting one on first contact) and the handler is told the token in a
-/// [`CsrfToken`] extension. `State<bool>` carries the `Secure` cookie flag.
+/// [`CsrfToken`] extension. [`CsrfPolicy`] carries the `Secure` cookie flag.
 ///
 /// **Bearer requests are exempt** (see [`is_bearer_authenticated`]).
+///
+/// **So is a request to an endpoint open to the public role**
+/// ([`CsrfPolicy::open_to_public`]) — but only by being served as the anonymous
+/// caller it would be without a cookie: it passes on with an [`AnonymousCaller`]
+/// marker, and the dispatcher reads no session for it. CSRF is a defence of the
+/// authority a cookie carries; a request that is given none has nothing for a
+/// cross-site page to borrow, and anybody may make it anyway.
 pub(crate) async fn csrf_middleware(
-    State(secure): State<bool>,
+    State(policy): State<CsrfPolicy>,
     jar: CookieJar,
     request: Request,
     next: Next,
 ) -> Response {
+    let secure = policy.secure;
     let existing = jar.get(CSRF_COOKIE).map(|c| c.value().to_owned());
     let mut request = request;
 
@@ -319,7 +345,9 @@ pub(crate) async fn csrf_middleware(
             });
             request = Request::from_parts(parts, axum::body::Body::from(bytes));
         }
-        if !valid {
+        if !valid && (policy.open_to_public)(&request) {
+            request.extensions_mut().insert(AnonymousCaller);
+        } else if !valid {
             // Reject, but still hand out a token so a first-contact client can
             // read it and retry successfully.
             let jar = ensure_csrf_cookie(jar, existing, secure);

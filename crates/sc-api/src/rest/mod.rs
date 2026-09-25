@@ -424,8 +424,19 @@ impl RestProvider {
             // endpoint's auth into the handler, where the rule becomes
             // "meets the role floor OR the formula grants the row". A table
             // without a formula keeps the MinRole gate exactly as before.
+            //
+            // A floor at the public role stays a floor, though: it admits
+            // everybody whatever the formula says, and saying so is what
+            // exempts the endpoint from CSRF (`AuthRequirement::is_public_role`).
+            let relaxed = |floor: u8| match AuthRequirement::MinRole(floor) {
+                open if open.is_public_role() => open,
+                _ => AuthRequirement::Public,
+            };
             let (read, write) = if table.ownership.is_some() {
-                (AuthRequirement::Public, AuthRequirement::Public)
+                (
+                    relaxed(table.access.min_role_read),
+                    relaxed(table.access.min_role_write),
+                )
             } else {
                 (
                     AuthRequirement::MinRole(table.access.min_role_read),
@@ -1551,16 +1562,13 @@ impl RestProvider {
 /// does not pass. Mirrors the server's own dispatch check, in the provider's
 /// JSON vocabulary.
 fn enforce_auth(auth: &AuthRequirement, user: Option<&User>) -> Option<ApiResponse> {
-    let unauthenticated = || ApiResponse::error(401, "authentication required");
-    match auth {
-        AuthRequirement::Public => None,
-        AuthRequirement::LoggedIn => user.is_none().then(unauthenticated),
-        AuthRequirement::MinRole(min) => match user {
-            None => Some(unauthenticated()),
-            Some(u) if u.meets_role(*min) => None,
-            Some(_) => Some(ApiResponse::error(403, "insufficient privilege")),
-        },
+    if auth.admits(user) {
+        return None;
     }
+    Some(match user {
+        None => ApiResponse::error(401, "authentication required"),
+        Some(_) => ApiResponse::error(403, "insufficient privilege"),
+    })
 }
 
 /// A `PathSpec` rooted at the provider's mount.
@@ -1933,6 +1941,73 @@ mod tests {
         assert!(enforce_auth(&AuthRequirement::Public, None).is_none());
         assert!(enforce_auth(&AuthRequirement::LoggedIn, None).is_some());
         assert!(enforce_auth(&AuthRequirement::LoggedIn, Some(&user(100))).is_none());
+    }
+
+    #[test]
+    fn a_floor_at_the_public_role_admits_a_caller_nobody_is_logged_in_as() {
+        // Role 100 is the role an anonymous caller holds, so a floor at it is
+        // everybody — not "any logged-in user of role 100".
+        let public = AuthRequirement::MinRole(sc_auth::ROLE_PUBLIC);
+        assert!(enforce_auth(&public, None).is_none());
+        assert!(enforce_auth(&public, Some(&user(100))).is_none());
+        assert!(enforce_auth(&public, Some(&user(1))).is_none());
+        // One step stricter and the anonymous caller is out again.
+        assert_eq!(
+            enforce_auth(&AuthRequirement::MinRole(99), None)
+                .unwrap()
+                .status,
+            401
+        );
+    }
+
+    #[test]
+    fn only_endpoints_at_the_public_role_are_open_without_a_session() {
+        use sc_action::{EventKind, Trigger};
+
+        let open = AccessRules {
+            min_role_read: sc_auth::ROLE_PUBLIC,
+            min_role_write: sc_auth::ROLE_PUBLIC,
+        };
+        let read_only = AccessRules {
+            min_role_read: sc_auth::ROLE_PUBLIC,
+            min_role_write: 80,
+        };
+        // An ownership table's endpoints are relaxed to `Public` for its
+        // formula; a floor at the public role must survive that relaxation.
+        let mut owned = table("notes", read_only.clone());
+        owned.ownership = Some(sc_expr::Formula::parse("owner === user.id").unwrap());
+        let p = RestProvider::project_with(
+            "/api",
+            &[table("guestbook", open), table("posts", read_only), owned],
+            &[
+                Trigger::new("sign", EventKind::None, "fetch").min_role(sc_auth::ROLE_PUBLIC),
+                Trigger::new("purge", EventKind::None, "fetch").min_role(80),
+            ],
+        )
+        .with_queries(vec![
+            CustomQuery::new("count", Method::Post, "/stats/count", "SELECT 1")
+                .min_role(sc_auth::ROLE_PUBLIC),
+            CustomQuery::new("audit", Method::Post, "/stats/audit", "SELECT 1").min_role(40),
+        ])
+        .unwrap();
+
+        let open = |method, path| p.open_to_public(method, path);
+        assert!(open(Method::Post, "/api/guestbook"));
+        assert!(open(Method::Delete, "/api/guestbook/7"));
+        assert!(open(Method::Get, "/api/posts"));
+        assert!(!open(Method::Post, "/api/posts"));
+        assert!(open(Method::Get, "/api/notes"));
+        assert!(
+            !open(Method::Post, "/api/notes"),
+            "the formula decides writes"
+        );
+        assert!(open(Method::Post, "/api/actions/sign"));
+        assert!(!open(Method::Post, "/api/actions/purge"));
+        assert!(open(Method::Post, "/api/stats/count"));
+        assert!(!open(Method::Post, "/api/stats/audit"));
+        // The auth plumbing is `Public`, not the public role: it keeps the check.
+        assert!(!open(Method::Post, "/api/login"));
+        assert!(!open(Method::Post, "/api/nowhere"));
     }
 
     #[test]

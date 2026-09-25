@@ -2,6 +2,43 @@
 
 Changes in reverse chronological order.
 
+## Endpoints at the public role are open to anybody
+
+An application endpoint whose role floor is 100 (public) refused every caller who was not
+logged in. Role 100 is the role an anonymous caller holds, so such an endpoint is meant for
+anybody: no user, no password, no session and no CSRF token. This affected tables whose
+`min_role_read` / `min_role_write` is 100, custom queries and exposed triggers. Two separate
+things were wrong:
+
+- **The role check.** `AuthRequirement::MinRole(n)` refused a missing user outright, whatever
+  `n` was. `AuthRequirement::admits(user)` now states the rule once: an anonymous caller holds
+  `ROLE_PUBLIC`, so they pass a floor of 100 and fail every stricter one. The REST provider's
+  `enforce_auth`, the server dispatcher's `enforce_auth` and the MCP endpoint tools'
+  `check_caller` all call it, so the three copies of the match are gone.
+- **CSRF.** The double-submit middleware refused any `POST`/`PUT`/`DELETE` without a token, so a
+  `curl`, a webhook or a third-party page could not call a public endpoint even after the role
+  fix. `csrf_middleware` now takes a `CsrfPolicy`. When a mutating request fails the check, it
+  asks whether the request is for an application API endpoint open to the public role
+  (`ApiProvider::open_to_public`, a default method over the endpoint set, true for an endpoint
+  whose auth `is_public_role()`). If it is, the request goes through with an `AnonymousCaller`
+  marker. `dispatch_app` then reads no session for it and applies no session change. A session
+  cookie sent without the token therefore gives the request no authority: a forged request
+  gets exactly what an anonymous one would. Anything stricter is refused as before, and so are
+  the `Public` auth endpoints (`login`, `signup`, …) and an application's UI pages.
+- **Ownership tables.** A table with an ownership formula relaxed its endpoints to `Public`.
+  An operation whose floor is 100 now stays `MinRole(100)`, which admits the same callers and
+  lets the CSRF exemption recognise it.
+- **Docs**: §7.3 gains a "The public role is everybody" paragraph.
+- **Tests**: in `sc-api`, `a_floor_at_the_public_role_admits_a_caller_nobody_is_logged_in_as`
+  and `only_endpoints_at_the_public_role_are_open_without_a_session`. The second covers a table,
+  an ownership table, triggers, custom queries and `login`. The new
+  `sc-server/tests/app_public_endpoints.rs` runs through the real router against Postgres. It
+  writes and reads a public table, runs a public `GET` and `POST` custom query and runs a public
+  trigger, each with no cookie at all. It checks that the admin-only table and the role-80
+  trigger beside them stay closed. It also sends the editor's session cookie without the token:
+  the public trigger then runs with `user` null, the role-80 trigger is refused with the CSRF
+  403, and the session survives.
+
 ## Deep clean for React applications
 
 The applications list has a **Deep clean** button next to Build, for a `node_modules` that no

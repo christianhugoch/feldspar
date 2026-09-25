@@ -307,6 +307,23 @@ pub trait ApiProvider: Send + Sync {
     /// generator types them.
     fn endpoints(&self) -> &EndpointSet;
 
+    /// Whether the endpoint a `method` request to `path` reaches is open to the
+    /// public role ([`AuthRequirement::is_public_role`]) — one anybody may call
+    /// with no session, and so with no CSRF token.
+    ///
+    /// The server asks this of a mutating request that failed the CSRF check,
+    /// and serves it as an anonymous caller when the answer is yes. The endpoint
+    /// is found the way a provider routes: the first one registered whose method
+    /// and path match.
+    ///
+    /// [`AuthRequirement::is_public_role`]: crate::AuthRequirement::is_public_role
+    fn open_to_public(&self, method: Method, path: &str) -> bool {
+        self.endpoints()
+            .iter()
+            .find(|ep| ep.method == method && ep.path.match_path(path).is_some())
+            .is_some_and(|ep| ep.auth.is_public_role())
+    }
+
     /// Handle one request. `user` is the authenticated caller, or `None` for an
     /// anonymous one; the provider is responsible for enforcing each endpoint's
     /// auth requirement.

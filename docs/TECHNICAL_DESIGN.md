@@ -933,6 +933,17 @@ Ownership *extends* access below the role floor; it never narrows it. A caller w
 meets `min_role` is unaffected by the formula (and by RLS, through a role-floor clause in
 every policy). A table with no formula behaves exactly as the plain role model does.
 
+**The public role is everybody.** A caller nobody is logged in as holds the public role (100),
+so a `min_role` of 100 — on a table operation, an application's custom query or an exposed
+trigger — admits them: no login, no session, and no CSRF token. It does not mean "a logged-in
+user whose role is 100". `AuthRequirement::admits` states the rule once, and the REST
+provider, the admin dispatcher and the MCP endpoint tools all ask it. A mutating request to
+such an endpoint that fails the CSRF check is not refused; it is served as the anonymous caller
+it then is. Its session cookie is not read, and no session is started or ended, so a
+cross-site page that makes the browser send the cookie gets nothing an anonymous caller would
+not. Everything stricter keeps the check, and so do the `Public` auth endpoints (`login`,
+`signup`, …) and an application's own UI pages.
+
 **One language, parsed once, evaluated two ways.** The formula lives in the `sc-expr` crate
 (§2). A single parse (via `swc_ecma_parser`, the parser family Deno uses, so the grammar is
 exactly V8's) is lowered into `sc-expr`'s own owned AST and evaluated two ways from that one
