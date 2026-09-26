@@ -43,15 +43,18 @@ pub const CFG_VISION: &str = "vision";
 /// (`yes`/`no`).
 pub const CFG_SUPPORTS_TEMPERATURE: &str = "supports_temperature";
 
-/// The context window assumed for a model no rule recognises.
-pub const UNKNOWN_CONTEXT_WINDOW: u64 = 32_000;
-/// The working budget of a model no rule recognises (§9: "32k tokens for an
-/// unknown model").
-pub const UNKNOWN_WORKING_BUDGET: u64 = 32_000;
+/// The context window assumed for a model no rule recognises: what a current
+/// frontier model offers at the least. A smaller model is the exception an
+/// admin records on its row, rather than the rule every model pays for by
+/// compacting a long task away early.
+pub const UNKNOWN_CONTEXT_WINDOW: u64 = 250_000;
+/// The working budget of a model no rule recognises: its assumed window.
+pub const UNKNOWN_WORKING_BUDGET: u64 = UNKNOWN_CONTEXT_WINDOW;
 /// The largest working budget a rule gives, however large the window. A bigger
 /// context costs more per step and is used less well, so a model with a
-/// million-token window still compacts at a size a run can afford.
-pub const MAX_BUILT_IN_WORKING_BUDGET: u64 = 100_000;
+/// million-token window still compacts at a size a run can afford: the loop
+/// compacts at 80% of this, 200k tokens.
+pub const MAX_BUILT_IN_WORKING_BUDGET: u64 = 250_000;
 
 /// How a model's prompt cache is driven.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,7 +174,7 @@ impl ModelCapabilities {
         let openai_family = is_openai_family(&name);
         let window = context_window(&name);
         let working_budget = match window {
-            Some(window) => (window / 2).min(MAX_BUILT_IN_WORKING_BUDGET),
+            Some(window) => window.min(MAX_BUILT_IN_WORKING_BUDGET),
             None => UNKNOWN_WORKING_BUDGET,
         };
         let context_window = window.unwrap_or(UNKNOWN_CONTEXT_WINDOW);
@@ -349,7 +352,7 @@ fn open_weight_vision(name: &str) -> bool {
 /// The context window a name implies, where a rule knows it.
 fn context_window(name: &str) -> Option<u64> {
     if name.starts_with("claude") {
-        return Some(200_000);
+        return Some(claude_window(name));
     }
     if name.starts_with("gpt-4.1") {
         return Some(1_000_000);
@@ -370,6 +373,34 @@ fn context_window(name: &str) -> Option<u64> {
         return Some(128_000);
     }
     None
+}
+
+/// A Claude model's window: a million tokens from Opus and Sonnet 4.6 on, and
+/// for everything named with a 5 or later; 200k for Haiku and the older
+/// generations.
+fn claude_window(name: &str) -> u64 {
+    if name.contains("haiku") {
+        return 200_000;
+    }
+    match claude_version(name) {
+        Some((major, minor)) if major > 4 || (major == 4 && minor >= 6) => 1_000_000,
+        _ => 200_000,
+    }
+}
+
+/// The `(major, minor)` in a Claude model name, wherever the family word sits:
+/// `(4, 6)` from `claude-opus-4-6`, `(3, 5)` from `claude-3-5-sonnet-20241022`,
+/// `(4, 0)` from `claude-sonnet-4-20250514`. A snapshot date is not a version
+/// number, and ends the search.
+fn claude_version(name: &str) -> Option<(u32, u32)> {
+    let mut numbers = name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+        .take_while(|part| part.len() <= 2)
+        .map(|part| part.parse::<u32>().ok());
+    let major = numbers.next()??;
+    let minor = numbers.next().flatten().unwrap_or(0);
+    Some((major, minor))
 }
 
 /// A non-blank text setting.
@@ -435,7 +466,7 @@ mod tests {
                 true,
                 PromptCaching::Explicit,
                 EditFormat::StrReplace,
-                200_000,
+                1_000_000,
                 true,
                 true,
             ),
@@ -584,6 +615,44 @@ mod tests {
             ModelCapabilities::built_in(ANTHROPIC_BACKEND, "claude-opus-5").working_budget,
             MAX_BUILT_IN_WORKING_BUDGET
         );
+        // A window smaller than the cap is the budget whole: the loop compacts
+        // at a share of it, and a request over the window is refused anyway.
+        assert_eq!(
+            ModelCapabilities::built_in(OPENAI_CHAT_BACKEND, "deepseek-chat").working_budget,
+            128_000
+        );
+    }
+
+    #[test]
+    fn a_model_no_rule_knows_is_given_a_frontier_sized_budget() {
+        // The loop compacts at 80% of the budget: 200k tokens, not the 24k an
+        // unknown model used to compact at a few tool calls into a task.
+        let caps = ModelCapabilities::built_in(OPENAI_CHAT_BACKEND, "mystery");
+        assert_eq!(caps.context_window, 250_000);
+        assert_eq!(caps.working_budget, 250_000);
+        assert_eq!(
+            ModelCapabilities::built_in(OPENAI_RESPONSES_BACKEND, "gpt-5.1").working_budget,
+            250_000,
+            "a bigger window is capped at the same size"
+        );
+    }
+
+    #[test]
+    fn claude_windows_follow_the_generation() {
+        for (model, window) in [
+            ("claude-opus-5-5", 1_000_000),
+            ("claude-fable-5-1", 1_000_000),
+            ("claude-opus-4-6", 1_000_000),
+            ("claude-sonnet-4-6", 1_000_000),
+            ("claude-opus-4-5@20251101", 200_000),
+            ("claude-sonnet-4-20250514", 200_000),
+            ("claude-3-5-sonnet-20241022", 200_000),
+            ("claude-haiku-4-5", 200_000),
+            ("claude-instant", 200_000),
+        ] {
+            let caps = ModelCapabilities::built_in(ANTHROPIC_BACKEND, model);
+            assert_eq!(caps.context_window, window, "{model}");
+        }
     }
 
     #[test]
@@ -603,7 +672,7 @@ mod tests {
         assert!(!caps.supports_temperature);
         assert_eq!(caps.edit_format, EditFormat::WholeFile);
         assert_eq!(caps.context_window, 64_000);
-        assert_eq!(caps.working_budget, UNKNOWN_WORKING_BUDGET);
+        assert_eq!(caps.working_budget, 64_000, "kept inside the window");
         assert!(caps.parallel_tool_calls_default);
         assert_eq!(caps.prompt_caching, PromptCaching::Automatic);
         assert!(!caps.reasoning_replay);

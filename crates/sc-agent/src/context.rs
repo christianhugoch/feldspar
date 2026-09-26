@@ -54,13 +54,16 @@ use crate::agent::Agent;
 pub const ATTR_KEEP_TURNS: &str = "keep_turns";
 /// Turns left untouched when the agent does not say.
 pub const DEFAULT_KEEP_TURNS: usize = 3;
-/// The share of the context budget, in percent, at which the loop compacts.
-pub const COMPACT_PERCENT: u64 = 75;
+/// The share of the context budget, in percent, at which the loop compacts:
+/// late enough that a long task keeps its working context (200k tokens of the
+/// largest built-in budget), early enough to leave room for the next result.
+pub const COMPACT_PERCENT: u64 = 80;
 /// The share of the context budget, in percent, that clearing must get below
 /// for the summary to be skipped.
 pub const SUMMARY_PERCENT: u64 = 50;
-/// The context budget for a model that says nothing about its own.
-pub const FALLBACK_CONTEXT_BUDGET: u64 = 32_000;
+/// The context budget for a model that says nothing about its own: the
+/// working budget the capability rules give a model they do not recognise.
+pub const FALLBACK_CONTEXT_BUDGET: u64 = sc_llm::UNKNOWN_WORKING_BUDGET;
 
 /// How far calibration may move the estimate, as [`sc_llm::TokenEstimator`]
 /// bounds it.
@@ -695,10 +698,13 @@ mod tests {
     }
 
     #[test]
-    fn the_verdict_compacts_at_three_quarters_and_ends_the_run_only_after_trying() {
+    fn the_verdict_compacts_at_four_fifths_and_ends_the_run_only_after_trying() {
         let mut cx = ContextState::default();
-        assert_eq!(cx.verdict(749, 1000, 3), ContextVerdict::Fits);
-        assert_eq!(cx.verdict(750, 1000, 3), ContextVerdict::Compact);
+        assert_eq!(cx.verdict(799, 1000, 3), ContextVerdict::Fits);
+        assert_eq!(cx.verdict(800, 1000, 3), ContextVerdict::Compact);
+        // The largest built-in budget compacts at 200k tokens.
+        assert_eq!(cx.verdict(199_999, 250_000, 3), ContextVerdict::Fits);
+        assert_eq!(cx.verdict(200_000, 250_000, 3), ContextVerdict::Compact);
         cx.record(Compaction {
             step: 3,
             at: 0,

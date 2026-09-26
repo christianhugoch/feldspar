@@ -2,6 +2,32 @@
 
 Changes in reverse chronological order.
 
+## Agents compact later and run longer
+
+The built-in coding agent compacted a modest task at about 27k tokens and stopped after 20
+steps. Both defaults were sized for a small model. They are now sized for a current frontier
+model.
+
+- **Compaction starts at 200k tokens.** `sc_agent::COMPACT_PERCENT` goes from 75 to 80. A
+  model's built-in working budget is now its whole window capped at 250k
+  (`MAX_BUILT_IN_WORKING_BUDGET`), where it was half the window capped at 100k. So a model with a
+  large window compacts at 200k, and a model with a smaller window compacts at 80% of it.
+- **A model no rule recognises is assumed to have a 250k window** (`UNKNOWN_CONTEXT_WINDOW` and
+  `UNKNOWN_WORKING_BUDGET`, previously 32k). This is what caused the early compaction.
+  `FALLBACK_CONTEXT_BUDGET` now uses the same value. A model with a smaller window needs its
+  model row's context window set.
+- **Claude windows follow the generation.** Opus and Sonnet 4.6 and later, and every Claude 5
+  model (Opus, Sonnet, Fable), have a 1M window. Haiku and older generations keep 200k. The
+  version is read from the name in any of its forms (`claude-opus-4-6`,
+  `claude-3-5-sonnet-20241022`, `claude-opus-4-5@20251101`).
+- **`DEFAULT_MAX_STEPS` is 250** (previously 20). 250 is mini-SWE-agent's step limit. It sits
+  between the 100 LLM calls SWE-agent allows a SWE-bench task and OpenHands' default of 500.
+  Agent SDKs that are not coding-specific default to 10–25, which is too few for a
+  read-edit-check loop. A runaway is still bounded by the run's cost, time and context budgets,
+  and an agent's `max_steps` attribute still overrides the default.
+
+The admin agent form's help text states the new numbers (80%, 250).
+
 ## Custom queries in JavaScript and Python
 
 An application API's "Custom SQL queries" are now **Custom queries**. Each query has a

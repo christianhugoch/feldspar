@@ -121,7 +121,7 @@ async fn old_tool_results_are_cleared_in_one_batch_and_the_transcript_stays_whol
     let catalog = catalog(&db).await?;
     let notes = Notes::new();
     let registry = registry_with_notes(notes.clone())?;
-    // Three 4000-character results are about 3400 tokens: past 75% of 4000
+    // Three 4000-character results are about 3400 tokens: past 80% of 4000
     // before the fourth call, and well under half once two are stubs.
     let agent = notes_agent()
         .attribute(ATTR_CONTEXT_BUDGET, 4000)

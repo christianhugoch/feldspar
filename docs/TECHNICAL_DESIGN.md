@@ -3101,7 +3101,7 @@ machine rather than needing a second one. What the driver does at each step:
    result*, not as a loop failure: "that table does not exist" is something the model can act
    on, and turning it into an exception is what makes an agent unable to recover.
 4. Append the results and go to 1, until the model stops asking for tools or **`max_steps`**
-   (default 20) is reached — an agent that will not converge must be stopped by a number, and
+   (default 250) is reached — an agent that will not converge must be stopped by a number, and
    the number is the admin's.
 
 **The caller travels with the run.** Every tool executes as the user who is chatting, not as the
@@ -3248,8 +3248,10 @@ milestone, Phase 3, `sc_agent::control`):
 - **The measurement is the provider's own number plus an estimate of the difference.** The
   previous response's `input_tokens` is the truth about everything up to it, and
   `TokenEstimator`'s calibrated character heuristic covers what has been appended since. At
-  `COMPACT_PERCENT` (75%) of the budget the loop compacts *before* the next call. The budget is
-  the agent's `context_budget`, or the executor model's working budget when it is unset.
+  `COMPACT_PERCENT` (80%) of the budget the loop compacts *before* the next call. The budget is
+  the agent's `context_budget`, or the executor model's working budget when it is unset. A
+  model's built-in working budget is its window capped at 250k tokens, so a large-window model
+  compacts at 200k; a model no rule recognises is assumed to have a 250k window.
 - **Two passes, and the second is conditional.** Pass 1 replaces every old tool result with the
   stub its trait writes through `AgentTrait::elide`, **all in one batch**, so the cache breaks
   once rather than every step; a tool call and its result are never separated. Pass 2 runs only
