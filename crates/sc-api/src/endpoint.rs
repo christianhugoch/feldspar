@@ -227,8 +227,9 @@ pub enum HandlerRef {
         /// The source code.
         source: String,
     },
-    /// A custom SQL query. Stubbed for the MVP (design §13.4).
-    Sql(String),
+    /// An application's custom query (design §13.4) — SQL, JavaScript or
+    /// Python — by name. The provider that projected it holds the definition.
+    Custom(String),
 }
 
 impl HandlerRef {

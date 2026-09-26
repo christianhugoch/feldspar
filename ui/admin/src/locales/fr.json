@@ -162,7 +162,7 @@
   "Create trigger": "Créer un déclencheur",
   "Created": "Créé",
   "Currently included: {summary}": "Inclus actuellement : {summary}",
-  "Custom SQL queries": "Requêtes SQL personnalisées",
+  "Custom queries": "Requêtes personnalisées",
   "Data Layer": "Couche de données",
   "Database": "Base de données",
   "Database connections": "Connexions à la base de données",
@@ -195,7 +195,11 @@
   "Dropped": "Supprimé",
   "Each one runs with {whose} authority, bounded by the boxes ticked when it is generated.": "Chacun s’exécute avec l’autorité de {whose}, dans les limites des cases cochées lors de sa génération.",
   "Each provider is mounted on its own sub-path; two on the same one is refused, because a request resolves to only one of them.": "Chaque fournisseur est monté sur son propre sous-chemin ; deux fournisseurs sur le même sous-chemin sont refusés, car une requête ne peut être dirigée que vers un seul d’entre eux.",
-  "Each query becomes one endpoint on this API and one typed method on the app’s generated client, with the return type taken from the columns Postgres reports.": "Chaque requête devient un point de terminaison de cette API et une méthode typée dans le client généré de l’application, dont le type de retour est déterminé à partir des colonnes indiquées par Postgres.",
+  "Each query becomes one endpoint on this API and one typed method on the app’s generated client. A SQL query’s return type is taken from the columns Postgres reports; a JavaScript or Python query returns whatever its body returns.": "Chaque requête devient un point de terminaison de cette API et une méthode typée dans le client généré de l’application. Le type de retour d’une requête SQL est déterminé à partir des colonnes indiquées par Postgres ; une requête JavaScript ou Python renvoie ce que renvoie son corps.",
+  "A JavaScript or Python query runs as a trigger’s code does, with the administrator’s authority over the tables unless it asks for the caller’s with {asUser}.": "Une requête JavaScript ou Python s’exécute comme le code d’un déclencheur : avec l’autorité de l’administrateur sur les tables, sauf si elle demande celle de l’appelant avec {asUser}.",
+  "The body of a function. The request is {body} (its JSON body) and {query} (its query string), the caller is {user}, and what it returns is the response.": "Le corps d’une fonction. La requête HTTP est {body} (son corps JSON) et {query} (sa chaîne de requête), l’appelant est {user}, et ce que la fonction renvoie est la réponse.",
+  "A declared parameter is checked and converted to its type before the body runs.": "Un paramètre déclaré est vérifié et converti dans son type avant l’exécution du corps.",
+  "Returns whatever its body returns.": "Renvoie ce que renvoie son corps.",
   "Each store's definition, every file in it, and each file's access rules.": "La définition de chaque espace de stockage, tous les fichiers qu’il contient et les règles d’accès de chaque fichier.",
   "Each ticked stream can be observed at {route} over a WebSocket, guarded by the stream’s own minimum role, and appears in this app’s generated client as {call}.": "Chaque flux coché peut être observé à l’adresse {route} via un WebSocket, protégé par le rôle minimal propre au flux, et apparaît dans le client généré de cette application sous la forme {call}.",
   "Each ticked trigger is exposed as {route} on this app, guarded by the trigger’s own minimum role.": "Chaque déclencheur coché est exposé sous la forme {route} dans cette application, protégé par le rôle minimal propre au déclencheur.",
@@ -900,5 +904,6 @@
   "— no trigger of that name exists here, so this application will not mount until it is removed or the trigger is recreated.": "— aucun déclencheur de ce nom n’existe ici ; cette application ne pourra donc pas être montée tant qu’il n’est pas supprimé ou que le déclencheur n’est pas recréé.",
   "← up": "← remonter",
   "Delete all rows": "Supprimer toutes les lignes",
-  "Delete all {count} rows of \"{name}\"? The table and its fields stay. This cannot be undone.": "Supprimer les {count} lignes de « {name} » ? La table et ses champs sont conservés. Cette action est irréversible."
+  "Delete all {count} rows of \"{name}\"? The table and its fields stay. This cannot be undone.": "Supprimer les {count} lignes de « {name} » ? La table et ses champs sont conservés. Cette action est irréversible.",
+  "Code": "Code"
 }

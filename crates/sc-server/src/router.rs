@@ -1675,7 +1675,7 @@ async fn handle_api(
             Some(h) => h.clone(),
             None => return json_error(StatusCode::NOT_IMPLEMENTED, "handler not implemented"),
         },
-        HandlerRef::GuestCode { .. } | HandlerRef::Sql(_) => {
+        HandlerRef::GuestCode { .. } | HandlerRef::Custom(_) => {
             return json_error(
                 StatusCode::NOT_IMPLEMENTED,
                 "custom handlers not yet supported",

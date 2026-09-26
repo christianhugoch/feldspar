@@ -11,6 +11,9 @@
 //! - a **custom query** whose `min_role` is 100;
 //! - an exposed **trigger** whose `min_role` is 100.
 //!
+//! The custom queries include two written in **JavaScript** (§13.4), which run
+//! on the `run_js_code` action with the request in scope as `body` and `query`.
+//!
 //! Each is called with no cookie at all, which is how a `curl`, a webhook or a
 //! third-party page calls it. And the CSRF exemption is bounded: a request that
 //! carries a session but no token is served as the anonymous caller it would be
@@ -25,7 +28,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use sc_action::{EventKind, Trigger, save_trigger};
-use sc_api::{CustomQuery, Method, set_custom_queries};
+use sc_api::{CustomParam, CustomQuery, Method, QueryLanguage, ValueType, set_custom_queries};
 use sc_app::{ApiConfig, Application, AssetBundle, CodeFramework, FrameworkRef, TriggerRef};
 use sc_auth::{ROLE_PUBLIC, Role, SessionStore, create_user, save_role};
 use sc_catalog::{Catalog, TableId, TableMeta, bootstrap_table_meta, save_table_meta};
@@ -138,6 +141,29 @@ fn guests_app() -> Application {
                 "/stats/latest",
                 "SELECT message FROM guestbook ORDER BY id DESC LIMIT 1",
             )
+            .min_role(ROLE_PUBLIC),
+            // JavaScript: a GET reading its query string, the declared
+            // parameter arriving as a number…
+            CustomQuery::new(
+                "greet",
+                Method::Get,
+                "/js/greet",
+                "return { hello: query.name ?? 'nobody', next: query.n + 1, \
+                          who: user?.email ?? null, body };",
+            )
+            .language(QueryLanguage::Javascript)
+            .params([CustomParam::new("n", ValueType::Int)])
+            .min_role(ROLE_PUBLIC),
+            // …and a POST writing through the row layer from its body.
+            CustomQuery::new(
+                "signJs",
+                Method::Post,
+                "/js/sign",
+                "if (!body.message) throw new Error('say something');\n\
+                 await db.guestbook.insert({ message: body.message, who: user?.email ?? null });\n\
+                 return { signatures: await db.guestbook.count() };",
+            )
+            .language(QueryLanguage::Javascript)
             .min_role(ROLE_PUBLIC),
         ],
     )
@@ -325,6 +351,57 @@ async fn a_public_custom_query_answers_anybody() -> sc_error::Result<()> {
     let (status, body, _) = send(r, "POST", "/api/stats/latest", None, &[], None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body[0]["message"], json!("first"), "{body}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_javascript_custom_query_reads_the_request_and_answers_with_its_result()
+-> sc_error::Result<()> {
+    let server = setup().await?;
+    let r = &server.router;
+
+    let (status, body, _) = send(r, "GET", "/api/js/greet?n=41&name=Ada", None, &[], None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({ "hello": "Ada", "next": 42, "who": null, "body": {} }),
+        "`n` is declared an int, so it arrives as a number"
+    );
+
+    // A declared parameter that is missing is refused before the body runs.
+    let (status, body, _) = send(r, "GET", "/api/js/greet", None, &[], None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // A POST body is `body`, and the signed-in caller is `user`.
+    let (session, csrf) = server.editor_session().await;
+    let jar = [
+        (SESSION_COOKIE, session.as_str()),
+        (CSRF_COOKIE, csrf.as_str()),
+    ];
+    let (status, body, _) = send(
+        r,
+        "POST",
+        "/api/js/sign",
+        Some(json!({ "message": "from js" })),
+        &jar,
+        Some(&csrf),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "signatures": 1 }));
+    assert_eq!(
+        server.guestbook().await,
+        vec![("from js".to_owned(), Some(EDITOR.to_owned()))]
+    );
+
+    // A body that throws is an error answer naming the query, not a trigger.
+    let (status, body, _) = send(r, "POST", "/api/js/sign", Some(json!({})), &[], None).await;
+    assert!(status.is_client_error(), "{status}: {body}");
+    let message = body.to_string();
+    assert!(
+        message.contains("custom query `signJs`") && message.contains("say something"),
+        "{message}"
+    );
     Ok(())
 }
 

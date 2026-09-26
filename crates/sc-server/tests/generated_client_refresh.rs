@@ -308,7 +308,7 @@ async fn saving_an_application_rewrites_its_typed_client() -> sc_error::Result<(
             "method": "GET",
             "path": "/reports/count",
             "min_role": 1,
-            "sql": "SELECT count(*) AS n FROM tasks WHERE title = :title",
+            "code": "SELECT count(*) AS n FROM tasks WHERE title = :title",
             "params": [{ "name": "title", "type": "text", "required": true }],
         }],
     });

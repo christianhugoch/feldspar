@@ -2,6 +2,46 @@
 
 Changes in reverse chronological order.
 
+## Custom queries in JavaScript and Python
+
+An application API's "Custom SQL queries" are now **Custom queries**. Each query has a
+**Language** drop-down: SQL, JavaScript, or Python. Python is offered only when the server can
+run it, meaning `getPythonStatus` reports `running` or `not_initialised`. A query that is already
+Python is always shown as Python. A JavaScript or Python query is edited in the same Monaco editor
+a trigger's code uses. For JavaScript, the completions declare `body`, `query` and `user` in place
+of `payload`.
+
+A code query runs on the action a trigger's body of that language runs on (`run_js_code` /
+`run_python_code`), through the new `TriggerDispatcher::run_code`. So it gets the same `db`,
+`fetch`, `fs`, `trigger` and `modfn`, the same limits, and the same authority as a trigger's body.
+Exposed triggers had no binding for the query string, so a body sees the request under two new
+names: `body` is the JSON body (`{}` when there is none) and `query` is the query string (the
+first value of a repeated key). The caller is `user`. There is no `payload`. The body's return
+value is the response. A declared parameter is checked, and converted to its type, before the
+body runs. It arrives in `query` for `GET`/`DELETE` and in `body` otherwise. A body that throws
+answers with an error naming the custom query. A code query has no described columns, so its
+client method returns opaque JSON. `GET` does not make a code query read-only.
+
+- `sc_api::CustomQuery` has a `language` (`QueryLanguage`, stored only when it is not `sql`), and
+  its `sql` field is renamed `code`, since it holds whichever source the language names. This is
+  the stored key, the `describeCustomQuery` body's field and the MCP `save_api_query` argument
+  and output; `feldspar api add-query` keeps `--sql`, as it adds SQL queries only. The SQL-only rules (one statement, `:name` parameters, `describe`) are
+  skipped for code; the endpoint rules are not. `HandlerRef::Sql` is now `HandlerRef::Custom`.
+- `sc_action::ActionContext::with_request`, read by the code-body actions' `bindings`.
+- `describeCustomQuery` takes `language`, answers no columns for code, and refuses a Python query
+  on a server that cannot run Python. The admin clients are regenerated.
+- The MCP `save_api_query` tool takes `language` and keeps a query's language on an edit.
+  `feldspar api add-query` still adds SQL queries only.
+- The new strings are translated in the five admin locales; the two they replace are removed.
+
+Tests: `rest::custom` unit tests (language default, code validation, projection, request scope);
+`code_body` › `a_custom_querys_body_sees_the_request_and_the_caller_and_no_payload`;
+`sc-server` `app_public_endpoints` ›
+`a_javascript_custom_query_reads_the_request_and_answers_with_its_result` (a GET reading
+`query`, a POST writing through `db` as the signed-in `user`, and an error that names the query);
+`customQueries.test.ts` › "the language a query is written in"; `codeTypes.test.ts` › "declare a
+custom query's request". Design §13.4, "Code queries".
+
 ## File manager: selection menu opens to the right, and "Copy relative path"
 
 In the admin file manager (`/#/files/{store}`), the menu next to the "N files selected" badge

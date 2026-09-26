@@ -5262,8 +5262,9 @@ fn api_provider_info_schema() -> TypeSchema {
     ])
 }
 
-/// The body `describeCustomQuery` takes: one custom SQL query as the editor
-/// holds it, plus the tables the application it belongs to declares.
+/// The body `describeCustomQuery` takes: one custom query as the editor holds
+/// it, plus the tables the application it belongs to declares. `language` is
+/// `sql` when absent; `code` is the source in whichever language it names.
 ///
 /// It is the stored [`CustomQuery`](crate::CustomQuery) shape rather than "just
 /// the SQL and the parameters" so that the *whole* refusal an eventual save
@@ -5279,7 +5280,8 @@ fn custom_query_input_schema() -> TypeSchema {
         StructField::new("description", TypeSchema::optional(TypeSchema::text())),
         StructField::new("method", TypeSchema::text()),
         StructField::new("path", TypeSchema::text()),
-        StructField::new("sql", TypeSchema::text()),
+        StructField::new("language", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("code", TypeSchema::text()),
         StructField::new(
             "params",
             TypeSchema::array(TypeSchema::struct_of([

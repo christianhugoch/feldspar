@@ -508,7 +508,7 @@ async fn a_scaffolded_app_installs_builds_and_serves_end_to_end() -> sc_error::R
             "method": "GET",
             "path": "/reports/count",
             "min_role": 1,
-            "sql": "SELECT count(*) AS n FROM tasks WHERE title = :title",
+            "code": "SELECT count(*) AS n FROM tasks WHERE title = :title",
             "params": [{ "name": "title", "type": "text", "required": true }],
         }]),
     )];

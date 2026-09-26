@@ -301,21 +301,21 @@ impl Action for RunJsCode {
 
     async fn run(&self, ctx: &mut ActionContext<'_>) -> Result<Json> {
         let code = config_str(ctx.config, CFG_CODE)
-            .map_err(|e| Error::invalid(format!("trigger `{}`: {e}", ctx.trigger)))?;
+            .map_err(|e| Error::invalid(format!("{}: {e}", code_body::subject(ctx))))?;
         let timeout = code_body::timeout(ctx.config)
-            .map_err(|e| Error::invalid(format!("trigger `{}`: {e}", ctx.trigger)))?;
+            .map_err(|e| Error::invalid(format!("{}: {e}", code_body::subject(ctx))))?;
         // Required here, unlike in `run_python_code`: the evaluator *is* the
         // engine this body runs on, so a process without one has nothing to run
         // it with — never mind the delegated read that would also want it.
         let evaluator = ctx.evaluator()?;
-        let bindings = code_body::bindings(ctx.event, ctx.run_context());
+        let bindings = code_body::bindings(ctx.event, ctx.run_context(), ctx.request());
         let hosts = Hosts::new(ctx, Some(evaluator), self.client.clone());
         // The result is the action's result: a directly-run trigger returns it to
         // its caller, and a workflow step will put it in the run context.
         evaluator
             .run_code(hosts.call(code, bindings, timeout))
             .await
-            .map_err(|e| Error::invalid(format!("trigger `{}`: `{CFG_CODE}`: {e}", ctx.trigger)))
+            .map_err(|e| Error::invalid(format!("{}: `{CFG_CODE}`: {e}", code_body::subject(ctx))))
     }
 }
 

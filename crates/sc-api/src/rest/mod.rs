@@ -312,7 +312,7 @@ pub struct RestProvider {
     mailer: Option<Arc<dyn sc_email::Mailer>>,
     /// Endpoint name → the admin-authored SQL query it runs
     /// ([`with_queries`](RestProvider::with_queries)). Keyed the same way the
-    /// [`HandlerRef::Sql`] on the endpoint names it, so dispatch is a lookup.
+    /// [`HandlerRef::Custom`] on the endpoint names it, so dispatch is a lookup.
     custom_routes: HashMap<String, CustomQuery>,
     /// The dispatcher an exposed trigger is run through. Injected by the server
     /// via [`with_dispatcher`](RestProvider::with_dispatcher); absent in the
@@ -707,7 +707,7 @@ impl RestProvider {
         for query in queries {
             if self.endpoints.find(&query.name).is_some() {
                 return Err(Error::config(format!(
-                    "custom SQL query `{}` has the same name as an endpoint this \
+                    "custom query `{}` has the same name as an endpoint this \
                      API already projects; rename the query",
                     query.name
                 )));
@@ -735,6 +735,9 @@ impl RestProvider {
         cat: &Catalog,
         user: Option<&User>,
     ) -> Result<ApiResponse> {
+        if let Some(action) = query.language.action() {
+            return self.run_custom_code(query, action, req, cat, user).await;
+        }
         let statement = custom::custom_statement(cat, query, req)?;
         let caller = ownership::caller_context(user);
         let rows = if query.read_only() {
@@ -743,6 +746,37 @@ impl RestProvider {
             sc_catalog::run_in_context(cat, &caller, &statement).await
         }?;
         Ok(ApiResponse::ok(custom::rows_to_json(&rows)))
+    }
+
+    /// Run a JavaScript or Python custom query (§13.4): its body, on the
+    /// action a trigger's body of that language runs on, through *the*
+    /// dispatcher — so it has the same host surfaces, bounds and authority an
+    /// exposed trigger's body has, and the caller travels with it as `user`.
+    ///
+    /// What the body returns is the response. A body that throws is an error
+    /// answer, as an exposed trigger's is: somebody is waiting for this one.
+    async fn run_custom_code(
+        &self,
+        query: &CustomQuery,
+        action: &str,
+        req: &ApiRequest,
+        cat: &Catalog,
+        user: Option<&User>,
+    ) -> Result<ApiResponse> {
+        let dispatcher = self.dispatcher.as_ref().ok_or_else(|| {
+            Error::config(format!(
+                "custom query `{}` is {} code, but no trigger dispatcher is \
+                 available in this context to run it",
+                query.name,
+                query.language.as_str()
+            ))
+        })?;
+        let scope = custom::code_scope(query, req)?;
+        let caller = ownership::caller_context(user);
+        let result = dispatcher
+            .run_code(cat, action, &query.name, &query.code, scope, Some(&caller))
+            .await?;
+        Ok(ApiResponse::ok(result))
     }
 
     /// Inject the JavaScript evaluator ownership formulas' reified path runs
@@ -798,7 +832,7 @@ impl RestProvider {
     ///
     /// The endpoint is projected and typed like any other, but nothing here
     /// knows how to *run* it: a [`HandlerRef::GuestCode`] is `501 Not
-    /// Implemented`, and a [`HandlerRef::Sql`] resolves against the queries
+    /// Implemented`, and a [`HandlerRef::Custom`] resolves against the queries
     /// [`with_queries`](RestProvider::with_queries) registered — which is the
     /// way to add a custom SQL query, since it carries the definition the
     /// handler needs.
@@ -1544,14 +1578,14 @@ impl RestProvider {
                 501,
                 format!("custom {language} routes are not implemented yet"),
             )),
-            HandlerRef::Sql(name) => match self.custom_routes.get(name) {
+            HandlerRef::Custom(name) => match self.custom_routes.get(name) {
                 Some(query) => self.run_custom(query, &req, cat, user).await,
                 // A `Sql` endpoint registered by something other than
                 // `with_queries` — the set was extended with a route this
                 // provider has no query for.
                 None => Ok(ApiResponse::error(
                     501,
-                    format!("custom SQL query `{name}` has no definition here"),
+                    format!("custom query `{name}` has no definition here"),
                 )),
             },
         }
@@ -2063,12 +2097,12 @@ mod tests {
                 Endpoint::new("search", Method::Post, PathSpec::root().lit("api/search"))
                     .input(TypeSchema::json())
                     .output(TypeSchema::json())
-                    .handler(HandlerRef::Sql("select 1".to_owned())),
+                    .handler(HandlerRef::Custom("select 1".to_owned())),
             );
         // The custom route is part of the contract even though it is stubbed.
         assert_eq!(p.endpoints().len(), AUTH_ENDPOINT_COUNT + 4 + 1);
         let ep = p.endpoints().find("search").unwrap();
-        assert!(matches!(ep.handler, HandlerRef::Sql(_)));
+        assert!(matches!(ep.handler, HandlerRef::Custom(_)));
 
         // A generated client types it like any other endpoint.
         let ts = crate::generate_client(p.endpoints());

@@ -217,6 +217,11 @@ pub struct ActionContext<'a> {
     /// formula naming `context` must be the unknown identifier it is rather than
     /// a null that reads as "nothing has happened yet".
     in_run: bool,
+    /// The request a **custom query**'s code body answers (§13.4): `body` and
+    /// `query`, bound in the body's scope in place of the event's `payload`.
+    ///
+    /// `None` for every trigger. Only the code-body actions read it.
+    request: Option<Attrs>,
 }
 
 impl<'a> ActionContext<'a> {
@@ -245,6 +250,7 @@ impl<'a> ActionContext<'a> {
             console: None,
             context: Attrs::new(),
             in_run: false,
+            request: None,
         }
     }
 
@@ -371,6 +377,18 @@ impl<'a> ActionContext<'a> {
             Some(context) => bindings.with_context(context),
             None => bindings,
         }
+    }
+
+    /// Run this action as a **custom query**'s body, with the request's names
+    /// in scope ([`TriggerDispatcher::run_code`]).
+    pub fn with_request(mut self, request: Attrs) -> ActionContext<'a> {
+        self.request = Some(request);
+        self
+    }
+
+    /// The request a custom query's body answers, or `None` for a trigger.
+    pub fn request(&self) -> Option<&Attrs> {
+        self.request.as_ref()
     }
 
     /// Supply the chain this run descends from (`Event::firing`'s result).

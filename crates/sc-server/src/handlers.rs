@@ -5335,8 +5335,11 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         Ok(HandlerResponse::ok(Json::Array(out)))
     });
 
-    // Prepare one custom SQL query and answer with the columns the database says
-    // it returns — the editor's "Check" button (§13.4).
+    // Prepare one custom query and answer with the columns the database says
+    // it returns — the editor's "Check" button (§13.4). A JavaScript or Python
+    // query is checked for everything but its body, which only the engine can
+    // read, and answers no columns: it returns what its body returns. A Python
+    // one on a server that cannot run Python is refused here, with the reason.
     //
     // The same two calls a save makes, in the same order: everything decidable
     // without a database first (the name, the path, one statement, the declared
@@ -5346,14 +5349,31 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
     // nobody is reading until a caller hits it.
     reg.register("describeCustomQuery", {
         let catalog = catalog.clone();
+        let apps = apps.clone();
         move |ctx| {
             let catalog = catalog.clone();
+            let apps = apps.clone();
             async move {
                 let obj = require_object(&ctx.body)?;
                 let tables = parse_str_array(obj, "tables")?;
                 let query: sc_api::CustomQuery = serde_json::from_value(ctx.body.clone())
-                    .map_err(|e| Error::invalid(format!("not a custom SQL query: {e}")))?;
+                    .map_err(|e| Error::invalid(format!("not a custom query: {e}")))?;
                 sc_api::validate_custom_queries(std::slice::from_ref(&query), &tables)?;
+                if query.language == sc_api::QueryLanguage::Python {
+                    let state = apps.python().map(|p| p.state());
+                    if !matches!(
+                        state,
+                        Some(
+                            sc_python::PythonState::NotInitialised
+                                | sc_python::PythonState::Running { .. }
+                        )
+                    ) {
+                        return Err(Error::invalid(
+                            "this server cannot run Python, so a Python custom query \
+                             would fail every call; see Development › Python for why",
+                        ));
+                    }
+                }
                 let columns = sc_api::describe_custom_query(&catalog, &query).await?;
                 Ok(HandlerResponse::ok(json!({
                     "columns": columns

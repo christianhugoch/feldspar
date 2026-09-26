@@ -512,6 +512,15 @@ describe("the types the code editor loads", () => {
     expect(library).toContain("declare const db");
   });
 
+  it("declare a custom query's request, and no payload, for a query body", () => {
+    const library = codeLibrary(TABLES, { request: true });
+    expect(library).toContain("declare const body");
+    expect(library).toContain("declare const query");
+    expect(library).toContain("declare const user");
+    expect(library).not.toContain("declare const payload");
+    expect(library).not.toContain("declare const row");
+  });
+
   it("refuse what the sandbox would refuse", () => {
     // Each of these is a mistake an admin can make, and each is a case where a
     // completion list that offered it would be lying.

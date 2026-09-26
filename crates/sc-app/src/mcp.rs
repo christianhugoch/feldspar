@@ -188,19 +188,21 @@ const ARG_NAME: &str = "name";
 const ARG_DESCRIPTION: &str = "description";
 const ARG_METHOD: &str = "method";
 const ARG_PATH: &str = "path";
-const ARG_SQL: &str = "sql";
+const ARG_CODE: &str = "code";
+const ARG_LANGUAGE: &str = "language";
 const ARG_PARAMS: &str = "params";
 const ARG_MIN_ROLE: &str = "min_role";
 
 /// The arguments [`save`] accepts.
-const SAVE_ARGS: [&str; 9] = [
+const SAVE_ARGS: [&str; 10] = [
     ARG_APPLICATION,
     ARG_API,
     ARG_NAME,
     ARG_DESCRIPTION,
     ARG_METHOD,
     ARG_PATH,
-    ARG_SQL,
+    ARG_CODE,
+    ARG_LANGUAGE,
     ARG_PARAMS,
     ARG_MIN_ROLE,
 ];
@@ -308,7 +310,8 @@ fn query_json(query: &CustomQuery) -> Json {
         "description": query.description,
         "method": query.method.as_str(),
         "path": query.path,
-        "sql": query.sql,
+        "language": query.language.as_str(),
+        "code": query.code,
         "params": query.params.iter().map(param_json).collect::<Vec<_>>(),
         "min_role": query.min_role,
         // Server-written, never declared: the shape the database said this
@@ -358,7 +361,7 @@ fn save_description(grants: &Grants) -> String {
          endpoint of the app at the API's mount plus `{ARG_PATH}`, and a typed \
          method on the app's generated client.\n\n\
          Adding one needs `{ARG_APPLICATION}`, `{ARG_NAME}`, `{ARG_PATH}` and \
-         `{ARG_SQL}`. Editing one needs only `{ARG_APPLICATION}`, `{ARG_NAME}` \
+         `{ARG_CODE}` (the SQL, unless `{ARG_LANGUAGE}` says otherwise). Editing one needs only `{ARG_APPLICATION}`, `{ARG_NAME}` \
          and what is changing: **anything you omit is left as it is**.\n\n\
          The rules, all of them checked before anything is stored:\n\
          - **One statement.** A custom query is one statement; a migration is not \
@@ -428,13 +431,25 @@ fn save_parameters() -> Json {
                      each segment. It may not start with a segment the app's own \
                      table routes answer.",
             },
-            ARG_SQL: {
+            ARG_CODE: {
                 "type": "string",
                 "description":
-                    "The SQL: one statement, with `:name` for each parameter. It \
+                    "The source. For SQL: one statement, with `:name` for each parameter. It \
                      runs against the whole database — `describe_schema` is what \
                      tells you the tables and columns — and inside the caller's \
                      context, so a table with row-level security still filters it.",
+            },
+            ARG_LANGUAGE: {
+                "type": "string",
+                "description":
+                    "What `code` is written in. `sql` — the default — is one \
+                     statement, as described here. `javascript` and `python` make \
+                     it a code body instead, run like a trigger's `run_js_code` / \
+                     `run_python_code` body, with the request's JSON body as \
+                     `body`, its query string as `query` and the caller as `user`; \
+                     what it returns is the response. A code body is not prepared, \
+                     and a declared parameter need not appear in it.",
+                "enum": ["sql", "javascript", "python"],
             },
             ARG_PARAMS: {
                 "type": "array",
@@ -586,7 +601,7 @@ fn build(
     let missing = |what: &str| {
         Error::invalid(format!(
             "there is no custom SQL query named `{name}` on this API, so this adds \
-             one — which needs `{ARG_PATH}` and `{ARG_SQL}` as well as the name \
+             one — which needs `{ARG_PATH}` and `{ARG_CODE}` as well as the name \
              (`{what}` is missing)"
         ))
     };
@@ -596,14 +611,23 @@ fn build(
             .map(|q| q.path.clone())
             .ok_or_else(|| missing(ARG_PATH))?,
     };
-    let sql = match optional_string(args, ARG_SQL)?.filter(|s| !s.trim().is_empty()) {
-        Some(sql) => sql,
+    let code = match optional_string(args, ARG_CODE)?.filter(|s| !s.trim().is_empty()) {
+        Some(code) => code,
         None => existing
-            .map(|q| q.sql.clone())
-            .ok_or_else(|| missing(ARG_SQL))?,
+            .map(|q| q.code.clone())
+            .ok_or_else(|| missing(ARG_CODE))?,
     };
 
-    let mut query = CustomQuery::new(name, method, path, sql);
+    let mut query = CustomQuery::new(name, method, path, code);
+    query.language = match optional_string(args, ARG_LANGUAGE)? {
+        Some(raw) => serde_json::from_value(Json::String(raw.trim().to_lowercase()))
+            .map_err(|_| {
+                Error::invalid(format!(
+                    "`{ARG_LANGUAGE}` should be `sql`, `javascript` or `python`, got `{raw}`"
+                ))
+            })?,
+        None => existing.map(|q| q.language).unwrap_or_default(),
+    };
     query.description = match args.contains_key(ARG_DESCRIPTION) {
         true => optional_string(args, ARG_DESCRIPTION)?.unwrap_or_default(),
         false => existing.map(|q| q.description.clone()).unwrap_or_default(),
@@ -884,14 +908,14 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains(ARG_SQL), "{err}");
+        assert!(err.contains(ARG_CODE), "{err}");
 
         let query = build(
             "topAuthors",
             None,
             &args(&[
                 (ARG_PATH, json!("reports/top-authors")),
-                (ARG_SQL, json!("select author from books")),
+                (ARG_CODE, json!("select author from books")),
             ]),
         )
         .unwrap();
@@ -918,10 +942,10 @@ mod tests {
         let edited = build(
             "topAuthors",
             Some(&stored),
-            &args(&[(ARG_SQL, json!("select author, count(*) from books"))]),
+            &args(&[(ARG_CODE, json!("select author, count(*) from books"))]),
         )
         .unwrap();
-        assert_eq!(edited.sql, "select author, count(*) from books");
+        assert_eq!(edited.code, "select author, count(*) from books");
         assert_eq!(edited.path, stored.path);
         assert_eq!(edited.method, stored.method);
         assert_eq!(edited.description, stored.description);

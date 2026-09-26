@@ -5925,9 +5925,11 @@ cap, exactly as a GraphQL list field's does.
 The list endpoints **declare** all of this as query parameters (§13.1), so `listBooks` takes a
 typed options object rather than leaving a hand-written `fetch` as the only way to ask.
 
-#### Custom SQL queries
+#### Custom queries
 
-The one thing in this section that is not a projection of the row layer. An administrator writes
+The one thing in this section that is not a projection of the row layer. A custom query is
+written in **SQL** — most of what follows — or as a **JavaScript or Python** body (below, "Code
+queries"). An administrator writes
 a statement, names its parameters and their types, picks an HTTP **method** and a sub-path, and
 the application gains an endpoint with a typed client method — the escape hatch for what the
 row layer's read cannot express: a window function, a recursive CTE, a report nobody wants to
@@ -5939,7 +5941,8 @@ pub struct CustomQuery {
     pub description: String,
     pub method:      Method,          // the admin's choice, never inferred from the SQL
     pub path:        String,          // sub-path within the mount, e.g. /reports/top-authors
-    pub sql:         String,          // one statement, with `:name` parameters
+    pub language:    QueryLanguage,   // sql (the default, not stored) | javascript | python
+    pub code:        String,          // the source: one statement with `:name` parameters, or a body
     pub params:      Vec<CustomParam>,// name, declared ValueType, required
     pub min_role:    u8,              // **admin unless stated**
     pub columns:     Vec<QueryColumn>,// server-written: what the database said it returns
@@ -6011,6 +6014,34 @@ exists to prevent, introduced by the tool meant to avoid it. The third is an **a
 `admin_copilot` (§11.3), whose `save_api_query` / `delete_api_query` go through the same
 `save_application` and the same re-emit; which API row a query lands on is `sc_app::select_api`
 for all three, so the answer cannot depend on which door the query came through.
+
+**Code queries.** A query whose `language` is `javascript` or `python` keeps everything above
+that is about the *endpoint* — the name, the method, the sub-path, the role floor, the declared
+parameters and the rules on all of them — and replaces everything that is about SQL. Its source
+is a code body, run on the action a trigger's body of that language runs on (`run_js_code` /
+`run_python_code`, §10.1) through `TriggerDispatcher::run_code`: the same `db`, `fetch`, `fs`,
+`trigger` and `modfn`, the same bounds, and the same authority — the admin's over the tables,
+with `db.asUser()` delegating to the caller. The request is in scope as `body` (the JSON body,
+`{}` when there is none) and `query` (the query string, one value per key), the caller as
+`user`, and there is no `payload`, because there is no event. A declared parameter is checked
+and coerced where it arrives (the query string for `GET`/`DELETE`, the body otherwise) before
+the body runs, so the client method's argument types hold inside the body too; what was not
+declared is passed as sent. What the body returns is the response, and a body that throws is an
+error answer naming the query.
+
+Neither `body` nor `query` is `payload` spelled differently: an exposed trigger's body gets the
+request body as `payload` because a trigger is an event handler first, and a trigger has no
+query string. A custom query is a request handler, so it is given the request's two halves under
+their own names.
+
+What does not carry over: a code query is not prepared, so it has no described columns and its
+client method returns opaque JSON; there is no one-statement rule and no `:name` rule; and
+**`GET` is not read-only** — a body writes through the row layer one statement at a time, as a
+trigger's does, and those writes raise table events. A body's syntax is checked when it runs,
+not on save (the save path has no engine, §10.1). Python is offered by the admin editor only
+where `getPythonStatus` says the server can run it, and `describeCustomQuery` refuses a Python
+query on one that cannot. `save_api_query` takes a `language`; `feldspar api add-query` adds SQL
+queries only.
 
 The tutorial for both halves of this provider is
 [tutorial-rest-queries.md](./tutorial-rest-queries.md).

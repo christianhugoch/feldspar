@@ -285,7 +285,7 @@ mod tests {
         let mut with_file = args(&["--app", "blog", "--name", "r", "--path", "/r"]);
         with_file.extend(args(&["--sql", &format!("@{}", path.display())]));
         assert_eq!(
-            parse_add_query(&with_file).unwrap().query.sql,
+            parse_add_query(&with_file).unwrap().query.code,
             "select 1 as n"
         );
 

@@ -19,6 +19,9 @@ import {
   blankQueryRow,
   columnsSummary,
   describeBody,
+  isCode,
+  languageOptions,
+  pythonAvailable,
   queryRowsFromConfig,
   queryRowsToConfig,
   statusSummary,
@@ -33,7 +36,7 @@ const stored = {
   description: "Most published authors since a year",
   method: "GET",
   path: "/reports/top-authors",
-  sql: "select author, count(*) as n from books where year > :since group by author",
+  code: "select author, count(*) as n from books where year > :since group by author",
   params: [{ name: "since", type: "int", required: true }],
   min_role: 40,
   columns: [
@@ -76,7 +79,7 @@ describe("reading the stored queries", () => {
     // the other way: a public endpoint nobody asked for, and an argument the
     // client may omit into a query that needs it.
     const [row] = queryRowsFromConfig({
-      queries: [{ name: "r", method: "GET", path: "/r", sql: "select 1", params: [{ name: "a" }] }],
+      queries: [{ name: "r", method: "GET", path: "/r", code: "select 1", params: [{ name: "a" }] }],
     });
     expect(row.minRole).toBe(ADMIN_ROLE);
     expect(row.params[0].required).toBe(true);
@@ -94,17 +97,18 @@ describe("writing the queries back", () => {
     const rows = queryRowsFromConfig({ queries: [stored] });
     const [out] = queryRowsToConfig(rows);
     const { columns, ...withoutColumns } = stored;
-    expect(out).toEqual(withoutColumns);
+    // A query stored before it had a language is SQL, and says so going back.
+    expect(out).toEqual({ ...withoutColumns, language: "sql" });
     expect(columns).toHaveLength(2);
     expect(out).not.toHaveProperty("columns");
   });
 
-  it("trims the name and path but leaves the SQL exactly as written", () => {
-    const row = { ...blankQueryRow(), name: " r ", path: " /r ", sql: "  select 1  " };
+  it("trims the name and path but leaves the code exactly as written", () => {
+    const row = { ...blankQueryRow(), name: " r ", path: " /r ", code: "  select 1  " };
     const [out] = queryRowsToConfig([row]);
     expect(out.name).toBe("r");
     expect(out.path).toBe("/r");
-    expect(out.sql).toBe("  select 1  ");
+    expect(out.code).toBe("  select 1  ");
   });
 
   it("survives an edit to the API row it belongs to", () => {
@@ -139,7 +143,7 @@ describe("checking a query", () => {
     const [row] = queryRowsFromConfig({ queries: [stored] });
     const body = describeBody(row, ["books", "authors"]);
     expect(body.name).toBe("topAuthors");
-    expect(body.sql).toBe(stored.sql);
+    expect(body.code).toBe(stored.code);
     expect(body.params).toEqual(stored.params);
     expect(body.tables).toEqual(["books", "authors"]);
   });
@@ -158,5 +162,47 @@ describe("checking a query", () => {
 
   it("says nothing at all before a check has run", () => {
     expect(statusSummary({ kind: "idle" })).toBe("");
+  });
+});
+
+describe("the language a query is written in", () => {
+  const js = {
+    name: "greet",
+    method: "POST",
+    path: "/greet",
+    language: "javascript",
+    code: "return { hello: body.name };",
+    params: [],
+  };
+
+  it("reads and writes the language, and reads an unknown one as SQL", () => {
+    const [row] = queryRowsFromConfig({ queries: [js] });
+    expect(row.language).toBe("javascript");
+    expect(isCode(row.language)).toBe(true);
+    expect(queryRowsToConfig([row])[0].language).toBe("javascript");
+    expect(describeBody(row, []).language).toBe("javascript");
+
+    const [odd] = queryRowsFromConfig({ queries: [{ ...js, language: "cobol" }] });
+    expect(odd.language).toBe("sql");
+    expect(blankQueryRow().language).toBe("sql");
+  });
+
+  it("offers Python only where the server runs it, or where the query already is", () => {
+    expect(languageOptions("sql", false)).toEqual(["sql", "javascript"]);
+    expect(languageOptions("sql", true)).toEqual(["sql", "javascript", "python"]);
+    // A stored Python query on a server without Python is still shown as one.
+    expect(languageOptions("python", false)).toEqual(["sql", "javascript", "python"]);
+  });
+
+  it("counts a Python runtime that has not started yet as available", () => {
+    expect(pythonAvailable("running")).toBe(true);
+    expect(pythonAvailable("not_initialised")).toBe(true);
+    for (const state of ["not_built", "off", "unavailable", undefined]) {
+      expect(pythonAvailable(state)).toBe(false);
+    }
+  });
+
+  it("reports a checked code query without claiming columns", () => {
+    expect(statusSummary({ kind: "checked" })).toMatch(/whatever its body returns/);
   });
 });

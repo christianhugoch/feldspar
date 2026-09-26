@@ -361,6 +361,20 @@ and is signed in. Also asked for: "forgot password" in general, and closing what
       therapist → patient flow end to end, the role rules, forgot-password, the `users`
       table), unit tests in `password_tokens.rs`, `user_rows.rs`, `rest/password.rs`.
 
+## Interjected — custom queries in JavaScript and Python
+
+Asked for directly: an application's "Custom SQL queries" become "Custom queries", each written
+in SQL, JavaScript or — where this server runs Python — Python, chosen by a drop-down per query.
+A JavaScript or Python body reads the request as `body` and `query`.
+
+- [x] Q.1 `sc-api/src/rest/custom.rs`: `CustomQuery::language` (`sql` by default); a code query's
+      source is not read as SQL, is not described, and projects an opaque-JSON response. The
+      REST provider runs it through the dispatcher's `run_js_code` / `run_python_code`
+      (`TriggerDispatcher::run_code`), with `body`, `query` and `user` in scope.
+- [x] Q.2 The application form: "Custom queries", a language drop-down per query (Python only
+      when the server can run it), a code editor for a JavaScript or Python body.
+- [x] Q.3 Tests, design §13.4, `CHANGELOG`.
+
 ## Explicitly OUT of scope for this milestone
 
 - **Uploading or writing assets from the agent.** §6. Reading is what the use case needs, and a

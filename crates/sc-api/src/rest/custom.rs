@@ -1,4 +1,13 @@
-//! Custom SQL queries: an application's own endpoints, written as SQL (§13.4).
+//! Custom queries: an application's own endpoints, written as SQL, JavaScript
+//! or Python (§13.4).
+//!
+//! Most of this module is about SQL, which is what the rest of this paragraph
+//! and the next describe. A **JavaScript or Python** query
+//! ([`QueryLanguage`]) is a code body instead: the same name, method, sub-path,
+//! role floor and declared parameters, but its source runs on the action a
+//! trigger's body runs on, with the request in scope as `body` and `query`
+//! ([`code_scope`]), and what it returns is the response. It is not prepared,
+//! so it has no described columns, and its client method returns opaque JSON.
 //!
 //! An administrator writes a statement, names its parameters and their types,
 //! picks an HTTP method and a sub-path, and gets a typed method on the app's
@@ -108,7 +117,54 @@ pub struct QueryColumn {
     pub ty: ValueType,
 }
 
-/// An administrator-authored SQL endpoint (§13.4).
+/// The language a [`CustomQuery`]'s source is written in.
+///
+/// SQL is prepared, typed by the database and run as one statement. JavaScript and
+/// Python are **code bodies**: they run on the action a trigger's body runs on
+/// (`run_js_code` / `run_python_code`), so they reach the same `db`, `fetch`,
+/// `fs`, `trigger` and `modfn`, under the same bounds and the same authority — the
+/// admin's, with `db.asUser()` delegating to the caller. What they see of the
+/// request is `body` (the JSON body, or `{}`), `query` (the query string, one value
+/// per key) and `user` (the caller's fields, or null). What they return is the
+/// response.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QueryLanguage {
+    /// One SQL statement with `:name` parameters.
+    #[default]
+    Sql,
+    /// A JavaScript body.
+    Javascript,
+    /// A Python body, where this server runs Python.
+    Python,
+}
+
+impl QueryLanguage {
+    /// The name as the wire and the stored configuration spell it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QueryLanguage::Sql => "sql",
+            QueryLanguage::Javascript => "javascript",
+            QueryLanguage::Python => "python",
+        }
+    }
+
+    /// The trigger action a code body runs on, or `None` for SQL.
+    pub fn action(self) -> Option<&'static str> {
+        match self {
+            QueryLanguage::Sql => None,
+            QueryLanguage::Javascript => Some("run_js_code"),
+            QueryLanguage::Python => Some("run_python_code"),
+        }
+    }
+
+    fn is_sql(&self) -> bool {
+        *self == QueryLanguage::Sql
+    }
+}
+
+/// An administrator-authored endpoint (§13.4): one SQL statement, or a
+/// JavaScript or Python body.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CustomQuery {
     /// The operation name: the generated client's method name, and the endpoint
@@ -124,8 +180,12 @@ pub struct CustomQuery {
     pub method: Method,
     /// The sub-path within the API's mount, e.g. `/reports/top-authors`.
     pub path: String,
-    /// The SQL, with `:name` parameters.
-    pub sql: String,
+    /// What [`code`](CustomQuery::code) is written in. SQL unless stated.
+    #[serde(default, skip_serializing_if = "QueryLanguage::is_sql")]
+    pub language: QueryLanguage,
+    /// The source: the SQL with `:name` parameters, or the body of a JavaScript
+    /// or Python query.
+    pub code: String,
     /// The declared parameters, in the order the editor lists them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub params: Vec<CustomParam>,
@@ -150,14 +210,15 @@ impl CustomQuery {
         name: impl Into<String>,
         method: Method,
         path: impl Into<String>,
-        sql: impl Into<String>,
+        code: impl Into<String>,
     ) -> CustomQuery {
         CustomQuery {
             name: name.into(),
             description: String::new(),
             method,
             path: normalize_path(&path.into()),
-            sql: sql.into(),
+            language: QueryLanguage::Sql,
+            code: code.into(),
             params: Vec::new(),
             min_role: ROLE_ADMIN,
             columns: Vec::new(),
@@ -182,11 +243,26 @@ impl CustomQuery {
         self
     }
 
+    /// Set the language the source is written in.
+    pub fn language(mut self, language: QueryLanguage) -> CustomQuery {
+        self.language = language;
+        self
+    }
+
+    /// Whether this is a JavaScript or Python body rather than SQL.
+    pub fn is_code(&self) -> bool {
+        !self.language.is_sql()
+    }
+
     /// Whether this query's transaction refuses writes.
     ///
     /// `GET` runs `READ ONLY` (decision 7): an `UPDATE` behind a `GET` is a
     /// mutation a cache, a crawler or a link prefetch can cause, so it fails
     /// loudly rather than quietly happening. Every other method commits.
+    ///
+    /// A SQL query's rule only. A code body writes through the row layer one
+    /// statement at a time, as a trigger's body does, and nothing stops a `GET`
+    /// body writing.
     pub fn read_only(&self) -> bool {
         self.method == Method::Get
     }
@@ -218,7 +294,7 @@ pub fn custom_queries(config: &Attrs) -> Result<Vec<CustomQuery>> {
     }
     serde_json::from_value(value.clone()).map_err(|e| {
         Error::invalid(format!(
-            "the API's `{CFG_QUERIES}` setting is not a list of custom SQL queries: {e}"
+            "the API's `{CFG_QUERIES}` setting is not a list of custom queries: {e}"
         ))
     })
 }
@@ -250,7 +326,7 @@ pub fn validate_custom_queries(queries: &[CustomQuery], tables: &[String]) -> Re
         validate_custom_query(q, tables)?;
         if let Some(other) = queries[..i].iter().find(|o| o.name == q.name) {
             return Err(Error::invalid(format!(
-                "two custom SQL queries are named `{}`; the name is the client's \
+                "two custom queries are named `{}`; the name is the client's \
                  method name, so it has to be unique",
                 other.name
             )));
@@ -260,7 +336,7 @@ pub fn validate_custom_queries(queries: &[CustomQuery], tables: &[String]) -> Re
             .find(|o| o.method == q.method && o.path == q.path)
         {
             return Err(Error::invalid(format!(
-                "custom SQL queries `{}` and `{}` both answer {} {}; one of them \
+                "custom queries `{}` and `{}` both answer {} {}; one of them \
                  would be unreachable",
                 other.name,
                 q.name,
@@ -280,14 +356,14 @@ const TABLE_OPS: [&str; 6] = ["list", "create", "update", "delete", "download", 
 fn validate_custom_query(q: &CustomQuery, tables: &[String]) -> Result<()> {
     if !is_identifier(&q.name) {
         return Err(Error::invalid(format!(
-            "custom SQL query name `{}` is not usable as a client method name; \
+            "custom query name `{}` is not usable as a client method name; \
              use letters, digits and underscores, starting with a letter",
             q.name
         )));
     }
     if super::RESERVED_AUTH_NAMES.contains(&q.name.as_str()) {
         return Err(Error::invalid(format!(
-            "custom SQL query `{}` has the name of one of the API's own sign-in \
+            "custom query `{}` has the name of one of the API's own sign-in \
              endpoints; give it another name",
             q.name
         )));
@@ -296,7 +372,7 @@ fn validate_custom_query(q: &CustomQuery, tables: &[String]) -> Result<()> {
         for op in TABLE_OPS {
             if q.name == super::op_name(op, table) {
                 return Err(Error::invalid(format!(
-                    "custom SQL query `{}` has the same name as the `{table}` table's \
+                    "custom query `{}` has the same name as the `{table}` table's \
                      own endpoint; give it another name",
                     q.name
                 )));
@@ -305,7 +381,7 @@ fn validate_custom_query(q: &CustomQuery, tables: &[String]) -> Result<()> {
     }
     if !(1..=100).contains(&q.min_role) {
         return Err(Error::invalid(format!(
-            "custom SQL query `{}` has a role floor of {}; roles run 1..=100",
+            "custom query `{}` has a role floor of {}; roles run 1..=100",
             q.name, q.min_role
         )));
     }
@@ -315,7 +391,7 @@ fn validate_custom_query(q: &CustomQuery, tables: &[String]) -> Result<()> {
     let first = segments.next().unwrap_or_default();
     if first.is_empty() {
         return Err(Error::invalid(format!(
-            "custom SQL query `{}` needs a sub-path, e.g. `/reports/sales`",
+            "custom query `{}` needs a sub-path, e.g. `/reports/sales`",
             q.name
         )));
     }
@@ -326,7 +402,7 @@ fn validate_custom_query(q: &CustomQuery, tables: &[String]) -> Result<()> {
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         {
             return Err(Error::invalid(format!(
-                "custom SQL query `{}` has an unusable path segment `{segment}` in \
+                "custom query `{}` has an unusable path segment `{segment}` in \
                  `{path}`; use letters, digits, `-`, `_` and `.`",
                 q.name
             )));
@@ -334,14 +410,14 @@ fn validate_custom_query(q: &CustomQuery, tables: &[String]) -> Result<()> {
     }
     if let Some(table) = tables.iter().find(|t| *t == first) {
         return Err(Error::invalid(format!(
-            "custom SQL query `{}` is mounted at `{path}`, which the `{table}` \
+            "custom query `{}` is mounted at `{path}`, which the `{table}` \
              table's own routes already answer; give it another sub-path",
             q.name
         )));
     }
     if let Some(reserved) = super::RESERVED_SEGMENTS.iter().find(|r| **r == first) {
         return Err(Error::invalid(format!(
-            "custom SQL query `{}` is mounted at `{path}`, but `{reserved}` is \
+            "custom query `{}` is mounted at `{path}`, but `{reserved}` is \
              reserved by the API's own routes; give it another sub-path",
             q.name
         )));
@@ -351,20 +427,37 @@ fn validate_custom_query(q: &CustomQuery, tables: &[String]) -> Result<()> {
     for (i, p) in q.params.iter().enumerate() {
         if !is_identifier(&p.name) {
             return Err(Error::invalid(format!(
-                "custom SQL query `{}` has a parameter named `{}`, which is not a \
+                "custom query `{}` has a parameter named `{}`, which is not a \
                  usable parameter name",
                 q.name, p.name
             )));
         }
         if q.params[..i].iter().any(|o| o.name == p.name) {
             return Err(Error::invalid(format!(
-                "custom SQL query `{}` declares the parameter `{}` twice",
+                "custom query `{}` declares the parameter `{}` twice",
                 q.name, p.name
             )));
         }
     }
 
-    check_sql(q)?;
+    if q.is_code() {
+        check_code(q)
+    } else {
+        check_sql(q)
+    }
+}
+
+/// The code half: there is a body. Whether it parses is the engine's question,
+/// asked when the query is called — as it is for a trigger's body, because the
+/// save path has no engine to ask.
+fn check_code(q: &CustomQuery) -> Result<()> {
+    if q.code.trim().is_empty() {
+        return Err(Error::invalid(format!(
+            "custom query `{}` has no {} code",
+            q.name,
+            q.language.as_str()
+        )));
+    }
     Ok(())
 }
 
@@ -378,17 +471,17 @@ fn check_sql(q: &CustomQuery) -> Result<()> {
     // A parameter's *placement* is dialect-specific but its presence is not, so
     // the counting dialect below is enough to answer both questions here. The
     // real dialect renders the statement that runs.
-    let named = rewrite_named_params(&CountingDialect, &q.sql)
-        .map_err(|e| Error::invalid(format!("custom SQL query `{}`: {e}", q.name)))?;
+    let named = rewrite_named_params(&CountingDialect, &q.code)
+        .map_err(|e| Error::invalid(format!("custom query `{}`: {e}", q.name)))?;
     if named.statements == 0 {
         return Err(Error::invalid(format!(
-            "custom SQL query `{}` has no SQL",
+            "custom query `{}` has no SQL",
             q.name
         )));
     }
     if named.statements > 1 {
         return Err(Error::invalid(format!(
-            "custom SQL query `{}` holds {} statements; a custom query is one \
+            "custom query `{}` holds {} statements; a custom query is one \
              statement — a migration is not an API endpoint",
             q.name, named.statements
         )));
@@ -396,7 +489,7 @@ fn check_sql(q: &CustomQuery) -> Result<()> {
     for used in &named.params {
         if q.param(used).is_none() {
             return Err(Error::invalid(format!(
-                "custom SQL query `{}` uses `:{used}`, which is not one of its \
+                "custom query `{}` uses `:{used}`, which is not one of its \
                  declared parameters",
                 q.name
             )));
@@ -405,7 +498,7 @@ fn check_sql(q: &CustomQuery) -> Result<()> {
     for declared in &q.params {
         if !named.params.contains(&declared.name) {
             return Err(Error::invalid(format!(
-                "custom SQL query `{}` declares the parameter `{}` but its SQL \
+                "custom query `{}` declares the parameter `{}` but its SQL \
                  never uses `:{}`",
                 q.name, declared.name, declared.name
             )));
@@ -434,17 +527,24 @@ impl sc_query::SqlDialect for CountingDialect {
 /// This is validation and typing in one call, which is the point: a query that
 /// will not prepare cannot be saved, and one that will is typed by the database
 /// rather than by a declaration that can go stale.
+///
+/// A JavaScript or Python query has no columns to report — it returns whatever
+/// its body returns — so it is described as none, which types its response as
+/// opaque JSON.
 pub async fn describe_custom_query(
     catalog: &Catalog,
     query: &CustomQuery,
 ) -> Result<Vec<QueryColumn>> {
+    if query.is_code() {
+        return Ok(Vec::new());
+    }
     let driver = catalog.primary();
     let (named, types) = prepare(catalog, query)?;
 
     let described = driver
         .describe(&named.sql, &types)
         .await
-        .map_err(|e| Error::invalid(format!("custom SQL query `{}`: {e}", query.name)))?;
+        .map_err(|e| Error::invalid(format!("custom query `{}`: {e}", query.name)))?;
 
     let mut columns: Vec<QueryColumn> = Vec::with_capacity(described.len());
     for column in &described {
@@ -453,7 +553,7 @@ pub async fn describe_custom_query(
         // admin is the only one who can choose it.
         if columns.iter().any(|c| c.name == column.name) {
             return Err(Error::invalid(format!(
-                "custom SQL query `{}` returns two columns named `{}`; give one of \
+                "custom query `{}` returns two columns named `{}`; give one of \
                  them an alias, or the response would carry only one",
                 query.name, column.name
             )));
@@ -477,11 +577,14 @@ pub fn custom_endpoint(mount: &str, query: &CustomQuery) -> Endpoint {
     let mut path = PathSpec::root().lit(mount);
     path = path.lit(&query.path);
 
-    let row = if query.columns.is_empty() {
-        // Not described (yet): opaque JSON is honest, an invented shape is not.
+    let output = if query.is_code() {
+        // A body returns what it returns: an object, a list, a number.
         TypeSchema::json()
+    } else if query.columns.is_empty() {
+        // Not described (yet): opaque JSON is honest, an invented shape is not.
+        TypeSchema::array(TypeSchema::json())
     } else {
-        TypeSchema::struct_of(
+        TypeSchema::array(TypeSchema::struct_of(
             query
                 .columns
                 .iter()
@@ -490,13 +593,13 @@ pub fn custom_endpoint(mount: &str, query: &CustomQuery) -> Endpoint {
                 // the backend commits to nothing about it, so the client is told
                 // the truth rather than a convenient half of it.
                 .map(|c| StructField::new(&c.name, TypeSchema::optional(TypeSchema::value(c.ty)))),
-        )
+        ))
     };
 
     let endpoint = Endpoint::new(&query.name, query.method, path)
-        .output(TypeSchema::array(row))
+        .output(output)
         .auth(AuthRequirement::MinRole(query.min_role))
-        .handler(HandlerRef::Sql(query.name.clone()));
+        .handler(HandlerRef::Custom(query.name.clone()));
 
     if query.args_in_query() {
         endpoint.query(query.params.iter().map(|p| {
@@ -527,8 +630,8 @@ pub fn custom_endpoint(mount: &str, query: &CustomQuery) -> Endpoint {
 /// be two answers, and the one that is wrong is the one nobody is reading until
 /// a caller hits it.
 fn prepare(catalog: &Catalog, query: &CustomQuery) -> Result<(sc_query::NamedSql, Vec<String>)> {
-    let named = rewrite_named_params(catalog.primary().dialect(), &query.sql)
-        .map_err(|e| Error::invalid(format!("custom SQL query `{}`: {e}", query.name)))?;
+    let named = rewrite_named_params(catalog.primary().dialect(), &query.code)
+        .map_err(|e| Error::invalid(format!("custom query `{}`: {e}", query.name)))?;
     let types = named
         .params
         .iter()
@@ -538,7 +641,7 @@ fn prepare(catalog: &Catalog, query: &CustomQuery) -> Result<(sc_query::NamedSql
                 .map(|p| p.ty.to_basic().sql_type().to_owned())
                 .ok_or_else(|| {
                     Error::invalid(format!(
-                        "custom SQL query `{}` uses `:{name}`, which is not one of \
+                        "custom query `{}` uses `:{name}`, which is not one of \
                          its declared parameters",
                         query.name
                     ))
@@ -574,7 +677,7 @@ pub(crate) fn custom_statement(
 fn bind(query: &CustomQuery, req: &ApiRequest, name: &str) -> Result<Value> {
     let param = query.param(name).ok_or_else(|| {
         Error::invalid(format!(
-            "custom SQL query `{}` uses `:{name}`, which is not one of its \
+            "custom query `{}` uses `:{name}`, which is not one of its \
              declared parameters",
             query.name
         ))
@@ -599,6 +702,62 @@ fn bind(query: &CustomQuery, req: &ApiRequest, name: &str) -> Result<Value> {
     // route by which a caller's value reaches the query at all.
     json_to_value(&param.ty.to_basic(), &supplied)
         .map_err(|e| Error::invalid(format!("argument `{name}`: {e}")))
+}
+
+/// What a JavaScript or Python query's body sees of the request: `body`, the
+/// JSON body (`{}` when there was none), and `query`, the query string as an
+/// object — the first value of a repeated key, as [`ApiRequest::query_get`]
+/// reads it.
+///
+/// A **declared** parameter is checked and coerced where it arrives — the query
+/// string for `GET` and `DELETE`, the body otherwise — so a body declared to
+/// take an `int` finds a number, not the string `"7"`, and a missing required
+/// one is refused before the body runs, with the sentence a SQL query's caller
+/// gets. What was not declared is passed through as it was sent.
+pub(crate) fn code_scope(query: &CustomQuery, req: &ApiRequest) -> Result<Attrs> {
+    let mut body = match &req.body {
+        Json::Null => serde_json::Map::new(),
+        Json::Object(map) => map.clone(),
+        other => {
+            // A list or a scalar body has no names to read a parameter from,
+            // and is still the body the caller sent.
+            if !query.args_in_query() && !query.params.is_empty() {
+                return Err(Error::invalid(format!(
+                    "this query takes a JSON object body, got {other}"
+                )));
+            }
+            let mut scope = Attrs::new();
+            scope.insert("body".to_owned(), other.clone());
+            scope.insert("query".to_owned(), Json::Object(query_object(req)));
+            return Ok(scope);
+        }
+    };
+    let mut args = query_object(req);
+    for param in &query.params {
+        let value = bind(query, req, &param.name)?;
+        let target = if query.args_in_query() {
+            &mut args
+        } else {
+            &mut body
+        };
+        if !value.is_null() {
+            target.insert(param.name.clone(), crate::convert::value_to_json(&value));
+        }
+    }
+    let mut scope = Attrs::new();
+    scope.insert("body".to_owned(), Json::Object(body));
+    scope.insert("query".to_owned(), Json::Object(args));
+    Ok(scope)
+}
+
+/// The query string as a JSON object of strings, first value winning.
+fn query_object(req: &ApiRequest) -> serde_json::Map<String, Json> {
+    let mut out = serde_json::Map::new();
+    for (key, value) in &req.query {
+        out.entry(key.clone())
+            .or_insert_with(|| Json::String(value.clone()));
+    }
+    out
 }
 
 /// A result row as JSON, by the column names the database reported.
@@ -654,7 +813,7 @@ mod tests {
     #[test]
     fn an_undeclared_parameter_is_refused_naming_it() {
         let mut q = query();
-        q.sql = "SELECT * FROM books WHERE year > :since AND author = :author".into();
+        q.code = "SELECT * FROM books WHERE year > :since AND author = :author".into();
         let msg = validate_custom_queries(&[q], &[]).unwrap_err().to_string();
         assert!(msg.contains(":author"), "{msg}");
     }
@@ -675,7 +834,7 @@ mod tests {
     fn a_second_statement_is_refused() {
         let mut q = query();
         q.params = Vec::new();
-        q.sql = "SELECT 1; DROP TABLE books".into();
+        q.code = "SELECT 1; DROP TABLE books".into();
         let msg = validate_custom_queries(&[q], &[]).unwrap_err().to_string();
         assert!(msg.contains("one statement"), "{msg}");
     }
@@ -684,7 +843,7 @@ mod tests {
     fn empty_sql_is_refused() {
         let mut q = query();
         q.params = Vec::new();
-        q.sql = "  -- nothing\n".into();
+        q.code = "  -- nothing\n".into();
         assert!(validate_custom_queries(&[q], &[]).is_err());
     }
 
@@ -766,7 +925,7 @@ mod tests {
             "name": "report",
             "method": "GET",
             "path": "/report",
-            "sql": "SELECT 1 AS n"
+            "code": "SELECT 1 AS n"
         });
         let q: CustomQuery = serde_json::from_value(stored).unwrap();
         assert_eq!(q.min_role, ROLE_ADMIN);
@@ -809,7 +968,7 @@ mod tests {
         assert_eq!(ep.method, Method::Get);
         assert_eq!(ep.path.pattern(), "/api/reports/top-authors");
         assert_eq!(ep.auth, AuthRequirement::MinRole(ROLE_ADMIN));
-        assert_eq!(ep.handler, HandlerRef::Sql("topAuthors".into()));
+        assert_eq!(ep.handler, HandlerRef::Custom("topAuthors".into()));
         assert!(ep.input.is_empty());
         assert_eq!(ep.query.len(), 1);
         assert_eq!(ep.query[0].name, "since");
@@ -831,7 +990,7 @@ mod tests {
             CustomParam::new("since", ValueType::Int),
             CustomParam::new("author", ValueType::Text).optional(),
         ];
-        q.sql = "SELECT :since AS a, :author AS b".into();
+        q.code = "SELECT :since AS a, :author AS b".into();
         let ep = custom_endpoint("/api", &q);
         assert!(ep.query.is_empty());
         assert_eq!(
@@ -842,5 +1001,80 @@ mod tests {
             ])
         );
         assert!(!q.read_only(), "only GET is read-only");
+    }
+
+    fn js_query() -> CustomQuery {
+        CustomQuery::new(
+            "greet",
+            Method::Get,
+            "/greet",
+            "return { hello: query.name, n: query.n };",
+        )
+        .language(QueryLanguage::Javascript)
+        .params([CustomParam::new("n", ValueType::Int)])
+    }
+
+    #[test]
+    fn the_language_is_sql_unless_stated_and_is_stored_only_when_it_is_not() {
+        let stored = json!({ "name": "r", "method": "GET", "path": "/r", "code": "SELECT 1" });
+        let q: CustomQuery = serde_json::from_value(stored).unwrap();
+        assert_eq!(q.language, QueryLanguage::Sql);
+        assert!(serde_json::to_value(&q).unwrap().get("language").is_none());
+
+        let js = serde_json::to_value(js_query()).unwrap();
+        assert_eq!(js["language"], json!("javascript"));
+        let back: CustomQuery = serde_json::from_value(js).unwrap();
+        assert_eq!(back, js_query());
+    }
+
+    #[test]
+    fn a_code_query_is_not_read_as_sql() {
+        // Neither the one-statement rule nor the `:name` rule applies: `n` is
+        // declared and never written as `:n`, and the body is two statements.
+        let mut q = js_query();
+        q.code = "const a = 1; return a + query.n;".into();
+        validate_custom_queries(&[q.clone()], &[]).unwrap();
+
+        // …but the rules about the endpoint still do, and a body is required.
+        q.path = "/login".into();
+        assert!(validate_custom_queries(&[q], &[]).is_err());
+        let mut empty = js_query();
+        empty.code = "  \n".into();
+        let msg = validate_custom_queries(&[empty], &[]).unwrap_err().to_string();
+        assert!(msg.contains("no javascript code"), "{msg}");
+    }
+
+    #[test]
+    fn a_code_query_returns_opaque_json_through_the_custom_handler() {
+        let ep = custom_endpoint("/api", &js_query());
+        assert_eq!(ep.output, TypeSchema::json());
+        assert_eq!(ep.handler, HandlerRef::Custom("greet".into()));
+        assert_eq!(ep.query.len(), 1, "declared parameters still type the client");
+    }
+
+    #[test]
+    fn a_code_querys_scope_is_the_request_with_declared_parameters_coerced() {
+        let req = ApiRequest::new(Method::Get, "/api/greet")
+            .query("n", "7")
+            .query("name", "Ada")
+            .query("name", "ignored");
+        let scope = code_scope(&js_query(), &req).unwrap();
+        assert_eq!(scope["query"], json!({ "n": 7, "name": "Ada" }));
+        assert_eq!(scope["body"], json!({}));
+
+        // A missing required parameter is refused before any body runs.
+        let bare = ApiRequest::new(Method::Get, "/api/greet");
+        let msg = code_scope(&js_query(), &bare).unwrap_err().to_string();
+        assert!(msg.contains("`n`"), "{msg}");
+
+        // A method with a body reads its parameters from the body.
+        let mut post = js_query();
+        post.method = Method::Post;
+        let req = ApiRequest::new(Method::Post, "/api/greet")
+            .query("page", "2")
+            .body(json!({ "n": "3", "extra": [1, 2] }));
+        let scope = code_scope(&post, &req).unwrap();
+        assert_eq!(scope["body"], json!({ "n": 3, "extra": [1, 2] }));
+        assert_eq!(scope["query"], json!({ "page": "2" }));
     }
 }

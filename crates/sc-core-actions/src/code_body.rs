@@ -107,8 +107,21 @@ pub(crate) fn timeout(config: &Attrs) -> Result<Option<Duration>> {
 /// insert is the case that distinguishes the two — in scope, null. `context` is
 /// the other: outside a run it is not bound at all, so a body that names it says
 /// so rather than reading an empty object as "nothing has happened yet".
-pub(crate) fn bindings(event: &Event, run_context: Option<&Attrs>) -> BTreeMap<String, Json> {
+///
+/// A **custom query**'s body (§13.4) has a request rather than an event: its
+/// names (`body`, `query`) are bound in place of `payload`, which it has none of,
+/// and `user` is the caller as it is everywhere else.
+pub(crate) fn bindings(
+    event: &Event,
+    run_context: Option<&Attrs>,
+    request: Option<&Attrs>,
+) -> BTreeMap<String, Json> {
     let mut bindings = BTreeMap::new();
+    if let Some(request) = request {
+        bindings.extend(request.iter().map(|(k, v)| (k.clone(), v.clone())));
+        bindings.insert("user".to_owned(), event.user.clone().unwrap_or(Json::Null));
+        return bindings;
+    }
     if let Some(context) = run_context {
         bindings.insert(
             "context".to_owned(),
@@ -133,6 +146,16 @@ pub(crate) fn bindings(event: &Event, run_context: Option<&Attrs>) -> BTreeMap<S
     bindings.insert("user".to_owned(), event.user.clone().unwrap_or(Json::Null));
     bindings.insert("payload".to_owned(), event.payload.clone());
     bindings
+}
+
+/// What an error from this run is about: the trigger, or the custom query whose
+/// body it is — an API caller who gets a message about a trigger they never
+/// heard of is left guessing.
+pub(crate) fn subject(ctx: &ActionContext<'_>) -> String {
+    match ctx.request() {
+        Some(_) => format!("custom query `{}`", ctx.trigger),
+        None => format!("trigger `{}`", ctx.trigger),
+    }
 }
 
 /// The five host surfaces one run may reach — and the schema it reads without
@@ -364,7 +387,7 @@ mod tests {
             .row(json!({ "id": 1, "title": "now" }))
             .old_row(json!({ "id": 1, "title": "was" }))
             .caller(1, Some(json!({ "email": "a@b.c" })));
-        let bound = bindings(&update, None);
+        let bound = bindings(&update, None, None);
         assert_eq!(
             bound.keys().map(String::as_str).collect::<Vec<_>>(),
             vec!["old", "payload", "row", "user"]
@@ -377,14 +400,14 @@ mod tests {
         let insert = Event::new(EventKind::Insert)
             .on("books")
             .row(json!({ "id": 1 }));
-        let bound = bindings(&insert, None);
+        let bound = bindings(&insert, None, None);
         assert_eq!(bound["old"], Json::Null);
         assert_eq!(bound["user"], Json::Null, "anonymous binds null");
 
         // An event with no row binds neither, so code naming `row` there fails
         // in the engine instead of reading undefined.
         let called = Event::new(EventKind::None).payload(json!({ "n": 2 }));
-        let bound = bindings(&called, None);
+        let bound = bindings(&called, None, None);
         assert!(!bound.contains_key("row") && !bound.contains_key("old"));
         assert_eq!(bound["payload"], json!({ "n": 2 }));
 
@@ -392,13 +415,32 @@ mod tests {
         // bound — including on the first step, where it is empty. Presence is
         // scope, so a body may ask what has happened before anything has.
         assert!(!bound.contains_key("context"));
-        let step = bindings(&called, Some(&Attrs::new()));
+        let step = bindings(&called, Some(&Attrs::new()), None);
         assert_eq!(step["context"], json!({}));
         let later: Attrs = [("total".to_owned(), json!(120))].into_iter().collect();
         assert_eq!(
-            bindings(&called, Some(&later))["context"],
+            bindings(&called, Some(&later), None)["context"],
             json!({"total": 120})
         );
+    }
+
+    #[test]
+    fn a_custom_querys_body_sees_the_request_and_the_caller_and_no_payload() {
+        let called = Event::new(EventKind::None).caller(80, Some(json!({ "email": "a@b.c" })));
+        let request: Attrs = [
+            ("body".to_owned(), json!({ "title": "Dune" })),
+            ("query".to_owned(), json!({ "since": 1965 })),
+        ]
+        .into_iter()
+        .collect();
+        let bound = bindings(&called, None, Some(&request));
+        assert_eq!(
+            bound.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["body", "query", "user"]
+        );
+        assert_eq!(bound["body"]["title"], json!("Dune"));
+        assert_eq!(bound["query"]["since"], json!(1965));
+        assert_eq!(bound["user"]["email"], json!("a@b.c"));
     }
 
     #[test]

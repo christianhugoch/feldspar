@@ -130,7 +130,7 @@ async fn a_query_that_will_not_prepare_cannot_be_saved() -> Result<()> {
     let cat = catalog(&db).await?;
 
     let mut broken = stocked();
-    broken.sql = "SELECT titel FROM books WHERE copies >= :least".into();
+    broken.code = "SELECT titel FROM books WHERE copies >= :least".into();
     let err = save_application(&cat, &library(&[broken]))
         .await
         .expect_err("this SQL does not prepare");
@@ -154,7 +154,7 @@ async fn the_stored_columns_are_never_older_than_the_stored_sql() -> Result<()> 
     // re-described in the same statement that stores the new SQL, so there is no
     // window in which they describe the old one.
     let mut edited = stocked();
-    edited.sql =
+    edited.code =
         "SELECT title AS name, copies * 2 AS doubled FROM books WHERE copies >= :least".into();
     let mut app = app;
     let mut config = sc_types::Attrs::new();

@@ -67,8 +67,11 @@ export type ModuleFunctionInfo = {
  *
  * `run` says the body is a **workflow step**, which is the same difference for
  * `context`: a step is bound the run so far and a trigger's own body is bound
- * nothing at all. */
-export type CodeScope = { table?: string; event?: string; run?: boolean };
+ * nothing at all.
+ *
+ * `request` says the body is an application's **custom query** (§13.4): it has
+ * no event, so no `payload`, and is bound the request as `body` and `query`. */
+export type CodeScope = { table?: string; event?: string; run?: boolean; request?: boolean };
 
 /** The join separator between a key field and a column of the table it points
  * at (`customerⱵemail`) — `sc_expr::JOIN`. */
@@ -732,11 +735,24 @@ export function scopeDeclarations(
     `/** Whoever caused the event, or null for the server's own events. */\n` +
       `declare const user: ScUser | null;`,
   );
-  parts.push(
-    `/** What the trigger was called with: the body posted to a directly-run\n` +
-      ` * trigger, or what the event carried. */\n` +
-      `declare const payload: Record<string, any>;`,
-  );
+  if (scope.request) {
+    parts.push(
+      `/** The request's JSON body — \`{}\` when there was none. A declared\n` +
+        ` * parameter arrives here, converted to its type, for a method with a\n` +
+        ` * body. */\ndeclare const body: any;`,
+    );
+    parts.push(
+      `/** The request's query string, one value per key. A declared parameter\n` +
+        ` * arrives here, converted to its type, for \`GET\` and \`DELETE\`. */\n` +
+        `declare const query: Record<string, any>;`,
+    );
+  } else {
+    parts.push(
+      `/** What the trigger was called with: the body posted to a directly-run\n` +
+        ` * trigger, or what the event carried. */\n` +
+        `declare const payload: Record<string, any>;`,
+    );
+  }
   if (scope.run) {
     // Only a workflow step has it, so it is declared only for one — naming it
     // in a trigger's own body is a `ReferenceError`, and completing it would be

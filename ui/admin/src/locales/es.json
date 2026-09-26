@@ -162,7 +162,7 @@
   "Create trigger": "Crear disparador",
   "Created": "Creado",
   "Currently included: {summary}": "Incluido actualmente: {summary}",
-  "Custom SQL queries": "Consultas SQL personalizadas",
+  "Custom queries": "Consultas personalizadas",
   "Data Layer": "Capa de datos",
   "Database": "Base de datos",
   "Database connections": "Conexiones de base de datos",
@@ -195,7 +195,11 @@
   "Dropped": "Descartado",
   "Each one runs with {whose} authority, bounded by the boxes ticked when it is generated.": "Cada uno se ejecuta con la autoridad de {whose}, limitada por las casillas marcadas al generarlo.",
   "Each provider is mounted on its own sub-path; two on the same one is refused, because a request resolves to only one of them.": "Cada proveedor se monta en su propia subruta; se rechazan dos en la misma, porque una solicitud solo se resuelve en uno de ellos.",
-  "Each query becomes one endpoint on this API and one typed method on the app’s generated client, with the return type taken from the columns Postgres reports.": "Cada consulta se convierte en un endpoint de esta API y en un método tipado en el cliente generado de la aplicación, cuyo tipo de retorno se obtiene de las columnas que informa Postgres.",
+  "Each query becomes one endpoint on this API and one typed method on the app’s generated client. A SQL query’s return type is taken from the columns Postgres reports; a JavaScript or Python query returns whatever its body returns.": "Cada consulta se convierte en un endpoint de esta API y en un método tipado del cliente generado de la aplicación. El tipo de retorno de una consulta SQL se toma de las columnas que informa Postgres; una consulta JavaScript o Python devuelve lo que devuelva su cuerpo.",
+  "A JavaScript or Python query runs as a trigger’s code does, with the administrator’s authority over the tables unless it asks for the caller’s with {asUser}.": "Una consulta JavaScript o Python se ejecuta como el código de un disparador: con la autoridad del administrador sobre las tablas, salvo que pida la del llamante con {asUser}.",
+  "The body of a function. The request is {body} (its JSON body) and {query} (its query string), the caller is {user}, and what it returns is the response.": "El cuerpo de una función. La petición es {body} (su cuerpo JSON) y {query} (su cadena de consulta), el llamante es {user}, y lo que devuelve es la respuesta.",
+  "A declared parameter is checked and converted to its type before the body runs.": "Un parámetro declarado se comprueba y se convierte a su tipo antes de ejecutar el cuerpo.",
+  "Returns whatever its body returns.": "Devuelve lo que devuelva su cuerpo.",
   "Each store's definition, every file in it, and each file's access rules.": "La definición de cada almacén, todos sus archivos y las reglas de acceso de cada archivo.",
   "Each ticked stream can be observed at {route} over a WebSocket, guarded by the stream’s own minimum role, and appears in this app’s generated client as {call}.": "Cada flujo marcado se puede observar en {route} mediante un WebSocket, protegido por el rol mínimo propio del flujo, y aparece en el cliente generado de esta aplicación como {call}.",
   "Each ticked trigger is exposed as {route} on this app, guarded by the trigger’s own minimum role.": "Cada disparador marcado se expone como {route} en esta aplicación, protegido por el rol mínimo propio del disparador.",
@@ -910,5 +914,6 @@
   "— no trigger of that name exists here, so this application will not mount until it is removed or the trigger is recreated.": "— aquí no existe ningún activador con ese nombre, por lo que esta aplicación no se montará hasta que se elimine o se vuelva a crear el activador.",
   "← up": "← arriba",
   "Delete all rows": "Eliminar todas las filas",
-  "Delete all {count} rows of \"{name}\"? The table and its fields stay. This cannot be undone.": "¿Eliminar las {count} filas de “{name}”? La tabla y sus campos se conservan. Esto no se puede deshacer."
+  "Delete all {count} rows of \"{name}\"? The table and its fields stay. This cannot be undone.": "¿Eliminar las {count} filas de “{name}”? La tabla y sus campos se conservan. Esto no se puede deshacer.",
+  "Code": "Código"
 }

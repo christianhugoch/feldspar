@@ -62,6 +62,7 @@ use sc_expr::{
     value_from_json,
 };
 use sc_query::Value;
+use sc_types::Attrs;
 use serde_json::Value as Json;
 
 use crate::action::ActionContext;
@@ -481,6 +482,42 @@ impl TriggerDispatcher {
         Ok(result.unwrap_or(Json::Null))
     }
 
+    /// Run a **code body that is not a trigger's** — an application's
+    /// JavaScript or Python custom query (§13.4) — on `action`
+    /// (`run_js_code` / `run_python_code`).
+    ///
+    /// The same action, with the same host surfaces, bounds and authority, that
+    /// an exposed trigger's body would have: the event is a `none` event carrying
+    /// the caller, and `name` stands where the trigger's name would — in the
+    /// cascade chain and in an error message. What differs is scope: the body
+    /// sees `request`'s names (`body`, `query`) and `user`, and no `payload`.
+    pub async fn run_code(
+        &self,
+        catalog: &Catalog,
+        action: &str,
+        name: &str,
+        code: &str,
+        request: Attrs,
+        caller: Option<&CallerContext>,
+    ) -> Result<Json> {
+        let mut event = Event::new(EventKind::None);
+        if let Some(caller) = caller {
+            event = event
+                .caller(caller.role, caller.user.clone())
+                .chained(caller.chain.clone());
+        }
+        let chain = event.firing(name)?;
+        let config: Attrs = [("code".to_owned(), Json::String(code.to_owned()))]
+            .into_iter()
+            .collect();
+        let registry = self.registry();
+        let action = registry.require(action)?;
+        let mut ctx = with_services(ActionContext::new(catalog, &event, &config, name), self)
+            .with_chain(chain)
+            .with_request(request);
+        action.run(&mut ctx).await
+    }
+
     /// Run one trigger **as a test**: the admin pressed Test run, and what comes
     /// back is everything they need to read — the result or the failure, and
     /// what the body printed on its way to either.
@@ -725,23 +762,35 @@ pub async fn fire_trigger_with(
     };
     let registry = dispatcher.registry();
     let action = registry.require(action.trim())?;
-    let mut ctx = ActionContext::new(catalog, event, configuration, &trigger.name)
-        .with_chain(chain)
-        .with_triggers(dispatcher);
+    let mut ctx = with_services(
+        ActionContext::new(catalog, event, configuration, &trigger.name),
+        dispatcher,
+    )
+    .with_chain(chain);
     if let Some(tx) = tx {
         ctx = ctx.with_transaction(tx.clone());
     }
+    if let Some(console) = console {
+        ctx = ctx.with_console(Arc::clone(console));
+    }
+    action.run(&mut ctx).await.map(Some)
+}
+
+/// What every action run is handed by the dispatcher running it: the
+/// dispatcher itself, and its services.
+fn with_services<'a>(
+    ctx: ActionContext<'a>,
+    dispatcher: &'a TriggerDispatcher,
+) -> ActionContext<'a> {
+    let services = &dispatcher.services;
+    let mut ctx = ctx.with_triggers(dispatcher);
     if let Some(evaluator) = &services.evaluator {
         ctx = ctx.with_evaluator(evaluator);
     }
     if let Some(mailer) = &services.mailer {
         ctx = ctx.with_mailer(mailer);
     }
-    ctx = ctx.with_adapters(&services.adapters);
-    if let Some(console) = console {
-        ctx = ctx.with_console(Arc::clone(console));
-    }
-    action.run(&mut ctx).await.map(Some)
+    ctx.with_adapters(&services.adapters)
 }
 
 /// Whether the trigger's `only_if` selects this event's row. No formula is

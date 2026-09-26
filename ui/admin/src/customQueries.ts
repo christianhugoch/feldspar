@@ -1,6 +1,7 @@
-// The application form's **custom SQL query** model (§13.4): the records an
-// admin edits, the request they are checked with, and what the check reports
-// back.
+// The application form's **custom query** model (§13.4): the records an admin
+// edits, the request they are checked with, and what the check reports back.
+// A query is SQL, JavaScript or Python (`language`); the source is stored under
+// `code` whichever it is.
 //
 // A module rather than state inside the screen, for the reason `apiRows.ts` is
 // one: what has to be right is a conversion. A stored `queries` array becomes
@@ -26,13 +27,57 @@ export type QueryParamRow = {
  * declares the parameters and Postgres types the result (decision 5). */
 export type QueryColumn = { name: string; type: string };
 
-/** One custom SQL query, as the form edits it. */
+/** What a query's source is written in — `sc_api::QueryLanguage`'s names. */
+export type QueryLanguage = "sql" | "javascript" | "python";
+
+/** The languages, in the order the drop-down lists them. */
+export const QUERY_LANGUAGES: readonly QueryLanguage[] = ["sql", "javascript", "python"];
+
+/** A language's name as the drop-down shows it. Product names, so not
+ * translated. */
+export function languageLabel(language: QueryLanguage): string {
+  switch (language) {
+    case "sql":
+      return "SQL";
+    case "javascript":
+      return "JavaScript";
+    case "python":
+      return "Python";
+  }
+}
+
+/** Whether the server can run Python, from `getPythonStatus`'s `state`: built
+ * with it, and not started with `--python off`. The interpreter itself starts
+ * with the first body that needs it, so `not_initialised` counts. */
+export function pythonAvailable(state: string | null | undefined): boolean {
+  return state === "running" || state === "not_initialised";
+}
+
+/** The languages the drop-down offers a query. Python only where the server
+ * runs it — except for a query that is already Python, which has to be shown
+ * as what it is so it can be changed to something that runs. */
+export function languageOptions(current: QueryLanguage, python: boolean): QueryLanguage[] {
+  return QUERY_LANGUAGES.filter((l) => l !== "python" || python || current === "python");
+}
+
+/** Whether the source is a JavaScript or Python body rather than SQL. */
+export function isCode(language: QueryLanguage): boolean {
+  return language !== "sql";
+}
+
+function languageFrom(value: unknown): QueryLanguage {
+  return QUERY_LANGUAGES.includes(value as QueryLanguage) ? (value as QueryLanguage) : "sql";
+}
+
+/** One custom query, as the form edits it. */
 export type QueryRow = {
   name: string;
   description: string;
   method: string;
   path: string;
-  sql: string;
+  language: QueryLanguage;
+  /** The source: SQL, or a JavaScript or Python body. */
+  code: string;
   minRole: number;
   params: QueryParamRow[];
   /** The columns last described — from the stored query when the form opened,
@@ -46,6 +91,9 @@ export type CheckStatus =
   | { kind: "idle" }
   | { kind: "checking" }
   | { kind: "ok"; columns: QueryColumn[] }
+  /** A JavaScript or Python query passed every check but its body, which only
+   * runs when it is called. */
+  | { kind: "checked" }
   | { kind: "error"; message: string };
 
 /** The parameter types an admin may declare — the wire's `ValueType` names, in
@@ -86,7 +134,8 @@ export function blankQueryRow(): QueryRow {
     description: "",
     method: "GET",
     path: "",
-    sql: "",
+    language: "sql",
+    code: "",
     minRole: ADMIN_ROLE,
     params: [],
     columns: [],
@@ -125,7 +174,8 @@ function queryRowFrom(stored: unknown): QueryRow {
     description: text(q.description),
     method: text(q.method) || "GET",
     path: text(q.path),
-    sql: text(q.sql),
+    language: languageFrom(q.language),
+    code: text(q.code),
     minRole: typeof q.min_role === "number" ? q.min_role : ADMIN_ROLE,
     params: params.map((p) => {
       const o = (p ?? {}) as Record<string, unknown>;
@@ -154,7 +204,8 @@ export type StoredQuery = {
   description: string;
   method: string;
   path: string;
-  sql: string;
+  language: QueryLanguage;
+  code: string;
   min_role: number;
   params: { name: string; type: string; required: boolean }[];
 };
@@ -171,7 +222,8 @@ export function queryRowsToConfig(rows: QueryRow[]): StoredQuery[] {
     description: row.description.trim(),
     method: row.method,
     path: row.path.trim(),
-    sql: row.sql,
+    language: row.language,
+    code: row.code,
     min_role: row.minRole,
     params: row.params.map((p) => ({
       name: p.name.trim(),
@@ -204,11 +256,13 @@ export function statusSummary(status: CheckStatus): string {
     case "idle":
       return "";
     case "checking":
-      return "Preparing the statement…";
+      return "Checking…";
     case "ok":
       return status.columns.length
         ? `Returns ${columnsSummary(status.columns)}`
         : "Prepared. It returns no columns.";
+    case "checked":
+      return "Checked. It returns whatever its body returns, as JSON.";
     case "error":
       return status.message;
   }

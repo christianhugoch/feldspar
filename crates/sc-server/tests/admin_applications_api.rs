@@ -642,7 +642,7 @@ async fn a_custom_sql_query_is_saved_described_and_returned() -> sc_error::Resul
         "description": "Posts whose title matches a pattern",
         "method": "GET",
         "path": "/reports/titles",
-        "sql": "SELECT id, title FROM posts WHERE title LIKE :pattern ORDER BY id",
+        "code": "SELECT id, title FROM posts WHERE title LIKE :pattern ORDER BY id",
         "params": [{ "name": "pattern", "type": "text" }],
         "min_role": 40
     });
@@ -684,7 +684,7 @@ async fn a_custom_sql_query_is_saved_described_and_returned() -> sc_error::Resul
     // A query that will not prepare is refused with Postgres's own message, and
     // the application it was posted with keeps the query it had.
     let mut broken = query.clone();
-    broken["sql"] = json!("SELECT titel FROM posts WHERE title LIKE :pattern");
+    broken["code"] = json!("SELECT titel FROM posts WHERE title LIKE :pattern");
     let mut bad = body;
     bad["apis"][0]["config"]["queries"] = json!([broken]);
     let id = created["id"].as_str().expect("a minted id").to_owned();
@@ -698,7 +698,7 @@ async fn a_custom_sql_query_is_saved_described_and_returned() -> sc_error::Resul
     );
     let (_, list) = admin.send("GET", "/api/applications", None).await;
     assert_eq!(
-        list[0]["apis"][0]["config"]["queries"][0]["sql"], query["sql"],
+        list[0]["apis"][0]["config"]["queries"][0]["code"], query["code"],
         "the stored query is untouched: {list}"
     );
     Ok(())
@@ -726,7 +726,7 @@ async fn a_custom_sql_query_is_described_without_being_saved() -> sc_error::Resu
         "name": "titlesLike",
         "method": "GET",
         "path": "/reports/titles",
-        "sql": "SELECT id, title FROM posts WHERE title LIKE :pattern ORDER BY id",
+        "code": "SELECT id, title FROM posts WHERE title LIKE :pattern ORDER BY id",
         "params": [{ "name": "pattern", "type": "text" }],
         "min_role": 40,
         "tables": ["posts"]
@@ -748,7 +748,7 @@ async fn a_custom_sql_query_is_described_without_being_saved() -> sc_error::Resu
 
     // A statement that will not prepare comes back as Postgres's own message.
     let mut broken = query.clone();
-    broken["sql"] = json!("SELECT titel FROM posts");
+    broken["code"] = json!("SELECT titel FROM posts");
     broken["params"] = json!([]);
     let (status, err) = admin
         .send("POST", "/api/custom-queries/describe", Some(broken))

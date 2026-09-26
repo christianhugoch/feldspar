@@ -157,7 +157,7 @@
   "Create trigger": "Trigger erstellen",
   "Created": "Erstellt",
   "Currently included: {summary}": "Derzeit enthalten: {summary}",
-  "Custom SQL queries": "Benutzerdefinierte SQL-Abfragen",
+  "Custom queries": "Benutzerdefinierte Abfragen",
   "Data Layer": "Datenebene",
   "Database": "Datenbank",
   "Database connections": "Datenbankverbindungen",
@@ -185,7 +185,11 @@
   "Dropped": "Entfernt",
   "Each one runs with {whose} authority, bounded by the boxes ticked when it is generated.": "Jedes wird mit den Berechtigungen von {whose} ausgeführt, begrenzt durch die bei seiner Erstellung aktivierten Kontrollkästchen.",
   "Each provider is mounted on its own sub-path; two on the same one is refused, because a request resolves to only one of them.": "Jeder Anbieter wird in einem eigenen Unterpfad eingebunden. Zwei Anbieter im selben Unterpfad werden abgelehnt, da eine Anfrage nur einem von ihnen zugeordnet werden kann.",
-  "Each query becomes one endpoint on this API and one typed method on the app’s generated client, with the return type taken from the columns Postgres reports.": "Jede Abfrage wird zu einem Endpunkt dieser API und zu einer typisierten Methode im generierten Client der App. Der Rückgabetyp wird aus den von Postgres gemeldeten Spalten abgeleitet.",
+  "Each query becomes one endpoint on this API and one typed method on the app’s generated client. A SQL query’s return type is taken from the columns Postgres reports; a JavaScript or Python query returns whatever its body returns.": "Jede Abfrage wird zu einem Endpunkt dieser API und zu einer typisierten Methode im generierten Client der App. Der Rückgabetyp einer SQL-Abfrage ergibt sich aus den Spalten, die Postgres meldet; eine JavaScript- oder Python-Abfrage gibt zurück, was ihr Rumpf zurückgibt.",
+  "A JavaScript or Python query runs as a trigger’s code does, with the administrator’s authority over the tables unless it asks for the caller’s with {asUser}.": "Eine JavaScript- oder Python-Abfrage läuft wie der Code eines Triggers: mit der Berechtigung des Administrators auf die Tabellen, sofern sie nicht mit {asUser} die des Aufrufers anfordert.",
+  "The body of a function. The request is {body} (its JSON body) and {query} (its query string), the caller is {user}, and what it returns is the response.": "Der Rumpf einer Funktion. Die Anfrage ist {body} (ihr JSON-Body) und {query} (ihr Query-String), der Aufrufer ist {user}, und was sie zurückgibt, ist die Antwort.",
+  "A declared parameter is checked and converted to its type before the body runs.": "Ein deklarierter Parameter wird geprüft und in seinen Typ umgewandelt, bevor der Rumpf ausgeführt wird.",
+  "Returns whatever its body returns.": "Gibt zurück, was ihr Rumpf zurückgibt.",
   "Each store's definition, every file in it, and each file's access rules.": "Die Definition jedes Speichers, jede darin enthaltene Datei und die Zugriffsregeln jeder Datei.",
   "Each ticked stream can be observed at {route} over a WebSocket, guarded by the stream’s own minimum role, and appears in this app’s generated client as {call}.": "Jeder aktivierte Stream kann unter {route} über einen WebSocket beobachtet werden, geschützt durch die eigene Mindestrolle des Streams, und erscheint im generierten Client dieser App als {call}.",
   "Each ticked trigger is exposed as {route} on this app, guarded by the trigger’s own minimum role.": "Jeder aktivierte Trigger wird in dieser App unter {route} bereitgestellt und durch seine eigene Mindestrolle geschützt.",
@@ -884,5 +888,6 @@
   "— no trigger of that name exists here, so this application will not mount until it is removed or the trigger is recreated.": "— hier gibt es keinen Trigger mit diesem Namen. Daher wird diese Anwendung erst eingebunden, wenn er entfernt oder neu erstellt wurde.",
   "← up": "← nach oben",
   "Delete all rows": "Alle Zeilen löschen",
-  "Delete all {count} rows of \"{name}\"? The table and its fields stay. This cannot be undone.": "Alle {count} Zeilen von „{name}“ löschen? Die Tabelle und ihre Felder bleiben erhalten. Dies kann nicht rückgängig gemacht werden."
+  "Delete all {count} rows of \"{name}\"? The table and its fields stay. This cannot be undone.": "Alle {count} Zeilen von „{name}“ löschen? Die Tabelle und ihre Felder bleiben erhalten. Dies kann nicht rückgängig gemacht werden.",
+  "Code": "Code"
 }

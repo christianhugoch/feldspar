@@ -160,7 +160,7 @@
   "Create trigger": "创建触发器",
   "Created": "已创建",
   "Currently included: {summary}": "当前包含：{summary}",
-  "Custom SQL queries": "自定义 SQL 查询",
+  "Custom queries": "自定义查询",
   "Data Layer": "数据层",
   "Database": "数据库",
   "Database connections": "数据库连接",
@@ -191,7 +191,11 @@
   "Dropped": "已丢弃",
   "Each one runs with {whose} authority, bounded by the boxes ticked when it is generated.": "每个项目都以 {whose} 的权限运行，其权限范围由生成时勾选的复选框限定。",
   "Each provider is mounted on its own sub-path; two on the same one is refused, because a request resolves to only one of them.": "每个提供程序都挂载在自己的子路径上；两个提供程序使用同一路径会被拒绝，因为一个请求只能解析到其中一个。",
-  "Each query becomes one endpoint on this API and one typed method on the app’s generated client, with the return type taken from the columns Postgres reports.": "每个查询都会成为此 API 上的一个端点，以及应用生成客户端中的一个类型化方法；返回类型取自 Postgres 报告的列。",
+  "Each query becomes one endpoint on this API and one typed method on the app’s generated client. A SQL query’s return type is taken from the columns Postgres reports; a JavaScript or Python query returns whatever its body returns.": "每个查询都会成为此 API 上的一个端点，以及应用生成的客户端中的一个带类型的方法。SQL 查询的返回类型取自 Postgres 报告的列；JavaScript 或 Python 查询则返回其函数体返回的内容。",
+  "A JavaScript or Python query runs as a trigger’s code does, with the administrator’s authority over the tables unless it asks for the caller’s with {asUser}.": "JavaScript 或 Python 查询的运行方式与触发器的代码相同：对表拥有管理员的权限，除非它通过 {asUser} 请求调用者的权限。",
+  "The body of a function. The request is {body} (its JSON body) and {query} (its query string), the caller is {user}, and what it returns is the response.": "一个函数的函数体。请求为 {body}（其 JSON 请求体）和 {query}（其查询字符串），调用者为 {user}，其返回值即为响应。",
+  "A declared parameter is checked and converted to its type before the body runs.": "声明的参数会在函数体运行前进行检查并转换为其类型。",
+  "Returns whatever its body returns.": "返回其函数体返回的内容。",
   "Each store's definition, every file in it, and each file's access rules.": "每个存储区的定义、其中的每个文件，以及每个文件的访问规则。",
   "Each ticked stream can be observed at {route} over a WebSocket, guarded by the stream’s own minimum role, and appears in this app’s generated client as {call}.": "每个勾选的流都可以通过 WebSocket 在 {route} 处进行观察，并受该流自身的最低角色保护；它会在此应用的生成客户端中显示为 {call}。",
   "Each ticked trigger is exposed as {route} on this app, guarded by the trigger’s own minimum role.": "每个勾选的触发器都会在此应用中以 {route} 的形式公开，并受该触发器自身的最低角色保护。",
@@ -874,5 +878,6 @@
   "— no trigger of that name exists here, so this application will not mount until it is removed or the trigger is recreated.": "——此处不存在该名称的触发器，因此在将其移除或重新创建该触发器之前，此应用不会挂载。",
   "← up": "← 向上",
   "Delete all rows": "删除所有行",
-  "Delete all {count} rows of \"{name}\"? The table and its fields stay. This cannot be undone.": "删除“{name}”的全部 {count} 行？表格及其字段将保留。此操作无法撤销。"
+  "Delete all {count} rows of \"{name}\"? The table and its fields stay. This cannot be undone.": "删除“{name}”的全部 {count} 行？表格及其字段将保留。此操作无法撤销。",
+  "Code": "代码"
 }

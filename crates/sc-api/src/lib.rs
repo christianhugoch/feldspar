@@ -80,7 +80,7 @@ pub use provider::{
 };
 pub use resource::{ResourceField, ResourceFile, ResourceModel, ResourceOps};
 pub use rest::custom::{
-    CFG_QUERIES as REST_CFG_QUERIES, CustomParam, CustomQuery, QueryColumn, custom_queries,
+    CFG_QUERIES as REST_CFG_QUERIES, CustomParam, CustomQuery, QueryColumn, QueryLanguage, custom_queries,
     describe_custom_query, set_custom_queries, validate_custom_queries,
 };
 pub use rest::password::{
