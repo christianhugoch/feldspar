@@ -42,6 +42,14 @@ Tests: `rest::custom` unit tests (language default, code validation, projection,
 `customQueries.test.ts` › "the language a query is written in"; `codeTypes.test.ts` › "declare a
 custom query's request". Design §13.4, "Code queries".
 
+## Fix: the file manager's "Copy relative path" is extractable again
+
+`feldspar i18n check --domain admin` (and `sc-cli`'s
+`every_declared_domain_scans_without_an_unreadable_call_site`) failed on `FileManager.tsx`,
+where the menu item chose its message with `<T text={one ? … : …} />`. The checker reads a
+message id only from a string literal at the call site, so it did not see either string.
+It is now two literal `<T>` elements. Both already had translations in all five locales.
+
 ## File manager: selection menu opens to the right, and "Copy relative path"
 
 In the admin file manager (`/#/files/{store}`), the menu next to the "N files selected" badge

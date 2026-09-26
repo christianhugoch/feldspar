@@ -695,7 +695,7 @@ function EntryMenu({
             it — so this is how a path gets out of the listing. */}
         {entries.length > 0 && (
           <Dropdown.Item onClick={() => void copyPaths(entries)}>
-            <T text={one ? "Copy relative path" : "Copy relative paths"} />
+            {one ? <T text="Copy relative path" /> : <T text="Copy relative paths" />}
           </Dropdown.Item>
         )}
         {one && <Dropdown.Item onClick={() => onRename(one)}><T text="Rename" /></Dropdown.Item>}
