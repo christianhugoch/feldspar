@@ -48,6 +48,7 @@ import { ideUrl, navigate } from "../App";
 import {
   NOTHING_SELECTED,
   clickSelection,
+  copyablePaths,
   formatModified,
   formatSize,
   keepPresent,
@@ -448,8 +449,12 @@ export function FileManager({
           <StatusBadge tone="blue">
             {selectionSummary(entries ?? [], selection.selected)}
           </StatusBadge>
+          {/* This menu sits at the start of the bar, so it opens towards the
+              listing: opening it towards the edge, as a row's menu does, would
+              put it under the sidebar. */}
           <EntryMenu
             id="selection-menu"
+            align="start"
             label={`Actions for ${selected.length} selected`}
             entries={selected}
             busy={busy}
@@ -557,6 +562,7 @@ export function FileManager({
                     <td className="text-end">
                       <EntryMenu
                         id={`file-menu-${entry.path}`}
+                        align="end"
                         label={`Actions for ${entry.name}`}
                         entries={[entry]}
                         busy={busy}
@@ -628,6 +634,7 @@ function AccessCell({ entry, roles }: { entry: Entry; roles: Roles }) {
  * shown only when there is one. */
 function EntryMenu({
   id,
+  align,
   label,
   entries,
   busy,
@@ -639,6 +646,9 @@ function EntryMenu({
   onDelete,
 }: {
   id: string;
+  /** Which edge of the toggle the menu lines up with — `end` opens it towards
+   * the start of the line, `start` towards the end. */
+  align: "start" | "end";
   label: string;
   entries: Entry[];
   busy: boolean;
@@ -655,7 +665,7 @@ function EntryMenu({
     // The click that opens the menu must not also change the selection under it:
     // ticking four files and then reaching for their menu would select the row
     // the menu is on and throw the other three away.
-    <Dropdown align="end" onClick={(e) => e.stopPropagation()}>
+    <Dropdown align={align} onClick={(e) => e.stopPropagation()}>
       <Dropdown.Toggle
         variant="outline-secondary"
         size="sm"
@@ -681,6 +691,13 @@ function EntryMenu({
             {files.length === 1 ? "Download" : `Download ${files.length} files`}
           </Dropdown.Item>
         )}
+        {/* The name on screen cannot be selected — a drag on a row is a click on
+            it — so this is how a path gets out of the listing. */}
+        {entries.length > 0 && (
+          <Dropdown.Item onClick={() => void copyPaths(entries)}>
+            <T text={one ? "Copy relative path" : "Copy relative paths"} />
+          </Dropdown.Item>
+        )}
         {one && <Dropdown.Item onClick={() => onRename(one)}><T text="Rename" /></Dropdown.Item>}
         {one && (
           <Dropdown.Item onClick={() => onPermissions(one)}><T text="Permissions" /></Dropdown.Item>
@@ -692,6 +709,16 @@ function EntryMenu({
       </Dropdown.Menu>
     </Dropdown>
   );
+}
+
+/** Put the entries' store-relative paths on the clipboard. */
+async function copyPaths(entries: Entry[]) {
+  try {
+    await navigator.clipboard.writeText(copyablePaths(entries));
+  } catch {
+    // A clipboard the browser will not hand over (an insecure origin, a denied
+    // permission) is not worth a banner: nothing else about the screen changed.
+  }
 }
 
 /** Edit a text file in place — what `readFile`'s UTF-8 shortcut was built for. */

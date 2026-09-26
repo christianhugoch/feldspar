@@ -2,6 +2,23 @@
 
 Changes in reverse chronological order.
 
+## File manager: selection menu opens to the right, and "Copy relative path"
+
+In the admin file manager (`/#/files/{store}`), the menu next to the "N files selected" badge
+opened towards the start of the line, which put it under the sidebar. It now opens towards the
+end of the line (`align="start"`). The menu on each row still opens the other way, since it
+sits at the row's far edge. `EntryMenu` takes the alignment as a prop.
+
+A file's name in the listing cannot be selected, because a drag on a row is a click on it. So
+both menus have a new **Copy relative path** item, which puts the store-relative path on the
+clipboard. On a multiple selection it reads **Copy relative paths** and copies every path,
+separated by a space. In that case, a path a shell would split or expand (a space or a quote
+in it, say) is single-quoted. A single path is always copied exactly as it is. The text comes from
+the new `copyablePaths` in `fileSelection.ts`. The two new strings are translated in the five
+admin locales.
+
+Test: `fileSelection.test.ts` › "Copy relative path" (ui/admin).
+
 ## Delete all rows
 
 The Table data card's menu on the table page has a new **Delete all rows** item, next to Forget
