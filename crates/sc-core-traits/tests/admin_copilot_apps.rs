@@ -392,17 +392,18 @@ async fn the_areas_decide_which_tools_the_model_is_offered() -> Result<()> {
     let all = offered(&default_grants());
     assert!(all.contains(&TOOL_DESCRIBE_APPS.to_owned()), "{all:?}");
     assert!(all.contains(&TOOL_DESCRIBE_TRIGGERS.to_owned()), "{all:?}");
-    assert_eq!(all.len(), 9, "{all:?}");
+    assert_eq!(all.len(), 10, "{all:?}");
 
     // Switched off, the tools are *gone* rather than present and refusing: a tool
-    // the model can see is a tool it will try.
+    // the model can see is a tool it will try. The code-body reference stays, as
+    // the schema tools do: it belongs to no area and grants nothing.
     let schema_only = config(&[
         (CFG_ALLOW_TRIGGERS, json!(false)),
         (CFG_ALLOW_APPLICATIONS, json!(false)),
     ]);
     assert_eq!(
         offered(&schema_only),
-        vec!["describe_schema", "edit_schema"]
+        vec!["describe_schema", "edit_schema", "describe_code_api"]
     );
     env.check(TRAIT, &schema_only).await?;
 

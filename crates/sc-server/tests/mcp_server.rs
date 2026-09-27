@@ -654,7 +654,7 @@ async fn a_token_without_the_trigger_area_is_offered_no_trigger_tools() -> sc_er
 
     let (_, body) = McpRequest::new(&full, list.clone()).send(&router).await;
     let offered = tool_names(&body);
-    // Tier 1: the nine composite tools.
+    // Tier 1: the ten composite tools.
     for name in [
         "describe_schema",
         "edit_schema",
@@ -662,6 +662,7 @@ async fn a_token_without_the_trigger_area_is_offered_no_trigger_tools() -> sc_er
         "describe_action",
         "save_trigger",
         "delete_trigger",
+        "describe_code_api",
         "describe_applications",
         "save_api_query",
         "delete_api_query",

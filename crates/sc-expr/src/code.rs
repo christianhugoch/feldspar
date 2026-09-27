@@ -1176,6 +1176,33 @@ Object.defineProperty(globalThis, "__scMakeDb", {
         );
       }
     };
+    // The shapes written from habit — another ORM's, or v1's `updateRow` —
+    // `update(id, values)` and `delete(id)`. Refused before `bounded` runs,
+    // because "add a .where()" is true of them too but does not say that the id
+    // belongs in it; this names the call to write instead, with the author's
+    // own id and values in it.
+    const byWhere = (op, args) => {
+      const ok = op === "delete"
+        ? args.length === 0
+        : args.length === 1 && args[0] !== null && typeof args[0] === "object";
+      if (ok) return;
+      const first = args[0];
+      const id = first !== null && first !== undefined && typeof first !== "object"
+        ? JSON.stringify(first) : "…";
+      let values = "{ … }";
+      if (op === "update") {
+        const v = args.find((a) => a !== null && typeof a === "object" && !Array.isArray(a));
+        const text = v === undefined ? "" : JSON.stringify(v);
+        if (text && text.length <= 80) values = text;
+      }
+      const call = op === "delete" ? "delete()" : "update(" + values + ")";
+      throw new Error(
+        "db." + state.table + "." + op + "() " +
+        (op === "delete" ? "takes no argument" : "takes one argument, the new values,") +
+        " and acts on the rows .where() chose: write db." + state.table +
+        ".where({ id: " + id + " })." + call
+      );
+    };
     // A scalar terminal is one nameless group: the same op, the same plan, the
     // one value unwrapped. Grouped, there is no one value to unwrap, so it says
     // so rather than answering the first group's.
@@ -1293,8 +1320,12 @@ Object.defineProperty(globalThis, "__scMakeDb", {
       max: (f) => scalar("max", f),
 
       insert: (values) => send(plan("insert", { values: values })),
-      update: (values) => { bounded("update"); return send(plan("update", { values: values })); },
-      delete: () => { bounded("delete"); return send(plan("delete")); },
+      update: (...args) => {
+        byWhere("update", args);
+        bounded("update");
+        return send(plan("update", { values: args[0] }));
+      },
+      delete: (...args) => { byWhere("delete", args); bounded("delete"); return send(plan("delete")); },
     };
   };
   const table = (authority, name) =>

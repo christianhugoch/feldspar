@@ -37,8 +37,8 @@
 use std::collections::BTreeMap;
 
 use sc_action::{
-    ATTR_DAY_OF_WEEK, ATTR_HOUR, ATTR_MINUTE, Action, ActionRegistry, EVENT_KINDS, EventKind,
-    Trigger, TriggerDispatcher,
+    ATTR_DAY_OF_WEEK, ATTR_HOUR, ATTR_MINUTE, ActionRegistry, EVENT_KINDS, EventKind, Trigger,
+    TriggerDispatcher,
 };
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
@@ -48,7 +48,8 @@ use serde_json::{Map, Value as Json, json};
 use crate::schema_edit::{GRANT_ACCESS_CHANGES, GRANT_CREATE, GRANT_DROP, GRANT_EDIT, Grants};
 
 use super::{
-    AdminTool, Area, ToolContext, optional_bool, optional_role, optional_string, require_grant,
+    AdminTool, Area, TOOL_DESCRIBE_CODE_API, ToolContext, optional_bool, optional_role,
+    optional_string, require_grant,
 };
 
 /// Reads the trigger set.
@@ -371,7 +372,10 @@ fn describe_action_description() -> String {
          literal — `row`, `old`, `user` and `payload` are what is in scope — and \
          which ones do is said in each setting's own description. If you get this \
          wrong, `{TOOL_SAVE_TRIGGER}` says so and names the setting; it does not \
-         save a trigger that cannot run."
+         save a trigger that cannot run.\n\n\
+         An action that takes JavaScript (`run_js_code`) also answers `code_api`: \
+         the API the code can call. Write the code against that, not against an \
+         API you know from elsewhere — its `db` is this server's own."
     )
 }
 
@@ -422,29 +426,32 @@ async fn describe_action(ctx: &ToolContext<'_>, args: &Json) -> Result<Json> {
         .and_then(Json::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    Ok(json!({
+    let spec = sc_catalog::resolve_options(ctx.catalog, action.config_spec_for(ctx.catalog, table))
+        .await?;
+    let mut out = json!({
         "action": action.name(),
         "description": action.description(),
         "table": table,
-        "settings": settings_json(ctx.catalog, action, table).await?,
-    }))
+        "settings": spec.iter().map(setting_json).collect::<Vec<_>>(),
+    });
+    // A JavaScript body is the one setting whose *contents* the model must be
+    // taught: it is keyed on the declaration's own language hint rather than on
+    // the action's name, so a plugin's code-taking action gets it too.
+    if spec
+        .iter()
+        .any(|f| f.code_language.as_deref() == Some("javascript"))
+    {
+        out["code_api"] = json!(super::JS_CODE_API);
+    }
+    Ok(out)
 }
 
-/// One action's settings, as the model reads them.
+/// One action setting, as the model reads it.
 ///
-/// [`resolve_options`](sc_catalog::resolve_options) runs first, so a setting
-/// whose choices are a server-side query (the file stores, say) arrives as a
-/// concrete list rather than as a query name the model cannot answer — the same
-/// resolution the admin UI's form gets.
-async fn settings_json(
-    catalog: &Catalog,
-    action: &std::sync::Arc<dyn Action>,
-    table: Option<&str>,
-) -> Result<Vec<Json>> {
-    let spec = sc_catalog::resolve_options(catalog, action.config_spec_for(catalog, table)).await?;
-    Ok(spec.iter().map(setting_json).collect())
-}
-
+/// [`resolve_options`](sc_catalog::resolve_options) runs first, in
+/// [`describe_action`], so a setting whose choices are a server-side query (the
+/// file stores, say) arrives as a concrete list rather than as a query name the
+/// model cannot answer — the same resolution the admin UI's form gets.
 fn setting_json(field: &FormField) -> Json {
     let mut out = Map::new();
     out.insert("name".to_owned(), json!(field.base.name));
@@ -515,6 +522,11 @@ fn save_description(grants: &Grants) -> String {
          the fields the event will actually have), so a mistake comes back naming \
          the setting, with the settings that action takes, and **nothing is \
          saved**. Fix it and call again.\n\n\
+         A `run_js_code` body is **not** checked on save: it is JavaScript \
+         against this server's own API, which `{TOOL_DESCRIBE_ACTION}` returns \
+         as `code_api` (and `{TOOL_DESCRIBE_CODE_API}` alone). Read it before \
+         writing one — rows are changed with `db.t.where({{ id: row.id }}).update({{ … }})`, \
+         and there is no `db.t.update(id, values)`.\n\n\
          {permitted} {access}"
     )
 }

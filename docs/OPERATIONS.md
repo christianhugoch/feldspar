@@ -890,7 +890,7 @@ Two things in that line are decisions rather than defaults:
 
 ### 7.4 Creating tables
 
-Nine composite tools sit over the administrative surface, plus the ones generated
+Ten composite tools sit over the administrative surface, plus the ones generated
 from tagged endpoints:
 
 | Tool | For |
@@ -898,6 +898,7 @@ from tagged endpoints:
 | `describe_schema` | every table, its fields and types, its access rules, foreign keys both ways |
 | `edit_schema` | an **ordered list** of schema operations, applied as one transaction |
 | `describe_triggers`, `describe_action`, `save_trigger`, `delete_trigger` | the trigger half |
+| `describe_code_api` | the JavaScript API a `run_js_code` body or a `javascript` API query can call — `db`, `fetch`, `fs`, `trigger` |
 | `describe_applications`, `save_api_query`, `delete_api_query` | applications and their custom SQL |
 
 Ask for the whole data model at once:

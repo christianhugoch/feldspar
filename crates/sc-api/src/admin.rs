@@ -2822,7 +2822,9 @@ pub fn admin_endpoints() -> EndpointSet {
              append-only, so nothing is overwritten and a run already suspended \
              on an earlier version still loads that one. Send the whole program \
              in the shape `getWorkflow` returns it, with a description saying \
-                 what changed.",
+                 what changed. A `run_js_code` step's code is JavaScript against \
+                 this server's own `db` API — call `describe_code_api` before \
+                 writing one.",
             )
             .in_area(Area::Triggers)
             // A workflow is an existing trigger's body — version 1 is created

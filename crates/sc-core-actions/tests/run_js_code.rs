@@ -454,6 +454,73 @@ async fn the_body_reads_and_writes_its_tables_through_db() -> Result<()> {
     Ok(())
 }
 
+/// The writes a model guesses from another ORM — `update(id, values)`,
+/// `delete(id)` — are refused naming the call to write instead, with the
+/// author's own id and values in it, and touch nothing; the form
+/// `describe_code_api` teaches is the one that writes.
+#[tokio::test]
+async fn a_write_by_id_is_refused_naming_the_where_to_write_instead() -> Result<()> {
+    let db = TestDb::new().await?;
+    let catalog = setup(&db).await?;
+
+    let err = run(
+        &catalog,
+        &book_insert(),
+        "await db.books.update(row.id, { pages: 5 });",
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains(r#"write db.books.where({ id: 7 }).update({"pages":5})"#),
+        "{err}"
+    );
+    let err = run(&catalog, &book_insert(), "await db.books.delete(row.id);")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("write db.books.where({ id: 7 }).delete()"),
+        "{err}"
+    );
+    // Refused even with a `.where()` in front: the second argument is not
+    // something the call reads, and silently dropping it would be worse.
+    let err = run(
+        &catalog,
+        &book_insert(),
+        "await db.books.where({ id: row.id }).update(row.id, { pages: 5 });",
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("takes one argument"), "{err}");
+
+    let untouched = run(
+        &catalog,
+        &book_insert(),
+        "return (await db.books.get(7)).pages;",
+    )
+    .await?;
+    assert_eq!(untouched, json!(100));
+
+    // The reference's own shape.
+    let out = run(
+        &catalog,
+        &book_insert(),
+        "return await db.books.where({ id: row.id }).update({ pages: 5 });",
+    )
+    .await?;
+    assert_eq!(out["updated"], json!(1), "{out}");
+    let pages = run(
+        &catalog,
+        &book_insert(),
+        "return (await db.books.get(7)).pages;",
+    )
+    .await?;
+    assert_eq!(pages, json!(5));
+    Ok(())
+}
+
 #[tokio::test]
 async fn as_user_delegates_to_the_event_own_caller() -> Result<()> {
     let db = TestDb::new().await?;

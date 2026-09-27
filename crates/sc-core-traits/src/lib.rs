@@ -128,8 +128,8 @@ pub use files::{CFG_ROOT, CFG_STORE, FileScope, configured_scope, slugify};
 pub use admin_copilot::{
     AdminCopilot, CFG_ALLOW_ACCESS, CFG_ALLOW_APPLICATIONS, CFG_ALLOW_CREATE, CFG_ALLOW_DROP,
     CFG_ALLOW_EDIT, CFG_ALLOW_TRIGGERS, TOOL_DELETE_QUERY, TOOL_DELETE_TRIGGER, TOOL_DESCRIBE,
-    TOOL_DESCRIBE_ACTION, TOOL_DESCRIBE_APPS, TOOL_DESCRIBE_TRIGGERS, TOOL_EDIT, TOOL_SAVE_QUERY,
-    TOOL_SAVE_TRIGGER,
+    TOOL_DESCRIBE_ACTION, TOOL_DESCRIBE_APPS, TOOL_DESCRIBE_CODE_API, TOOL_DESCRIBE_TRIGGERS,
+    TOOL_EDIT, TOOL_SAVE_QUERY, TOOL_SAVE_TRIGGER,
 };
 pub use build_application::{BuildApplication, CFG_APPLICATION};
 pub use coding::{
@@ -494,8 +494,9 @@ mod tests {
             ]
         );
         // `admin_copilot`'s names are fixed rather than derived, and say the
-        // same nine things every deployment's do — two over the schema, four over
-        // the triggers, three over an application's custom SQL queries.
+        // same ten things every deployment's do — two over the schema, four over
+        // the triggers, one reference for a code body, three over an
+        // application's custom SQL queries.
         assert_eq!(
             tool_names::admin_copilot(),
             [
@@ -505,6 +506,7 @@ mod tests {
                 "describe_action",
                 "save_trigger",
                 "delete_trigger",
+                "describe_code_api",
                 "describe_applications",
                 "save_api_query",
                 "delete_api_query",

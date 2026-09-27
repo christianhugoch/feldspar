@@ -2,6 +2,46 @@
 
 Changes in reverse chronological order.
 
+## Coding agents are told the JavaScript code-body API instead of guessing it
+
+An external coding agent on the MCP server, asked to update a row from a trigger, wrote
+`db.TableName.update(row.id, { x: 5 })`. The correct form is
+`db.TableName.where({ id: row.id }).update({ x: 5 })`. The agent was never shown the API. Every
+path by which an agent writes a JavaScript body described it only as "Run JavaScript against the
+event" with a `Code` setting. That covered `save_trigger` / `describe_action`, `save_api_query`
+with `language: javascript`, and `saveWorkflow`, for both the external MCP agent and the internal
+`admin_copilot`, which share one tool set. So the model wrote the ORM API it knew best. A body is
+not checked on save, so the mistake surfaced only when the trigger fired.
+
+- **One reference page**, `sc-api/src/mcp/code_api_js.md` (`sc_api::mcp::JS_CODE_API`). It lists
+  the bindings in scope (`row`, `old`, `user`, `payload`, `context`, `body`/`query`) and the `db`
+  chain and terminals. It shows writes as `.where(…).update(…)` / `.where(…).delete()` and names
+  the guesses that do not exist (`db.t.update(id, values)`, `delete(id)`, `find`, `findOne`,
+  `getRows`, `updateRow`). It also covers conditions, joins, `db.sql`, `fetch`, `fs`, `trigger`,
+  `modfn` and the bounds. It is transcribed from the preludes, as `ui/admin/src/codeTypes.ts` is.
+- **Two ways to reach it:**
+  - A new composite tool, **`describe_code_api`**. It belongs to no area, like the schema tools,
+    so it is offered even when only the applications area is on.
+  - **`describe_action`**, which now includes the page as `code_api` for any action with a
+    JavaScript code setting. This is keyed on the setting's `code_language`, not the action name,
+    so a plugin's action gets it too.
+- **Pointers where code is written:** `save_trigger`, `save_api_query`'s `language`,
+  `saveWorkflow` and the MCP `initialize` instructions each say to read the API first. The
+  `save_trigger` pointer spells out the `where`-then-`update` shape.
+- **The guessed call now fails with the fix in the message.** In `DB_PRELUDE`,
+  `db.books.update(7, { pages: 5 })` now throws `… write db.books.where({ id: 7 }).update({"pages":5})`
+  instead of the generic "add a .where()". `delete(7)` gets the same treatment, and an extra
+  argument after a `.where()` is refused rather than dropped.
+- The composite tool set grows from nine tools to ten. The pinned name lists and docs/OPERATIONS.md
+  §7.4 are updated to match.
+- **Tests:**
+  - `a_write_by_id_is_refused_naming_the_where_to_write_instead` (real V8 + Postgres): the guessed
+    forms are refused naming the fix and write nothing, and the reference's own form writes.
+  - `an_action_hands_over_its_settings_when_it_is_asked_for_them`: `run_js_code` carries
+    `code_api`, `insert_row` does not, and `describe_code_api` answers the same page.
+  - `the_trait_offers_ten_tools_…`: `save_trigger`'s description points at the reference.
+  - `the_reference_teaches_where_then_write_and_names_the_guesses`.
+
 ## A module denied a DNS lookup is told which host to grant
 
 A module that makes HTTP requests through `node:http`, such as `@saltcorn/nominatim-geocode` over

@@ -5,7 +5,7 @@
 //! would too but for the layering: these three read and write an
 //! [`Application`], whose storage is this crate's and which `sc-api` — a layer
 //! below — cannot name. So they are [`AdminTool`]s like the other six, and
-//! [`tool_set`] is where the nine become one set. That is also the reason the
+//! [`tool_set`] is where the ten become one set. That is also the reason the
 //! set is a list of trait objects rather than a `match`.
 //!
 //! [`describe_applications`](TOOL_DESCRIBE_APPS) reads what is served and what
@@ -448,7 +448,10 @@ fn save_parameters() -> Json {
                      `run_python_code` body, with the request's JSON body as \
                      `body`, its query string as `query` and the caller as `user`; \
                      what it returns is the response. A code body is not prepared, \
-                     and a declared parameter need not appear in it.",
+                     and a declared parameter need not appear in it. Its `db`, \
+                     `fetch` and `fs` are this server's own API: call \
+                     `describe_code_api` before writing a `javascript` body \
+                     rather than guessing the methods.",
                 "enum": ["sql", "javascript", "python"],
             },
             ARG_PARAMS: {
