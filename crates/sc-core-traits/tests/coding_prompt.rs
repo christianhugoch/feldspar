@@ -285,9 +285,16 @@ async fn a_store_inside_someone_elses_repository_gets_no_git_log() -> Result<()>
 /// planner sees the page it is planning a change to — about 200 tokens there,
 /// with the one prompt line saying to. Measured: `act` 2 017 on Claude, 2 072
 /// on GPT; `plan` 2 032 on both.
+///
+/// **2 200 since the builder can call the application's API.** `call_api`
+/// (in `act` every method, in `plan` `GET` only) lets it see what an endpoint
+/// actually answers — the shape a page is written against — as itself, as
+/// another user or as nobody. Its description was cut to one line and its
+/// method list to the five a model sends, and it still costs about 110 tokens.
+/// Measured: `act` 2 136 on Claude, 2 190 on GPT; `plan` 2 138 on both.
 #[tokio::test]
-async fn the_react_builder_agents_stable_prefix_is_at_most_2100_tokens() -> Result<()> {
-    const LIMIT: u64 = 2_100;
+async fn the_react_builder_agents_stable_prefix_is_at_most_2200_tokens() -> Result<()> {
+    const LIMIT: u64 = 2_200;
     let env = Env::new().await?;
     let app = Application::new(
         "Todo",

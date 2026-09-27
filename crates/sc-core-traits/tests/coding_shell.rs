@@ -89,6 +89,7 @@ impl<'e> Session<'e> {
             delegate: None,
             previews: None,
             browser: None,
+            requests: None,
             signals: Vec::new(),
             images: Vec::new(),
         };

@@ -3456,8 +3456,8 @@ scope, so what it changed enters the change ledger and the model's reads of it g
   and `process`, each suffixed with the scope's slug (and since then `list_assets` and
   `view_image`, which depend on the `application` setting and the model's `vision` rather than
   on a grant). Which of them a run is *offered* is the
-  mode (§11.2) and the five checkboxes — `may_edit`, `may_run_scripts`, `may_check`,
-  `may_view_app`, `may_use_shell` — and a withheld tool is never declared to the model. Since the
+  mode (§11.2) and the checkboxes — `may_edit`, `may_run_scripts`, `may_check`,
+  `may_view_app`, `may_use_shell`, and since then `may_call_api` — and a withheld tool is never declared to the model. Since the
   longest derived name is `implement_feature_<slug>`, `validate_config` checks **that** name
   against the 64 characters both vendors accept, rather than the shortest one that happens to
   fit.
@@ -3531,7 +3531,9 @@ scope, so what it changed enters the change ledger and the model's reads of it g
   tokens; `act` 1 974 on GPT). It went to 2 100 when agents learnt to look: `view_image` for a
   model with `vision` (~90 tokens), and `view_app`'s looking actions offered in `plan` so a
   planner sees the page it is planning a change to (~200 tokens there; `act` 2 072 on GPT,
-  `plan` 2 032). It is still a **test**, and the next addition has the same argument to make.
+  `plan` 2 032). It went to 2 200 with `call_api` (~110 tokens after its description was cut to
+  one line and its method list to five; `act` 2 190 on GPT, `plan` 2 138). It is still a
+  **test**, and the next addition has the same argument to make.
 - **`planned` is a workflow setting, not a second trait.** `workflow = planned` starts the run in
   `plan` mode (the new `AgentTrait::starting_mode` hook, read by `Runner::new`), where the tools
   are the read-only four plus `save_plan`, `implement_feature` and `explore`. The plan — an
@@ -3564,6 +3566,26 @@ scope, so what it changed enters the change ledger and the model's reads of it g
   own build. So the agent can screenshot the page it was asked about before touching it, and
   `plan` is offered the tool too — `goto`, `wait_for`, `snapshot` and `screenshot` only, since
   `click`, `fill` and `press` change what a plan is written from.
+- **`call_api` asks the application's API what it answers.** A sixth grant, `may_call_api`
+  (needs `application`; on for a builder agent), offers `call_api_<slug>`: one HTTP request —
+  `method`, `path` with its query, `body`, `headers` — and back come the status, the headers
+  that say something (the security boilerplate is left out, a `set-cookie` value is hidden) and
+  the body, JSON pretty-printed and cut at 12 000 characters. **As whom** is the `user`
+  argument: left out, the caller (or `view_app_user` for a triggered run); `"public"`, no
+  session; an email, that user — which, for anyone but the caller themself, only an admin's run
+  may name, since it is acting as them. The seam is a third capability beside the previewer and
+  the browser, `sc_agent::AppRequester` on `TraitContext::requests`, which `serve` installs as
+  `sc_server::AppRequests`: the request is handed **in process** to the same router the public
+  listener serves, with `Host` set to the application's subdomain, a CSRF token in cookie and
+  header, and for a user a session logged in for this one request and logged out after it. So
+  the answer is the one the application's own page gets — the provider, the table's rules, the
+  ownership formula and the CSRF middleware all apply — and no socket is involved (no
+  `ConnectInfo`, so a loopback-only route sees an unknown peer). It targets the **live mount**,
+  not the run's preview: the API is built from the catalog, which the two share, and a preview
+  host would need the run's browser session to be reachable at all. A subdomain nothing is
+  mounted at is refused rather than falling through to the admin routes. `plan` gets `GET` (and
+  `HEAD`) only; the body is read to 1 MB or the 30-second timeout, whichever comes first, and
+  the result says which. An old result elides to its status line.
 - **`view_image` shows a seeing model an image file.** `read_file` refuses binary, rightly;
   `view_image_<slug>` is offered wherever reading is (every mode, no grant) to a model with
   `vision`, and takes a `path` in the scope or a `url` one of the application's static

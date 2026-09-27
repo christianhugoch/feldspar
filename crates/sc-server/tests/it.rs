@@ -53,6 +53,8 @@ mod app_trigger_api;
 mod backup_api;
 #[path = "builder_route.rs"]
 mod builder_route;
+#[path = "call_api.rs"]
+mod call_api;
 #[path = "code_body_tables.rs"]
 mod code_body_tables;
 #[path = "concurrent_code_bodies.rs"]

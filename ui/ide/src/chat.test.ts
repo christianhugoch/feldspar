@@ -546,6 +546,14 @@ describe("one event, relayed", () => {
       "Looking at /img/hero.png",
     );
     expect(changedPaths("view_image_todoapp_app", { path: "public/logo.png" })).toEqual([]);
+    expect(toolName("call_api_todoapp_app")).toBe("call_api");
+    expect(toolProgress("call_api_todoapp_app", { path: "/api/tasks" })).toBe(
+      "Calling GET /api/tasks",
+    );
+    expect(
+      toolProgress("call_api_todoapp_app", { method: "post", path: "/api/tasks", user: "public" }),
+    ).toBe("Calling POST /api/tasks");
+    expect(changedPaths("call_api_todoapp_app", { path: "/api/tasks" })).toEqual([]);
   });
 
   it("shows listing the application's assets, and writes nothing", () => {

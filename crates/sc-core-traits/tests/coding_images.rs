@@ -93,6 +93,7 @@ async fn look(env: &Env, args: Json, role: u8) -> (Result<String>, Vec<ImagePart
         delegate: None,
         previews: None,
         browser: None,
+        requests: None,
         signals: Vec::new(),
         images: Vec::new(),
     };

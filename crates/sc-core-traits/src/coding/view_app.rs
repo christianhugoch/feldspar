@@ -283,7 +283,7 @@ async fn preview(application: &str, ctx: &TraitContext<'_>) -> Result<(PreviewIn
 }
 
 /// Whom the run looks at the application as.
-async fn viewer(config: &Attrs, ctx: &TraitContext<'_>) -> Result<User> {
+pub(super) async fn viewer(config: &Attrs, ctx: &TraitContext<'_>) -> Result<User> {
     if let Some(user) = &ctx.caller.user {
         return Ok(user.clone());
     }

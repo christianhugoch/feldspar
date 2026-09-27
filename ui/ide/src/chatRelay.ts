@@ -373,6 +373,7 @@ const VERBS: { prefix: string; label: string; writes?: true }[] = [
 const OTHER_SCOPED = [
   "view_app_",
   "view_image_",
+  "call_api_",
   "check_",
   "shell_",
   "process_",
@@ -409,6 +410,11 @@ export function toolProgress(tool: string, args: unknown): string {
   // Looking at an image: a path in this scope, or a URL the application serves.
   if (tool.startsWith("view_image_")) {
     return `Looking at ${firstString(args, ["path", "url"]) ?? "an image"}`;
+  }
+  // A request to the application's API: `GET /api/tasks`.
+  if (tool.startsWith("call_api_")) {
+    const method = firstString(args, ["method"]) ?? "GET";
+    return `Calling ${method.toUpperCase()} ${firstString(args, ["path"]) ?? "the API"}`;
   }
   if (tool.startsWith("check_")) return "Running the checks";
   if (tool.startsWith("shell_")) {

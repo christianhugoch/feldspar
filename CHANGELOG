@@ -2,6 +2,53 @@
 
 Changes in reverse chronological order.
 
+## Agents call the application's API
+
+A coding agent can now send a request to its application's API and see the answer, as the person
+chatting, as another user, or with no session. Before this, an agent only saw what an endpoint
+returned through a page in `view_app`, and only as the person chatting.
+
+- **`call_api_<slug>`** (`sc-core-traits/src/coding/call_api.rs`), behind a new `coding` grant,
+  `may_call_api`. The grant needs the `application` setting, and builder agents are created with
+  it on. The tool takes `method`, `path` (with its query), `body` (JSON, or a string sent as it
+  is) and `headers`. It returns the status line, the headers that carry information, and the
+  body. A JSON body is pretty-printed, and any body is cut at 12 000 characters. The security
+  headers every response has are left out, and a `set-cookie` value is hidden. An old result
+  elides to its status line.
+- **As whom** is the `user` argument:
+  - left out: the caller, or `view_app_user` in a triggered run;
+  - `"public"`: no session;
+  - an email: that user. Naming a user other than the caller works only in an admin's run.
+- **`plan` may only look.** The tool offers `GET` only there and accepts `GET` and `HEAD`. In
+  `act` it offers `GET`, `POST`, `PUT`, `PATCH` and `DELETE`, and the description says the data
+  is live.
+- **The seam** is `sc_agent::AppRequester`, a third capability in `ViewServices` alongside the
+  previewer and the browser. It is reached through `TraitContext::requests` and
+  `require_requests`, or `Runner::with_requests`.
+- **`sc_server::AppRequests`** (`sc-server/src/requests.rs`), installed by `serve` through
+  `install_app_requests` wherever there is a base domain and agents. No browser is needed. Each
+  request is passed in process to the same router the public listener serves, addressed to the
+  application's live mount. It carries a fresh CSRF token in the cookie and the header. A request
+  as a user also carries a session that `SessionStore::login` creates for that one request and
+  `logout` removes afterwards. The table rules, ownership formulas and CSRF middleware therefore
+  all apply as they do to the application's own page. A subdomain with no mount is refused, so
+  the request cannot fall through to the admin routes. The body is read up to 1 MB or until the
+  30-second timeout, and the result says which limit stopped it.
+- **The IDE's chat relay** shows the call as "Calling GET /api/tasks".
+- **The stable-prefix budget** for the React builder went from 2 100 to 2 200 estimated tokens.
+  Measured: `act` 2 136 on Claude and 2 190 on GPT, `plan` 2 138 on both.
+- **Tests:**
+  - `sc-server/tests/call_api.rs` runs through the real router against Postgres, with an
+    owner-scoped table. It covers:
+    - Alice's rows as Alice, both by default and by her own email;
+    - an empty list as `public`;
+    - Bob's rows when an admin's run names Bob, and a refusal when a member's run does;
+    - a `POST` that writes a row in `act`, and the same `POST` refused in `plan`;
+    - a triggered run with no one to send as;
+    - an unmounted subdomain;
+    - no session rows left behind.
+  - Unit tests in `call_api.rs`, `builder_agent_traits.rs`'s grant, and the IDE relay's vitest.
+
 ## Agents see screenshots and image files
 
 A coding agent on a model with vision can now look at the application before it changes anything,

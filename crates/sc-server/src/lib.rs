@@ -38,6 +38,7 @@ mod models;
 mod modules;
 mod observe;
 mod reload;
+mod requests;
 mod router;
 mod security;
 mod serve;
@@ -138,6 +139,7 @@ pub use models::{CatalogDatasetSource, ModelServices, install_models};
 pub use modules::ModuleServices;
 pub use observe::STREAM_OBSERVE_ROUTE;
 pub use reload::{ReloadReport, reload_all, spawn_sighup_reload};
+pub use requests::{AppRequests, MAX_RESPONSE_BYTES, install_app_requests};
 pub use router::{
     BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, IDE_PREFIX, build_router, build_router_with_apps,
 };

@@ -397,6 +397,31 @@ the page it was asked about. No tool showed a model an image file.
       live-build run against Chromium, the IDE relay's label. Stable-prefix budget 2 000 → 2 100
       (measured `act` 2 072, `plan` 2 032). Design §11.3, the agents tutorial, `CHANGELOG`.
 
+## Interjected — agents call the application's API
+
+Asked for directly: a coding agent should be able to send a request to the application's API and
+see the response, and to choose which user it is sent as, or send it unauthenticated. Until now
+the only way an agent saw an endpoint's answer was through a page in `view_app`, and only as the
+person chatting.
+
+- [x] C.1 `sc_agent::AppRequester` (`AppHttpRequest`/`AppHttpResponse`), a third capability in
+      `ViewServices` beside the previewer and the browser, on `TraitContext::requests` with
+      `require_requests`, and `Runner::with_requests`.
+- [x] C.2 `sc_server::AppRequests`, installed by `serve` (`install_app_requests`): the request
+      is dispatched in process through the router to the application's live mount, with a CSRF
+      token and, for a user, a session made for the one request and deleted after it. 1 MB
+      body cap, 30 s timeout.
+- [x] C.3 `coding/call_api.rs`: `call_api_<slug>` under a new `may_call_api` grant (needs
+      `application`; on for builder agents). `user` absent → the caller (or `view_app_user`),
+      `"public"` → no session, an email → that user, another user's for an admin's run only.
+      `GET`/`HEAD` only in `plan`. Result: status line, the headers that say something, the
+      body pretty-printed and capped; `set-cookie` values hidden; elides to its status line.
+- [x] C.4 Tests: unit tests in `call_api.rs`; `sc-server/tests/call_api.rs` through the real
+      router (as the caller, as `public`, as another user by an admin, refused to a member, a
+      `POST` in `act` and refused in `plan`, no one to send as, an unmounted subdomain, no
+      session left behind); the IDE relay's label. Stable-prefix budget 2 100 → 2 200
+      (measured `act` 2 190, `plan` 2 138). Design §11.3, the agents tutorial, `CHANGELOG`.
+
 ## Explicitly OUT of scope for this milestone
 
 - **Uploading or writing assets from the agent.** §6. Reading is what the use case needs, and a

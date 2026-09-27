@@ -31,6 +31,11 @@
 //! the live build before there is one — in the server's headless browser, as
 //! the person chatting ([`view_app`]).
 //!
+//! **Calling its API is a fifth** ([`CFG_MAY_CALL_API`]): `call_api` sends one
+//! HTTP request to the application's live mount through the server's router —
+//! as the person chatting, as another user (an admin's run only) or with no
+//! session — and returns the status, headers and body ([`call_api`]).
+//!
 //! **Looking at an image is not a grant**: `view_image` ([`view_image`]) shows a
 //! model that has `vision` a PNG, JPEG, GIF or WebP from the scope or from the
 //! application's static directories, and is offered wherever `read_file` is.
@@ -69,6 +74,7 @@
 //! (§11.2).
 
 mod assets;
+mod call_api;
 mod change;
 mod check;
 mod commit;
@@ -113,6 +119,7 @@ use crate::files::{
 use crate::table::config_str;
 
 pub use assets::tool_name as list_assets_tool_name;
+pub use call_api::tool_name as call_api_tool_name;
 pub use check::{Baseline, CFG_CHECKS, tool_name as check_checks_tool_name};
 pub use commit::CFG_COMMIT;
 pub use edit::tool_name as edit_file_tool_name;
@@ -175,6 +182,10 @@ pub const CFG_MAY_USE_SHELL: &str = "may_use_shell";
 /// Off by default; needs [`crate::CFG_APPLICATION`] and a browser on the server.
 pub const CFG_MAY_VIEW_APP: &str = "may_view_app";
 
+/// May send HTTP requests to the application (`call_api`). Off by default;
+/// needs [`crate::CFG_APPLICATION`]. `GET` and `HEAD` only outside `act`.
+pub const CFG_MAY_CALL_API: &str = "may_call_api";
+
 /// The `package.json` script that type-checks the project after a turn's edits.
 pub const CFG_DIAGNOSE: &str = "diagnose";
 
@@ -229,6 +240,7 @@ pub fn tool_names(scope: &FileScope) -> Vec<String> {
         script::tool_name(scope),
         check::tool_name(scope),
         view_app::tool_name(scope),
+        call_api::tool_name(scope),
         shell::tool_name(scope),
         process::tool_name(scope),
     ]
@@ -335,6 +347,7 @@ impl AgentTrait for Coding {
                 .default_value(DEFAULT_TIMEOUT_SECONDS as i64),
         );
         spec.extend(view_app::config_fields());
+        spec.extend(call_api::config_fields());
         // Last, because it is every grant above at once.
         spec.extend(shell::config_fields());
         spec
@@ -373,6 +386,7 @@ impl AgentTrait for Coding {
             CFG_MAY_RUN_SCRIPTS,
             CFG_MAY_CHECK,
             CFG_MAY_VIEW_APP,
+            CFG_MAY_CALL_API,
             CFG_MAY_USE_SHELL,
             shell::CFG_SHELL_NETWORK,
         ] {
@@ -396,6 +410,7 @@ impl AgentTrait for Coding {
         }
         check::validate(check.catalog, check.config).await?;
         view_app::validate(check).await?;
+        call_api::validate(check)?;
         shell::validate(check.catalog, &scope, check.config).await?;
         for name in tool_names(&scope) {
             check_tool_name(&name)?;
@@ -404,10 +419,11 @@ impl AgentTrait for Coding {
         Ok(())
     }
 
-    /// The read-only tools in every mode (TODO §5). In `plan`, the plan tools
-    /// and `explore`. In `act`, `explore` and, under the grants, the write
-    /// tool, the one edit tool the edit format picks, the script runner,
-    /// `check`, `view_app` and the shell.
+    /// The read-only tools in every mode (TODO §5). In `plan`, the plan tools,
+    /// `explore`, and the looking halves of `view_app` and `call_api`. In
+    /// `act`, `explore` and, under the grants, the write tool, the one edit
+    /// tool the edit format picks, the script runner, `check`, `view_app`,
+    /// `call_api` and the shell.
     fn tools(&self, cx: &ToolsContext<'_>, config: &Attrs) -> Vec<ToolSpec> {
         let scope = scope_as_written(config);
         let mut tools = vec![
@@ -442,6 +458,9 @@ impl AgentTrait for Coding {
                         RunMode::Plan,
                     ));
                 }
+                if may(config, CFG_MAY_CALL_API) {
+                    tools.push(call_api::spec(&scope, config, RunMode::Plan));
+                }
                 return tools;
             }
             RunMode::Act => tools.push(explore::spec(&scope)),
@@ -470,6 +489,9 @@ impl AgentTrait for Coding {
                 cx.capabilities.vision,
                 RunMode::Act,
             ));
+        }
+        if may(config, CFG_MAY_CALL_API) {
+            tools.push(call_api::spec(&scope, config, RunMode::Act));
         }
         if may(config, CFG_MAY_USE_SHELL) && cx.caller.is_some_and(is_admin) {
             tools.push(shell::spec(&scope, config));
@@ -544,6 +566,17 @@ impl AgentTrait for Coding {
                 permit_grant(config, CFG_MAY_VIEW_APP, "look at the application", ctx)?;
                 view_app::call(config, args, ctx).await
             }
+            _ if tool == call_api::tool_name(&scope) => {
+                // `plan` too, where the tool itself refuses the methods that
+                // change data.
+                permit_mode(
+                    &[RunMode::Plan, RunMode::Act],
+                    "call the application's API",
+                    ctx,
+                )?;
+                permit_grant(config, CFG_MAY_CALL_API, "call the application's API", ctx)?;
+                call_api::call(config, args, ctx).await
+            }
             _ if tool == shell::tool_name(&scope) => {
                 permit_shell(config, ctx)?;
                 shell::call(&scope, config, args, ctx).await
@@ -598,6 +631,7 @@ impl AgentTrait for Coding {
         match old.call.name.as_str() {
             name if name == view_app::tool_name(&scope) => Some(view_app::elide(old)),
             name if name == view_image::tool_name(&scope) => Some(view_image::elide(old)),
+            name if name == call_api::tool_name(&scope) => Some(call_api::elide(old)),
             // An old review keeps its verdict; the latest checklist is later.
             name if name == feature::tool_name(&scope) => Some(format!(
                 "[elided {}]",
@@ -735,6 +769,7 @@ mod tests {
                 "run_script_app_src_web",
                 "check_app_src_web",
                 "view_app_app_src_web",
+                "call_api_app_src_web",
                 "shell_app_src_web",
                 "process_app_src_web",
             ]

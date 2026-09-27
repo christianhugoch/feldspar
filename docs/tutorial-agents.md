@@ -440,6 +440,23 @@ side) before they are sent. It reads as the person chatting, like every other fi
 image in a store you cannot open is not shown to your agent either. An SVG is text, and the agent
 reads it with `read_file`.
 
+### Calling the application's API
+
+The checkbox **May send HTTP requests to the application** adds `call_api`, which sends one
+request to your application — `GET /api/tasks?done=false`, or a `POST` with a JSON body — and
+shows the agent the status, the headers and the body. It is how an agent writing a page against
+your API finds out what an endpoint *actually* returns, instead of what it expects: the shape of a
+row, the error a refused write gets, what a custom query hands back. A builder agent is created
+with it on.
+
+The request goes to your **live** application, not the run's preview (the API is the same in
+both), through the same router a browser reaches, so your tables' rules and ownership formulas
+decide the answer. By default it is sent **as the person chatting**, with a session made for that
+one request. The agent can also say `user: "public"` to see what a visitor who is not signed in
+gets, or name another user by email to see what *they* get — but only in a run an administrator
+started, because that is acting as them. As with `view_app`, a planning agent may only `GET`,
+and in `act` a `POST`, `PUT`, `PATCH` or `DELETE` changes **real rows**.
+
 ## Step 5f — Turning on the shell
 
 The last checkbox on the `coding` form is **May use a shell**, and its label says what it is:

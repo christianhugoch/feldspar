@@ -38,7 +38,7 @@ use crate::machine::{AgentLoop, Conclusion, Step, StepMeta, ToolOutcome, trait_s
 use crate::registry::AgentRegistry;
 use crate::run::{Run, RunId, RunMode};
 use crate::run_store::{load_run, save_run};
-use crate::view::{AppPreviewer, BrowserDriver};
+use crate::view::{AppPreviewer, AppRequester, BrowserDriver};
 
 /// What a caller watching a run wants to see while it happens.
 ///
@@ -94,6 +94,7 @@ pub struct Runner<'a> {
     /// falls back to what the registry's [`ViewServices`](crate::ViewServices) hold.
     previews: Option<&'a Arc<dyn AppPreviewer>>,
     browser: Option<&'a Arc<dyn BrowserDriver>>,
+    requests: Option<&'a Arc<dyn AppRequester>>,
     /// The mode and role a run this runner *starts* is given. A run it drives
     /// carries its own on its row.
     mode: RunMode,
@@ -149,6 +150,7 @@ impl<'a> Runner<'a> {
             connector: None,
             previews: None,
             browser: None,
+            requests: None,
             mode,
             role: mode.role(),
             chain: Vec::new(),
@@ -218,6 +220,14 @@ impl<'a> Runner<'a> {
         self
     }
 
+    /// Send this run's requests to applications through `requests`
+    /// (`call_api`). Optional, with the same fallback as
+    /// [`with_previews`](Runner::with_previews).
+    pub fn with_requests(mut self, requests: &'a Arc<dyn AppRequester>) -> Runner<'a> {
+        self.requests = Some(requests);
+        self
+    }
+
     /// The previewer this run uses, if any.
     fn previews(&self) -> Option<&Arc<dyn AppPreviewer>> {
         self.previews
@@ -228,6 +238,12 @@ impl<'a> Runner<'a> {
     fn browser(&self) -> Option<&Arc<dyn BrowserDriver>> {
         self.browser
             .or_else(|| self.registry.view_services().browser())
+    }
+
+    /// The application requester this run uses, if any.
+    fn requests(&self) -> Option<&Arc<dyn AppRequester>> {
+        self.requests
+            .or_else(|| self.registry.view_services().requests())
     }
 
     /// Start runs in `mode`, answered by `role`'s model, whatever the agent's
@@ -872,6 +888,7 @@ impl<'a> Runner<'a> {
                             delegate: self.connector.map(|_| &delegation as &dyn Delegator),
                             previews: self.previews().map(|p| p.as_ref() as &dyn AppPreviewer),
                             browser: self.browser().map(|b| b.as_ref() as &dyn BrowserDriver),
+                            requests: self.requests().map(|r| r.as_ref() as &dyn AppRequester),
                             signals: Vec::new(),
                             images: Vec::new(),
                         };
@@ -1127,6 +1144,7 @@ impl<'a> Runner<'a> {
             connector: self.connector,
             previews: self.previews,
             browser: self.browser,
+            requests: self.requests,
             mode: child_mode,
             role: child_role,
             chain,

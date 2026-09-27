@@ -179,6 +179,7 @@ impl Env {
             delegate: None,
             previews: None,
             browser: None,
+            requests: None,
             signals: Vec::new(),
             images: Vec::new(),
         };
@@ -215,6 +216,7 @@ impl Env {
             delegate: None,
             previews: None,
             browser: None,
+            requests: None,
             signals: Vec::new(),
             images: Vec::new(),
         };
@@ -326,6 +328,7 @@ impl Env {
             delegate: None,
             previews: None,
             browser: None,
+            requests: None,
             signals: Vec::new(),
             images: Vec::new(),
         };
