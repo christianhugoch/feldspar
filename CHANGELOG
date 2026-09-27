@@ -2,15 +2,41 @@
 
 Changes in reverse chronological order.
 
+## Tool descriptions written out, and a larger prompt budget
+
+The `coding` tool descriptions had been cut down to fit the stable-prefix budget until some were
+too terse to act on. An agent that had `call_api` still reported that nothing could make an HTTP
+request. The budget for the React builder's prompt plus tools goes from 2 200 to **4 000**
+estimated tokens, and the descriptions are written out again.
+
+- **Every tool** (`read_file`, `find_files`, `search_files`, `repo_map`, `list_assets`,
+  `view_image`, `save_plan`, `implement_feature`, `explore`, `write_file`, `edit_file`, `check`,
+  `view_app` and `call_api`) now says what it returns, when to use it, and the rule a model trips
+  on. Examples: a file must be read before it is edited; `old_text` must match exactly one
+  place; a `list_assets` URL goes into the page as given. **Every parameter** says what it is
+  for.
+- **Corrections:** `list_assets` said "Images" but lists every file a static directory serves.
+  `explore` now says its helper can send `GET` requests to the application.
+- **The workflow names `call_api`** in `plan`, `act` and `explore` wherever there is an
+  application. For example: "Before writing code against an API endpoint, call it with
+  `call_api_…` to see what it really returns."
+- **Measured:** `act` 3 130 estimated tokens on Claude and 3 105 on GPT, `plan` 3 038 on both.
+  The headroom is deliberate, so that the next tool gets a proper description.
+- **Tests:** `coding_prompt.rs` gains a test that every mode's workflow names `call_api` where
+  there is an application and never where there is not. The budget test is renamed
+  `…_at_most_4000_tokens`.
+
 ## Agents call the application's API
 
 A coding agent can now send a request to its application's API and see the answer, as the person
 chatting, as another user, or with no session. Before this, an agent only saw what an endpoint
 returned through a page in `view_app`, and only as the person chatting.
 
-- **`call_api_<slug>`** (`sc-core-traits/src/coding/call_api.rs`), behind a new `coding` grant,
-  `may_call_api`. The grant needs the `application` setting, and builder agents are created with
-  it on. The tool takes `method`, `path` (with its query), `body` (JSON, or a string sent as it
+- **`call_api_<slug>`** (`sc-core-traits/src/coding/call_api.rs`). There is **no checkbox**: the
+  tool is offered in every mode wherever the `coding` trait's `application` setting names one,
+  as `list_assets` is. (A first version put it behind a `may_call_api` grant. An agent saved
+  before that grant existed was never offered the tool, and told its user that nothing could make
+  a live HTTP request.) The tool takes `method`, `path` (with its query), `body` (JSON, or a string sent as it
   is) and `headers`. It returns the status line, the headers that carry information, and the
   body. A JSON body is pretty-printed, and any body is cut at 12 000 characters. The security
   headers every response has are left out, and a `set-cookie` value is hidden. An old result
@@ -19,7 +45,9 @@ returned through a page in `view_app`, and only as the person chatting.
   - left out: the caller, or `view_app_user` in a triggered run;
   - `"public"`: no session;
   - an email: that user. Naming a user other than the caller works only in an admin's run.
-- **`plan` may only look.** The tool offers `GET` only there and accepts `GET` and `HEAD`. In
+- **`plan` and `explore` may only look.** The tool offers `GET` only there and accepts `GET` and
+  `HEAD`. `explore` is where a planner sends its questions, so the helper can answer one about
+  the API. In
   `act` it offers `GET`, `POST`, `PUT`, `PATCH` and `DELETE`, and the description says the data
   is live.
 - **The seam** is `sc_agent::AppRequester`, a third capability in `ViewServices` alongside the
@@ -46,6 +74,8 @@ returned through a page in `view_app`, and only as the person chatting.
     - a `POST` that writes a row in `act`, and the same `POST` refused in `plan`;
     - a triggered run with no one to send as;
     - an unmounted subdomain;
+    - the tool offered in every mode with no grant, and not without an application;
+    - a `GET` from `explore`, and a `DELETE` refused there;
     - no session rows left behind.
   - Unit tests in `call_api.rs`, `builder_agent_traits.rs`'s grant, and the IDE relay's vitest.
 

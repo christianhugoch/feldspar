@@ -65,13 +65,15 @@ pub fn spec(scope: &FileScope, config: &Attrs) -> ToolSpec {
     ToolSpec::new(
         tool_name(scope),
         format!(
-            "Images `{application}` serves, newest first, at most {ceiling}. Put each `url` \
-             in the page as given."
+            "List the files `{application}` serves from its static directories (images, \
+             fonts, documents), most recently changed first, at most {ceiling}, each with its \
+             `url`, content type and size. Put a `url` in the page exactly as given: a guessed \
+             URL will 404."
         ),
         json!({
             "type": "object",
             "properties": {
-                ARG_PATTERN: {"type": "string", "description": "`*.png`, or `icons/**`"},
+                ARG_PATTERN: {"type": "string", "description": "A glob, e.g. `*.png` or `icons/**`"},
                 ARG_DIR: {"type": "string", "description": "Only under this directory"},
             },
             "additionalProperties": false,

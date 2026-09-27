@@ -19,22 +19,24 @@
 //!   after it. Anyone may name themselves; naming **another** user is for an
 //!   administrator's run only, because it is acting as them.
 //!
-//! In a `plan` run only `GET` and `HEAD` are offered: a plan is written from
-//! what is there. In `act` every method is, and the description says that the
-//! data is the live data.
+//! **It is not a grant.** It is offered in every mode wherever the `coding`
+//! trait's `application` setting names one, as `list_assets` is. Outside `act`
+//! — a `plan` run, an `explore` helper — only `GET` is offered (and `GET` and
+//! `HEAD` accepted), because those runs only look. In `act` every method is,
+//! and the description says that the data is the live data.
 
 use std::time::Duration;
 
-use sc_agent::{AppHttpRequest, AppHttpResponse, Elidable, RunMode, TraitCheck, TraitContext};
+use sc_agent::{AppHttpRequest, AppHttpResponse, Elidable, RunMode, TraitContext};
 use sc_auth::User;
 use sc_error::{Error, Result};
 use sc_llm::ToolSpec;
-use sc_types::{Attrs, BasicType, FormField};
+use sc_types::Attrs;
 use serde_json::{Value as Json, json};
 
 use super::check::configured_application;
+use super::is_admin;
 use super::view_app::viewer;
-use super::{CFG_MAY_CALL_API, is_admin, may};
 use crate::files::FileScope;
 
 /// How long one request may take, reading the body included.
@@ -75,28 +77,9 @@ pub fn tool_name(scope: &FileScope) -> String {
     format!("call_api_{}", scope.slug())
 }
 
-/// The grant's checkbox.
-pub fn config_fields() -> Vec<FormField> {
-    vec![
-        FormField::new(CFG_MAY_CALL_API, BasicType::Bool)
-            .label(
-                "May send HTTP requests to the application, as the person chatting, as another \
-                 user (an admin's runs only) or unauthenticated (needs the application setting)",
-            )
-            .default_value(false),
-    ]
-}
-
-/// The grant needs an application to send to.
-pub fn validate(check: &TraitCheck<'_>) -> Result<()> {
-    if may(check.config, CFG_MAY_CALL_API) && configured_application(check.config).is_none() {
-        return Err(Error::invalid(format!(
-            "`{CFG_MAY_CALL_API}` needs the `{}` setting: call_api sends requests to that \
-             application",
-            crate::CFG_APPLICATION
-        )));
-    }
-    Ok(())
+/// Whether the tool is offered: wherever there is an application to send to.
+pub fn offered(config: &Attrs) -> bool {
+    configured_application(config).is_some()
 }
 
 /// The tool, with only the looking methods outside `act`.
@@ -107,18 +90,26 @@ pub fn spec(scope: &FileScope, config: &Attrs, mode: RunMode) -> ToolSpec {
     ToolSpec::new(
         tool_name(scope),
         format!(
-            "HTTP request to `{application}`: status, headers, body. As you, or `user`: an \
-             email or \"public\".{}",
-            if acts { " Data is live." } else { "" }
+            "Send one HTTP request to `{application}`'s live server and return the response \
+             status, headers and body. Use it to see what an API endpoint actually returns \
+             (the shape of its rows, its errors) before writing code against it. The request \
+             is sent as the user you are working for, unless `user` names another user by \
+             email (only in an admin's run) or is \"public\" for a visitor who is not signed \
+             in. Table permissions apply as they would to that user.{}",
+            if acts {
+                " The data is live: POST, PUT, PATCH and DELETE change real rows."
+            } else {
+                " Only GET is available here."
+            }
         ),
         json!({
             "type": "object",
             "properties": {
                 "method": {"type": "string", "enum": methods},
-                "path": {"type": "string"},
-                "body": {"description": "JSON; a string is sent raw"},
-                "headers": {"type": "object"},
-                "user": {"type": "string"},
+                "path": {"type": "string", "description": "Path and query, e.g. /api/tasks?done=false"},
+                "body": {"description": "Request body: JSON, or a string sent as it is"},
+                "headers": {"type": "object", "description": "Extra request headers, e.g. {\"accept\": \"text/csv\"}"},
+                "user": {"type": "string", "description": "Email of the user to send as, or \"public\"; default: you"},
             },
             "required": ["path"],
             "additionalProperties": false,
@@ -440,9 +431,10 @@ mod tests {
         assert_eq!(plan.name, "call_api_code_web");
         assert!(!plan.parameters.to_string().contains("DELETE"));
         assert!(act.parameters.to_string().contains("DELETE"));
-        assert!(act.description.contains("Data is live"));
+        assert!(act.description.contains("data is live"));
         assert!(act.description.contains("\"public\""));
-        assert!(!plan.description.contains("Data is live"));
+        assert!(!plan.description.contains("data is live"));
+        assert!(plan.description.contains("Only GET"));
     }
 
     #[test]

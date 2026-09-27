@@ -442,20 +442,19 @@ reads it with `read_file`.
 
 ### Calling the application's API
 
-The checkbox **May send HTTP requests to the application** adds `call_api`, which sends one
+An agent whose `coding` trait names an application also gets `call_api` — no checkbox — which sends one
 request to your application — `GET /api/tasks?done=false`, or a `POST` with a JSON body — and
 shows the agent the status, the headers and the body. It is how an agent writing a page against
 your API finds out what an endpoint *actually* returns, instead of what it expects: the shape of a
-row, the error a refused write gets, what a custom query hands back. A builder agent is created
-with it on.
+row, the error a refused write gets, what a custom query hands back.
 
 The request goes to your **live** application, not the run's preview (the API is the same in
 both), through the same router a browser reaches, so your tables' rules and ownership formulas
 decide the answer. By default it is sent **as the person chatting**, with a session made for that
 one request. The agent can also say `user: "public"` to see what a visitor who is not signed in
 gets, or name another user by email to see what *they* get — but only in a run an administrator
-started, because that is acting as them. As with `view_app`, a planning agent may only `GET`,
-and in `act` a `POST`, `PUT`, `PATCH` or `DELETE` changes **real rows**.
+started, because that is acting as them. A planning agent, and the helper it sends questions
+to, may only `GET`; in `act` a `POST`, `PUT`, `PATCH` or `DELETE` changes **real rows**.
 
 ## Step 5f — Turning on the shell
 

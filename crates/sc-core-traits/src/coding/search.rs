@@ -54,20 +54,23 @@ pub fn spec(scope: &FileScope, config: &Attrs) -> ToolSpec {
     ToolSpec::new(
         tool_name(scope),
         format!(
-            "Search file contents for lines as `path:line: text`, at most {ceiling}. \
-             Dependency and build directories are skipped."
+            "Search the contents of the project's text files and return matching lines as \
+             `path:line: text`, at most {ceiling}. The pattern is literal text unless `regex` \
+             is set, and case-insensitive unless `case_sensitive` is. Dependency and build \
+             directories (node_modules, .git, dist, build) are skipped. Narrow a broad search \
+             with `glob` or `dir`."
         ),
         json!({
             "type": "object",
             "properties": {
-                ARG_PATTERN: {"type": "string", "description": "Literal unless `regex`"},
-                ARG_REGEX: {"type": "boolean", "description": "Pattern is a regex"},
-                ARG_CASE: {"type": "boolean", "description": "Default false"},
-                ARG_GLOB: {"type": "string", "description": "e.g. `*.tsx`"},
-                ARG_DIR: {"type": "string", "description": "Only this directory"},
+                ARG_PATTERN: {"type": "string", "description": "Text to find (literal unless `regex` is true)"},
+                ARG_REGEX: {"type": "boolean", "description": "Treat the pattern as a regular expression"},
+                ARG_CASE: {"type": "boolean", "description": "Match case exactly (default false)"},
+                ARG_GLOB: {"type": "string", "description": "Only files matching this glob, e.g. `*.tsx`"},
+                ARG_DIR: {"type": "string", "description": "Only files under this directory"},
                 ARG_CONTEXT: {
                     "type": "integer", "minimum": 0, "maximum": MAX_CONTEXT_LINES,
-                    "description": "Lines around each match",
+                    "description": "Lines of context to show around each match",
                 },
             },
             "required": [ARG_PATTERN],

@@ -411,11 +411,21 @@ person chatting.
       is dispatched in process through the router to the application's live mount, with a CSRF
       token and, for a user, a session made for the one request and deleted after it. 1 MB
       body cap, 30 s timeout.
-- [x] C.3 `coding/call_api.rs`: `call_api_<slug>` under a new `may_call_api` grant (needs
-      `application`; on for builder agents). `user` absent → the caller (or `view_app_user`),
+- [x] C.3 `coding/call_api.rs`: `call_api_<slug>`, offered in every mode wherever the
+      `application` setting names one — no grant. `user` absent → the caller (or `view_app_user`),
       `"public"` → no session, an email → that user, another user's for an admin's run only.
-      `GET`/`HEAD` only in `plan`. Result: status line, the headers that say something, the
+      `GET`/`HEAD` only outside `act` (`plan`, `explore`). Result: status line, the headers that say something, the
       body pretty-printed and capped; `set-cookie` values hidden; elides to its status line.
+- [x] C.5 No `may_call_api` checkbox: an agent saved without it was never offered the tool and
+      reported that nothing could make a live HTTP request. Offered like `list_assets` instead,
+      and in `explore` too, where a planner's questions go. Test: offered in every mode with no
+      grant, not without an application, `GET` from `explore` and a `DELETE` refused there.
+- [x] C.6 Fuller tool descriptions, and a stable-prefix budget of 4 000 (was 2 200). Every
+      `coding` tool says what it returns, when to use it and the rule that trips a model up;
+      every parameter says what it is for; `list_assets` says it lists every served file, not
+      only images. The workflow names `call_api` in `plan`, `act` and `explore` wherever there is
+      an application (test: `every_mode_says_to_ask_the_api_where_there_is_an_application`).
+      Measured `act` 3 130, `plan` 3 038.
 - [x] C.4 Tests: unit tests in `call_api.rs`; `sc-server/tests/call_api.rs` through the real
       router (as the caller, as `public`, as another user by an admin, refused to a member, a
       `POST` in `act` and refused in `plan`, no one to send as, an unmounted subdomain, no

@@ -73,15 +73,18 @@ pub fn spec(scope: &FileScope, config: &Attrs) -> ToolSpec {
             if let Some(map) = properties.as_object_mut() {
                 map.insert(
                     ARG_URL.to_owned(),
-                    json!({"type": "string", "description": "A list_assets url, e.g. `/img/hero.png`"}),
+                    json!({"type": "string", "description": "A URL the application serves, as list_assets gives it, e.g. `/img/hero.png`"}),
                 );
             }
             format!(
-                "Look at a PNG, JPEG, GIF or WebP: a `path` in this project, or a `url` \
-                 `{application}` serves."
+                "Look at a PNG, JPEG, GIF or WebP image: give either a `path` in this project \
+                 or a `url` that `{application}` serves. Large images are scaled down before \
+                 they are shown. An SVG is text: read it with read_file."
             )
         }
-        None => "Look at a PNG, JPEG, GIF or WebP in this project.".to_owned(),
+        None => "Look at a PNG, JPEG, GIF or WebP image in this project. Large images are \
+                 scaled down before they are shown. An SVG is text: read it with read_file."
+            .to_owned(),
     };
     ToolSpec::new(
         tool_name(scope),

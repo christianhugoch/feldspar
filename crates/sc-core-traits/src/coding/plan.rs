@@ -214,8 +214,9 @@ pub fn spec(scope: &FileScope) -> ToolSpec {
     let strings = json!({"type": "array", "items": {"type": "string"}});
     ToolSpec::new(
         tool_name(scope),
-        "Write or replace the plan: the features, in order, each one session of work. Keeps the \
-         progress of ids that stay."
+        "Save the plan, replacing any earlier one: the features, in the order they should be \
+         built, each one session of work, with acceptance criteria. A feature whose `id` stays \
+         the same keeps its progress, so re-planning does not lose finished work."
             .to_owned(),
         json!({
             "type": "object",

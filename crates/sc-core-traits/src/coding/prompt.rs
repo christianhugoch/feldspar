@@ -11,17 +11,19 @@
 //! would send a cheap model looking for a tool that is not there — and it says
 //! the same thing on every step.
 //!
-//! Short on purpose. R§4 budgets 1.5k tokens for the prompt and the tools
-//! together, and the tool descriptions already say how each tool is called, so
-//! this says only *when* and *in what order*.
+//! It says *when* and *in what order*; the tool descriptions say how each tool
+//! is called and what it returns. The two together are budgeted by the
+//! stable-prefix test (`coding_prompt.rs`), which is generous enough that
+//! neither has to be cryptic.
 
 use sc_agent::{RunMode, ToolsContext};
 use sc_llm::EditFormat;
 use sc_types::Attrs;
 
 use super::{
-    CFG_MAY_CHECK, CFG_MAY_EDIT, CFG_MAY_USE_SHELL, CFG_MAY_VIEW_APP, check, edit, edit_format,
-    explore, feature, is_admin, may, patch, plan, repo_map, search, shell, view_app, write,
+    CFG_MAY_CHECK, CFG_MAY_EDIT, CFG_MAY_USE_SHELL, CFG_MAY_VIEW_APP, call_api, check, edit,
+    edit_format, explore, feature, is_admin, may, patch, plan, repo_map, search, shell, view_app,
+    write,
 };
 use crate::files::{FileScope, scope_as_written};
 
@@ -30,7 +32,7 @@ pub fn prompt(cx: &ToolsContext<'_>, config: &Attrs) -> String {
     let scope = scope_as_written(config);
     let body = match cx.mode {
         RunMode::Plan => plan(config, &scope),
-        RunMode::Explore => explore(&scope),
+        RunMode::Explore => explore(config, &scope),
         RunMode::Act => act(cx, config, &scope),
     };
     // Said once here rather than in every tool's description: an agent with
@@ -40,6 +42,18 @@ pub fn prompt(cx: &ToolsContext<'_>, config: &Attrs) -> String {
         scope.slug(),
         scope.label()
     )
+}
+
+/// The step that says to ask the API before relying on it, where the run has
+/// `call_api`.
+fn ask_api(config: &Attrs, scope: &FileScope, when: &str) -> Option<String> {
+    call_api::offered(config).then(|| {
+        format!(
+            "{when}, call it with `{}` to see what it really returns, as the user who will \
+             see it.",
+            call_api::tool_name(scope)
+        )
+    })
 }
 
 /// Where to look first, in every mode.
@@ -72,6 +86,11 @@ fn act(cx: &ToolsContext<'_>, config: &Attrs, scope: &FileScope) -> String {
         true => format!("For a bug, reproduce it first with a failing test or `{check}`."),
         false => "For a bug, find its cause before changing anything.".to_owned(),
     });
+    steps.extend(ask_api(
+        config,
+        scope,
+        "Before writing code against an API endpoint",
+    ));
     steps.push("Make the smallest change. Edit only files you have read.".to_owned());
     if may_check {
         steps.push(format!(
@@ -137,12 +156,17 @@ fn plan(config: &Attrs, scope: &FileScope) -> String {
         ),
         false => String::new(),
     };
-    let steps = [
-        format!(
-            "{} For a wide question, ask `{}`.{look}",
-            locate(scope),
-            explore::tool_name(scope)
-        ),
+    let mut steps = vec![format!(
+        "{} For a wide question, ask `{}`.{look}",
+        locate(scope),
+        explore::tool_name(scope)
+    )];
+    steps.extend(ask_api(
+        config,
+        scope,
+        "Before planning around an API endpoint",
+    ));
+    steps.extend([
         format!(
             "Write the plan with `{save}`: features, each one session of work, with acceptance \
              criteria and the files it likely touches. A one-line fix is a one-feature plan."
@@ -154,7 +178,7 @@ fn plan(config: &Attrs, scope: &FileScope) -> String {
         ),
         format!("When a result says re-plan, change the plan with `{save}` first."),
         "End with a 3–5 line summary of what was done and what was not.".to_owned(),
-    ];
+    ]);
     format!(
         "{}\n\n<rules>\n\
          - You do not edit files in this mode.\n\
@@ -165,11 +189,16 @@ fn plan(config: &Attrs, scope: &FileScope) -> String {
     )
 }
 
-fn explore(scope: &FileScope) -> String {
-    let steps = [
-        locate(scope),
+fn explore(config: &Attrs, scope: &FileScope) -> String {
+    let mut steps = vec![locate(scope)];
+    steps.extend(ask_api(
+        config,
+        scope,
+        "For a question about an API endpoint",
+    ));
+    steps.push(
         "Answer the question in at most 300 words, naming files and line numbers.".to_owned(),
-    ];
+    );
     format!(
         "{}\n\n<rules>\n- You cannot change anything. Do not guess: say what you did not \
          find.\n</rules>",

@@ -82,8 +82,6 @@ pub const TRAIT_CFG_MAY_RUN_SCRIPTS: &str = "may_run_scripts";
 pub const TRAIT_CFG_MAY_CHECK: &str = "may_check";
 /// `coding`'s "may look at the application's preview" grant.
 pub const TRAIT_CFG_MAY_VIEW_APP: &str = "may_view_app";
-/// `coding`'s "may send HTTP requests to the application" grant.
-pub const TRAIT_CFG_MAY_CALL_API: &str = "may_call_api";
 /// `coding`'s "may run shell commands" grant.
 pub const TRAIT_CFG_MAY_USE_SHELL: &str = "may_use_shell";
 /// `coding`'s application setting: the subdomain its `check` builds and its
@@ -308,9 +306,6 @@ fn coding_agent(
                 .with(TRAIT_CFG_MAY_EDIT, true)
                 .with(TRAIT_CFG_MAY_CHECK, true)
                 .with(TRAIT_CFG_MAY_VIEW_APP, true)
-                // …and ask the application's API what it answers, which is
-                // what the pages it writes are written against.
-                .with(TRAIT_CFG_MAY_CALL_API, true)
                 // Off, like the trait's own defaults: both execute code the model
                 // chose, which is a grant the admin gives deliberately rather than
                 // one that arrives with an application.
@@ -532,7 +527,6 @@ mod tests {
         // application it was created for, by subdomain — and looks at the result.
         assert_eq!(coding.config[TRAIT_CFG_MAY_CHECK], Json::from(true));
         assert_eq!(coding.config[TRAIT_CFG_MAY_VIEW_APP], Json::from(true));
-        assert_eq!(coding.config[TRAIT_CFG_MAY_CALL_API], Json::from(true));
         assert_eq!(coding.config[TRAIT_CFG_MAY_USE_SHELL], Json::from(false));
         assert_eq!(coding.config[TRAIT_CFG_APPLICATION], Json::from("todo"));
         assert_eq!(

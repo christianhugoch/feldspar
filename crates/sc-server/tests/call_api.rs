@@ -9,14 +9,15 @@
 //! - the requester `serve` installs is the one a run reaches, and it answers
 //!   through the router's providers, CSRF middleware included (a `POST` works);
 //! - `user` picks the session, and naming someone else is an admin's alone;
-//! - `plan` only looks, and a subdomain nothing is mounted at is refused;
+//! - it is no grant: offered in every mode wherever there is an application;
+//! - `plan` and `explore` only look, and a subdomain nothing is mounted at is refused;
 //! - the per-request session is gone afterwards.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use sc_agent::{RunCaller, RunId, RunMode, TraitContext};
+use sc_agent::{RunCaller, RunId, RunMode, ToolsContext, TraitContext};
 use sc_app::{
     ApiConfig, Application, CodeFramework, FrameworkRef, app_source_from_config, build_application,
     save_application,
@@ -96,7 +97,6 @@ fn coding() -> Attrs {
         ("store".to_owned(), json!("apps")),
         ("root".to_owned(), json!("web")),
         ("application".to_owned(), json!("notes")),
-        ("may_call_api".to_owned(), json!(true)),
     ]
     .into_iter()
     .collect()
@@ -414,5 +414,61 @@ async fn call_api_needs_someone_to_send_as_and_a_served_application() -> Result<
         .unwrap_err()
         .to_string();
     assert!(err.contains("no application is being served"), "{err}");
+    Ok(())
+}
+
+/// Not a grant: every mode is offered the tool wherever the trait names an
+/// application — `GET` only outside `act` — and a trait that names none is not.
+#[tokio::test]
+async fn call_api_is_offered_wherever_there_is_an_application() -> Result<()> {
+    let env = setup("offered").await?;
+    let registry = sc_core_traits::builtin_traits().unwrap();
+    let coding_trait = registry.require("coding").unwrap().clone();
+    let caps = sc_llm::ModelCapabilities::built_in("", "");
+    let mut no_app = coding();
+    no_app.remove("application");
+    for mode in [RunMode::Explore, RunMode::Plan, RunMode::Act] {
+        let cx = ToolsContext::new(&env.catalog, mode, &caps);
+        let tools = coding_trait.tools(&cx, &coding());
+        let tool = tools
+            .iter()
+            .find(|t| t.name == TOOL)
+            .unwrap_or_else(|| panic!("offered in {mode} with no grant set"));
+        let methods = tool.parameters["properties"]["method"]["enum"].to_string();
+        assert_eq!(
+            methods.contains("POST"),
+            mode == RunMode::Act,
+            "{mode}: {methods}"
+        );
+        assert!(
+            !coding_trait
+                .tools(&cx, &no_app)
+                .iter()
+                .any(|t| t.name == TOOL),
+            "{mode}: nothing to send to"
+        );
+    }
+
+    // An `explore` helper — where a planner sends a question — gets the answer…
+    let alice = RunCaller::user(env.alice.clone());
+    let text = env
+        .call(
+            &alice,
+            RunMode::Explore,
+            json!({"path": "/api/notes", "user": "public"}),
+        )
+        .await?;
+    assert!(text.starts_with("GET /api/notes as public → 200"), "{text}");
+    // …and may not write.
+    let refused = env
+        .call(
+            &alice,
+            RunMode::Explore,
+            json!({"method": "DELETE", "path": "/api/notes/1"}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("only looks"), "{refused}");
     Ok(())
 }

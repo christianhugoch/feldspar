@@ -3453,11 +3453,11 @@ scope, so what it changed enters the change ledger and the model's reads of it g
 - **One trait, one scope, fifteen tools, and the grants decide which are declared.** The set is
   `read_file`, `find_files`, `search_files`, `repo_map`, `save_plan`, `implement_feature`,
   `explore`, `write_file`, `edit_file`, `apply_patch`, `run_script`, `check`, `view_app`, `shell`
-  and `process`, each suffixed with the scope's slug (and since then `list_assets` and
-  `view_image`, which depend on the `application` setting and the model's `vision` rather than
-  on a grant). Which of them a run is *offered* is the
+  and `process`, each suffixed with the scope's slug (and since then `list_assets`, `call_api`
+  and `view_image`, which depend on the `application` setting and the model's `vision` rather
+  than on a grant). Which of them a run is *offered* is the
   mode (§11.2) and the checkboxes — `may_edit`, `may_run_scripts`, `may_check`,
-  `may_view_app`, `may_use_shell`, and since then `may_call_api` — and a withheld tool is never declared to the model. Since the
+  `may_view_app`, `may_use_shell` — and a withheld tool is never declared to the model. Since the
   longest derived name is `implement_feature_<slug>`, `validate_config` checks **that** name
   against the 64 characters both vendors accept, rather than the shortest one that happens to
   fit.
@@ -3519,8 +3519,8 @@ scope, so what it changed enters the change ledger and the model's reads of it g
   `<workflow>`/`<rules>`/`<edit_format>` blocks. The scope is named **once**, in the prompt,
   rather than in fifteen tool descriptions. The size test (8.3) is the reason several of these
   texts are as short as they are: the React builder's stable prefix plus tool definitions is
-  ≤ 2 100 estimated tokens in both `act` and `plan`, and it took cutting every tool description
-  and dropping `SHARED_PROMPT`'s workflow to get there. The budget was 1 500 and `act` measured
+  ≤ 4 000 estimated tokens in both `act` and `plan`. It was far tighter, and it took cutting
+  every tool description and dropping `SHARED_PROMPT`'s workflow to fit. The budget was 1 500 and `act` measured
   1 496 — spent to the last token — until `list_assets` made the set ten tools
   (TODO "Static directories" §6); a tenth tool costs about a hundred, so the number went up
   rather than an existing description coming off. It went up again, to 1 750, when the builder
@@ -3532,8 +3532,13 @@ scope, so what it changed enters the change ledger and the model's reads of it g
   model with `vision` (~90 tokens), and `view_app`'s looking actions offered in `plan` so a
   planner sees the page it is planning a change to (~200 tokens there; `act` 2 072 on GPT,
   `plan` 2 032). It went to 2 200 with `call_api` (~110 tokens after its description was cut to
-  one line and its method list to five; `act` 2 190 on GPT, `plan` 2 138). It is still a
-  **test**, and the next addition has the same argument to make.
+  one line and its method list to five; `act` 2 190 on GPT, `plan` 2 138). Then it went to
+  4 000, because the cutting had gone too far: an agent offered `call_api` told its user that
+  nothing could make an HTTP request. Each description now says what the tool returns, when to
+  use it, and the rule that trips a model up; each parameter says what it is for; and the
+  workflow names `call_api` (~950 tokens; `act` 3 130 on Claude, `plan` 3 038). It is still a
+  **test**, but with headroom, so that the next tool is described properly rather than
+  squeezed.
 - **`planned` is a workflow setting, not a second trait.** `workflow = planned` starts the run in
   `plan` mode (the new `AgentTrait::starting_mode` hook, read by `Runner::new`), where the tools
   are the read-only four plus `save_plan`, `implement_feature` and `explore`. The plan — an
@@ -3566,8 +3571,11 @@ scope, so what it changed enters the change ledger and the model's reads of it g
   own build. So the agent can screenshot the page it was asked about before touching it, and
   `plan` is offered the tool too — `goto`, `wait_for`, `snapshot` and `screenshot` only, since
   `click`, `fill` and `press` change what a plan is written from.
-- **`call_api` asks the application's API what it answers.** A sixth grant, `may_call_api`
-  (needs `application`; on for a builder agent), offers `call_api_<slug>`: one HTTP request —
+- **`call_api` asks the application's API what it answers.** It is **not a grant**:
+  `call_api_<slug>` is offered in every mode wherever the `application` setting names one, as
+  `list_assets` is. (It was a checkbox, `may_call_api`, for a day; an agent saved before the
+  checkbox existed was never offered the tool and told its user that nothing could make an HTTP
+  request, which is the argument against a grant for something every builder needs.) It sends one HTTP request —
   `method`, `path` with its query, `body`, `headers` — and back come the status, the headers
   that say something (the security boilerplate is left out, a `set-cookie` value is hidden) and
   the body, JSON pretty-printed and cut at 12 000 characters. **As whom** is the `user`
@@ -3583,8 +3591,9 @@ scope, so what it changed enters the change ledger and the model's reads of it g
   `ConnectInfo`, so a loopback-only route sees an unknown peer). It targets the **live mount**,
   not the run's preview: the API is built from the catalog, which the two share, and a preview
   host would need the run's browser session to be reachable at all. A subdomain nothing is
-  mounted at is refused rather than falling through to the admin routes. `plan` gets `GET` (and
-  `HEAD`) only; the body is read to 1 MB or the 30-second timeout, whichever comes first, and
+  mounted at is refused rather than falling through to the admin routes. Outside `act` — `plan`,
+  and the `explore` helper a planner hands its questions to — the tool offers `GET` only and
+  accepts `GET` and `HEAD`; the body is read to 1 MB or the 30-second timeout, whichever comes first, and
   the result says which. An old result elides to its status line.
 - **`view_image` shows a seeing model an image file.** `read_file` refuses binary, rightly;
   `view_image_<slug>` is offered wherever reading is (every mode, no grant) to a model with

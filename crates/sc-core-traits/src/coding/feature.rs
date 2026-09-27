@@ -74,8 +74,10 @@ pub fn tool_name(scope: &FileScope) -> String {
 pub fn spec(scope: &FileScope) -> ToolSpec {
     ToolSpec::new(
         tool_name(scope),
-        "Implement one feature of the plan in a fresh session, check it independently and \
-         commit it. Returns the result to review."
+        "Implement one feature of the saved plan, by `id`, in a fresh working session. The \
+         feature is then checked independently and, in a git work tree, committed. Returns \
+         the session's result, the check report and the diff, for you to review before the \
+         next feature."
             .to_owned(),
         json!({
             "type": "object",

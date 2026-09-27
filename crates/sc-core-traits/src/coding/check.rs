@@ -71,8 +71,10 @@ pub fn tool_name(scope: &FileScope) -> String {
 pub fn spec(scope: &FileScope) -> ToolSpec {
     ToolSpec::new(
         tool_name(scope),
-        "Run the configured checks (type check, tests, build). Diagnostics are marked new or \
-         pre-existing; done means no new failures."
+        "Run the project's configured checks (type check, tests, and the application's \
+         build where there is one). Each diagnostic is marked new or pre-existing; the work \
+         is done when there are no new failures. A green build of the application becomes \
+         this run's preview, which view_app then looks at."
             .to_owned(),
         json!({
             "type": "object",

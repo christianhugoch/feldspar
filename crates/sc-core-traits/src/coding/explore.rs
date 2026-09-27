@@ -26,10 +26,14 @@ pub fn tool_name(scope: &FileScope) -> String {
 pub fn spec(scope: &FileScope) -> ToolSpec {
     ToolSpec::new(
         tool_name(scope),
-        "Ask a helper a question about the code; returns a brief.".to_owned(),
+        "Hand a question to a helper session that reads, searches and, where there is an \
+         application, sends GET requests to its API, and returns a brief answer of at most \
+         300 words. Use it for a wide question that would take many searches and reads; your \
+         own context then holds only the answer."
+            .to_owned(),
         json!({
             "type": "object",
-            "properties": {"question": {"type": "string"}},
+            "properties": {"question": {"type": "string", "description": "What to find out, with any names or paths you already know"}},
             "required": ["question"],
             "additionalProperties": false,
         }),

@@ -134,15 +134,19 @@ pub fn spec(scope: &FileScope, config: &Attrs, vision: bool, mode: RunMode) -> T
     ToolSpec::new(
         tool_name(scope),
         format!(
-            "Use `{application}` as the user: this run's last green check, else the live \
-             build. Returns a snapshot with @e refs, console errors and failed requests.{}{}",
+            "Open `{application}` in a headless browser, signed in as the user you are working \
+             for, and do one action per call. It shows this run's last green check, or the \
+             live build before there is one. Each result has the URL, the HTTP status, an \
+             accessibility snapshot of the page whose interactive elements carry refs (`@e12`) \
+             for the next action, and any console errors and failed requests since the last \
+             call.{}{}",
             if acts {
-                " Data is live: click and fill write real rows."
+                " The data is live: click and fill on a form write real rows."
             } else {
-                ""
+                " Only looking actions are available here."
             },
             if vision {
-                " screenshot returns an image."
+                " screenshot returns an image of the page."
             } else {
                 ""
             }
@@ -156,22 +160,22 @@ pub fn spec(scope: &FileScope, config: &Attrs, vision: bool, mode: RunMode) -> T
 fn parameters(actions: Vec<&str>, vision: bool, acts: bool) -> Json {
     let mut properties = json!({
         "action": {"type": "string", "enum": actions},
-        "path": {"type": "string", "description": "goto"},
-        "ref": {"type": "string", "description": "@e ref"},
-        "text": {"type": "string", "description": "fill, wait_for"},
-        "timeout": {"type": "integer", "description": "wait_for: seconds"},
+        "path": {"type": "string", "description": "For goto: the path to open, e.g. /tasks"},
+        "ref": {"type": "string", "description": "For click, fill, wait_for: an @e ref from the last snapshot"},
+        "text": {"type": "string", "description": "For fill: the text to type; for wait_for: text to wait for"},
+        "timeout": {"type": "integer", "description": "For wait_for: seconds to wait"},
     });
     if let Some(map) = properties.as_object_mut() {
         if acts {
             map.insert(
                 "key".to_owned(),
-                json!({"type": "string", "description": "press: e.g. Enter"}),
+                json!({"type": "string", "description": "For press: a key, e.g. Enter, Tab or Escape"}),
             );
         }
         if vision {
             map.insert(
                 "full_page".to_owned(),
-                json!({"type": "boolean", "description": "screenshot: whole page"}),
+                json!({"type": "boolean", "description": "For screenshot: the whole page, not just the viewport"}),
             );
         }
     }
