@@ -52,7 +52,7 @@ import type {
   ListFileStoresResponse,
 } from "../client";
 import { navigate } from "../App";
-import { IconArrowLeft, IconFolder } from "../icons";
+import { IconArrowLeft, IconFolder, IconRefresh } from "../icons";
 import { AlertBody, PageBody, PageHeader } from "../layout";
 import { OptionalRoleSelect } from "../roleSelect";
 import { useRoles } from "../roles";
@@ -64,7 +64,7 @@ import {
 } from "../settings";
 import { T, useT } from "../i18n";
 import { isScmOperation, parseScmStatus, type ScmStatus } from "../sourceControl";
-import { SourceControl } from "./SourceControl";
+import { IconButton, SourceControl } from "./SourceControl";
 
 type BackendInfo = ListFileStoreBackendsResponse[number];
 type OperationInfo = BackendInfo["operations"][number];
@@ -401,12 +401,14 @@ function InstanceOperations({
   storeName: string;
   operations: OperationInfo[];
 }) {
+  const { t } = useT();
   const [reports, setReports] = useState<Record<string, string>>({});
   // The working copy, when an automatic operation reported one — which is what
   // turns the store's operations into the source-control panel.
   const [scm, setScm] = useState<ScmStatus | null>(null);
   const [inputs, setInputs] = useState<OperationInputs>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [output, setOutput] = useState<string | null>(null);
 
@@ -464,8 +466,28 @@ function InstanceOperations({
 
   return (
     <Card className="mb-3">
-      <Card.Header>
+      <Card.Header className="d-flex align-items-center">
         {scm ? <T text="Source control" /> : <T text="Operations" />}
+        {scm && (
+          // Re-reads the working copy, picking up files changed on disk since —
+          // through the file manager, the IDE, or anything else.
+          <span className="ms-auto">
+            <IconButton
+              label={t("Refresh")}
+              disabled={refreshing}
+              onClick={() => {
+                setRefreshing(true);
+                void refresh().finally(() => setRefreshing(false));
+              }}
+            >
+              {refreshing ? (
+                <Spinner animation="border" size="sm" />
+              ) : (
+                <IconRefresh className="icon-1" />
+              )}
+            </IconButton>
+          </span>
+        )}
       </Card.Header>
       <Card.Body>
         {error && <Alert variant="danger">{error}</Alert>}
@@ -479,7 +501,6 @@ function InstanceOperations({
               report={automatic.map((op) => reports[op.name] ?? "").join("\n")}
               declared={operations.map((op) => op.name)}
               onStatus={setScm}
-              onRefresh={refresh}
             />
           </div>
         ) : (

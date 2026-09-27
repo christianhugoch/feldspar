@@ -22,7 +22,6 @@ import {
   IconGitBranch,
   IconMinus,
   IconPlus,
-  IconRefresh,
 } from "../icons";
 import { T, useT } from "../i18n";
 import {
@@ -51,7 +50,6 @@ export function SourceControl({
   report,
   declared,
   onStatus,
-  onRefresh,
 }: {
   storeId: string;
   status: ScmStatus;
@@ -60,10 +58,9 @@ export function SourceControl({
   /** The operations the backend declares; a control whose operation is missing is not drawn. */
   declared: readonly string[];
   onStatus: (status: ScmStatus) => void;
-  onRefresh: () => Promise<void>;
 }) {
   const { t } = useT();
-  const [busy, setBusy] = useState<ScmOperation | "refresh" | null>(null);
+  const [busy, setBusy] = useState<ScmOperation | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [output, setOutput] = useState<string | null>(null);
   const [message, setMessage] = useState("");
@@ -90,13 +87,6 @@ export function SourceControl({
     return ok;
   };
 
-  const refresh = async () => {
-    setBusy("refresh");
-    setError(null);
-    await onRefresh();
-    setBusy(null);
-  };
-
   const rows = changeRows(status);
   const primary = primaryAction(status, message);
   const disabled = busy !== null;
@@ -121,25 +111,6 @@ export function SourceControl({
 
   return (
     <div className="scm">
-      <div className="d-flex justify-content-end mb-2">
-        {status.cloned && has("pull") && (
-          <IconButton
-            label={status.behind > 0 ? t("Pull ({n} behind)", { n: status.behind }) : t("Pull")}
-            onClick={() => void run("pull")}
-            disabled={disabled}
-          >
-            <IconArrowDown className="icon-1" />
-          </IconButton>
-        )}
-        <IconButton label={t("Refresh")} onClick={() => void refresh()} disabled={disabled}>
-          {busy === "refresh" ? (
-            <Spinner animation="border" size="sm" />
-          ) : (
-            <IconRefresh className="icon-1" />
-          )}
-        </IconButton>
-      </div>
-
       {error && (
         <Alert variant="danger" onClose={() => setError(null)} dismissible>
           <pre className="mb-0 small text-break text-pre-wrap">{error}</pre>
@@ -233,7 +204,13 @@ export function SourceControl({
           )}
 
           {has("checkout") && (
-            <BranchSelector status={status} disabled={disabled} run={run} />
+            <BranchSelector
+              status={status}
+              disabled={disabled}
+              pulling={busy === "pull"}
+              canPull={has("pull")}
+              run={run}
+            />
           )}
           {status.lastCommit && (
             <div className="text-secondary small mt-2 text-break">
@@ -395,10 +372,14 @@ function letterClass(row: ChangeRow): string {
 function BranchSelector({
   status,
   disabled,
+  pulling,
+  canPull,
   run,
 }: {
   status: ScmStatus;
   disabled: boolean;
+  pulling: boolean;
+  canPull: boolean;
   run: (op: ScmOperation, input: Record<string, unknown>) => Promise<boolean>;
 }) {
   const { t } = useT();
@@ -480,13 +461,29 @@ function BranchSelector({
           <option value={NEW_BRANCH}>{t("+ Create new branch…")}</option>
         </Form.Select>
       )}
+      {!creating && canPull && (
+        <Button
+          variant="outline-secondary"
+          className="text-nowrap"
+          onClick={() => void run("pull", {})}
+          disabled={disabled}
+          title={t("Fetch the remote and merge it into this branch")}
+        >
+          {pulling ? (
+            <Spinner animation="border" size="sm" className="me-2" />
+          ) : (
+            <IconArrowDown className="icon-2" />
+          )}
+          {status.behind > 0 ? `${t("Pull")} ↓${status.behind}` : t("Pull")}
+        </Button>
+      )}
     </div>
   );
 }
 
 /** A small borderless icon button, VS Code's toolbar style, labelled for
  * pointer (tooltip) and screen reader alike. */
-function IconButton({
+export function IconButton({
   label,
   onClick,
   disabled,

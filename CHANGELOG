@@ -18,7 +18,9 @@ a **Source control** panel laid out like VS Code's view:
   "smart commit").
 - Once there is nothing left to commit, **the button becomes Push ↑n**. If the remote has moved
   on it becomes **Pull ↓n** instead, and on a branch with no upstream it becomes **Publish
-  branch**. Pull and Refresh are also icon buttons above the panel.
+  branch**.
+- **Refresh** is an icon at the right of the card's title. It re-reads the working copy, so files
+  changed on disk since (through the file manager, the IDE or anything else) show up.
 - **The changed files** are listed in **Merge changes** (only when there is a conflict),
   **Staged changes** and **Changes**. Each row has the file name, its directory, and VS Code's
   letter at the right (`M`, `A`, `D`, `R`, `U` for untracked, `!` for a conflict) in VS Code's
@@ -28,7 +30,8 @@ a **Source control** panel laid out like VS Code's view:
   Open File / Open Changes have no counterpart. A discard asks first and says whether it deletes
   (untracked) or reverts.
 - **A branch dropdown** sits underneath, with "+ Create new branch…" at the end. Choosing it turns
-  the dropdown into a name box that is checked as you type.
+  the dropdown into a name box that is checked as you type. **Pull** (↓n when behind) is a button
+  beside the dropdown.
 
 Behind it:
 
