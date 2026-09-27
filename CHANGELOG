@@ -2,6 +2,57 @@
 
 Changes in reverse chronological order.
 
+## A git file store's operations look like VS Code's Source Control view
+
+A git store's edit screen used to show its operations as a column of generic forms: a
+"Paths, one per line" textarea under Stage and again under Unstage, a commit-message box with a
+"Commit only what is staged" checkbox, a branch text box with a "Create" checkbox, and the
+status as a block of prose. Anyone who has used VS Code had to relearn all of it. The card is now
+a **Source control** panel laid out like VS Code's view:
+
+- **Clone** appears only when there is no working copy and the directory is missing or empty.
+  Otherwise the status prose explains why nothing can be cloned.
+- **The commit message** is one line that grows as lines are added, and Ctrl/⌘+Enter commits.
+  **Commit** sits beside it rather than underneath, since the screen has the width. With
+  something staged, only that is committed; with nothing staged, everything is (VS Code's
+  "smart commit").
+- Once there is nothing left to commit, **the button becomes Push ↑n**. If the remote has moved
+  on it becomes **Pull ↓n** instead, and on a branch with no upstream it becomes **Publish
+  branch**. Pull and Refresh are also icon buttons above the panel.
+- **The changed files** are listed in **Merge changes** (only when there is a conflict),
+  **Staged changes** and **Changes**. Each row has the file name, its directory, and VS Code's
+  letter at the right (`M`, `A`, `D`, `R`, `U` for untracked, `!` for a conflict) in VS Code's
+  colours. Hovering a row reveals its actions: unstage (−) on a staged row, and discard (↶) and
+  stage (+) on a changed one. Hovering a group header reveals the same for the whole group:
+  Unstage all, and Discard all / Stage all. There is no editor on this screen, so VS Code's
+  Open File / Open Changes have no counterpart. A discard asks first and says whether it deletes
+  (untracked) or reverts.
+- **A branch dropdown** sits underneath, with "+ Create new branch…" at the end. Choosing it turns
+  the dropdown into a name box that is checked as you type.
+
+Behind it:
+
+- **A new `discard` operation** (`sc_files::OP_DISCARD`, `GitRepo::discard`). It throws away
+  *unstaged* changes: an edited or deleted file goes back to the index (`git checkout`) and an
+  untracked file is deleted (`git clean -f`). Staged work is left alone. Because it cannot be
+  undone, it is narrower than stage/unstage in three ways. Its `paths` are required, so there is
+  no "empty means everything". Each path must be one `status` lists with an unstaged change,
+  and a clean, staged-only or conflicted path is refused by name. The paths are passed with
+  `--literal-pathspecs`, so a file called `*.md` discards only itself.
+- **The status payload gains `upstream`** (whether the branch has one) **and `can_clone`** (no
+  clone, and the directory is missing or empty).
+- **How the form chooses the panel.** It is chosen by what the store's automatic status
+  operation *answers*: a payload `parseScmStatus` recognises. The form never checks which backend
+  it is looking at. `FileStoreForm.tsx` still never names git, and a plugin backend that returns
+  the same payload gets the same panel. Any operation the panel does not draw is still a generic
+  button.
+- Tests:
+  - `discard_reverts_edits_deletes_untracked_files_and_keeps_the_index` and
+    `a_non_empty_directory_is_not_offered_a_clone`, against a real repository in `sc-files`.
+  - `ui/admin/src/sourceControl.test.ts` covers groups and letters, Commit → Push / Pull /
+    Publish, the smart-commit input, the discard confirmation, and branch-name checks.
+  - `git_store_api.rs`'s pinned operation list now includes `discard`.
+
 ## Coding agents are told the JavaScript code-body API instead of guessing it
 
 An external coding agent on the MCP server, asked to update a row from a trigger, wrote

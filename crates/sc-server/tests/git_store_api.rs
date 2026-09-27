@@ -293,6 +293,7 @@ async fn a_git_store_is_cloned_on_save_and_serves_the_repository() -> sc_error::
             "push",
             "stage",
             "unstage",
+            "discard",
             "commit",
             "checkout"
         ]

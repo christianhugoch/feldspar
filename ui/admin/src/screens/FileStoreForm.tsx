@@ -24,6 +24,13 @@
 //   - `instance` runs against a saved store. `automatic` ones run when the
 //     screen opens, for the operation whose whole job is to report state.
 //
+// One step past buttons: when an automatic operation's `data` is a
+// source-control status (`parseScmStatus`), the store is a working copy and its
+// operations are drawn as a VS Code-style Source Control panel instead of a
+// column of forms (`SourceControl.tsx`). That is still decided by what the
+// backend *answers* — a plugin backend returning the same payload gets the same
+// panel — so this file still never asks which backend it is looking at.
+//
 // Saving does not require the store to be reachable (§1.2): a well-formed
 // definition whose directory is missing is saved, and the failure to connect is
 // reported. That is deliberate — demanding a reachable directory would make a
@@ -56,6 +63,8 @@ import {
   type FieldSpec,
 } from "../settings";
 import { T, useT } from "../i18n";
+import { isScmOperation, parseScmStatus, type ScmStatus } from "../sourceControl";
+import { SourceControl } from "./SourceControl";
 
 type BackendInfo = ListFileStoreBackendsResponse[number];
 type OperationInfo = BackendInfo["operations"][number];
@@ -393,19 +402,28 @@ function InstanceOperations({
   operations: OperationInfo[];
 }) {
   const [reports, setReports] = useState<Record<string, string>>({});
+  // The working copy, when an automatic operation reported one — which is what
+  // turns the store's operations into the source-control panel.
+  const [scm, setScm] = useState<ScmStatus | null>(null);
   const [inputs, setInputs] = useState<OperationInputs>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [output, setOutput] = useState<string | null>(null);
 
   const automatic = operations.filter((op) => op.automatic);
-  const manual = operations.filter((op) => !op.automatic);
+  // The panel draws its own operations; whatever else the backend offers is
+  // still a generic button.
+  const manual = operations.filter(
+    (op) => !op.automatic && !(scm && isScmOperation(op.name)),
+  );
 
   const refresh = async () => {
     for (const op of automatic) {
       try {
         const res = await api.runFileStoreOperation(storeId, op.name, { input: {} });
         setReports((r) => ({ ...r, [op.name]: res.output }));
+        const status = parseScmStatus(res.data);
+        if (status) setScm(status);
       } catch (err) {
         setReports((r) => ({
           ...r,
@@ -446,21 +464,36 @@ function InstanceOperations({
 
   return (
     <Card className="mb-3">
-      <Card.Header><T text="Operations" /></Card.Header>
+      <Card.Header>
+        {scm ? <T text="Source control" /> : <T text="Operations" />}
+      </Card.Header>
       <Card.Body>
         {error && <Alert variant="danger">{error}</Alert>}
         <OperationOutput output={output} onClose={() => setOutput(null)} />
 
-        {automatic.map((op) =>
-          reports[op.name] ? (
-            <pre
-              key={op.name}
-              className="small text-break mb-3"
-              style={{ whiteSpace: "pre-wrap" }}
-            >
-              {reports[op.name]}
-            </pre>
-          ) : null,
+        {scm ? (
+          <div className="mb-3">
+            <SourceControl
+              storeId={storeId}
+              status={scm}
+              report={automatic.map((op) => reports[op.name] ?? "").join("\n")}
+              declared={operations.map((op) => op.name)}
+              onStatus={setScm}
+              onRefresh={refresh}
+            />
+          </div>
+        ) : (
+          automatic.map((op) =>
+            reports[op.name] ? (
+              <pre
+                key={op.name}
+                className="small text-break mb-3"
+                style={{ whiteSpace: "pre-wrap" }}
+              >
+                {reports[op.name]}
+              </pre>
+            ) : null,
+          )
         )}
 
         {manual.map((op) => (
@@ -494,9 +527,11 @@ function InstanceOperations({
             <IconFolder className="icon-2" />
             <T text="Change files" />
           </Button>
-          <Button variant="outline-secondary" onClick={() => void refresh()}>
-            <T text="Refresh" />
-          </Button>
+          {!scm && (
+            <Button variant="outline-secondary" onClick={() => void refresh()}>
+              <T text="Refresh" />
+            </Button>
+          )}
         </div>
       </Card.Body>
     </Card>

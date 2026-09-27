@@ -1649,3 +1649,79 @@ div.navbar-brand>a:hover {
 .grid-fields-move:disabled {
   opacity: 0.3;
 }
+/* A file store's source-control panel (`screens/SourceControl.tsx`), after
+ * VS Code's Source Control view: compact rows, the status letter at the right
+ * edge, and the row's actions revealed on hover or keyboard focus. */
+.scm-message {
+  resize: none;
+  overflow-y: auto;
+  max-height: 14rem;
+}
+
+.scm-primary {
+  flex-shrink: 0;
+}
+
+.scm-row {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-height: 1.75rem;
+  padding: 0 0.375rem;
+  border-radius: var(--tblr-border-radius-sm);
+}
+
+.scm-row:hover {
+  background: var(--tblr-bg-surface-secondary);
+}
+
+.scm-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scm-actions {
+  display: inline-flex;
+  visibility: hidden;
+}
+
+.scm-row:hover .scm-actions,
+.scm-row:focus-within .scm-actions {
+  visibility: visible;
+}
+
+.scm-letter {
+  width: 1rem;
+  text-align: center;
+  font-weight: 600;
+  font-family: var(--tblr-font-monospace);
+}
+
+.scm-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.625rem;
+  height: 1.625rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--tblr-border-radius-sm);
+  background: transparent;
+  color: var(--tblr-secondary);
+}
+
+.scm-icon-button:hover:not(:disabled) {
+  background: var(--tblr-bg-surface-tertiary, rgba(0, 0, 0, 0.06));
+  color: var(--tblr-body-color);
+}
+
+.scm-icon-button:disabled {
+  opacity: 0.5;
+}
+
+.scm-branch {
+  max-width: 24rem;
+}

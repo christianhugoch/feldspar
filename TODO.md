@@ -449,6 +449,24 @@ person chatting.
   it needs a way to say "this one is a file store", which is a change to the settings vocabulary
   rather than to a form.
 
+## Interjected — a VS Code-style source-control panel for git file stores
+
+Asked for directly: the git operations on a file store's edit screen were a column of generic
+forms (a paths textarea, a commit-message box, a branch box). They should look and behave like
+VS Code's Source Control view.
+
+- [x] G.1 `discard` operation (`GitRepo::discard`, `OP_DISCARD`): unstaged edits revert to the
+      index, untracked files are deleted, staged work is untouched. Paths are required, each
+      must be a listed unstaged change, and they are passed with `--literal-pathspecs`.
+- [x] G.2 The status payload carries `upstream` (for Publish branch) and `can_clone` (no clone,
+      and the directory is missing or empty).
+- [x] G.3 `ui/admin/src/screens/SourceControl.tsx` + `sourceControl.ts`: Clone only when
+      `can_clone`; a growing commit message box with Commit beside it, turning into Push
+      (Pull when behind, Publish branch without an upstream); Merge / Staged / Changes groups
+      with M/A/D/U letters and hover stage/unstage/discard, group-header stage/unstage/discard
+      all; a branch dropdown with "Create new branch…". Chosen by the status payload's shape,
+      not the backend name, so `FileStoreForm` still never names git.
+
 ## Carried past this milestone
 
 - From TODO-post-mvp-28: the rest of 3.6 — `de`, `es`, `zh-Hans` and `ar` for all three domains,
