@@ -133,7 +133,7 @@ pub async fn validate(catalog: &Catalog, config: &Attrs) -> Result<()> {
 /// Unlike `build_application`'s, which exists only to build, this setting is
 /// also how an agent is known as an application's builder, so an application
 /// with no build step is not refused here.
-async fn checked_application(
+pub(super) async fn checked_application(
     catalog: &Catalog,
     subdomain: &str,
 ) -> Result<(sc_app::Application, Option<sc_app::AppSource>)> {

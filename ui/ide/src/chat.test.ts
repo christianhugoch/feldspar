@@ -538,6 +538,14 @@ describe("one event, relayed", () => {
       "Looking at the application",
     );
     expect(changedPaths("view_app_todoapp_app", { path: "/tasks" })).toEqual([]);
+    expect(toolName("view_image_todoapp_app")).toBe("view_image");
+    expect(toolProgress("view_image_todoapp_app", { path: "public/logo.png" })).toBe(
+      "Looking at public/logo.png",
+    );
+    expect(toolProgress("view_image_todoapp_app", { url: "/img/hero.png" })).toBe(
+      "Looking at /img/hero.png",
+    );
+    expect(changedPaths("view_image_todoapp_app", { path: "public/logo.png" })).toEqual([]);
   });
 
   it("shows listing the application's assets, and writes nothing", () => {

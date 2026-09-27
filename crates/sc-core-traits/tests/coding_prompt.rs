@@ -277,9 +277,17 @@ async fn a_store_inside_someone_elses_repository_gets_no_git_log() -> Result<()>
 /// `/set-password` — a page it must keep, because nothing else in the project
 /// says a link from outside the application lands there. About 230 tokens.
 /// Measured: `act` 1 919 on Claude, 1 974 on GPT; `plan` 1 729 on both.
+///
+/// **2 100 since agents look at images and at the page while planning.**
+/// `view_image` (about 90 tokens, and only for a model with `vision`, which
+/// both of these have) shows the model a PNG from the code or a static
+/// directory; and `plan` is now offered `view_app`'s looking actions, so a
+/// planner sees the page it is planning a change to — about 200 tokens there,
+/// with the one prompt line saying to. Measured: `act` 2 017 on Claude, 2 072
+/// on GPT; `plan` 2 032 on both.
 #[tokio::test]
-async fn the_react_builder_agents_stable_prefix_is_at_most_2000_tokens() -> Result<()> {
-    const LIMIT: u64 = 2_000;
+async fn the_react_builder_agents_stable_prefix_is_at_most_2100_tokens() -> Result<()> {
+    const LIMIT: u64 = 2_100;
     let env = Env::new().await?;
     let app = Application::new(
         "Todo",

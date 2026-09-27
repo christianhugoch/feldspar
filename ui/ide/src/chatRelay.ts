@@ -372,6 +372,7 @@ const VERBS: { prefix: string; label: string; writes?: true }[] = [
 /** The coding trait's tools that are not a verb over a path. */
 const OTHER_SCOPED = [
   "view_app_",
+  "view_image_",
   "check_",
   "shell_",
   "process_",
@@ -404,6 +405,10 @@ export function toolProgress(tool: string, args: unknown): string {
   // Looking at the application: where, when the call says (TODO §7b).
   if (tool.startsWith("view_app_")) {
     return `Looking at ${firstString(args, ["path"]) ?? "the application"}`;
+  }
+  // Looking at an image: a path in this scope, or a URL the application serves.
+  if (tool.startsWith("view_image_")) {
+    return `Looking at ${firstString(args, ["path", "url"]) ?? "an image"}`;
   }
   if (tool.startsWith("check_")) return "Running the checks";
   if (tool.startsWith("shell_")) {

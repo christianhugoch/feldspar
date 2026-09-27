@@ -620,12 +620,13 @@ fn build(
 
     let mut query = CustomQuery::new(name, method, path, code);
     query.language = match optional_string(args, ARG_LANGUAGE)? {
-        Some(raw) => serde_json::from_value(Json::String(raw.trim().to_lowercase()))
-            .map_err(|_| {
+        Some(raw) => {
+            serde_json::from_value(Json::String(raw.trim().to_lowercase())).map_err(|_| {
                 Error::invalid(format!(
                     "`{ARG_LANGUAGE}` should be `sql`, `javascript` or `python`, got `{raw}`"
                 ))
-            })?,
+            })?
+        }
         None => existing.map(|q| q.language).unwrap_or_default(),
     };
     query.description = match args.contains_key(ARG_DESCRIPTION) {

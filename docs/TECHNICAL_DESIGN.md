@@ -3453,7 +3453,9 @@ scope, so what it changed enters the change ledger and the model's reads of it g
 - **One trait, one scope, fifteen tools, and the grants decide which are declared.** The set is
   `read_file`, `find_files`, `search_files`, `repo_map`, `save_plan`, `implement_feature`,
   `explore`, `write_file`, `edit_file`, `apply_patch`, `run_script`, `check`, `view_app`, `shell`
-  and `process`, each suffixed with the scope's slug. Which of them a run is *offered* is the
+  and `process`, each suffixed with the scope's slug (and since then `list_assets` and
+  `view_image`, which depend on the `application` setting and the model's `vision` rather than
+  on a grant). Which of them a run is *offered* is the
   mode (§11.2) and the five checkboxes — `may_edit`, `may_run_scripts`, `may_check`,
   `may_view_app`, `may_use_shell` — and a withheld tool is never declared to the model. Since the
   longest derived name is `implement_feature_<slug>`, `validate_config` checks **that** name
@@ -3517,7 +3519,7 @@ scope, so what it changed enters the change ledger and the model's reads of it g
   `<workflow>`/`<rules>`/`<edit_format>` blocks. The scope is named **once**, in the prompt,
   rather than in fifteen tool descriptions. The size test (8.3) is the reason several of these
   texts are as short as they are: the React builder's stable prefix plus tool definitions is
-  ≤ 2 000 estimated tokens in both `act` and `plan`, and it took cutting every tool description
+  ≤ 2 100 estimated tokens in both `act` and `plan`, and it took cutting every tool description
   and dropping `SHARED_PROMPT`'s workflow to get there. The budget was 1 500 and `act` measured
   1 496 — spent to the last token — until `list_assets` made the set ten tools
   (TODO "Static directories" §6); a tenth tool costs about a hundred, so the number went up
@@ -3526,8 +3528,10 @@ scope, so what it changed enters the change ledger and the model's reads of it g
   halved to 676 characters first, so the ~150 it costs is the tool and not its prose. It went
   to 2 000 with invitations and forgotten passwords: the prompt names the `/set-password` page
   that emailed links open, which nothing else in the project tells the builder to keep (~230
-  tokens; `act` 1 974 on GPT). It is still a **test**, and the next addition has the same
-  argument to make.
+  tokens; `act` 1 974 on GPT). It went to 2 100 when agents learnt to look: `view_image` for a
+  model with `vision` (~90 tokens), and `view_app`'s looking actions offered in `plan` so a
+  planner sees the page it is planning a change to (~200 tokens there; `act` 2 072 on GPT,
+  `plan` 2 032). It is still a **test**, and the next addition has the same argument to make.
 - **`planned` is a workflow setting, not a second trait.** `workflow = planned` starts the run in
   `plan` mode (the new `AgentTrait::starting_mode` hook, read by `Runner::new`), where the tools
   are the read-only four plus `save_plan`, `implement_feature` and `explore`. The plan — an
@@ -3553,6 +3557,24 @@ scope, so what it changed enters the change ledger and the model's reads of it g
   evaluator, so a run driven from a context that has neither says so instead of finding another
   way to open a browser. `TraitCheck` gained `host: HostCapabilities` for the same reason —
   `validate_config` refuses `may_view_app` where no browser was detected, on save and on load.
+  **A run that has built nothing looks at the live build**: its first `view_app` call mounts the
+  run's preview from the application's output directory as the last build left it
+  (`sc_app::app_output_dir`, through the same `AppPreviewer::mount_preview` a green `check`
+  calls), and the result says so; a later green `check` re-mounts that preview with the run's
+  own build. So the agent can screenshot the page it was asked about before touching it, and
+  `plan` is offered the tool too — `goto`, `wait_for`, `snapshot` and `screenshot` only, since
+  `click`, `fill` and `press` change what a plan is written from.
+- **`view_image` shows a seeing model an image file.** `read_file` refuses binary, rightly;
+  `view_image_<slug>` is offered wherever reading is (every mode, no grant) to a model with
+  `vision`, and takes a `path` in the scope or a `url` one of the application's static
+  directories serves — the URL `list_assets` gave, resolved by `static_dir_for` and
+  `StaticDir::resolve` exactly as the router does, refused wherever the router would 404, and
+  read through `check_access` as the caller. PNG, JPEG, GIF and WebP go as they are when they
+  fit 1 568 px and 1.5 MB (the screenshot cap); a larger one is scaled to fit and re-encoded —
+  PNG where a pixel is transparent, JPEG otherwise — with the `image` crate the tree already
+  had through deno. An SVG is text and is refused toward `read_file`. An old result elides to
+  `[elided image <name>]`, and the run's image cap and screenshot-first compaction apply to it
+  as to a screenshot.
 
 **The schema, the triggers, and an application's own SQL endpoints.** `admin_copilot` is the
 first **app-building** trait: it describes and edits the catalog itself, the trigger set over it,

@@ -27,8 +27,13 @@
 //! can disagree with itself.
 //!
 //! **Looking at the application is a fourth** ([`CFG_MAY_VIEW_APP`]): `view_app`
-//! opens the run's preview of the application — mounted by a green `check` — in
-//! the server's headless browser, as the person chatting ([`view_app`]).
+//! opens the run's preview of the application — mounted by a green `check`, or
+//! the live build before there is one — in the server's headless browser, as
+//! the person chatting ([`view_app`]).
+//!
+//! **Looking at an image is not a grant**: `view_image` ([`view_image`]) shows a
+//! model that has `vision` a PNG, JPEG, GIF or WebP from the scope or from the
+//! application's static directories, and is offered wherever `read_file` is.
 //!
 //! **The shell is the last checkbox** ([`CFG_MAY_USE_SHELL`]), because it is all
 //! the others at once: `shell` and `process` ([`shell`], [`process`]), offered
@@ -88,6 +93,7 @@ mod shell;
 mod snapshot;
 mod state;
 mod view_app;
+mod view_image;
 mod write;
 
 use sc_agent::{
@@ -143,6 +149,7 @@ pub use view_app::{
     CFG_VIEW_APP_TIMEOUT, CFG_VIEW_APP_USER, DEFAULT_VIEW_APP_TIMEOUT,
     tool_name as view_app_tool_name,
 };
+pub use view_image::tool_name as view_image_tool_name;
 pub use write::tool_name as write_file_tool_name;
 
 /// May create and change files: adds `write_file` and the edit tool. Off by
@@ -212,6 +219,7 @@ pub fn tool_names(scope: &FileScope) -> Vec<String> {
         search::tool_name(scope),
         repo_map::tool_name(scope),
         assets::tool_name(scope),
+        view_image::tool_name(scope),
         plan::tool_name(scope),
         feature::tool_name(scope),
         explore::tool_name(scope),
@@ -414,12 +422,26 @@ impl AgentTrait for Coding {
         if assets::offered(config) {
             tools.push(assets::spec(&scope, config));
         }
+        // Looking at an image reads it, so it goes where reading goes — but only
+        // to a model that can see one.
+        if cx.capabilities.vision {
+            tools.push(view_image::spec(&scope, config));
+        }
         match cx.mode {
             RunMode::Explore => return tools,
             RunMode::Plan => {
                 tools.push(plan::spec(&scope));
                 tools.push(feature::spec(&scope));
                 tools.push(explore::spec(&scope));
+                // Looking only: a plan is written from what the page is.
+                if may(config, CFG_MAY_VIEW_APP) {
+                    tools.push(view_app::spec(
+                        &scope,
+                        config,
+                        cx.capabilities.vision,
+                        RunMode::Plan,
+                    ));
+                }
                 return tools;
             }
             RunMode::Act => tools.push(explore::spec(&scope)),
@@ -442,7 +464,12 @@ impl AgentTrait for Coding {
             tools.push(check::spec(&scope));
         }
         if may(config, CFG_MAY_VIEW_APP) {
-            tools.push(view_app::spec(&scope, config, cx.capabilities.vision));
+            tools.push(view_app::spec(
+                &scope,
+                config,
+                cx.capabilities.vision,
+                RunMode::Act,
+            ));
         }
         if may(config, CFG_MAY_USE_SHELL) && cx.caller.is_some_and(is_admin) {
             tools.push(shell::spec(&scope, config));
@@ -467,6 +494,9 @@ impl AgentTrait for Coding {
                 repo_map::call(&scope, config, args, ctx).await
             }
             _ if tool == assets::tool_name(&scope) => assets::call(config, args, ctx).await,
+            _ if tool == view_image::tool_name(&scope) => {
+                view_image::call(&scope, config, args, ctx).await
+            }
             _ if tool == plan::tool_name(&scope) => {
                 permit_mode(&[RunMode::Plan], "write a plan", ctx)?;
                 plan::call(args, ctx).await
@@ -504,7 +534,14 @@ impl AgentTrait for Coding {
                 check::call(&scope, config, args, ctx).await
             }
             _ if tool == view_app::tool_name(&scope) => {
-                permit(config, CFG_MAY_VIEW_APP, "look at the application", ctx)?;
+                // `plan` too, where the tool itself refuses the actions that
+                // change the page.
+                permit_mode(
+                    &[RunMode::Plan, RunMode::Act],
+                    "look at the application",
+                    ctx,
+                )?;
+                permit_grant(config, CFG_MAY_VIEW_APP, "look at the application", ctx)?;
                 view_app::call(config, args, ctx).await
             }
             _ if tool == shell::tool_name(&scope) => {
@@ -560,6 +597,7 @@ impl AgentTrait for Coding {
         let scope = scope_as_written(config);
         match old.call.name.as_str() {
             name if name == view_app::tool_name(&scope) => Some(view_app::elide(old)),
+            name if name == view_image::tool_name(&scope) => Some(view_image::elide(old)),
             // An old review keeps its verdict; the latest checklist is later.
             name if name == feature::tool_name(&scope) => Some(format!(
                 "[elided {}]",
@@ -637,6 +675,11 @@ fn permit(config: &Attrs, key: &str, what: &str, ctx: &TraitContext<'_>) -> Resu
             ctx.agent, ctx.mode
         )));
     }
+    permit_grant(config, key, what, ctx)
+}
+
+/// Refuse a tool whose grant is off, naming the checkbox.
+fn permit_grant(config: &Attrs, key: &str, what: &str, ctx: &TraitContext<'_>) -> Result<()> {
     if may(config, key) {
         return Ok(());
     }
@@ -682,6 +725,7 @@ mod tests {
                 "search_files_app_src_web",
                 "repo_map_app_src_web",
                 "list_assets_app_src_web",
+                "view_image_app_src_web",
                 "save_plan_app_src_web",
                 "implement_feature_app_src_web",
                 "explore_app_src_web",

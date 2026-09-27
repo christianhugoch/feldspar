@@ -8491,6 +8491,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "htmd",
+ "image",
  "libc",
  "lru 0.12.5",
  "markup5ever_rcdom",

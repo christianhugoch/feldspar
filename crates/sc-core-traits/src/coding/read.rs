@@ -10,7 +10,8 @@
 //!   page at [`MAX_READ_CHARS`], so a minified bundle is one page, not the
 //!   conversation.
 //! - **Text only.** A file with a NUL byte or invalid UTF-8 is refused with its
-//!   size. The model cannot act on a PNG, and base64 of one costs context.
+//!   size. Base64 of a PNG costs context and says nothing; a model that can see
+//!   one is pointed at `view_image`, which shows it the picture.
 //! - **Plain text, not JSON.** Escaped newlines and quotes cost tokens and are
 //!   harder for the model to read than the file itself.
 //! - **The read is recorded.** The file's content hash goes into the run's
@@ -95,8 +96,16 @@ pub async fn call(
     let bytes = store.read(&path).await?;
     let text = as_text(&bytes).ok_or_else(|| {
         Error::invalid(format!(
-            "`{rel}` is a binary file ({} bytes) and cannot be read as text",
-            bytes.len()
+            "`{rel}` is a binary file ({} bytes) and cannot be read as text{}",
+            bytes.len(),
+            match image::guess_format(&bytes) {
+                // Where the model can see, the tool that shows it one is there.
+                Ok(_) => format!(
+                    "; an image is looked at with `{}`, where it is offered",
+                    super::view_image::tool_name(scope)
+                ),
+                Err(_) => String::new(),
+            }
         ))
     })?;
 

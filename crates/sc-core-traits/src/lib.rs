@@ -183,7 +183,8 @@ pub mod tool_names {
         read_file_tool_name as read_file, repo_map_tool_name as repo_map,
         run_script_tool_name as run_project_script, save_plan_tool_name as save_plan,
         search_files_tool_name as search_files, shell_tool_name as shell,
-        view_app_tool_name as view_app, write_file_tool_name as write_file,
+        view_app_tool_name as view_app, view_image_tool_name as view_image,
+        write_file_tool_name as write_file,
     };
     pub use crate::delete_rows::tool_name as delete_rows;
     pub use crate::http::tool_name as http;
@@ -422,6 +423,7 @@ mod tests {
             tool_names::search_files(&scope),
             tool_names::repo_map(&scope),
             tool_names::list_assets(&scope),
+            tool_names::view_image(&scope),
             tool_names::run_project_script(&scope),
             tool_names::check(&scope),
             tool_names::view_app(&scope),
@@ -449,6 +451,7 @@ mod tests {
                 "search_files_app_src_web",
                 "repo_map_app_src_web",
                 "list_assets_app_src_web",
+                "view_image_app_src_web",
                 "run_script_app_src_web",
                 "check_app_src_web",
                 "view_app_app_src_web",
@@ -462,7 +465,7 @@ mod tests {
         );
         let unique: std::collections::BTreeSet<&String> = names.iter().collect();
         assert_eq!(unique.len(), names.len());
-        // The sixteen file names above are `coding`'s whole set, which is what the
+        // The seventeen file names above are `coding`'s whole set, which is what the
         // collision check compares when the trait is enabled twice: two
         // instances over one scope produce these same names and are refused.
         assert_eq!(
@@ -473,6 +476,7 @@ mod tests {
                 tool_names::search_files(&scope),
                 tool_names::repo_map(&scope),
                 tool_names::list_assets(&scope),
+                tool_names::view_image(&scope),
                 tool_names::save_plan(&scope),
                 tool_names::implement_feature(&scope),
                 tool_names::explore(&scope),

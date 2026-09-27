@@ -375,6 +375,28 @@ A JavaScript or Python body reads the request as `body` and `query`.
       when the server can run it), a code editor for a JavaScript or Python body.
 - [x] Q.3 Tests, design §13.4, `CHANGELOG`.
 
+## Interjected — agents look at screenshots and image files
+
+Asked for directly: a coding agent on a visual model should be able to take a screenshot and see
+it, and to look at an image file in the code store or in a store the application serves
+statically. `view_app` already had `screenshot` for a `vision` model, but only after a green
+`check` in the same run and only in `act`, so a builder, which starts in `plan`, could not see
+the page it was asked about. No tool showed a model an image file.
+
+- [x] I.1 `view_app` with no preview in the run mounts one from the **live build**
+      (`sc_app::app_output_dir`, through `AppPreviewer::mount_preview`) and says so in the result;
+      a later green `check` re-mounts it with the run's own build. Offered in `plan` with the
+      looking actions only (`goto`, `wait_for`, `snapshot`, `screenshot`); the plan prompt says to
+      look before planning a visible change.
+- [x] I.2 `coding/view_image.rs`: `view_image_<slug>`, for a model with `vision`, in every mode.
+      `path` in the scope, or `url` in one of the application's static directories, resolved and
+      access-checked as the router does. PNG/JPEG/GIF/WebP; anything over 1 568 px or 1.5 MB is
+      scaled and re-encoded (`image` crate, already in the tree). `read_file` on an image names it.
+- [x] I.3 Tests: `coding_images.rs` (both names, 404-shaped refusals, a closed store, vision
+      gating, `plan`'s look-only `view_app`), unit tests in `view_image.rs`, `view_app.rs`'s
+      live-build run against Chromium, the IDE relay's label. Stable-prefix budget 2 000 → 2 100
+      (measured `act` 2 072, `plan` 2 032). Design §11.3, the agents tutorial, `CHANGELOG`.
+
 ## Explicitly OUT of scope for this milestone
 
 - **Uploading or writing assets from the agent.** §6. Reading is what the use case needs, and a

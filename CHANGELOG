@@ -2,6 +2,57 @@
 
 Changes in reverse chronological order.
 
+## Agents see screenshots and image files
+
+A coding agent on a model with vision can now look at the application before it changes anything,
+and can look at image files. Previously, `view_app`'s `screenshot` worked only after a green
+`check` in the same run, and only in `act` mode. A builder agent starts in `plan`, so it could not
+see the page it was asked about. No tool showed a model an image file: `read_file` refuses binary
+files.
+
+- **`view_app` falls back to the live build** (`sc-core-traits/src/coding/view_app.rs`). If the
+  run has no preview when `view_app` is first called, a preview is mounted from what the
+  application's last build left on disk (`sc_app::app_output_dir`, the path `load_app_bundle`
+  reads), through the same `AppPreviewer::mount_preview` that `check` calls. The result carries a
+  line saying this is the live build. A later green `check` re-mounts the preview with the run's
+  own build. An application that has never been built still gets "run the check tool".
+- **`view_app` in `plan` mode**, limited to the actions that only look: `goto`, `wait_for`,
+  `snapshot`, and `screenshot` for a vision model. `click`, `fill` and `press` are neither declared
+  nor accepted there. The plan prompt now says to look at the page before planning a visible
+  change.
+- **`view_image_<slug>`** (`sc-core-traits/src/coding/view_image.rs`), offered in every mode to a
+  model with `vision`, and not otherwise. It takes one of:
+  - `path`: a file in the coding scope (`public/logo.png`), opened through `open_at` like
+    `read_file`.
+  - `url`: an image the application serves from a static directory (`/img/hero.png`, as
+    `list_assets` gives it; an absolute URL or one with a query string also works). This is
+    resolved by `static_dir_for` and `StaticDir::resolve` as the router does. It is refused with a
+    pointer to `list_assets` wherever the router would 404, and read through `check_access` as the
+    caller.
+
+  PNG, JPEG, GIF and WebP are sent unchanged when they fit in 1 568 px and 1.5 MB. A larger image
+  is scaled to fit and re-encoded: as PNG if any pixel is transparent, otherwise as JPEG. Files
+  over 25 MB, and images over 16 384 px on either side, are refused. An SVG is refused with a
+  pointer to `read_file`. The result line gives the dimensions, the format, and any scaling. An old
+  result elides to `[elided image /img/hero.png]`.
+- **`read_file` on an image** now names `view_image` in its refusal.
+- **The `image` crate** (0.25, png/jpeg/gif/webp only) is a workspace dependency. It was already
+  in the lockfile through deno's canvas.
+- **The IDE's chat relay** shows `view_image_…` as "Looking at <path or url>".
+- **The stable-prefix budget** for the React builder went from 2 000 to 2 100 estimated tokens.
+  Measured: `act` 2 017 on Claude and 2 072 on GPT, `plan` 2 032 on both.
+- **Tests:**
+  - `sc-core-traits/tests/coding_images.rs`: a code image sent as is; a served image scaled; an
+    absolute URL; `..`, `%2e%2e` and unmounted URLs refused; both-or-neither arguments; a text
+    file; `read_file`'s pointer; a closed store; vision gating in every mode; `plan`'s look-only
+    `view_app` and its prompt line.
+  - Unit tests in `view_image.rs`: pass-through, scaling, transparency, refusals, flattening,
+    elision, the spec.
+  - `sc-server/tests/view_app.rs`: a new test against real Chromium, where a `plan` run with no
+    build looks at, and screenshots, the live build. It is refused a click, then a green `check`
+    shows it the run's build.
+  - The IDE relay's vitest.
+
 ## Agents compact later and run longer
 
 The built-in coding agent compacted a modest task at about 27k tokens and stopped after 20

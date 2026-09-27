@@ -81,7 +81,7 @@ pub fn spec(scope: &FileScope, config: &Attrs) -> ToolSpec {
 
 /// One static directory as a scope over the store it lives in, so the walk, the
 /// floor and the access check are the ones every other file tool uses.
-fn dir_scope(dir: &StaticDir) -> FileScope {
+pub(super) fn dir_scope(dir: &StaticDir) -> FileScope {
     FileScope {
         store: dir.store.0.clone(),
         root: dir
@@ -94,7 +94,7 @@ fn dir_scope(dir: &StaticDir) -> FileScope {
 }
 
 /// The application the `coding` trait names, by subdomain.
-async fn application(catalog: &Catalog, config: &Attrs) -> Result<Application> {
+pub(super) async fn application(catalog: &Catalog, config: &Attrs) -> Result<Application> {
     let subdomain = configured_application(config).ok_or_else(|| {
         Error::invalid(format!(
             "list_assets needs the `coding` trait's `{}` setting",

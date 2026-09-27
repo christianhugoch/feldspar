@@ -538,6 +538,11 @@ reqwest = { version = "0.13", default-features = false, features = [
 htmd = "0.5"
 markup5ever_rcdom = "0.38"
 
+# `coding`'s `view_image`: what an image file is, how big, and — for one too
+# large to send a model as it is — a scaled copy. Already in the tree through
+# deno's canvas, pinned to its version and to the four formats a model reads.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+
 # --- Mail transport (design §18.2) -------------------------------------------
 #
 # The SMTP client behind `sc-email`'s own `Mailer` seam. `lettre` is the crate

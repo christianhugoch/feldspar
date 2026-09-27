@@ -29,7 +29,7 @@ use crate::files::{FileScope, scope_as_written};
 pub fn prompt(cx: &ToolsContext<'_>, config: &Attrs) -> String {
     let scope = scope_as_written(config);
     let body = match cx.mode {
-        RunMode::Plan => plan(&scope),
+        RunMode::Plan => plan(config, &scope),
         RunMode::Explore => explore(&scope),
         RunMode::Act => act(cx, config, &scope),
     };
@@ -128,11 +128,18 @@ fn edit_rules(scope: &FileScope, format: EditFormat) -> String {
     format!("<edit_format>\n{body}\n</edit_format>")
 }
 
-fn plan(scope: &FileScope) -> String {
+fn plan(config: &Attrs, scope: &FileScope) -> String {
     let save = plan::tool_name(scope);
+    let look = match may(config, CFG_MAY_VIEW_APP) {
+        true => format!(
+            " For a visible change, look at the page first with `{}`.",
+            view_app::tool_name(scope)
+        ),
+        false => String::new(),
+    };
     let steps = [
         format!(
-            "{} For a wide question, ask `{}`.",
+            "{} For a wide question, ask `{}`.{look}",
             locate(scope),
             explore::tool_name(scope)
         ),

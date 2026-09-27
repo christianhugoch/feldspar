@@ -380,10 +380,16 @@ pub async fn remove_dependencies(spec: &BuildSpec, root: &Path) -> Result<bool> 
 /// so is the right answer — a reload that quietly started running `npm install`
 /// would be a very slow surprise.
 pub fn load_app_bundle(cat: &Catalog, source: &AppSource) -> Result<AssetBundle> {
+    load_output_dir(&app_output_dir(cat, source)?)
+}
+
+/// Where an application's build writes its bundle, on disk — whether or not a
+/// build has written it yet. What [`load_app_bundle`] reads, and what a coding
+/// run's `view_app` previews when the run has built nothing of its own.
+pub fn app_output_dir(cat: &Catalog, source: &AppSource) -> Result<PathBuf> {
     let store = cat.require_file_store(&source.store.0)?;
     let root = store_root(&store, source)?;
-    let output_dir = resolve_under(&root, &source.build.output_dir)?;
-    load_output_dir(&output_dir)
+    resolve_under(&root, &source.build.output_dir)
 }
 
 /// Load the bundle in `output_dir`, refusing a missing or empty one.
