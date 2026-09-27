@@ -327,6 +327,20 @@ fn kind_of(value: &Json) -> &'static str {
 /// Returns `None` for anything that is not a permission denial, so the caller
 /// leaves every other failure exactly as the module worded it.
 pub fn explain_denial(module: &str, message: &str) -> Option<String> {
+    // A net denial at **DNS lookup** time, which Deno's `node:dns` reports the
+    // way node reports a failed `getaddrinfo`: `getaddrinfo EPERM <host>`. That
+    // is the first socket call an HTTP client makes, so for anything built on
+    // `http`/`https` (axios, node-fetch) it is the form a missing grant arrives
+    // in. It carries no port, and the lookup is checked against the port the
+    // request is for, so the remedy is the host alone, which allows every port.
+    if let Some((_, rest)) = message.split_once("getaddrinfo EPERM ") {
+        let host = rest.split_whitespace().next()?;
+        return Some(format!(
+            "the module `{module}` was denied net access to \"{host}\": add {host} to its \
+             network allow-list in Settings → Modules → {module} → Permissions (the host \
+             alone, with no port, allows every port)"
+        ));
+    }
     // `Requires <access>, run again with the --allow-<name> flag`, or the
     // `deno compile` variant of the same sentence.
     let (before, after) = message.split_once(", run again with the --allow-")?;
@@ -496,6 +510,30 @@ mod tests {
         )
         .expect("a run denial should be recognised");
         assert!(sentence.contains("never grants"), "{sentence}");
+    }
+
+    #[test]
+    fn a_denied_dns_lookup_is_a_net_denial_naming_the_host() {
+        // What `@saltcorn/nominatim-geocode` (axios over `node:http`) throws
+        // with no grant, or with a grant for `:443` only when the first request
+        // is `http://`: Deno's `node:dns` words the denial as node would.
+        let sentence = explain_denial(
+            "@saltcorn/nominatim-geocode",
+            "configuration error: getaddrinfo EPERM nominatim.openstreetmap.org",
+        )
+        .expect("a denied lookup should be recognised");
+        assert!(
+            sentence.contains("@saltcorn/nominatim-geocode"),
+            "{sentence}"
+        );
+        assert!(
+            sentence.contains("add nominatim.openstreetmap.org to"),
+            "{sentence}"
+        );
+        assert!(sentence.contains("network allow-list"), "{sentence}");
+        assert!(!sentence.contains("EPERM"), "{sentence}");
+        // A lookup that failed for any other reason is the module's to word.
+        assert!(explain_denial("m", "getaddrinfo ENOTFOUND nowhere.invalid").is_none());
     }
 
     #[test]

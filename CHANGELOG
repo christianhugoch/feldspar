@@ -2,6 +2,25 @@
 
 Changes in reverse chronological order.
 
+## A module denied a DNS lookup is told which host to grant
+
+A module that makes HTTP requests through `node:http`, such as `@saltcorn/nominatim-geocode` over
+axios, reported a missing net grant as `getaddrinfo EPERM nominatim.openstreetmap.org`. Deno's
+`node:dns` reports a denied lookup in Node's words, not with the `Requires net access to …`
+sentence that `explain_denial` rewrites, so the admin got no hint about what to change.
+
+- **`explain_denial`** (`sc-module/src/permissions.rs`) now also recognises
+  `getaddrinfo EPERM <host>` and returns the usual sentence: the module was denied net access to
+  the host, so add the host in Settings → Modules → *module* → Permissions.
+- **The port matters.** The lookup is checked against the port of the request. Nominatim-geocode
+  first requests `http://` (port 80) and is redirected to `https://`, so a grant of
+  `nominatim.openstreetmap.org:443` alone is still denied. The sentence therefore suggests the
+  host with no port. This was checked against the real module on a Deno worker:
+  - no grant, or `:443` only: denied, with the new sentence;
+  - the bare host, or both `:80` and `:443`: `"51.5160587"` for `E1 7QX`.
+- **Test:** `a_denied_dns_lookup_is_a_net_denial_naming_the_host`. It also checks that
+  `getaddrinfo ENOTFOUND` is left as the module worded it.
+
 ## Module functions are in a code body's scope by their bare name, as in Saltcorn 1
 
 A `run_js_code` body that called a module function as v1 does, with
