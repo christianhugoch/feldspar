@@ -36,6 +36,9 @@ use crate::code_body::{self, CFG_CODE, Hosts};
 /// loaded on — which is where the `markdown-it`, the geocoder and the module's
 /// configuration are. Everything is awaited, including the ones that are
 /// synchronous in v1, and `modfn` is bound only where this server has modules.
+/// As in v1, each function is also in scope by its bare name
+/// (`await geocode_lat({ q: row.postcode })`), unless something already in scope
+/// has that name.
 ///
 /// ```js
 /// const overdue = await db.invoices

@@ -99,7 +99,7 @@
 //! the process, and a body that fills even the callback's grace is stopped the
 //! way any other runaway is.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -5258,6 +5258,9 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
             names.push(name);
         }
     }
+    if wants_module_fns {
+        consts.push_str(&bare_module_fn_consts(call, &names));
+    }
     let params = names.join(", ");
     let code = &call.code;
     Ok(RunScripts {
@@ -5278,6 +5281,100 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
         wants_console,
     })
 }
+
+/// Every module function **by its bare name**, as Saltcorn 1 binds it: v1
+/// spreads `getState().eval_context` into a code action's sandbox, so a v1 body
+/// calls `await geocode_lat(q)` with no prefix, and GOALS asks that JavaScript
+/// stay v1-compatible. `modfn.geocode_lat` remains the spelling that is always
+/// there.
+///
+/// Each is `const name = modfn["name"];`, so it is exactly the short form: a
+/// name two modules supply binds the thrower that names both, and a call is
+/// awaited like any other. Everything else in scope comes first — a binding
+/// (`row`, `user`), a host surface, `require`, a shadowed node global — so a
+/// module cannot change what an existing name means in a body. A name that is
+/// not a plain identifier, or is a reserved word, stays reachable only through
+/// `modfn`, since a `const` of it would be a body that does not compile. The
+/// body's own code runs in a nested function, so it may still declare a name
+/// of its own that shadows one of these.
+#[cfg(feature = "eval")]
+fn bare_module_fn_consts(call: &CodeRun, params: &[&str]) -> String {
+    let mut seen = BTreeSet::new();
+    let mut out = String::new();
+    for f in &call.module_functions {
+        let name = f.name.as_str();
+        if !is_plain_ident(name)
+            || JS_RESERVED.contains(&name)
+            || name.starts_with("__")
+            || name == REQUIRE
+            || call.bindings.contains_key(name)
+            || params.contains(&name)
+            || !seen.insert(name)
+        {
+            continue;
+        }
+        // The name was checked as an identifier; the key is JSON-quoted anyway,
+        // as a binding's is.
+        let key = serde_json::Value::String(name.to_owned());
+        out.push_str(&format!("const {name} = {MODFN}[{key}];\n"));
+    }
+    out
+}
+
+/// The words a strict-mode `const` may not declare. A module function with one
+/// of these names is reached as `modfn.name`.
+#[cfg(feature = "eval")]
+const JS_RESERVED: &[&str] = &[
+    "arguments",
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "eval",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "implements",
+    "import",
+    "in",
+    "instanceof",
+    "interface",
+    "let",
+    "new",
+    "null",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "static",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "undefined",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield",
+];
 
 /// The module functions a run may call, as the array the guest's `modfn` closes
 /// over.
@@ -8817,6 +8914,64 @@ mod tests {
         assert_eq!(asked[0]["function"], json!("md_to_html"));
         assert_eq!(asked[0]["args"], json!(["hi"]));
         assert!(asked[0]["timeout_ms"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn a_module_function_is_in_scope_by_its_bare_name_as_in_saltcorn_1() {
+        // A v1 body: `await geocode_lat(q)` with no `modfn.` in front of it.
+        let mods = FakeModuleFns::new(&[
+            ("@saltcorn/nominatim-geocode", "geocode_lat"),
+            ("@acme/odd", "row"),
+            ("@acme/odd", "delete"),
+            ("@acme/odd", "own"),
+        ])
+        .answering(|plan| Ok(json!({ "from": plan["function"], "args": plan["args"] })));
+        let rt = CodeRuntime::new();
+        let call = CodeCall {
+            bindings: BTreeMap::from([("row".to_owned(), json!({ "postcode": "E1 7QX" }))]),
+            ..with_module_fns(
+                r#"const own = () => "the body's own";
+                   return {
+                     lat: await geocode_lat({ q: row.postcode }),
+                     row: row.postcode,
+                     own: own(),
+                     reserved: await modfn.delete(),
+                   };"#,
+                &*mods,
+            )
+        };
+        let out = rt.run(call).await.unwrap();
+        assert_eq!(
+            out["lat"],
+            json!({ "from": "geocode_lat", "args": [{ "q": "E1 7QX" }] })
+        );
+        // A binding outranks a module function of the same name, and so does
+        // the body's own declaration; a reserved word is reachable through
+        // `modfn` and does not stop the body compiling.
+        assert_eq!(out["row"], json!("E1 7QX"));
+        assert_eq!(out["own"], json!("the body's own"));
+        assert_eq!(out["reserved"]["from"], json!("delete"));
+    }
+
+    #[tokio::test]
+    async fn a_bare_name_two_modules_supply_names_both_modules() {
+        let mods = FakeModuleFns::new(&[
+            ("@saltcorn/nominatim-geocode", "geocode_lat"),
+            ("@saltcorn/other-geocode", "geocode_lat"),
+        ]);
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_module_fns(
+                r#"try { await geocode_lat("here"); } catch (e) { return e.message; }"#,
+                &*mods,
+            ))
+            .await
+            .unwrap();
+        let msg = out.as_str().unwrap();
+        assert!(
+            msg.contains("@saltcorn/other-geocode") && msg.contains("say which module"),
+            "{msg}"
+        );
     }
 
     #[tokio::test]

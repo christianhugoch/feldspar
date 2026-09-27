@@ -2,6 +2,30 @@
 
 Changes in reverse chronological order.
 
+## Module functions are in a code body's scope by their bare name, as in Saltcorn 1
+
+A `run_js_code` body that called a module function as v1 does, with
+`await geocode_lat(row.postcode)`, failed with `ReferenceError: geocode_lat is not defined`. Only
+`modfn.geocode_lat` was bound. v1 spreads every plugin function into a code action's sandbox, and
+GOALS asks that JavaScript stay v1-compatible.
+
+- **`build_run_scripts`** (`sc-expr/src/code.rs`) now adds `const name = modfn["name"];` for each
+  module function in the run, so a bare name is exactly the short form. A name two modules supply
+  throws naming both, as `modfn.name` does.
+- **What is already in scope wins.** A bare name is skipped when it is a binding (`row`, `user`,
+  …), a host surface (`db`, `fetch`, …), `require`, a shadowed node global, a reserved word or not
+  a plain identifier. The body's own code runs in a nested function, so it can still declare the
+  name itself. `modfn.name` always works.
+- **Checked against the real `@saltcorn/nominatim-geocode`** on a Deno worker with `net: *`:
+  `await geocode_lat({ q: row.postcode })` with `row.postcode = "E1 7QX"` returns `"51.5160587"`.
+  The module expects a **query object**, such as `{ q }` or `{ postalcode, country }`. A bare
+  string is spread into `?0=E&1=1&…` by the module's `Object.assign`, and Nominatim answers 400.
+  v1 does the same.
+- **Tests:** `a_module_function_is_in_scope_by_its_bare_name_as_in_saltcorn_1` (a binding and
+  the body's own `const` outrank a module function, and a reserved-word name is still reachable
+  through `modfn`) and `a_bare_name_two_modules_supply_names_both_modules`.
+- **Docs:** `tutorial-modules.md` Step 5 and the `run_js_code` doc comment.
+
 ## `TABLES_RENAME.sql` upgrades stored custom queries to `code`
 
 When a custom query's `sql` field was renamed `code` (see "custom queries can be in any
