@@ -2,6 +2,23 @@
 
 Changes in reverse chronological order.
 
+## `TABLES_RENAME.sql` upgrades stored custom queries to `code`
+
+When a custom query's `sql` field was renamed `code` (see "custom queries can be in any
+language"), queries already stored under the old name were left alone. An installation from
+before that change fails on every read of that application's API, including a React build:
+"the API's `queries` setting is not a list of custom queries: missing field `code`".
+`TABLES_RENAME.sql` now has a **section 5** (Postgres) that renames the key in
+`_fd_applications.apis[*].config.queries[*]` in place, and a **section 6** with the same change
+for a SQLite primary. The header's "What to run" points to both.
+
+- The upgrade keeps the order of the APIs and their queries, touches only rows that still hold
+  a `sql` key (so re-running it is a no-op), and skips a database with no `_fd_applications`.
+- **Tested by hand, with no automated test.** On a scratch Postgres database holding an old
+  `_sc_applications` row, the whole file ran twice, then once on an empty database. The SQLite
+  statement was run through Python's `sqlite3` (SQLite 3.46) against sample rows, including a
+  query that already had `code` and was left unchanged.
+
 ## Tool descriptions written out, and a larger prompt budget
 
 The `coding` tool descriptions had been cut down to fit the stable-prefix budget until some were

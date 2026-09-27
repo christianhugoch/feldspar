@@ -21,4 +21,6 @@ Standard working mode:
 
 ## Status
 
-The system is in prototype status. Do not add any code to handle backwards compatibility with previously created applications.
+The system is in prototype status. Do not add any code to handle backwards compatibility with 
+previously created applications. However, if the database needs to migrate, add SQL commands 
+(which should be idempotent) to TABLE_RENAME.sql so we can manually migrate a handful of running systems
