@@ -319,6 +319,21 @@ pub struct StreamProviderManifest {
 /// }
 /// ```
 ///
+/// A framework can also offer **build targets** beside the web bundle, as the
+/// bundled `react-native` module does for its APK:
+///
+/// ```js
+/// targets: {
+///   android: {
+///     label: "Android APK",
+///     command: "npm run build:android",
+///     artifact: "{{ project }}/android/app/build/outputs/apk/release/app-release.apk",
+///     env: { ANDROID_HOME: configuration.android_home },
+///     requires: [{ env: "ANDROID_HOME", directory: true, hint: "Set the Android SDK …" }],
+///   },
+/// },
+/// ```
+///
 /// **What crosses is the declaration**, and that is the whole design decision:
 /// every question the admin UI asks a framework — its settings, its default CSP,
 /// where its source is — is asked synchronously, on the path that renders a form
@@ -369,6 +384,12 @@ pub struct FrameworkManifest {
     /// has a project Saltcorn writes, or one the admin brought.
     #[serde(default)]
     pub scaffolds: bool,
+    /// The extra builds it offers beside the web bundle, such as an Android APK:
+    /// `{ android: { label, command, artifact, env, requires } }`. Each becomes a
+    /// button on the application, and the file it produces lands in the app's
+    /// file store. JSON for the reason `build` is.
+    #[serde(default)]
+    pub targets: Json,
 }
 
 /// An entity type the module exports and this version does not load.

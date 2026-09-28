@@ -19,8 +19,12 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import {
   buildApplication,
+  buildApplicationTarget,
   buildStatus,
+  resumeTargetBuilds,
   showAppOutcome,
+  targetBuilding,
+  targetNotReadyNotice,
   updateApplicationClient,
   useAppActions,
 } from "./appActions";
@@ -29,15 +33,18 @@ import {
   appNavLinks,
   builderAgentFor,
   linkActive,
+  linkKey,
   onApplicationsList,
   type AppNavLink,
 } from "./appNav";
 import { splitRoute } from "./builder";
 import type { ListAgentsResponse, ListApplicationsResponse } from "./client";
 import {
+  IconAlertTriangle,
   IconApps,
   IconBooks,
   IconCode,
+  IconDeviceMobile,
   IconFile,
   IconHammer,
   IconLanguage,
@@ -57,6 +64,7 @@ const LINK_ICONS: Record<AppNavLink["id"], ReactNode> = {
   "edit-code": <IconCode />,
   "update-client": <IconRefresh />,
   build: <IconHammer />,
+  target: <IconDeviceMobile />,
   chat: <IconMessagePlus />,
   views: <IconLayoutDashboard />,
   pages: <IconFile />,
@@ -131,6 +139,16 @@ export function ApplicationsNav({ route, folded }: { route: string; folded: bool
   }, [open]);
 
   const current = apps?.find((app) => app.id === currentId) ?? null;
+
+  // A target build still running on the server — started before a reload, or in
+  // another tab — is picked up when its application is the current one, so its
+  // button says it is building and its news arrives here. Keyed by the app and
+  // its targets rather than the object, which is refetched on every route.
+  const resumeKey = current ? `${current.id}:${current.targets.map((t) => t.name).join(",")}` : "";
+  useEffect(() => {
+    if (current) void resumeTargetBuilds(current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeKey]);
   const label = current
     ? current.name
     : apps && apps.length === 0
@@ -208,7 +226,7 @@ export function ApplicationsNav({ route, folded }: { route: string; folded: bool
       {current &&
         links.map((link) => (
           <AppLink
-            key={link.id}
+            key={linkKey(link)}
             link={link}
             app={current}
             active={linkActive(link, path)}
@@ -218,7 +236,9 @@ export function ApplicationsNav({ route, folded }: { route: string; folded: bool
                 ? buildStatus(actions, current.id) === "building"
                 : link.id === "update-client"
                   ? Boolean(actions.updating[current.id])
-                  : false
+                  : link.target
+                    ? targetBuilding(actions, current.id, link.target.name)
+                    : false
             }
           />
         ))}
@@ -241,16 +261,29 @@ function AppLink({
   folded: boolean;
   busy: boolean;
 }) {
-  const text = busy ? (link.id === "build" ? "Building…" : "Updating…") : link.label;
+  const { t } = useT();
+  const text = busy ? (link.id === "update-client" ? "Updating…" : "Building…") : link.label;
+  // A target this server cannot build yet: the button says so with a warning
+  // and its tooltip, and pressing it shows what is missing instead of building.
+  const missing = link.target?.readiness.missing ?? [];
   const content = (
     <>
       <span className="nav-link-icon d-md-none d-lg-inline-block">{LINK_ICONS[link.id]}</span>
       <span className="nav-link-title">{text}</span>
+      {missing.length > 0 && (
+        <span className="ms-auto text-warning" aria-label={t("setup needed")}>
+          <IconAlertTriangle />
+        </span>
+      )}
     </>
   );
-  const title = folded ? text : link.id === "update-client"
-    ? "Rewrite this application's generated client, hooks and schema from its current definition — no build"
-    : undefined;
+  const title = missing.length
+    ? missing.join("\n")
+    : folded
+      ? text
+      : link.id === "update-client"
+        ? "Rewrite this application's generated client, hooks and schema from its current definition — no build"
+        : undefined;
 
   return (
     <li className={active ? "nav-item active" : "nav-item"}>
@@ -272,7 +305,13 @@ function AppLink({
           disabled={busy}
           title={title}
           onClick={() =>
-            void (link.id === "build" ? buildApplication(app) : updateApplicationClient(app))
+            void (link.target
+              ? missing.length
+                ? showAppOutcome(targetNotReadyNotice(app, link.target))
+                : buildApplicationTarget(app, link.target)
+              : link.id === "build"
+                ? buildApplication(app)
+                : updateApplicationClient(app))
           }
         >
           {content}

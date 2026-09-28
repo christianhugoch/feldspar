@@ -1687,6 +1687,46 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // Build one of the targets an application's framework offers beside its web
+    // bundle — an Android APK. A native build is minutes long, so this **starts**
+    // it and answers at once with the job, `running`; the UI then asks
+    // `getApplicationTargetBuild` until it is done. A second start while one is
+    // running answers that one rather than starting another in the same project.
+    // Not a mount: the result is a file left in the application's store. Not
+    // offered over MCP: nothing an agent changing a schema needs to do.
+    set.register(
+        Endpoint::new(
+            "buildApplicationTarget",
+            Method::Post,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("targets")
+                .param("target", ValueType::Text)
+                .lit("build"),
+        )
+        .output(target_build_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // The latest build of a target, running or finished — what the UI polls, and
+    // what it asks after a reload to find a build still running. A 404 when this
+    // process has not built that target since it started.
+    set.register(
+        Endpoint::new(
+            "getApplicationTargetBuild",
+            Method::Get,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("targets")
+                .param("target", ValueType::Text)
+                .lit("build"),
+        )
+        .output(target_build_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
     // Rewrite an application's **generated** code from its current definition —
     // `src/feldspar/**`: the typed client, the hooks, the schema and the README
     // (§13.3). No bundler runs; this is the "if the API definition changes, the
@@ -4690,6 +4730,25 @@ fn application_schema() -> TypeSchema {
     // Whether the application's source is views and pages (Saltcorn UI), so
     // the screen offers the Views and Pages tabs.
     fields.push(StructField::new("has_views", TypeSchema::bool()));
+    // The builds its framework offers beside the web bundle — an Android APK —
+    // each a button beside Build. Derived from the framework, like `builds`.
+    fields.push(StructField::new(
+        "targets",
+        TypeSchema::array(TypeSchema::struct_of([
+            StructField::new("name", TypeSchema::text()),
+            StructField::new("label", TypeSchema::text()),
+            // Whether this server can build it now — a state, checked each time
+            // the list is asked for — and if not, what it lacks, one sentence
+            // each ("`ANDROID_HOME` is not set. …").
+            StructField::new(
+                "readiness",
+                TypeSchema::struct_of([
+                    StructField::new("ready", TypeSchema::bool()),
+                    StructField::new("missing", TypeSchema::array(TypeSchema::text())),
+                ]),
+            ),
+        ])),
+    ));
     TypeSchema::Struct(fields)
 }
 
@@ -5045,6 +5104,27 @@ fn created_application_schema() -> TypeSchema {
 /// minus the id (server-assigned on create, taken from the path on update).
 fn application_input_schema() -> TypeSchema {
     TypeSchema::Struct(application_fields())
+}
+
+/// One build of a target, as the admin UI polls it: where it has got to, where
+/// its log is from the moment it starts, and — once finished — the artifact or
+/// the error.
+fn target_build_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("target", TypeSchema::text()),
+        StructField::new("label", TypeSchema::text()),
+        // `running`, `succeeded` or `failed`.
+        StructField::new("status", TypeSchema::text()),
+        StructField::new("store", TypeSchema::text()),
+        StructField::new("log_path", TypeSchema::text()),
+        StructField::new("started_at", TypeSchema::timestamp()),
+        StructField::new("finished_at", TypeSchema::optional(TypeSchema::timestamp())),
+        StructField::new("artifact", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("size", TypeSchema::optional(TypeSchema::int())),
+        // The end of the log, once finished; the whole of it is at `log_path`.
+        StructField::new("log", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("error", TypeSchema::optional(TypeSchema::text())),
+    ])
 }
 
 /// The outcome of a build: whether it built, whether its source is a git repo,

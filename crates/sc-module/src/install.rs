@@ -434,6 +434,10 @@ impl Installer {
         check_npm_version(npm_version().await.as_deref())?;
         self.ensure_project().await?;
 
+        // A reinstall's previous copy, moved aside while npm copies the directory
+        // anew — `(where it was, where it waits)` — so a failed install can put
+        // it back instead of leaving the module without its files.
+        let mut set_aside: Option<(PathBuf, PathBuf)> = None;
         let spec = match source {
             // npm has nothing to say about PyPI. The caller routes a Python
             // module to `sc_python`'s environment, and reaching here with one
@@ -477,12 +481,71 @@ impl Installer {
                         path.display()
                     )));
                 }
+                // A reinstall is how an edited checkout arrives, and npm will
+                // not bring it: the copy `--install-links` made last time has
+                // the same name and version as the directory, so npm finds the
+                // tree satisfied and keeps the old files. Moving the copy aside
+                // first makes npm copy the directory as it is now.
+                let name = local_package_name(&path)?;
+                // The name is about to become a path that is deleted, so it must
+                // be one npm itself would accept: `name` or `@scope/name`.
+                let segments: Vec<&str> = name.split('/').collect();
+                let valid = match segments.as_slice() {
+                    [bare] => !bare.starts_with('@'),
+                    [scope, _] => scope.starts_with('@'),
+                    _ => false,
+                } && segments
+                    .iter()
+                    .all(|s| !s.is_empty() && *s != "." && *s != ".." && !s.contains('\\'));
+                if !valid {
+                    return Err(Error::invalid(format!(
+                        "{} names its package {name:?}, which is not an npm package name",
+                        path.join(PACKAGE_JSON).display()
+                    )));
+                }
+                let installed = self.root.join("node_modules").join(&name);
+                // Only a copy **of this directory** is moved: the project says so
+                // in its dependency on it. A package of the same name that got
+                // there another way — another module's dependency, say — is not
+                // this install's to touch; npm resolves that as it would.
+                if installed.is_dir() && self.is_local_copy_of(&name, &path).await {
+                    let backup = previous_copy(&installed);
+                    if backup.exists() {
+                        let _ = tokio::fs::remove_dir_all(&backup).await;
+                    }
+                    tokio::fs::rename(&installed, &backup).await.map_err(|e| {
+                        Error::config(format!(
+                            "moving the previously installed copy at {} aside to reinstall it: {e}",
+                            installed.display()
+                        ))
+                    })?;
+                    set_aside = Some((installed, backup));
+                }
                 path.display().to_string()
             }
         };
 
         let before = self.dependencies().await?;
-        let mut log = self.npm(&install_args(&spec)).await?;
+        let installed = self.npm(&install_args(&spec)).await;
+        if let Some((copy, backup)) = set_aside {
+            if installed.is_ok() {
+                let _ = tokio::fs::remove_dir_all(&backup).await;
+            } else {
+                // npm failed — offline, a registry error, a full disk. The module
+                // keeps the files it had rather than being left with none while
+                // its row still says it is installed.
+                if copy.exists() {
+                    let _ = tokio::fs::remove_dir_all(&copy).await;
+                }
+                if let Err(e) = tokio::fs::rename(&backup, &copy).await {
+                    sc_log::log_error!(
+                        "restoring {} after a failed reinstall: {e}",
+                        copy.display()
+                    );
+                }
+            }
+        }
+        let mut log = installed?;
         let after = self.dependencies().await?;
 
         let name = self.installed_name(&before, &after, source, location)?;
@@ -575,6 +638,23 @@ impl Installer {
         })
     }
 
+    /// Whether `node_modules/<name>` is a copy of local directory `dir`: the
+    /// project depends on `name` as `file:` a path that is `dir`.
+    async fn is_local_copy_of(&self, name: &str, dir: &Path) -> bool {
+        let Ok(deps) = self.dependencies().await else {
+            return false;
+        };
+        let Some(spec) = deps.get(name).and_then(Json::as_str) else {
+            return false;
+        };
+        let Some(relative) = spec.strip_prefix("file:") else {
+            return false;
+        };
+        tokio::fs::canonicalize(self.root.join(relative))
+            .await
+            .is_ok_and(|resolved| resolved == dir)
+    }
+
     /// Which package the install actually added.
     ///
     /// The dependency that appeared (or whose specifier changed) is the answer,
@@ -634,6 +714,17 @@ fn install_args(spec: &str) -> Vec<&str> {
 
 /// The stub package's `index.js`. Never loaded — see [`stub_json`].
 const STUB_INDEX: &str = "// The Saltcorn v1 API is answered by the module host itself (see\n                          // `module-host.mjs`); this package exists only so npm has something\n                          // to resolve a module's `@saltcorn/*` dependency to.\n                          module.exports = {};\n";
+
+/// Where a reinstall's previous copy waits: beside it, hidden, so the move is a
+/// rename within one directory and npm's resolver never mistakes it for a
+/// package.
+fn previous_copy(installed: &Path) -> PathBuf {
+    let name = installed
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    installed.with_file_name(format!(".{name}.previous"))
+}
 
 /// The `name` in a local directory's `package.json`.
 fn local_package_name(dir: &Path) -> Result<String> {

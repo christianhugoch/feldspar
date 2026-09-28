@@ -5053,6 +5053,31 @@ Nor does a module serve. A built Vue app is a static bundle with an SPA fallback
 a built React app is, so `CodeFramework` serves both; a declared framework with no `build` is
 refused when the module loads, because this version serves a built bundle and nothing else.
 
+**Build targets: files to take away, beside the bundle that is served.** A framework may declare
+`targets` — `{ android: { label, command, artifact } }` — for builds whose result is not served
+but kept: an Android APK. A target runs in the framework's source directory after the same
+install step as the web build, and before it Saltcorn rewrites the generated client and runtime,
+because an APK bundles the project's JavaScript and a stale client would ship a stale contract.
+Its `artifact` is a path template over the framework's settings, checked when the module loads
+like the build's paths are. Nothing is mounted. The result is the file in the application's store,
+and `buildApplicationTarget` answers with its path and size. A command that succeeds without
+leaving the file is an error naming the path. A target may also declare `env`, the variables its
+command and install step are started with. That is where a toolchain goes, and a module fills it
+from its **own settings**: `plugins/react-native` has an Android SDK and a JDK directory on the
+Modules tab, and its `frameworks` export is a function of them. Saving the settings reloads the
+module and so the declaration. A blank value is left out rather than set empty, so an unconfigured
+module falls back to the server's environment. A target also declares `requires`: what the machine must have before it can
+build. Each entry is one of `{ env, directory }` (a variable the build sees is set, and is a
+directory), `{ command }` (a program is on the build's `PATH`) and `{ os }` (the host's operating
+system), with an optional `hint`. They are data, so the server checks them synchronously:
+`listApplications` reports each target's `readiness` (`ready`, and the `missing` sentences), a
+state of this machine rather than part of the target, so the button warns before it is
+pressed, and `buildApplicationTarget` refuses with all of them before a job starts. An Android APK
+needs `ANDROID_HOME` and `JAVA_HOME`; an iOS target will add `{ os: "macos" }`, `xcodebuild` and
+`pod` without a change to the mechanism. A server without the toolchain fails that target
+with the tools' own message, and still builds and serves the web bundle. The built-in frameworks declare none.
+`plugins/react-native` is the one that does.
+
 **The context the generator receives carries the derivations, not just the data.** Whether a
 page may offer a delete button, what a table hangs off the client as, which columns a create
 form asks for and which the database issues — each is a question answered *by asking the

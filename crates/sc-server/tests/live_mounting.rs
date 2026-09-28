@@ -133,6 +133,8 @@ async fn setup(tmp: &TempDir) -> sc_error::Result<(Arc<AppMounts>, Router, Arc<C
     let apps = Arc::new(AppMounts::new(catalog.clone()));
     let config = ServerConfig {
         base_domain: Some(BASE_DOMAIN.to_owned()),
+        // How an Android emulator reaches this machine.
+        extra_base_domains: vec!["10.0.2.2.nip.io".to_owned()],
         ..ServerConfig::default()
     };
     let router = build_router_with_apps(
@@ -181,6 +183,11 @@ async fn an_app_is_created_edited_and_deleted_without_a_restart() -> sc_error::R
 
     // The very same router now serves the app on its subdomain — no rebuild.
     let (status, body) = get(&router, APP_HOST, "/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"<!doctype html><div id=root>v1</div>");
+    // …and on every extra base domain, which is the same app under another
+    // name: the emulator's `blog.10.0.2.2.nip.io` is not a second mount.
+    let (status, body) = get(&router, "blog.10.0.2.2.nip.io:3032", "/").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, b"<!doctype html><div id=root>v1</div>");
 

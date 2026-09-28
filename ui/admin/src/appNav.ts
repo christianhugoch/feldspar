@@ -25,6 +25,7 @@ export type AppNavLink = {
   | "edit-code"
   | "update-client"
   | "build"
+  | "target"
   | "chat"
   | "views"
   | "pages"
@@ -32,14 +33,31 @@ export type AppNavLink = {
   | "translations"
   | "settings";
   label: string;
-  /** Where it goes. Absent for the two links that *do* something (build, update
-   * client) rather than go somewhere. */
+  /** Where it goes. Absent for the links that *do* something (build, update
+   * client, build a target) rather than go somewhere. */
   href?: string;
   /** Opens in a new tab (the IDE is a separate page). */
   external?: boolean;
   /** Route prefixes that light it up. */
   matches: string[];
+  /** The build target a `target` link builds, and whether this server can
+   * build it now (a state, not part of the target). */
+  target?: TargetLink;
 };
+
+/** A build target as its button needs it: what it is, and whether this server
+ * can build it now. */
+export type TargetLink = {
+  name: string;
+  label: string;
+  readiness: { ready: boolean; missing: string[] };
+};
+
+/** A link's key among its siblings: an application has one link of each kind,
+ * except `target`, of which it has one per target. */
+export function linkKey(link: Pick<AppNavLink, "id" | "target">): string {
+  return link.target ? `${link.id}:${link.target.name}` : link.id;
+}
 
 /** The coding agent that builds `app`, by name, if there is one.
  *
@@ -76,7 +94,7 @@ export function builderAgentFor(
  *   rows, where it cannot be clicked on the way to something else.
  */
 export function appNavLinks(
-  app: Pick<AppItem, "id" | "builds" | "has_views" | "source">,
+  app: Pick<AppItem, "id" | "builds" | "has_views" | "source" | "targets">,
   agent: string | null,
 ): AppNavLink[] {
   const base = `/applications/${encodeURIComponent(app.id)}`;
@@ -93,6 +111,11 @@ export function appNavLinks(
     }
     links.push({ id: "update-client", label: "Update client", matches: [] });
     links.push({ id: "build", label: "Build", matches: [] });
+    // The builds the framework offers beside the web bundle, each its own
+    // button right under Build — an Android APK is built from the same project.
+    for (const target of app.targets) {
+      links.push({ id: "target", label: `Build ${target.label}`, matches: [], target });
+    }
   }
   if (app.has_views) {
     links.push({ id: "views", label: "Views", href: `#${base}/views`, matches: [`${base}/views`] });

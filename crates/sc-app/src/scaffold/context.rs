@@ -51,6 +51,10 @@ pub fn context_json(ctx: &ProjectContext<'_>, runtime: &str, client: &str) -> Js
             "description": ctx.app.description,
             "url": ctx.app_url_or_placeholder(),
         },
+        // The framework's own settings as the admin filled them in: a setting
+        // is the framework's to declare, so it is the framework's to read when
+        // it generates — the store and project as much as anything it added.
+        "settings": Json::Object(ctx.app.framework.config.clone()),
         "tables": exposed
             .iter()
             .map(|t| table_json(t, ctx.endpoints))

@@ -21,6 +21,8 @@ mod common;
 
 #[path = "bundled_catalog.rs"]
 mod bundled_catalog;
+#[path = "bundled_react_native.rs"]
+mod bundled_react_native;
 #[path = "bundled_rss.rs"]
 mod bundled_rss;
 #[path = "bundled_vue.rs"]

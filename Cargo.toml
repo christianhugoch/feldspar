@@ -366,6 +366,9 @@ zip = { version = "8", default-features = false, features = [
 # workbench, bridged to a `typescript-language-server` process on the server.
 axum = { version = "0.8", features = ["macros", "ws"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
+# A cookie's `Max-Age` is a `time::Duration` (the `cookie` crate's own type,
+# which `axum-extra` does not re-export). Already in the tree through `cookie`.
+time = "0.3"
 
 # --- TLS termination (design §13.5) ------------------------------------------
 #

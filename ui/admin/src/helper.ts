@@ -27,19 +27,38 @@ export async function clientError(op: string, res: Response): Promise<Error> {
   return new Error(`${op} failed: ${res.status}${detail}`);
 }
 
+/** The CSRF token the server last named in a response, for a client that
+ * cannot read the cookie. */
+let rememberedCsrf: string | undefined;
+
 function csrfToken(): string | undefined {
-  if (typeof document === "undefined") return undefined;
-  for (const part of document.cookie.split(";")) {
-    const [name, ...rest] = part.trim().split("=");
-    if (name === "sc_csrf") return decodeURIComponent(rest.join("="));
+  if (typeof document !== "undefined") {
+    for (const part of document.cookie.split(";")) {
+      const [name, ...rest] = part.trim().split("=");
+      if (name === "sc_csrf") return decodeURIComponent(rest.join("="));
+    }
   }
-  return undefined;
+  return rememberedCsrf;
 }
 
-/** The headers a request carries: its content type, and its CSRF token. */
+/** `fetchImpl`, remembering the CSRF token each response names — how a client
+ * with no `document.cookie` learns what its next write must echo. */
+export function trackCsrf(fetchImpl: typeof fetch): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const res = await fetchImpl(input, init);
+    const token = res.headers.get("x-csrf-token");
+    if (token) rememberedCsrf = token;
+    return res;
+  }) as typeof fetch;
+}
+
+/** The headers a request carries: its content type, its CSRF token, and — where
+ * there is no `document`, i.e. a native app — that it is not a browser, so the
+ * server lets its login outlive the app being closed. */
 export function requestHeaders(method: string, hasBody: boolean): Record<string, string> {
   const headers: Record<string, string> = {};
   if (hasBody) headers["content-type"] = "application/json";
+  if (typeof document === "undefined") headers["x-feldspar-client"] = "native";
   if (method !== "GET" && method !== "HEAD") {
     const token = csrfToken();
     if (token) headers["x-csrf-token"] = token;

@@ -48,6 +48,114 @@ async fn a_local_package_installs_under_node_modules_with_its_own_name_and_versi
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Installing a local directory a second time is how an edited checkout
+/// arrives — a bundled module's Reinstall button. npm alone keeps the old copy,
+/// because the directory's name and version have not changed.
+#[tokio::test]
+async fn reinstalling_a_local_package_copies_the_directory_as_it_is_now() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let root = temp_root("install-reinstall");
+    let source = root.with_extension("source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("package.json"),
+        r#"{ "name": "@saltcorn-test/edited", "version": "0.1.0", "main": "index.js" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("index.js"),
+        "module.exports = { edition: 1 };\n",
+    )
+    .unwrap();
+
+    let installer = Installer::new(&root);
+    let location = source.display().to_string();
+    installer
+        .install(ModuleSource::Local, &location)
+        .await
+        .unwrap();
+
+    // The checkout is edited; its version is not.
+    std::fs::write(
+        source.join("index.js"),
+        "module.exports = { edition: 2 };\n",
+    )
+    .unwrap();
+    installer
+        .install(ModuleSource::Local, &location)
+        .await
+        .unwrap();
+
+    let installed = std::fs::read_to_string(
+        installer
+            .package_dir("@saltcorn-test/edited")
+            .join("index.js"),
+    )
+    .unwrap();
+    assert!(installed.contains("edition: 2"), "{installed}");
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&source);
+}
+
+/// A reinstall that npm cannot finish — offline, a registry error, a full disk
+/// — leaves the module the files it had, not none: the previous copy is moved
+/// aside for the install and put back when it fails.
+#[tokio::test]
+async fn a_failed_reinstall_keeps_the_copy_that_worked() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let root = temp_root("install-reinstall-fails");
+    let source = root.with_extension("source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("package.json"),
+        r#"{ "name": "@saltcorn-test/sturdy", "version": "0.1.0", "main": "index.js" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("index.js"),
+        "module.exports = { edition: 1 };\n",
+    )
+    .unwrap();
+
+    let installer = Installer::new(&root);
+    let location = source.display().to_string();
+    installer
+        .install(ModuleSource::Local, &location)
+        .await
+        .unwrap();
+
+    // The checkout is edited into something npm refuses — a dependency whose
+    // name is not a package name, which npm rejects without the network.
+    std::fs::write(
+        source.join("package.json"),
+        r#"{ "name": "@saltcorn-test/sturdy", "version": "0.1.0", "main": "index.js",
+            "dependencies": { "@@not a package@@": "1.0.0" } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("index.js"),
+        "module.exports = { edition: 2 };\n",
+    )
+    .unwrap();
+    assert!(
+        installer
+            .install(ModuleSource::Local, &location)
+            .await
+            .is_err(),
+        "npm should refuse the edited package"
+    );
+
+    // The working copy is still there, as it was, and nothing is left aside.
+    let dir = installer.package_dir("@saltcorn-test/sturdy");
+    let installed = std::fs::read_to_string(dir.join("index.js")).unwrap();
+    assert!(installed.contains("edition: 1"), "{installed}");
+    assert!(!dir.with_file_name(".sturdy.previous").exists());
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&source);
+}
+
 #[tokio::test]
 async fn a_directory_that_is_not_a_package_is_refused_by_name() {
     skip_without!(have_npm(), "npm is not on the PATH");

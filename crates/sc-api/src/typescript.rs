@@ -69,24 +69,46 @@ pub fn client_helper() -> String {
     // point: a client generated from the server's own endpoint set should be able
     // to call the server it was generated from.
     //
-    // Guarded on `document` so the module stays usable where there is none (a
-    // test, a node script); there is no cookie to echo there, and a caller with
-    // its own scheme can still supply `options.fetch`.
+    // Where there is no `document` — a React Native app on a phone, a node
+    // script — there is no cookie to read either, so the token is the one the
+    // server last sent in its `x-csrf-token` **response header** (every response
+    // carries it; see `sc-server`'s `security` module). `trackCsrf` wraps the
+    // client's `fetch` to remember it, so the first request a native app makes —
+    // its `whoami` at startup, or even a refused `login` — arms the next one.
     let _ = write!(
         out,
-        r#"function csrfToken(): string | undefined {{
-  if (typeof document === "undefined") return undefined;
-  for (const part of document.cookie.split(";")) {{
-    const [name, ...rest] = part.trim().split("=");
-    if (name === "{cookie}") return decodeURIComponent(rest.join("="));
+        r#"/** The CSRF token the server last named in a response, for a client that
+ * cannot read the cookie. */
+let rememberedCsrf: string | undefined;
+
+function csrfToken(): string | undefined {{
+  if (typeof document !== "undefined") {{
+    for (const part of document.cookie.split(";")) {{
+      const [name, ...rest] = part.trim().split("=");
+      if (name === "{cookie}") return decodeURIComponent(rest.join("="));
+    }}
   }}
-  return undefined;
+  return rememberedCsrf;
 }}
 
-/** The headers a request carries: its content type, and its CSRF token. */
+/** `fetchImpl`, remembering the CSRF token each response names — how a client
+ * with no `document.cookie` learns what its next write must echo. */
+export function trackCsrf(fetchImpl: typeof fetch): typeof fetch {{
+  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {{
+    const res = await fetchImpl(input, init);
+    const token = res.headers.get("{header}");
+    if (token) rememberedCsrf = token;
+    return res;
+  }}) as typeof fetch;
+}}
+
+/** The headers a request carries: its content type, its CSRF token, and — where
+ * there is no `document`, i.e. a native app — that it is not a browser, so the
+ * server lets its login outlive the app being closed. */
 export function requestHeaders(method: string, hasBody: boolean): Record<string, string> {{
   const headers: Record<string, string> = {{}};
   if (hasBody) headers["content-type"] = "application/json";
+  if (typeof document === "undefined") headers["{client_header}"] = "{native}";
   if (method !== "GET" && method !== "HEAD") {{
     const token = csrfToken();
     if (token) headers["{header}"] = token;
@@ -97,6 +119,8 @@ export function requestHeaders(method: string, hasBody: boolean): Record<string,
 "#,
         cookie = crate::auth::CSRF_COOKIE,
         header = crate::auth::CSRF_HEADER,
+        client_header = crate::auth::CLIENT_KIND_HEADER,
+        native = crate::auth::NATIVE_CLIENT,
     );
     out.push_str(READ_TYPES);
     out.push_str(STREAM_TYPES);
@@ -166,7 +190,7 @@ pub fn generate_client_with_streams(set: &EndpointSet, streams: &[StreamExport])
     // code, about generated code, in somebody else's project.
     let mut values: Vec<&str> = Vec::new();
     if !set.is_empty() {
-        values.extend(["clientError", "requestHeaders"]);
+        values.extend(["clientError", "requestHeaders", "trackCsrf"]);
     }
     if !streams.is_empty() {
         values.push("openStream");
@@ -307,7 +331,7 @@ pub fn generate_client_with_streams(set: &EndpointSet, streams: &[StreamExport])
     // An application that exposes only streams never calls `fetch`, and an
     // unused binding is a `noUnusedLocals` error in somebody else's project.
     if !set.is_empty() {
-        out.push_str("  const doFetch = options.fetch ?? fetch;\n");
+        out.push_str("  const doFetch = trackCsrf(options.fetch ?? fetch);\n");
     }
     // Each table is bound to a name before the client is assembled, so `get` can
     // call `list` without going through `this` — a generated method's `this` is

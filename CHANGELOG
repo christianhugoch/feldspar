@@ -2,6 +2,302 @@
 
 Changes in reverse chronological order.
 
+## Review fixes: stuck builds, the CSRF header and caches, log pruning, one build per project
+
+From a code review of the build-target, mobile and login work.
+
+- **A build that panics no longer stays "running" forever** (`crates/sc-server/src/target_builds.rs`).
+  The build runs on its own task, and a supervisor awaits its `JoinHandle`. A panic is recorded as
+  a failed job ("the build stopped unexpectedly …"), and the target can build again. Before, every
+  later start joined the dead job and the UI polled it forever.
+- **The CSRF token header never reaches a shared cache** (`expose_csrf_token`, `security.rs`):
+  - it goes only on JSON answers (what a native client calls), and never on a response marked
+    cacheable (e.g. hashed assets with `Cache-Control: public, immutable`);
+  - a JSON answer with no cache rule of its own gets `Cache-Control: private`;
+  - the 403 refusal carries it with `no-store`.
+
+  Before, every response carried it, so a CDN could store one user's token on an asset and serve
+  it to everyone.
+- **Log pruning matches its own target exactly**: `is_target_log` requires
+  `<target>-YYYYMMDD-HHMMSS.log`. A prefix match meant `android`'s pruning also deleted
+  `android-debug`'s logs.
+- **One build per project at a time** (`lock_project`, `crates/sc-app/src/build.rs`). The web build
+  (`build_application`) and every target build of one project directory share a lock, because
+  each rewrites `src/feldspar/` and then runs a bundler over the same tree. A second build is
+  **refused at once**, naming the project, rather than queued: a web build waiting behind a
+  15-minute APK build would be a request held open that long.
+- **Doc comments put back**: `SessionStore::login` / `ttl`, and `build_result_schema` /
+  `target_build_schema`.
+- Tests:
+  - a panicking build is recorded as failed and frees the target;
+  - cached assets and documents carry no token, API answers are `private` and the refusal is
+    `no-store` (`router.rs`);
+  - pruning leaves `android-debug`'s logs alone, and log names are matched exactly;
+  - one project refuses a second build and frees again, and another project is unaffected.
+
+## Build targets check what the machine needs before they build
+
+A target now declares what the machine must have, and the server checks it before a build starts
+and when it lists the targets. A missing Android SDK is shown on the button straight away, instead
+of Gradle failing minutes into a build.
+
+- **Declaration**: `requires: [...]` on a target, each entry exactly one of:
+  - `{ env: "ANDROID_HOME", directory: true }`: the variable the build sees is set, from the
+    target's `env` or else the server's, and optionally is an existing directory;
+  - `{ command: "xcodebuild" }`: a program is on the build's `PATH`;
+  - `{ os: "macos" }`: the server's operating system.
+
+  Each may carry a `hint` that says how to fix it. A malformed entry (none or more than one kind,
+  `directory` without `env`, a non-list) is refused when the module loads.
+- **Types**: `TargetRequirement` / `TargetRequirementKind` (`crates/sc-app/src/declared.rs`), carried on
+  `TargetTemplate` and `TargetSpec`, and parsed by `target_requires`
+  (`crates/sc-module/src/frameworks.rs`).
+- **Checks** (`crates/sc-app/src/build.rs`):
+  - `target_readiness(spec)` gives a `TargetReadiness { missing }`: one sentence per missing thing,
+    plus its hint;
+  - `require_target_ready(spec)` refuses listing all of them;
+  - `buildApplicationTarget` calls it before a job starts, and `run_target` again before it runs
+    anything.
+- **API and UI**:
+  - each listed target carries `readiness: { ready, missing }`, a state of this machine kept apart
+    from the target's description (`TargetInfo` is only `name` and `label`;
+    `app_target_readiness` answers the state);
+  - the sidebar button shows a warning icon, with the reasons as its tooltip;
+  - pressing it shows them in the toast (`targetUnmetNotice`) instead of starting a build.
+- **`plugins/react-native`**: the `android` target requires `ANDROID_HOME` and `JAVA_HOME` as
+  directories, with hints pointing to Settings → Modules → React Native.
+- The iOS target is not added yet, but the three kinds are what it will need (`os`, `xcodebuild`,
+  `pod`).
+- Tests:
+  - each kind met and unmet, including the target's `env` against the server's and a value that
+    isn't a directory;
+  - an unmet target refused before anything runs or logs;
+  - parsing, and the refusal of malformed entries;
+  - the React Native module's declared requirements;
+  - the UI notice (`targetNotReadyNotice`).
+- **Naming**: everything about targets carries the `Target` prefix: `TargetTemplate`, `TargetSpec`,
+  `TargetRequirement`, `TargetReadiness`, `TargetInfo`, `TargetReport`, `TargetJob`.
+
+## Login from a native app: the CSRF token as a response header, and a lasting session cookie
+
+A React Native app on a phone got `403 CSRF token missing or invalid` on login. The generated
+client read the token from `document.cookie`, and a native app has no `document`; its cookie store
+is native and invisible to its JavaScript.
+
+- **API answers name the CSRF token** in an `x-csrf-token` header (`csrf_middleware`,
+  `crates/sc-server/src/security.rs`), the same value as the `sc_csrf` cookie. The 403 refusal
+  names it too, so a first-contact client can retry. The header goes only on JSON answers, never
+  on a response a shared cache may store (see the review fixes above).
+- **The generated client remembers it** (`crates/sc-api/src/typescript.rs`):
+  - `helper.ts` gains `trackCsrf`, which wraps the client's `fetch` and keeps the last token a
+    response named;
+  - `csrfToken()` still prefers `document.cookie` and falls back to that remembered value;
+  - `createClient` builds `doFetch` through `trackCsrf`.
+
+  A React Native app's startup `whoami` (already in its `auth.tsx`) therefore arms the `login`
+  that follows. The native cookie store sends the `sc_csrf` cookie by itself, so the double-submit
+  check is unchanged.
+- **A native app's session cookie lasts; a browser's is unchanged.**
+  - The generated client sends `x-feldspar-client: native` wherever there is no `document`
+    (`CLIENT_KIND_HEADER` / `NATIVE_CLIENT` in `sc_api::auth`).
+  - A login from such a request gets a session cookie with a `Max-Age` of the session's lifetime
+    (`SessionStore::ttl`), set where the cookie is built (`apply_session` in `router.rs`, checking
+    `is_native_client` from `security.rs`). Without it, a native cookie store may drop the session
+    whenever the app is closed.
+  - **Browsers are not affected**: their session cookie still has no `Max-Age` and ends with the
+    browser, as before.
+  - The header is safe: a page on another site can't make a victim's browser send it, and it only
+    makes the sender's own cookie last as long as its session.
+- **Not changed**: the GraphQL client (`crates/sc-api/src/graphql/client.rs`) still reads only the
+  cookie. The React Native module uses the REST client.
+- Tests:
+  - the generated client, run in Node with no `document`, echoes the token the first response
+    named (`generated_client_csrf.rs`);
+  - through the router, every response and the refusal name the token, and echoing it is accepted
+    (`router.rs`);
+  - a native login's `Set-Cookie` carries `Max-Age=86400`, and a browser login's has none.
+
+## Target builds run in the background, poll for status, and log into the file store
+
+A build target such as the Android APK no longer runs inside one HTTP request, which a proxy,
+browser or page reload could cut off after minutes of Gradle.
+
+- **Background job** (`crates/sc-server/src/target_builds.rs`, held on `AppMounts`):
+  - `POST /api/applications/{id}/targets/{target}/build` starts the build and answers
+    immediately with the job (`status: "running"`).
+  - The new `GET` on the same path (`getApplicationTargetBuild`) answers the latest job: `running`,
+    `succeeded` (with artifact, size and the log's end) or `failed` (with the error). It answers
+    404 when that target has not been built since the server started.
+  - **One build per app and target at a time**: starting again while one runs answers the running
+    job instead of starting a second Gradle in the same folder.
+  - An unknown target is refused before anything starts (`sc_app::app_target_spec`).
+  - Jobs live in the server process. A restart kills their processes (`kill_on_drop`) and forgets
+    them; artifacts and logs stay in the store.
+- **Build logs in the file store**: each target build writes `<project>/build-logs/<target>-<UTC
+  timestamp>.log`.
+  - Install output, the command line, and the command's stdout and stderr go straight into the
+    file **as the build runs**, so it can be opened under Files while Gradle works.
+  - The job names the log from the start. A failure's message carries the log's last lines and
+    names the file.
+  - The last 10 logs per target are kept (`TARGET_LOGS_KEPT`); older ones are removed when a new
+    build starts.
+  - The React Native scaffold's `.gitignore` lists `build-logs`.
+- **Admin UI** (`appActions.ts`): the button starts the build, then polls every 3 seconds until it
+  finishes. `resumeTargetBuilds` picks up a build that is still running when an app becomes the
+  current one, e.g. after a reload or in a second tab. The toast names the artifact and the whole
+  log.
+- Tests:
+  - the job registry: a second start joins the running build, failures are kept, jobs are per app
+    and target;
+  - `run_target`: the log is written in order and pruned to 10, and a failure names the log;
+  - the log path; the 404 for a status that was never built;
+  - `jobResult` and the log path in the toast (`appActions.test.ts`).
+
+## The Android toolchain is a setting of the React Native module
+
+The APK build no longer depends on `ANDROID_HOME` and `JAVA_HOME` being exported in the shell that
+started the server. They are the React Native module's own settings, edited under
+**Settings → Modules → React Native**.
+
+- **A build target can declare `env`**, e.g. `{ ANDROID_HOME: "/opt/sdk" }`: variables its command
+  and install step are started with, on top of the server's own environment.
+  - `TargetTemplate.env` and `TargetSpec.env` (`crates/sc-app/src/declared.rs`);
+    `run_target` sets them on the processes it starts (`build.rs`).
+  - Checked when the module loads (`target_env` in `crates/sc-module/src/frameworks.rs`): a name
+    that is empty or contains `=`/NUL is refused, and so is a value that is not text.
+  - **A blank value is left out**, so an unfilled setting falls back to the server's environment
+    instead of blanking the variable.
+- **`plugins/react-native`** declares a `configuration_workflow` with two settings, "Android SDK
+  directory (ANDROID_HOME)" and "JDK directory (JAVA_HOME)". Its `frameworks` export is now a
+  function of that configuration, and the `android` target's `env` comes from it. Saving the
+  settings reloads the module, which reinstalls the framework with the new values.
+- The web build is unchanged; it gets no extra environment.
+- Tests: the environment reaches the install step and the command (`build.rs`), it travels on the
+  spec (`declared.rs`), `env` is translated and refused when malformed (`frameworks.rs`), and the
+  module's settings appear and become the APK build's environment (`bundled_react_native.rs`).
+
+## Extra base domains, and a server URL for the mobile app
+
+An APK has to reach the server, and `todo.localhost` is not this machine from an Android emulator
+or a phone. Two changes make that possible without changing an application's own URL.
+
+- **`extra_base_domains`** (`feldspar.toml`), or `--extra-base-domain` (repeatable). Every
+  application also answers under each listed domain: with `10.0.2.2.nip.io` listed,
+  `todo.10.0.2.2.nip.io` is the app `todo`.
+  - Only routing reads the list (`subdomain_in`, `crates/sc-server/src/apps.rs`, used by
+    `resolve_app`). Application URLs, cookies and the admin's framing policy stay on
+    `base_domain`.
+  - Without a base domain the extras do nothing, as before: routing stays off.
+  - An extra domain itself, like the base domain, is the admin.
+- **React Native: "Server URL for the mobile app"** (`mobile_url`), a new framework setting.
+  Blank means the application's URL, which is right for production. Set, it becomes `APP_URL` in
+  the generated `src/feldspar/config.ts`, which is rewritten on every build, so changing the
+  setting and building again updates the next APK. Cleartext is enabled in `app.json` when this
+  URL is plain `http://`, decided when the project is written.
+- **Declared frameworks now receive their own settings** as `ctx.settings` when they generate
+  files (`crates/sc-app/src/scaffold/context.rs`).
+- Tests:
+  - routing under extra domains (`apps.rs` unit test, and `live_mounting.rs` through the
+    router);
+  - flag parsing (`config.rs`) and the config file (`sc-config-file`);
+  - settings reaching a generator (`declared_framework.rs`);
+  - the module's URL and cleartext handling (`bundled_react_native.rs`).
+
+## Build targets: a framework can build an Android APK beside its web bundle
+
+A framework declared by a module can now offer **build targets**: builds whose result is a file
+to take away rather than a bundle to serve. `plugins/react-native` uses this to build an Android
+APK. The admin UI shows a **Build Android APK** button under Build.
+
+- **Declaration** (`module-host.mjs`, `sc-module/src/frameworks.rs`):
+  `targets: { android: { label, command, artifact } }`. `artifact` is a path template over the
+  framework's settings. A target with no command or artifact, or one whose template names an
+  unknown setting, is refused when the module loads.
+- **`sc-app`**: `TargetTemplate` and `TargetSpec` (`declared.rs`), and
+  `build_application_target` / `run_target` (`build.rs`). A target runs in the source directory
+  after the same install step as the web build. Before it runs, the generated client and runtime
+  are rewritten, because the APK bundles them. Nothing is mounted. A command that succeeds without
+  leaving the artifact is an error that names the path.
+- **Admin API**: `POST /api/applications/{id}/targets/{target}/build` (`buildApplicationTarget`)
+  answers with the artifact's store, path and size, plus the tail of the log (last 32 KB). An
+  application lists its framework's `targets`. It is not an MCP tool.
+- **Admin UI**: one sidebar button per target (`appNav.ts`, `AppSidebar.tsx`) and its own
+  progress state (`appActions.ts`). The toast names the file and its size; download it from
+  Files.
+- **The Android toolchain**: `ANDROID_HOME` and `JAVA_HOME`, now set as the React Native module's
+  settings (see the entry above). Without them, the target fails with Gradle's own message and the
+  web build is unaffected.
+- **`plugins/react-native` is now an Expo (SDK 57) project**, replacing Vite + react-native-web.
+  The same source is both targets:
+  - web: `expo export --platform web`, served as before;
+  - Android: `expo prebuild` plus `./gradlew assembleRelease --no-daemon`, producing
+    `android/app/build/outputs/apk/release/app-release.apk`.
+
+  Also new in the module:
+  - Real React Native types, so the `src/react-native.d.ts` shim is gone.
+  - A generated `src/feldspar/config.ts` holds the application's URL. On a phone the client sends
+    requests there; on the web they stay relative.
+  - An app reached over plain `http://` gets `usesCleartextTraffic` (via `expo-build-properties`),
+    because Android release builds refuse cleartext otherwise.
+  - The Android package is `com.feldspar.<subdomain>`.
+- **Fix: Reinstall now picks up an edited local or bundled module.** npm kept the copy
+  `--install-links` had made earlier, because the name and version were unchanged, so a bundled
+  module's Reinstall silently kept its old code. `Installer::install` now handles a reinstall of a
+  local directory like this:
+  1. **it moves the previous copy aside** (`node_modules/.<name>.previous`), so npm copies the
+     directory as it is now;
+  2. it deletes that copy once npm succeeds;
+  3. **if npm fails** (offline, registry error, full disk), it puts the copy back, so the module
+     keeps its working files.
+
+  Only a copy **of this same directory** is moved, which the project's `file:` dependency on it
+  shows (`is_local_copy_of`). A package of the same name that arrived another way, e.g. another
+  module's dependency, is left alone. A `package.json` name that isn't a valid npm name is
+  refused. Tests: `reinstalling_a_local_package_copies_the_directory_as_it_is_now`,
+  `a_failed_reinstall_keeps_the_copy_that_worked`.
+- **Not done yet**: login from the APK. Writes still need the CSRF token that the client reads
+  from `document.cookie`, and a phone has no `document`. That is the next step.
+- Tests: target templates and specs (`declared.rs`), `run_target` with fake commands
+  (`build.rs`), translation and load-time refusal (`frameworks.rs`), the React Native module's
+  declaration, Expo scaffold and cleartext handling (`bundled_react_native.rs`), the 404 for a
+  framework without targets (`admin_applications_api.rs`), and the UI's links and state
+  (`appNav.test.ts`, `appActions.test.ts`).
+- Regenerating the admin clients also refreshed `ui/ide/src/client.ts` and
+  `ui/builder/src/client.ts`, which were already missing `file_store_settings` and
+  `created_file_stores`.
+
+## React Native (web) as a bundled application framework
+
+A new bundled module, `plugins/react-native` (`@feldspar/react-native`), declares the framework
+`react-native`. Built the same way as `plugins/vue`: an admin installs it from Settings → Modules,
+picks **React Native (web)** as an application's framework, and Saltcorn scaffolds, builds and
+serves the project. There is no Rust change.
+
+- **Web only.** Screens are written against React Native's components (`View`, `Text`,
+  `Pressable`, `TextInput`, `Switch`, `StyleSheet`). Vite aliases `react-native` to
+  `react-native-web`. The project installs no `react-native` package and has no Metro, Expo or
+  native toolchain, so it builds wherever a Vite app builds.
+- **The screens use no DOM**, which keeps a later native target an addition rather than a
+  rewrite. The only web-specific file is `src/index.tsx`, which mounts `AppRegistry` into
+  `#root`. Navigation is a small path-in-state navigator (`src/navigation.tsx`) kept in step with
+  the browser's history.
+- **The types are declared in the project.** `@types/react-native-web` depends on the
+  `react-native` package, so `src/react-native.d.ts` types the components in use instead. It is
+  scaffolded once and is the developer's to extend.
+- **The runtime directory gets `hooks.ts`**, the same hook shapes as the React scaffold
+  (`useX`, `useXRow`, `useCreateX`, `useUpdateX`, `useDeleteX`). One screen is generated per table.
+  Its form uses `TextInput` or `Switch` according to the control kind Saltcorn decides.
+- **CSP: one widening beyond React's policy, `style-src 'self' 'unsafe-inline'`.**
+  react-native-web's `StyleSheet` writes styles into a `<style>` element at run time and has no
+  nonce support. Without the widening the app renders unstyled; this was checked with a headless
+  browser against both policies. `script-src` stays strict.
+- Tests: `crates/sc-module/tests/bundled_react_native.rs`, registered in `tests/it.rs`, behind
+  `deno-host` like the Vue tests. They check the declaration, the CSP, that every relative import
+  in the scaffold resolves (with auth, without auth, with no tables), that no screen uses DOM
+  elements, that the project depends on `react-native-web` and not `react-native`, and that a
+  rebuild rewrites only `src/feldspar/`. The opt-in `SC_TEST_NPM=1` test scaffolds, installs,
+  type-checks and builds a real application.
+
 ## Admin UI UX tweaks
 
 Reorder and relabel the menu, remove translation link for applications, fix CSS for button menu items.

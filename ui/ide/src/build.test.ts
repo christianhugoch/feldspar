@@ -37,6 +37,7 @@ function application(
     source,
     builds: true,
     has_views: false,
+    targets: [],
   };
 }
 

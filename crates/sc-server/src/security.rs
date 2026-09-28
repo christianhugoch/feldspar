@@ -12,11 +12,20 @@
 //!   hands the SPA a non-`HttpOnly` `sc_csrf` cookie, and every mutating request
 //!   must echo it in the `x-csrf-token` header. A cross-site page can send the
 //!   cookie but cannot read it to set the header, so the forgery fails.
+//!
+//!   The token is also sent as an `x-csrf-token` **response header** on API
+//!   answers (JSON) and on the refusal. A browser page reads it from the cookie;
+//!   a native app — React Native on a phone — has no `document.cookie` to read,
+//!   and its cookie store is not visible to its JavaScript, so the header is how
+//!   it learns the value to echo. A page on another origin cannot read this
+//!   origin's response headers any more than its cookies; what could leak the
+//!   token is a **shared cache**, so the header never goes on a response one may
+//!   store (see `expose_csrf_token`).
 //! - **Cookies.** `SameSite=Strict` on both cookies; the session cookie is
 //!   `HttpOnly`; `Secure` is set behind TLS (see `ServerConfig::secure_cookies`).
 
 use axum::extract::{Request, State};
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum_extra::extract::CookieJar;
@@ -32,7 +41,7 @@ pub const SESSION_COOKIE: &str = "sc_session";
 /// server enforces the check here and the generated TypeScript client satisfies
 /// it, and a second spelling of either name is exactly how those two stop
 /// agreeing.
-pub use sc_api::auth::{CSRF_COOKIE, CSRF_HEADER};
+pub use sc_api::auth::{CLIENT_KIND_HEADER, CSRF_COOKIE, CSRF_HEADER, NATIVE_CLIENT};
 
 /// The strict Content-Security-Policy served with every response. No
 /// `unsafe-inline` **script**: executable code loads only from the app's own
@@ -225,6 +234,22 @@ pub(crate) fn build_cookie(
         .build()
 }
 
+/// Whether a request comes from a **native app**: the generated client sends
+/// [`CLIENT_KIND_HEADER`]: [`NATIVE_CLIENT`] wherever there is no `document`.
+///
+/// Its only effect is on the session cookie a login sets: a native app's gets a
+/// `Max-Age` of the session's lifetime, because a React Native cookie store may
+/// drop a cookie without one when the *app* closes, signing its user out every
+/// time. A browser's stays a session cookie, which a shared or kiosk machine
+/// relies on. A page on another site cannot make a victim's browser send this
+/// header, and all it changes is how long the sender's own cookie lasts.
+pub(crate) fn is_native_client(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(CLIENT_KIND_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case(NATIVE_CLIENT))
+}
+
 /// Whether a method may change server state (and so needs CSRF protection).
 fn is_mutating(method: &Method) -> bool {
     !matches!(
@@ -320,10 +345,17 @@ pub(crate) async fn csrf_middleware(
             request = Request::from_parts(parts, axum::body::Body::from(bytes));
         }
         if !valid {
-            // Reject, but still hand out a token so a first-contact client can
-            // read it and retry successfully.
-            let jar = ensure_csrf_cookie(jar, existing, secure);
-            return (StatusCode::FORBIDDEN, jar, "CSRF token missing or invalid").into_response();
+            // Reject, but still hand out a token — as the cookie and as the
+            // header — so a first-contact client can read it and retry.
+            let token = existing.clone().unwrap_or_else(new_csrf_token);
+            let jar = match existing {
+                Some(_) => jar,
+                None => jar.add(build_cookie(CSRF_COOKIE, token.clone(), false, secure)),
+            };
+            let mut refused =
+                (StatusCode::FORBIDDEN, jar, "CSRF token missing or invalid").into_response();
+            expose_csrf_token_on_refusal(&mut refused, &token);
+            return refused;
         }
     }
 
@@ -332,9 +364,65 @@ pub(crate) async fn csrf_middleware(
     let response = next.run(request).await;
     let jar = match existing {
         Some(_) => jar,
-        None => jar.add(build_cookie(CSRF_COOKIE, token, false, secure)),
+        None => jar.add(build_cookie(CSRF_COOKIE, token.clone(), false, secure)),
     };
-    (jar, response).into_response()
+    let mut response = (jar, response).into_response();
+    expose_csrf_token(&mut response, &token);
+    response
+}
+
+/// Name the request's CSRF token in the response's `x-csrf-token` header — how a
+/// client with no `document.cookie` (a native app) learns what to echo — on the
+/// responses where that is safe and useful, and nowhere else.
+///
+/// The token belongs to one browser, so it must never reach a **shared cache**:
+/// a CDN that stored a hashed asset served `Cache-Control: public, immutable`
+/// with the token on it would hand that user's token to everyone who fetched the
+/// asset. So the header goes only on API answers — JSON, which is what a native
+/// client calls — and never on one a shared cache may keep. A JSON answer that
+/// states no caching of its own is marked `private` as it gains the header, which
+/// is what it is anyway: one user's data.
+fn expose_csrf_token(response: &mut Response, token: &str) {
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+    let is_json = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("application/json"));
+    if !is_json {
+        return;
+    }
+    let cache = response
+        .headers()
+        .get(CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_ascii_lowercase);
+    match cache.as_deref() {
+        None => {
+            response
+                .headers_mut()
+                .insert(CACHE_CONTROL, HeaderValue::from_static("private"));
+        }
+        Some(rule) if rule.contains("private") || rule.contains("no-store") => {}
+        // Anything a shared cache may store gets no token.
+        Some(_) => return,
+    }
+    if let Ok(value) = HeaderValue::from_str(token) {
+        response.headers_mut().insert(CSRF_HEADER, value);
+    }
+}
+
+/// Name the token on a refusal: always, because the refusal is exactly where a
+/// first-contact client needs it, and never cacheable, because it is one
+/// browser's answer.
+fn expose_csrf_token_on_refusal(response: &mut Response, token: &str) {
+    use axum::http::header::CACHE_CONTROL;
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Ok(value) = HeaderValue::from_str(token) {
+        response.headers_mut().insert(CSRF_HEADER, value);
+    }
 }
 
 /// Whether the request's body is a URL-encoded form.
@@ -352,14 +440,6 @@ fn form_field(body: &[u8], name: &str) -> Option<String> {
         .into_iter()
         .find(|(k, _)| k == name)
         .map(|(_, v)| v)
-}
-
-/// Ensure the jar carries a CSRF cookie, minting one when absent.
-fn ensure_csrf_cookie(jar: CookieJar, existing: Option<String>, secure: bool) -> CookieJar {
-    match existing {
-        Some(_) => jar,
-        None => jar.add(build_cookie(CSRF_COOKIE, new_csrf_token(), false, secure)),
-    }
 }
 
 #[cfg(test)]

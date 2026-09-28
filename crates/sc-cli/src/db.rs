@@ -70,6 +70,13 @@ impl Serving<'_> {
         self.section.and_then(|s| s.base_domain.as_deref())
     }
 
+    /// The further domains the file says the applications answer under.
+    pub fn extra_base_domains(&self) -> &[String] {
+        self.section
+            .map(|s| s.extra_base_domains.as_slice())
+            .unwrap_or_default()
+    }
+
     /// The configured bind address, if the file gave one.
     pub fn bind(&self) -> Option<&str> {
         self.section.and_then(|s| s.bind.as_deref())

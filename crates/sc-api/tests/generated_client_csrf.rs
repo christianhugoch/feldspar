@@ -119,6 +119,12 @@ fn the_generated_client_echoes_the_csrf_cookie_on_mutations() -> std::io::Result
         list["headers"][sc_api::auth::CSRF_HEADER].is_null(),
         "a GET should carry no CSRF header: {calls}"
     );
+    // A browser does not claim to be a native app: its session keeps ending with
+    // the browser.
+    assert!(
+        login["headers"][sc_api::auth::CLIENT_KIND_HEADER].is_null(),
+        "{calls}"
+    );
     Ok(())
 }
 
@@ -163,6 +169,70 @@ console.log(JSON.stringify(seen));
     );
     let headers: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(headers[sc_api::auth::CSRF_HEADER].is_null(), "{headers}");
+    Ok(())
+}
+
+/// A native app — React Native on a phone — has no `document`, and its cookie
+/// store is not visible to its JavaScript. The server names the token in every
+/// response's `x-csrf-token` header, and the client remembers it: the `whoami` an
+/// app makes at startup arms the `login` that follows.
+#[test]
+fn a_client_with_no_document_echoes_the_token_the_server_named() -> std::io::Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        eprintln!("skipping: no `node` on PATH to run the generated client");
+        return Ok(());
+    }
+    const DRIVER: &str = r#"
+import { createClient } from "./client.ts";
+const sent: any[] = [];
+(globalThis as any).fetch = async (_url: string, init: any) => {
+  sent.push(init.headers);
+  // Every response names the token, as the server's CSRF middleware does.
+  return new Response('{"id":"u","email":"a@b.c","role":1}', {
+    status: 200,
+    headers: { "content-type": "application/json", "x-csrf-token": "native-tok" },
+  });
+};
+const api = createClient({ baseUrl: "http://todo.10.0.2.2.nip.io:3032" });
+await api.whoami();
+await api.login({ email: "a@b.c", password: "pw" });
+console.log(JSON.stringify(sent));
+"#;
+
+    let provider = RestProvider::project("/api", &[]);
+    let client_ts = sc_api::generate_client(ApiProvider::endpoints(&provider));
+    let dir = std::env::temp_dir().join(format!("sc-api-csrf-native-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("client.ts"), for_node(&client_ts))?;
+    std::fs::write(
+        dir.join(sc_api::CLIENT_HELPER_FILE),
+        sc_api::client_helper(),
+    )?;
+    std::fs::write(dir.join("driver.ts"), DRIVER)?;
+
+    let output = Command::new("node").arg(dir.join("driver.ts")).output()?;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "running the generated client failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sent: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    // The first request had nothing to echo; the login echoes what it was told.
+    assert!(sent[0][sc_api::auth::CSRF_HEADER].is_null(), "{sent}");
+    // And every request says it is a native app, so the login lasts.
+    for request in sent.as_array().unwrap() {
+        assert_eq!(
+            request[sc_api::auth::CLIENT_KIND_HEADER],
+            serde_json::json!(sc_api::auth::NATIVE_CLIENT),
+            "{sent}"
+        );
+    }
+    assert_eq!(
+        sent[1][sc_api::auth::CSRF_HEADER],
+        serde_json::json!("native-tok"),
+        "{sent}"
+    );
     Ok(())
 }
 

@@ -43,6 +43,7 @@
 //! [environments.production]
 //! url = "postgres://saltcorn:…@db.internal/saltcorn"
 //! base_domain = "example.com"      # apps are at <subdomain>.example.com
+//! extra_base_domains = []          # …and also at <subdomain>.<each of these>
 //! bind = "0.0.0.0:443"
 //! secure_cookies = true
 //! ```
@@ -163,6 +164,13 @@ pub struct Environment {
     /// The domain applications are served under — `--base-domain`. An app is at
     /// `<subdomain>.<base_domain>` (design §13.2).
     pub base_domain: Option<String>,
+    /// Further domains the same applications answer under —
+    /// `--extra-base-domain`, once per domain. `todo.10.0.2.2.nip.io` reaches
+    /// the app `todo` just as `todo.<base_domain>` does, which is how an Android
+    /// emulator or a phone on the LAN reaches a development server. The base
+    /// domain stays the one an application's URL is written with.
+    #[serde(default)]
+    pub extra_base_domains: Vec<String>,
     /// The address the server binds — `--bind`. Only its port takes part in an
     /// application's URL, but it is spelled as the flag is so there is one thing
     /// to write and one thing to read.
@@ -564,6 +572,22 @@ test_template = "saltcorn_template"
             file.environments["test"].database.as_deref(),
             Some("saltcorn_test")
         );
+    }
+
+    #[test]
+    fn an_environment_may_list_extra_base_domains() {
+        let file = parse(
+            "[environments.laptop]\nbase_domain = \"localhost\"\n\
+             extra_base_domains = [\"10.0.2.2.nip.io\", \"192.168.1.50.nip.io\"]\n",
+        )
+        .expect("parses");
+        assert_eq!(
+            file.environments["laptop"].extra_base_domains,
+            ["10.0.2.2.nip.io", "192.168.1.50.nip.io"]
+        );
+        // Absent is none, not an error: most deployments have one domain.
+        let file = parse("[environments.prod]\nbase_domain = \"example.com\"\n").expect("parses");
+        assert!(file.environments["prod"].extra_base_domains.is_empty());
     }
 
     #[test]

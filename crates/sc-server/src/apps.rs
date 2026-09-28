@@ -253,6 +253,10 @@ pub struct AppMounts {
     ///
     /// [`sweep_previews`]: AppMounts::sweep_previews
     preview_idle: Duration,
+    /// The build targets running and last run, by application and target
+    /// (`crate::target_builds`): a native build is minutes long, so it runs as a
+    /// job the admin UI polls rather than inside one request.
+    target_builds: crate::target_builds::TargetBuilds,
 }
 
 /// One run's preview of one application.
@@ -299,7 +303,13 @@ impl AppMounts {
             previews: RwLock::new(Previews::default()),
             base_domain: None,
             preview_idle: Duration::from_secs(crate::config::DEFAULT_PREVIEW_IDLE_MINUTES * 60),
+            target_builds: crate::target_builds::TargetBuilds::default(),
         }
+    }
+
+    /// The build-target jobs of every application this registry serves.
+    pub fn target_builds(&self) -> &crate::target_builds::TargetBuilds {
+        &self.target_builds
     }
 
     /// Say which domain applications are served under, so a preview has a host
@@ -1107,6 +1117,25 @@ pub fn subdomain_of<'h>(host: &'h str, base_domain: Option<&str>) -> Option<&'h 
     (!label.is_empty() && !label.contains('.')).then_some(label)
 }
 
+/// The application subdomain a `Host` names under the base domain **or any of
+/// the extra base domains** (`--extra-base-domain`).
+///
+/// The extras widen where an application answers, never whether routing is on:
+/// with no base domain, no host names an app, whatever extras were given —
+/// [`subdomain_of`]'s rule, for its reason.
+pub fn subdomain_in<'h>(
+    host: &'h str,
+    base_domain: Option<&str>,
+    extra_base_domains: &[String],
+) -> Option<&'h str> {
+    base_domain?;
+    subdomain_of(host, base_domain).or_else(|| {
+        extra_base_domains
+            .iter()
+            .find_map(|extra| subdomain_of(host, Some(extra.as_str())))
+    })
+}
+
 /// Whether `path` falls under a provider's `mount`.
 ///
 /// `/api` claims `/api` and `/api/posts` but not `/apiary`; a mount of `/`
@@ -1143,6 +1172,34 @@ mod tests {
         // Without a configured base domain, no host names an app: a request must
         // not be able to choose its own app via the Host header.
         assert_eq!(subdomain_of("blog.example.com", None), None);
+    }
+
+    #[test]
+    fn an_extra_base_domain_names_the_same_applications() {
+        let extras = [
+            "10.0.2.2.nip.io".to_owned(),
+            "192.168.1.50.nip.io".to_owned(),
+        ];
+        let base = Some("localhost");
+        assert_eq!(
+            subdomain_in("todo.localhost:3032", base, &extras),
+            Some("todo")
+        );
+        // The emulator's way to this machine, and a phone's on the LAN.
+        assert_eq!(
+            subdomain_in("todo.10.0.2.2.nip.io:3032", base, &extras),
+            Some("todo")
+        );
+        assert_eq!(
+            subdomain_in("todo.192.168.1.50.nip.io", base, &extras),
+            Some("todo")
+        );
+        // An extra domain itself is the admin, as the base domain is.
+        assert_eq!(subdomain_in("10.0.2.2.nip.io:3032", base, &extras), None);
+        // A domain nobody configured is still nobody's.
+        assert_eq!(subdomain_in("todo.10.0.2.3.nip.io", base, &extras), None);
+        // And extras never switch routing on by themselves.
+        assert_eq!(subdomain_in("todo.10.0.2.2.nip.io", None, &extras), None);
     }
 
     #[test]
