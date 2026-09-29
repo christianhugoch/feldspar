@@ -70,6 +70,10 @@ smartcore = { workspace = true, optional = true }
 # Student's *t* and Fisher–Snedecor's *F*, for `t_test`, `anova` and a
 # regression coefficient's *p*. Not optional: see the feature comment above.
 statrs.workspace = true
+# The symmetric eigendecomposition behind `icar_scale`, BYM2's scaling factor
+# (Stan TODO §12). Not behind the `smartcore` feature: binding is the host's,
+# whichever providers are compiled in.
+nalgebra.workspace = true
 
 [dev-dependencies]
 # The dataset's `Select` is asserted as rendered SQL rather than as a tree: the
@@ -78,6 +82,10 @@ statrs.workspace = true
 # because what a save writes and a load reads back is the whole of whether a
 # configured model survives a restart.
 sc-db-postgres.workspace = true
+# `_fd_model_draws` is written in the transaction that marks an instance fitted,
+# and whether that is atomic is a property of the backend's transactions — so
+# the draws store is pinned on SQLite as well as Postgres.
+sc-db-sqlite.workspace = true
 sc-test-harness.workspace = true
 tokio = { workspace = true }
 

@@ -804,11 +804,12 @@ async fn the_actions_describe_their_own_settings() -> sc_error::Result<()> {
         vec![
             "delete_rows",
             "fetch",
+            // The one model action is registered beside `run_agent` and for
+            // the same reason (Stan TODO 7.5): it needs the model provider
+            // registry and the fits assembled first. There is no
+            // `predict_row` and no `write_posterior` (milestone 31 §1).
+            "fit_model",
             "insert_row",
-            // Registered beside `run_agent` and for the same reason (TODO
-            // "Predictive models", §12): it needs the model provider registry
-            // and the dataset seam assembled first.
-            "predict_row",
             "run_agent",
             "run_js_code",
             "run_python_code",

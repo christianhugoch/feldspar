@@ -2769,7 +2769,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     .map(str::trim)
                     .filter(|table| !table.is_empty());
                 // The models over this table, for the one declaration that asks
-                // for them: `predict_row`'s picker (§12). Read once rather than
+                // for them: `fit_model`'s picker. Read once rather than
                 // per action, and **only when the request named a table** — with
                 // no channel there is no "this table's models" to answer with,
                 // and answering with an empty list would be claiming there are
@@ -3142,6 +3142,15 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         "outcome": outcome,
                         "outcome_error": outcome_error,
                         "standardise": kind.standardise,
+                        "binds_data": kind.binds_data,
+                        "cancellable": kind.cancellable,
+                        // Only a provider this server knows how to ask has an
+                        // availability; CmdStan's is found at boot (Stan §20).
+                        "unavailable": (kind.name == sc_stan::STAN_PROVIDER)
+                            .then(|| models.stan().unavailable().map(|why| {
+                                format!("CmdStan was not found: {why}")
+                            }))
+                            .flatten(),
                     }));
                 }
                 // An empty picker reads like a bug; the sentence reads like the
@@ -3276,6 +3285,21 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let body = rows::require_object(&ctx.body)?;
                 let created = body.get("id").is_none_or(Json::is_null);
                 let model = model_from_body(body)?;
+                // A program is checked by its compiler before it is saved (Stan
+                // §5): `stanc` when this server has CmdStan, which refuses a
+                // program it would refuse at fit time a minute into a compile;
+                // our own parse, with the notice saying so, when it has not.
+                // Here rather than in `validate_model`, which also runs when the
+                // models are loaded and must not start a process per model.
+                let program_check = if model.provider.trim() == sc_stan::STAN_PROVIDER {
+                    let check = models.stan().check_program(&model.configuration).await?;
+                    Some(json!({
+                        "warnings": Some(check.warnings).filter(|w| !w.trim().is_empty()),
+                        "notice": check.notice,
+                    }))
+                } else {
+                    None
+                };
                 // Validated against the same registry a fit runs with, and with
                 // the dataset's **shape** where it can be read: the provider's
                 // form is over the dataset's columns, so checking the
@@ -3283,7 +3307,11 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // time and the guessing to the admin.
                 let shape = dataset_shape(&models, &model.dataset).await;
                 sc_model::save_model(&catalog, &models.registry(), &model, shape.as_ref()).await?;
-                let response = HandlerResponse::ok(model_json(&catalog, &model, None).await?);
+                let mut saved = model_json(&catalog, &model, None).await?;
+                if let (Some(check), Json::Object(map)) = (program_check, &mut saved) {
+                    map.insert("program_check".to_owned(), check);
+                }
+                let response = HandlerResponse::ok(saved);
                 Ok(if created {
                     response.with_status(201)
                 } else {
@@ -3295,16 +3323,19 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("deleteModel", {
         let catalog = catalog.clone();
+        let apps = apps.clone();
         move |ctx| {
             let catalog = catalog.clone();
+            let apps = apps.clone();
             async move {
+                let models = models_of(&apps)?;
                 let id = sc_model::ModelId(parse_uuid(ctx.path_param("id")?, "model")?);
                 // `delete_model` takes its instances with it, which is the
                 // difference from an agent's runs: an instance is not a record
                 // of what happened, it is a fit *of this model*, and its
                 // coefficients mean nothing without the dataset they were fitted
                 // over.
-                if !sc_model::delete_model(&catalog, id).await? {
+                if !sc_model::delete_model(&catalog, &models.registry(), id).await? {
                     return Err(Error::not_found(format!("no model with id {id}")));
                 }
                 Ok(HandlerResponse::ok(json!({ "deleted": true })))
@@ -3358,23 +3389,52 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("getModelInstance", {
         let catalog = catalog.clone();
+        let apps = apps.clone();
         move |ctx| {
             let catalog = catalog.clone();
+            let apps = apps.clone();
             async move {
                 let id = sc_model::InstanceId(parse_uuid(ctx.path_param("id")?, "model instance")?);
                 let instance = sc_model::require_model_instance(&catalog, id).await?;
-                Ok(HandlerResponse::ok(model_instance_detail_json(&instance)))
+                let mut out = model_instance_detail_json(&instance);
+                // "The program has changed since this fit" (Stan TODO §18):
+                // the provider compares its snapshot with the model's program
+                // now. Null for a provider with no program, and whenever it
+                // cannot tell — a screen must still open when a store is down.
+                let changed = match (
+                    models_of(&apps),
+                    sc_model::load_model(&catalog, instance.model).await,
+                ) {
+                    (Ok(models), Ok(Some(model))) => {
+                        match models.registry().require(model.provider.trim()) {
+                            Ok(provider) => {
+                                provider
+                                    .program_changed(&model.configuration, &instance.state)
+                                    .await
+                            }
+                            Err(_) => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if let Json::Object(map) = &mut out {
+                    map.insert("program_changed".to_owned(), json!(changed));
+                }
+                Ok(HandlerResponse::ok(out))
             }
         }
     });
 
     reg.register("deleteModelInstance", {
         let catalog = catalog.clone();
+        let apps = apps.clone();
         move |ctx| {
             let catalog = catalog.clone();
+            let apps = apps.clone();
             async move {
+                let models = models_of(&apps)?;
                 let id = sc_model::InstanceId(parse_uuid(ctx.path_param("id")?, "model instance")?);
-                if !sc_model::delete_model_instance(&catalog, id).await? {
+                if !sc_model::delete_model_instance(&catalog, &models.registry(), id).await? {
                     return Err(Error::not_found(format!("no model instance with id {id}")));
                 }
                 Ok(HandlerResponse::ok(json!({ "deleted": true })))
@@ -3471,6 +3531,313 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         .unwrap_or(Json::Null),
                     "predictions": predictions,
                 })))
+            }
+        }
+    });
+
+    // --- posteriors -----------------------------------------------------------
+    // Stan TODO §§5, 13, 16, 18. The reading and the write-back are the host's
+    // (`sc_model::read_draws`, `summarise_variable`, `plan_write`) and the
+    // write is `sc_api::models::write_posterior`, which a code body's model
+    // handle makes too; what is here is the
+    // reading of the request and the two things only a server can do — read a
+    // model's datasets through the row layer, and start or stop a job.
+
+    reg.register("getProgramInterface", {
+        let apps = apps.clone();
+        move |ctx| {
+            let apps = apps.clone();
+            async move {
+                let models = models_of(&apps)?;
+                let store = ctx
+                    .query_get("store")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| Error::invalid("`store` is required"))?;
+                let path = ctx
+                    .query_get("path")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| Error::invalid("`path` is required"))?;
+                let mut config = Attrs::new();
+                config.insert(
+                    sc_stan::config_keys::PROGRAM_STORE.to_owned(),
+                    Json::from(store),
+                );
+                config.insert(sc_stan::config_keys::PROGRAM.to_owned(), Json::from(path));
+                // A refused program is the answer the button exists for, so it
+                // is a field of a successful response rather than a failed one.
+                Ok(HandlerResponse::ok(
+                    match models.stan().check_program(&config).await {
+                        Ok(check) => json!({
+                            "interface": serde_json::to_value(&check.interface)
+                                .unwrap_or(Json::Null),
+                            "warnings": Some(check.warnings).filter(|w| !w.trim().is_empty()),
+                            "notice": check.notice,
+                            "error": Json::Null,
+                        }),
+                        Err(e) => json!({
+                            "interface": Json::Null,
+                            "warnings": Json::Null,
+                            "notice": Json::Null,
+                            "error": plain_sentence(&e),
+                        }),
+                    },
+                ))
+            }
+        }
+    });
+
+    reg.register("previewModelData", {
+        let apps = apps.clone();
+        move |ctx| {
+            let apps = apps.clone();
+            async move {
+                let models = models_of(&apps)?;
+                let model = model_from_body(rows::require_object(&ctx.body)?)?;
+                let (_, interface) = crate::posterior::binding_interface(&models, &model).await?;
+                let datasets = crate::posterior::posterior_datasets(&models, &model).await?;
+                let preview = sc_model::preview_data(
+                    &interface,
+                    &model.configuration,
+                    &datasets,
+                    models.posterior_limits().max_data_values,
+                );
+                Ok(HandlerResponse::ok(
+                    serde_json::to_value(&preview)
+                        .map_err(|e| Error::msg(format!("the preview: {e}")))?,
+                ))
+            }
+        }
+    });
+
+    reg.register("suggestBindings", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let models = models_of(&apps)?;
+                let model = model_from_body(rows::require_object(&ctx.body)?)?;
+                let (_, interface) = crate::posterior::binding_interface(&models, &model).await?;
+                let suggestions =
+                    sc_model::suggest_bindings(&interface, &model, &catalog.schema_shape()?);
+                Ok(HandlerResponse::ok(json!({
+                    "bindings": Json::Object(suggestions.bindings),
+                    "reasons": serde_json::to_value(&suggestions.reasons)
+                        .unwrap_or(Json::Null),
+                })))
+            }
+        }
+    });
+
+    reg.register("compileModel", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let models = models_of(&apps)?;
+                let id = sc_model::ModelId(parse_uuid(ctx.path_param("id")?, "model")?);
+                let model = sc_model::load_model(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no model with id {id}")))?;
+                if model.provider.trim() != sc_stan::STAN_PROVIDER {
+                    return Err(Error::invalid(format!(
+                        "model `{}` has no program to compile: its provider is `{}`",
+                        model.name, model.provider
+                    )));
+                }
+                let minutes = model
+                    .configuration
+                    .get(sc_stan::config_keys::MAX_RUNTIME_MINUTES)
+                    .and_then(Json::as_u64)
+                    .unwrap_or(60);
+                let answer = models
+                    .stan()
+                    .compile(
+                        &model.configuration,
+                        std::time::Duration::from_secs(minutes * 60),
+                    )
+                    .await?;
+                Ok(HandlerResponse::ok(
+                    serde_json::to_value(&answer)
+                        .map_err(|e| Error::msg(format!("the compile: {e}")))?,
+                ))
+            }
+        }
+    });
+
+    reg.register("cancelModelFit", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let models = models_of(&apps)?;
+                let id = sc_model::InstanceId(parse_uuid(ctx.path_param("id")?, "model instance")?);
+                let instance = sc_model::require_model_instance(&catalog, id).await?;
+                let model = sc_model::load_model(&catalog, instance.model)
+                    .await?
+                    .ok_or_else(|| {
+                        Error::not_found(format!("the model of instance {id} is gone"))
+                    })?;
+                let registry = models.registry();
+                let provider = registry.require(model.provider.trim())?;
+                if !provider.cancellable() {
+                    return Err(Error::invalid(format!(
+                        "a fit of `{}` cannot be cancelled: it runs inside this server rather                          than as a process it can stop, so it runs to the end",
+                        provider.name()
+                    )));
+                }
+                if !sc_model::request_fit_cancel(&catalog, id).await? {
+                    return Err(Error::invalid(format!(
+                        "instance {id} is `{}`: there is no running fit to cancel",
+                        instance.status
+                    )));
+                }
+                let instance = sc_model::require_model_instance(&catalog, id).await?;
+                Ok(HandlerResponse::ok(model_instance_json(&instance)))
+            }
+        }
+    });
+
+    reg.register("getModelDraws", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let models = models_of(&apps)?;
+                let id = sc_model::InstanceId(parse_uuid(ctx.path_param("id")?, "model instance")?);
+                let instance = sc_model::require_model_instance(&catalog, id).await?;
+                let request = sc_model::DrawsRequest {
+                    variable: required_query(&ctx, "variable")?,
+                    selection: sc_model::Selection::from_json(
+                        query_json(&ctx, "elements")?.as_ref(),
+                    )?,
+                    chains: match ctx.query_get("chains").map(str::trim) {
+                        None | Some("") => None,
+                        Some(list) => Some(
+                            list.split(',')
+                                .map(|c| {
+                                    c.trim().parse::<u32>().map_err(|_| {
+                                        Error::invalid(format!(
+                                            "`chains` is a comma-separated list of chain                                              numbers, and `{}` is not one",
+                                            c.trim()
+                                        ))
+                                    })
+                                })
+                                .collect::<Result<Vec<_>>>()?,
+                        ),
+                    },
+                    warmup: matches!(ctx.query_get("warmup"), Some("true" | "1")),
+                    thin: match ctx.query_get("thin").map(str::trim) {
+                        None | Some("") => 1,
+                        Some(n) => n.parse::<usize>().ok().filter(|n| *n >= 1).ok_or_else(
+                            || Error::invalid(format!("`thin` must be a whole number from 1, not `{n}`")),
+                        )?,
+                    },
+                };
+                let draws = sc_model::read_draws(
+                    &catalog,
+                    &instance,
+                    &request,
+                    models.max_draws_response(),
+                )
+                .await?;
+                Ok(HandlerResponse::ok(serde_json::to_value(&draws).map_err(
+                    |e| Error::msg(format!("the draws: {e}")),
+                )?))
+            }
+        }
+    });
+
+    reg.register("getPosteriorSummary", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = sc_model::InstanceId(parse_uuid(ctx.path_param("id")?, "model instance")?);
+                let instance = sc_model::require_model_instance(&catalog, id).await?;
+                let variable = required_query(&ctx, "variable")?;
+                let selection =
+                    sc_model::Selection::from_json(query_json(&ctx, "elements")?.as_ref())?;
+                let summary =
+                    sc_model::summarise_variable(&catalog, &instance, &variable, &selection)
+                        .await?;
+                Ok(HandlerResponse::ok(
+                    serde_json::to_value(&summary)
+                        .map_err(|e| Error::msg(format!("the summary: {e}")))?,
+                ))
+            }
+        }
+    });
+
+    reg.register("downloadModelRun", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let models = models_of(&apps)?;
+                let id = sc_model::InstanceId(parse_uuid(ctx.path_param("id")?, "model instance")?);
+                let instance = sc_model::require_model_instance(&catalog, id).await?;
+                let model = sc_model::load_model(&catalog, instance.model)
+                    .await?
+                    .ok_or_else(|| {
+                        Error::not_found(format!("the model of instance {id} is gone"))
+                    })?;
+                let bytes = crate::posterior::run_zip(&catalog, &models, &model, &instance).await?;
+                Ok(HandlerResponse::download(crate::handler::Download {
+                    bytes: Bytes::from(bytes),
+                    content_type: "application/zip".to_owned(),
+                    filename: crate::posterior::run_filename(&model, &instance),
+                }))
+            }
+        }
+    });
+
+    reg.register("writePosterior", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = sc_model::InstanceId(parse_uuid(ctx.path_param("id")?, "model instance")?);
+                let instance = sc_model::require_model_instance(&catalog, id).await?;
+                let model = sc_model::load_model(&catalog, instance.model)
+                    .await?
+                    .ok_or_else(|| {
+                        Error::not_found(format!("the model of instance {id} is gone"))
+                    })?;
+                // Nulls the generated client sends for absent optional fields
+                // are absent here: the write-back refuses fields it does not
+                // take, and "no table" is not "a table called null".
+                let body: Map<String, Json> = rows::require_object(&ctx.body)?
+                    .iter()
+                    .filter(|(_, v)| !v.is_null())
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let write = sc_model::PosteriorWrite::from_json(&Json::Object(body))?;
+                // The admin's own authority — the same the row API grants them —
+                // through the ordinary write path, so the target table's own
+                // triggers fire.
+                let authority = admin_caller(ctx.user.as_ref());
+                let written = sc_api::models::write_posterior(
+                    &catalog,
+                    &model,
+                    &instance,
+                    &write,
+                    &sc_api::models::Writer::Context(&authority),
+                    &rows::Executor::Pooled,
+                )
+                .await?;
+                Ok(HandlerResponse::ok(written))
             }
         }
     });
@@ -8868,6 +9235,26 @@ fn query_json(ctx: &crate::handler::HandlerCtx, name: &str) -> Result<Option<Jso
         .map_err(|e| Error::invalid(format!("`{name}` is not valid JSON: {e}")))
 }
 
+/// A required, non-empty query parameter.
+fn required_query(ctx: &crate::handler::HandlerCtx, name: &str) -> Result<String> {
+    ctx.query_get(name)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| Error::invalid(format!("`{name}` is required")))
+}
+
+/// An error as the sentence it was written as, without its kind's prefix — for
+/// an answer that carries a refusal as a field rather than as a failure.
+fn plain_sentence(e: &Error) -> String {
+    match e.repr() {
+        sc_error::Repr::Invalid(m) | sc_error::Repr::NotFound(m) | sc_error::Repr::Config(m) => {
+            m.clone()
+        }
+        _ => sc_error::format_chain(e),
+    }
+}
+
 /// A [`Dataset`](sc_model::Dataset) off the wire.
 fn dataset_from_json(value: &Json) -> Result<sc_model::Dataset> {
     serde_json::from_value(value.clone())
@@ -8918,6 +9305,8 @@ async fn model_json(
         "table_name": model.table(),
         "dataset": serde_json::to_value(&model.dataset)
             .map_err(|e| Error::msg(format!("dataset: {e}")))?,
+        "related": serde_json::to_value(&model.related)
+            .map_err(|e| Error::msg(format!("related datasets: {e}")))?,
         "configuration": Json::Object(model.configuration.clone()),
         "hyperparameters": Json::Object(model.hyperparameters.clone()),
         "split": serde_json::to_value(model.split)
@@ -8927,6 +9316,7 @@ async fn model_json(
         "instances": instances.len(),
         "last_fit": last_fit,
         "active_instance": active,
+        "program_check": Json::Null,
     }))
 }
 
@@ -8956,6 +9346,11 @@ fn model_from_body(body: &Map<String, Json>) -> Result<sc_model::Model> {
     model.configuration = optional_attrs(body, "configuration")?;
     model.hyperparameters = optional_attrs(body, "hyperparameters")?;
     model.attributes = optional_attrs(body, "attributes")?;
+    if let Some(related) = body.get("related").filter(|v| !v.is_null()) {
+        model.related = serde_json::from_value(related.clone()).map_err(|e| {
+            Error::invalid(format!("`related` is not a list of named datasets: {e}"))
+        })?;
+    }
     if let Some(split) = body.get("split").filter(|v| !v.is_null()) {
         model.split = serde_json::from_value(split.clone())
             .map_err(|e| Error::invalid(format!("`split` is not a split: {e}")))?;
@@ -8991,6 +9386,13 @@ fn model_instance_json(instance: &sc_model::ModelInstance) -> Json {
         "outcome": instance.attributes.get(sc_model::ATTR_OUTCOME),
         "metrics": instance.metrics,
         "rows": instance.attributes.get(sc_model::ATTR_ROWS),
+        "progress": instance.attributes.get(sc_model::ATTR_PROGRESS),
+        "cancel_requested": sc_model::cancel_requested(instance),
+        "warnings": instance
+            .attributes
+            .get(sc_model::ATTR_WARNINGS)
+            .cloned()
+            .unwrap_or_else(|| Json::Array(Vec::new())),
     })
 }
 
@@ -9015,6 +9417,22 @@ fn model_instance_detail_json(instance: &sc_model::ModelInstance) -> Json {
                 .get(sc_model::ATTR_SEARCH)
                 .cloned()
                 .unwrap_or(Json::Array(Vec::new())),
+        );
+        map.insert(
+            "variables".to_owned(),
+            instance
+                .attributes
+                .get(sc_model::ATTR_AXES)
+                .cloned()
+                .unwrap_or_else(|| Json::Object(Map::new())),
+        );
+        map.insert(
+            "binding".to_owned(),
+            instance
+                .attributes
+                .get(sc_model::ATTR_BINDING)
+                .cloned()
+                .unwrap_or(Json::Null),
         );
     }
     out

@@ -96,9 +96,9 @@ pub async fn predict_rows(
     let outcome = instance.outcome()?;
     if !outcome.predicts() {
         return Err(Error::invalid(format!(
-            "instance {} is a hypothesis test: its parameters are the answer, and there is no \
-             per-row prediction to make",
-            instance.id
+            "instance {} is {}",
+            instance.id,
+            no_per_row_prediction(outcome.is_posterior())
         )));
     }
     let encoding = instance.encoding()?;
@@ -137,8 +137,8 @@ pub async fn predict_rows(
 ///   derive them from.
 /// - [`Dataset`](Subject::Dataset) is rows of the model's own table, read
 ///   **through the dataset**, so a join path and an aggregation are computed by
-///   the row layer exactly as they were at fit time. This is what a trigger's
-///   `predict_row` uses, and it is why the restriction goes into the read rather
+///   the row layer exactly as they were at fit time. This is what a formula's
+///   `predict("…")` uses, and it is why the restriction goes into the read rather
 ///   than being applied to what came back.
 #[derive(Debug, Clone, Copy)]
 pub enum Subject<'a> {
@@ -162,7 +162,7 @@ pub struct Predictions {
 /// Apply `instance` to whatever `subject` names, answering in row order.
 ///
 /// The one path both callers of Phase 5 go through — the `predictRows` endpoint
-/// and the `predict_row` action — because "read the rows, encode them the way
+/// and `predict("…")` — because "read the rows, encode them the way
 /// the fit was, ask the provider, name the classes" must not be written twice
 /// and drift.
 pub async fn predict_subject(
@@ -223,10 +223,28 @@ pub fn name_classes(predictions: Vec<Prediction>, encoding: &Encoding) -> Result
         .collect()
 }
 
-/// The value each prediction writes into a row (§12) — what `predict_row` hands
+/// The value each prediction writes into a row (§12) — what `predict()` hands
 /// the row layer.
 pub fn prediction_values(predictions: &[Prediction]) -> Result<Vec<Json>> {
     predictions.iter().map(Prediction::to_json).collect()
+}
+
+/// What a fit that answers nothing per row is, and what to do instead: the
+/// end of every refusal to predict with one, after "… is".
+///
+/// A posterior is refused in its own words rather than a hypothesis test's:
+/// prediction for new rows from a posterior (standalone generated quantities,
+/// Stan TODO §19) is carried past the Stan milestone, and the draws in a code
+/// body are the way to it meanwhile.
+pub fn no_per_row_prediction(posterior: bool) -> &'static str {
+    if posterior {
+        "a posterior: its draws are the answer, and a posterior does not predict rows here — \
+         read its draws in a code body (`m.draws(…)`, on `models.get(…)`) and compute the \
+         prediction there"
+    } else {
+        "a hypothesis test: its parameters are the answer, and there is no per-row prediction \
+         to make"
+    }
 }
 
 #[cfg(test)]
@@ -530,6 +548,25 @@ mod tests {
             .await
             .expect_err("a test");
         assert!(err.to_string().contains("hypothesis test"), "{err}");
+    }
+
+    /// Prediction from a posterior is carried past the Stan milestone, so a
+    /// posterior is refused — as a posterior, pointing at the draws, not as a
+    /// hypothesis test.
+    #[tokio::test]
+    async fn a_posterior_is_refused_as_a_posterior_and_pointed_at_its_draws() {
+        let mut instance = instance();
+        instance.attributes.insert(
+            ATTR_OUTCOME.to_owned(),
+            serde_json::to_value(Outcome::Posterior { prediction: None }).expect("outcome"),
+        );
+        let err = predict_rows(&registry(), "fixed_class", &instance, &training())
+            .await
+            .expect_err("a posterior")
+            .to_string();
+        assert!(err.contains("is a posterior"), "{err}");
+        assert!(err.contains("`m.draws(…)`, on `models.get(…)`"), "{err}");
+        assert!(!err.contains("hypothesis test"), "{err}");
     }
 
     #[test]

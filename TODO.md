@@ -1,33 +1,37 @@
-# Saltcorn v2 — Static directories: served, picked, and listed
+# Saltcorn v2 — Models without actions of their own (milestone 31)
 
-Ordered, checkable task list for the twenty-ninth milestone after the MVP. Earlier lists are
+Ordered, checkable task list for the thirty-first milestone after the MVP. Earlier lists are
 archived in [docs/TODO-mvp.md](./docs/TODO-mvp.md) (the MVP) and
-`docs/TODO-post-mvp-1.md` … [docs/TODO-post-mvp-28.md](./docs/TODO-post-mvp-28.md) (most
-recently: internationalisation, and streams as an entity). Scope and rationale are in
-[docs/GOALS.md](./docs/GOALS.md), whose sentence on applications is quoted in §1.
+`docs/TODO-post-mvp-1.md` … [docs/TODO-post-mvp-30.md](./docs/TODO-post-mvp-30.md) (most
+recently: Bayesian models with Stan). The predictive-models milestone is
+[docs/TODO-post-mvp-22.md](./docs/TODO-post-mvp-22.md); both are now
+[docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md) §14.2.
 
-An application has images. A logo, a hero, a folder of screenshots for the docs page — bytes
-that are not rows, that nobody uploads through a form, and that the person building the
-application wants to point at from a page. GOALS gave them a home in the first milestone: an
-application is "configured with … any number of subdirectories that are served statically", and
-`Application::static_dirs` has been a stored, editable, validated-on-delete field ever since
-(TODO-mvp §161–162).
+The last two milestones gave models three actions: `predict_row`, `write_posterior` and
+`fit_model`. Two of them are too specific. Every trigger form lists them, including for an admin
+who will never build a model, and GOALS asks for a **minimal** action set, because control flow
+belongs to workflows rather than to more and more actions. `write_posterior` only means something
+for one kind of provider. `predict_row` is what `update_rows` does, plus one value it cannot
+compute. This milestone keeps the one action that is generic, removes the other two, and moves
+their capabilities to where values are already computed: **methods on a model object in code
+bodies**, and a **`predict()` function in formulas**, including non-stored calculated fields.
 
-**Nothing serves them.** `router.rs` matches a request against the app's API providers and then
-falls through to `app.framework.handle`; `app.static_dirs` is read by `applications_using_file_store`,
-by the admin API's JSON, and by nothing else. An admin can fill the form in, save it, and get a
-404. So the field is a promise the server does not keep, and the agent that writes the
-application's pages has no URL it could truthfully put in an `<img src>`.
-
-This milestone keeps the promise and then tells the coding agent about it, because the two are
-one job: a URL the agent can be told about is a URL something has to serve.
-
-**Milestone definition of done:** an admin adds a static directory to an application — mount
-`/img`, store picked from a **drop-down** of the stores the application declares, path `media` —
-and `https://<app>/img/hero.png` serves `media/hero.png` out of that store with the right
-content type and an ETag. The application's coding agent, asked to put the hero image on the
-landing page, calls `list_assets_*`, is told `/img/hero.png`, and writes it into the JSX
-without being told the URL by a human. The same scenario passes in `cargo test`.
+**Milestone definition of done:** the models tutorial's `houses` table has the `House prices`
+linear regression (with `neighbourhoodⱵaverage_income` and `viewingsↃhouse.length` in its
+dataset). The admin adds a non-stored calculated field `estimated_price` whose expression is
+`predict("House prices")`. Listing `houses` over the REST API returns a number in
+`estimated_price` for every row, with **one** provider call for the page, including for an
+unsold house that the dataset's filter excludes. Filtering on `estimated_price` is refused with a
+sentence naming the field. A nightly trigger runs `fit_model` on `House prices` with
+`activate: if_clean`. The new fit becomes active, and the next read of `estimated_price` follows
+it without anything being edited. A stub provider that reports a warning leaves its new fit
+inactive. For **Radon**, a workflow runs `fit_model`, then a `run_js_code` step that does
+`const m = await models.get("Radon"); await m.writePosterior({ variable: "alpha", statistics:
+{ mean: "alpha_mean", sd: "alpha_sd" } })`. That fills `counties.alpha_mean` and fires the
+`counties` update trigger. The same body calls `m.predict(...)` on a posterior and gets a
+sentence pointing at `m.draws`; `models.get("House prices").draws` is absent, and calling it
+gets a sentence too. The Python body does the same through `m.write_posterior(...)`.
+`listActions` has `fit_model` and has neither `predict_row` nor `write_posterior`.
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -35,453 +39,362 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 # The specification
 
-### 1. What GOALS says
+### 1. The rule this milestone applies
 
-> The application also is configured with the subdomain on which it is served, any number of
-> APIs that are created under an application, and any number of subdirectories that are served
-> statically.
+An action belongs in the action set only if it is **generic**: it makes sense for every table,
+every provider, every application. A capability that exists for one kind of model is a
+**method** of that model, reached from code. A computed value belongs in a **formula**, which
+already has a place to live in every action that writes rows (`insert_row` values, `update_rows`
+assignments, `only_if`, `{{ }}` templates) and in calculated fields.
 
-Three things are configured there and two of them work. This is the third.
+| Capability | Before | After |
+|---|---|---|
+| Refit a model | `fit_model` | `fit_model`, generic across providers (§2) |
+| Predict a row | `predict_row` action | `predict("Model")` in any formula (§4); `m.predict(row)` in code (§3) |
+| Write a posterior back | `write_posterior` action | `m.writePosterior({...})` in code (§3), only on a posterior |
+| Read draws / summary / fit | `models.draws(name, var)` etc. | `m.draws(var)`, `m.summary(var)`, `m.fit` (§3) |
 
-### 2. Where a static directory sits in the request path
+**The admin API does not change.** `predictRows`, `writePosterior` and the posterior screen's
+**Write back** button stay, because they are the admin's own tools and not the action namespace.
+The one `write_posterior()` function they share moves from `sc-core-actions` into `sc-api`
+(`sc_api::models`), which already owns the row layer and depends on `sc-model`, so the admin
+handler and the code host (§3) call the same function.
 
-An application request resolves in three steps, and the new one is the middle:
+**No migration.** A stored trigger that names `predict_row` or `write_posterior` loads as a
+broken trigger ("unknown action"), listed with its reason and editable, which is how any trigger
+whose action went away already behaves. Nothing goes in `TABLES_RENAME.sql`: no table or column
+changes.
 
-1. **An API provider**, by longest matching mount (`router.rs`, unchanged).
-2. **A static directory**, by longest matching mount — new.
-3. **The framework**, which serves the built bundle and whose SPA fallback claims `/*`.
+### 2. `fit_model`, for every provider
 
-The order is forced. The framework must be last because its fallback answers every path, so a
-static directory behind it would never be reached. APIs must be first because an API is the
-thing an application cannot work without, and an admin who mounts a directory over one should
-find out at *save* time rather than by watching their data layer stop answering — which is
-§5's refusal.
+The action's steps are already provider-neutral: `validate_model`, then
+`FitStarter::start_fit`, then optionally wait. What is not neutral is **"activate when clean"**.
+"Clean" means "fitted with no warnings", and today only a posterior produces warnings. For a
+random forest the option really means "if it didn't fail". So the fix is in the provider
+interface, not the action:
 
-### 3. What is served, and to whom
+- **`FitResult` gets `warnings: Vec<String>`** (`FitResult::warning("…")`), as sentences that
+  say what to do, like a posterior's. A Python provider's `fit` may return
+  `{"state": …, "parameters": […], "warnings": ["…"]}`. `@sc.model_provider`'s docstring and
+  `tutorial-python.md` say so, and a `warnings.warn` from inside `fit` (sklearn's
+  `ConvergenceWarning`) is caught and added. The fit job merges them with the posterior
+  diagnostics into `ATTR_WARNINGS`, so `fitted_cleanly` means the same thing for every provider.
+- **Configuration:** `model` (the picker), `activate`: `never` | `if_clean` | `always`
+  (default `never`), `wait` (default true) and `name`.
+- **The answer:** `{ instance, status, active, error, warnings, metrics }`. With `metrics`, a
+  later workflow step can branch on `metrics.test.r2` without a new activation rule.
+- The description loses its posterior wording: "Fit a model again, and optionally make the new
+  fit active".
 
-The remainder of the path after the mount is resolved under `StaticDir::path` inside
-`StaticDir::store`, and then read through the **same `sc_files::check_access`** every other
-reader in this system goes through, as the request's user role. That is the one decision worth
-stating out loud: a static directory is a **mount, not a grant**. It says where in the URL
-space a store's subdirectory appears; it does not say that everything under it is public. A
-file whose store or path is closed to a guest is not served to a guest, and the refusal is the
-404 an unknown path gets — a 403 would confirm the file exists to somebody not allowed to know.
+### 3. The model handle in code bodies
 
-A path that escapes the directory (`..`) is the same 404, resolved rather than string-matched,
-so there is no place to be clever about encodings.
+`models` stays a `const` built over the run's `db` handle (so it is on the run's call budget,
+and a body with no `db` has no `models`). Its one function returns a **handle**:
 
-The content type is `sc_app::asset_content_type`, already the code framework's answer for the
-same question, so a `.png` in a bundle and a `.png` in a static directory are served identically.
-The ETag is over the bytes, and a matching `If-None-Match` is a 304: these are images, they are
-requested on every page load, and they do not change.
+```js
+const m = await models.get("House prices");              // the model's active fit
+const m = await models.get("House prices", { fit: id }); // a specific fit
+m.name; m.provider; m.table; m.outcome;                   // outcome as recorded on the fit
+m.fit;   // { id, name, status, active, created, error, warnings, metrics, parameters }
 
-**Previews come free.** A preview is a `MountedApp` over the same `Application` record
-(`apps.rs`), so `view_app` sees the images without anything further.
+// every fit whose outcome predicts (regression, classification, clustering, embedding)
+await m.predict(row);                    // → 312000 | "spam" | 3 | [0.1, …]
+await m.predict([r1, r2, r3]);           // one provider call, answers in row order
+await m.predict(row, { detail: true });  // → { value, probability } (probability for a class)
 
-**No CSP change.** A static directory is on the application's own origin, which
-`default-src 'self'` already allows. That is itself a reason to prefer this over an admin
-hand-writing an `img-src` for some other host.
-
-### 4. The URL, and why the agent is told a relative one
-
-The public URL is `//<subdomain>.<host><mount>/<path within the directory>`. The agent is told
-the **app-root-relative** part — `/img/hero.png` — for two reasons. It is what belongs in the
-JSX: an absolute URL baked into a component follows the application from `localhost:3000` to
-the production domain as a broken link. And it is the answer `preview_pane_url` already gives
-to the same question, where the host is a `{host}` placeholder resolved in the browser
-(`builder_agent.rs`), so the tree has one story about this rather than two.
-
-### 5. The store is a pick-list, not a text field
-
-Today `Static directories` is three text inputs — mount, store, path — and `store` is a store's
-name typed from memory (`ApplicationForm.tsx`, `RepeatableRows`). This is wrong three times
-over, and only the first is cosmetic:
-
-- **The set is short, known, and already loaded.** `ApplicationForm` calls `listFileStores()`
-  on mount and renders the result as a multi-select for the application's store subset, twenty
-  lines above. Asking the admin to type one of those names into a box underneath is asking a
-  question whose answer is on the screen.
-- **A typo is silent, and stays silent.** Nothing validates the name on save — not
-  `save_application`, not the admin API. A misspelled store is stored, and the first sign of it
-  is a 404 from §2, or (before this milestone) nothing at all, because nothing served the
-  directory either.
-- **It quietly widens what the application reaches.** `StaticDir::store` is documented as
-  "which should be one the app declares access to" and nothing enforces the *should*. Meanwhile
-  `applications_using_file_store` counts a static directory as a reference that blocks deleting
-  a store — so a typed name can pin a store an application was never granted, and an
-  application's declared subset stops being the whole truth about which stores it touches.
-
-So: the drop-down offers **the application's own declared file stores**, live from the form's
-state rather than from the server's full list, and `save_application` refuses a static directory
-whose store is outside the subset, naming both. The subset is right above it on the same screen,
-so the fix for an empty drop-down is visible without scrolling, and the empty state says so.
-
-A stored value the list no longer offers is still shown and still selected — the pattern the
-framework picker on this same form already uses for a framework this server does not register —
-because a form must never silently discard what it was given to edit.
-
-This is TODO-post-mvp-1 §1.6's argument arriving in the one place it had not: a file-store
-reference should *be* a pick-list, because being one is what carries the meaning "this is a
-store" to everything downstream.
-
-### 6. `list_assets`: what the agent gets
-
-One read-only tool on the `coding` trait, offered when the trait's `application` setting names
-an application — which an application's builder agent always sets (`builder_agent.rs`). It is
-not behind `may_edit`: it reads names and sizes, nothing else. Named per scope like every other
-tool the trait contributes (`list_assets_web_todo`), so an agent with two scopes has two and
-neither collides.
-
-```
-list_assets_<scope>(pattern?: string, dir?: string)
-→ {"assets": [
-     {"url": "/img/hero.png", "path": "media/hero.png", "store": "Assets",
-      "content_type": "image/png", "size": 184320, "modified": "…"}
-   ], "truncated": false}
+// a Posterior outcome only
+await m.draws("alpha", { keys: [27001], chains: [1, 2], thin: 10 });
+await m.summary("alpha", { keys: [27001] });
+m.variables;                             // what the fit drew, `__` internals left out
+await m.writePosterior({ variable: "alpha", statistics: { mean: "alpha_mean", sd: "alpha_sd" } });
+await m.writePosterior({ variable: "y_future", mode: "insert", table: "forecasts",
+                         statistics: { mean: "mean", q5: "lower", q95: "upper" },
+                         coordinates: [{ axis: "day.future", field: "day" }] });
 ```
 
-Newest first, capped with the same hint `find_files` gives, the same excluded directories, the
-same §9 access rule as the caller. It walks the **application's** static directories, not the
-coding scope: the code is in one store and the images are in another, which is exactly why
-`find_files` cannot answer this. And `find_files` could not answer it anyway — a path is not a
-URL, and a model handed a path will invent the URL, which is the bug.
+Python has the same handle, synchronously and in snake case: `m = models.get("Radon")`,
+`m.predict(row)`, `m.predict(rows, detail=True)`, `m.draws("alpha", keys=[27001])`,
+`m.summary("alpha")`, `m.write_posterior(variable="alpha", statistics={...})`.
 
-Plus one line per static directory in the session header, beside `AGENTS.md` and the repo map
-(`coding/header.rs`): `/img → store "Assets" (media), 24 files`. A model that does not know the
-tool exists will not call it, and finding out costs a turn and the admin's money.
+The rules:
 
-**Reading only.** Uploading an image through the agent is a grant an admin gives deliberately,
-and this milestone does not invent it.
+- **What a row is.** A row that carries the model table's primary key is read **through the
+  model's dataset**, by key and unfiltered (design §14.2's `predict_subject` rule), so a join
+  path and an aggregation are computed as they were at fit time. A row without one (not inserted
+  yet, or made up) is taken as the dataset's columns as given
+  (`Subject::Rows`) and must supply every feature. A missing one is refused by name. In a batch,
+  keyed rows are read in one query and literal rows go in one frame.
+- **The fit's recorded outcome decides which methods exist, not the provider's name.**
+  `draws`, `summary`, `variables` and `writePosterior` exist on a handle whose outcome is
+  `Posterior`. Today only Stan produces one, and a Bayesian provider from a module would get them
+  unchanged. On any other handle they are **absent**, and calling one throws a sentence ("`House
+  prices` is a linear_regression regression; draws are for posterior models"). JavaScript uses a
+  getter that throws; Python uses `__getattr__`. `predict` exists on every handle; on an outcome
+  that does not predict it throws `no_per_row_prediction`'s sentence. There is no per-provider
+  method registry. One can be added when a provider needs a method nobody else has.
+- **Authority.** A prediction and a draws read read the admin's own fit, as today. **A
+  `writePosterior` writes under the handle's authority and the run's trigger chain.** That is
+  the `db` handle's, the same as `db.counties.update(…)`: ownership is checked, the target's
+  triggers fire, and the chain bounds recursion. The removed action wrote as admin. A trigger
+  body that needs admin writes gets them the way any code body does.
+- **The wire.** `op: "models"` requests on the `db` host, with `what`: `get`, `predict`,
+  `draws`, `summary`, `write_posterior`. `get` answers everything the handle needs to be built
+  without another call (the fit, the outcome, the variables). The later calls name the **fit
+  id** the `get` resolved, so a handle does not change fit halfway through a body when someone
+  activates another. The flat `models.draws(name, var)`, `models.summary` and `models.instance`
+  are removed (prototype: no compatibility layer).
+- **The seam.** The code host has a `Catalog`, and a prediction needs the provider registry and
+  the `DatasetSource`. Both are reached through the `ModelHost` seam of §4, which is installed
+  on the `Catalog`. The code host adds nothing of its own.
+
+### 4. `predict()` in formulas
+
+```js
+predict("House prices")      // this row, through the model's active fit
+```
+
+**One argument, a string literal: the model's name.** Pinning a fit is what `active` is for,
+and a formula that named a fit id would break the day that fit was deleted. It returns the
+plain value, the one `predict_row` wrote: a number, a class name, a cluster index or a vector.
+`predict` is a global of the formula language. A **column** called `predict` shadows it, which
+is the scope rule's one rule. The built-in wins over a module function called `predict`, which
+code bodies can still reach as `modfn("…").predict`.
+
+**It is hoisted, exactly as a module function call is** (design §4b):
+
+- `sc-expr`'s `analyze` recognises `predict(<string literal>)` and collects it into a new
+  `Analysis::model_calls: BTreeSet<ModelCall { key, model }>`, keyed by `hoisted_call_key`'s text
+  (`predict("House prices")`). A non-literal argument, a second argument, and a call inside `=>`
+  are refused on save, with sentences in the module-call style.
+- `translate` answers `Untranslatable` for it, so no SQL path ever tries to compute one.
+- `sc_catalog::prefetch_bindings` resolves each model call before the formula runs, after the
+  join paths, and binds the value under the key. The formula isolate stays op-less and does no
+  I/O. The **row** is the row being evaluated: by its key when it has one, otherwise its values
+  as literal dataset columns (a proposed row on the write path), under §3's rule.
+
+**The seam: `ModelHost` on the `Catalog`.** `sc-catalog` sits below `sc-model`, so it cannot
+call `predict_subject`. It declares a trait that speaks JSON and installs it the way
+`module_functions()` is installed:
+
+```rust
+#[async_trait]
+pub trait ModelHost: Send + Sync {                        // sc-catalog
+    /// Predict `rows` of `table` with `model`'s active fit (or `fit`), in row order.
+    async fn predict(&self, model: &str, fit: Option<&str>, table: &str,
+                     rows: PredictRows<'_>, detail: bool) -> Result<Vec<Json>>;
+    /// What a formula's save check needs: the model's table and whether its outcome
+    /// predicts, and into which basic types.
+    async fn describe(&self, model: &str) -> Result<ModelSummary>;
+}
+pub enum PredictRows<'a> { Keys(&'a [Json]), Values(&'a [Json]) }
+```
+
+`sc-server`'s `ModelServices` implements it over the provider registry and the `DatasetSource`,
+and sets it on the `Catalog` at startup and again whenever the module set is rebuilt (the same
+act that swaps the action registry today). A server with no model support has none, and a
+formula that calls `predict` fails **naming the call**, never with a null, which is the module
+functions' rule.
+
+**Save-time checks** (async, because models are rows). They run in `schema_edit` for a
+calculated field and on trigger save for an action's formulas and `only_if`:
+
+- the model exists;
+- its table is the formula's table ("`House prices` is a model of `houses`, and this formula is
+  on `orders`");
+- its outcome predicts (a t-test, or a posterior with no prediction quantity, is refused with
+  `no_per_row_prediction`'s sentence);
+- for a calculated field, the field's declared type is among the outcome's
+  `possible_prediction_types`. This is the check `predict_row` made against its target field.
+
+An **ownership formula refuses `predict`** outright, for the module-function reason: `Err` is
+deny, and a rule that waits on a provider makes every read wait on it.
+
+**Where it works:**
+
+- **Action formulas**: `insert_row` values, `update_rows` assignments, `only_if`, `{{ }}`
+  templates in `send_email`, `fetch` and the rest. These already go through
+  `prefetch_bindings`, so they need nothing beyond the hoist. This is the direct replacement for
+  `predict_row`: an insert trigger on `houses` whose `update_rows` sets
+  `estimate = predict("House prices")`. A workflow that wanted the prediction in its context
+  uses a formula step.
+- **Non-stored calculated fields.** These need the read path to change. Today `rows.rs`'s
+  `calc_projections` computes calculated fields only in SQL and **silently skips** one that does
+  not translate (`crates/sc-api/src/rows.rs:1014`). This milestone adds the missing fallback:
+  - After the `SELECT`, every calculated field that did not translate is evaluated by the
+    reified evaluator over the fetched page, in the calculated fields' dependency order (a field
+    that reads a predicting field sees its value).
+  - **Predictions are batched per page**: for each model named on the page, one
+    `ModelHost::predict` with `PredictRows::Keys` of every row's key, so a 50-row page is one
+    dataset read and one provider call, not fifty. The other hoisted values (join paths, module
+    calls) are resolved by `prefetch_bindings` per row, as they are on the write path.
+  - The fallback is **general**. Any untranslatable calculated field is computed rather than
+    skipped, which also covers a module function call in a calculated field.
+  - Such a field **cannot be filtered or sorted on**. A `where` or `orderBy` that names it is
+    refused with a sentence naming the field and saying why ("`estimated_price` is computed after
+    the rows are read, because it calls `predict`"). Everywhere a query lowers a filter
+    (`filter.rs`, GraphQL, the CSV export) refuses the same way.
+  - **Errors fail the read, naming the field, the model and the row** (an unseen category, a
+    model with no active fit). This is the system's position on silent failure and the rule the
+    module functions already follow. A model with no active fit makes its table's reads fail
+    until one is activated, and the save-time check warns about that when the field is added.
+  - Every read path that projects calculated fields goes through the one fallback: the four
+    `calc_projections` call sites in `rows.rs`, plus GraphQL and CSV if they project calculated
+    fields separately. There must be one implementation, because two would drift.
+- **Stored calculated fields** do not exist yet. When they do, `predict` in one is refused. A
+  prediction depends on rows the model reads through its dataset, and recomputing it on every
+  write to every one of them is the objection design §14.2 already records.
+
+### 5. Where the code goes
+
+| Crate | What changes |
+|---|---|
+| `sc-model` | `FitResult::warnings`; the fit job merges them into `ATTR_WARNINGS` |
+| `sc-python` | the fit payload's `warnings`, `warnings.warn` caught in `fit`; the `Models` handle class in `saltcorn.py` |
+| `sc-expr` | `ModelCall`, `Analysis::model_calls`, the hoist in `analyze`, `Untranslatable` in `translate`; the JavaScript `models` prelude becomes the handle |
+| `sc-catalog` | the `ModelHost` trait, `Catalog::set_model_host`/`model_host`, model calls in `prefetch_bindings` |
+| `sc-api` | `models::write_posterior` (moved); the code host's `get`/`predict`/`write_posterior`; the calculated-field fallback and batching in `rows.rs`; the save checks in `schema_edit.rs`; filter/sort refusals |
+| `sc-core-actions` | `predict_row.rs` deleted; `posterior.rs` keeps only `FitModel` (renamed `fit_model.rs`); `register_model_actions` takes the registry and the `FitStarter` only |
+| `sc-server` | `ModelServices` implements `ModelHost` and installs it; handlers call `sc_api::models::write_posterior`; the trigger save path runs the formula checks |
+| `ui/admin` | `ModelForm.tsx` and `PosteriorInstance.tsx` wording; `codeTypes.ts` declares the handle |
 
 ---
 
-# The work
+## Phase 1 — One model action
 
-## Phase 1 — Serving a static directory
+- [x] 1.1 `FitResult::warnings` and `FitResult::warning(…)`; the fit job writes provider
+      warnings into `ATTR_WARNINGS` beside the posterior diagnostics; the Python
+      `@sc.model_provider` payload's `warnings` and `warnings.warn` captured during `fit`.
+      Tests: a stub provider with a warning gives an instance with that sentence; a clean one
+      gives none.
+- [x] 1.2 `fit_model` generic (§2): `activate: never | if_clean | always`, `metrics` in the
+      answer, the neutral description. Tests: fired from a trigger over a
+      `linear_regression` model; `if_clean` with the warning stub stays inactive; `always`
+      activates it anyway; `wait: false` with `if_clean` is activated by the job.
+- [x] 1.3 Remove `predict_row` and `write_posterior`: delete `predict_row.rs`, move
+      `write_posterior()` and its helpers (target checks, count rounding, dates as days) to
+      `sc_api::models`, point `handlers.rs`'s `writePosterior` at it, and shrink
+      `register_model_actions` and its callers (`sc-cli/src/main.rs`, `sc-server`'s
+      `triggers.rs`, `modules.rs`, `apps.rs`). Rewrite the tests that used them
+      (`posterior_api.rs`, `trigger_admin_api.rs`, `model_admin_api.rs`, `stan_models.rs`) to
+      keep what they covered through the admin API, until Phases 2 and 3 give them their new
+      home. The `sc-core-actions` test asserts the model action set is exactly `fit_model`.
+- [x] 1.4 The admin UI's wording: `ModelForm.tsx`'s "what a `predict_row` action names this
+      model by" and `PosteriorInstance.tsx`'s "the `write_posterior` action does the same"
+      now point at `predict()` and at `m.writePosterior`. The strings go in the `admin` i18n
+      domain.
 
-- [x] 1.1 `sc-server/src/router.rs`: after the API-provider match and before
-      `app.framework.handle`, resolve the request against `app.static_dirs` by longest matching
-      mount (§2). The remainder under `StaticDir::path` in `StaticDir::store`, read through
-      `sc_files::check_access` as the request's user role; a closed file and an escaping path
-      are both the 404 an unknown path gets (§3). Factor the match itself into `sc-app`
-      (`Application::static_dir_for(path)`) so it is testable without a server and so the
-      longest-mount rule has one implementation, as `provider_for` does.
-- [x] 1.2 The response: `sc_app::asset_content_type`, an ETag over the bytes, `304` on a
-      matching `If-None-Match`, and the app's CSP applied by `with_csp` like every other app
-      response.
-- [x] 1.3 `sc-server/tests/`: a static directory serves a file with the right content type; a
-      second request with the ETag is a 304; `..` does not escape; a file closed to a guest is
-      404 for a guest and served to an admin; an API mounted under the same prefix still wins;
-      the framework's SPA fallback still answers a path no static directory claims.
+## Phase 2 — The model handle in code
 
-## Phase 2 — The store is a pick-list
+- [x] 2.1 The `ModelHost` trait in `sc-catalog` (§4), with `Catalog::set_model_host` and
+      `model_host()`; `ModelServices` implements it over `predict_subject` (keys become a
+      `Subject::Dataset` restricted to those keys; values become `Subject::Rows`) and is
+      installed at startup and on every module rebuild. Tests: keyed rows come back in the
+      order asked, including a row the dataset filter excludes; a literal row missing a
+      feature is refused by name; `detail` carries a class's probability.
+- [x] 2.2 The code host's `op: "models"` (§3): `get` (resolving a name to its active fit, or
+      `fit` to that fit, answering fit, outcome, table and variables), `predict`, `draws`,
+      `summary` and `write_posterior` by fit id; `write_posterior` through the handle's
+      authority, chain and executor. Tests in `code_host/tests.rs`.
+- [x] 2.3 The JavaScript prelude's `models.get` and the handle: the posterior-only methods as
+      throwing getters on any other outcome; `predict` accepting a row or an array. Tests in
+      `sc-expr`'s code tests over a fake host.
+- [x] 2.4 Python's `Models.get` and the handle class, with `__getattr__` for the absent
+      methods. Tests in `python_models.rs` (needs `--features python-host`; say so in the
+      CHANGELOG if it cannot be run here).
+- [x] 2.5 `codeTypes.ts` declares `models.get` and the handle (the posterior methods as
+      optional members); `codeTypes.test.ts`. The MCP page `code_api_js.md` documents the
+      handle.
+- [x] 2.6 Integration tests in `sc-server`: a `run_js_code` trigger that predicts the event's
+      row and writes it with `db`; a workflow `fit_model` → `run_js_code` `writePosterior`
+      over the stub posterior provider, firing the target table's trigger; a non-admin
+      body's `writePosterior` into a table it may not update is refused.
 
-- [x] 2.1 `sc-app/src/store.rs`: `save_application` refuses a static directory whose store is
-      not in `Application::file_stores`, naming the store and the application, beside
-      `validate_api_mounts`. Refuse a mount colliding with an API mount there too (§2), for the
-      reason the API-at-`/` check is already made on save.
-- [x] 2.2 `ApplicationForm.tsx`: `RepeatableRows` grows a column kind — a `select` beside its
-      text inputs — and `Static directories`' `store` column becomes one, its options the
-      form's live `fileStores` state, a stored-but-unoffered value kept and selected, and an
-      empty state that says to add a file store above (§5).
-- [x] 2.3 Tests: a `sc-app` test for each refusal in 2.1; a vitest that the drop-down offers
-      the declared subset, that changing the subset changes the options, and that a stored value
-      outside it survives a render and a save untouched.
+## Phase 3 — `predict()` in formulas and calculated fields
 
-## Phase 3 — `list_assets` and the session header
+- [x] 3.1 `sc-expr`: `ModelCall`, `Analysis::model_calls`, the hoist in `analyze` (literal
+      string only, one argument, not inside `=>`, shadowed by a column), `Untranslatable` in
+      `translate`. Unit tests beside the module-call ones.
+- [x] 3.2 `prefetch_bindings` resolves model calls through `model_host()`: by key when the row
+      has one, otherwise from its values; no host is an error naming the call. Tests in
+      `sc-catalog` over a fake `ModelHost`.
+- [x] 3.3 Save-time checks (§4): in `schema_edit` for a calculated field (existence, table,
+      outcome predicts, declared type among `possible_prediction_types`, a notice when the
+      model has no active fit) and on trigger save for action formulas and `only_if`;
+      ownership formulas refuse `predict`. Tests for each refusal's sentence.
+- [x] 3.4 Action formulas: an insert trigger on `houses` with `update_rows` setting
+      `estimate = predict("House prices")` writes the number; a `{{ predict(…) }}` in a
+      template renders it. (Nothing to build beyond 3.1–3.3; this task is the test.)
+- [x] 3.5 The read-path fallback in `rows.rs` (§4): untranslatable calculated fields evaluated
+      after the `SELECT` in dependency order, predictions batched per page and per model, the
+      silent skip removed; every read path that projects calculated fields shares it. Tests:
+      a page of 50 houses is one `ModelHost::predict` (count the calls on a fake); a field
+      that reads the predicting field sees its value; a module-function calculated field that
+      was skipped before is now computed; an unseen category fails the read naming the field,
+      the model and the row.
+- [x] 3.6 Filtering and sorting on a fallback-computed field are refused with §4's sentence in
+      REST, GraphQL and the code host's query plans. Tests.
 
-- [x] 3.1 `sc-core-traits/src/coding/assets.rs`: the tool spec and call of §6, offered when
-      `CFG_APPLICATION` is set and absent when it is not. The URL is built by the same `sc-app`
-      helper Phase 1 serves through, so the tool cannot describe a URL the router does not
-      answer.
-- [x] 3.2 `coding/header.rs`: one line per static directory in the session header (§6), left
-      out silently when the application has none or cannot be read — nothing in the header
-      fails a run.
-- [x] 3.3 Tests: `list_assets_*` over a fixture application returns the URL Phase 1 actually
-      serves (same fixture, so the two cannot drift); the glob and the cap behave as
-      `find_files`' do; a file the caller may not read is not listed; with no `application`
-      setting the tool is not in the spec list; the header names the mounts.
+## Phase 4 — Documentation and the definition of done
 
-      **Deviation:** the stable-prefix budget (8.3) went from 1 500 estimated tokens to 1 600.
-      R§4's 1 500 was already spent to the last token — `act` measured 1 496 — and a tenth tool
-      costs about a hundred whatever it says, so the choice was this or taking a description off
-      one of the other nine. `list_assets` is the smallest spec in the set at 279 characters.
-      `docs/TECHNICAL_DESIGN.md`'s sentence on the budget says so, and it is still a test.
+- [x] 4.1 `docs/TECHNICAL_DESIGN.md`: §10's built-in action list; §14.2's table row "prediction |
+      … | the `predict_row` action", "Prediction: the action, and the calculated field there is
+      not" rewritten as "Prediction: a formula and a method", "Reading and writing back"
+      (`write_posterior` action and `models.draws` replaced by the handle); §4b gains model
+      calls beside module calls; §6.2's calculated fields gain the read-path fallback and its
+      filter/sort rule; `ModelHost` in the seams table.
+- [x] 4.2 Tutorials: `tutorial-models.md` (the trigger that applies the model becomes the
+      `estimated_price` calculated field, and an `update_rows` for the stored variant),
+      `tutorial-stan.md` (write back from a code step after `fit_model`),
+      `tutorial-triggers.md`, `tutorial-python.md` (the handle, and `warnings` in a provider);
+      `README.md`, `OPERATIONS.md` where they name the removed actions.
+      `crates/sc-cli/tests/repo_hygiene.rs`'s fragments (`predict_row`, "There is no
+      calculated field that predicts") follow the documents.
+- [x] 4.3 The definition of done as one `sc-server` test (`models_without_actions.rs`), over
+      `linear_regression` and the stub posterior provider (no CmdStan), with the Radon half
+      also in `stan_models.rs` behind its `#[ignore]`.
 
-## Phase 4 — The documentation and the walk-through
-
-- [x] 4.1 `docs/TECHNICAL_DESIGN.md` §13.2: the request path of §2, the mount-not-a-grant rule
-      of §3, and the store-subset rule of §5.
-- [x] 4.2 `docs/tutorial-code-framework.md`: a short section — put an image in a store, mount
-      it, use it from a page — and the note that a new file is live without a rebuild, because
-      the server serves it rather than the bundler.
-- [x] 4.3 Walk the definition of done by hand against a running server, and record what it
-      showed. The agent half needs an API key and spends money; if that is not available, it is
-      carried, and the `cargo test` half still stands.
-- [x] 4.4 `CHANGELOG`.
-
-### What running it by hand found
-
-Walked on 2026-09-22 against a debug `feldspar serve --base-domain localhost --bind
-127.0.0.1:3032 --sqlite … --file-store apps=…`, driving the admin API with `curl` as the first
-admin user: an application `todo` on the `code` framework, one file store, a static directory
-`/img → apps (store/media)`, and a `hero.png` on disk. Everything §3 promises happened —
-`http://todo.localhost:3032/img/hero.png` served the exact bytes as `image/png` with
-`etag: "bae263a2d70f2c71"`, the same request carrying that ETag was a `304`, `/img/../…` and
-`/img/%2e%2e/…` were both `404`, a second file dropped into the store served **with no rebuild
-and no restart**, a folder given `min_role: 1` through `setFileMeta` was `404` to a guest and
-`200` to the signed-in admin, and both save refusals fired with the sentences §5 asks for (an
-undeclared store, and a mount under an API's). On a second application with an API at `/api` and
-a directory at `/`, `GET /api/whoami` was the **API's** `401` rather than the directory's 404,
-and `GET /hero.png` was the image: the §2 order holds in the running server. Three things it
-found:
-
-1. **A static directory added by an *edit* did not serve until a build or a `SIGHUP`, and that
-   is fixed.** `updateApplication` re-mounted only a *constructed* framework (Saltcorn UI);
-   a built one — every `code` and `react` application — kept the `Application` record its mount
-   was made with, and the router resolves static directories off that record. So the admin
-   filled the form in, saved it, and the new mount's path was answered by the framework's **SPA
-   fallback**: `200` with `index.html`, which is worse than the 404 this milestone set out to
-   remove, because it looks like it worked. The mechanism to fix it already existed for the
-   locale set — `AppMounts::refresh_mount`, which rebuilds the record and the providers and
-   **keeps the bundle** — so the update handler now calls it (`refresh_mounted_app`) for every
-   framework rather than re-mounting only the constructed ones. The same edit-and-it-is-live
-   rule now covers the app's CSP, which was stale in exactly the same way and by the same
-   sentence of §13.2. Asserted in `admin_applications_api.rs`, against the bytes rather than the
-   status, because the bug's signature is a 200. Re-walked against the rebuilt server: removing
-   the directory hands its path back to the SPA fallback, adding it serves the file on the very
-   next request, and an edited CSP is on the next response — no build, no signal, no restart.
-2. **The agent half is carried: this machine has no API key.** `POST /api/applications` said so
-   itself — `no LLM provider is connected, so the `build-todo` agent that builds this
-   application was not created`. What the agent would be told is pinned by
-   `app_static_dirs.rs`'s `list_assets_returns_the_urls_the_router_serves`, which fetches every
-   URL the tool hands the model through the real router; what is unwalked is a model reading the
-   session header and writing the `<img>` itself.
-3. **`feldspar serve --sqlite` still announces the config file's Postgres environment.** The
-   line `database configured from the `production` environment of …/feldspar.toml` is printed
-   before `--sqlite` overrides it; the server does use the SQLite file (its `_fd_*` tables were
-   created there and the production database was untouched). Cosmetic, out of this milestone,
-   and noted because the first reading of that line is alarming.
-
-## Interjected — web access for agents (the `http` trait)
-
-Asked for directly, outside this milestone: can a coding agent read a library's documentation?
-It could not — no trait reached the web, and the only route was `shell_*` with `shell_network`
-on, i.e. `curl` returning raw HTML into the context. Design and the survey of how other agents
-bound a page's size are in `docs/TECHNICAL_DESIGN.md` §11.3, "The web".
-
-- [x] W.1 `sc-core-traits/src/http/guard.rs`: the host policy — public addresses only unless
-      opened, an optional allow-list with subdomains, checked on every redirect hop; a resolver
-      that filters what the client connects to.
-- [x] W.2 `http/client.rs`: redirects by hand, headers dropped on a host change, a whole-request
-      deadline, a 5 MB read cap that is reported rather than silent.
-- [x] W.3 `http/document.rs`: HTML to the Markdown of its main content (`htmd`), links absolute,
-      permalinks and `data:` images removed; JSON pretty-printed; binary described.
-- [x] W.4 `http/page.rs` and `http/cache.rs`: the window, the outline, `find`, and the per-run
-      cache that makes paging free.
-- [x] W.5 `http.rs`: the trait — `fetch_<name>`, its form, `elide`, `run_ended`; registered with
-      the built-ins.
-- [x] W.6 Tests: unit tests per module; `tests/http_fetch.rs` against a local server (paging,
-      cache hits counted on the wire, redirects, 404, `POST`, headers, a whole agent run);
-      `docs_agents.rs` pins the tutorial's names. Design §11.3, tutorial Step 10, `CHANGELOG`.
-
-- [x] W.7 Every framework's builder agent (`sc_app::framework_builder_agent`) carries `http`:
-      `fetch_web`, read-only, public hosts, no allow-list (design §11.3, "The web"). The eval
-      harness now applies a task's `checks`/`workflow` to `coding` alone, since `http` and
-      `preview_pane` refuse settings they do not declare.
-- [ ] W.8 Agent trait configuration is not redacted when an agent is read back (streams do this
-      with `redact_attrs`/`merge_secrets`). `http`'s `headers` is declared `secret()` so it will
-      be covered when agents adopt it; until then an admin reading the agent sees the key.
-      (The builder's own `http` carries no headers, so it has no key to show.)
-
-## Interjected — skip unchanged application builds at boot
-
-Asked for directly: every boot re-ran every application's bundler, which is most of the start-up
-time. The boot path now keys each build on git's tree hash of the working directory (staged,
-unstaged and untracked-but-not-ignored changes all included), and reuses the previous output
-when nothing changed.
-
-- [x] B.1 `sc-app/src/build_cache.rs`: the key — the source subtree's tree hash written from a
-      throwaway index, the build spec, the Feldspar version and the generated files' bytes;
-      the stamp kept in the repository's git dir. `build_application_if_changed` uses it;
-      `mount_all` calls it, while the Build button, the tools and a restore still always build.
-
-## Interjected — build no applications at boot
-
-Asked for directly: building every application at startup was still slowing boot down. Boot now
-mounts each application from what its last build left on disk, as a `SIGHUP` reload does.
-
-- [x] B.2 `mount_all` builds nothing: it and `reload_all` share `apps::mount_from_disk`. An
-      application that has never been built is logged and skipped. The Build button, the tools
-      and a restore still always build.
-
-## Interjected — a "None" framework
-
-Asked for directly: picking a framework when creating an application should offer "None" — an
-application of APIs, static directories and streams with no build step — and it should still
-get a coding agent, to write static assets such as HTML and CSS.
-
-- [x] N.1 `sc-app/src/none.rs`: `none` as a compiled-in `FrameworkFactory` (settings `store` and
-      `source`; `serves_ui` false; strict CSP; a framework that 404s everything). Listed after
-      the installed factories.
-- [x] N.2 Its builder agent (`builder_agent_in`): `coding` over the store and directory, naming
-      the application, no checks, and a prompt listing the static directories, APIs and
-      streams. `coding`'s `application` setting now accepts an application with nothing to
-      build: `check` passes the "build", and the preview is mounted through the factory.
-- [x] N.3 A static directory serves `index.html` for a directory request. The admin API's
-      `source` and the sidebar's "Edit code" cover a `none` application's directory.
-
-## Interjected — invitations, forgotten passwords, and `users` behind an app's API
-
-Asked for directly: a therapist, signed in to a therapists' app, creates an account for a
-patient; the patient is emailed a link that opens the *patients'* app, chooses a password there
-and is signed in. Also asked for: "forgot password" in general, and closing what exposing the
-`users` table to an app opened (the hash was readable, and `role` writable upwards).
-
-- [x] P.1 `sc-auth/src/password_tokens.rs`: `_fd_password_tokens` (SHA-256 of a 256-bit token,
-      purpose, expiry — 7 days for an invitation, 1 hour for a reset), `invite_user` (an account
-      with **no password**, only to a role less powerful than the inviter's; resent to a pending
-      account, `AlreadyActive` for one in use), and `redeem_password_token` (single use by
-      `DELETE … RETURNING`; ends the user's other tokens and sessions).
-- [x] P.2 `sc-api/src/rest/password.rs`: `POST {mount}/invite` (settings `allow_invite` and
-      `invite_min_role`; role, target app, subject, body/html and from-address in the call),
-      and on every app `POST {mount}/forgot-password` (always `{ok: true}`, one link a minute,
-      sent off the request) and `POST {mount}/set-password` (signs in). Links are
-      `{origin}/set-password#token=…`, the origin coming from the router's `AppDirectory`, so
-      only a served application can be linked to.
-- [x] P.3 `sc-api/src/user_rows.rs`: through any app API the users table never reads, filters,
-      orders, embeds or types `password_hash`, and never writes it; below admin, a written role
-      must be less powerful than the caller's (own row: may keep it), and updates/deletes reach
-      only the caller's own row and less powerful accounts'. A signed-in caller refused by
-      `Error::auth` gets `403` from the REST provider.
-- [x] P.4 The React scaffold: `src/SetPassword.tsx` on a public `/set-password` route,
-      "Forgot your password?" in `src/Login.tsx`, `setPassword`/`forgotPassword` in
-      `src/auth.tsx`; the runtime README and the builder agents' prompts describe all three.
-- [x] P.5 Tests: `sc-auth/tests/db_password_tokens.rs`, `sc-server/tests/app_invite.rs` (the
-      therapist → patient flow end to end, the role rules, forgot-password, the `users`
-      table), unit tests in `password_tokens.rs`, `user_rows.rs`, `rest/password.rs`.
-
-## Interjected — custom queries in JavaScript and Python
-
-Asked for directly: an application's "Custom SQL queries" become "Custom queries", each written
-in SQL, JavaScript or — where this server runs Python — Python, chosen by a drop-down per query.
-A JavaScript or Python body reads the request as `body` and `query`.
-
-- [x] Q.1 `sc-api/src/rest/custom.rs`: `CustomQuery::language` (`sql` by default); a code query's
-      source is not read as SQL, is not described, and projects an opaque-JSON response. The
-      REST provider runs it through the dispatcher's `run_js_code` / `run_python_code`
-      (`TriggerDispatcher::run_code`), with `body`, `query` and `user` in scope.
-- [x] Q.2 The application form: "Custom queries", a language drop-down per query (Python only
-      when the server can run it), a code editor for a JavaScript or Python body.
-- [x] Q.3 Tests, design §13.4, `CHANGELOG`.
-
-## Interjected — agents look at screenshots and image files
-
-Asked for directly: a coding agent on a visual model should be able to take a screenshot and see
-it, and to look at an image file in the code store or in a store the application serves
-statically. `view_app` already had `screenshot` for a `vision` model, but only after a green
-`check` in the same run and only in `act`, so a builder, which starts in `plan`, could not see
-the page it was asked about. No tool showed a model an image file.
-
-- [x] I.1 `view_app` with no preview in the run mounts one from the **live build**
-      (`sc_app::app_output_dir`, through `AppPreviewer::mount_preview`) and says so in the result;
-      a later green `check` re-mounts it with the run's own build. Offered in `plan` with the
-      looking actions only (`goto`, `wait_for`, `snapshot`, `screenshot`); the plan prompt says to
-      look before planning a visible change.
-- [x] I.2 `coding/view_image.rs`: `view_image_<slug>`, for a model with `vision`, in every mode.
-      `path` in the scope, or `url` in one of the application's static directories, resolved and
-      access-checked as the router does. PNG/JPEG/GIF/WebP; anything over 1 568 px or 1.5 MB is
-      scaled and re-encoded (`image` crate, already in the tree). `read_file` on an image names it.
-- [x] I.3 Tests: `coding_images.rs` (both names, 404-shaped refusals, a closed store, vision
-      gating, `plan`'s look-only `view_app`), unit tests in `view_image.rs`, `view_app.rs`'s
-      live-build run against Chromium, the IDE relay's label. Stable-prefix budget 2 000 → 2 100
-      (measured `act` 2 072, `plan` 2 032). Design §11.3, the agents tutorial, `CHANGELOG`.
-
-## Interjected — agents call the application's API
-
-Asked for directly: a coding agent should be able to send a request to the application's API and
-see the response, and to choose which user it is sent as, or send it unauthenticated. Until now
-the only way an agent saw an endpoint's answer was through a page in `view_app`, and only as the
-person chatting.
-
-- [x] C.1 `sc_agent::AppRequester` (`AppHttpRequest`/`AppHttpResponse`), a third capability in
-      `ViewServices` beside the previewer and the browser, on `TraitContext::requests` with
-      `require_requests`, and `Runner::with_requests`.
-- [x] C.2 `sc_server::AppRequests`, installed by `serve` (`install_app_requests`): the request
-      is dispatched in process through the router to the application's live mount, with a CSRF
-      token and, for a user, a session made for the one request and deleted after it. 1 MB
-      body cap, 30 s timeout.
-- [x] C.3 `coding/call_api.rs`: `call_api_<slug>`, offered in every mode wherever the
-      `application` setting names one — no grant. `user` absent → the caller (or `view_app_user`),
-      `"public"` → no session, an email → that user, another user's for an admin's run only.
-      `GET`/`HEAD` only outside `act` (`plan`, `explore`). Result: status line, the headers that say something, the
-      body pretty-printed and capped; `set-cookie` values hidden; elides to its status line.
-- [x] C.5 No `may_call_api` checkbox: an agent saved without it was never offered the tool and
-      reported that nothing could make a live HTTP request. Offered like `list_assets` instead,
-      and in `explore` too, where a planner's questions go. Test: offered in every mode with no
-      grant, not without an application, `GET` from `explore` and a `DELETE` refused there.
-- [x] C.6 Fuller tool descriptions, and a stable-prefix budget of 4 000 (was 2 200). Every
-      `coding` tool says what it returns, when to use it and the rule that trips a model up;
-      every parameter says what it is for; `list_assets` says it lists every served file, not
-      only images. The workflow names `call_api` in `plan`, `act` and `explore` wherever there is
-      an application (test: `every_mode_says_to_ask_the_api_where_there_is_an_application`).
-      Measured `act` 3 130, `plan` 3 038.
-- [x] C.4 Tests: unit tests in `call_api.rs`; `sc-server/tests/call_api.rs` through the real
-      router (as the caller, as `public`, as another user by an admin, refused to a member, a
-      `POST` in `act` and refused in `plan`, no one to send as, an unmounted subdomain, no
-      session left behind); the IDE relay's label. Stable-prefix budget 2 100 → 2 200
-      (measured `act` 2 190, `plan` 2 138). Design §11.3, the agents tutorial, `CHANGELOG`.
+---
 
 ## Explicitly OUT of scope for this milestone
 
-- **Uploading or writing assets from the agent.** §6. Reading is what the use case needs, and a
-  write grant is a decision an admin makes on purpose.
-- **Image transformation** — the `?w=1` resizing `/files/serve/` understands. A static directory
-  serves the bytes that are there.
-- **A directory listing.** A mount serves files, not an index; an index is a page, and a page is
-  something the application's own code writes.
-- **Unifying `/files/serve/` and static directories.** Saltcorn UI's route is a framework's own,
-  with a store named in the path and that framework's access rules; folding the two together is
-  a route change for every existing Saltcorn UI application and buys nothing this milestone
-  needs.
-- **Making a framework's `store` setting a pick-list** (TODO-post-mvp-1 §1.6's other half). The
-  same argument applies and the fix is elsewhere: a framework declares its settings as data, so
-  it needs a way to say "this one is a file store", which is a change to the settings vocabulary
-  rather than to a form.
-
-## Interjected — a VS Code-style source-control panel for git file stores
-
-Asked for directly: the git operations on a file store's edit screen were a column of generic
-forms (a paths textarea, a commit-message box, a branch box). They should look and behave like
-VS Code's Source Control view.
-
-- [x] G.1 `discard` operation (`GitRepo::discard`, `OP_DISCARD`): unstaged edits revert to the
-      index, untracked files are deleted, staged work is untouched. Paths are required, each
-      must be a listed unstaged change, and they are passed with `--literal-pathspecs`.
-- [x] G.2 The status payload carries `upstream` (for Publish branch) and `can_clone` (no clone,
-      and the directory is missing or empty).
-- [x] G.3 `ui/admin/src/screens/SourceControl.tsx` + `sourceControl.ts`: Clone only when
-      `can_clone`; a growing commit message box with Commit beside it, turning into Push
-      (Pull when behind, Publish branch without an upstream); Merge / Staged / Changes groups
-      with M/A/D/U letters and hover stage/unstage/discard, group-header stage/unstage/discard
-      all; a branch dropdown with "Create new branch…". Chosen by the status payload's shape,
-      not the backend name, so `FileStoreForm` still never names git.
+- **An `if_better` activation rule** (comparing a new fit's test metric with the active fit's).
+  Decided against; `fit_model`'s answer carries `metrics`, so a workflow can make that
+  decision itself.
+- **Stored calculated fields**, and so `predict` in one (§4).
+- **Prediction for new rows from a posterior**: still carried (below). When it is picked up it
+  arrives as `m.predict` and `predict()` over a posterior, not as an action.
+- **Caching predicted values** between reads (carried from TODO-post-mvp-22).
+- **A per-provider method registry** on the handle (§3).
 
 ## Carried past this milestone
 
-- From TODO-post-mvp-28: the rest of 3.6 — `de`, `es`, `zh-Hans` and `ar` for all three domains,
-  and `fr` for `admin` (833 messages) and `builder` (339). One `feldspar i18n translate
-  --domain D --locale L` per file, against a configured provider. **3.6 itself has the recipe**:
-  the provider row the key goes in, the loop over the fifteen files, and what to do with what
-  the validator refuses.
-- From TODO-post-mvp-28: the non-JSX half of 3.4's sweep (see its deviations) — the `setError`
-  fallback sentences, and `deleteConfirmation`/`libraryDeleteConfirmation`, which are pure
-  functions in `.ts` modules whose unit tests assert the English they build.
-- From TODO-post-mvp-27: the live-broker half of the streams definition of done (10.3). It needs
-  a real MQTT broker, which this machine has not got; `docs/tutorial-streams.md` is the script.
+- **Prediction for new rows from a posterior**: TODO-post-mvp-30's Phase 9, skipped (design
+  in its §19). The `new` pseudo-dataset and `prediction` in the configuration, empty at fit
+  time, resolving `Outcome::Posterior { prediction }`; standalone generated quantities
+  re-binding `new` only against the instance's stored coordinates, with the compiled model
+  from the cache or recompiled from the snapshot and the CSVs fetched from the runs store;
+  `Prediction::Distribution { mean, sd, q5, q95 }`; `predict()`, `m.predict` and
+  `predictRows` accepting a posterior fit, with an unknown county refused by name. Picking it
+  up means undoing two things done in its absence: `OutcomeSpec::Posterior
+  { prediction: None }` declares no prediction types (so `predict()` over a Stan model is
+  refused on save), and `sc_model::no_per_row_prediction` sends a posterior to `m.draws`.
+- **LOO/WAIC and an instance comparison view**: PSIS-LOO over `log_lik` in `sc-model`, and the
+  side-by-side screen TODO-post-mvp-22 already wanted.
+- **A formula front end generating Stan** (brms-style), which would make the binding
+  automatic because the program would be ours.
+- **Bayesian providers from modules**: `@sc.model_provider(binds_data=True)` receiving bound
+  data and returning draws.
+- **Geometry types and adjacency from `ST_Touches`.**
+- From TODO-post-mvp-29: W.8. An agent's trait configuration is not redacted when the agent is
+  read back (streams do this with `redact_attrs`/`merge_secrets`); `http`'s `headers` is
+  declared `secret()` and will be covered when agents adopt it. Also the agent half of that
+  milestone's definition of done, which needs an API key.
+- From TODO-post-mvp-28: the rest of 3.6 (`de`, `es`, `zh-Hans` and `ar` for all three
+  domains, and `fr` for `admin` and `builder`) and the non-JSX half of 3.4's sweep. The
+  recipes are in [docs/TODO-post-mvp-28.md](./docs/TODO-post-mvp-28.md).
+- From TODO-post-mvp-27: the live-broker half of the streams definition of done (10.3).
 - From TODO-post-mvp-26: running the agent eval against a real provider (11.4) and walking the
-  agent milestone's definition of done by hand (12.3). Both need an API key and spend money;
-  `docs/AGENT_EVAL.md` has the command and the heading the numbers go under.
+  agent milestone's definition of done by hand (12.3).
 - From TODO-post-mvp-25: page groups, HTML-file pages, copilot layout generation, uploading from
   the builder, v1's help topics, formula-editor completions, replacing CKEditor 4, a menu editor,
   cloning pages and views, sharing library items, collaborative editing, and the builder in a
@@ -489,3 +402,5 @@ VS Code's Source Control view.
 - From TODO-post-mvp-24: `room`/`workflow-room` and realtime, tags, file upload from an Edit
   view, themes as plugins, a v1 `db` module for plugins, and externalising inline handlers to
   drop `'unsafe-inline'` from Saltcorn UI's CSP.
+- From TODO-post-mvp-22: statsmodels as a second bundled module, k-fold cross-validation,
+  application-facing prediction, a fit as a durable workflow run, predicted-value caching.

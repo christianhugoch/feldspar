@@ -2,6 +2,1401 @@
 
 Changes in reverse chronological order.
 
+## Models without actions of their own: documentation and the definition of done
+
+Phase 4, the last of milestone 31. The documents now teach `predict("…")` in formulas, the model
+handle in code and the one generic `fit_model`, and no longer teach `predict_row`,
+`write_posterior` or the flat `models.draws(name, …)` family. The milestone's definition of
+done is one test.
+
+- **`docs/TECHNICAL_DESIGN.md`** (4.1).
+  - §10.1: there are seven built-ins, plus `run_agent` and `fit_model`, which are registered
+    apart. The section now states the rule "an action is in the set only if it is generic", and
+    says why that removed the two actions. `models` in a code body is described as requests on
+    `db`, not a sixth surface.
+  - §6.2: a non-stored calculated field is projected in SQL where it translates, and computed
+    after the read (`CalcPlan`) where it does not. The section covers per-page batching, a read
+    that fails naming the field, model and row, the filter/sort refusal, writes, and
+    `RowQuery::sql_only`. §7.3 points at it.
+  - §14.2: the nouns table's "prediction" row. A new seams table lists `DatasetSource`,
+    `ModelProviderHost`, `FitStarter` and `ModelHost`, with where each is declared, implemented
+    and installed. `FitResult` gains `warnings` and what "clean" means. "Prediction: the action,
+    and the calculated field there is not" is rewritten as **"Prediction: a formula and a
+    method"**: the row rule, `predict()` and its hoist, the save checks, the handle and its
+    wire, and why a stored field will not predict. "Reading and writing back" and "What was
+    left out" now use the handle. The API section says why `predictRows` and `writePosterior`
+    outlived the actions.
+  - §15.1: `predict("…")` is hoisted beside module calls.
+- **Tutorials** (4.2).
+  - `tutorial-models.md` step 6 is now **"A calculated field that predicts"**:
+    `estimated_price = predict("House prices")`, what is checked on save, one call per page,
+    reading past the filter, no filtering or sorting, and errors that fail the read. It also
+    covers the stored variant (an `update_rows` trigger) and a nightly `fit_model` with
+    `if_clean`. `estimated_price` is no longer a plain column in step 1.
+  - `tutorial-stan.md`: "Every night" is a `fit_model` step and then a `run_js_code` step
+    calling `m.writePosterior(…)`. "Doing prediction in code" uses `models.get("Radon")` and
+    `m.draws`.
+  - `tutorial-triggers.md`: step 5 gains "Asking a model", and the action table gains
+    `fit_model`. "What next" introduces `predict()`.
+  - `tutorial-python.md`: step 5's `models` is the handle. Step 7 gains "A model provider, and
+    the warnings it gives".
+  - `README.md` and `OPERATIONS.md` (the restart note, and a troubleshooting row for a table
+    whose reads fail because a field's model has no active fit).
+  - `feldspar_sklearn/plugin.py`'s docstring.
+- **`repo_hygiene.rs`** follows the documents. The design's fragments are now "Prediction: a
+  formula and a method", the hoist, `ModelHost` and the generic-action rule. The models
+  tutorial's are `predict("House prices")`, `update_rows`, `fit_model` and `if_clean`. A new
+  test, `no_document_teaches_the_removed_model_actions`, checks that the seven documents an
+  admin reads contain none of the following:
+  - `` `predict_row` action ``;
+  - a `"action": "predict_row"` or `"action": "write_posterior"` step;
+  - `models.draws(`, `models.summary(` or `models.instance(`;
+  - `"activate": true`.
+- **The definition of done** (4.3), `crates/sc-server/tests/models_without_actions.rs`. It
+  runs over `linear_regression`, the warning stub from `fit_model_action.rs` and the stub
+  sampler from `posterior_api.rs` (both now `pub(crate)`, as is `model_formulas.rs`'s call
+  counter). It checks:
+  - `listActions` has `fit_model` and neither removed action;
+  - `House prices` uses `neighbourhoodⱵaverage_income` and `viewingsↃhouse.length`;
+  - listing `houses` answers `estimated_price` for all 61 rows, including the unsold house, in
+    **one** provider call;
+  - `?estimated_price=gt.…` is refused naming the field;
+  - a `daily` `fit_model` with `if_clean`, run after prices double, activates the new fit, and
+    the next read of house 500 doubles with nothing edited;
+  - the warning stub's nightly fit is kept, inactive, carrying its warning;
+  - a workflow runs `fit_model` then `run_js_code`: `models.get("Radon").writePosterior(…)`
+    fills `counties.alpha_mean`, the `counties` update trigger fires three times,
+    `m.predict` points at `m.draws(…)`, and `models.get("House prices")` has no enumerable
+    `draws`, and calling it throws "`draws` is for posterior models";
+  - a `run_python_code` body does the same through `m.write_posterior`. **Not run here:**
+    that half is `#[cfg(feature = "python")]`, and this machine has no `libpython3.13`. The
+    default build asserts the "`--features python`" sentence and that nothing was written.
+- **`stan_models.rs`** gains `radon_is_refitted_by_a_workflow_and_written_back_from_code`
+  (`#[ignore]`d, real CmdStan). It is the same workflow over the real Radon model: a clean
+  refit becomes active, 85 counties are written back and audited, and a prediction points at
+  `m.draws`. `setup` now starts the workflow engine.
+- **Two clippy fixes** in Phase 3's code, which failed `clippy --tests -D warnings`
+  (`expect_used`). They were `sc-expr`'s `walk_model_calls` and `calc_read.rs`'s "no model
+  support" error. Both now return an error instead of panicking on a branch that cannot be
+  reached. The messages are unchanged.
+- **Tests run here:**
+  - `sc-cli`'s `repo_hygiene`: 41 passed.
+  - `cargo test -p sc-expr -p sc-api -p sc-server`: all passed, including
+    `models_without_actions`; `sc-server`'s `it` ran 427 passed and 6 ignored.
+  - `radon_is_refitted_by_a_workflow_and_written_back_from_code` with `--ignored`, against
+    CmdStan 2.40: passed in 100 s.
+  - `clippy -p sc-server -p sc-cli --tests -D warnings`: clean.
+- **Formatting:** `cargo fmt --check` still reports four files that this phase did not touch
+  (`sc-api/src/lib.rs`, `sc-api/src/rest/custom.rs`, `sc-llm/src/lib.rs`,
+  `sc-model/src/lib.rs`). They are left as they were.
+
+## Models without actions of their own: `predict()` in formulas and calculated fields
+
+Phase 3 of milestone 31. A formula can now call `predict("House prices")`: in a non-stored
+calculated field, an `update_rows` assignment, an `only if` and a `{{ }}` template. It predicts
+the row the formula ranges over with the model's active fit. This replaces the removed
+`predict_row` action. Calculated fields that do not translate to SQL are now computed on the
+read path instead of being silently left out.
+
+- **The hoist** (3.1), in `sc-expr`'s `analyze`.
+  - `predict(<string literal>)` is collected into `Analysis::model_calls` as a `ModelCall
+    { key, model }`, keyed by `hoisted_call_key`'s text (`predict("House prices")`), the way a
+    module call is. The evaluator binds it through the same hoist, so it needed no change.
+  - Refused on save, by name:
+    - an argument the formula computes;
+    - no argument, or more than one;
+    - a call inside `=>`;
+    - `predict` passed as a value.
+  - A column called `predict` shadows it. The built-in wins over a module function called
+    `predict`.
+  - `translate` already answers `Untranslatable` for any bare call; a test now says so for
+    `predict`.
+  - `Analysis::first_model_call` is for the callers that allow none.
+- **`prefetch_bindings` resolves predictions** (3.2) through `Catalog::model_host()`.
+  - A row with a value in its single-column primary key is asked **by key**, so it is read
+    through the model's dataset.
+  - A row without one (a proposed row) is asked **by its values**. Hoisted keys are left out
+    of those values.
+  - No host is an error naming the call, never a null. So is a failing host.
+  - A value the caller already bound is not asked again, which is how the read path's batch
+    reaches it.
+  - Tests: `sc-catalog`'s new `model_calls.rs`, over a fake `ModelHost`.
+- **Save checks** (3.3). They live in one function, `sc_catalog::check_model_calls`, which
+  checks three things:
+  - the model exists;
+  - it is a model of the formula's table ("`House prices` is a model of `houses`, and this
+    formula is on `orders`");
+  - its outcome predicts (a t-test gets `no_per_row_prediction`'s sentence).
+
+  Where it runs:
+  - **Calculated fields**, in `schema_edit`'s deferred validation, which is now async. When
+    the expression *is* the call, the field's declared type must be able to hold the
+    prediction ("the field is text and `House prices` predicts float"). This is the check
+    `predict_row` made against its target field. A model with no active fit is accepted, and
+    the batch's `notes` say that every read of the table fails until a fit is active.
+  - **Triggers**. `ConfigCheck` gains async `formula` and `template` methods. They run
+    `check_formula`/`check_template`, which now return their analyses, and then the model
+    check. `update_rows`, `delete_rows`, `send_email` and `fetch` call them. So does the
+    `only if` check in `validate_trigger`.
+  - A formula in the event scope (an `insert_row` value, a `fetch` body, a `run_agent`
+    prompt) ranges over no row, so `predict` there is refused synchronously, saying where it
+    does work.
+  - **Ownership formulas** refuse `predict` outright, on save (`validate_ownership`) and on
+    reload (the catalog clears the rule, which fails closed). The reason is the module
+    functions' reason.
+- **Action formulas** (3.4). An insert trigger on `houses` whose `update_rows` sets
+  `estimate = predict("House prices")` writes the number for the unsold house just inserted.
+  A `{{ predict("House prices") }}` in a template renders it. Nothing was built for this
+  beyond 3.1–3.3; the test is `model_formulas.rs`.
+- **The read-path fallback** (3.5), in the new `sc-api/src/calc_read.rs`.
+  - `CalcPlan` splits a table's calculated fields into those SQL projects and those computed
+    after the `SELECT`. It replaces `calc_projections` and its silent skip.
+  - All four call sites in `rows.rs` go through it: `read_select` and the two reads built on
+    it, `select_values_in`, and the `RETURNING` of an insert and an update. GraphQL, the code
+    host and the CSV import read through these, so there is one implementation.
+  - Fields are computed in dependency order. A field that reads a predicting field sees its
+    value.
+  - **Predictions are batched**: one `ModelHost::predict` per model per page, with every
+    row's key. A failed batch is asked again row by row, so the error names the field, the
+    model **and the row** ("`styled` of `houses` could not be computed for the row whose id
+    is 500: …").
+  - Other hoisted values (joins, relations, module calls) are resolved per row by
+    `prefetch_bindings`.
+  - A module-function calculated field, which used to be skipped, is now computed.
+  - The evaluator comes from the catalog: `Catalog::set_formula_evaluator`, installed by
+    `install_triggers` alongside the dispatcher's.
+  - On a write, a failure after the commit says "the row was saved, but …". Inside a
+    caller's transaction the after-read fields are left out, because a prediction reads the
+    row on another connection where it is not committed yet.
+  - `RowQuery::sql_only` leaves the after-read fields out. A model's dataset read
+    (`CatalogDatasetSource`) sets it. Without it, a field that predicts with a model of its
+    own table recursed until the stack overflowed: computing the field read the dataset,
+    and reading the dataset computed the field.
+- **Filtering and sorting refused** (3.6). `CalcPlan::refuse_query` walks a read's lowered
+  filter and ordering. REST's query string, GraphQL's `where`/`order_by` and counts all end
+  there. The code host's plan lowering checks its `where` keys and its formulas against the
+  same plan. The sentence is: "cannot filter on `estimated_price`: `estimated_price` is
+  computed after the rows are read, because it calls `predict`, so the database never sees
+  it".
+- **Fixed**: the "no row has the id …" message from `predict_for` had lost a line
+  continuation and carried a run of spaces.
+- **Known limitation**: a calculated field's *basic* declared type (`float8`) is not kept
+  once the schema reloads. Only a rich type is stored on the overlay, so such a field reads
+  back as text, and in GraphQL it is a `String` input. This predates this milestone. The
+  save-time type check therefore sees the type the admin declared, and a read returns the
+  prediction's own JSON value rather than coercing it.
+- Tests:
+  - `sc-expr`: analyze and translate units, and an eval test of a bound prediction.
+  - `sc-catalog`: `model_calls.rs`.
+  - `sc-api`: `calc_after_read.rs`, over a counting fake host, a fake module and the real
+    evaluator. It checks one call for a 50-row page, dependency order, a module field, the
+    row named in an error, and the REST, count and GraphQL refusals.
+  - `sc-server`: `model_formulas.rs`, over the real `linear_regression`. It checks every
+    refusal's sentence, the insert trigger and the template, a listing of 61 houses in one
+    provider call, the REST and code-body refusals, and an unseen category naming house 500.
+- **The full suite** (`scripts/test.sh --no-fail-fast`): 3,950 passed and 3 failed. None of
+  the three failures touch this change.
+  - `sc-cli`'s `i18n::every_declared_domain_scans_without_an_unreadable_call_site` fails
+    because of three non-literal `t()` calls in `ui/admin/src/screens/SourceControl.tsx`.
+  - `sc-files`' `a_backends_operations_are_declared_like_its_settings` fails because the git
+    backend declares a `discard` operation the test does not list.
+  - `sc-server`'s `saving_the_development_settings_moves_the_logging_switches` flips a
+    process-global switch and passes when run alone.
+
+  The first two are in files this phase did not modify.
+
+## Models without actions of their own: the model handle in code
+
+Phase 2 of milestone 31. A code body now reaches a model through a **handle**:
+`const m = await models.get("House prices")`, then `m.predict(row)`. A posterior's handle also
+has `m.draws`, `m.summary`, `m.variables` and `m.writePosterior`. This replaces the Stan
+milestone's flat `models.draws(name, …)`, `models.summary` and `models.instance`, which are
+removed. Prediction in formulas (`predict("…")`) is Phase 3.
+
+- **`ModelHost` on the catalog** (2.1).
+  - `sc-catalog` declares the trait (`predict` and `describe`, speaking JSON), with
+    `PredictRows::Keys`/`Values` and `ModelSummary`. It is installed with
+    `Catalog::set_model_host`, the way module functions are, because `sc-catalog` sits below
+    `sc-model`.
+  - The logic is `sc_api::models::predict_for` and `describe_model`. `sc-server`'s
+    `ModelServices` implements the trait by calling them with its registry, dataset source and
+    row cap. `install_models` installs it, and every module rebuild installs it again.
+  - Keys are read through the model's dataset in **one** read restricted to them
+    (`pk IN (…)`), unfiltered, and the answers come back in the order the keys were asked in.
+    A key no row has is refused naming it. Literal rows are one frame, and a missing feature
+    is refused naming it.
+  - `detail` answers `{ value, probability }`, with the probability only for a class.
+  - `describe` reports the prediction types from the provider's **declaration**, not the
+    active fit, because a field is typed before any fit exists.
+  - Test: `the_model_host_answers_keys_in_the_order_asked_and_literal_rows_by_their_features`
+    (`sc-server`, new `model_handle.rs`).
+- **The code host's `op: "models"`** (2.2), in `sc-api/src/code_host/models.rs`.
+  - `get` resolves a name to its active fit, or to `fit`. It answers everything a handle is
+    built from in one call: fit, outcome, table, variables, and, when the fit does not
+    predict, the sentence saying why.
+  - `predict`, `draws`, `summary` and `write_posterior` must name the fit `get` resolved, so a
+    handle does not change fit halfway through a body.
+  - `predict` sends keyed rows (those carrying the table's primary key) in one `ModelHost`
+    call and literal rows in another, then merges the answers back into row order.
+  - `write_posterior` writes under the handle's authority, this run's trigger chain and its
+    executor, the same as a `db` write. `sc_api::models::write_posterior` now takes a
+    `Writer`: either the row layer under a context (the admin API, and an undelegated body),
+    or a delegated caller through `ownership::*_as`.
+  - `draws`, `summary` and `write_posterior` on a fit that is not a posterior are refused by
+    the host too, in the handle's own words.
+  - Tests in `code_host/tests.rs`, over a recording fake `ModelHost`:
+    - one call for keyed rows and one for literal rows, answered in order;
+    - a non-object row is refused;
+    - a malformed request is refused before any model is read.
+- **The JavaScript handle** (2.3), `__scMakeModels` in `sc-expr`.
+  - On a handle whose outcome is not a posterior, `draws`, `summary`, `variables` and
+    `writePosterior` are **non-enumerable getters that throw**: "`House prices` is a
+    linear_regression regression; `draws` is for posterior models". Because they are
+    non-enumerable, the handle still serialises.
+  - `m.predict` takes a row or an array, sends one request either way, and takes
+    `{ detail: true }`. On a fit that does not predict, it throws the host's sentence
+    without making a call.
+  - `m.asUser()` / `m.asAdmin()` choose the write-back's authority, as on `db`.
+  - Four tests in `sc-expr`'s code tests, over a fake host.
+- **The Python handle** (2.4), in `saltcorn.py`.
+  - `models.get(name, fit=None)` answers a `Model`, or a `Posterior` (its subclass).
+  - `Model.__getattr__` raises an `AttributeError` carrying the same sentence for the
+    posterior-only four, so `hasattr(m, "draws")` is `False`.
+  - `write_posterior(**write)` and `as_user()` are on the `Posterior`. `m.predict` on a fit
+    that does not predict raises `DbError`.
+  - `python_models.rs` is rewritten for the handle.
+  - **Not run here:** it needs `--features python-host`, and this machine has no
+    `libpython3.13` to link against. It type-checks with the feature on
+    (`cargo check -p sc-python --tests --features python-host`). The Python was also exercised
+    directly with `python3` against a stub `__sc` module.
+- **Editor types and the agent's reference** (2.5).
+  - `codeTypes.ts` declares `models.get` and `ScModel`, with the posterior's four as optional
+    members.
+  - `codeTypes.test.ts` checks:
+    - that the handle type-checks;
+    - that an unguarded `r.draws(…)` is "possibly undefined";
+    - that the removed `models.draws` and a misspelt method are errors.
+  - The MCP page `code_api_js.md` documents the handle. A new `code_api.rs` test checks that
+    it teaches the handle and not the removed functions.
+- **Integration tests** (2.6).
+  - `model_handle.rs`, `a_code_trigger_predicts_the_events_row_and_writes_it_with_db`: an
+    insert trigger predicts the new, unsold house and writes the estimate with `db`. It also
+    checks a mixed batch, and that the posterior-only members are absent and throw.
+  - `posterior_api.rs`, `a_workflow_refits_and_a_code_step_writes_the_posterior_back`: a
+    workflow runs `fit_model`, then a `run_js_code` step calls `m.writePosterior`. This fills
+    `counties`, fires its update trigger once per county, stays on the fit the previous step
+    activated, and a `m.predict` on the posterior points at `m.draws`.
+  - `posterior_api.rs`, `a_callers_write_back_is_held_to_the_callers_own_rights`: run for a
+    role-40 caller, `m.asUser().writePosterior` into the admin-only `counties` is refused and
+    writes nothing. The same body under the trigger's own authority writes all three rows.
+  - `posterior_api.rs`'s existing code-body test and `stan_models.rs`'s `#[ignore]`d
+    prediction-in-code body now use the handle.
+- **Smaller changes.**
+  - A write-back's `mode` now defaults to `update`, so
+    `m.writePosterior({ variable, statistics })` works as the milestone writes it.
+  - `no_per_row_prediction`'s posterior sentence now points at `m.draws(…)` on
+    `models.get(…)`.
+- **Not changed yet:** the tutorials still show the removed flat functions:
+  - `tutorial-stan.md`'s "Doing prediction in code";
+  - `tutorial-python.md` step 5;
+  - `TECHNICAL_DESIGN.md` §14.2.
+
+  They are Phase 4.
+
+## Models without actions of their own: one model action
+
+Phase 1 of milestone 31 (TODO "Models without actions of their own"). `fit_model` is now the
+only model action, and it means the same thing for every provider. `predict_row` and
+`write_posterior` are gone. Their replacements are Phases 2 and 3 (`models.get(…)` in code and
+`predict("…")` in formulas). Until then, prediction and write-back are the admin API's
+`predictRows` and `writePosterior`, which have not changed.
+
+- **Provider warnings** (1.1). `FitResult` gains `warnings: Vec<String>` and
+  `FitResult::warning("…")`. The fit job writes them to the instance's `ATTR_WARNINGS`, where a
+  posterior's diagnostics already go. So `fitted_cleanly` now means "fitted, and nothing
+  warned" for every provider, not just Stan.
+  - A Python provider's `fit` may return `"warnings": [...]`. A `warnings.warn` raised during
+    `fit` (such as scikit-learn's `ConvergenceWarning`) is caught and added as
+    `"Category: message"`, without duplicates. `@sc.model_provider`'s docstring says so.
+  - A JavaScript module's `fit` may return `warnings` too, since both languages share one wire
+    format.
+  - Tests:
+    - `a_providers_warnings_are_the_instances_and_a_clean_fit_has_none` (`sc-model`)
+    - `a_fit_answer_carries_its_warnings_and_one_without_any_is_clean` (`sc-module`)
+    - the Python fixture's `fixture_mean` now warns both ways, and
+      `a_python_model_provider_declares_itself_and_then_fits_and_predicts` asserts both
+      sentences. **Not run here:** this machine has no `libpython3.13` to link `python-host`
+      against. The Python side was checked by calling `plugin.op_model_fit` directly with
+      `python3`.
+- **`fit_model`, generic** (1.2), in `crates/sc-core-actions/src/fit_model.rs`.
+  - `activate` is now `never` | `if_clean` | `always` (default `never`), replacing a boolean.
+    The rule is `sc_model::Activation`, and the `FitStarter` seam carries it, so
+    `wait: false` activates by the same rule once the job finishes. `always` activates any
+    fitted instance, but never a failed one.
+  - The answer gains `metrics`, so a later workflow step can branch on `metrics.test.r2`.
+    Not waiting answers the same shape, saying `fitting`.
+  - The description is now "Fit a model again, and optionally make the new fit active".
+  - Tests: `crates/sc-server/tests/fit_model_action.rs`, over `linear_regression` and a
+    stub provider that always warns. `if_clean` activates the clean fit and not the warned one,
+    `always` activates the warned one, `never` keeps the new fit beside the active one, and
+    `wait: false` with `if_clean` is activated by the job.
+- **`predict_row` and `write_posterior` removed** (1.3).
+  - `predict_row.rs` and `posterior.rs` are deleted.
+  - `write_posterior()` and its helpers (target checks, count rounding, dates as days) moved to
+    the new `sc_api::models`, and the `writePosterior` handler calls it from there. A code
+    body's handle will call it too (Phase 2).
+  - `register_model_actions` now takes only the provider registry and the `FitStarter`.
+  - Fixed while moving: the "not a midnight" sentence had a run of spaces in it (a missing
+    line continuation).
+  - Test changes:
+    - The `sc-core-actions` test `the_model_action_set_is_exactly_fit_model`.
+    - `trigger_admin_api`'s action list no longer has the two.
+    - `model_admin_api`'s `predict_row` test is now
+      `a_row_the_datasets_filter_excludes_is_predicted_through_the_dataset`, through
+      `predictRows`. It still checks that the model picker offers this table's models, now on
+      `fit_model`.
+    - `posterior_api`'s trigger test writes back through `writePosterior`, and uses
+      `activate: "if_clean"`.
+  - Stale `predict_row` mentions in code comments across `sc-model`, `sc-stan`, `sc-expr`,
+    `sc-server` and `saltcorn.py` now point at `predict()` or `fit_model`.
+  - A stored trigger naming either action now loads as a broken trigger ("unknown action").
+    There is no migration.
+- **Admin UI wording** (1.4).
+  - The model form's name hint now reads "What predict("…") in a formula and models.get("…")
+    in code name this model by."
+  - The posterior write-back note now points at `m.writePosterior(…)` in a code step after a
+    `fit_model`.
+  - Both are whole `<T>` sentences in the `admin` domain, replacing the old fragments. The
+    three stale keys are removed from the five admin locale files. The new sentences are not
+    translated yet; that is a `feldspar i18n translate` run.
+- **Not changed yet:** the documents still describe the removed actions and `activate: true`
+  (`tutorial-stan.md`, `tutorial-models.md`, the design document). They are Phase 4.
+- **Pre-existing and unrelated:** `sc-cli`'s
+  `every_declared_domain_scans_without_an_unreadable_call_site` fails on three `t()` calls in
+  `ui/admin/src/screens/SourceControl.tsx`. It fails the same way with this change stashed.
+
+## Stan against a real CmdStan, the tutorial, and the definition of done
+
+Phase 11, the last of the Stan milestone (TODO "Bayesian models with Stan"). Every item on its
+list is done. Prediction for new rows from a posterior stays carried past it (Phase 9).
+
+- **`crates/sc-server/tests/stan_models.rs`** (11.1): the milestone's three models end to end
+  through the assembled router against a real CmdStan. Each is `#[ignore]`d, and finds CmdStan
+  the way the server does (`$CMDSTAN`, else `~/.cmdstan`):
+  `cargo test -p sc-server --test it -- --ignored stan_models`. The data is drawn from known
+  parameters with fixed seeds, and the sampler's seed is fixed too. The compile cache is kept
+  in the temporary directory between runs.
+  - **Radon**: 85 counties (five with one home, one with none) and 919 homes. It checks Bind
+    automatically's four bindings and Preview's sizes. The fit must have no warnings, R̂ ≤ 1.01
+    and no divergences. `gamma0`, `gamma1` and `beta` must be inside their 90 % intervals, and
+    `alpha` 85 rows labelled by county name. The empty county's interval must be over 1.5× the
+    median's. The draws come back 4 × 1 000 keyed by FIPS code. Write back fills
+    `counties.alpha_mean`/`alpha_sd`, and Download run holds CmdStan's CSVs. The tutorial's
+    prediction-in-code trigger then fills a new home's predictive mean and interval.
+  - **Daily sales**: an AR(1) with eleven missing days on a daily grid with a 14-day horizon.
+    `mu`, `phi` and `sigma` are recovered, and the eleven missing days are estimated.
+    `y_future` is labelled `2025-05-01`…`2025-05-14` and inserted into `forecasts`.
+  - **Outbreak**: BYM2 over a 5 × 5 lattice with a weekly random walk. It checks the edges (40)
+    and a clean preview. `beta0` is recovered, `convolved_re` is labelled by region, and `rw`
+    by week.
+  - Radon samples 1 000 draws a chain, because at 500 a few of 85 R̂s land just over 1.01. The
+    BYM2 samples 1 000 + 1 000, because `sigma` and `rho` mix slowly.
+- **Fixed: a time grid's coordinate into a `date` field** (found by 11.1). A grid's key is an
+  instant (`2025-05-01T00:00:00Z`), and the row layer refused it for a date field, so a forecast
+  could not be inserted into `forecasts(day date, …)`. `write_posterior` and `writePosterior`
+  now write a midnight instant into a date as its day. Another hour is refused, naming a
+  timestamp field as the way out. Tested by
+  `a_grids_instant_goes_into_a_date_field_as_its_day`.
+- **`docs/TECHNICAL_DESIGN.md`** (11.2): §14.2 gains "Bayesian models". It covers:
+  - the six nouns, and where the code lives;
+  - the seam;
+  - the interface parsed by us and checked by `stanc`;
+  - datasets and order;
+  - dimensions and coordinates;
+  - the binder and its two rounds of checks;
+  - compiling and running;
+  - `_fd_model_draws` and the optional raw run;
+  - the host's summary, metrics and warnings;
+  - reading and writing back;
+  - what was left out.
+
+  The `Dataset` and `Outcome` sketches, the storage paragraph and "there is no cancel" are
+  brought up to date. The ASCII layer diagram and the crate tree's comment gain `sc-stan`.
+- **`docs/tutorial-stan.md`** (11.3): the three models, each with its tables, a SQL script
+  for synthetic data from known parameters, its program, its bindings, and what to read on the
+  instance screen. The nightly `fit_model` + `write_posterior` pair is included. "Doing
+  prediction in code" is a `run_js_code` trigger over `models.draws` computing a new home's
+  posterior predictive, and says why combining draws iteration by iteration is right. A table
+  covers the sentences that come after Preview. The programs are the test's, the SQL was run
+  against Postgres, and the JavaScript is run by the radon test.
+- **README** (11.4): §1 gains Bayesian models; §3 points at the tutorial and says how to run the
+  real-CmdStan tests.
+- **The definition of done by hand** (11.5), on a debug `feldspar serve` over a scratch Postgres
+  database with CmdStan 2.40 and an empty compile cache:
+  - Bind automatically proposed `N`, `J`, `county`, `y`; Preview said 919 and 85.
+  - The fit compiled (8 s), sampled four chains and summarised, with no warnings. The largest
+    R̂ was 1.008, and every population parameter was inside its 90 % interval.
+  - County 85 (no homes) had a 90 % width of 1.06 against a median of 0.65.
+  - The draws came back by FIPS key, and Write back filled 85 rows.
+  - `cmdstanpy.from_csv` read the downloaded run, and its summary agrees with ours.
+  - The instance screen (labels, forest plot, per-chain traces) was checked in headless
+    Chromium.
+  - Also found: the tutorial said "Models" where the sidebar says "Predictive models" (fixed).
+    Not fixed, and recorded in the TODO: `serve`'s "database configured from the `production`
+    environment" line is printed when `--database-url` has overridden that environment.
+- **Checked here**: the three ignored tests, together from a cold cache (90 s).
+  `sc-core-actions`' posterior unit tests, and `sc-server`'s `posterior_api`, `model_*` and
+  `stan_models` (without `--ignored`). Clippy is clean on both crates.
+
+## Stan operations; prediction from a posterior carried past
+
+Phase 10 of the Stan milestone (TODO "Bayesian models with Stan", §20), and Phase 9 skipped.
+
+- **Phase 9 is carried past the milestone.** Prediction for new rows from a posterior
+  (standalone generated quantities, TODO §19) moves to "Carried past this milestone", and
+  §19 says what stands meanwhile. Nothing in Phases 10 and 11 needed it: a forecast is a time
+  grid's horizon computed in the fit and written back with `writePosterior`. Two places
+  assumed it would come, and now say what is true instead:
+  - `predict_row` over a Stan model was accepted on save (a posterior declared `Float` as a
+    possible prediction), then refused at every fire as *"a hypothesis test"*. A posterior
+    that names no prediction now declares no prediction types, so the trigger is refused
+    when it is saved.
+  - That refusal, the fire-time one and `predictRows`' now call it a posterior and point at
+    `models.draws` (`sc_model::no_per_row_prediction`). Hypothesis tests keep their wording.
+  - The TODO's other references (§1, §14, Phase 0, 11.3) are updated.
+- **The Stan server flags** (10.1): `--cmdstan`, `--stan-cache-dir`, `--stan-max-processes`,
+  `--stan-max-data-values`, `--stan-max-draws-bytes`, `--stan-max-draws-response` and
+  `--stan-summary-max-elements`.
+  - They are `ServerConfig::stan`, an `sc_server::StanSettings`. `serve` hands them to the new
+    `install_models_with`; `install_models(catalog, max_rows)` keeps the defaults for the tests.
+  - `--cmdstan` goes into discovery ahead of `$CMDSTAN`. A named directory that is wrong makes
+    the provider unavailable, naming it, rather than falling back to `~/.cmdstan`.
+  - The cache directory and process budget are the provider's. `ProcessBudget::processes()` and
+    `StanProvider::budget()` are new.
+  - The three fit ceilings were constants until now. They are carried as `PosteriorLimits`
+    into every fit's `FitContext` (`ModelServices::with_posterior_limits`) and into
+    `previewModelData`. The draws-response cap is set once at boot.
+  - The four ceilings and the process count refuse `0`. `--stan-summary-max-elements 0` is
+    allowed and means "summarise every generated quantity on demand".
+  - `serve` logs which CmdStan it will use and where it came from, the chain budget and the
+    cache directory, or why Stan is unavailable.
+- **The configuration file** gains `cmdstan` and the six `stan_*` keys.
+  `Environment::stan_flags()` turns them into the flags they mirror, placed ahead of the
+  command line's, so a flag wins and a bad value in the file gets the same sentence as the
+  same value typed. `serve`'s usage lists the flags.
+- **`docs/OPERATIONS.md` §9, "Bayesian models with Stan"** (10.2). It covers:
+  - installing CmdStan: what it needs, 1.2 GB built, 1–2 GB per build job, and where the
+    server looks. Under the systemd unit, install *as the service account*: `~` there is
+    `/var/lib/feldspar`, the only writable path, and `ProtectHome` hides your own;
+  - the process budget, cancel and restarts;
+  - the compile cache: its key, one compile at a time, and that it is never pruned;
+  - the four ceilings and the summary threshold, as a table;
+  - the size of `_fd_model_draws` (about 12 bytes per number, and how to keep it down),
+    and the scratch directory;
+  - the raw run directories and backups;
+  - the security paragraph of §20, including the scrubbed child environment.
+
+  The file's key table, the environment variables (`CMDSTAN`, `CXX`, `STAN_*`) and the
+  common failures gain Stan rows. §8.3 no longer says fits have no cancel. README's
+  server-options table lists the flags, and its CmdStan paragraph points to §9.
+- **Tests**:
+  - `parses_the_stan_flags` (defaults, every flag, zero and junk refused);
+  - `an_environment_may_carry_the_stan_settings`;
+  - `a_budget_is_the_processes_it_was_given_and_never_none`;
+  - `a_posterior_is_refused_as_a_posterior_and_pointed_at_its_draws`;
+  - the posterior cases in `predict_row`'s outcome-spec test;
+  - `posterior_api.rs`'s `the_stan_flags_reach_the_provider_the_preview_and_the_fit`, over
+    the stub sampler. It checks the budget, the cache directory, the response cap and a
+    missing `--cmdstan` said by name. A tiny `--stan-max-data-values` fails the preview and
+    the fit naming the flag. A tiny `--stan-max-draws-bytes` finishes the fit with the draws
+    dropped and the warning.
+- **Checked here**:
+  - `sc-config-file`, `sc-stan`, `sc-model`, `sc-core-actions`, `sc-server`'s config unit
+    tests and its `model`/`posterior` integration tests, and `sc-cli`'s tests pass. The one
+    exception is the pre-existing i18n failure on `SourceControl.tsx`'s three non-literal
+    `t()` calls.
+  - Clippy is clean on the touched crates.
+  - A real `feldspar serve` on a SQLite file printed the new CmdStan line with
+    `--stan-max-processes 3`, and `--stan-max-processes 0` was refused before boot.
+
+## The posterior's admin UI
+
+This is Phase 8 of the Stan milestone (TODO "Bayesian models with Stan", §18). The Models tab
+can now build, bind, preview, fit, read and write back a posterior. There is no second screen
+for Stan: the model form and the instance screen grow the parts a posterior needs, keyed on the
+provider's `binds_data`, and none of them names Stan. Walked by hand against a real CmdStan on
+synthetic radon data (below).
+
+- **The model form** (8.1, `ModelBindings.tsx`).
+  - **Program**: a file-store picker, the path (with the store's `.stan` files suggested),
+    **Check program** (`getProgramInterface`: `stanc`'s warnings or error, or the "not checked"
+    notice), **Open in IDE** at that file, and **Compile** once the model is saved. The interface
+    is re-read when the path changes, and the binding table follows it.
+  - **Related datasets**: add, name, label formula, and each built with the same builder as the
+    main one. The builder is now its own component (`DatasetBuilder.tsx`) and edits a dataset's
+    **order** for a binding provider.
+  - **Dimensions**: values and time grids, with their fields. The implicit rows dimensions are
+    listed.
+  - **The binding table**: one row per `data` variable with its declared type. The kind picker
+    offers only the kinds that can produce that declaration (the server's save-time rule,
+    mirrored). Each kind's fields get a control for what they hold: dataset, column, dimension,
+    variable, choice, flag or literal. Problems the form can see without the data (a missing
+    required field, a literal that is not JSON) are shown under the row.
+  - **Bind automatically** fills only empty rows and shows the server's reasons. **Preview
+    data** puts each variable's shape, first values or error on its row, with the dimension
+    sizes (`main 919`, `counties 85`), drops and warnings below.
+  - Each dataset's `nulls` and `unknown` policies are edited in a table.
+  - The sampler's settings and the runs store are rendered as settings, after the program.
+  - The split and the hyperparameter grid are hidden (and not sent) for a posterior.
+  - A provider that is unavailable here says why beside the picker.
+  - `stanc`'s warnings from the save are shown.
+  - The fits list shows a running fit's stage and a fit's warning count.
+- **The instance screen** (8.2, `PosteriorInstance.tsx`, `PosteriorPlots.tsx`).
+  - While a fit runs: the stage, a progress bar per chain (warmup and sampling told apart), and
+    **Cancel** when the provider can cancel. A running fit is recognised as a posterior by its
+    provider, since it has no outcome yet.
+  - Afterwards:
+    - the warnings first, ordered by what they mean and headed in plain words;
+    - "the program has changed since this fit" when it has;
+    - the diagnostics;
+    - what the binder bound;
+    - one section per variable.
+  - A variable's section:
+    - its summary with the label columns (scrolling, with its headings kept in view);
+    - a search that picks an element by key, label, part of a label or `#position`;
+    - for a one-axis labelled variable, a **forest plot** (the 90 % interval and the mean,
+      sorted by mean, by label or in the dimension's order; click a row to choose it);
+    - for the chosen element, its **trace per chain** (crosshair readout) and a **histogram**.
+  - A variable too large to be summarised at fit time is summarised on demand.
+  - **Download run** and **Write back** (a dialog over `writePosterior`: update the rows of the
+    dimension's table by key, or insert a row per element with its coordinates and the fit's
+    id).
+  - The plots are plain SVG coloured through `.viz` tokens in `admin.css`: the `dataviz`
+    reference palette, with dark-mode steps of its own, validated. Chains take the categorical
+    slots in order and are never cycled.
+- **"The program has changed"** needed the server. `getModelInstance` now answers
+  `program_changed` from a new `ModelProvider::program_changed(config, state)` (default:
+  `None`). `StanProvider` compares the snapshot's store, main file and per-file SHA-256 with the
+  program the model names now. A program it cannot read is `None`, not "unchanged". The three
+  `client.ts` copies are regenerated.
+- **Open in IDE at a file**: `ideUrl(store, path)`, and the IDE opens `?path=` once the
+  workbench is up. `requestedPath` refuses `..` and empty segments.
+- **Helpers and tests** (8.3). `models.ts` gains the binding kinds and `kindsFor`, the draft
+  print/parse (a round trip for every field shape, and an unknown kind kept whole),
+  `applySuggestions`, the policies, `orderWarnings`, `forestRows`, `matchElements` /
+  `elementAt`, `histogram`, `niceTicks`, `updateTarget` and `buildPosteriorWrite`. There are
+  `posterior.test.ts` (30 tests), a `requestedPath` test in the IDE, and
+  `a_snapshot_is_compared_with_the_program_in_its_store_now` in `sc-stan`. `posterior_api`
+  asserts `program_changed` is null for a provider with no program. Every new string is in
+  the `admin` domain, and `feldspar i18n lint ui/admin/src` is clean.
+- **Walked by hand** against CmdStan 2.40 and headless Chromium, on a scratch database with 85
+  counties (one with no homes) and 919 homes generated from known parameters. The model was
+  built entirely in the form; Bind automatically proposed `N`, `J`, `county`, `y`, and `x` and
+  `u` were bound by hand. Preview said 919 and 85. The fit had no warnings (largest R̂ 1.007) and
+  recovered `gamma0` 1.52 (true 1.5). `alpha` is labelled by county name, and the county with no
+  homes has the widest interval (sd 0.36 against about 0.15). Write back filled
+  `counties.alpha_mean`/`alpha_sd` for 85 rows. A long fit showed four progress bars and
+  Cancel killed it.
+  - **Fixed on the way:** a running posterior was rendered as an ordinary fit (no progress, no
+    Cancel), and the forest plot's axis scrolled out of view.
+  - **Not fixed (Phase 4's):**
+    - A cancel that arrives after the chains have finished is not honoured while the host
+      summarises. From then on `record_fit_progress` also stops writing progress, so the row
+      keeps its last `sampling` report.
+    - The cancellation sentence reads "internal error: the fit was cancelled after 7
+      seconds (at crates/sc-stan/src/compile.rs:…)": the kind prefix and the source location
+      leak into the admin's sentence, and the seconds count from the wrong start.
+
+## The posterior's API, its actions and the code API
+
+This is Phase 7 of the Stan milestone (TODO "Bayesian models with Stan", §§5, 13, 16–18). A
+fitted posterior can now be bound, previewed, compiled, cancelled, read, summarised, downloaded
+and written back over the admin API, refitted and written back from a trigger, and read from a
+code body. Nothing here names Stan except the two endpoints about a program. Everything is tested
+over a stub sampler, so no CmdStan is needed.
+
+- **The model form's endpoints** (7.1).
+  - `listModelProviders` now says, per provider, `binds_data`, `cancellable`, and
+    `unavailable` ("CmdStan was not found: …").
+  - `getProgramInterface(store, path)` answers the parsed interface, `stanc`'s warnings, or the
+    notice that the program was not checked. A program `stanc` refuses comes back in `error`,
+    because showing the diagnostics is what the Check button is for.
+  - `saveModel` of a Stan model runs `check_program` first. A refused program refuses the save;
+    otherwise the answer carries `program_check` (warnings, or the notice).
+  - `previewModelData(model)` (`sc_model::preview_data`) binds what binds. Each data variable
+    gets a row with its shape and first values, or its own error: a binding that does not
+    parse, a size that does not match, or a null under `refuse`. A `width` or `segment_*` of a
+    variable that failed says so. Only sentences about no one variable stop it (`errors`).
+  - `suggestBindings(model)` (`sc_model::suggest_bindings`) proposes a binding for each unbound
+    variable:
+    - a column named like the variable (an `index` when it is an int array and the column is a
+      foreign key into another dataset's table);
+    - `size(d)` for an `upper=` of an index into `d`;
+    - `count(ds)` for the first size of a per-row binding;
+    - `width(X)` beside a design.
+
+    It never replaces a binding. On radon it proposes `N`, `J`, `county` and `y`, each with a
+    reason, and leaves `x` and `u`.
+  - `compileModel(model)` compiles into the cache without fitting, waits for it, and answers the
+    key (`StanProvider::compile`).
+- **Cancel** (7.2). `cancelModelFit(instance)` sets `cancel_requested` on the row. It is refused
+  for a provider whose fit cannot be stopped (the new `ModelProvider::cancellable`, true for
+  Stan) and for a fit that has finished.
+- **Reading a posterior** (7.3, `sc_model::reading`).
+  - A fit now records, per output variable, its shape and the dimension each axis is labelled by
+    (`attributes.axes`). An instance is then read by the labels it was fitted with, whatever the
+    model's configuration says now.
+  - `getModelDraws(instance, variable, elements?, chains?, warmup?, thin?)` answers `dims`,
+    `axes`, per-axis `labels` and `keys`, the selected `elements` and their `names`
+    (`alpha[Anoka]`), and per chain one array per element.
+  - `elements` selects by key or label per axis (`{"counties": ["27001", "Becker"]}`), by an
+    axis's ordinal (`{"1": […]}`), or by index arrays.
+  - More than `max_draws_response` numbers (2 million; the flag is Phase 10) is refused before
+    anything is read, with the arithmetic and `thin`.
+  - `getPosteriorSummary` summarises any variable now, from its draws. When the draws were not
+    kept, the fit's stored table answers (`source: "stored"`).
+  - `downloadModelRun` is a zip. With a runs store it holds the raw CmdStan run, its CSVs
+    gunzipped back for `cmdstanpy.from_csv` (the new `ModelProvider::run_files`). Otherwise it
+    holds one CSV per chain in CmdStan's column layout (column-major within a variable), plus
+    `coordinates.json` and `variables.json`. A raw run that can no longer be read falls back to
+    the draws, with a `README.txt` saying why.
+  - The instance JSON carries `progress`, `cancel_requested` and `warnings`, and the detail
+    carries `variables` and `binding`.
+- **Write-back** (7.4). `writePosterior` and the new `write_posterior` action share one writer
+  (`sc_core_actions::write_posterior`) through the row layer, so the target table's triggers
+  fire.
+  - `update` writes a one-axis variable's statistics into the rows of the table its rows
+    dimension is over, by key.
+  - `insert` makes a row per element in any table, with chosen coordinates (key, label or
+    position) and the fit's id.
+  - Statistics go into float fields. An effective sample size may also go into an integer
+    field, rounded down.
+- **`fit_model`** (7.5). A new action that refits a named model. It waits for the fit by
+  default, and with `activate` makes it active when it finished with no warnings. A fit with a
+  warning is kept inactive. `sc_model::FitStarter` is the seam, implemented by `ModelServices`.
+- **`models` in code bodies** (7.6). `models.draws`, `models.summary` and `models.instance`, in
+  JavaScript and in Python.
+  - The first argument is a model's name (its active fit) or a fit's id. `keys: […]` picks the
+    first axis by key or label.
+  - It is not a sixth host surface: it is an `op: "models"` request on the `db` host, on the
+    run's call budget, with a prelude object in each language. The JS one is a `const` over the
+    run's own `db`; Python's is `saltcorn.models`.
+  - A draws answer from code is capped at 500 000 numbers.
+  - Documented in `code_api_js.md` and `tutorial-python.md`, and declared for the editor in
+    `codeTypes.ts`.
+- **Tests** (7.7).
+  - `sc-server`'s `posterior_api.rs`, over a stub sampler with a program of its own:
+    - the provider list, suggestions and a preview with the null on `x`'s row;
+    - draws by key and by label, one chain, thinned, and the cap's refusal;
+    - a summary by label;
+    - both write-back modes, with the audit trigger on `counties` firing three times;
+    - a text target refused;
+    - the zip's files and CSV header;
+    - cancel, and its two refusals;
+    - `fit_model` activating a clean fit and not a divergent one;
+    - `write_posterior` from a trigger;
+    - `models` from a JavaScript body.
+  - `sc-python`'s `python_models.rs` pins the requests the Python `models` sends. It needs
+    `--features python-host` (`python3-dev`) and was not run on the development machine.
+  - `sc-model` unit tests cover selection, the write plan, the preview and the suggestions.
+- `sc-api` now depends on `sc-model` (the design's crate table says so). The ER diagram gains
+  `_fd_model_draws`, which Phase 1.5 added without it. `trigger_admin_api`'s action list gains
+  the two new actions. The admin client is regenerated in all three copies.
+
+## Time series and space: the structured binding kinds
+
+This is Phase 6 of the Stan milestone (TODO "Bayesian models with Stan", §12). The binder now
+has the thirteen structured kinds that were refused as "not available yet". They put rows onto
+a time grid or a pair of dimensions, turn a junction table into a graph, and turn latitude and
+longitude into points and distances. All of it is in `sc-model` (`bind::structured` for the
+arithmetic, `bind::resolve` for the wiring), so no CmdStan is needed to test it.
+
+- **`series` and `series_present`** (6.1).
+  - `series` gives one value per position of a dimension, usually a time grid's steps. Its
+    `over` is `{ dimension, column?, match? }`.
+  - `column` says which column of the dataset places each row. When it is absent, the
+    dimension's own column is used. That only works when the dimension is declared over the
+    same dataset; a related dataset like `weather` is told to give its column.
+  - The rows of one position combine by `aggregate`: `count`, `sum`, `mean`, `min`, `max`,
+    `first`, `last` or `refuse`. The default is `count` with no value column and `refuse` with
+    one. `refuse` names the two rows that share a position.
+  - A position no row falls in takes `fill` (a number or `"NaN"`). Without a `fill`, it is
+    refused by its label, and the sentence names both ways out: a fill with a mask, or the
+    missing-data idiom. A count needs no fill, and takes none.
+  - A row with a null value is simply not in its position. `series_present` is the 0/1 mask.
+  - Counts, and sums, extremes and picks of an int column, stay ints. A mean, or a fractional
+    fill, makes the series real.
+- **`cells` and `cells_present`** (6.2). The same thing over `rows` and `cols`, into
+  `matrix[R, C]` or `array[R, C] int`. An empty cell is named by both labels:
+  "(`cellar`, `2024-03-01T01:00:00Z`) of `sensors` × `hour`".
+- **Lookups are one mechanism.** An `index`, each axis of a `series` or `cells`, and each end
+  of an edge are all "a column of this dataset looked up in that dimension". So they share:
+  - the `unknown` policy (a weather row before the grid, or an edge to a region not in
+    `regions`, is refused or dropped exactly as an orphan key is);
+  - the resolution order (a `weather` series over `main`'s grid resolves after `main`);
+  - `match`.
+- **The edge bindings** (6.3). They all take `{ dataset, from, to, dimension, match? }` over a
+  junction table:
+  - `edge_count`, `edge_from` and `edge_to` build the ICAR edge list. `symmetric: dedupe` (the
+    default) keeps each unordered pair once, the lesser position first, sorted, so a table
+    storing both directions gives the same list. `keep` gives every row as stored.
+  - `adjacency` gives the symmetric 0/1 matrix.
+  - `components` and `component` number the components by their first region.
+  - A self-loop and a null end are refused by row. `symmetric` on a non-list kind is refused
+    at save.
+  - A region with no neighbour goes into `BindReport::warnings`, by name, once. That field is
+    new, and is for the preview.
+- **`icar_scale`** (6.4). This is BYM2's scaling factor: the geometric mean of the diagonal
+  of the Laplacian's Moore–Penrose inverse.
+  - The inverse comes from `nalgebra`'s symmetric eigendecomposition, per connected
+    component, dropping each component's one zero eigenvalue. A singleton component
+    contributes 1.
+  - It is capped at `MAX_ICAR_NODES` = 5 000.
+  - It is tested against closed forms: K₄ is 3/16, C₆ is 35/72, P₃ is (50/729)^⅓, and two
+    pairs plus an island is 0.25^0.8.
+  - It is also tested against a 4 × 4 lattice (0.4716296437256453), computed exactly in
+    rational arithmetic as (L + J/n)⁻¹ − J/n, which uses no eigendecomposition.
+  - `nalgebra` 0.35 is a new workspace dependency. It was in `Cargo.lock` only as statrs's
+    optional dependency, and nothing compiled it before.
+- **`points` and `distances`** (6.5). Both take `{ dataset, lat, lon }`.
+  - `points` gives `[lon, lat]` in degrees. With `project: true` it gives kilometres east and
+    north of the centroid (equirectangular: good at city-to-country scale).
+  - `distances` gives the `matrix[N, N]` of haversine distances on the mean Earth radius. It
+    is capped at `MAX_DISTANCE_SITES` = 3 000, and its n² values count against the data cap.
+  - A null or out-of-range coordinate is refused by row. Planar x/y needs no new kind: it is a
+    `columns` binding.
+- **Tests** (6.6). `bind/structured_tests.rs` has one test per row of §12's tables:
+  - gaps on a daily grid, both as the missing-data idiom and as a filled series with its mask;
+  - visits counted into days, and two in one day refused, then summed;
+  - a monthly grid across a year boundary;
+  - a horizon whose `y_future` is labelled with its three dates through `Labeller`;
+  - a weather table aligned to the grid, with its out-of-grid day refused and then dropped;
+  - a sensor panel, long and wide, with the wide matrix labelled `Y[cellar,…]`;
+  - a region × week model: the edge list, adjacency, components, the scaling factor of a
+    square plus an island, weekly counts, and the island's warning.
+
+  There are also tests for every refusal. The arithmetic has its own unit tests in
+  `bind/structured.rs`.
+
+## Draws, summary and diagnostics: a fitted posterior says what it found and how far to trust it
+
+This is Phase 5 of the Stan milestone (TODO "Bayesian models with Stan"). A posterior's
+instance now has a summary table per variable, labelled by the database, and metrics for its
+method. Warnings say what is wrong and what to do about it. `exclude_variables` and
+`keep_draws` decide which draws are kept, and a fit whose draws would be too large is refused
+before it samples. Everything here is the host's (`sc-model`), so a second Bayesian provider
+would be summarised and diagnosed by the same code.
+
+- **The summary** (`sc_model::summary`, 5.3).
+  - Per element it gives mean, sd, MCSE of the mean, the 5 %, 50 % and 95 % quantiles,
+    rank-normalised split-R̂, and bulk- and tail-ESS. The definitions are Vehtari et al.
+    (2021), as `posterior`, ArviZ and `stansummary` implement them.
+  - The autocovariances go through a small radix-2 FFT in the crate, and the normal quantile
+    comes from `statrs`. No new dependency.
+  - The MCSE divides by the ESS of the split chains, as `posterior` and ArviZ do.
+    `stansummary` divides by the unsplit ESS, which differs in the third significant figure.
+  - When only one tail indicator is constant, the tail-ESS is the other one, as Stan does.
+  - An undefined statistic (the R̂ of a constant, anything over a NaN draw) is NaN, stored as
+    `null`.
+- **Labels** (`sc_model::bind::labels`, 5.5).
+  - An output axis whose size is a bare identifier bound by `size(d)` or `count(d)` gets
+    dimension `d`'s labels and keys. One sized by `width(X)` gets the design's column names.
+    Anything else is numbered.
+  - The `labels` override takes one entry per axis: a dimension, a `design`-bound variable,
+    or `null`.
+  - The override is checked on save (the names, and one entry per axis). It is checked again
+    before sampling, against every declared size that evaluates. If the draws still do not
+    fit it, the axis is left numbered and a warning says so.
+  - `Labeller`, `Axis` and `element_label` are public, for the draws API of Phase 7.
+- **Metrics and warnings** (`sc_model::diagnose`, 5.4).
+  - `sample` gives `Metrics::Posterior`: chains, draws per chain, divergences (total and per
+    chain), tree-depth hits, E-BFMI per chain, the worst R̂, the smallest bulk- and tail-ESS
+    over the parameters and transformed parameters, and wall time per chain.
+  - `optimize` gives the new `Metrics::PosteriorMode`: the log density, the optimiser's
+    iterations and the wall time. Its tables have one `estimate` column.
+  - `pathfinder` gives `Metrics::PosteriorApproximation`, and its tables have no R̂.
+  - Warnings use the published thresholds: any divergence, any tree-depth hit, E-BFMI below
+    0.3, R̂ above 1.01, and ESS below 100 per chain. Each is a sentence naming the worst
+    element by its label ("R̂ is 1.070 for `alpha[Anoka]` (and 3 other elements), above
+    1.01: …") and the remedy. They are stored in `attributes.warnings`. The instance is still
+    `fitted`.
+  - Every parameter and transformed parameter is summarised. A generated quantity is
+    summarised when it has at most `--stan-summary-max-elements` elements (1 000).
+- **What is kept** (5.2).
+  - `exclude_variables` and `keep_draws` are now host keys (`EXCLUDE_VARIABLES_KEY`,
+    `KEEP_DRAWS_KEY`), because the host summarises every draw before deciding which to keep.
+    An excluded variable still has its summary. `keep_draws: false` keeps the summary and the
+    diagnostics and stores no draws.
+  - Both are checked against the program on save.
+- **The size bound** (5.2).
+  - A new `ModelProvider::draw_plan(config)` gives chains, draws per chain and the sampler's
+    own variables. The Stan provider fills it from its settings: 7 sampler columns for
+    `sample`, 2 for `optimize`, 3 for `pathfinder`.
+  - Before sampling, the host multiplies the plan by the declared sizes, evaluated against the
+    bound data. It refuses a fit over `--stan-max-draws-bytes` (1 GB), with the arithmetic and
+    the four ways out ("about 2.4 GB (4 chains × 1 000 draws × 50 092 elements); the largest
+    variable is `y_rep`…").
+  - A size that does not evaluate is measured after sampling. If the draws are then over the
+    limit, they are dropped with a warning and the summary is kept.
+- **Unread variables.** A generated quantity that is too large to summarise, and is not kept,
+  goes into `PosteriorInput::unread`. The provider skips its CSV columns.
+- **Limits.** `PosteriorLimits` (data values, draws bytes, summary elements) rides on
+  `FitContext::with_limits`, with the defaults the TODO names. The server flags are Phase 10.
+- **The CSV reader** (`sc_stan::output`, 5.1).
+  - It reads a line at a time, skipping unread columns.
+  - It also reads the adaptation (the step size, and a diagonal or dense inverse metric) and
+    CmdStan's timing (`Warm-up`/`Sampling`/`Total`, and Pathfinder's labels).
+  - The state records each chain's step size and timing.
+  - `optimizer_iterations` reads the optimiser's last iteration from its log.
+  - It accepts the spaces 2.40's Pathfinder writes after its commas, and the new
+    `converged__` and `path__` columns.
+- **The seam.**
+  - `PosteriorResult` gains `run: PosteriorRun`: the method (`Mcmc`, `Mode`,
+    `Approximation`), the maximum tree depth, wall seconds, and iterations.
+  - `PosteriorInput` gains `unread`, and the `Fit` gains `warnings`.
+  - The host's summary tables come before the provider's own parameter blocks.
+- **Tests.**
+  - `summary`: reference numbers from `stansummary --sig_figs 9` (CmdStan 2.40.0), with the
+    command in the comment and an ignored test that writes the CSVs. The inputs are a
+    well-mixed normal, an AR(1) at 0.9 and four chains with one stuck. Mean, sd, quantiles,
+    R̂, both ESS and Stan's MCSE agree to 1e-7 on the first two. On the stuck chains R̂
+    agrees and is 1.50. The FFT is checked against the direct sum.
+  - `diagnose`: labelled tables; every warning's sentence; the summary cap; the mode and
+    approximation variants; and E-BFMI.
+  - `labels`: automatic, `width` and override labels; the length checks; the save-time
+    refusals.
+  - `draws`: the estimate and its sentence.
+  - `fit`: labelled tables through `run_fit`, `exclude_variables`, `keep_draws: false`,
+    `unread`, the refusal before sampling, the drop after it, and a mislabelled axis refused
+    before sampling.
+  - `posterior_store` (Postgres and SQLite): the stored instance has its tables and metrics.
+  - `sc-stan`:
+    - the fake model now writes adaptation and timing comments and an optimiser table;
+    - the runner tests check `run`, the per-chain state, `unread` skipping and `draw_plan`;
+    - `real_cmdstan.rs` runs the host's diagnostics on CmdStan 2.40's real output: 4 × 1 000
+      draws, R̂ < 1.01, ESS > 400, no divergences, no warnings, the optimiser's iterations,
+      and Pathfinder's approximation metrics. It passes on this machine.
+
+## Compiling and running: a Stan model is fitted with CmdStan
+
+This is Phase 4 of the Stan milestone (TODO "Bayesian models with Stan"). A Stan model's fit
+now compiles its program, runs one CmdStan process per chain, reads the draws back and keeps
+them. Its progress reaches the instance, it can be cancelled from the row, and it stops at
+its `max_runtime_minutes`. When the model names a `runs_store`, CmdStan's own output is
+published there. The summary, the diagnostics and `exclude_variables`/`keep_draws` are
+Phase 5; until then an instance has its draws and no summary.
+
+- **The compile cache** (`sc_stan::compile`, 4.1).
+  - The key is the SHA-256 of the program's files (path and hash), the CmdStan version and
+    the fixed compile options. An edited include is a new key; so is a CmdStan upgrade.
+  - An entry is `<key>/model`, `<key>/src/…`, `manifest.json` and `compile.log`. A compile
+    is built in `<key>.building-<pid>-<n>` and renamed into place when it has finished.
+  - The cache is `<data dir>/feldspar/stan-cache` on a server, beside the modules root.
+  - A process-wide lock allows one compile at a time per node. A second fit of the same
+    program waits, then finds it cached.
+  - `make` is run in the CmdStan directory with only `STANCFLAGS=--include-paths=<src>` and
+    the target. There is no `--allow-undefined` and no `CXXFLAGS`.
+  - A `stanc` error comes back in `stanc`'s words with store paths ("stanc refused the program
+    `radon.stan`: Semantic error in 'radon.stan', line 3…"). Any other failure quotes the end
+    of `make`'s output.
+- **The runner** (`sc_stan::run`, 4.2, 4.4, 4.6).
+  - It runs one process per chain with cmdstanpy's argument order and `sig_figs=9`. `refresh`
+    is set so a progress line comes about every 2 %.
+  - `RunSettings` is the configuration with its defaults filled in. It is recorded in the
+    instance's state and in `config.json`. A model with no `seed` gets a fresh one per fit,
+    and it is recorded.
+  - Chains run up to `parallel_chains` at a time. Every chain on the node also needs a permit
+    from one `ProcessBudget` (half the CPUs, at least one). A fit none of whose chains has
+    started is reported as `queued`.
+  - `Iteration: 400 / 2000 [ 20%] (Warmup)` lines become per-chain `ChainProgress`.
+  - Every child (`make` included) has a scrubbed environment: `PATH`, `HOME`, `TMPDIR`,
+    `CMDSTAN`, `CXX` and `STAN_*`. Each runs in its own process group, which is killed on
+    drop, on cancel and on timeout. On Linux each also gets `PR_SET_PDEATHSIG`.
+  - When one chain fails, the others are dropped, and so killed.
+  - **Failure sentences.** A data error names CmdStan's variable ("CmdStan refused the data
+    for `y` — which the binder should have caught…"). An initialisation failure says every
+    initial value was rejected, quotes the last reason, and suggests `init: 0` or tighter
+    priors. Any other exit carries the chain's last 40 lines. Cancelled and timed-out fits
+    say how long they ran.
+  - `optimize` and `pathfinder` run as one process each through the same runner. Pathfinder
+    gets `num_paths` = chains and `num_draws` = `num_psis_draws` = `iter_sampling`.
+- **Draws** (`sc_stan::output`, part of 5.1). The CSV is read with element indices taken from
+  the column **names**, so `Sigma.2.1` is `Sigma[2,1]`. The sampler columns are variables like
+  any other. With `save_warmup`, the first ⌈warmup/thin⌉ rows are stored as warmup series.
+  `nan`/`inf` are kept.
+- **The raw run** (`sc_stan::run_dir`, 4.5).
+  - A fit writes into `<scratch>/stan-run-<pid>-<instance>/`: `program/…`, `data.json`,
+    `coordinates.json`, `config.json`, `chain-N.csv` and `chain-N.log`.
+  - With a `runs_store`, the directory is published to `<runs_dir>/<model>/<instance>/` (the
+    default `runs_dir` is `stan-runs`), with the CSVs gzipped. In a git store a `.gitignore`
+    of `*` is written into `runs_dir` first.
+  - The scratch directory is removed in every case.
+  - `StanProvider::discard` deletes the published run. If saving a fitted instance fails,
+    the host now calls `discard` on its state, so the run does not outlive the instance.
+- **The provider's state** is kept small: the program snapshot (every file's text and hash),
+  the seed, the method and settings, the CmdStan version, the compile key, the interface,
+  per-chain wall time, and the run's location.
+- **The job** (`sc-server`, 4.3).
+  - `start_fit` runs the fit beside `keep_row`. Once a second, `keep_row` writes the latest
+    progress to `attributes.progress` and reads `cancel_requested` back. When it is set, it
+    raises the flag the provider polls.
+  - The providers get the context's instance id, so `PosteriorInput` now carries `model` and
+    `instance`.
+  - `max_runtime_minutes` is enforced by the runner, which owns the processes.
+  - At boot, `install_models` also removes scratch run directories and half-built compiles
+    left by server processes that are no longer running.
+  - `ModelServices::with_stan` takes a Stan provider of the caller's (tests).
+- **In `sc-model`**:
+  - `record_fit_progress(catalog, id, Option<&Progress>)` answers `Running`, `CancelRequested`
+    or `Finished`. Its write is guarded by `status = 'fitting' AND attributes ->
+    'cancel_requested' IS NULL`, so it can neither undo a cancel that landed between its read
+    and its write, nor touch a finished row.
+  - `request_fit_cancel(catalog, id)` sets the attribute on a running instance.
+    `cancel_requested(&instance)` reads it. They are the halves `cancelModelFit` (Phase 7)
+    will call.
+- **Dependencies.** `flate2` is added to the workspace. It was already in the tree through
+  `zip`, on the same pure-Rust zlib backend. `sc-stan` gains `bytes`, `futures`, `flate2` and
+  `uuid`, all already in the workspace. `install.rs` now shares the process helpers
+  (`KillGroupOnDrop`, `forward_lines`, `TAIL_LINES`).
+- **Tests.**
+  - `sc-stan/tests/runner.rs` uses a fake `make` and a fake model executable (a shell script
+    that reads CmdStan's arguments, prints its progress lines and writes a canned CSV). It
+    covers:
+    - the compile and the cache hit, and a recompile after an edit;
+    - the exact command line and the scrubbed environment;
+    - the draws, progress stages and chain progress;
+    - warmup draws;
+    - two fits sharing a budget of one (no overlap, one `queued`, one compile);
+    - cancel killing a sleeping chain's process;
+    - the timeout;
+    - the fail/init/data sentences, and a `stanc` error with its store path and nothing left in
+      the cache;
+    - the published run's files, gzip, `.gitignore` and discard;
+    - `optimize` and `pathfinder`.
+  - `real_cmdstan.rs` gains an ignored end-to-end fit through the provider against the real
+    CmdStan 2.40. It compiles with an `#include`, samples 4 chains (θ's posterior mean ≈
+    0.25), and publishes the run. `optimize` finds the mode (0.2) and `pathfinder` runs, all
+    from one compile, and a `stanc` error comes back in its words. It passes on this machine.
+  - `sc-model`: progress and cancel through the row, on Postgres and SQLite.
+  - `sc-server`: a running fit's progress reaches its row, and a cancel set on the row fails
+    it within seconds; a late progress write does not touch the finished row.
+
+## Binding: a Stan program's `data` block tied to the tables
+
+This is Phase 3 of the Stan milestone (TODO "Bayesian models with Stan"). The host can now turn
+a model's datasets into the data file a Stan program reads, checked against the program's
+declared types and sizes, with every position recorded as a key and a label. A fit of a program
+that declares data no longer stops with "not implemented yet": it binds the data and hands it to
+the provider. Sampling is still Phase 4.
+
+- **The binder** (`sc_model::bind_data`). It takes the interface, the configuration and the
+  materialised datasets (`main` first, then each related one). It answers `BoundData`: the
+  CmdStan JSON, the `Coordinates` and a `BindReport`. It lives in `sc-model`, not `sc-stan`, so a
+  second Bayesian provider gets it for free (§4).
+- **Dimensions** (3.1). Each dimension maps positions `1..n` to keys.
+  - **Rows**: every dataset is one, under its own name. Its keys are the primary keys.
+  - A related dataset's labels come from its label formula. That formula is read with the rows
+    as the reserved column `_fd_label` (`binding_dataset`), then taken out of the frame. Rows
+    without a label formula are labelled by their key.
+  - **Values** (`{"kind": "values", "dataset", "column"}` under `dimensions`): the distinct
+    non-null values, sorted. Numbers sort numerically, text by code point (never by locale), and
+    `false` before `true`.
+  - **Time grids** (`{"kind": "time_grid", "dataset", "column", "step", "start"?, "end"?,
+    "horizon"?}`).
+    - `step` is `day`, `3 hours`, `1 month` and so on.
+    - The start is the first value floored to the step: to the minute, hour, day, Monday,
+      month, quarter or year, in UTC.
+    - Months, quarters and years step by the calendar.
+    - A grid also exposes `name.future`, the horizon alone.
+    - A grid is capped at 1 000 000 steps.
+  - `Coordinates` serialises every dimension's keys and labels, plus every `design`'s column
+    names and encoding. A fitted posterior stores it as the instance attribute `coordinates`.
+    The report is stored as `binding`.
+- **The core binding kinds** (3.2): `value`, `count`, `size`, `column`, `columns`, `design`,
+  `width`, `index`, `present`, `absent`, `count_present`, `count_absent`, `present_values`,
+  `segment_start` and `segment_size`.
+  - All of them are `sc_model::Binding`, parsed from the JSON under `bindings`.
+  - A `column` over a date needs `time: {unit, origin}`. The unit is seconds to weeks. The origin
+    is `min`, `epoch` or an instant.
+  - `design` goes through `fit_encoding`/`apply_encoding`, so text is one-hot and
+    reference-coded.
+  - `index` matches the target's primary key by default, or another column with `match`. A
+    `match` column that has a value on two rows is refused.
+  - A `segment_*` binding sorts its dataset stably by the index before anything of the dataset
+    is bound. The dataset's own rows dimension follows that sort.
+  - The Phase 6 kinds (`series`, `cells`, the edge kinds…) are refused as "not available yet".
+- **The checks** (3.3). Every refusal starts "`y`, declared `vector[N]` and bound to
+  `main.log_radon`: …".
+  - **At save** (`check_bindings`, called from `validate_model` in place of the "declared"
+    check), with no data read:
+    - every variable is bound and every binding is declared;
+    - the datasets, columns and dimensions a binding names exist;
+    - the kind can produce the declaration's rank, and a `design` or a scaled date is not bound
+      into an `int`;
+    - `width` names a `design`, and `segment_*` names an `index` on the same dataset;
+    - `match` is used only with a rows dimension;
+    - dimension and policy declarations are well formed;
+    - the datasets have a resolution order. Indexing into each other is refused as a cycle,
+      naming the bindings. So is a dataset indexing its own rows.
+  - **At bind time**:
+    - **Policies.** The new configuration key `policies` gives each dataset
+      `{"nulls": "refuse"|"drop", "unknown": "refuse"|"drop"}`; both default to `refuse`.
+      Datasets resolve in dependency order, so a county dropped for a null is an unknown key to
+      its homes, and the sentence says both.
+    - **Element types.** A float is refused into an `int` ("round it in the dataset"). Text
+      reaches Stan only through `index` or `design`. A boolean becomes 0/1.
+    - **Sizes.** Every size expression that evaluates is checked: "`y` is declared `vector[N]`
+      with `N` = 919 (the row count of `main`), but its binding `counties.log_uranium` has 85
+      values".
+    - **Bounds.** Every bound that evaluates is checked. That is numbers, bound scalars,
+      `+ - * /` and parentheses. The sentence names the element and the row's key, so a
+      zero-based index is caught by `lower=1`.
+    - **The cap.** The data-values cap (`DEFAULT_MAX_DATA_VALUES`, 20 million, not yet a server
+      flag) is refused naming the three largest variables.
+- **`BoundData`** (3.4). The CmdStan JSON writes ints as ints. Reals are reals, with
+  `"NaN"`/`"Inf"`/`"-Inf"` strings. Values nest row-major, and empty axes are empty arrays
+  (`array[3] vector[0]` is `[[], [], []]`). A `real` declaration gets its ints as reals.
+- **The fit** now reads each related dataset with its label column, and binds when the provider
+  declares an interface.
+  - `PosteriorInput` gains `coordinates`.
+  - `Fit` gains `binding`.
+  - `RowCounts.dropped` counts `main`'s rows dropped by the policies.
+- `StanProvider` declares `policies` in its form and requires it to be an object.
+- **Tests** (3.5): 39 in `sc_model::bind`. One per row of §11's table:
+  - two-level radon, with a county that has no homes;
+  - three levels, both ways;
+  - a values dimension;
+  - crossed IRT indices;
+  - a weighted junction;
+  - segments;
+  - a code matched with `match`;
+  - a design with its width;
+  - the missing-data idiom;
+  - a time grid with its future.
+
+  And every refusal: a size mismatch, a zero-based index, a null under `refuse` and the same row
+  dropped under `drop`, an orphan key (refused and dropped), the cascade, a cycle, the cap, and
+  the type refusals. Plus the save-time sentences. Two fit tests replace the old "refused until
+  there is a binder" test: an unbound program is refused by name, and a bound one is handed its
+  data while the instance keeps the coordinates.
+
+## The program: a Stan parser, `stanc`, and `StanProvider`
+
+This is Phase 2 of the Stan milestone (TODO "Bayesian models with Stan"). A Stan program in a
+file store can now be read with its `#include`s, parsed into the host's `Interface`, checked by
+the real `stanc`, and named by a model whose provider is **`stan`**. Nothing is compiled or
+sampled yet (Phase 4), and nothing is bound yet (Phase 3).
+
+- **The program** (`sc_stan::program`, 2.1). `Program::load(store, name, path)` reads the main
+  file, then every file it `#include`s.
+  - Includes are found by the lexer, so an `#include` inside a comment is not one. All three
+    spellings work: bare, `"quoted"` and `<angled>`.
+  - An include is resolved **relative to the including file, inside the same store**. `..` may
+    climb within the store. Climbing out of it, or an absolute path, is refused by name. So is a
+    missing file, quoting the line that included it.
+  - A cycle is refused naming the chain (`a.stan → b.stan → a.stan`).
+  - Every file is kept with its text and SHA-256 (`Program::hashes`), which is the snapshot a
+    fit will record (§6).
+  - A program is at most 64 files of at most 1 MiB each.
+- **The lexer and block splitter** (2.1). The lexer handles comments, strings (a `}` in
+  `print("}")` does not close a block), numbers, the operators, and `#include`.
+  - A `#` comment is refused with a sentence, because Stan 2.33 removed them.
+  - The splitter finds the seven blocks by brace matching. It refuses an unknown block, a block
+    out of order, a second block of the same kind, and an unclosed brace.
+  - Every sentence names `path:line:col` in the file the token came from, including files
+    reached through `#include`.
+- **The declaration parser** (2.2). It reads the top-level declarations of `data`,
+  `parameters`, `transformed parameters` and `generated quantities`, and skips everything else.
+  - Statements are skipped to their `;`, or across a braced block or a
+    `for`/`while`/`if…else`/`profile` statement. So a declaration nested in a block is a local
+    variable, not an output.
+  - It knows every type of §5: `int` and `real`; `complex` and its vector and matrix forms;
+    `vector`, `row_vector` and `matrix`; every constrained type; `array[…]`; and `tuple(…)`.
+    It also knows three newer ones: `sum_to_zero_matrix`, `column_stochastic_matrix` and
+    `row_stochastic_matrix`.
+  - It reads multi-name declarations (`real a, b;`) and initial values.
+  - `dims` is the full shape outer to inner. `cov_matrix[K]` is `[K, K]`, and
+    `cholesky_factor_cov[M]` is `[M, M]`.
+  - Bounds are kept as text. `lower=` and `upper=` are recorded. `offset=` and `multiplier=`
+    are accepted and are not bounds.
+  - `stan_type` is the type as written, with comments dropped.
+  - A size is a `SizeTree` when it is identifiers, integer literals, `+ - * %/% %` and
+    parentheses. Anything else (`num_elements(y)`) is kept opaque.
+  - Refused by name:
+    - a tuple or a complex number in `data` ("bind a tuple's parts as separate variables");
+    - the old array syntax `real y[N]`, with the new spelling in the sentence;
+    - `array[…] array[…]`;
+    - a container with the wrong number of sizes;
+    - an unknown bound key;
+    - a missing `;`.
+- **`stanc`** (`sc_stan::stanc`, 2.4). `run_stanc` lays the program out in a scratch directory
+  at its store paths, with each `#include` rewritten, on its own line, to the resolved store
+  path. It runs `stanc --info --include-paths=.` there.
+  - The environment is scrubbed to `PATH`, `HOME` and `TMPDIR`. The process is killed on drop
+    and after 60 s.
+  - Because stanc runs in the layout directory, its diagnostics already name store paths. What
+    is left of the scratch directory, and any `./`, is stripped.
+  - `check_program` refuses a program with stanc's own words. It then compares `--info` with
+    our parse: names, base type and number of dimensions for every variable of the four
+    blocks. A disagreement is refused as "a bug in Feldspar's Stan parser — please report it".
+    It is not silently resolved either way.
+  - stanc searches only its include paths and never beside the including file. That is why
+    the includes are rewritten rather than handing stanc every directory.
+- **`StanProvider`** (2.5). It is registered as `stan` in `ModelServices` beside the built-ins,
+  and it survives the module-change rebuild through the new `ModelServices::base_registry()`.
+  - It reads programs through a `StoreLookup`. In the server that is the catalog's connected
+    file stores.
+  - CmdStan is discovered once at startup (`$CMDSTAN`, else `~/.cmdstan`; the `--cmdstan` flag
+    is Phase 10). When none is found, the provider is still listed, and its description ends
+    "— CmdStan was not found: …".
+  - It declares the whole form:
+    - the program: `program_store` (a file-store picker) and `program`;
+    - the binding: `dimensions`, `bindings` and `labels`;
+    - the sampler, with §13's defaults: `method` (sample/optimize/pathfinder), `chains`,
+      `parallel_chains`, `iter_warmup`, `iter_sampling`, `thin`, `adapt_delta`,
+      `max_treedepth`, `seed`, `init`, `save_warmup` and `max_runtime_minutes`;
+    - the output: `runs_store`, `runs_dir`, `exclude_variables` and `keep_draws`.
+  - Its outcome is a posterior, it `binds_data`, and it has no hyperparameters.
+  - `validate` checks what only it knows: ranges (a seed must fit in 32 bits), `parallel_chains
+    ≤ chains`, `0 < adapt_delta < 1`, the shapes of the JSON settings, `runs_dir` without
+    `runs_store`, and a program path with `..`.
+  - `interface()` reads and parses the program as it is **now**.
+  - `check_program(config)` is for the "Check program" button. It runs `stanc` when CmdStan is
+    available. Otherwise it returns our parse with a notice that the program has not been
+    checked.
+  - `fit_posterior` is refused: with the not-found sentence (a configuration error) when there
+    is no CmdStan, and as not implemented yet otherwise.
+- **The save-time binding checks, in the host** (`sc_model::bind`). `BINDINGS_KEY`,
+  `DIMENSIONS_KEY` and `LABELS_KEY` are `sc-model`'s constants, because the binder that reads
+  them is the host's.
+  - `check_bindings_declared` checks three things. Every `data` variable has a binding
+    (missing ones are named with their types). Every binding names a declared variable (a typo
+    lists the declared ones). Every binding is an object with a `kind`.
+  - `validate_model` runs it for any provider that `binds_data`, through
+    `provider.interface()`. So a Stan model saves only when its program's data block is fully
+    bound.
+  - This also runs at load, so a model whose program has gone from its store is listed with
+    that reason and stays editable.
+  - The per-kind checks against declarations and datasets are Phase 3.
+
+**Deviations from the TODO.**
+- §10's structural checks run in `validate_model`, not in `StanProvider::validate`. The
+  provider's `validate` is synchronous and never sees the program, and the binder is the
+  host's.
+- `stanc` is **not** run on save yet. `validate_model` also runs when the models are loaded,
+  and must not start a subprocess per model. Wiring `check_program` into `saveModel` and the
+  Check button is now written into TODO 7.1.
+- `listModelProviders` does not carry `binds_data` yet (7.1). No generated client changed.
+
+**Tests.**
+- The five programs of 2.3 each have their whole `Interface` asserted: radon, eight schools,
+  an AR(1), BYM2 (Morris et al.), and one of every type and statement form.
+- There are tests for includes through a real `LocalFileStore`, for each refusal and its
+  sentence, and for the lexer, layout and path mapping.
+- A fake-`stanc` script checks the arguments, layout, scrubbed environment, refusal,
+  disagreement and non-JSON output.
+- The provider is tested for its kind, its interface from a store, its configuration checks,
+  the no-CmdStan notice, and a fake CmdStan directory's `stanc`.
+- A Postgres API test (`model_admin_api`) covers the server end to end. `stan` is listed, with
+  the connected store offered for `program_store`. A save is refused for a missing binding and
+  for a stray one, and accepted when fully bound. After the program is deleted, the model is
+  listed with the reason.
+- **Against the real CmdStan 2.40** (`#[ignore]`d without one, run here): `stanc`'s `--info`
+  agrees with our parse for every test program. A program with nested includes passes. A
+  syntax error in an included file comes back naming `models/lib/f.stan`, with no scratch path
+  in the message.
+
+## Many datasets, an order and a posterior: the `sc-model` groundwork for Stan
+
+This is Phase 1 of the Stan milestone (TODO "Bayesian models with Stan"). Nothing here runs
+Stan. It widens `sc-model` so that a Bayesian provider has somewhere to plug in: several
+datasets, a row order, an outcome that is a posterior, a seam that hands over data and gets draws
+back, and a table to keep the draws in.
+
+- **`Dataset::order`** (1.1). This is a list of `DatasetOrder { expr, descending }`.
+  - Each key is a formula, validated like a column. It must also translate to SQL, because an
+    `ORDER BY` has no reified fallback.
+  - `Dataset::order_by` gives the keys with nulls last in both directions, then **the primary
+    key**, so the order is total and is the same on Postgres and SQLite. A keyless table gets
+    the declared keys alone.
+  - `CatalogDatasetSource` applies it to every read: fits, previews and predictions. A dataset
+    with no declared order is now read in primary-key order. That costs the hash-split
+    providers nothing, and it makes a posterior's input reproducible.
+  - An empty order is not serialised, so existing datasets are unchanged on the wire.
+- **Related datasets** (1.2). This is `Model::related: Vec<NamedDataset { name, dataset, label
+  }>`, stored in a new **nullable** `_fd_models.related` column. `bootstrap_models` adds the
+  column to an installation whose table already has rows, so `TABLE_RENAME.sql` needs nothing.
+  - No related datasets is stored as SQL NULL. A NULL or absent column reads as none. Anything
+    other than an array is refused by name, as every column of that table is.
+  - `validate_model` validates each one against **its own** table, and requires its primary
+    key.
+  - A related dataset's `label` must be a formula that resolves and translates.
+  - Names must be identifiers, unique, and not `main` (`MAIN_DATASET`, which is what bindings
+    call the model's own dataset).
+  - The admin API's model JSON carries `related` both ways. The three generated `client.ts`
+    copies were regenerated.
+- **A posterior outcome** (1.3):
+  - `OutcomeSpec::Posterior { prediction }`, where `prediction` is the configuration key that
+    names the generated quantity a prediction reads.
+  - `Outcome::Posterior { prediction }`. It `predicts()` only when a prediction is named, and
+    only then is its `prediction_type()` Float. `Outcome::is_posterior()` is new.
+  - `Metrics::Posterior(PosteriorMetrics)`. It has the §15 fields and nothing computes them yet.
+    It ranks nothing and counts no rows.
+  - A hyperparameter **list** on a posterior model is refused **on save** (the outcome spec is
+    known without data) and again in the fit: "a posterior is sampled, not searched".
+- **The seam** (1.4):
+  - `Interface`, `Declaration`, `Element` and `SizeExpr`/`SizeTree` (the §5 types) are in
+    `sc_model::interface`. They differ from the spec in one place: a declaration's bounds are
+    two optional fields, `lower` and `upper`, not one `Option<(String, String)>`, because
+    `int<lower=0>` has only one. `SizeExpr::eval` does Stan's integer arithmetic (`%/%` and `%`
+    truncate toward zero). An unknown name, a zero divisor or an overflow answer `None`, which
+    means "not checked here" and never a panic.
+  - `ModelProvider` gains `interface(cfg)` (async, `None` by default) and
+    `fit_posterior(input, cfg, ctx)` (refused by name by default). It also gains
+    `discard(state)`, which does nothing by default, and `binds_data()`. The last is surfaced as
+    `ModelProviderKind::binds_data` and forwarded by a module's `HostProvider`.
+  - `PosteriorInput { datasets, interface, data }` puts `main` first, then each related dataset
+    by name.
+  - `PosteriorResult { state, draws, parameters }`, where each draw is a `DrawSeries { variable,
+    element, chain, warmup, draws }`.
+  - `FitContext { progress, cancelled() }` carries a `FitProgress` sink, `Progress { stage,
+    chains }` and `NoProgress`. `FitContext::detached()` is the context for fits nobody watches.
+  - `run_fit` branches on a posterior **before** `predicts()`. That branch has no split, no
+    encoding and no grid. It reads each related dataset under the row cap, and a failed read is
+    named. Then it asks for the interface, binds, calls `fit_posterior`, and reports
+    `summarising`.
+  - The binder is Phase 3. Until then a program that declares `data` is refused, naming the
+    variables. A program that declares none gets `{}`.
+  - `run_fit_with` and `fit_model_with` take the context. `run_fit` and `fit_model` are
+    unchanged and run detached.
+  - `Fit` carries the draws.
+- **`_fd_model_draws`** (1.5). It has one row per element per chain: `id`, `instance`,
+  `variable`, `element` (JSON index array), `chain`, `warmup` and `draws` (JSON; NaN and ±Inf
+  are stored as CmdStan's `"NaN"`, `"Inf"` and `"-Inf"`).
+  - `bootstrap_model_draws` creates it with an `(instance, variable)` index using `CREATE INDEX
+    IF NOT EXISTS`, which is idempotent on both backends. `install_models` calls it at boot.
+  - The new **`save_fitted_instance(catalog, instance, draws)`** writes the draws in batched
+    multi-row `INSERT`s (250 rows each), replacing any the instance had, and then writes the
+    instance row. Both happen in **one transaction**.
+  - Draws on an instance that is not fitted are refused. So are malformed series (index 0,
+    chain 0, a duplicate), which are refused before anything is written.
+  - `fit_model` saves through it. A write that fails is recorded as a failed instance ("the fit
+    finished but could not be recorded").
+  - `save_model_instance` is now transactional too: the row and the deactivation of the other
+    instances happen together.
+  - `DrawsReader` reads one variable, optionally only some elements (compared as JSON, `IN`
+    lists of at most 500) and some chains, with or without warmup. It orders by element, then
+    chain, with warmup first. `count()` is new.
+- **Deletion and `discard`** (1.6):
+  - `delete_model_instance` and `delete_model` now take the `ModelRegistry`.
+  - Each one deletes the rows and their draws in one transaction. Then it asks the provider to
+    `discard` each non-null state.
+  - A missing model or provider skips the discard. A failed discard is reported, and the
+    message says that the rows were already deleted.
+  - The admin handlers pass `models.registry()`.
+  - `delete_model_instances` is no longer public, because it deleted rows without the discard.
+- **New attribute constants.** `ATTR_PROGRESS`, `ATTR_CANCEL_REQUESTED` and `ATTR_WARNINGS`
+  are beside `ATTR_OUTCOME`.
+- Tests:
+  - Unit tests:
+    - The rendered `ORDER BY` puts the declared keys first and the primary key last. With no
+      order there is a key-only order, and a keyless table gets no tiebreak.
+    - Order keys are validated, and the wire shape of an order is checked.
+    - Size-expression evaluation, including truncation, overflow, a zero divisor and opaque
+      expressions. An interface JSON round trip.
+    - The posterior outcome: it predicts only with a named prediction, and its spec resolves
+      from the configuration.
+    - `Metrics::Posterior` JSON with NaNs.
+    - `Progress` JSON, the cancel flag, and draw-series checks.
+    - The posterior fit path against a stub sampler: every dataset reaches the provider under
+      its name, the draws are kept, progress arrives, and there is no encoding and no search.
+    - The same path refuses a grid, names a related dataset that cannot be read, refuses a
+      program that declares data, and refuses a non-sampler.
+  - `sc-model/tests/posterior_store.rs` runs each scenario on **Postgres and SQLite**:
+    - The draws round trip covers selection by variable, element, chain and warmup. It also
+      covers NaN and ±Inf, scalar and two-index elements, replacement on re-save, and isolation
+      between instances.
+    - **Atomicity.** A database constraint or trigger refuses the last batch after 600 good
+      series. The instance is still `fitting`, with zero draws.
+    - Deletion of an instance and then of its model: the draws go with them, and `discard`
+      receives exactly the fitted states.
+    - A full `fit_model` job with a stub sampler stores its draws beside its row.
+    - A posterior grid is refused on save.
+  - `model_store.rs`:
+    - Related datasets round trip. Each wrong case is refused by name: `main`, a
+      non-identifier, a duplicate, an unresolvable label, a column of the wrong table.
+    - **An existing `_fd_models` with rows but without `related` gains the column on
+      bootstrap**, and its rows read back with no related datasets (before and after).
+  - `sc-server/tests/model_dataset.rs`: a frame comes back in the declared order, including by a
+    join path and descending, with ties broken by the key. A preview's `LIMIT` takes the first
+    rows of that order.
+
+## CmdStan on the machine, first: `sc-stan`, `feldspar cmdstan status | install`
+
+This is Phase 0 of the Stan milestone (TODO "Bayesian models with Stan"). The integration tests
+of the later phases need a real CmdStan, and building one takes a while, so the installer is
+built before anything else.
+
+- **A new crate, `crates/sc-stan`**, at layer 6 beside `sc-model`. It is in the workspace, the
+  design's crate tree, the dependency graph and the crate table. For now it holds only its
+  `cmdstan` module and depends only on `sc-error`. `sc-model` and `sc-files` join when the
+  provider does. There is no Cargo feature: nothing is linked, so whether Stan is available is
+  something discovered at run time.
+- **Discovery** (`sc_stan::cmdstan::discover`). It tries `--cmdstan <dir>`, then `$CMDSTAN`,
+  then the newest `~/.cmdstan/cmdstan-*` (cmdstanpy's convention, so an existing install is
+  picked up).
+  - The version is read from the `CMDSTAN_VERSION :=` line of the makefile, and anything older
+    than **2.33** is refused by name.
+  - A directory the operator named that is wrong (missing, not CmdStan, too old) is an
+    **error**. Discovery does not fall through to a CmdStan nobody chose.
+  - Under `~/.cmdstan`, the newest *supported* install wins, and a **built** one is preferred.
+    An unfinished 2.40 does not hide a working 2.37.
+  - "Built" means `bin/stanc`, `stansummary`, `print` and `diagnose` all exist. `stanc` alone
+    does not count, because `make build` fetches it first and an interrupted build has it.
+  - `Toolchain::find` looks for `make` and a C++ compiler on `PATH`. The compiler is `$CXX` if
+    that is set (it is what CmdStan's makefiles use), otherwise `g++`, `clang++` or `c++`.
+  - Every input goes through `Locations`, so the tests run against fake directories and a fake
+    `PATH`.
+- **`feldspar cmdstan status [--cmdstan DIR]`** prints what was found, where it came from,
+  whether it is built, and where `make` and the compiler are. It exits non-zero when Stan cannot
+  be used, so a provisioning script can test for it.
+- **`feldspar cmdstan install [--version V] [--dir D] [--jobs J]`**:
+  - It downloads the release tarball from GitHub. That is the latest release (from GitHub's API)
+    unless `--version` is given, and the Linux arm64/armhf/ppc64el/s390x assets are chosen as
+    cmdstanpy chooses them.
+  - The tarball is unpacked with the system `tar` into `~/.cmdstan/cmdstan-<version>`, and
+    `make build -jJ` runs inside it. `J` defaults to **1**, because each job is a 1–2 GB C++
+    compile.
+  - Progress is printed as it goes: the download every 5 %, then each line of `make`'s output.
+    A failed build quotes its last 40 lines.
+  - Running it again for an installed version does nothing. A directory already there that is
+    not a built CmdStan is refused rather than overwritten.
+  - **A half-finished install is removed**: the partial download, the unpacking directory and
+    the install directory. This happens on failure *and* on Ctrl-C. `make` runs in its own
+    process group, and the whole group is killed first, so no compiler is left writing into the
+    directory being removed.
+  - None of this touches a database. The server never downloads or builds anything on its own.
+- **Run here**:
+  - CmdStan **2.40.0** was installed into `~/.cmdstan` with `--jobs 1`.
+  - `feldspar cmdstan status` finds it and reports it ready.
+  - Interrupting a second install mid-build left an empty directory and no stray compiler.
+  - The `bernoulli` example compiles outside the CmdStan tree and samples in about 7 s.
+- **README §3** has a new "Stan, which is found at run time" section and a row in the
+  prerequisites table.
+- Tests:
+  - `sc-stan`, 15 unit tests: version parsing and ordering (a release candidate sorts before its
+    release), the makefile line, and discovery in each case: found, the order of authority, a
+    wrong named directory, too old, absent, built and unbuilt, no compiler, `$CXX`. Also the
+    release URL per platform, the target directory, refusals before any download, an existing
+    install left alone, and the cleanup guard.
+  - `sc-stan/tests/real_cmdstan.rs`, `#[ignore]`d: it compiles CmdStan's `bernoulli` example
+    and samples it with the discovered CmdStan. It checks the progress line the runner will
+    parse, and that θ's posterior mean is Beta(3, 9)'s 0.25. It runs with
+    `cargo test -p sc-stan -- --ignored`. `$CMDSTAN` is not needed when an install is under
+    `~/.cmdstan`.
+  - `sc-cli/tests/cmdstan.rs`: the arguments of both subcommands and their refusals, the
+    install directory, and the status report for not built, ready, no compiler and not found.
+
 ## A git file store's operations look like VS Code's Source Control view
 
 A git store's edit screen used to show its operations as a column of generic forms: a

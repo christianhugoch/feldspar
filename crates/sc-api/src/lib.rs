@@ -43,12 +43,16 @@ pub mod filter;
 // agent and the administration MCP server.
 pub mod mcp;
 pub mod metadata_tables;
+// A posterior written back into rows: the admin API's `writePosterior` and a
+// code body's model handle share this one function.
+pub mod models;
 pub mod provided_tables;
 pub mod query_string;
 pub mod rows;
 pub mod schema_edit;
 
 mod admin;
+mod calc_read;
 mod endpoint;
 mod graphql;
 mod ownership;
