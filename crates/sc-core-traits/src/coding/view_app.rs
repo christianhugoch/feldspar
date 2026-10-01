@@ -5,7 +5,16 @@
 //! [`super::check`]). This tool opens that preview in the server's headless
 //! Chromium, in a browser context of the run's own, **as the run's caller**: the
 //! person chatting, or for a run nobody is present for, the account the
-//! [`CFG_VIEW_APP_USER`] setting names. One action per call, over one page:
+//! [`CFG_VIEW_APP_USER`] setting names.
+//!
+//! **A run that has built nothing yet looks at the live build.** Its first call
+//! mounts the preview from what the application's last build left on disk —
+//! what the live mount is serving — so an agent can see the page it was asked
+//! about *before* changing it, which is where most visual work starts. The
+//! result says so, and a later green `check` re-mounts the same preview with
+//! the run's own build.
+//!
+//! One action per call, over one page:
 //!
 //! - `goto(path)`, `click(ref)`, `fill(ref, text)`, `press(key)`,
 //!   `wait_for(text | ref, timeout)` and `snapshot()`, each answered with a
@@ -14,6 +23,10 @@
 //!   works for any model.
 //! - `screenshot(full_page?)`, a JPEG attached to the result, offered only when
 //!   the model has `vision`.
+//!
+//! In a `plan` run only the looking actions are offered — `goto`, `wait_for`,
+//! `snapshot` and `screenshot` — because a plan is written from what is there,
+//! and `click`, `fill` and `press` change it.
 //!
 //! Every result also carries the URL, the last document's HTTP status, and the
 //! console errors and failed requests since the previous call.
@@ -24,14 +37,16 @@
 
 use std::time::Duration;
 
-use sc_agent::{BrowserAction, BrowserRequest, Elidable, TraitCheck, TraitContext};
+use sc_agent::{
+    BrowserAction, BrowserRequest, Elidable, PreviewInfo, RunMode, TraitCheck, TraitContext,
+};
 use sc_auth::User;
 use sc_error::{Error, Result};
 use sc_llm::{ImagePart, ToolSpec};
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Value as Json, json};
 
-use super::check::configured_application;
+use super::check::{checked_application, configured_application};
 use super::{CFG_MAY_VIEW_APP, may};
 use crate::files::{FileScope, config_count};
 use crate::table::config_str;
@@ -101,44 +116,68 @@ pub async fn validate(check: &TraitCheck<'_>) -> Result<()> {
     Ok(())
 }
 
-/// The tool, with `screenshot` only for a model that takes images.
-pub fn spec(scope: &FileScope, config: &Attrs, vision: bool) -> ToolSpec {
+/// The actions that change nothing: all a `plan` run is offered.
+const LOOKING: [&str; 3] = ["goto", "wait_for", "snapshot"];
+
+/// The tool, with `screenshot` only for a model that takes images, and only
+/// the looking actions outside `act`.
+pub fn spec(scope: &FileScope, config: &Attrs, vision: bool, mode: RunMode) -> ToolSpec {
     let application = configured_application(config).unwrap_or_default();
-    let mut actions = vec!["goto", "click", "fill", "press", "wait_for", "snapshot"];
+    let acts = mode == RunMode::Act;
+    let mut actions = LOOKING.to_vec();
+    if acts {
+        actions.splice(1..1, ["click", "fill", "press"]);
+    }
     if vision {
         actions.push("screenshot");
     }
     ToolSpec::new(
         tool_name(scope),
         format!(
-            "Use this run's preview of `{application}` (mounted by a green check) as the user. \
-             Returns a snapshot with @e refs, console errors and failed requests. Data is live: \
-             click and fill write real rows.{}",
+            "Open `{application}` in a headless browser, signed in as the user you are working \
+             for, and do one action per call. It shows this run's last green check, or the \
+             live build before there is one. Each result has the URL, the HTTP status, an \
+             accessibility snapshot of the page whose interactive elements carry refs (`@e12`) \
+             for the next action, and any console errors and failed requests since the last \
+             call.{}{}",
+            if acts {
+                " The data is live: click and fill on a form write real rows."
+            } else {
+                " Only looking actions are available here."
+            },
             if vision {
-                " screenshot returns an image."
+                " screenshot returns an image of the page."
             } else {
                 ""
             }
         ),
-        parameters(actions, vision),
+        parameters(actions, vision, acts),
     )
 }
 
-/// The tool's arguments: `full_page` only beside `screenshot`.
-fn parameters(actions: Vec<&str>, vision: bool) -> Json {
+/// The tool's arguments: `full_page` only beside `screenshot`, `key` only
+/// beside `press`.
+fn parameters(actions: Vec<&str>, vision: bool, acts: bool) -> Json {
     let mut properties = json!({
         "action": {"type": "string", "enum": actions},
-        "path": {"type": "string", "description": "goto"},
-        "ref": {"type": "string", "description": "@e ref"},
-        "text": {"type": "string", "description": "fill, wait_for"},
-        "key": {"type": "string", "description": "press: e.g. Enter"},
-        "timeout": {"type": "integer", "description": "wait_for: seconds"},
+        "path": {"type": "string", "description": "For goto: the path to open, e.g. /tasks"},
+        "ref": {"type": "string", "description": "For click, fill, wait_for: an @e ref from the last snapshot"},
+        "text": {"type": "string", "description": "For fill: the text to type; for wait_for: text to wait for"},
+        "timeout": {"type": "integer", "description": "For wait_for: seconds to wait"},
     });
-    if vision && let Some(map) = properties.as_object_mut() {
-        map.insert(
-            "full_page".to_owned(),
-            json!({"type": "boolean", "description": "screenshot: whole page"}),
-        );
+    if let Some(map) = properties.as_object_mut() {
+        if acts {
+            map.insert(
+                "key".to_owned(),
+                json!({"type": "string", "description": "For press: a key, e.g. Enter, Tab or Escape"}),
+            );
+        }
+        if vision {
+            map.insert(
+                "full_page".to_owned(),
+                json!({"type": "boolean", "description": "For screenshot: the whole page, not just the viewport"}),
+            );
+        }
     }
     json!({
         "type": "object",
@@ -213,8 +252,42 @@ fn action(args: &Json, limit: Duration) -> Result<BrowserAction> {
     )
 }
 
+/// The run's preview of `application`, and whether it was mounted just now
+/// from the live build because the run had none (see the module notes).
+async fn preview(application: &str, ctx: &TraitContext<'_>) -> Result<(PreviewInfo, bool)> {
+    let previews = ctx.require_previews()?;
+    if let Some(preview) = previews.preview(ctx.run, application) {
+        return Ok((preview, false));
+    }
+    let never_built = |reason: &dyn std::fmt::Display| {
+        Error::invalid(format!(
+            "no preview of `{application}` is mounted for this run, and its live build cannot \
+             be previewed ({reason}): run the check tool, and a green build is mounted as the \
+             preview"
+        ))
+    };
+    let (_, source) = checked_application(ctx.catalog, application).await?;
+    // An application with nothing to build is previewed as it is served, and
+    // the directory is not read.
+    let output_dir = match source {
+        None => std::path::PathBuf::new(),
+        Some(source) => {
+            let dir = sc_app::app_output_dir(ctx.catalog, &source).map_err(|e| never_built(&e))?;
+            if !dir.is_dir() {
+                return Err(never_built(&"it has never been built"));
+            }
+            dir
+        }
+    };
+    let preview = previews
+        .mount_preview(ctx.run, application, &output_dir)
+        .await
+        .map_err(|e| never_built(&e))?;
+    Ok((preview, true))
+}
+
 /// Whom the run looks at the application as.
-async fn viewer(config: &Attrs, ctx: &TraitContext<'_>) -> Result<User> {
+pub(super) async fn viewer(config: &Attrs, ctx: &TraitContext<'_>) -> Result<User> {
     if let Some(user) = &ctx.caller.user {
         return Ok(user.clone());
     }
@@ -251,15 +324,22 @@ pub async fn call(config: &Attrs, args: &Json, ctx: &mut TraitContext<'_>) -> Re
         DEFAULT_VIEW_APP_TIMEOUT,
     )?);
     let action = action(args, limit)?;
-    let preview = ctx
-        .require_previews()?
-        .preview(ctx.run, &application)
-        .ok_or_else(|| {
-            Error::invalid(format!(
-                "no preview of `{application}` is mounted for this run yet: run the check tool, \
-                 and a green build is mounted as the preview"
-            ))
-        })?;
+    let looks = matches!(
+        action,
+        BrowserAction::Goto { .. }
+            | BrowserAction::WaitFor { .. }
+            | BrowserAction::Snapshot
+            | BrowserAction::Screenshot { .. }
+    );
+    if ctx.mode != RunMode::Act && !looks {
+        return Err(Error::invalid(format!(
+            "`{}` changes the page, and a `{}` run only looks: use goto, wait_for, snapshot or \
+             screenshot",
+            action.name(),
+            ctx.mode
+        )));
+    }
+    let (preview, live) = preview(&application, ctx).await?;
     let user = viewer(config, ctx).await?;
     let name = action.name();
     let target = match &action {
@@ -284,6 +364,12 @@ pub async fn call(config: &Attrs, args: &Json, ctx: &mut TraitContext<'_>) -> Re
     let mut out = format!("view_app {name}{target}\nurl: {}", report.url);
     if let Some(status) = report.status {
         out.push_str(&format!(" (status {status})"));
+    }
+    if live {
+        out.push_str(&format!(
+            "\nnote: this run has no green check yet, so this is the live build of \
+             `{application}`; after one, it is the run's own build."
+        ));
     }
     if let Some(note) = &report.note {
         out.push_str(&format!("\nnote: {note}"));
@@ -403,8 +489,8 @@ mod tests {
         let config: Attrs = [("application".to_owned(), json!("todo"))]
             .into_iter()
             .collect();
-        let without = spec(&scope, &config, false);
-        let with = spec(&scope, &config, true);
+        let without = spec(&scope, &config, false, RunMode::Act);
+        let with = spec(&scope, &config, true, RunMode::Act);
         assert_eq!(without.name, "view_app_code_web");
         assert!(!without.parameters.to_string().contains("screenshot"));
         assert!(with.parameters.to_string().contains("screenshot"));

@@ -61,6 +61,7 @@ import {
   mergeChanges,
   relayEvent,
   storeModel,
+  ToolRuns,
   workspacePath,
   type ParticipantContribution,
   type StoreChange,
@@ -294,8 +295,9 @@ function registerParticipant(
         context.history.length === 0,
       );
       const changes: StoreChange[] = [];
+      const runs = new ToolRuns();
       const sink = (event: ServerEvent) => {
-        changes.push(relayEvent(event, response));
+        changes.push(relayEvent(event, response, runs));
       };
       try {
         const outcome = await conversation.ask(request.prompt, sink, token);
@@ -309,6 +311,10 @@ function registerParticipant(
           `\n\n⚠️ ${err instanceof Error ? err.message : String(err)}\n\n`,
         );
         return {};
+      } finally {
+        // A run still open when the turn ends — cancelled, or the socket
+        // dropped — settles rather than spinning on.
+        runs.close();
       }
     },
   );

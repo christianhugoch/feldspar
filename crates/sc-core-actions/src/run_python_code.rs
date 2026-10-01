@@ -196,9 +196,9 @@ impl Action for RunPythonCode {
 
     async fn run(&self, ctx: &mut ActionContext<'_>) -> Result<Json> {
         let code = config_str(ctx.config, CFG_CODE)
-            .map_err(|e| Error::invalid(format!("trigger `{}`: {e}", ctx.trigger)))?;
+            .map_err(|e| Error::invalid(format!("{}: {e}", code_body::subject(ctx))))?;
         let timeout = code_body::timeout(ctx.config)
-            .map_err(|e| Error::invalid(format!("trigger `{}`: {e}", ctx.trigger)))?;
+            .map_err(|e| Error::invalid(format!("{}: {e}", code_body::subject(ctx))))?;
         let adapter = ctx.adapter(PYTHON)?;
         // Optional here, where `run_js_code` requires it: the evaluator is not
         // what runs this body, it is what decides a **delegated** read whose
@@ -207,14 +207,14 @@ impl Action for RunPythonCode {
         // separate. A process with no JavaScript engine still runs Python, and
         // the read that needs a formula fails there saying so.
         let evaluator = ctx.evaluator().ok();
-        let bindings = code_body::bindings(ctx.event, ctx.run_context());
+        let bindings = code_body::bindings(ctx.event, ctx.run_context(), ctx.request());
         let hosts = Hosts::new(ctx, evaluator, self.client.clone());
         // The result is the action's result: a directly-run trigger returns it to
         // its caller, and a workflow step puts it in the run context.
         adapter
             .run_code(hosts.call(code, bindings, timeout))
             .await
-            .map_err(|e| Error::invalid(format!("trigger `{}`: `{CFG_CODE}`: {e}", ctx.trigger)))
+            .map_err(|e| Error::invalid(format!("{}: `{CFG_CODE}`: {e}", code_body::subject(ctx))))
     }
 }
 

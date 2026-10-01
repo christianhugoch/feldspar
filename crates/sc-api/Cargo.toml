@@ -28,6 +28,9 @@ sc-i18n.workspace = true
 # layering is the one `sc-action`'s own docs state — it is layer 6, this is layer
 # 7, and nothing below it may name a trigger.
 sc-action.workspace = true
+# An application's invitation and forgotten-password endpoints send their links
+# by email, through the same `Mailer` a `send_email` action uses (§18.2).
+sc-email.workspace = true
 # The row layer (`rows`) executes table CRUD for every API surface, so it speaks
 # the query language and the type system directly.
 sc-db.workspace = true
@@ -43,6 +46,9 @@ sc-files.workspace = true
 # `mcp` produces the one and the transport renames it — rather than defining a
 # third shape here for the two callers to convert between.
 sc-llm.workspace = true
+# A code body's `models` (Stan TODO §17): a fitted posterior's draws and
+# summary, read through the `db` host. `sc-model` is layer 6, below this crate.
+sc-model.workspace = true
 bytes.workspace = true
 # A table's rows in and out as CSV (`csv` module): the one bulk shape an admin
 # already has a tool for. See the workspace pin for why the format is not

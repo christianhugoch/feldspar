@@ -241,7 +241,7 @@ async fn custom_routes_are_typed_but_stubbed() -> Result<()> {
             .input(TypeSchema::json())
             .output(TypeSchema::json())
             .auth(sc_api::AuthRequirement::admin())
-            .handler(HandlerRef::Sql("select * from posts".to_owned())),
+            .handler(HandlerRef::Custom("select * from posts".to_owned())),
     );
 
     // The route is part of the contract...

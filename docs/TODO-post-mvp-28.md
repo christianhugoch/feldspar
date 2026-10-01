@@ -239,7 +239,7 @@ translates against *that customer's* `language`, which is a bug class v1 had.
          **API key**, **Base URL** left alone. Save; then on the provider's page **Add model**
          `claude-sonnet-5` (or **Fetch models**), **Test** it, and **Make default** — a provider
          with no default model is an error from `require_llm_model`, not a guess. This is
-         Step 1 of [docs/tutorial-agents.md](./docs/tutorial-agents.md) verbatim; the same two
+         Step 1 of [docs/tutorial-agents.md](./tutorial-agents.md) verbatim; the same two
          rows can be made over the admin API (`POST /api/llm-providers` with
          `{name, description, backend, config: {api_key, base_url}}`, then
          `POST /api/llm-providers/{id}/models` with `{name, description, is_default, config}`)

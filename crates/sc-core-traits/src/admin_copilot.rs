@@ -17,7 +17,7 @@
 //! **The tools themselves are not here.** They are
 //! [`sc_api::mcp`]'s — assembled into one [`ToolSet`] by
 //! [`sc_app::mcp::tool_set`] — because this agent is no longer their only
-//! caller: the administration MCP server (§13.6) offers the same nine tools to
+//! caller: the administration MCP server (§13.6) offers the same ten tools to
 //! an external coding agent, under a token's grants instead of an agent's
 //! checkboxes. Two callers over one implementation, rather than two
 //! implementations that check grants slightly differently and drift within a
@@ -102,8 +102,8 @@ use sc_types::{Attrs, BasicType, FormField};
 use serde_json::Value as Json;
 
 pub use sc_api::mcp::{
-    TOOL_DELETE_TRIGGER, TOOL_DESCRIBE, TOOL_DESCRIBE_ACTION, TOOL_DESCRIBE_TRIGGERS, TOOL_EDIT,
-    TOOL_SAVE_TRIGGER,
+    TOOL_DELETE_TRIGGER, TOOL_DESCRIBE, TOOL_DESCRIBE_ACTION, TOOL_DESCRIBE_CODE_API,
+    TOOL_DESCRIBE_TRIGGERS, TOOL_EDIT, TOOL_SAVE_TRIGGER,
 };
 pub use sc_app::mcp::{TOOL_DELETE_QUERY, TOOL_DESCRIBE_APPS, TOOL_SAVE_QUERY};
 
@@ -144,7 +144,7 @@ pub struct AdminCopilot;
 /// subset of these. This is the whole set, which is what the admin UI's "what
 /// will this be called?" and §11.2's collision check want — a name that any
 /// configuration could produce is a name that could collide.
-pub fn tool_names() -> [&'static str; 9] {
+pub fn tool_names() -> [&'static str; 10] {
     [
         TOOL_DESCRIBE,
         TOOL_EDIT,
@@ -152,6 +152,7 @@ pub fn tool_names() -> [&'static str; 9] {
         TOOL_DESCRIBE_ACTION,
         TOOL_SAVE_TRIGGER,
         TOOL_DELETE_TRIGGER,
+        TOOL_DESCRIBE_CODE_API,
         TOOL_DESCRIBE_APPS,
         TOOL_SAVE_QUERY,
         TOOL_DELETE_QUERY,
@@ -228,7 +229,7 @@ impl AgentTrait for AdminCopilot {
     }
 }
 
-/// The nine tools under this agent's configuration.
+/// The ten tools under this agent's configuration.
 ///
 /// The whole of what configuring this trait *means*: six checkboxes become a
 /// [`Grants`] and an [`Areas`], and the set does the rest. A token minted for
@@ -309,9 +310,9 @@ mod tests {
 
     /// The set this agent builds is the whole surface, in the order this crate
     /// has always published: the schema's two, the triggers' four, the
-    /// applications' three.
+    /// code-body reference, the applications' three.
     #[test]
-    fn the_configured_set_is_the_nine_tools_this_trait_names() {
+    fn the_configured_set_is_the_ten_tools_this_trait_names() {
         let set = tool_set(&Attrs::new());
         assert_eq!(set.all_names(), tool_names().to_vec());
         assert_eq!(*set.grants(), grants(&Attrs::new()));

@@ -368,7 +368,10 @@ installation: the half of an application that lives in the database rather than 
 repository — the tables and their fields, the access rules, the triggers, the workflows and \
 the agents. Write the application's source code through the filesystem as usual; use these \
 tools for everything that is configuration. There are deliberately no tools for reading or \
-writing row data, for the file store, or for user management.";
+writing row data, for the file store, or for user management. Code you store here — a \
+`run_js_code` trigger or workflow step, a `javascript` API query — runs against this server's \
+own JavaScript API, which is not one you know from elsewhere: call `describe_code_api` before \
+writing any.";
 
 /// Run one tool and render the result the way MCP wants it.
 async fn call_tool(

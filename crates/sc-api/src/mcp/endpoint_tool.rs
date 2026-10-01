@@ -275,6 +275,7 @@ impl Projection {
                 // are tier 3 (§13.6), and `binary_input` is not a shape a JSON
                 // arguments object has.
                 raw: None,
+                links: None,
             },
             path_params,
         })
@@ -334,12 +335,7 @@ impl Projection {
 /// things depending on which tier a tool came from.
 pub fn check_caller(projection: &Projection, ctx: &ToolContext<'_>, grants: &Grants) -> Result<()> {
     require_admin(ctx.role, projection.name())?;
-    let met = match projection.auth() {
-        AuthRequirement::Public => true,
-        AuthRequirement::LoggedIn => ctx.user.is_some(),
-        AuthRequirement::MinRole(min) => ctx.user.is_some_and(|user| user.meets_role(*min)),
-    };
-    if !met {
+    if !projection.auth().admits(ctx.user) {
         return Err(Error::invalid(format!(
             "`{}` is not available to this caller",
             projection.name()

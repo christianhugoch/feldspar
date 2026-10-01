@@ -332,7 +332,7 @@ fn resolve(
             )));
         }
         let key = item.alias.unwrap_or(name).to_owned();
-        let Some(field) = table.field(name) else {
+        let Some(field) = crate::user_rows::visible_field(table, name) else {
             // An embed of a *table* name rather than of one of this table's keys
             // is PostgREST's one-to-many embed: a second, batched read, and the
             // shape of paging and ordering *within* it is undecided. Named as

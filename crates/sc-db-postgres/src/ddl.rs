@@ -174,6 +174,61 @@ pub fn render(dialect: &PgDialect, change: &SchemaChange) -> Result<String> {
             }
             sql
         }
+        SchemaChange::SetColumnNullable {
+            table,
+            column,
+            nullable,
+        } => {
+            format!(
+                "ALTER TABLE {} ALTER COLUMN {} {} NOT NULL",
+                dialect.quote_ident(table),
+                dialect.quote_ident(column),
+                if *nullable { "DROP" } else { "SET" }
+            )
+        }
+        SchemaChange::SetColumnReference {
+            table,
+            column,
+            references,
+        } => {
+            // The key being replaced is found by what it constrains rather than
+            // by name: one declared by `ADD COLUMN … REFERENCES` is named by
+            // Postgres, and one on a table built outside Saltcorn is named by
+            // whoever built it. So a block walks the catalog for every
+            // single-column foreign key on this column and drops each — none at
+            // all being the ordinary case of a plain column becoming a key.
+            //
+            // Names reach the block as string literals, not identifiers:
+            // `to_regclass` resolves the quoted table name through the
+            // connection's `search_path`, exactly as the `ALTER TABLE` beside it
+            // does.
+            let quoted_table = dialect.quote_ident(table);
+            let mut sql = format!(
+                "DO $sc$ DECLARE fk record; BEGIN \
+                 FOR fk IN SELECT c.conname FROM pg_constraint c \
+                 JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1] \
+                 WHERE c.conrelid = to_regclass({table_lit}) AND c.contype = 'f' \
+                 AND array_length(c.conkey, 1) = 1 AND a.attname = {column_lit} \
+                 LOOP EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', {table_lit}, fk.conname); \
+                 END LOOP; END $sc$",
+                table_lit = quote_string(&quoted_table),
+                column_lit = quote_string(column),
+            );
+            if let Some(target) = references {
+                // Declared as `column_def` declares one — deferrable, checked
+                // immediately — so a key repointed here is the same key a field
+                // created pointing there would have had. The name is left to
+                // Postgres, which is what `ADD COLUMN … REFERENCES` does too.
+                sql.push_str(&format!(
+                    "; ALTER TABLE {quoted_table} ADD FOREIGN KEY ({}) REFERENCES {} ({}) \
+                     DEFERRABLE INITIALLY IMMEDIATE",
+                    dialect.quote_ident(column),
+                    dialect.quote_ident(&target.table),
+                    dialect.quote_ident(&target.column),
+                ));
+            }
+            sql
+        }
         SchemaChange::AddUniqueConstraint {
             table,
             name,
@@ -280,8 +335,9 @@ fn quoted_list(dialect: &PgDialect, items: &[String]) -> String {
         .join(", ")
 }
 
-/// A SQL string literal holding `value` — for the one place a name is passed as
-/// *text* rather than as an identifier (`pg_get_serial_sequence`).
+/// A SQL string literal holding `value` — for the places a name is passed as
+/// *text* rather than as an identifier (`pg_get_serial_sequence`, the catalog
+/// lookup that finds a column's foreign key).
 fn quote_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -474,6 +530,28 @@ mod tests {
     }
 
     #[test]
+    fn a_column_can_be_made_to_reject_or_accept_nulls() {
+        let change = SchemaChange::SetColumnNullable {
+            table: "book".into(),
+            column: "title".into(),
+            nullable: false,
+        };
+        assert_eq!(
+            render_ok(&change),
+            "ALTER TABLE \"book\" ALTER COLUMN \"title\" SET NOT NULL"
+        );
+        let change = SchemaChange::SetColumnNullable {
+            table: "book".into(),
+            column: "title".into(),
+            nullable: true,
+        };
+        assert_eq!(
+            render_ok(&change),
+            "ALTER TABLE \"book\" ALTER COLUMN \"title\" DROP NOT NULL"
+        );
+    }
+
+    #[test]
     fn a_primary_key_can_be_set_on_a_table_that_has_none() {
         // Three statements in one: a table created without a key (which is every
         // table, per the goals) has no constraint to drop, and the columns are
@@ -532,6 +610,38 @@ mod tests {
             unlogged: false,
         };
         assert!(render(&PgDialect::new(), &change).is_err());
+    }
+
+    #[test]
+    fn a_column_reference_drops_whatever_key_it_had_and_adds_the_new_one() {
+        let sql = render_ok(&SchemaChange::SetColumnReference {
+            table: "book".into(),
+            column: "author".into(),
+            references: Some(sc_db::ColumnRef {
+                table: "writer".into(),
+                column: "id".into(),
+            }),
+        });
+        // The old key is found by the column it constrains, not by a name.
+        assert!(sql.starts_with("DO $sc$"), "{sql}");
+        assert!(sql.contains("to_regclass('\"book\"')"), "{sql}");
+        assert!(sql.contains("a.attname = 'author'"), "{sql}");
+        assert!(
+            sql.ends_with(
+                "; ALTER TABLE \"book\" ADD FOREIGN KEY (\"author\") REFERENCES \"writer\" \
+                 (\"id\") DEFERRABLE INITIALLY IMMEDIATE"
+            ),
+            "{sql}"
+        );
+
+        // No target: the drop alone.
+        let sql = render_ok(&SchemaChange::SetColumnReference {
+            table: "book".into(),
+            column: "author".into(),
+            references: None,
+        });
+        assert!(sql.ends_with("END $sc$"), "{sql}");
+        assert!(!sql.contains("ADD FOREIGN KEY"), "{sql}");
     }
 
     #[test]

@@ -218,6 +218,7 @@ async fn fetch(env: &Env, run: RunId, config: &Attrs, args: Json) -> Result<Stri
         delegate: None,
         previews: None,
         browser: None,
+        requests: None,
         signals: Vec::new(),
         images: Vec::new(),
     };

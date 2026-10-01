@@ -17,8 +17,8 @@ use bytes::Bytes;
 use sc_files::{
     ARG_BRANCH, ARG_CREATE, ARG_MESSAGE, ARG_PATHS, ARG_STAGED_ONLY, CFG_BRANCH, CFG_DIR,
     DATA_DIR_ENV, FileStore, FileStoreDef, GIT_BACKEND, GitFileStore, GitRepo, OP_CHECKOUT,
-    OP_COMMIT, OP_STAGE, OP_STATUS, OP_UNSTAGE, clone_path, connect_from_def, generate_deploy_key,
-    record_clone_path, run_backend_operation, validate_file_store_config,
+    OP_COMMIT, OP_DISCARD, OP_STAGE, OP_STATUS, OP_UNSTAGE, clone_path, connect_from_def,
+    generate_deploy_key, record_clone_path, run_backend_operation, validate_file_store_config,
 };
 use sc_types::Attrs;
 
@@ -801,4 +801,109 @@ fn set_data_dir(dir: Option<&Path>) -> Option<String> {
         }
     }
     before
+}
+
+/// Discard throws away unstaged changes — an edit goes back to the index, an
+/// untracked file is deleted — and leaves staged work alone. It is the one
+/// irreversible operation, so it refuses to guess: no paths, a clean path, or a
+/// path that is only staged are all errors rather than no-ops.
+#[tokio::test]
+async fn discard_reverts_edits_deletes_untracked_files_and_keeps_the_index() {
+    let origin = origin_with_a_commit("discard");
+    let workspace = temp_dir("discard-clone");
+    let mut def = git_store_def("app", &origin, &workspace.join("app"));
+    let repo = GitRepo::from_def(&def).unwrap();
+
+    // Before cloning, an empty (here: missing) directory is one a clone may use.
+    let before = repo.status().await.unwrap();
+    assert!(!before.cloned);
+    assert!(before.can_clone);
+
+    repo.ensure_cloned().await.unwrap();
+    let clone = workspace.join("app");
+    let status = repo.status().await.unwrap();
+    assert!(!status.can_clone, "a clone is not offered over a clone");
+    assert!(status.upstream, "a fresh clone tracks origin/main");
+
+    std::fs::write(clone.join("README.md"), "# edited\n").unwrap();
+    std::fs::write(clone.join("scratch.txt"), "junk\n").unwrap();
+    std::fs::write(clone.join("*.md"), "a file with a glob for a name\n").unwrap();
+    std::fs::write(clone.join("kept.txt"), "staged\n").unwrap();
+    repo.stage(&["kept.txt".to_owned()]).await.unwrap();
+
+    // Nothing named is not "everything".
+    let err = run_backend_operation(&mut def, OP_DISCARD, &Attrs::new())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("paths"), "{err}");
+    // A path with only staged changes is refused by name.
+    let err = repo
+        .discard(&["kept.txt".to_owned()])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("only staged"), "{err}");
+
+    // A literal `*.md` discards that file, not README.md with it.
+    repo.discard(&["*.md".to_owned()]).await.unwrap();
+    assert!(!clone.join("*.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(clone.join("README.md")).unwrap(),
+        "# edited\n"
+    );
+
+    let mut input = Attrs::new();
+    input.insert(
+        ARG_PATHS.to_owned(),
+        serde_json::json!("README.md\nscratch.txt"),
+    );
+    let outcome = run_backend_operation(&mut def, OP_DISCARD, &input)
+        .await
+        .unwrap();
+    assert!(outcome.output.contains("2 paths"), "{}", outcome.output);
+    assert_eq!(
+        std::fs::read_to_string(clone.join("README.md")).unwrap(),
+        "# from the remote\n"
+    );
+    assert!(!clone.join("scratch.txt").exists());
+    let data = outcome.data.unwrap();
+    let left: Vec<&str> = data["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|change| change["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(left, ["kept.txt"], "the staged file survives: {data}");
+    assert_eq!(data["upstream"], serde_json::json!(true));
+    assert_eq!(data["can_clone"], serde_json::json!(false));
+
+    // Discarding what is already clean says so.
+    let err = repo
+        .discard(&["README.md".to_owned()])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no changes"), "{err}");
+
+    // A branch made here has no upstream until it is pushed.
+    repo.checkout("topic", true).await.unwrap();
+    assert!(!repo.status().await.unwrap().upstream);
+}
+
+/// A directory that already has someone's files in it is not a clone target.
+#[tokio::test]
+async fn a_non_empty_directory_is_not_offered_a_clone() {
+    let origin = origin_with_a_commit("occupied");
+    let workspace = temp_dir("occupied-clone");
+    let dir = workspace.join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    let def = git_store_def("app", &origin, &dir);
+    let repo = GitRepo::from_def(&def).unwrap();
+    assert!(
+        repo.status().await.unwrap().can_clone,
+        "an empty directory may be cloned into"
+    );
+    std::fs::write(dir.join("notes.txt"), "mine\n").unwrap();
+    assert!(!repo.status().await.unwrap().can_clone);
 }

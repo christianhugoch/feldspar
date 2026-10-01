@@ -44,7 +44,7 @@ export const NUMBER_ATTRIBUTES = [
   {
     key: "max_steps",
     label: "Max steps per run",
-    help: "How many times one run may go round the loop. Blank means 20.",
+    help: "How many times one run may go round the loop. Blank means 250.",
   },
 ] as const;
 
@@ -63,7 +63,7 @@ export const BUDGETS = [
   {
     key: "context_budget",
     label: "Context per request (tokens)",
-    help: "The context is compacted at 75% of this. Blank uses the model's own working budget.",
+    help: "The context is compacted at 80% of this. Blank uses the model's own working budget.",
   },
   {
     key: "max_images",

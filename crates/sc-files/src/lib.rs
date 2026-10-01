@@ -40,8 +40,8 @@ pub use def::{
 pub use git::{
     ARG_BRANCH, ARG_CREATE, ARG_MESSAGE, ARG_PATHS, ARG_STAGED_ONLY, CommitOutcome, DeployKey,
     GitChange, GitFileStore, GitOutput, GitRepo, GitStatus, OP_CHECKOUT, OP_CLONE, OP_COMMIT,
-    OP_GENERATE_KEY, OP_PULL, OP_PUSH, OP_STAGE, OP_STATUS, OP_UNSTAGE, clone_dir, clone_path,
-    generate_deploy_key, git_operations, key_dir, parse_change, record_clone_path,
+    OP_DISCARD, OP_GENERATE_KEY, OP_PULL, OP_PUSH, OP_STAGE, OP_STATUS, OP_UNSTAGE, clone_dir,
+    clone_path, generate_deploy_key, git_operations, key_dir, parse_change, record_clone_path,
     record_deploy_key,
 };
 pub use local::{LocalFileStore, OP_SUGGEST_DIR, local_operations};

@@ -8304,11 +8304,13 @@ dependencies = [
  "sc-db",
  "sc-db-postgres",
  "sc-db-sqlite",
+ "sc-email",
  "sc-error",
  "sc-expr",
  "sc-files",
  "sc-i18n",
  "sc-llm",
+ "sc-model",
  "sc-query",
  "sc-test-harness",
  "sc-types",
@@ -8340,6 +8342,7 @@ dependencies = [
  "sc-test-harness",
  "sc-types",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "uuid",
 ]
@@ -8414,6 +8417,7 @@ dependencies = [
  "sc-log",
  "sc-query",
  "sc-server",
+ "sc-stan",
  "sc-test-harness",
  "sc-types",
  "sc-viewpattern",
@@ -8479,7 +8483,6 @@ dependencies = [
  "sc-types",
  "serde_json",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -8489,6 +8492,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "htmd",
+ "image",
  "libc",
  "lru 0.12.5",
  "markup5ever_rcdom",
@@ -8688,9 +8692,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "nalgebra",
  "sc-catalog",
  "sc-db",
  "sc-db-postgres",
+ "sc-db-sqlite",
  "sc-error",
  "sc-expr",
  "sc-query",
@@ -8835,6 +8841,7 @@ dependencies = [
  "sc-module",
  "sc-python",
  "sc-query",
+ "sc-stan",
  "sc-stream",
  "sc-test-harness",
  "sc-types",
@@ -8849,6 +8856,28 @@ dependencies = [
  "tower-http",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "sc-stan"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "flate2",
+ "futures",
+ "libc",
+ "reqwest",
+ "sc-catalog",
+ "sc-error",
+ "sc-files",
+ "sc-model",
+ "sc-types",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

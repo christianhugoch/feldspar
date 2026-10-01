@@ -467,6 +467,16 @@ export function IconRefresh(props: IconProps) {
   );
 }
 
+export function IconExternalLink(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12 6h-6a2 2 0 0 0 -2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-6" />
+      <path d="M11 13l9 -9" />
+      <path d="M15 4h5v5" />
+    </Svg>
+  );
+}
+
 export function IconHammer(props: IconProps) {
   return (
     <Svg {...props}>
@@ -549,6 +559,50 @@ export function IconDeviceMobile(props: IconProps) {
       <path d="M6 5a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2z" />
       <path d="M11 4l2 0" />
       <path d="M12 17l0 .01" />
+    </Svg>
+  );
+}
+
+/** Pull — the arrow VS Code's status bar uses for commits to bring down. */
+export function IconArrowDown(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12 5l0 14" />
+      <path d="M18 13l-6 6" />
+      <path d="M6 13l6 6" />
+    </Svg>
+  );
+}
+
+/** Commit. */
+export function IconCheck(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5 12l5 5l10 -10" />
+    </Svg>
+  );
+}
+
+/** Discard a change — VS Code's curved "undo" arrow. */
+export function IconArrowBackUp(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M9 14l-4 -4l4 -4" />
+      <path d="M5 10h11a4 4 0 1 1 0 8h-1" />
+    </Svg>
+  );
+}
+
+/** The branch selector. */
+export function IconGitBranch(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M7 18m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" />
+      <path d="M7 6m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" />
+      <path d="M17 6m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" />
+      <path d="M7 8l0 8" />
+      <path d="M9 18h6a2 2 0 0 0 2 -2v-5" />
+      <path d="M14 14l3 -3l3 3" />
     </Svg>
   );
 }

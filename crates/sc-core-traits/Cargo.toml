@@ -74,6 +74,9 @@ reqwest.workspace = true
 # first to find the page's main content (see the workspace pin).
 htmd.workspace = true
 markup5ever_rcdom.workspace = true
+# `view_image`: decode, measure and, when too large, scale an image before it
+# is shown to a model.
+image.workspace = true
 # The `http` trait's page cache: fetched documents, byte-bounded, least
 # recently used out first.
 lru.workspace = true

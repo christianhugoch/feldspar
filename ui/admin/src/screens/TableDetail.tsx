@@ -71,6 +71,7 @@ import {
   fieldFormError,
   keyValueNote,
   newFieldForm,
+  nullableEditable,
   updateFieldBody,
   type FieldForm,
   type FieldItem,
@@ -435,6 +436,40 @@ function TableData({
     }
   };
 
+  /**
+   * Delete every row, keeping the table, its fields and its settings.
+   *
+   * Confirmed with the number that is about to go, because the count is the
+   * one thing the admin can check against what they expected before it is too
+   * late. A refusal from the server (another table's key still points at one
+   * of these rows) is shown as it came, since it names what is in the way.
+   */
+  const deleteAllRows = async () => {
+    if (
+      !window.confirm(
+        t('Delete all {count} rows of "{name}"? The table and its fields stay. This cannot be undone.', {
+          count: String(rowCount ?? 0),
+          name: table,
+        }),
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    setRejected([]);
+    try {
+      const { deleted } = await api.deleteAllRows(table);
+      setNotice(`${deleted} row${deleted === 1 ? "" : "s"} deleted.`);
+      onChange();
+    } catch (err) {
+      setError(errorMessage(err, "Could not delete the rows."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const forget = async () => {
     if (
       !window.confirm(
@@ -522,6 +557,18 @@ function TableData({
                   list: forgetting it is the "remove" below. */}
               {configured && !provided && !metadata && (
                 <Dropdown.Item onClick={() => void forget()}><T text="Forget settings" /></Dropdown.Item>
+              )}
+              {/* Not on a metadata table: its rows are Saltcorn's own — the
+                  users table among them — and emptying one in a click would
+                  lock the admin out. Row by row, in the data grid, it still can. */}
+              {allowed.delete && !metadata && (
+                <Dropdown.Item
+                  className="text-danger"
+                  disabled={busy || !rowCount}
+                  onClick={() => void deleteAllRows()}
+                >
+                  <T text="Delete all rows" />
+                </Dropdown.Item>
               )}
               <Dropdown.Item className="text-danger" onClick={() => void dropTable()}>
                 {metadata ? "Remove from tables list" : provided ? "Delete table" : "Drop table"}
@@ -1782,15 +1829,19 @@ function Fields({
                     type="checkbox"
                     label={t("Nullable")}
                     checked={form.nullable && !form.primaryKey}
-                    // A NOT NULL is the column's, and changing one on a table
-                    // with rows in it is a migration (§3.3). A key column is
-                    // NOT NULL whatever this says, so it shows that way.
-                    disabled={isEdit || form.primaryKey}
+                    // A key column is NOT NULL whatever this says, so it shows
+                    // that way and cannot be changed while it is in the key.
+                    disabled={!nullableEditable(form)}
                     onChange={(e) => update({ nullable: e.target.checked })}
                   />
-                  {isEdit && (
+                  {isEdit && form.primaryKey && (
                     <Form.Text muted className="d-block">
-                      <T text="Whether the column accepts nulls cannot be changed here." />
+                      <T text="A primary key field never accepts nulls." />
+                    </Form.Text>
+                  )}
+                  {isEdit && !form.primaryKey && form.wasNullable && !form.nullable && (
+                    <Form.Text muted className="d-block">
+                      <T text="Saving fails if any row has no value in this field." />
                     </Form.Text>
                   )}
 

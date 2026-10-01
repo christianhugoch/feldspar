@@ -270,6 +270,39 @@ pub enum SchemaChange {
         /// The generator to give it; `None` removes whatever it has.
         generator: Option<ColumnGenerator>,
     },
+    /// Make an existing column accept nulls, or reject them.
+    ///
+    /// Making a column `NOT NULL` is a check of the data as well as a change of
+    /// the declaration: a backend refuses it while any row holds a null there,
+    /// and the change fails rather than inventing a value to put in its place.
+    SetColumnNullable {
+        /// The table to alter.
+        table: String,
+        /// The column to alter.
+        column: String,
+        /// `true` drops the `NOT NULL`; `false` adds it.
+        nullable: bool,
+    },
+    /// Make an existing column a foreign key onto another column, repoint the
+    /// one it is, or stop it being one.
+    ///
+    /// The [`ColumnDef::references`] of a column that already exists: every
+    /// single-column foreign key on `column` is dropped, whatever it was named,
+    /// and — unless `references` is `None` — the new one is added. Replacing
+    /// rather than adding, for the reason [`SetPrimaryKey`](SchemaChange::SetPrimaryKey)
+    /// replaces: a column that is a `Key` points at one thing, and a second
+    /// reference beside the first would be a column no row could satisfy.
+    ///
+    /// Adding the key is a check of the data as well as a declaration: a row
+    /// whose value is not in the new target makes the backend refuse the change.
+    SetColumnReference {
+        /// The table to alter.
+        table: String,
+        /// The referencing column.
+        column: String,
+        /// What it references from now on, or `None` for nothing.
+        references: Option<ColumnRef>,
+    },
     /// Add a `UNIQUE` constraint over one or more columns — a table-level
     /// constraint, which is what "jointly unique" needs and what
     /// [`ColumnDef::unique`] cannot express.

@@ -26,7 +26,7 @@ import {
   scopeLabel,
   totalsLabel,
 } from "../runInfo";
-import { TranscriptEntry } from "./AgentChat";
+import { Transcript } from "./AgentChat";
 import { runTone } from "./WorkflowRuns";
 import { T, useT } from "../i18n";
 
@@ -220,9 +220,7 @@ export function AgentRunDetail({ run, onRefresh }: { run: GetRunResponse; onRefr
           <Card.Header><T text="Transcript" /></Card.Header>
           <Card.Body>
             {entries.length === 0 && <p className="text-secondary mb-0"><T text="Nothing was said." /></p>}
-            {entries.map((entry, i) => (
-              <TranscriptEntry key={i} entry={entry} />
-            ))}
+            <Transcript entries={entries} />
           </Card.Body>
         </Card>
       </PageBody>

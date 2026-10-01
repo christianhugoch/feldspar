@@ -18,6 +18,7 @@ import {
   defaultControlValues,
   emptyChat,
   applyEvent,
+  groupTranscript,
   applyUserMessage,
   compactionLabel,
   conclusionLabel,
@@ -615,5 +616,54 @@ describe("the preview pane an agent declares", () => {
     expect(PANE_WIDTHS.map((w) => w.name)).toEqual(["full", "tablet", "phone"]);
     expect(PANE_WIDTHS[0].px).toBeNull();
     expect(PANE_WIDTHS[2].px).toBe(390);
+  });
+});
+
+describe("grouping consecutive tool calls", () => {
+  const call = (id: string, name: string): Entry => ({
+    kind: "tool",
+    id,
+    name,
+    args: {},
+    result: null,
+    isError: false,
+  });
+
+  it("folds a run of calls to one tool into one item, and leaves a single call alone", () => {
+    const entries: Entry[] = [
+      { kind: "user", text: "look around" },
+      call("1", "list_tables"),
+      call("2", "read_rows"),
+      call("3", "read_rows"),
+      call("4", "read_rows"),
+      call("5", "list_tables"),
+      { kind: "assistant", text: "done", reasoning: "" },
+    ];
+    const items = groupTranscript(entries);
+    expect(items.map((item) => item.kind)).toEqual(["entry", "entry", "tools", "entry", "entry"]);
+    const group = items[2];
+    expect(group.kind === "tools" && group.name).toBe("read_rows");
+    expect(group.kind === "tools" && group.calls.map((c) => c.id)).toEqual(["2", "3", "4"]);
+    // Keyed by where it starts, so the key holds while the run grows.
+    expect(group.index).toBe(2);
+    expect(items[3].index).toBe(5);
+  });
+
+  it("does not join calls to one tool that something was said between", () => {
+    const entries: Entry[] = [
+      call("1", "read_rows"),
+      { kind: "assistant", text: "one more", reasoning: "" },
+      call("2", "read_rows"),
+    ];
+    expect(groupTranscript(entries).map((item) => item.kind)).toEqual(["entry", "entry", "entry"]);
+  });
+
+  it("groups calls as they stream in, from the first repeat", () => {
+    let state = emptyChat();
+    for (const id of ["a", "b"]) {
+      state = applyEvent(state, { type: "tool_call", id, name: "edit_file", arguments: {} });
+    }
+    const [group] = groupTranscript(state.entries);
+    expect(group.kind === "tools" && group.calls.length).toBe(2);
   });
 });

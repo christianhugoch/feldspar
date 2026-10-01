@@ -455,7 +455,7 @@ async fn models_are_created_listed_edited_and_deleted_under_their_provider() -> 
     );
     assert_eq!(
         sonnet["capabilities"]["context_window"],
-        json!(200_000),
+        json!(1_000_000),
         "{sonnet}"
     );
     assert_eq!(sonnet["prices"]["input"], json!(3.0), "{sonnet}");

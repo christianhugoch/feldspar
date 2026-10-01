@@ -209,6 +209,7 @@ async fn a_graphql_only_app_gets_a_client_with_no_auth_layer() -> sc_error::Resu
 
     assert!(!project.join("src/auth.tsx").exists());
     assert!(!project.join("src/Login.tsx").exists());
+    assert!(!project.join("src/SetPassword.tsx").exists());
     assert!(!std::fs::read_to_string(project.join("src/main.tsx"))?.contains("AuthProvider"));
 
     // What it does get is the shell and the GraphQL runtime. There are no

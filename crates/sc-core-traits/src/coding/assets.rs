@@ -65,13 +65,15 @@ pub fn spec(scope: &FileScope, config: &Attrs) -> ToolSpec {
     ToolSpec::new(
         tool_name(scope),
         format!(
-            "Images `{application}` serves, newest first, at most {ceiling}. Put each `url` \
-             in the page as given."
+            "List the files `{application}` serves from its static directories (images, \
+             fonts, documents), most recently changed first, at most {ceiling}, each with its \
+             `url`, content type and size. Put a `url` in the page exactly as given: a guessed \
+             URL will 404."
         ),
         json!({
             "type": "object",
             "properties": {
-                ARG_PATTERN: {"type": "string", "description": "`*.png`, or `icons/**`"},
+                ARG_PATTERN: {"type": "string", "description": "A glob, e.g. `*.png` or `icons/**`"},
                 ARG_DIR: {"type": "string", "description": "Only under this directory"},
             },
             "additionalProperties": false,
@@ -81,7 +83,7 @@ pub fn spec(scope: &FileScope, config: &Attrs) -> ToolSpec {
 
 /// One static directory as a scope over the store it lives in, so the walk, the
 /// floor and the access check are the ones every other file tool uses.
-fn dir_scope(dir: &StaticDir) -> FileScope {
+pub(super) fn dir_scope(dir: &StaticDir) -> FileScope {
     FileScope {
         store: dir.store.0.clone(),
         root: dir
@@ -94,7 +96,7 @@ fn dir_scope(dir: &StaticDir) -> FileScope {
 }
 
 /// The application the `coding` trait names, by subdomain.
-async fn application(catalog: &Catalog, config: &Attrs) -> Result<Application> {
+pub(super) async fn application(catalog: &Catalog, config: &Attrs) -> Result<Application> {
     let subdomain = configured_application(config).ok_or_else(|| {
         Error::invalid(format!(
             "list_assets needs the `coding` trait's `{}` setting",

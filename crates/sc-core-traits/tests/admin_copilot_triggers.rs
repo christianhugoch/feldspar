@@ -146,6 +146,27 @@ async fn an_action_hands_over_its_settings_when_it_is_asked_for_them() -> Result
     assert_eq!(keys, vec!["table", "values"]);
     assert!(settings.iter().all(|s| s["required"] == json!(true)));
     assert_eq!(settings[0]["what_it_is"], json!("Table"));
+    // Settings that are data carry no code reference…
+    assert!(one["code_api"].is_null(), "{one}");
+
+    // …and an action whose setting is a JavaScript body hands over the API
+    // that body can call, so the code is written against it rather than
+    // against an ORM the model already knows — the same page
+    // `describe_code_api` answers on its own.
+    let js = call(
+        &env,
+        &default_grants(),
+        "describe_action",
+        json!({ "action": "run_js_code", "table": "books" }),
+    )
+    .await?;
+    let api = js["code_api"]
+        .as_str()
+        .expect("run_js_code carries code_api");
+    assert!(api.contains(".where({ id: row.id }).update({"), "{api}");
+    assert!(api.contains("db.t.update(id, values)"), "{api}");
+    let alone = call(&env, &default_grants(), "describe_code_api", json!({})).await?;
+    assert_eq!(alone["reference"].as_str(), Some(api));
 
     // A guessed name is refused with the alternatives, which is the whole
     // recovery a model needs.
@@ -449,7 +470,7 @@ async fn every_tool_refuses_a_conversation_that_is_not_with_an_admin() -> Result
 }
 
 #[tokio::test]
-async fn the_trait_offers_nine_tools_and_the_trigger_ones_point_at_each_other() -> Result<()> {
+async fn the_trait_offers_ten_tools_and_the_trigger_ones_point_at_each_other() -> Result<()> {
     let env = env().await?;
     let tools = env.tools(TRAIT, &default_grants());
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -462,6 +483,7 @@ async fn the_trait_offers_nine_tools_and_the_trigger_ones_point_at_each_other() 
             "describe_action",
             "save_trigger",
             "delete_trigger",
+            "describe_code_api",
             "describe_applications",
             "save_api_query",
             "delete_api_query",
@@ -486,6 +508,14 @@ async fn the_trait_offers_nine_tools_and_the_trigger_ones_point_at_each_other() 
         by_name("save_trigger")
             .description
             .contains("describe_action")
+    );
+    // And a code body is pointed at the API it is written against, with the
+    // one shape models most often guess wrong spelled out.
+    let save = by_name("save_trigger").description;
+    assert!(save.contains("describe_code_api"), "{save}");
+    assert!(
+        save.contains("db.t.where({ id: row.id }).update("),
+        "{save}"
     );
     // Nothing is compulsory but the name, so an edit sends what it is changing.
     assert_eq!(

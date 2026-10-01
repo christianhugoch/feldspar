@@ -15,9 +15,12 @@
 //! - [`BrowserDriver`] performs one [`BrowserAction`] in the run's own browser
 //!   context, as a session for the run's caller, and reports what the page is
 //!   now.
+//! - [`AppRequester`] sends one HTTP request to an application through the
+//!   server's own router, as a session for a user or as nobody, and hands back
+//!   the response — `call_api`'s way of seeing what an endpoint answers.
 //! - [`HostCapabilities`] is what the server found on its host at boot, so a
 //!   trait's configuration check can refuse a grant the host cannot honour.
-//! - [`ViewServices`] holds the two capabilities once the server has built them.
+//! - [`ViewServices`] holds the three capabilities once the server has built them.
 //!   The registry carries it, because the server builds its mounts after the
 //!   agents and every runner — a chat turn, a trigger, a delegated child — is
 //!   made from the registry.
@@ -77,7 +80,8 @@ pub struct PreviewInfo {
 pub trait AppPreviewer: Send + Sync {
     /// Mount `run`'s preview of `subdomain`, serving the bundle a green build
     /// just wrote to `output_dir`, or re-mount it under the label it already
-    /// has. The live mount is not touched.
+    /// has. The live mount is not touched. An application with nothing to build
+    /// is previewed as it is served, and `output_dir` is not read.
     async fn mount_preview(
         &self,
         run: RunId,
@@ -179,7 +183,53 @@ pub trait BrowserDriver: Send + Sync {
     fn close(&self, run: RunId);
 }
 
-/// The server's preview and browser capabilities, once it has built them.
+/// One HTTP request to an application (`call_api`).
+#[derive(Debug, Clone)]
+pub struct AppHttpRequest<'a> {
+    /// The application's subdomain. The request goes to its live mount.
+    pub subdomain: &'a str,
+    /// The method, upper case.
+    pub method: String,
+    /// The path, with any query string.
+    pub path: String,
+    /// Headers besides the ones the requester sets itself (`Host`, `Cookie`
+    /// and the CSRF header).
+    pub headers: Vec<(String, String)>,
+    /// The body; empty for none.
+    pub body: Vec<u8>,
+    /// Whom a session is made for, or `None` for a request with no session —
+    /// what an anonymous visitor sends.
+    pub user: Option<&'a User>,
+    /// How long the whole request may take, reading the body included.
+    pub timeout: Duration,
+}
+
+/// What an application answered.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AppHttpResponse {
+    /// The status code.
+    pub status: u16,
+    /// The response headers, in order, names lower case.
+    pub headers: Vec<(String, String)>,
+    /// The body, up to the requester's cap.
+    pub body: Vec<u8>,
+    /// Why the body is incomplete — over the cap, or still streaming when the
+    /// time ran out — if it is.
+    pub truncated: Option<String>,
+}
+
+/// Sends a request to an application as its own client would.
+#[async_trait::async_trait]
+pub trait AppRequester: Send + Sync {
+    /// Send `request` to the application's live mount, with a session for
+    /// `request.user` made for this one request and ended after it, and a
+    /// valid CSRF token, so the answer is the one the application's own page
+    /// would get.
+    async fn request(&self, request: AppHttpRequest<'_>) -> Result<AppHttpResponse>;
+}
+
+/// The server's preview, browser and request capabilities, once it has built
+/// them.
 ///
 /// Late-bound, because the server builds the mount registry after the agents.
 /// Each slot is set once; a second set is ignored.
@@ -187,6 +237,7 @@ pub trait BrowserDriver: Send + Sync {
 pub struct ViewServices {
     previews: OnceLock<Arc<dyn AppPreviewer>>,
     browser: OnceLock<Arc<dyn BrowserDriver>>,
+    requests: OnceLock<Arc<dyn AppRequester>>,
 }
 
 impl ViewServices {
@@ -200,6 +251,11 @@ impl ViewServices {
         let _ = self.browser.set(browser);
     }
 
+    /// Install the application requester.
+    pub fn set_requests(&self, requests: Arc<dyn AppRequester>) {
+        let _ = self.requests.set(requests);
+    }
+
     /// The previewer, if installed.
     pub fn previews(&self) -> Option<&Arc<dyn AppPreviewer>> {
         self.previews.get()
@@ -209,6 +265,11 @@ impl ViewServices {
     pub fn browser(&self) -> Option<&Arc<dyn BrowserDriver>> {
         self.browser.get()
     }
+
+    /// The application requester, if installed.
+    pub fn requests(&self) -> Option<&Arc<dyn AppRequester>> {
+        self.requests.get()
+    }
 }
 
 impl std::fmt::Debug for ViewServices {
@@ -216,6 +277,7 @@ impl std::fmt::Debug for ViewServices {
         f.debug_struct("ViewServices")
             .field("previews", &self.previews.get().is_some())
             .field("browser", &self.browser.get().is_some())
+            .field("requests", &self.requests.get().is_some())
             .finish()
     }
 }

@@ -59,19 +59,21 @@ pub fn tool_name(scope: &FileScope) -> String {
 pub fn spec(scope: &FileScope) -> ToolSpec {
     ToolSpec::new(
         tool_name(scope),
-        "The code's most relevant definitions, ranked for the focus: `line│ signature` rows \
-         under each path."
+        "A map of the project's most relevant definitions (functions, components, types), \
+         ranked by how they relate to the focus, as `line│ signature` rows under each file's \
+         path. Use it to get oriented and to find which files to read, before reading them."
             .to_owned(),
         json!({
             "type": "object",
             "properties": {
                 ARG_FOCUS: {
                     "type": "array", "items": {"type": "string"},
-                    "description": "Paths and identifiers (default: files read or changed)"
+                    "description": "File paths and identifiers to rank around (default: the files read or \
+                                    changed in this run)"
                 },
                 ARG_TOKENS: {
                     "type": "integer", "minimum": 64, "maximum": MAX_REPO_MAP_TOKENS,
-                    "description": "Size in tokens"
+                    "description": "How large a map to return, in tokens"
                 },
             },
             "additionalProperties": false,

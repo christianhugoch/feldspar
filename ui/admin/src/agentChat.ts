@@ -436,6 +436,45 @@ export function compactionLabel(entry: Extract<Entry, { kind: "compaction" }>): 
   return `Context compacted from ${entry.beforeTokens} to ${entry.afterTokens} tokens${detail}`;
 }
 
+/** A tool call entry. */
+export type ToolEntry = Extract<Entry, { kind: "tool" }>;
+
+/** One thing the transcript draws: an entry, or a run of calls to one tool. */
+export type TranscriptItem =
+  | { kind: "entry"; entry: Entry; index: number }
+  | { kind: "tools"; name: string; calls: ToolEntry[]; index: number };
+
+/** Fold consecutive calls to the same tool into one item.
+ *
+ * An agent paging through records, or editing five files, calls one tool many
+ * times in a row, and a badge per call buries what it said between them. A
+ * run of two or more reads as one badge with a count, opening onto the calls.
+ * `index` is where the item starts in `entries`, so a key stays put while the
+ * run grows. */
+export function groupTranscript(entries: Entry[]): TranscriptItem[] {
+  const items: TranscriptItem[] = [];
+  entries.forEach((entry, index) => {
+    const last = items[items.length - 1];
+    if (entry.kind === "tool" && last) {
+      if (last.kind === "tools" && last.name === entry.name) {
+        last.calls.push(entry);
+        return;
+      }
+      if (last.kind === "entry" && last.entry.kind === "tool" && last.entry.name === entry.name) {
+        items[items.length - 1] = {
+          kind: "tools",
+          name: entry.name,
+          calls: [last.entry, entry],
+          index: last.index,
+        };
+        return;
+      }
+    }
+    items.push({ kind: "entry", entry, index });
+  });
+  return items;
+}
+
 /** A loop conclusion as the server spells it, on a `done` event or in a stored
  * run's context. */
 export type Conclusion = { conclusion?: string; budget?: string; reason?: string };

@@ -26,7 +26,9 @@ import {
   storeModel,
   uniqueSlug,
   relayEvent,
+  toolName,
   toolProgress,
+  ToolRuns,
   workspacePath,
   type ResponseStream,
 } from "./chatRelay";
@@ -76,6 +78,7 @@ function application(
     attributes: {},
     source,
     builds: true,
+    installs: true,
     has_views: false,
     targets: [],
   };
@@ -214,21 +217,42 @@ describe("what the chat panel is given", () => {
   });
 });
 
+/** A progress line with a task, as the panel holds it: what the task listed
+ * under it, and what it settled as. */
+interface RecordedTask {
+  line: string;
+  items: string[];
+  settled: string | void | null;
+}
+
 /** A response stream that records what was written to it. */
 function recordingStream(): ResponseStream & {
   markdownText: string[];
   progressText: string[];
   thinkingText: string[];
+  tasks: RecordedTask[];
 } {
   const markdownText: string[] = [];
   const progressText: string[] = [];
   const thinkingText: string[] = [];
+  const tasks: RecordedTask[] = [];
   return {
     markdownText,
     progressText,
     thinkingText,
+    tasks,
     markdown: (value) => markdownText.push(value),
-    progress: (value) => progressText.push(value),
+    progress: (value, task) => {
+      progressText.push(value);
+      if (task == null) return;
+      const recorded: RecordedTask = { line: value, items: [], settled: null };
+      tasks.push(recorded);
+      void task({ report: (item) => recorded.items.push(item.value.variableName) }).then(
+        (label) => {
+          recorded.settled = label;
+        },
+      );
+    },
     thinkingProgress: (delta) => thinkingText.push(delta.text),
   };
 }
@@ -275,6 +299,55 @@ describe("one event, relayed", () => {
     );
     expect(stream.progressText).toEqual(["Reading App.tsx"]);
     expect(stream.markdownText).toEqual([]);
+  });
+
+  it("folds consecutive calls to one tool into one line with a count", async () => {
+    const stream = recordingStream();
+    const runs = new ToolRuns();
+    const read = (id: string, path: string) =>
+      relayEvent(
+        { type: "tool_call", id, name: "read_file_todoapp_app", arguments: { path } },
+        stream,
+        runs,
+      );
+    const worked = (id: string) =>
+      relayEvent(
+        { type: "tool_result", id, name: "read_file_todoapp_app", content: "…", is_error: false },
+        stream,
+        runs,
+      );
+    read("1", "a.ts");
+    worked("1");
+    read("2", "b.ts");
+    worked("2");
+    read("3", "c.ts");
+    // One line, opening onto every call — the first included.
+    expect(stream.progressText).toEqual(["Reading a.ts"]);
+    expect(stream.tasks[0].items).toEqual(["Reading a.ts", "Reading b.ts", "Reading c.ts"]);
+    // Another tool ends the run, and starts one of its own.
+    relayEvent(
+      { type: "tool_call", id: "4", name: "edit_file_todoapp_app", arguments: { path: "a.ts" } },
+      stream,
+      runs,
+    );
+    // Something said in between ends a run too, so a call after it is a new line.
+    relayEvent({ type: "text", delta: "Now b." }, stream, runs);
+    read("5", "b.ts");
+    runs.close();
+    await Promise.resolve();
+    expect(stream.tasks.map((task) => [task.line, task.settled])).toEqual([
+      ["Reading a.ts", "read_file (3)"],
+      // A single call settles as the line it was.
+      ["Editing a.ts", undefined],
+      ["Reading b.ts", undefined],
+    ]);
+    expect(stream.tasks[1].items).toEqual([]);
+  });
+
+  it("names a run by the tool without its scope", () => {
+    expect(toolName("search_files_todoapp_app")).toBe("search_files");
+    expect(toolName("view_app_todoapp_app")).toBe("view_app");
+    expect(toolName("send_email")).toBe("send_email");
   });
 
   it("reports a compaction as progress and keeps its summary out of the answer", () => {
@@ -466,6 +539,22 @@ describe("one event, relayed", () => {
       "Looking at the application",
     );
     expect(changedPaths("view_app_todoapp_app", { path: "/tasks" })).toEqual([]);
+    expect(toolName("view_image_todoapp_app")).toBe("view_image");
+    expect(toolProgress("view_image_todoapp_app", { path: "public/logo.png" })).toBe(
+      "Looking at public/logo.png",
+    );
+    expect(toolProgress("view_image_todoapp_app", { url: "/img/hero.png" })).toBe(
+      "Looking at /img/hero.png",
+    );
+    expect(changedPaths("view_image_todoapp_app", { path: "public/logo.png" })).toEqual([]);
+    expect(toolName("call_api_todoapp_app")).toBe("call_api");
+    expect(toolProgress("call_api_todoapp_app", { path: "/api/tasks" })).toBe(
+      "Calling GET /api/tasks",
+    );
+    expect(
+      toolProgress("call_api_todoapp_app", { method: "post", path: "/api/tasks", user: "public" }),
+    ).toBe("Calling POST /api/tasks");
+    expect(changedPaths("call_api_todoapp_app", { path: "/api/tasks" })).toEqual([]);
   });
 
   it("shows listing the application's assets, and writes nothing", () => {

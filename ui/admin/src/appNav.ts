@@ -22,8 +22,8 @@ const BUILD_TRAIT_APPLICATION = "application";
 /** One link under the application picker. */
 export type AppNavLink = {
   id:
+  | "app-link"
   | "edit-code"
-  | "update-client"
   | "build"
   | "target"
   | "chat"
@@ -33,10 +33,11 @@ export type AppNavLink = {
   | "translations"
   | "settings";
   label: string;
-  /** Where it goes. Absent for the links that *do* something (build, update
-   * client, build a target) rather than go somewhere. */
+  /** Where it goes. Absent for the links that *do* something (build, build a
+   * target) rather than go somewhere. */
   href?: string;
-  /** Opens in a new tab (the IDE is a separate page). */
+  /** Opens in a new tab (the application itself and the IDE are separate
+   * pages). */
   external?: boolean;
   /** Route prefixes that light it up. */
   matches: string[];
@@ -57,6 +58,16 @@ export type TargetLink = {
  * except `target`, of which it has one per target. */
 export function linkKey(link: Pick<AppNavLink, "id" | "target">): string {
   return link.target ? `${link.id}:${link.target.name}` : link.id;
+}
+
+/** Where the admin itself is served: what an application's subdomain sits on. */
+export type AdminLocation = Pick<Location, "protocol" | "host">;
+
+/** The URL an app is served at: `<subdomain>.<the admin's host>`. The admin runs
+ * on the base domain, so its own host (with port) is what the subdomain sits on —
+ * `blog.example.com` or, in local dev, `blog.localhost:3032`. */
+export function appUrl(subdomain: string, admin: AdminLocation = window.location): string {
+  return `${admin.protocol}//${subdomain}.${admin.host}`;
 }
 
 /** The coding agent that builds `app`, by name, if there is one.
@@ -84,8 +95,12 @@ export function builderAgentFor(
 /**
  * The links for working on `app`, in sidebar order.
  *
+ * - **The application itself comes first**, on its own subdomain, in a new
+ *   tab: it is what all the other links are for.
  * - An application that is **built** from a source tree (React, code) gets the
- *   loop an admin works in: edit the code, update the generated client, build.
+ *   loop an admin works in: edit the code, build. A build rewrites the
+ *   generated client first, so there is no separate link for that. One with no
+ *   framework has a directory but no build, so it gets only the first.
  * - One that is **constructed** from views and pages (Saltcorn UI) gets those,
  *   and the library its views and pages place.
  * - Either gets a new chat with its coding agent, when it has one.
@@ -94,22 +109,32 @@ export function builderAgentFor(
  *   rows, where it cannot be clicked on the way to something else.
  */
 export function appNavLinks(
-  app: Pick<AppItem, "id" | "builds" | "has_views" | "source" | "targets">,
+  app: Pick<AppItem, "id" | "subdomain" | "builds" | "has_views" | "source" | "targets">,
   agent: string | null,
+  admin: AdminLocation,
 ): AppNavLink[] {
   const base = `/applications/${encodeURIComponent(app.id)}`;
-  const links: AppNavLink[] = [];
+  const links: AppNavLink[] = [
+    {
+      id: "app-link",
+      label: "Application link",
+      href: appUrl(app.subdomain, admin),
+      external: true,
+      matches: [],
+    },
+  ];
+  // Any application with a directory of its own — built from it, or (with no
+  // framework) serving it as it is — can have it opened in the IDE.
+  if (app.source) {
+    links.push({
+      id: "edit-code",
+      label: "Edit code",
+      href: ideUrl(app.source.store),
+      external: true,
+      matches: [],
+    });
+  }
   if (app.builds) {
-    if (app.source) {
-      links.push({
-        id: "edit-code",
-        label: "Edit code",
-        href: ideUrl(app.source.store),
-        external: true,
-        matches: [],
-      });
-    }
-    links.push({ id: "update-client", label: "Update client", matches: [] });
     links.push({ id: "build", label: "Build", matches: [] });
     // The builds the framework offers beside the web bundle, each its own
     // button right under Build — an Android APK is built from the same project.

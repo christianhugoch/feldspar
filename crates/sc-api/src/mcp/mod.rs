@@ -46,16 +46,17 @@
 //!
 //! ## Why the set is a list of [`AdminTool`]s
 //!
-//! Six of the nine tools are implemented here; the three that reach an
+//! Seven of the ten tools are implemented here; the three that reach an
 //! `Application` cannot be, because `sc-app` is layer 8 *above* this crate and
 //! the storage they read lives there. So a tool is a
 //! trait object and a set is a list of them, which is also what phase 4's
 //! generated tools want: a tool projected from a tagged [`Endpoint`](crate::Endpoint)
 //! dispatches through the handler registry, which only the server holds.
 //!
-//! The full nine-tool set is therefore assembled by `sc_app::mcp::tool_set`, the
+//! The full ten-tool set is therefore assembled by `sc_app::mcp::tool_set`, the
 //! lowest layer that can name every tool in it.
 
+mod code_api;
 mod endpoint_tool;
 mod json_schema;
 mod schema;
@@ -73,6 +74,7 @@ use serde_json::{Map, Value as Json};
 
 use crate::schema_edit::{self, Grants};
 
+pub use code_api::{JS_CODE_API, TOOL_DESCRIBE_CODE_API};
 pub use endpoint_tool::{BODY_KEY, ProjectedCall, Projection, check_caller};
 pub use json_schema::{json_schema, object_schema, scalar_schema};
 pub use schema::{TOOL_DESCRIBE, TOOL_EDIT};
@@ -368,7 +370,8 @@ pub struct ToolSet {
 }
 
 impl ToolSet {
-    /// The tools this crate can hold: the schema's two and the triggers' four.
+    /// The tools this crate can hold: the schema's two, the triggers' four and
+    /// the code-body reference.
     ///
     /// Not the whole surface — `sc_app::mcp::tool_set` adds the three
     /// application tools and is what a caller should normally build.
@@ -381,6 +384,7 @@ impl ToolSet {
                 Arc::new(triggers::DescribeAction),
                 Arc::new(triggers::SaveTrigger),
                 Arc::new(triggers::DeleteTrigger),
+                Arc::new(code_api::DescribeCodeApi),
             ],
             grants,
             areas,
@@ -617,9 +621,11 @@ mod tests {
     #[test]
     fn an_area_that_is_off_takes_its_tools_out_of_the_listing() {
         let set = ToolSet::core(Grants::all(), Areas::none());
-        // The schema's two are unconditional; the triggers' four are gone.
-        assert_eq!(set.all_names().len(), 6);
+        // The schema's two and the code-body reference are unconditional; the
+        // triggers' four are gone.
+        assert_eq!(set.all_names().len(), 7);
         assert!(set.offers(TOOL_DESCRIBE) && set.offers(TOOL_EDIT));
+        assert!(set.offers(TOOL_DESCRIBE_CODE_API));
         assert!(!set.offers(TOOL_SAVE_TRIGGER));
 
         let set = ToolSet::core(Grants::all(), Areas::all());

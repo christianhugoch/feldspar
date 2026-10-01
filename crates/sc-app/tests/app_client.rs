@@ -91,8 +91,8 @@ async fn app_client_is_generated_from_the_apps_own_endpoint_set() -> Result<()> 
 
     let endpoints = app_endpoints(&blog(), &cat)?;
     // Four endpoints for the one declared table, plus the app's own login /
-    // logout / whoami.
-    assert_eq!(endpoints.len(), 4 + 3);
+    // logout / whoami / forgotPassword / setPassword.
+    assert_eq!(endpoints.len(), 4 + 5);
 
     let ts = app_client(&blog(), &cat)?;
 
@@ -118,6 +118,12 @@ async fn app_client_is_generated_from_the_apps_own_endpoint_set() -> Result<()> 
     // The app authenticates through its own API, so the client has login too.
     assert!(ts.contains("login("));
     assert!(ts.contains("/api/login"));
+    // …and the password links every app has: a reset request, and the page
+    // an emailed link opens spending its token.
+    assert!(ts.contains("forgotPassword("), "{ts}");
+    assert!(ts.contains("/api/forgot-password"));
+    assert!(ts.contains("setPassword("), "{ts}");
+    assert!(ts.contains("/api/set-password"));
 
     // The app declared only `posts`, so `secrets` — which exists in the catalog —
     // is nowhere in its client (§13.2).

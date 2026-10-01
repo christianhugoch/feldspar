@@ -103,6 +103,15 @@ feldspar/
 │  │                              #    `_fd_model_instances`. Beside sc-action rather than
 │  │                              #    above the row layer it reads through, because a module
 │  │                              #    supplies model providers (TODO "Predictive models" §4)
+│  ├─ sc-stan/                    # 6. Bayesian models with Stan, beside sc-model (§14.2,
+│  │                              #    "Bayesian models"): CmdStan discovery (`--cmdstan`,
+│  │                              #    `$CMDSTAN`, `~/.cmdstan`) and `feldspar cmdstan install`;
+│  │                              #    the program's declaration parser and `stanc`, the compile
+│  │                              #    cache, the chain runner, the CmdStan CSV reader, the raw
+│  │                              #    run directory, and StanProvider. What is not
+│  │                              #    Stan-specific (the binder, the draws, the posterior
+│  │                              #    summary) is sc-model's. No Cargo feature: nothing is
+│  │                              #    linked, availability is a runtime fact
 │  ├─ sc-stream/                  # 6. Streams: dataflows as an entity (§14.3). The
 │  │                              #    StreamProvider seam and its registry, the element
 │  │                              #    type and the envelope, `_fd_streams`, the supervisor
@@ -114,9 +123,9 @@ feldspar/
 │  │                              #    (REST/GraphQL/gRPC/tRPC/MCP) + TypeScript consumer gen
 │  ├─ sc-app/                     # 8. Application, Framework provider trait, routing/subdomains
 │  ├─ sc-core-actions/            # 8. the built-in action set (insert_row, update_rows,
-│  │                              #    delete_rows, fetch, run_js_code, send_email) — above the
-│  │                              #    row layer, because a trigger's write goes *through* it
-│  │                              #    (§10.1)
+│  │                              #    delete_rows, fetch, run_js_code, run_python_code,
+│  │                              #    send_email, and fit_model) — above the row layer,
+│  │                              #    because a trigger's write goes *through* it (§10.1)
 │  ├─ sc-viewpattern/             # 9. Saltcorn UI (§13.3): `_fd_views`/`_fd_pages`, the pattern
 │  │                              #    registry, the view snapshot, the `ViewRuntime` seam and
 │  │                              #    the `saltcorn-ui` framework. Above sc-app, because it
@@ -171,6 +180,9 @@ graph TD
   server --> module["sc-module"]
   viewpattern["sc-viewpattern"] --> app
   server --> model["sc-model"]
+  cli --> stan["sc-stan"]
+  server --> stan
+  stan --> model
   coreact --> model
   server --> stream["sc-stream"]
   app --> stream
@@ -240,17 +252,18 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-action` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-model` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-stream` | `sc-catalog` `sc-db` `sc-error` `sc-query` `sc-types` |
+| `sc-stan` | `sc-catalog` `sc-error` `sc-files` `sc-model` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
 | `sc-workflow` | `sc-action` `sc-agent` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
-| `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-llm` `sc-query` `sc-types` |
+| `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-llm` `sc-model` `sc-query` `sc-types` |
 | `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-query` `sc-stream` `sc-types` |
 | `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-model` `sc-query` `sc-types` |
 | `sc-viewpattern` | `sc-action` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-query` `sc-types` |
 | `sc-module` | `sc-action` `sc-app` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-model` `sc-query` `sc-stream` `sc-types` `sc-viewpattern` |
 | `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-model` `sc-module` `sc-types` |
 | `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-repomap` `sc-types` |
-| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-stream` `sc-types` `sc-viewpattern` `sc-workflow` |
-| `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-types` `sc-viewpattern` |
+| `sc-server` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-stan` `sc-stream` `sc-types` `sc-viewpattern` `sc-workflow` |
+| `sc-cli` | `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-core-traits` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-stan` `sc-types` `sc-viewpattern` |
 
 Four things the graph is worth reading for:
 
@@ -352,7 +365,7 @@ through a single Rust shim per adapter.
           ┌──────────────────────▼────────────────────────▼──────────────────────┐
           │                       Core services                                    │
           │  sc-workflow · sc-agent · sc-action · sc-model · sc-viewpattern        │
-          │  sc-stream · sc-fieldview · sc-copilot · sc-files                       │
+          │  sc-stan · sc-stream · sc-fieldview · sc-copilot · sc-files             │
           └──────────────────────┬────────────────────────────────────────────────┘
                                  │
                     ┌────────────▼─────────────┐        ┌──────────────────────┐
@@ -814,6 +827,42 @@ pub struct Calc { pub stored: bool, pub source: CalcSource }
 pub enum CalcSource { Expr(Formula), Code { adapter: AdapterId, body: String } }
 ```
 
+**A non-stored field is projected in SQL where it translates, and computed after the read
+where it does not.** Most expressions translate: `pages * 2`, a Ⱶ-join and an Ↄ-aggregation
+are each one more projection of the `SELECT`. A field that calls `predict("…")` (§14.2) or a
+module function (§15.1) cannot, because its value comes from outside the database. Such a
+field is not skipped. `sc-api`'s `CalcPlan` (`calc_read.rs`) splits a table's calculated fields
+into the ones SQL projects and the ones computed **after** the rows are fetched. The second
+kind are evaluated by the reified evaluator over the page, in dependency order, so a field that
+reads a predicting field sees its value. Every read path that projects calculated fields goes
+through the one plan: a list, a read by key, `select_values_in`, and the `RETURNING` of an
+insert and an update. GraphQL, the code host and the CSV export read through those, so there is
+one implementation and nothing to drift.
+
+- **Hoisted values are resolved first.** Predictions are **batched per page**: one
+  `ModelHost::predict` per model, with every row's key, so a 50-row page is one dataset read
+  and one provider call rather than fifty. Join paths, relations and module calls are resolved
+  per row by `prefetch_bindings`, as on the write path.
+- **An error fails the read**, naming the field, the model and the row ("`estimated_price` of
+  `houses` could not be computed for the row whose id is 500: …"). A failed batch is asked again
+  row by row to find which row it was. A null would be a silent failure, and a model with no
+  active fit therefore makes its table's reads fail until one is activated. The save check
+  warns about that when the field is added.
+- **It cannot be filtered or sorted on**, because the database never sees it. Every place that
+  lowers a filter or an ordering (REST's query string, GraphQL's `where` and `order_by`, counts,
+  the code host's query plans) refuses with one sentence: "cannot filter on `estimated_price`:
+  `estimated_price` is computed after the rows are read, because it calls `predict`, so the
+  database never sees it".
+- **A write computes it after the commit.** If that fails, the error says the row was saved.
+  Inside a caller's transaction the after-read fields are left out, because a prediction reads
+  the row through the dataset on another connection, where it is not committed yet.
+- **A model's dataset read is SQL-only** (`RowQuery::sql_only`). Otherwise a field that predicts
+  with a model of its own table would recurse: computing the field reads the dataset, and
+  reading the dataset computes the field.
+
+*Stored* calculated fields do not exist yet. When they do, `predict` in one is refused, for the
+reason §14.2 gives.
+
 ### 6.3 Fieldviews
 
 A fieldview displays and optionally edits a value of one or more types. With the admin UI and
@@ -933,6 +982,17 @@ Ownership *extends* access below the role floor; it never narrows it. A caller w
 meets `min_role` is unaffected by the formula (and by RLS, through a role-floor clause in
 every policy). A table with no formula behaves exactly as the plain role model does.
 
+**The public role is everybody.** A caller nobody is logged in as holds the public role (100),
+so a `min_role` of 100 — on a table operation, an application's custom query or an exposed
+trigger — admits them: no login, no session, and no CSRF token. It does not mean "a logged-in
+user whose role is 100". `AuthRequirement::admits` states the rule once, and the REST
+provider, the admin dispatcher and the MCP endpoint tools all ask it. A mutating request to
+such an endpoint that fails the CSRF check is not refused; it is served as the anonymous caller
+it then is. Its session cookie is not read, and no session is started or ended, so a
+cross-site page that makes the browser send the cookie gets nothing an anonymous caller would
+not. Everything stricter keeps the check, and so do the `Public` auth endpoints (`login`,
+`signup`, …) and an application's own UI pages.
+
 **One language, parsed once, evaluated two ways.** The formula lives in the `sc-expr` crate
 (§2). A single parse (via `swc_ecma_parser`, the parser family Deno uses, so the grammar is
 exactly V8's) is lowered into `sc-expr`'s own owned AST and evaluated two ways from that one
@@ -1007,7 +1067,8 @@ SQL NULL, granting nothing — optional-chaining semantics for free.
 
 **Non-stored calculated fields** (§6.2) reuse this whole machinery over the same scope
 **minus `user` and the operation flags**: an expression computed on read, dependency-ordered
-so one calc field may read another. A calc-field reference inside an ownership formula is
+so one calc field may read another, projected in SQL where it translates and computed after the
+`SELECT` where it does not (§6.2). A calc-field reference inside an ownership formula is
 **inlined** as its defining expression, transitively, before translation — so a calc field is
 usable in ownership formulae and in RLS policies alike (an untranslatable inlined definition
 refuses RLS, naming the construct). Because a calc field can hold no `user`/flags, inlining can
@@ -1254,6 +1315,7 @@ a sparse value goes into `attributes`.**
 | `_fd_streams` | streams: dataflows as an entity | **not an overlay** — there is nothing to introspect a stream from, so the row is its only definition (§14.3): the provider, the `configuration` its `config_spec` declares (secrets stored as given, redacted on the way to a form), `min_role` (the floor for **observing** it through an application; `None` is admin-only, the trigger rule for the trigger reason), and in `attributes` the sparse `enabled` flag. The **element type is not a column**: it is a pure function of `provider` + `configuration`, computed on read, because a stored copy would be a second answer that drifts the day a provider's declaration changes. Nor are the elements — a flow is made durable by a trigger that writes a row, and there is no `_fd_stream_elements` |
 | `_fd_roles` | roles | **not an overlay** — a role is a row carrying a name and role-specific settings; `users.role` is a foreign key onto it (§7.4). Two built-ins (admin, public) seeded at bootstrap |
 | `_fd_sessions` | live sessions | **`UNLOGGED`** where the backend allows it (§7.2): the SHA-256 of the token, the user it names, and when it lapses. Shared by every node, cached per node behind an LRU + freshness TTL. `user_id` is deliberately **not** a foreign key — the schema layer renders no `ON DELETE` action, so one would block deleting a signed-in user; a session resolves by reading the user, so a deleted one's session resolves to nobody |
+| `_fd_password_tokens` | invitation and password-reset links | the SHA-256 of the emailed token (never the token), the user it sets a password for, its purpose (`invite` or `reset`) and when it lapses. Redeemed with `DELETE … RETURNING`, so a link works once. `user_id` is not a foreign key, for the reason `_fd_sessions` gives |
 | `users` | users | UUID PK (not `_fd_`-prefixed; it is user-facing and extensible) |
 
 **Files have no per-file database row.** Per-file metadata is stored in **xattrs** on disk;
@@ -1381,6 +1443,13 @@ erDiagram
     timestamp last_used_at "throttled to one write a minute"
     timestamp revoked_at "nullable while it is live"
   }
+  PASSWORDTOKENS["_fd_password_tokens"] {
+    text token_hash PK "SHA-256 of the emailed token"
+    uuid user_id "deliberately NOT a foreign key"
+    text purpose "invite | reset"
+    timestamp created_at
+    timestamp expires_at "7 days for an invitation, 1 hour for a reset"
+  }
   TABLES["_fd_tables"] {
     uuid id PK
     text name UK "the physical table it overlays"
@@ -1451,6 +1520,15 @@ erDiagram
     json encoding "fitted on the training rows only, and applied unchanged"
     json hyperparameters "the point this fit used -- never a list"
     json attributes "the failure sentence, the outcome, the row counts, the search"
+  }
+  DRAWS["_fd_model_draws"] {
+    uuid id PK
+    uuid instance FK "-> _fd_model_instances.id, deleted with it"
+    text variable "alpha, lp__"
+    json element "the 1-based index array, [] for a scalar"
+    int chain
+    bool warmup
+    json draws "one value per iteration, in order"
   }
   LLM["_fd_llm_providers"] {
     uuid id PK
@@ -1623,6 +1701,7 @@ erDiagram
   ROLES ||--o{ USERS : "role -- enforced FK"
   USERS ||--o{ SESSIONS : "user_id -- by value"
   USERS ||--o{ APITOKENS : "user_id -- by value"
+  USERS ||--o{ PASSWORDTOKENS : "user_id -- by value"
   USERS |o--o{ RUNS : "user_id -- by value, nullable"
   TABLES ||--o{ FIELDS : "table_name -- same subject, joined by name"
   FIELDS }o--o| TABLES : "attributes.target_table -- Key fields"
@@ -1648,6 +1727,7 @@ erDiagram
   VIEWS }o--o| TABLES : "table_name -- by name"
   MODULES |o--o{ TRIGGERS : "action -- by name, an action the module supplies"
   STREAMS |o--o{ TRIGGERS : "channel -- by name, stream events"
+  INSTANCES ||--o{ DRAWS : "instance -- by value, one row per element per chain"
   APPS }o--o{ STREAMS : "streams[] -- by name"
   MODULES |o--o{ STREAMS : "provider -- by name, a stream provider the module supplies"
 ```
@@ -1737,11 +1817,22 @@ ambient, and `row`/`old` are *out of scope* on an event that has no row (so nami
 run's `context` — §10.3) so an `only_if` and an action's settings cannot disagree about what is
 in scope.
 
-The six built-ins are `insert_row`, `update_rows`, `delete_rows`, `fetch`, `run_js_code` and
-`send_email`, and they live in **`sc-core-actions`, above the row layer**. That placement is
-the design's one real constraint on where an action may live: a trigger's write goes through
-`sc-api`'s `rows` module, so it is coerced, validated, `File`-field-checked and *observed*
-exactly like an API caller's write. A second write path would quietly skip all of it.
+The seven built-ins are `insert_row`, `update_rows`, `delete_rows`, `fetch`, `run_js_code`,
+`run_python_code` (§15.2) and `send_email`, and they live in **`sc-core-actions`, above the row
+layer**. That placement is the design's one real constraint on where an action may live: a
+trigger's write goes through `sc-api`'s `rows` module, so it is coerced, validated,
+`File`-field-checked and *observed* exactly like an API caller's write. A second write path would
+quietly skip all of it. Two more are registered apart from the set, because each holds a seam a
+server assembles: `run_agent` (§11.5) and **`fit_model`** (§14.2), the one model action.
+
+**An action is in the set only if it is generic**: it means something for every table, every
+provider and every application. A capability that exists for one kind of thing is a *method* of
+that thing, reached from a code body; a computed value is a *formula*, which already has a place
+in every action that writes rows. That rule is why there is no `predict_row` and no
+`write_posterior`. A prediction is `predict("House prices")` in any formula, and writing a
+posterior back is `m.writePosterior(…)` on a model handle in code (§14.2). Every trigger form
+lists every action, including for an admin who will never build a model, so an action that
+means something for one provider is a cost paid by everybody.
 
 - `insert_row` / `update_rows` / `delete_rows` take a target table and formulas. The `where`
   of the latter two **selects** rows: translated into SQL when it translates, and falling back
@@ -1772,7 +1863,9 @@ exactly like an API caller's write. A second write path would quietly skip all o
   schema changes, no path to a file that is not a store an admin connected, and no way to fire
   an event except by being one more caller of the dispatcher every event already goes through.
   Beside them a body is handed Saltcorn 1's `Table` and `Field` (below), which are not a sixth
-  surface but v1's vocabulary over the first and the fourth. It runs on its
+  surface but v1's vocabulary over the first and the fourth, and `models`, whose
+  `models.get("…")` answers a model handle (§14.2) and which is also not a surface: its
+  requests are `op: "models"` on the `db` host, on the run's call budget. It runs on its
   **own pool of isolates**, not the single pure isolate every ownership formula shares, which
   is what lets it suspend on a host call and carry a configurable `timeout_ms` (default 5s,
   max 60s) without either becoming a property of every authorization decision in the process.
@@ -3081,7 +3174,7 @@ machine rather than needing a second one. What the driver does at each step:
    result*, not as a loop failure: "that table does not exist" is something the model can act
    on, and turning it into an exception is what makes an agent unable to recover.
 4. Append the results and go to 1, until the model stops asking for tools or **`max_steps`**
-   (default 20) is reached — an agent that will not converge must be stopped by a number, and
+   (default 250) is reached — an agent that will not converge must be stopped by a number, and
    the number is the admin's.
 
 **The caller travels with the run.** Every tool executes as the user who is chatting, not as the
@@ -3228,8 +3321,10 @@ milestone, Phase 3, `sc_agent::control`):
 - **The measurement is the provider's own number plus an estimate of the difference.** The
   previous response's `input_tokens` is the truth about everything up to it, and
   `TokenEstimator`'s calibrated character heuristic covers what has been appended since. At
-  `COMPACT_PERCENT` (75%) of the budget the loop compacts *before* the next call. The budget is
-  the agent's `context_budget`, or the executor model's working budget when it is unset.
+  `COMPACT_PERCENT` (80%) of the budget the loop compacts *before* the next call. The budget is
+  the agent's `context_budget`, or the executor model's working budget when it is unset. A
+  model's built-in working budget is its window capped at 250k tokens, so a large-window model
+  compacts at 200k; a model no rule recognises is assumed to have a 250k window.
 - **Two passes, and the second is conditional.** Pass 1 replaces every old tool result with the
   stub its trait writes through `AgentTrait::elide`, **all in one batch**, so the cache breaks
   once rather than every step; a tool call and its result are never separated. Pass 2 runs only
@@ -3431,8 +3526,10 @@ scope, so what it changed enters the change ledger and the model's reads of it g
 - **One trait, one scope, fifteen tools, and the grants decide which are declared.** The set is
   `read_file`, `find_files`, `search_files`, `repo_map`, `save_plan`, `implement_feature`,
   `explore`, `write_file`, `edit_file`, `apply_patch`, `run_script`, `check`, `view_app`, `shell`
-  and `process`, each suffixed with the scope's slug. Which of them a run is *offered* is the
-  mode (§11.2) and the five checkboxes — `may_edit`, `may_run_scripts`, `may_check`,
+  and `process`, each suffixed with the scope's slug (and since then `list_assets`, `call_api`
+  and `view_image`, which depend on the `application` setting and the model's `vision` rather
+  than on a grant). Which of them a run is *offered* is the
+  mode (§11.2) and the checkboxes — `may_edit`, `may_run_scripts`, `may_check`,
   `may_view_app`, `may_use_shell` — and a withheld tool is never declared to the model. Since the
   longest derived name is `implement_feature_<slug>`, `validate_config` checks **that** name
   against the 64 characters both vendors accept, rather than the shortest one that happens to
@@ -3495,14 +3592,26 @@ scope, so what it changed enters the change ledger and the model's reads of it g
   `<workflow>`/`<rules>`/`<edit_format>` blocks. The scope is named **once**, in the prompt,
   rather than in fifteen tool descriptions. The size test (8.3) is the reason several of these
   texts are as short as they are: the React builder's stable prefix plus tool definitions is
-  ≤ 1 750 estimated tokens in both `act` and `plan`, and it took cutting every tool description
-  and dropping `SHARED_PROMPT`'s workflow to get there. The budget was 1 500 and `act` measured
+  ≤ 4 000 estimated tokens in both `act` and `plan`. It was far tighter, and it took cutting
+  every tool description and dropping `SHARED_PROMPT`'s workflow to fit. The budget was 1 500 and `act` measured
   1 496 — spent to the last token — until `list_assets` made the set ten tools
   (TODO "Static directories" §6); a tenth tool costs about a hundred, so the number went up
   rather than an existing description coming off. It went up again, to 1 750, when the builder
   gained `http`'s `fetch_web` (TODO W.7): `act` was at 1 596, and `fetch_web`'s description was
-  halved to 676 characters first, so the ~150 it costs is the tool and not its prose. It is
-  still a **test**, and the next tool has the same argument to make.
+  halved to 676 characters first, so the ~150 it costs is the tool and not its prose. It went
+  to 2 000 with invitations and forgotten passwords: the prompt names the `/set-password` page
+  that emailed links open, which nothing else in the project tells the builder to keep (~230
+  tokens; `act` 1 974 on GPT). It went to 2 100 when agents learnt to look: `view_image` for a
+  model with `vision` (~90 tokens), and `view_app`'s looking actions offered in `plan` so a
+  planner sees the page it is planning a change to (~200 tokens there; `act` 2 072 on GPT,
+  `plan` 2 032). It went to 2 200 with `call_api` (~110 tokens after its description was cut to
+  one line and its method list to five; `act` 2 190 on GPT, `plan` 2 138). Then it went to
+  4 000, because the cutting had gone too far: an agent offered `call_api` told its user that
+  nothing could make an HTTP request. Each description now says what the tool returns, when to
+  use it, and the rule that trips a model up; each parameter says what it is for; and the
+  workflow names `call_api` (~950 tokens; `act` 3 130 on Claude, `plan` 3 038). It is still a
+  **test**, but with headroom, so that the next tool is described properly rather than
+  squeezed.
 - **`planned` is a workflow setting, not a second trait.** `workflow = planned` starts the run in
   `plan` mode (the new `AgentTrait::starting_mode` hook, read by `Runner::new`), where the tools
   are the read-only four plus `save_plan`, `implement_feature` and `explore`. The plan — an
@@ -3528,6 +3637,48 @@ scope, so what it changed enters the change ledger and the model's reads of it g
   evaluator, so a run driven from a context that has neither says so instead of finding another
   way to open a browser. `TraitCheck` gained `host: HostCapabilities` for the same reason —
   `validate_config` refuses `may_view_app` where no browser was detected, on save and on load.
+  **A run that has built nothing looks at the live build**: its first `view_app` call mounts the
+  run's preview from the application's output directory as the last build left it
+  (`sc_app::app_output_dir`, through the same `AppPreviewer::mount_preview` a green `check`
+  calls), and the result says so; a later green `check` re-mounts that preview with the run's
+  own build. So the agent can screenshot the page it was asked about before touching it, and
+  `plan` is offered the tool too — `goto`, `wait_for`, `snapshot` and `screenshot` only, since
+  `click`, `fill` and `press` change what a plan is written from.
+- **`call_api` asks the application's API what it answers.** It is **not a grant**:
+  `call_api_<slug>` is offered in every mode wherever the `application` setting names one, as
+  `list_assets` is. (It was a checkbox, `may_call_api`, for a day; an agent saved before the
+  checkbox existed was never offered the tool and told its user that nothing could make an HTTP
+  request, which is the argument against a grant for something every builder needs.) It sends one HTTP request —
+  `method`, `path` with its query, `body`, `headers` — and back come the status, the headers
+  that say something (the security boilerplate is left out, a `set-cookie` value is hidden) and
+  the body, JSON pretty-printed and cut at 12 000 characters. **As whom** is the `user`
+  argument: left out, the caller (or `view_app_user` for a triggered run); `"public"`, no
+  session; an email, that user — which, for anyone but the caller themself, only an admin's run
+  may name, since it is acting as them. The seam is a third capability beside the previewer and
+  the browser, `sc_agent::AppRequester` on `TraitContext::requests`, which `serve` installs as
+  `sc_server::AppRequests`: the request is handed **in process** to the same router the public
+  listener serves, with `Host` set to the application's subdomain, a CSRF token in cookie and
+  header, and for a user a session logged in for this one request and logged out after it. So
+  the answer is the one the application's own page gets — the provider, the table's rules, the
+  ownership formula and the CSRF middleware all apply — and no socket is involved (no
+  `ConnectInfo`, so a loopback-only route sees an unknown peer). It targets the **live mount**,
+  not the run's preview: the API is built from the catalog, which the two share, and a preview
+  host would need the run's browser session to be reachable at all. A subdomain nothing is
+  mounted at is refused rather than falling through to the admin routes. Outside `act` — `plan`,
+  and the `explore` helper a planner hands its questions to — the tool offers `GET` only and
+  accepts `GET` and `HEAD`; the body is read to 1 MB or the 30-second timeout, whichever comes first, and
+  the result says which. An old result elides to its status line.
+- **`view_image` shows a seeing model an image file.** `read_file` refuses binary, rightly;
+  `view_image_<slug>` is offered wherever reading is (every mode, no grant) to a model with
+  `vision`, and takes a `path` in the scope or a `url` one of the application's static
+  directories serves — the URL `list_assets` gave, resolved by `static_dir_for` and
+  `StaticDir::resolve` exactly as the router does, refused wherever the router would 404, and
+  read through `check_access` as the caller. PNG, JPEG, GIF and WebP go as they are when they
+  fit 1 568 px and 1.5 MB (the screenshot cap); a larger one is scaled to fit and re-encoded —
+  PNG where a pixel is transparent, JPEG otherwise — with the `image` crate the tree already
+  had through deno. An SVG is text and is refused toward `read_file`. An old result elides to
+  `[elided image <name>]`, and the run's image cap and screenshot-first compaction apply to it
+  as to a screenshot.
 
 **The schema, the triggers, and an application's own SQL endpoints.** `admin_copilot` is the
 first **app-building** trait: it describes and edits the catalog itself, the trigger set over it,
@@ -4745,7 +4896,14 @@ actions registry arrives.
 restart should never be required and that only individual APIs and applications may need
 one, so mounting is a runtime operation, not a boot-time one:
 
-- **At boot**, `sc-server` loads every row of `_fd_applications` and mounts each app.
+- **At boot**, `sc-server` loads every row of `_fd_applications` and mounts each app from
+  what its last build left in its output directory, **running no bundler** — the same mount a
+  `SIGHUP` reload does (`mount_from_disk`). Building every application (or even hashing its
+  source tree to decide whether to) was most of the start-up time. An application that has
+  never been built is skipped with a log line; the Build button mounts it without a restart.
+  Every build (create, the Build button, the build tool, a restore) runs the bundler.
+  (`sc_app::build_application_if_changed`, the git-tree-keyed build that boot used to call,
+  is still there but no longer on the boot path.)
 - **On create/edit**, the admin UI's call persists the row, then builds (for a framework with
   a build step, §13.3) and mounts or re-mounts *that app alone*. Other apps keep serving; the
   admin never goes away; the process does not restart. An **edit** re-mounts without building:
@@ -4951,6 +5109,18 @@ would make a build fail for a reason unrelated to building.
   and served on its subdomain. No source tree and no build. Layouts are edited in v1's own
   builder (`ui/builder`), and a per-application library holds shared layout fragments. See
   "Saltcorn UI", "The builder" and "The library" below.
+- **The `none` framework** — no UI framework and no build step: the application is its API
+  providers, its static directories and its streams. Its framework serves nothing (every path
+  nothing else claims is a 404) and declares `serves_ui` false, so an API may be mounted at `/`.
+  It is a `FrameworkFactory` compiled into `sc-app` and always registered (last in the picker),
+  so every "nothing to build" path the server has for Saltcorn UI — saving is the deployment, no
+  Build button, no generated client — applies unchanged. Its settings are a `store` and a
+  directory (`source`), for one reason: it is still created with a **coding agent**, which works
+  there — writing the HTML and CSS a static directory serves, for instance. That agent's
+  `coding` trait names the application like any builder's; `check` has no build to run and
+  passes it, and a run's preview is the application constructed as it is served. A static
+  directory serves `index.html` for a request that names a directory (`/`, `/docs/`), so such a
+  site has a front page.
 
 #### Two code frameworks, and why
 
@@ -5744,6 +5914,21 @@ empty tree with a `src/feldspar/` and no project around it would produce somethi
 build — using the scaffold's own emptiness check, since a second opinion about what "empty"
 means is how the two would eventually disagree.
 
+`deepCleanApplication` (**Deep clean** on the applications list) is for the dependency tree
+that no build fixes: an interrupted install, a corrupted npm cache, `node_modules` edited by
+hand. It deletes the install step's marker directory (`node_modules`), then builds as Build
+does, and that build installs from scratch because the marker is gone. It is offered only where
+the build installs dependencies itself (`installs` on the application, which is true for
+`react`) and is refused elsewhere.
+
+Builds are **serialised per process** (`sc_app::build::BUILD_LOCK`, covering install, bundler
+and Deep clean's deletion), because one React build peaks at a few hundred MB and the server
+has to fit on a 1 GB machine. For the same reason a build command of exactly
+`npm run <script>` runs the script's own command line with `sh -c`, the way npm would, with the
+`pre`/`post` hooks, `node_modules/.bin` on `PATH` and the `npm_lifecycle_*` variables, but
+without an `npm` process holding ~60 MB for the length of the build. Anything else goes to npm
+as written.
+
 ### 13.4 API providers
 
 ```rust
@@ -5821,6 +6006,42 @@ response. An address that already has an account gets `409`. When the setting is
 and the client's `signup` method do not exist. The generated `src/feldspar/README.md` says which
 of the two cases applies, and the builder agents' prompts point to it.
 
+**Password links** are the other half of an application's own accounts. Every REST API projects
+two public endpoints: `POST /api/forgot-password {email}` and `POST /api/set-password {token,
+password}`. A third, `POST /api/invite`, exists only where `allow_invite` is on, and only for
+callers at `invite_min_role` or more powerful (default: admin). An invitation makes an account
+with **no password**, which cannot sign in, and emails its owner a link. The call supplies the
+new account's `role`, which must be *less powerful than the caller's own* (a greater number),
+its other columns (`fields`), the application the link opens (`app`, a subdomain, defaulting to
+the inviting one), and the message: `subject`, `body`/`html` containing `{{link}}`, and `from`.
+This is so that a therapists' application can invite patients into the patients' application
+with the therapist's own words. If the message cannot be sent, the new account is deleted again.
+An address with a pending invitation is sent a new link; an address whose account is in use gets
+`409`.
+
+A link is `{origin}/set-password#token=…`. The origin is taken from the request's
+`AppDirectory`, which the router fills in: the request's own origin, or that of another
+*served* application under the same scheme, base domain and port, so a link never points at a
+host a caller typed. The token is in the fragment so that it reaches no server log and no
+`Referer`. The token is 256 random bits, stored as its SHA-256 in `_fd_password_tokens`. It
+lasts 7 days for an invitation and 1 hour for a reset. It is spent by `DELETE … RETURNING`, so
+it works exactly once, and spending it ends the user's other tokens and sessions.
+`forgot-password` always answers `{ok: true}`, so it cannot be used to find out which addresses
+have accounts; it sends at most one link a minute per account, sends it off the request, and
+uses the system's sender and wording. The scaffold's `src/SetPassword.tsx` is the page at that
+path.
+
+**`users` behind an application's API.** The users table can be declared by an application like
+any other table (for example, a therapist listing their patients' accounts), so the row layer
+treats it specially for every surface (REST, GraphQL, agent tools, trigger actions).
+`password_hash` is not projected by any read, not accepted by any filter, ordering, `select` or
+GraphQL type, and refused in any write. Below admin, a role written into a row must be less
+powerful than the caller's own; on their own row a caller may keep their role. An update or
+delete reaches only the caller's own row and the rows of less powerful accounts; this rule is
+added to the statement's `WHERE`, so a row out of reach is a 404, exactly like a missing one.
+The table's access rules and ownership formula still decide whether the caller may write the
+table at all.
+
 A **list read takes a query string** in PostgREST's syntax:
 
 ```
@@ -5857,9 +6078,11 @@ cap, exactly as a GraphQL list field's does.
 The list endpoints **declare** all of this as query parameters (§13.1), so `listBooks` takes a
 typed options object rather than leaving a hand-written `fetch` as the only way to ask.
 
-#### Custom SQL queries
+#### Custom queries
 
-The one thing in this section that is not a projection of the row layer. An administrator writes
+The one thing in this section that is not a projection of the row layer. A custom query is
+written in **SQL** — most of what follows — or as a **JavaScript or Python** body (below, "Code
+queries"). An administrator writes
 a statement, names its parameters and their types, picks an HTTP **method** and a sub-path, and
 the application gains an endpoint with a typed client method — the escape hatch for what the
 row layer's read cannot express: a window function, a recursive CTE, a report nobody wants to
@@ -5871,7 +6094,8 @@ pub struct CustomQuery {
     pub description: String,
     pub method:      Method,          // the admin's choice, never inferred from the SQL
     pub path:        String,          // sub-path within the mount, e.g. /reports/top-authors
-    pub sql:         String,          // one statement, with `:name` parameters
+    pub language:    QueryLanguage,   // sql (the default, not stored) | javascript | python
+    pub code:        String,          // the source: one statement with `:name` parameters, or a body
     pub params:      Vec<CustomParam>,// name, declared ValueType, required
     pub min_role:    u8,              // **admin unless stated**
     pub columns:     Vec<QueryColumn>,// server-written: what the database said it returns
@@ -5943,6 +6167,34 @@ exists to prevent, introduced by the tool meant to avoid it. The third is an **a
 `admin_copilot` (§11.3), whose `save_api_query` / `delete_api_query` go through the same
 `save_application` and the same re-emit; which API row a query lands on is `sc_app::select_api`
 for all three, so the answer cannot depend on which door the query came through.
+
+**Code queries.** A query whose `language` is `javascript` or `python` keeps everything above
+that is about the *endpoint* — the name, the method, the sub-path, the role floor, the declared
+parameters and the rules on all of them — and replaces everything that is about SQL. Its source
+is a code body, run on the action a trigger's body of that language runs on (`run_js_code` /
+`run_python_code`, §10.1) through `TriggerDispatcher::run_code`: the same `db`, `fetch`, `fs`,
+`trigger` and `modfn`, the same bounds, and the same authority — the admin's over the tables,
+with `db.asUser()` delegating to the caller. The request is in scope as `body` (the JSON body,
+`{}` when there is none) and `query` (the query string, one value per key), the caller as
+`user`, and there is no `payload`, because there is no event. A declared parameter is checked
+and coerced where it arrives (the query string for `GET`/`DELETE`, the body otherwise) before
+the body runs, so the client method's argument types hold inside the body too; what was not
+declared is passed as sent. What the body returns is the response, and a body that throws is an
+error answer naming the query.
+
+Neither `body` nor `query` is `payload` spelled differently: an exposed trigger's body gets the
+request body as `payload` because a trigger is an event handler first, and a trigger has no
+query string. A custom query is a request handler, so it is given the request's two halves under
+their own names.
+
+What does not carry over: a code query is not prepared, so it has no described columns and its
+client method returns opaque JSON; there is no one-statement rule and no `:name` rule; and
+**`GET` is not read-only** — a body writes through the row layer one statement at a time, as a
+trigger's does, and those writes raise table events. A body's syntax is checked when it runs,
+not on save (the save path has no engine, §10.1). Python is offered by the admin editor only
+where `getPythonStatus` says the server can run it, and `describeCustomQuery` refuses a Python
+query on one that cannot. `save_api_query` takes a `language`; `feldspar api add-query` adds SQL
+queries only.
 
 The tutorial for both halves of this provider is
 [tutorial-rest-queries.md](./tutorial-rest-queries.md).
@@ -6552,11 +6804,11 @@ Five nouns, fixed here because the words are overloaded everywhere else in the i
 | **dataset** | which table, which derived columns, which rows | a JSON column *on the model* |
 | **model** | a dataset + a provider + its configuration + its hyperparameter space | `_fd_models` |
 | **model instance** | one fit: parameters, metrics, encoding, serialised state | `_fd_model_instances` |
-| **prediction** | applying an instance to rows | the `predict_row` action, and `predictRows` |
+| **prediction** | applying an instance to rows | `predict("…")` in a formula, `m.predict(…)` on a model handle in code, and `predictRows` |
 
 A model is edited and refitted; each fit leaves an instance behind, so the instances of a model
 are its history and are **comparable** — same dataset, same split, different settings. At most
-one instance per model is **active**, which is what lets a trigger name a model rather than a fit.
+one instance per model is **active**, which is what lets a formula name a model rather than a fit.
 
 #### A dataset is a list of formulas, and that is the whole of it
 
@@ -6565,6 +6817,7 @@ pub struct Dataset {
     pub table: String,
     pub columns: Vec<DatasetColumn>,   // { name, expr }
     pub filter: Option<String>,        // one boolean formula, or none
+    pub order: Vec<DatasetOrder>,      // { expr, descending }; the primary key always follows
 }
 ```
 
@@ -6626,6 +6879,20 @@ table (§8.3) at all. `ModelServices` in `sc-server/src/models.rs` assembles the
 the fit job runner. `ModelProviderHost` routes by the `(module, provider)` pair rather than by
 the provider name alone, because one host serves every module of its language and two of them may
 well supply a `random_forest`.
+
+Two more seams face the other way: they let what sits *below* `sc-model` start a fit and ask for
+a prediction.
+
+| Seam | Declared in | Implemented in | Installed by | What reaches it |
+|---|---|---|---|---|
+| `DatasetSource` | `sc-model` | `sc-server` (`CatalogDatasetSource`, over `sc_api::rows`) | `ModelServices` | every fit and prediction |
+| `ModelProviderHost` | `sc-model` | `sc-module`, `sc-python` | the module rebuild | the registry, for a module's provider |
+| `FitStarter` | `sc-model` | `sc-server` (`ModelServices`) | `register_model_actions` | the `fit_model` action |
+| `ModelHost` | `sc-catalog` | `sc-server` (`ModelServices`, over `sc_api::models`) | `Catalog::set_model_host`, at startup and on every module rebuild | `predict("…")` in a formula, and the code host's model handle |
+
+`ModelHost` is declared in `sc-catalog` because that is where `prefetch_bindings` is, and
+`sc-catalog` is below `sc-model`. It speaks JSON and is installed the way the module functions
+are (§15.1). It is described with prediction, below.
 
 #### The frame is columnar, and it is bounded
 
@@ -6743,12 +7010,14 @@ pub enum Outcome {
     Cluster,                         // a cluster number per row
     Embedding { dimensions: usize }, // a vector per row
     Test,                            // no per-row output; the parameters are the result
+    Posterior { prediction: Option<String> }, // draws; see "Bayesian models" below
 }
 ```
 
 A random forest is a regressor or a classifier according to the type of the column its
 configuration names as the label. `Outcome` is what the UI renders against, what the metric set
-is chosen by, and what `predict_row` checks before it writes a number into a text column;
+is chosen by, and what a calculated field calling `predict` is checked against before it may
+hold a number as text. It also decides which methods a model handle in code has (below).
 `Test` has no per-row output at all, so nothing asks a t-test to predict. Because the seam
 carries data and not closures, a provider *declares* an `OutcomeSpec` (`Supervised { label }`,
 `Regression { … }`, `Cluster`, `Embedding { components }`, `Test`) naming which configuration key
@@ -6762,8 +7031,9 @@ the metric pass score 50 000 rows in one call rather than in 50 000.
 
 #### Metrics are the host's; parameters are the provider's
 
-A provider returns `FitResult { state, parameters }` and **no metrics**. `sc-model` computes
-those itself, by running the fitted state back over each split and scoring the predictions:
+A provider returns `FitResult { state, parameters, warnings }` and **no metrics**. `sc-model`
+computes those itself, by running the fitted state back over each split and scoring the
+predictions:
 
 | outcome | metrics |
 |---|---|
@@ -6794,6 +7064,14 @@ column of feature importances; a row that is not as wide as the headings is refu
 block is built rather than rendered against the wrong column. `Text` is for a provider whose own
 output is a summary nobody should reformat — statsmodels' `summary()` is the case — and it means
 a fourth kind of parameter can arrive without a schema change.
+
+**Warnings are the provider's too**, as sentences that say what to do ("the optimiser stopped
+after 100 iterations without converging: raise `max_iter`"). A Python provider's `fit` may
+return `"warnings": […]`, and a `warnings.warn` raised during `fit` (scikit-learn's
+`ConvergenceWarning`) is caught and added. The fit job writes them to the instance's
+`ATTR_WARNINGS`, beside a posterior's diagnostics. So "fitted cleanly" means "fitted, and nothing
+warned" for every provider. That is what `fit_model`'s `activate: if_clean` tests, and it is why
+the action is generic rather than a posterior's.
 
 A `Prediction` is `Number`, `Class`, `Cluster`, `Vector` — or `ClassIndex`, which is the same
 answer earlier in its journey. A provider works in class *indices*, because that is what the
@@ -6831,9 +7109,11 @@ Two consequences, stated rather than discovered:
   `failed` with "the server restarted while this fit was running". Making a fit durable is the
   workflow engine's job (§10.3) and would mean expressing a fit as steps, which is a bigger claim
   than this design makes.
-- **There is no cancel.** Stopping a fit means stopping a smartcore call or a Python call
-  mid-flight, and §15.2 has already said what CPython can and cannot be interrupted at. The bound
-  that exists is the row cap, and it is the honest one.
+- **There is no cancel** for these providers. Stopping a fit means stopping a smartcore call or
+  a Python call mid-flight, and §15.2 has already said what CPython can and cannot be
+  interrupted at. The bound that exists is the row cap, and it is the honest one. A posterior
+  is the exception, because its fit is subprocesses, which *can* be killed ("Bayesian models"
+  below); `cancelModelFit` refuses any provider that does not declare `cancellable`.
 
 #### The built-ins, and the `smartcore` feature
 
@@ -6873,37 +7153,142 @@ module wrapping five scikit-learn estimators — ridge, gradient boosting, an SV
 — installed in one click from the Modules tab and appearing on the model form beside the
 built-ins, with nothing above the seam knowing which language answered.
 
-#### Prediction: the action, and the calculated field there is not
+#### Prediction: a formula and a method
 
 **A prediction reads past the dataset's filter, and that is deliberate.** The filter says which
 rows the model was *fitted from*; the rows it may be asked about are the caller's, and they are
 usually the ones the filter excludes — a model of what houses sell for is fitted on the `sold`
-ones and asked about the unsold one a trigger just inserted. So `Read::unfiltered` is what
+ones and asked about the unsold one just inserted. So `Read::unfiltered` is what
 `predict_subject` asks for, while the columns still come *through* the dataset and the row layer,
 so a join path and an aggregation are computed exactly as they were at fit time. Reusing the
 sample restriction as an access rule would make every model of this shape unable to answer the
 only question anybody asks it.
 
-`predict_row` is an ordinary action (`sc-core-actions`, layer 9 with the others that write rows):
-configure a model — or a named instance — and where the answer goes, either a field on the row or
-a key in the workflow context. Its `config_spec_for` offers the models on *this* table when the
-trigger has one, and it checks at save time that the target field's type can hold what the model's
-outcome produces, using `possible_prediction_types` (two wide for a `Supervised` declaration,
-empty for a `Test`, which is a target that is wrong whatever its type). The definitive check is
-made again at fire time, against the outcome the instance actually recorded.
+**What a row is.** A row that carries the model table's primary key is read **through the
+dataset**, by key and unfiltered. A row without one (a proposed row not inserted yet, or one a
+body made up) is taken as the dataset's columns as given (`Subject::Rows`) and must supply
+every feature; a missing one is refused by name. In a batch, keyed rows are one read
+restricted to their keys and literal rows are one frame, and the answers come back in the order
+asked.
 
-**There is no calculated field that predicts**, and the reason is not effort. A calculated field
-is an `sc-expr` formula with two evaluators that must agree (§7.3), and a prediction is
-translatable to neither SQL nor the reified evaluator; a *stored* one would have to be recomputed
-on every write to every row the model reads, which for a model with an aggregation in its dataset
-is every row of two tables. An action, fired by a trigger the admin wrote, puts the recomputation
-where somebody chose it.
+There is **no prediction action**. A prediction is a computed value, so it lives where values
+are already computed (§10.1's rule). There are two places.
+
+**In a formula: `predict("House prices")`.** It predicts the row the formula ranges over with the
+model's active fit, and returns the plain value: a number, a class name, a cluster index or a
+vector. It takes one argument, a string literal naming the model. Pinning a fit is what `active`
+is for, and a formula that named a fit id would break the day that fit was deleted. `predict` is
+a global of the formula language. A column called `predict` shadows it, and it wins over a
+module function called `predict`. It works in:
+
+- a non-stored calculated field (§6.2). `estimated_price = predict("House prices")` is a number
+  in every row a listing returns, including an unsold house, for one provider call per page;
+- an `update_rows` assignment. An insert trigger that sets `estimate = predict("House prices")`
+  is the stored variant, recomputed when the admin's trigger says so;
+- an `only_if`, and a `{{ }}` template in `send_email`, `fetch` and the rest.
+
+A formula in the event scope (an `insert_row` value, a `run_agent` prompt) ranges over no row,
+so `predict` there is refused on save, saying where it does work.
+
+It is **hoisted, exactly as a module call is** (§15.1). `sc-expr`'s `analyze` collects each call
+into `Analysis::model_calls`, a `ModelCall { key, model }` keyed by the call's text.
+`translate` answers `Untranslatable`, so no SQL path tries to compute one.
+`sc_catalog::prefetch_bindings` resolves the call through the catalog's `ModelHost` before the
+formula runs, and binds the value under the key. It asks by the row's key when it has one, and
+otherwise by its values. The formula isolate stays op-less and does no I/O. A computed argument,
+a second argument and a call inside `=>` are refused on save naming the call. A server with no
+model host fails the formula naming the call, never with a null.
+
+The save checks are `sc_catalog::check_model_calls`. They are async, because models are rows,
+and run in `schema_edit` for a calculated field and on trigger save for an action's formulas
+and `only_if`. They check that:
+
+- the model exists;
+- it is a model of the formula's table ("`House prices` is a model of `houses`, and this formula
+  is on `orders`");
+- its outcome predicts. A t-test, or a posterior with no prediction quantity, gets
+  `no_per_row_prediction`'s sentence;
+- for a calculated field that *is* the call, its declared type is among the provider's
+  `possible_prediction_types`. That is two types for a `Supervised` declaration, taken from the
+  **declaration** rather than the active fit, because a field is typed before any fit exists.
+
+A model with no active fit is accepted, with a note that every read of the table fails until one
+is active. An **ownership formula refuses `predict`** outright, for the module functions'
+reason: `Err` is deny, and a rule that waits on a provider makes every read wait on it.
+
+**In code: a model handle.** `models.get` answers a handle over the model's active fit, or over
+a named one:
+
+```js
+const m = await models.get("House prices");              // the active fit
+const m = await models.get("House prices", { fit: id }); // a specific fit
+m.name; m.provider; m.table; m.outcome; m.fit;           // fit: status, warnings, metrics, …
+await m.predict(row);                                     // → 312000 | "spam" | 3 | [0.1, …]
+await m.predict([r1, r2, r3]);                            // one provider call, in row order
+await m.predict(row, { detail: true });                   // → { value, probability }
+
+// a Posterior outcome only
+await m.draws("alpha", { keys: [27001], chains: [1, 2], thin: 10 });
+await m.summary("alpha", { keys: [27001] });
+m.variables;
+await m.writePosterior({ variable: "alpha", statistics: { mean: "alpha_mean", sd: "alpha_sd" } });
+```
+
+Python has the same handle, synchronous and in snake case (`m.write_posterior(…)`).
+
+- **The fit's recorded outcome decides which methods exist, not the provider's name.** `draws`,
+  `summary`, `variables` and `writePosterior` exist on a handle whose outcome is `Posterior`, so
+  a Bayesian provider from a module would get them unchanged. On any other handle they are
+  **absent**, and touching one throws a sentence ("`House prices` is a linear_regression
+  regression; `draws` is for posterior models"). JavaScript uses a non-enumerable getter that
+  throws, so the handle still serialises. Python uses `__getattr__`, so `hasattr(m, "draws")` is
+  false. `predict` exists on every handle. On an outcome that does not predict it throws
+  `no_per_row_prediction`'s sentence without making a call. There is no per-provider method
+  registry. One can be added when a provider needs a method nobody else has.
+- **The wire** is `op: "models"` on the `db` host (so it is on the run's call budget, and a body
+  with no `db` has no `models`), with `what`: `get`, `predict`, `draws`, `summary`,
+  `write_posterior`. `get` answers everything the handle is built from in one call: the fit, the
+  outcome, the table, the variables, and why it does not predict when it does not. The later
+  calls name the **fit id** `get` resolved, so a handle does not change fit halfway through a
+  body when someone activates another.
+- **Authority.** A prediction and a draws read read the admin's own fit. A `writePosterior`
+  writes under the handle's authority and the run's trigger chain, the same as
+  `db.counties.update(…)`: ownership is checked, the target's triggers fire, and the chain
+  bounds recursion. `m.asUser()` and `m.asAdmin()` choose, as on `db`.
+
+**The seam: `ModelHost` on the `Catalog`.**
+
+```rust
+#[async_trait]
+pub trait ModelHost: Send + Sync {                        // sc-catalog
+    /// Predict `rows` of `table` with `model`'s active fit (or `fit`), in row order.
+    async fn predict(&self, model: &str, fit: Option<&str>, table: &str,
+                     rows: PredictRows<'_>, detail: bool) -> Result<Vec<Json>>;
+    /// What a formula's save check needs: the model's table, and whether its outcome
+    /// predicts, and into which basic types.
+    async fn describe(&self, model: &str) -> Result<ModelSummary>;
+}
+pub enum PredictRows<'a> { Keys(&'a [Json]), Values(&'a [Json]) }
+```
+
+The logic is `sc_api::models::predict_for` and `describe_model`. `sc-server`'s `ModelServices`
+implements the trait by calling them with its registry, dataset source and row cap, and installs
+it on the catalog at startup and again whenever the module set is rebuilt. That is the same act
+that swaps the action registry. The formula path and the code host reach models through it
+alone, so the code host adds nothing of its own.
+
+**A stored calculated field will not predict.** A stored value would have to be recomputed on
+every write to every row the model reads, which for a model with an aggregation in its dataset
+is every row of two tables. A non-stored field is computed when it is read, batched per page
+(§6.2). An `update_rows` trigger that stores the value puts the recomputation where somebody
+chose it.
 
 #### Storage
 
 `_fd_models`: `id` (uuid pk), `name` (unique), `description`, `table_name`, `provider`, `dataset`
-(JSON), `configuration` (JSON), `hyperparameters` (JSON — values or lists), `split` (JSON —
-fractions and seed), `attributes` (JSON).
+(JSON), `related` (JSON, nullable — a posterior's related datasets), `configuration` (JSON),
+`hyperparameters` (JSON — values or lists), `split` (JSON — fractions and seed), `attributes`
+(JSON).
 
 `_fd_model_instances`: `id` (uuid pk), `model` (uuid), `name`, `description`, `status`
 (`fitting` | `fitted` | `failed`), `created`, `active` (bool), `state` (JSON — the provider's
@@ -6932,7 +7317,11 @@ milestone already established for a record whose world changed underneath it.
 the answer of before you fit it), `listModels` / `getModel` / `saveModel` / `deleteModel`,
 `fitModel` / `listModelInstances` / `getModelInstance` / `activateModelInstance` /
 `deleteModelInstance`, and `predictRows` — an instance, or a model meaning its active instance,
-plus either literal rows or a filter over the model's table.
+plus either literal rows or a filter over the model's table. These are the admin's own tools, not
+the action namespace, which is why they outlived the `predict_row` and `write_posterior`
+actions. `predictRows` and a formula's `predict` both end in `sc_model::predict_subject`, and
+`writePosterior` and a handle's `writePosterior` call the same
+`sc_api::models::write_posterior`.
 
 The admin UI is a **Models** tab (§12): the model form with the dataset builder beside its live
 preview, the provider's own form rendered from `config_spec`, the hyperparameter grid and the
@@ -6940,7 +7329,207 @@ split; then the instance list, which polls while anything says `fitting`; then t
 screen, which renders the three parameter variants, the metrics per split, the search results,
 the row counts and what was dropped, and a "try a row" box over `predictRows`. An
 application-facing prediction endpoint is deliberately not here: which application, which
-permission and what shape are application-API questions, and this API is the admin's.
+permission and what shape are application-API questions, and this API is the admin's. An
+application that wants predictions reads a calculated field that calls `predict`, which its
+APIs already serve under its own permissions.
+
+#### Bayesian models
+
+GOALS asks for "bayesian inference (e.g. using Stan) — model configuration is the model code in
+a stan file where the data section needs to be linked to the dataset". Every other provider
+answers about one rectangle, one row at a time. A Bayesian model is usually worth writing
+*because* the data is structured: homes in counties, pupils in classes in schools, readings per
+hour with gaps, regions next to regions. The database holds that structure as foreign keys,
+timestamps and junction tables. A Stan program wants it as flat arrays of 1-based integers and
+a handful of sizes. Closing that gap is the design; running CmdStan is a subprocess.
+
+Six more nouns, beside the five above:
+
+| noun | what it is | where it lives |
+|---|---|---|
+| **program** | a Stan file in a file store (§14.1), plus what it `#include`s | the configuration names it (`program_store`, `program`); a fit snapshots it |
+| **interface** | what the program declares: its `data` variables, and the shapes of its parameters and generated quantities | parsed on demand; a fit records it |
+| **related dataset** | a named `Dataset` over another table, beside the main one | `_fd_models.related` |
+| **dimension** | an ordered set of labelled positions `1..n` | derived when data is bound; its **coordinates** are stored on the instance |
+| **binding** | the rule that computes one `data` variable | the configuration's `bindings` |
+| **draws** | every chain × iteration × element of every output variable | `_fd_model_draws`, and optionally the raw run in a file store |
+
+**Where it lives.** `sc-model` holds everything that is not Stan-specific: related datasets and
+order, `Outcome::Posterior`, the seam, **the binder**, `_fd_model_draws` and its reader, and the
+posterior summary and diagnostics. All of it is pure Rust over frames. The binder sits in the
+host for the reason metrics do: a second Bayesian provider (PyMC in a module, one day) should
+declare an interface and receive bound data, not reimplement "a foreign key becomes a 1-based
+index". `sc-stan` (layer 6, beside `sc-model` and above it) holds the Stan half. That is
+discovery, the declaration parser and `stanc`, the compile cache, the runner, the CmdStan CSV
+reader, the raw run directory, and `StanProvider`. Rust drives CmdStan directly rather than
+through a Python module over `cmdstanpy`, for three reasons. The binder must read several
+datasets through `DatasetSource`, which a module cannot. CmdStan's interface is a command line,
+a JSON file and CSV files. And a subprocess can be killed, which is what makes cancel and a
+timeout possible. There is no Cargo feature: nothing is linked, so the provider is always
+registered and says "CmdStan was not found — …" on the picker when it wasn't.
+
+**The seam.** A posterior provider declares `OutcomeSpec::Posterior`, `binds_data` and
+`cancellable`, and implements the posterior half of `ModelProvider`, all with defaults that
+refuse or do nothing:
+
+```rust
+async fn interface(&self, cfg: &Attrs) -> Result<Option<Interface>>;
+async fn fit_posterior(&self, input: &PosteriorInput, cfg: &Attrs, ctx: &FitContext<'_>)
+    -> Result<PosteriorResult>;                        // { state, draws: Vec<DrawSeries>, run, … }
+fn draw_plan(&self, cfg: &Attrs) -> Result<Option<DrawPlan>>;   // sized before sampling
+async fn run_files(&self, state: &Json) -> Result<Option<Vec<(String, Vec<u8>)>>>;
+async fn program_changed(&self, cfg: &Attrs, state: &Json) -> Option<bool>;
+async fn discard(&self, state: &Json) -> Result<()>;  // on instance and model deletion
+```
+
+`run_fit` branches on the outcome. For a posterior it materialises the main dataset and each
+related one, each under `--model-max-rows`. It binds them against the interface, checks the
+planned size of the draws, and calls `fit_posterior` with a `FitContext` carrying a progress
+sink, the cancel flag and the node's `PosteriorLimits`. Then it summarises the draws and saves
+the instance with its draws in one transaction. A posterior has no split and no hyperparameter
+grid: the sampler's settings are configuration, and a model with a hyperparameter list over a
+posterior is refused, as one over a hypothesis test is.
+
+**The interface: parsed by us, checked by `stanc`.** Binding needs each `data` variable's
+element type, container and **size expressions**. For `array[N] int<lower=1, upper=J> county`
+that is int, rank 1, size `N`, values in `1..J`. `stanc --info` gives names and ranks but not
+the expressions, so `sc-stan` has its own narrow parser. It handles comments, strings and
+`#include` (resolved inside the store, relative to the including file; `..` out of the store is
+refused). It splits the seven blocks by brace matching and reads the top-level declarations of
+the modern type grammar. Sizes become a tiny integer expression tree (`+ - * %/% %`, literals,
+identifiers); anything else stays text and simply isn't evaluable. Shapes are outer-to-inner, so
+`array[N] vector[K]` and `matrix[N, K]` are both `[N, K]`, which is also how CmdStan's JSON
+nests them. **`stanc` is the authority**: saving a model and "Check program" run it (about a
+second, no C++), show its diagnostics with paths mapped back to the store, and compare `--info`
+with our parse. Without CmdStan the model saves on our parse, with a notice that it hasn't been
+checked.
+
+**Datasets and order.** `Model::related` is a list of `NamedDataset { name, dataset, label }`.
+The main dataset is `main` in bindings; `label` is a formula naming a row on the screen (the
+primary key by default). `Dataset::order` goes into the `ORDER BY`, **always followed by the
+primary key**. Order matters beyond time series: MCMC with the same seed over the same rows in a
+different order gives different draws, so a total order is what makes a run reproducible from
+its snapshot. Other providers ignore it.
+
+**Dimensions and coordinates.** A Stan index is a position; a database has keys. A dimension
+maps between them, and every label, write-back and hierarchical model goes through it:
+
+- **rows** of a dataset: every dataset is one, under its own name, with each row's key and
+  label. A group's positions come from **its own table**, not from the observations, so a
+  county with no homes still gets a parameter. That is partial pooling's point, and a numbering
+  built from the distinct keys in `homes` would drop exactly the counties it says most about.
+- **values** of a column: the distinct non-null values, sorted by a defined order (numbers
+  numerically, text by code point, `false < true`) that cannot change with the server's locale.
+- **time grid** over a date column: steps of N minutes to years (months and years by the
+  calendar), from a start to an end, plus a `horizon`. It exposes two dimensions, `day` and
+  `day.future`, so a forecast declared `vector[H] y_future` comes back labelled with its dates.
+  UTC.
+
+Positions are the instance's private business. Each instance stores its own `Coordinates`,
+and the draws API, the summary, the write-back and the code API all answer by key and label. A
+county inserted between two fits may renumber every one after it, and nothing outside an
+instance ever sees `alpha.37`.
+
+**The binder.** The configuration's `bindings` gives each `data` variable exactly one binding,
+so the form is one row per declared variable and each variable's provenance is one line. The
+core kinds are `value`, `count`, `size`, `column`, `columns`, `design` (through `encode`, so a
+model matrix's columns have names), `width`, `index` (with `match` for a code rather than a
+key), `present`/`absent` and their counts and values, and `segment_start`/`segment_size`. Time
+and space add `series`, `cells` (and their `_present` masks, with aggregation into a step),
+the edge kinds over a junction table (`edge_count`, `edge_from`, `edge_to`, `adjacency`,
+`components`, `component`), `icar_scale` (BYM2's scaling factor, by `nalgebra`'s symmetric
+eigendecomposition per connected component, capped at 5 000 regions), `points` and
+`distances`. Every column is an `sc-expr` formula, so reaching across a key is the dataset
+language's job and the binder never learns a second way. The one join formulas cannot express,
+on a time bucket, is what a grid does.
+
+The binder checks twice. **At save** it checks structure only: every variable has a binding,
+every binding names a declared variable, the kind can produce that element type and rank, and
+the datasets, columns and dimensions exist. **At preview and fit** it checks the data:
+
+- every size expression that evaluates against the bound value's shape ("`y` is declared
+  `vector[N]` with `N` = 919, but its binding has 85 values"), which is the error CmdStan would
+  otherwise give after a minute of compiling;
+- element types and declared bounds, so a zero-based index fails `lower=1` here;
+- each dataset's `nulls` and `unknown` policies (`refuse`, the default, or `drop`, counted);
+- datasets resolved in dependency order, so a dropped county is an unknown key to `homes`;
+- the total size against `--stan-max-data-values`.
+
+Each failure is a sentence naming the variable, its declaration and its binding. What comes out
+is `BoundData { json, coordinates, report }`: CmdStan's JSON (`"NaN"`/`"Inf"`, row-major
+nesting), the coordinates, and the report the preview shows. `previewModelData` binds what binds
+and puts each variable's error on its row. `suggestBindings` fills empty rows from names,
+foreign keys into a related dataset's table, and the size expressions.
+
+**Compiling and running** (`sc-stan`). A compiled program is cached by the SHA-256 of the
+program and its includes, the CmdStan version and the fixed compile options, under
+`--stan-cache-dir`. A miss runs `make` on a copy with the includes laid out beside it, **one
+compile at a time per node**, because a Stan compile is a C++ compile. There is never an
+admin-supplied `CXXFLAGS` or `--allow-undefined`, so a program cannot reach C++. Each chain is
+its own process (`sample`, or `optimize` or `pathfinder` through the same runner), with
+`sig_figs=9`. Chains draw from one node-wide **process budget** (`--stan-max-processes`); a fit
+waiting for it says `queued`. Progress lines are parsed into stage and per-chain iteration and
+written to the instance at most once a second. That write also reads back `cancel_requested`,
+so a cancel works from any node, because the row is still the registry. `max_runtime_minutes`
+bounds a fit. Children get a scrubbed environment, `kill_on_drop` and `PR_SET_PDEATHSIG`; boot
+clears stale scratch and half-built compiles. Every failure is a sentence: `stanc`'s error with
+its store path, "Rejecting initial value" with what to try, or a chain's last 40 lines.
+
+**Draws.** Radon is 4 chains × 1 000 draws × about 1 100 elements, 4.4 million numbers: too
+many for the instance's JSON, not too many for a table. `_fd_model_draws` is `id`, `instance`,
+`variable`, `element` (the 1-based index array, from CmdStan's **column names**, because CmdStan
+writes matrices column-major), `chain`, `warmup` and `draws` (a JSON array). There is one row
+per element per chain, indexed on `(instance, variable)`. The rows are written in batched
+`INSERT`s inside the transaction that marks the instance `fitted`, so a fitted instance has all
+its draws and a failed one has none, and they are deleted in the one that deletes it. `lp__` and
+the sampler columns are variables like any other, so diagnostics can be recomputed from the
+table. A row per draw would be millions of rows; a row per variable would make a large `y_rep`
+one value read whole to plot one element. JSON rather than `bytea`, for `state`'s reason.
+Before sampling, the expected size is computed from the interface and the bound sizes. A run
+over `--stan-max-draws-bytes` is refused, suggesting `thin`, `exclude_variables` or
+`keep_draws: false`; a size that only sampling reveals drops the draws with a warning instead.
+
+The instance's `state` stays small: the program snapshot and hashes, the seed, the CmdStan
+version, the compile key and the run's location. With a `runs_store`, CmdStan's own output is
+published to `<runs_dir>/<model>/<instance>/` once the draws are loaded: the program, the data,
+the coordinates, the arguments, gzipped chain CSVs and logs. A git store gets a `.gitignore` of
+`*` there. That directory is what **Download run** zips for `cmdstanpy.from_csv`. Without one,
+the download is per-chain CSVs rebuilt from the table.
+
+**What the host computes.** For each element: mean, sd, MCSE, the 5/50/95 % quantiles,
+rank-normalised split-R̂, and bulk- and tail-ESS (Vehtari et al., 2021, with an in-crate FFT).
+They are checked against CmdStan's `stansummary`. The summary is stored as one
+`ParameterBlock::Table` per variable, **label columns first**. An axis is labelled when its size
+expression is a bare identifier bound by `size`, `count` or `width` (or overridden in
+`labels`). Generated quantities larger than `--stan-summary-max-elements` are summarised on
+demand. `Metrics::Posterior` holds the sampler diagnostics: divergences, tree-depth hits,
+E-BFMI per chain, the worst R̂, the smallest ESS, and wall time. Warnings are derived from them
+with the published thresholds and stored as sentences that say what to do. A fit with warnings
+is still `fitted`, because a posterior isn't wrong for being hard. `optimize` and `pathfinder`
+get `Metrics::PosteriorMode` and `Metrics::PosteriorApproximation`.
+
+**Reading and writing back.** `getModelDraws` answers one variable, selected by key or label,
+chain, warmup and `thin`, under `--stan-max-draws-response`. `getPosteriorSummary` covers any
+variable, stored or not, and `downloadModelRun` is described above. The admin's
+`writePosterior` and a code body's `m.writePosterior(…)` are one function,
+`sc_api::models::write_posterior`, and write statistics through the row layer, so the target
+table's triggers fire. In **update** mode (the default) that is into the table of the rows
+dimension a one-axis variable is labelled by, matched by key (`alpha` into
+`counties.alpha_mean`). In **insert** mode it is one new row per element into any table, with its
+coordinates (a key, a label, a grid step's date). A midnight instant goes into a `date` field as
+its day. "Refit and write back nightly" is a workflow: `fit_model` with `activate: if_clean`,
+then a `run_js_code` step that calls `models.get("Radon")` and `m.writePosterior(…)`. Code reads
+the draws as `m.draws`, `m.summary` and `m.variables` on the same handle (above).
+
+**What was left out, and why.** Prediction for new rows from a posterior (CmdStan's standalone
+generated quantities over a `new` pseudo-dataset) is **carried past** this design. A posterior
+declares no prediction, so `predict("Radon")` in a formula is refused when it is saved, and
+`m.predict` on its handle throws a sentence pointing at `m.draws`. When it is picked up, it
+arrives as those two accepting a posterior, not as an action. A forecast needs none of it: a time grid's horizon is a generated quantity of
+the fit itself. LOO/WAIC, a formula front end generating Stan, Bayesian providers from modules,
+and adjacency from geometry are later work. A fit still doesn't survive a restart; the chains
+die with the server. The admin-facing walk-through is `docs/tutorial-stan.md`; operating it
+(installing CmdStan, the flags, the cache, the size of the draws) is `OPERATIONS.md` §9.
 
 ---
 
@@ -7437,6 +8026,14 @@ stays op-less and does no I/O. A call that cannot be hoisted (inside a lambda, o
 formula's own computation) is refused on save naming the call, and an **ownership** formula
 refuses module functions outright: `Err` is deny, so a rule calling a geocoder would turn a
 third party's outage into "nobody may read anything".
+
+**`predict("…")` is hoisted beside them** (§14.2). It is a built-in rather than a module's
+function, and it is collected into `Analysis::model_calls` rather than `module_calls`, but it
+follows every rule above. It is keyed by the same `hoisted_call_key` text, resolved by the same
+`prefetch_bindings` through the catalog's `ModelHost` rather than its module functions, and
+refused in the same places for the same reasons. A module function called `predict` is still
+reachable from code as `modfn("…").predict`. In a non-stored calculated field either kind of
+call makes the field one computed after the read (§6.2).
 
 **Installing changes a running server.** The registry the dispatcher runs from is rebuilt from
 the built-ins plus every loaded module and swapped in whole

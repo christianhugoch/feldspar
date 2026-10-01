@@ -117,6 +117,23 @@ export function selectionSummary(entries: FileEntry[], selected: string[]): stri
   return `${count} items selected`;
 }
 
+/** What "Copy relative path" puts on the clipboard: each entry's store-relative
+ * path, separated by a space.
+ *
+ * Space-separated is what pastes into a shell command line, so a path that a
+ * shell would split or expand — one with a space in it, say — is single-quoted,
+ * or two files would paste as three. A plain path is left bare, which is every
+ * path there is in the usual case, and a lone path copies as exactly itself. */
+export function copyablePaths(entries: FileEntry[]): string {
+  if (entries.length === 1) return entries[0].path;
+  return entries.map((e) => shellQuote(e.path)).join(" ");
+}
+
+function shellQuote(path: string): string {
+  if (/^[A-Za-z0-9._\-/+@%:,=]+$/.test(path)) return path;
+  return `'${path.replace(/'/g, `'\\''`)}'`;
+}
+
 /** `selected` in the listing's order, without duplicates. */
 function inOrder(order: string[], selected: string[]): string[] {
   return order.filter((path) => selected.includes(path));

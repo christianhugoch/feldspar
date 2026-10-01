@@ -330,6 +330,76 @@ async fn a_delete_trigger_carries_the_row_as_it_was() -> sc_error::Result<()> {
     Ok(())
 }
 
+/// "Delete all rows" on the table page: one request empties the table, says how
+/// many rows went, and still raises a delete event for each of them — a trigger
+/// watching deletes is watching these too. A table nothing watches is emptied
+/// the same way, and rows another table's key still points at are refused.
+#[tokio::test]
+async fn deleting_all_rows_empties_the_table_and_fires_each_delete() -> sc_error::Result<()> {
+    let mut server = setup().await?;
+    server
+        .add_trigger(audit_action(
+            Trigger::new("audit_delete", EventKind::Delete, "insert_row").on("books"),
+            json!({ "what": "\"delete\"", "title": "row.title" }),
+        ))
+        .await?;
+    for title in ["Dune", "Emma", "Ulysses"] {
+        let (status, body) = server
+            .client
+            .send(
+                "POST",
+                "/api/tables/books/rows",
+                Some(json!({ "title": title, "author": 1 })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+
+    // The authors are still referenced by the books, so the database refuses,
+    // and nothing is deleted.
+    let (status, body) = server
+        .client
+        .send("DELETE", "/api/tables/authors/rows", None)
+        .await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert_eq!(server.client.rows("authors").await.len(), 2);
+
+    let (status, body) = server
+        .client
+        .send("DELETE", "/api/tables/books/rows", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "deleted": 3 }));
+    assert!(server.client.rows("books").await.is_empty());
+    let mut titles: Vec<String> = server
+        .client
+        .rows("audit")
+        .await
+        .iter()
+        .map(|r| r["title"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    titles.sort();
+    assert_eq!(titles, ["Dune", "Emma", "Ulysses"], "one event per row");
+
+    // Nothing watches `authors`, and with the books gone it empties too.
+    let (status, body) = server
+        .client
+        .send("DELETE", "/api/tables/authors/rows", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "deleted": 2 }));
+    assert!(server.client.rows("authors").await.is_empty());
+
+    // An empty table is emptied again without complaint.
+    let (status, body) = server
+        .client
+        .send("DELETE", "/api/tables/authors/rows", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "deleted": 0 }));
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_only_if_decides_whether_the_action_runs() -> sc_error::Result<()> {
     let mut server = setup().await?;

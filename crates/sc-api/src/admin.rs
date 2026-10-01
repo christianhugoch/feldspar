@@ -610,6 +610,25 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // Empty the table: every row, in one statement, keeping the table, its
+    // fields and its settings. The table page's "Delete all rows". Answers how
+    // many rows went, which is the one thing the admin cannot see afterwards.
+    set.register(
+        Endpoint::new(
+            "deleteAllRows",
+            Method::Delete,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("rows"),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::int(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- rows in bulk, as CSV ----------------------------------------------
     //
     // The document crosses as a **string** in a JSON envelope rather than as a
@@ -1684,6 +1703,26 @@ pub fn admin_endpoints() -> EndpointSet {
             // that just changed a schema has to read to fix what it broke.
             .is_a_build(),
         )
+        .auth(AuthRequirement::admin()),
+    );
+
+    // **Deep clean**: delete an application's installed dependencies (a `react`
+    // app's `node_modules`) and build it again, which installs them from
+    // scratch. For the tree a plain build cannot fix — an interrupted install,
+    // a corrupted cache, dependencies changed by hand. The result is a build's,
+    // because that is what it ends in; a framework that installs nothing is
+    // refused. Not an MCP tool: it is slow, and it is the admin's remedy for a
+    // broken machine rather than a step in building an application.
+    set.register(
+        Endpoint::new(
+            "deepCleanApplication",
+            Method::Post,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("deep-clean"),
+        )
+        .output(build_result_schema())
         .auth(AuthRequirement::admin()),
     );
 
@@ -2823,7 +2862,9 @@ pub fn admin_endpoints() -> EndpointSet {
              append-only, so nothing is overwritten and a run already suspended \
              on an earlier version still loads that one. Send the whole program \
              in the shape `getWorkflow` returns it, with a description saying \
-                 what changed.",
+                 what changed. A `run_js_code` step's code is JavaScript against \
+                 this server's own `db` API — call `describe_code_api` before \
+                 writing one.",
             )
             .in_area(Area::Triggers)
             // A workflow is an existing trigger's body — version 1 is created
@@ -3078,8 +3119,10 @@ pub fn admin_endpoints() -> EndpointSet {
     // times out halfway through while the work carries on invisibly. The screen
     // polls `getModelInstance`.
     //
-    // There is no cancel, and the row cap is the bound that exists instead:
-    // stopping a fit means stopping a `smartcore` or a Python call mid-flight.
+    // A fit of a provider that can stop one (a posterior's chains are
+    // processes) is cancelled with `cancelModelFit`; for the others the row cap
+    // is the bound that exists instead, since stopping a `smartcore` or a
+    // Python call mid-flight is not something the host can do.
     set.register(
         Endpoint::new(
             "fitModel",
@@ -3134,8 +3177,8 @@ pub fn admin_endpoints() -> EndpointSet {
     );
 
     // At most one instance per model is **active**, and that is what lets a
-    // trigger name a model rather than a fit: the admin refits, activates the
-    // new instance, and every `predict_row` action follows without being edited.
+    // formula name a model rather than a fit: the admin refits, activates the
+    // new instance, and every `predict("…")` follows without being edited.
     // Activating one deactivates whichever was.
     set.register(
         Endpoint::new(
@@ -3180,6 +3223,228 @@ pub fn admin_endpoints() -> EndpointSet {
                 StructField::new("predictions", TypeSchema::array(prediction_schema())),
             ]))
             .auth(AuthRequirement::admin()),
+    );
+
+    // --- posteriors ----------------------------------------------------------
+    // What a Bayesian model needs beyond the model screens' endpoints (Stan TODO
+    // §§5, 13, 16, 18). None of them names Stan: a provider that binds data is
+    // one that declares an interface, and a posterior is read, summarised and
+    // written back by the host whichever provider sampled it. The two that are
+    // about a *program* — checking one and compiling one — are the Stan
+    // provider's, because a program is what only it has.
+
+    // Check a program without saving anything: what it declares, and `stanc`'s
+    // warnings — or the sentence saying it was not checked, when this server
+    // has no CmdStan (§5). A program `stanc` refuses is answered with its
+    // diagnostics in `error` rather than as a failed request, because the
+    // "Check program" button exists to show them.
+    set.register(
+        Endpoint::new(
+            "getProgramInterface",
+            Method::Get,
+            api().lit("model-programs"),
+        )
+        .query([
+            QueryParam::new("store", ValueType::Text),
+            QueryParam::new("path", ValueType::Text),
+        ])
+        .output(TypeSchema::struct_of([
+            StructField::new("interface", TypeSchema::optional(TypeSchema::json())),
+            StructField::new("warnings", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("notice", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("error", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // **Preview data** (§18): the model as the form holds it, bound as far as it
+    // binds — each data variable's shape and first values, or its error, on its
+    // own row. A `POST` of the whole model for `previewDataset`'s reason: it
+    // need not be saved, and usually is not yet.
+    set.register(
+        Endpoint::new(
+            "previewModelData",
+            Method::Post,
+            api().lit("model-data").lit("preview"),
+        )
+        .input(model_input_schema())
+        .output(TypeSchema::struct_of([
+            StructField::new("variables", TypeSchema::array(TypeSchema::json())),
+            // The datasets read and bound, the dimensions' sizes, the drops and
+            // the warnings of what did bind; null when a sentence about no one
+            // variable stopped it, which is then in `errors`.
+            StructField::new("report", TypeSchema::optional(TypeSchema::json())),
+            StructField::new("errors", TypeSchema::array(TypeSchema::text())),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // **Bind automatically** (§18): a binding for each data variable the model
+    // leaves unbound that the names, the foreign keys and the size expressions
+    // say something about, and why. Nothing bound is replaced; the form fills
+    // only its empty rows.
+    set.register(
+        Endpoint::new(
+            "suggestBindings",
+            Method::Post,
+            api().lit("model-bindings").lit("suggest"),
+        )
+        .input(model_input_schema())
+        .output(TypeSchema::struct_of([
+            StructField::new("bindings", TypeSchema::json()),
+            StructField::new("reasons", TypeSchema::json()),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Warm the compile cache without fitting (§13). It waits for the compile —
+    // a minute the first time, nothing after — and answers the cache key, so a
+    // compile error is shown where the button was pressed.
+    set.register(
+        Endpoint::new(
+            "compileModel",
+            Method::Post,
+            api()
+                .lit("models")
+                .param("id", ValueType::Uuid)
+                .lit("compile"),
+        )
+        .output(TypeSchema::struct_of([
+            StructField::new("key", TypeSchema::text()),
+            StructField::new("cached", TypeSchema::bool()),
+            StructField::new("cmdstan", TypeSchema::text()),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Ask a running fit to stop (§13). It sets `cancel_requested` on the row,
+    // which the job reads back within a second — so it works from any node,
+    // because the row is the registry. Refused by name for a provider whose
+    // fit cannot be stopped, and for a fit that has already finished.
+    set.register(
+        Endpoint::new(
+            "cancelModelFit",
+            Method::Post,
+            api()
+                .lit("model-instances")
+                .param("id", ValueType::Uuid)
+                .lit("cancel"),
+        )
+        .output(model_instance_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // One variable's draws, columnar and labelled (§16): per chain, one array
+    // per selected element. `elements` is JSON — index arrays, or per axis the
+    // keys or labels wanted (`{"counties":["27001"]}`); `chains` is a
+    // comma-separated list. An answer of more than `--stan-max-draws-response`
+    // numbers is refused with the arithmetic, which `thin` is for.
+    set.register(
+        Endpoint::new(
+            "getModelDraws",
+            Method::Get,
+            api()
+                .lit("model-instances")
+                .param("id", ValueType::Uuid)
+                .lit("draws"),
+        )
+        .query([
+            QueryParam::new("variable", ValueType::Text),
+            QueryParam::new("elements", ValueType::Text),
+            QueryParam::new("chains", ValueType::Text),
+            QueryParam::new("warmup", ValueType::Bool),
+            QueryParam::new("thin", ValueType::Int),
+        ])
+        .output(TypeSchema::struct_of([
+            StructField::new("variable", TypeSchema::text()),
+            StructField::new("dims", TypeSchema::array(TypeSchema::int())),
+            StructField::new("axes", TypeSchema::array(TypeSchema::text())),
+            StructField::new("labels", TypeSchema::array(TypeSchema::json())),
+            StructField::new("keys", TypeSchema::array(TypeSchema::json())),
+            StructField::new("elements", TypeSchema::array(TypeSchema::json())),
+            StructField::new("names", TypeSchema::array(TypeSchema::text())),
+            StructField::new("thin", TypeSchema::int()),
+            StructField::new("chains", TypeSchema::array(TypeSchema::json())),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // The §15 summary of any variable, computed now from its stored draws —
+    // including one too large for the fit to have stored a table of. When the
+    // draws were not kept, the stored table answers (`source: "stored"`).
+    set.register(
+        Endpoint::new(
+            "getPosteriorSummary",
+            Method::Get,
+            api()
+                .lit("model-instances")
+                .param("id", ValueType::Uuid)
+                .lit("summary"),
+        )
+        .query([
+            QueryParam::new("variable", ValueType::Text),
+            QueryParam::new("elements", ValueType::Text),
+        ])
+        .output(TypeSchema::struct_of([
+            StructField::new("variable", TypeSchema::text()),
+            StructField::new("source", TypeSchema::text()),
+            StructField::new("columns", TypeSchema::array(TypeSchema::text())),
+            StructField::new("elements", TypeSchema::array(TypeSchema::json())),
+            StructField::new("names", TypeSchema::array(TypeSchema::text())),
+            StructField::new("keys", TypeSchema::array(TypeSchema::json())),
+            StructField::new("rows", TypeSchema::array(TypeSchema::json())),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // The run as a zip (§16): the raw CmdStan run directory when the model
+    // keeps one in a file store, else per-chain draws CSVs built from the table
+    // with `coordinates.json`. The response **is** the file — the endpoint model
+    // has no bytes shape, so the declared output is empty and the admin UI
+    // links to the path rather than calling the client.
+    set.register(
+        Endpoint::new(
+            "downloadModelRun",
+            Method::Get,
+            api()
+                .lit("model-instances")
+                .param("id", ValueType::Uuid)
+                .lit("run"),
+        )
+        .output(TypeSchema::json())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Write one variable's summary into rows (§16), through the row layer:
+    // `update` into the rows of the table its one axis is about, matched by
+    // key; `insert`, one row per element into `table`. The same write-back a
+    // code body's model handle makes (`sc_api::models::write_posterior`).
+    set.register(
+        Endpoint::new(
+            "writePosterior",
+            Method::Post,
+            api()
+                .lit("model-instances")
+                .param("id", ValueType::Uuid)
+                .lit("posterior-writes"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("variable", TypeSchema::text()),
+            StructField::new("mode", TypeSchema::text()),
+            StructField::new("statistics", TypeSchema::json()),
+            StructField::new("table", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("coordinates", TypeSchema::optional(TypeSchema::json())),
+            StructField::new("instance_field", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("elements", TypeSchema::optional(TypeSchema::json())),
+        ]))
+        .output(TypeSchema::struct_of([
+            StructField::new("variable", TypeSchema::text()),
+            StructField::new("mode", TypeSchema::text()),
+            StructField::new("table", TypeSchema::text()),
+            StructField::new("instance", TypeSchema::text()),
+            StructField::new("written", TypeSchema::int()),
+        ]))
+        .auth(AuthRequirement::admin()),
     );
 
     // --- streams ------------------------------------------------------------
@@ -3854,14 +4119,19 @@ fn create_constraint_schema() -> TypeSchema {
 }
 
 /// The body accepted when **editing** a field — the overlay-only subset, plus
-/// the one column property that must be reachable after the fact. No `name`,
-/// `required`, `unique` or storage type: those are the database's, and changing
-/// them is a schema change out of scope for this milestone.
+/// the two column properties that must be reachable after the fact. No `name`,
+/// `unique` or storage type: those are the database's, and changing them is a
+/// schema change out of scope for this milestone.
 ///
-/// `primary_key` is the exception, and a considered one: since no table is
+/// `primary_key` is one exception, and a considered one: since no table is
 /// created with a key it did not declare, a table that has none — imported from
 /// a CSV with no key column, or built a field at a time — could otherwise only
 /// get one by being dropped and recreated with its rows thrown away.
+///
+/// `required` is the other: whether a field may be left empty is a rule about
+/// the data that changes as an application does. Making one required is refused
+/// while a row has no value in it; a key field is required whatever this says.
+/// Both are **omitted means leave it**, unlike the rest of this body.
 fn field_settings_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("type", TypeSchema::optional(TypeSchema::text())),
@@ -3870,6 +4140,7 @@ fn field_settings_schema() -> TypeSchema {
         StructField::new("label", TypeSchema::optional(TypeSchema::text())),
         StructField::new("description", TypeSchema::optional(TypeSchema::text())),
         StructField::new("primary_key", TypeSchema::optional(TypeSchema::bool())),
+        StructField::new("required", TypeSchema::optional(TypeSchema::bool())),
     ])
 }
 
@@ -4346,6 +4617,10 @@ fn run_summary_schema() -> TypeSchema {
         // and a stuck run alike, and this is what tells them apart. Null while
         // running and for a workflow run.
         StructField::new("conclusion", TypeSchema::optional(TypeSchema::json())),
+        // The run that delegated this one — set on a subagent's run, null on a
+        // run somebody started. The chat history lists only the latter: a
+        // child's transcript is read nested inside its parent's.
+        StructField::new("parent_run", TypeSchema::optional(TypeSchema::uuid())),
     ])
 }
 
@@ -4727,6 +5002,9 @@ fn application_schema() -> TypeSchema {
     // its deployment, so the list offers no Build button and shows no
     // "not built yet" state.
     fields.push(StructField::new("builds", TypeSchema::bool()));
+    // Whether the build installs the project's dependencies itself (a `react`
+    // app's `npm install`), so the list offers Deep clean.
+    fields.push(StructField::new("installs", TypeSchema::bool()));
     // Whether the application's source is views and pages (Saltcorn UI), so
     // the screen offers the Views and Pages tabs.
     fields.push(StructField::new("has_views", TypeSchema::bool()));
@@ -5290,8 +5568,9 @@ fn api_provider_info_schema() -> TypeSchema {
     ])
 }
 
-/// The body `describeCustomQuery` takes: one custom SQL query as the editor
-/// holds it, plus the tables the application it belongs to declares.
+/// The body `describeCustomQuery` takes: one custom query as the editor holds
+/// it, plus the tables the application it belongs to declares. `language` is
+/// `sql` when absent; `code` is the source in whichever language it names.
 ///
 /// It is the stored [`CustomQuery`](crate::CustomQuery) shape rather than "just
 /// the SQL and the parameters" so that the *whole* refusal an eventual save
@@ -5307,7 +5586,8 @@ fn custom_query_input_schema() -> TypeSchema {
         StructField::new("description", TypeSchema::optional(TypeSchema::text())),
         StructField::new("method", TypeSchema::text()),
         StructField::new("path", TypeSchema::text()),
-        StructField::new("sql", TypeSchema::text()),
+        StructField::new("language", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("code", TypeSchema::text()),
         StructField::new(
             "params",
             TypeSchema::array(TypeSchema::struct_of([
@@ -5404,6 +5684,15 @@ fn model_provider_schema() -> TypeSchema {
         // them over — a k-means says yes, a regression says no because a
         // coefficient in the data's own units is what somebody reads it for.
         StructField::new("standardise", TypeSchema::bool()),
+        // Whether it takes a program's data bound from the datasets — what the
+        // form renders the binding editor for (Stan TODO §18).
+        StructField::new("binds_data", TypeSchema::bool()),
+        // Whether a running fit can be cancelled — what the instance screen
+        // renders Cancel for.
+        StructField::new("cancellable", TypeSchema::bool()),
+        // Why it cannot fit anything on this server, when it cannot: "CmdStan
+        // was not found: …". Listed rather than hidden (Stan TODO §4).
+        StructField::new("unavailable", TypeSchema::optional(TypeSchema::text())),
     ])
 }
 
@@ -5437,6 +5726,9 @@ fn model_schema() -> TypeSchema {
         StructField::new("provider", TypeSchema::text()),
         StructField::new("table_name", TypeSchema::text()),
         StructField::new("dataset", TypeSchema::json()),
+        // The datasets beside the main one, each under the name bindings
+        // address it by (Stan TODO §7); `[]` for every model that has none.
+        StructField::new("related", TypeSchema::json()),
         StructField::new("configuration", TypeSchema::json()),
         StructField::new("hyperparameters", TypeSchema::json()),
         StructField::new("split", TypeSchema::json()),
@@ -5448,6 +5740,10 @@ fn model_schema() -> TypeSchema {
             "active_instance",
             TypeSchema::optional(model_instance_schema()),
         ),
+        // On `saveModel`'s answer for a program provider: `stanc`'s warnings,
+        // or the notice that the program was not checked (Stan TODO §5). Null
+        // everywhere else.
+        StructField::new("program_check", TypeSchema::optional(TypeSchema::json())),
     ])
 }
 
@@ -5459,6 +5755,7 @@ fn model_input_schema() -> TypeSchema {
         StructField::new("description", TypeSchema::optional(TypeSchema::text())),
         StructField::new("provider", TypeSchema::text()),
         StructField::new("dataset", TypeSchema::json()),
+        StructField::new("related", TypeSchema::optional(TypeSchema::json())),
         StructField::new("configuration", TypeSchema::optional(TypeSchema::json())),
         // Per hyperparameter either a value or a **list** of values, and a fit
         // runs the grid of the lists (§11). One field rather than two, because a
@@ -5490,6 +5787,14 @@ fn model_instance_schema() -> TypeSchema {
         StructField::new("outcome", TypeSchema::optional(TypeSchema::json())),
         StructField::new("metrics", TypeSchema::json()),
         StructField::new("rows", TypeSchema::optional(TypeSchema::json())),
+        // A running posterior fit's stage and per-chain iterations, written at
+        // most once a second (Stan TODO §13); null otherwise.
+        StructField::new("progress", TypeSchema::optional(TypeSchema::json())),
+        // Whether somebody has asked this fit to stop.
+        StructField::new("cancel_requested", TypeSchema::bool()),
+        // A posterior's diagnostic warnings, as sentences that say what to do
+        // (§15); empty for every other fit.
+        StructField::new("warnings", TypeSchema::array(TypeSchema::text())),
     ])
 }
 
@@ -5517,6 +5822,17 @@ fn model_instance_detail_schema() -> TypeSchema {
                 // Every hyperparameter point tried and what it scored, so the
                 // search is inspectable and not a number that appeared (§11).
                 StructField::new("search", TypeSchema::array(TypeSchema::json())),
+                // A posterior's output variables: each one's shape and the
+                // dimension labelling each axis (Stan TODO §16) — what the
+                // draws and the summary endpoints are asked about.
+                StructField::new("variables", TypeSchema::json()),
+                // A posterior's binding report: rows read and bound, drops, a
+                // line per data variable.
+                StructField::new("binding", TypeSchema::optional(TypeSchema::json())),
+                // Whether the model's program differs now from the one this
+                // fit snapshotted (Stan TODO §§6, 18); null for a provider with
+                // no program, or when it cannot tell.
+                StructField::new("program_changed", TypeSchema::optional(TypeSchema::bool())),
             ])
             .collect(),
     )

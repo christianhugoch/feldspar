@@ -206,7 +206,8 @@ bundle.
 **The application's coding agent knows.** If you built this app with an agent (see
 [the agents tutorial](tutorial-agents.md)), its session header lists the mounts, and its
 `list_assets_*` tool returns each file with the URL the server actually answers — so "put the
-hero image on the landing page" does not need you to paste a URL into the chat.
+hero image on the landing page" does not need you to paste a URL into the chat. A model with vision can also look at one of them (`view_image_*` with that URL), so "use
+the darker of the two hero images" is something it can decide for itself.
 
 ## Notes
 

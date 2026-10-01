@@ -346,8 +346,7 @@ export class StoreGit {
    *
    * `staged_only` every time, because the view this client serves shows an index
    * — a Commit that swept up the rows the admin deliberately left in Changes
-   * would make the two groups a decoration rather than a decision. The admin
-   * screen, which has no index on display, sends the argument the other way.
+   * would make the two groups a decoration rather than a decision.
    */
   commit(message: string): Promise<GitOperationResult> {
     return this.run("commit", { message, staged_only: true });

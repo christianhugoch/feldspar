@@ -66,13 +66,6 @@ pub struct CreatedUser {
 /// constraint violation naming an index. A duplicate email violates the table's
 /// `UNIQUE` constraint and surfaces as a database error.
 pub async fn create_user_with(catalog: &Catalog, new: NewUser) -> Result<CreatedUser> {
-    let email = new.email.trim();
-    if email.is_empty() {
-        return Err(Error::invalid("email is required"));
-    }
-    crate::manage::require_role_exists(catalog, new.role).await?;
-    crate::manage::reject_system_columns(&new.extra)?;
-
     // A blank password is a request, not a mistake: an admin who does not want
     // to invent one gets a generated one back to hand over.
     let (password, generated) = match new.password.is_empty() {
@@ -82,23 +75,42 @@ pub async fn create_user_with(catalog: &Catalog, new: NewUser) -> Result<Created
         }
         false => (new.password.clone(), None),
     };
-
     // Hash before touching the database — argon2id is deliberately slow.
     let password_hash = hash_password(&password)?;
-    let id = Uuid::new_v4();
+    let user = insert_user(catalog, new, Some(password_hash)).await?;
+    Ok(CreatedUser {
+        user,
+        generated_password: generated,
+    })
+}
 
-    let mut columns = vec![
-        COL_ID.to_owned(),
-        COL_ROLE.to_owned(),
-        COL_EMAIL.to_owned(),
-        COL_PASSWORD_HASH.to_owned(),
-    ];
+/// Insert one user row, with `password_hash` or — for an invited account that
+/// will choose its own ([`create_invited_user`](crate::create_invited_user)) —
+/// with none. `new.password` is not read: the caller has already decided what
+/// the hash is.
+pub(crate) async fn insert_user(
+    catalog: &Catalog,
+    new: NewUser,
+    password_hash: Option<String>,
+) -> Result<User> {
+    let email = new.email.trim();
+    if email.is_empty() {
+        return Err(Error::invalid("email is required"));
+    }
+    crate::manage::require_role_exists(catalog, new.role).await?;
+    crate::manage::reject_system_columns(&new.extra)?;
+
+    let id = Uuid::new_v4();
+    let mut columns = vec![COL_ID.to_owned(), COL_ROLE.to_owned(), COL_EMAIL.to_owned()];
     let mut values = vec![
         Expr::lit(id),
         Expr::lit(i64::from(new.role)),
         Expr::lit(email),
-        Expr::lit(password_hash),
     ];
+    if let Some(password_hash) = password_hash {
+        columns.push(COL_PASSWORD_HASH.to_owned());
+        values.push(Expr::lit(password_hash));
+    }
     // Only when it was chosen: a `NULL` language is the ordinary state, and
     // writing an explicit one would be the same thing said louder.
     let language = new
@@ -131,10 +143,7 @@ pub async fn create_user_with(catalog: &Catalog, new: NewUser) -> Result<Created
             .insert(COL_LANGUAGE.to_owned(), Value::Text(language.to_owned()));
     }
     user.extra.extend(new.extra);
-    Ok(CreatedUser {
-        user,
-        generated_password: generated,
-    })
+    Ok(user)
 }
 
 /// Create a user with the given email, plaintext password, and role, returning

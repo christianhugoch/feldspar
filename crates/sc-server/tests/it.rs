@@ -37,6 +37,8 @@ mod app_builder_agent;
 mod app_file_access;
 #[path = "app_i18n.rs"]
 mod app_i18n;
+#[path = "app_invite.rs"]
+mod app_invite;
 #[path = "app_serving.rs"]
 mod app_serving;
 #[path = "app_signup.rs"]
@@ -51,6 +53,8 @@ mod app_trigger_api;
 mod backup_api;
 #[path = "builder_route.rs"]
 mod builder_route;
+#[path = "call_api.rs"]
+mod call_api;
 #[path = "code_body_tables.rs"]
 mod code_body_tables;
 #[path = "concurrent_code_bodies.rs"]
@@ -67,6 +71,8 @@ mod file_manager;
 mod file_operations_api;
 #[path = "file_store_admin_api.rs"]
 mod file_store_admin_api;
+#[path = "fit_model_action.rs"]
+mod fit_model_action;
 #[path = "generated_client_refresh.rs"]
 mod generated_client_refresh;
 #[path = "graphql_serving.rs"]
@@ -91,6 +97,14 @@ mod metadata_tables_api;
 mod model_admin_api;
 #[path = "model_dataset.rs"]
 mod model_dataset;
+#[path = "model_fit_job.rs"]
+mod model_fit_job;
+#[path = "model_formulas.rs"]
+mod model_formulas;
+#[path = "model_handle.rs"]
+mod model_handle;
+#[path = "models_without_actions.rs"]
+mod models_without_actions;
 #[path = "modules_api.rs"]
 mod modules_api;
 #[path = "other_events.rs"]
@@ -99,6 +113,8 @@ mod other_events;
 mod ownership_enforcement;
 #[path = "ownership_settings_api.rs"]
 mod ownership_settings_api;
+#[path = "posterior_api.rs"]
+mod posterior_api;
 #[path = "primary_key_api.rs"]
 mod primary_key_api;
 #[path = "provided_tables_api.rs"]
@@ -125,8 +141,12 @@ pub(crate) fn module_registries() -> &'static tokio::sync::RwLock<()> {
     LOCK.get_or_init(|| tokio::sync::RwLock::new(()))
 }
 
+#[path = "app_none_framework.rs"]
+mod app_none_framework;
 #[path = "app_preview.rs"]
 mod app_preview;
+#[path = "app_public_endpoints.rs"]
+mod app_public_endpoints;
 #[path = "saltcorn_ui_admin_api.rs"]
 mod saltcorn_ui_admin_api;
 #[path = "saltcorn_ui_configure.rs"]
@@ -141,6 +161,8 @@ mod saltcorn_ui_render;
 mod schema_edit_api;
 #[path = "settings_admin_api.rs"]
 mod settings_admin_api;
+#[path = "stan_models.rs"]
+mod stan_models;
 #[path = "stream_triggers.rs"]
 mod stream_triggers;
 #[path = "streams_admin_api.rs"]

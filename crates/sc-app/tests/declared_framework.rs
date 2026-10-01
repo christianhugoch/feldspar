@@ -197,7 +197,7 @@ fn a_declared_framework_joins_the_registry_the_admin_ui_reads() {
     let names: Vec<&str> = listed.iter().map(|f| f.name.as_str()).collect();
     // The built-ins keep their order and their place at the front: `react` is
     // the path an admin should take, and a module cannot displace that.
-    assert_eq!(names, ["react", "code", "vue"]);
+    assert_eq!(names, ["react", "code", "none", "vue"]);
     let vue = listed.iter().find(|f| f.name == "vue").unwrap();
     assert_eq!(vue.label, "Vue");
     assert!(vue.serves_ui);

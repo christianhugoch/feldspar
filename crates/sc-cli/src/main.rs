@@ -53,6 +53,7 @@ async fn run(args: &[String]) -> Result<()> {
         Some("auth") => auth_command(&args[1..]).await,
         Some("agent") => agent_command(&args[1..]).await,
         Some("i18n") => i18n_command(&args[1..]).await,
+        Some("cmdstan") => cmdstan_command(&args[1..]).await,
         Some(other) => Err(sc_error::Error::config(format!(
             "unknown command `{other}`"
         ))),
@@ -223,10 +224,29 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // is its row, so nothing survives a restart and an instance still saying
     // `fitting` at boot is one nothing will finish — it is failed by name here,
     // before anything can read it.
-    // It is also what carries the provider registry and the dataset seam into
-    // the action set below: `predict_row` needs both, so the models come up
-    // before the triggers do.
-    let models = sc_server::install_models(&catalog, config.model_max_rows).await?;
+    // It is also what carries the provider registry and the fits into the
+    // action set below: `fit_model` needs both, so the models come up before
+    // the triggers do.
+    let models =
+        sc_server::install_models_with(&catalog, config.model_max_rows, &config.stan).await?;
+    // Which CmdStan Stan models will use, and how many chains may run at once
+    // — or why there is none — said once, as the browser is (Stan TODO §20).
+    let stan = models.stan();
+    match stan.cmdstan() {
+        Some(cmdstan) => eprintln!(
+            "feldspar: Stan models will use CmdStan {} at {} ({}), up to {} chain \
+             process(es) at once, compiling into {}",
+            cmdstan.version,
+            cmdstan.dir.display(),
+            cmdstan.source,
+            stan.budget().processes(),
+            stan.compile_cache().dir().display()
+        ),
+        None => eprintln!(
+            "feldspar: Stan models are unavailable: {}",
+            stan.unavailable().unwrap_or("CmdStan was not found")
+        ),
+    }
 
     // Triggers: the built-in actions plus `run_agent`, the stored trigger set,
     // and the dispatcher installed into the catalog — after which a row write
@@ -431,6 +451,10 @@ fn serving_defaults(db: &DbConfig) -> Vec<String> {
     }
     if serving.browser_sandbox() == Some(false) {
         flags.push("--no-browser-sandbox".to_owned());
+    }
+    for (flag, value) in serving.stan_flags() {
+        flags.push(flag.to_owned());
+        flags.push(value);
     }
     flags
 }
@@ -1169,6 +1193,19 @@ async fn i18n_command(args: &[String]) -> Result<()> {
     }
 }
 
+/// `feldspar cmdstan status | install` (TODO "Bayesian models with Stan" §20).
+///
+/// No database: `status` reports what is on this machine, and `install` is a
+/// download and a build the operator asked for.
+async fn cmdstan_command(args: &[String]) -> Result<()> {
+    use sc_cli::cmdstan::{CmdStanArgs, install, status};
+
+    match CmdStanArgs::parse(args)? {
+        CmdStanArgs::Status { cmdstan } => status(cmdstan),
+        CmdStanArgs::Install { version, dir, jobs } => install(version, dir, jobs).await,
+    }
+}
+
 /// The trees a command reads: the bare paths when there are any, else the
 /// domains'.
 ///
@@ -1464,6 +1501,8 @@ fn print_usage() {
     );
     eprintln!("                          [database flags]");
     eprintln!("  feldspar auth token --app SUBDOMAIN (--email EMAIL | --admin | --role NAME)");
+    eprintln!("  feldspar cmdstan status [--cmdstan DIR]");
+    eprintln!("  feldspar cmdstan install [--version V] [--dir D] [--jobs J]");
     eprintln!("                      [--format playwright|netscape] [--out PATH] [--url ORIGIN]");
     eprintln!();
     eprintln!("  database (or the DATABASE_URL / PG* environment variables):");
@@ -1562,10 +1601,27 @@ fn print_usage() {
                              this server was built against, or the environment
                              is refused rather than segfaulted on"
     );
+    eprintln!(
+        "    --model-max-rows N       rows one model dataset may select (default 200000)
+    --cmdstan DIR            the CmdStan Stan models use (default: $CMDSTAN, else
+                             the newest ~/.cmdstan/cmdstan-*)
+    --stan-cache-dir DIR     where compiled Stan programs are kept (default: the
+                             platform's data directory, e.g.
+                             ~/.local/share/feldspar/stan-cache)
+    --stan-max-processes N   Stan chain processes at once, across every fit
+                             (default: half the CPUs, at least 1)
+    --stan-max-data-values N numbers one fit's bound data may hold (default 20000000)
+    --stan-max-draws-bytes N bytes of draws one fit may store (default 1000000000)
+    --stan-max-draws-response N
+                             numbers one draws response may carry (default 2000000)
+    --stan-summary-max-elements N
+                             a generated quantity larger than this is summarised
+                             on demand rather than at fit time (default 1000)"
+    );
     eprintln!();
     eprintln!(
-        "  a feldspar.toml environment may also carry `base_domain`, `extra_base_domains`,
-  `bind`, `secure_cookies`, `browser` and `browser_sandbox`, so `serve --environment NAME` needs none of those flags —
+        "  a feldspar.toml environment may also carry `base_domain`, `extra_base_domains`, `bind`,
+  `secure_cookies`, `browser`, `browser_sandbox`, `cmdstan` and the `stan_*` keys, so `serve --environment NAME` needs none of those flags —
   and so a build from the command line writes the same application URL into the
   generated documentation that the server would."
     );

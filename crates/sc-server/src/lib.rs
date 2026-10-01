@@ -37,7 +37,9 @@ mod mcp;
 mod models;
 mod modules;
 mod observe;
+mod posterior;
 mod reload;
+mod requests;
 mod router;
 mod security;
 mod serve;
@@ -136,10 +138,14 @@ pub use i18n::{LANG_COOKIE, LANG_QUERY};
 pub use logging::log_requests;
 pub use lsp::{LSP_ROUTE, MAX_LANGUAGE_SERVERS};
 pub use mcp::{MCP_PROTOCOL_VERSION, MCP_ROUTE, MCP_SERVER_NAME};
-pub use models::{CatalogDatasetSource, ModelServices, install_models};
+pub use models::{
+    CatalogDatasetSource, ModelServices, StanSettings, install_model_host, install_models,
+    install_models_with,
+};
 pub use modules::ModuleServices;
 pub use observe::STREAM_OBSERVE_ROUTE;
 pub use reload::{ReloadReport, reload_all, spawn_sighup_reload};
+pub use requests::{AppRequests, MAX_RESPONSE_BYTES, install_app_requests};
 pub use router::{
     BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, IDE_PREFIX, build_router, build_router_with_apps,
 };

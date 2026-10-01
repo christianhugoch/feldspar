@@ -319,8 +319,11 @@ fn a_popped_out_chat_has_its_window_and_its_rules() {
     // `.page:has(.chat-page)` puts the whole admin into the full-height chat
     // layout. A window is inside `.page` on every route, so it takes the shared
     // `.chat-surface` and leaves `.chat-page` to the screen that really is one.
+    // Whitespace-insensitive: the choice is a ternary that rustfmt's cousin,
+    // prettier, is free to wrap.
+    let flat = screen.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        screen.contains(r#"frame ? "chat-surface" : "chat-page chat-surface""#),
+        flat.contains(r#"const surfaceClass = frame ? "chat-surface" :"#),
         "a popped-out chat must not carry `.chat-page` — it would claim the viewport \
          on whatever screen it is floating over"
     );

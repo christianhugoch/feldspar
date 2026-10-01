@@ -1,13 +1,17 @@
-// The **custom SQL query** editor: an application's own endpoints, written as
-// SQL (§13.4).
+// The **custom query** editor: an application's own endpoints, written as SQL,
+// JavaScript or Python (§13.4).
 //
-// One list per API row that serves them, each query carrying a name, a method,
-// a sub-path, a role floor, the SQL and its declared parameters. The button that
-// matters is **Check**: it prepares the statement on the server and shows the
-// columns Postgres says it returns — which is both the validation ("column
-// `titel` does not exist", in Postgres's own words, while its author is still
-// looking at the SQL) and the *documentation*, because those columns are what
-// the generated client method will hand back.
+// One list per API row that serves them, each query carrying a name, a
+// language, a method, a sub-path, a role floor, the source and its declared
+// parameters. The button that matters is **Check**: for SQL it prepares the
+// statement on the server and shows the columns Postgres says it returns —
+// which is both the validation ("column `titel` does not exist", in Postgres's
+// own words, while its author is still looking at the SQL) and the
+// *documentation*, because those columns are what the generated client method
+// will hand back. A JavaScript or Python body is checked for everything but the
+// body itself, which only runs when it is called; its method returns JSON.
+//
+// Python is offered only where the server can run it (`getPythonStatus`).
 //
 // The model is `../customQueries`; this file is controls. In particular nothing
 // here decides whether a query is valid — the server does, with the same call a
@@ -18,7 +22,7 @@
 // coercion and File-field rules do not reach it. An admin opening this hole
 // should be told what it is a hole in, where they are opening it.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Button from "react-bootstrap/Button";
 import Card from "react-bootstrap/Card";
 import Col from "react-bootstrap/Col";
@@ -26,14 +30,20 @@ import Form from "react-bootstrap/Form";
 import Row from "react-bootstrap/Row";
 
 import { api, errorMessage } from "../api";
+import { CodeEditor } from "../CodeEditor";
 import {
   PARAM_TYPES,
   QUERY_METHODS,
   blankParamRow,
   blankQueryRow,
   describeBody,
+  isCode,
+  languageLabel,
+  languageOptions,
+  pythonAvailable,
   statusSummary,
   type CheckStatus,
+  type QueryLanguage,
   type QueryRow,
 } from "../customQueries";
 import { roleOptions, useRoles } from "../roles";
@@ -60,6 +70,21 @@ export function CustomQueries({
   // Keyed by index rather than held on the row: a check result is about this
   // editing session, not part of what gets saved.
   const [status, setStatus] = useState<Record<number, CheckStatus>>({});
+  // Whether Python is on offer. Asked once; a server that cannot say is one
+  // that is not offered it.
+  const [python, setPython] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getPythonStatus()
+      .then((s) => {
+        if (!cancelled) setPython(pythonAvailable(s.state));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const setQuery = (index: number, next: QueryRow) =>
     onChange(queries.map((q, i) => (i === index ? next : q)));
@@ -72,7 +97,10 @@ export function CustomQueries({
       // are what the stored query will carry, and showing them after a reopen
       // is the same fact as showing them now.
       setQuery(index, { ...queries[index], columns });
-      setStatus((s) => ({ ...s, [index]: { kind: "ok", columns } }));
+      setStatus((s) => ({
+        ...s,
+        [index]: isCode(queries[index].language) ? { kind: "checked" } : { kind: "ok", columns },
+      }));
     } catch (err) {
       setStatus((s) => ({
         ...s,
@@ -87,7 +115,7 @@ export function CustomQueries({
   return (
     <Card className="mb-3">
       <Card.Header className="d-flex justify-content-between align-items-center">
-        <span><T text="Custom SQL queries" /></span>
+        <span><T text="Custom queries" /></span>
         <Button
           size="sm"
           variant="outline-primary"
@@ -98,7 +126,7 @@ export function CustomQueries({
       </Card.Header>
       <Card.Body>
         <p className="text-muted small">
-          <T text="Each query becomes one endpoint on this API and one typed method on the app’s generated client, with the return type taken from the columns Postgres reports." />{" "}
+          <T text="Each query becomes one endpoint on this API and one typed method on the app’s generated client. A SQL query’s return type is taken from the columns Postgres reports; a JavaScript or Python query returns whatever its body returns." />{" "}
           {/* Two sentences, each whole, each with its emphasis as a hole: a
             translator can move the emphasised clause, which is the thing three
             fragments would have made impossible. */}
@@ -121,13 +149,17 @@ export function CustomQueries({
                 </em>
               ),
             }}
+          />{" "}
+          <T
+            text="A JavaScript or Python query runs as a trigger’s code does, with the administrator’s authority over the tables unless it asks for the caller’s with {asUser}."
+            values={{ asUser: <code>db.asUser()</code> }}
           />
         </p>
         {queries.length === 0 && <div className="text-muted">None.</div>}
         {queries.map((query, index) => (
           <div key={index} className={index > 0 ? "border-top pt-3 mt-3" : undefined}>
             <Row className="mb-2 align-items-end">
-              <Col md={4}>
+              <Col md={3}>
                 <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-name`}>
                   <T text="Name" />
                 </Form.Label>
@@ -137,6 +169,31 @@ export function CustomQueries({
                   placeholder={t("topAuthors")}
                   onChange={(e) => setQuery(index, { ...query, name: e.target.value })}
                 />
+              </Col>
+              <Col md={2}>
+                <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-language`}>
+                  <T text="Language" />
+                </Form.Label>
+                <Form.Select
+                  id={`${idPrefix}-q${index}-language`}
+                  value={query.language}
+                  onChange={(e) => {
+                    // Columns described for the old language are not this
+                    // query's any more, and neither is its check.
+                    setQuery(index, {
+                      ...query,
+                      language: e.target.value as QueryLanguage,
+                      columns: [],
+                    });
+                    setStatus((s) => ({ ...s, [index]: { kind: "idle" } }));
+                  }}
+                >
+                  {languageOptions(query.language, python).map((l) => (
+                    <option key={l} value={l}>
+                      {languageLabel(l)}
+                    </option>
+                  ))}
+                </Form.Select>
               </Col>
               <Col md={2}>
                 <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-method`}>
@@ -165,7 +222,7 @@ export function CustomQueries({
                   onChange={(e) => setQuery(index, { ...query, path: e.target.value })}
                 />
               </Col>
-              <Col md={3}>
+              <Col md={2}>
                 <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-role`}>
                   <T text="Minimum role" />
                 </Form.Label>
@@ -197,23 +254,51 @@ export function CustomQueries({
               />
             </Form.Group>
 
-            <Form.Group className="mb-2">
-              <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-sql`}>
-                <T text="SQL" />
-              </Form.Label>
-              <Form.Control
-                as="textarea"
-                rows={5}
-                className="font-monospace"
-                id={`${idPrefix}-q${index}-sql`}
-                value={query.sql}
-                placeholder={t("select author, count(*) as n from books where year > :since group by author")}
-                onChange={(e) => setQuery(index, { ...query, sql: e.target.value })}
-              />
-              <Form.Text muted>
-                <T text="One statement. Write a parameter as" /> <code>:name</code> <T text="and declare it below; arguments are always bound, never pasted into the text." />
-              </Form.Text>
-            </Form.Group>
+            {isCode(query.language) ? (
+              <Form.Group className="mb-2">
+                <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-code`}>
+                  <T text="Code" />
+                </Form.Label>
+                {/* Keyed by language: the editor is built once, with its
+                  grammar, so a change of language is a new editor. */}
+                <CodeEditor
+                  key={query.language}
+                  id={`${idPrefix}-q${index}-code`}
+                  language={query.language}
+                  scope={{ request: true }}
+                  value={query.code}
+                  onChange={(code) => setQuery(index, { ...query, code })}
+                />
+                <Form.Text muted>
+                  <T
+                    text="The body of a function. The request is {body} (its JSON body) and {query} (its query string), the caller is {user}, and what it returns is the response."
+                    values={{
+                      body: <code>body</code>,
+                      query: <code>query</code>,
+                      user: <code>user</code>,
+                    }}
+                  />
+                </Form.Text>
+              </Form.Group>
+            ) : (
+              <Form.Group className="mb-2">
+                <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-code`}>
+                  <T text="SQL" />
+                </Form.Label>
+                <Form.Control
+                  as="textarea"
+                  rows={5}
+                  className="font-monospace"
+                  id={`${idPrefix}-q${index}-code`}
+                  value={query.code}
+                  placeholder={t("select author, count(*) as n from books where year > :since group by author")}
+                  onChange={(e) => setQuery(index, { ...query, code: e.target.value })}
+                />
+                <Form.Text muted>
+                  <T text="One statement. Write a parameter as" /> <code>:name</code> <T text="and declare it below; arguments are always bound, never pasted into the text." />
+                </Form.Text>
+              </Form.Group>
+            )}
 
             <div className="mb-2">
               <div className="d-flex justify-content-between align-items-center mb-1">
@@ -301,7 +386,13 @@ export function CustomQueries({
                 </Row>
               ))}
               <Form.Text muted>
-                <T text="An optional parameter binds SQL" /> <code>NULL</code> <T text="when it is left out, which is what makes" /> <code>(:q is null or name = :q)</code> <T text="an optional filter." />
+                {isCode(query.language) ? (
+                  <T text="A declared parameter is checked and converted to its type before the body runs." />
+                ) : (
+                  <>
+                    <T text="An optional parameter binds SQL" /> <code>NULL</code> <T text="when it is left out, which is what makes" /> <code>(:q is null or name = :q)</code> <T text="an optional filter." />
+                  </>
+                )}
               </Form.Text>
             </div>
 
@@ -344,9 +435,17 @@ function CheckResult({ status, query }: { status: CheckStatus; query: QueryRow }
     return <span className="text-danger small">{statusSummary(status)}</span>;
   }
   if (status.kind !== "idle") {
+    const success = status.kind === "ok" || status.kind === "checked";
     return (
-      <span className={status.kind === "ok" ? "text-success small" : "text-muted small"}>
+      <span className={success ? "text-success small" : "text-muted small"}>
         {statusSummary(status)}
+      </span>
+    );
+  }
+  if (isCode(query.language)) {
+    return (
+      <span className="text-muted small">
+        <T text="Returns whatever its body returns." />
       </span>
     );
   }

@@ -18,18 +18,22 @@
 //!   thing eventually disagree.
 
 use sc_catalog::{Catalog, DataField, Table};
-use sc_db::Row;
+use sc_db::{Row, Transaction};
 use sc_error::{Error, Result};
 use sc_query::{
-    Assignment, BinOp, Delete, Expr, Insert, OrderBy, Select, Source, Statement, Update, Value,
+    Assignment, BinOp, Delete, Expr, Insert, JsonStep, OrderBy, Projection, Select, Source,
+    Statement, UnOp, Update, Value,
 };
 use sc_types::{BasicType, TypeRef};
 use serde_json::Value as Json;
 
+use crate::draws::{DRAWS_TABLE, delete_instance_draws, delete_model_draws, write_draws};
 use crate::instance::{ATTR_ERROR, FitStatus, InstanceId, ModelInstance, RESTARTED};
 use crate::model::ModelId;
+use crate::posterior::DrawSeries;
 use crate::provider::ParameterBlock;
-use crate::store::{bad_column, exec, object, optional_text, rows, structured, text};
+use crate::registry::ModelRegistry;
+use crate::store::{bad_column, load_model, object, optional_text, rows, structured, text};
 
 /// Name of the model-instances table in the primary database.
 pub const INSTANCES_TABLE: &str = "_fd_model_instances";
@@ -114,7 +118,27 @@ pub async fn bootstrap_model_instances(catalog: &Catalog) -> Result<Table> {
 /// is refused rather than quietly ignored: an active instance is one a trigger
 /// will predict with, and a fit that is still running or that failed has nothing
 /// to predict with.
+///
+/// One transaction, so the row and the other instances' deactivation land
+/// together.
 pub async fn save_model_instance(catalog: &Catalog, instance: &ModelInstance) -> Result<()> {
+    save_fitted_instance(catalog, instance, &[]).await
+}
+
+/// Save an instance **and its draws** in one transaction (Stan TODO §14): the
+/// draws are written in batches, then the row — so a fitted instance always
+/// has all of its draws, and a write that fails half way leaves the row as it
+/// was (still `fitting`) with none of them.
+///
+/// Draws belong only to a fitted instance, and are refused on any other: a
+/// failed fit has nothing to read, and a running one is not finished writing.
+/// With no draws this is [`save_model_instance`], and the draws table need not
+/// exist.
+pub async fn save_fitted_instance(
+    catalog: &Catalog,
+    instance: &ModelInstance,
+    draws: &[DrawSeries],
+) -> Result<()> {
     if instance.active && !instance.status.is_usable() {
         return Err(Error::invalid(format!(
             "a model instance that is `{}` cannot be the active one: only a fitted instance \
@@ -122,11 +146,81 @@ pub async fn save_model_instance(catalog: &Catalog, instance: &ModelInstance) ->
             instance.status
         )));
     }
-
-    let columns = instance_columns();
+    if !draws.is_empty() {
+        if instance.status != FitStatus::Fitted {
+            return Err(Error::invalid(format!(
+                "a model instance that is `{}` cannot store draws: only a fitted one has any",
+                instance.status
+            )));
+        }
+        if catalog.get(DRAWS_TABLE)?.is_none() {
+            return Err(Error::config(format!(
+                "`{DRAWS_TABLE}` does not exist, so this fit's draws have nowhere to go: \
+                 the server bootstraps it at start-up"
+            )));
+        }
+    }
     let values = instance_values(instance)?;
+    let mut tx = catalog.primary().begin().await?;
+    let written = async {
+        write_draws_if_any(tx.as_mut(), instance.id, draws).await?;
+        write_instance(tx.as_mut(), instance, values).await
+    }
+    .await;
+    finish(tx, written).await
+}
 
-    if load_model_instance(catalog, instance.id).await?.is_some() {
+/// The draws half of [`save_fitted_instance`], skipped entirely when there are
+/// none — which is every fit that is not a posterior.
+async fn write_draws_if_any(
+    tx: &mut dyn Transaction,
+    instance: InstanceId,
+    draws: &[DrawSeries],
+) -> Result<()> {
+    if draws.is_empty() {
+        return Ok(());
+    }
+    write_draws(tx, instance, draws).await
+}
+
+/// Commit `tx` if `outcome` is a success and roll it back otherwise, answering
+/// `outcome`.
+pub(crate) async fn finish(tx: Box<dyn Transaction>, outcome: Result<()>) -> Result<()> {
+    match outcome {
+        Ok(()) => tx.commit().await,
+        Err(e) => {
+            // The rollback's own failure is not the news: the statement that
+            // failed is, and a connection that cannot roll back is dropped by
+            // the pool, which rolls back.
+            let _ = tx.rollback().await;
+            Err(e)
+        }
+    }
+}
+
+/// Run a statement on `tx` and collect what it answers.
+pub(crate) async fn run(tx: &mut dyn Transaction, statement: Statement) -> Result<Vec<Row>> {
+    tx.query(&statement).await?.try_collect().await
+}
+
+/// Insert or update the instance row on `tx`, and keep `active` unique.
+async fn write_instance(
+    tx: &mut dyn Transaction,
+    instance: &ModelInstance,
+    values: Vec<Value>,
+) -> Result<()> {
+    let columns = instance_columns();
+    let mut probe = Select::from(Source::table(INSTANCES_TABLE))
+        .filter(Expr::col(COL_ID).eq(Expr::lit(instance.id.0)));
+    probe.columns = vec![Projection::expr(Expr::col(COL_ID))];
+    if run(tx, Statement::from(probe)).await?.is_empty() {
+        let insert = Insert::row(
+            INSTANCES_TABLE,
+            columns,
+            values.into_iter().map(Expr::Lit).collect(),
+        );
+        run(tx, Statement::from(insert)).await?;
+    } else {
         let assignments = columns
             .iter()
             .zip(values)
@@ -135,24 +229,16 @@ pub async fn save_model_instance(catalog: &Catalog, instance: &ModelInstance) ->
             .collect();
         let update = Update::new(INSTANCES_TABLE, assignments)
             .filter(Expr::col(COL_ID).eq(Expr::lit(instance.id.0)));
-        exec(catalog, Statement::from(update)).await?;
-    } else {
-        let insert = Insert::row(
-            INSTANCES_TABLE,
-            columns,
-            values.into_iter().map(Expr::Lit).collect(),
-        );
-        exec(catalog, Statement::from(insert)).await?;
+        run(tx, Statement::from(update)).await?;
     }
-
     if instance.active {
-        deactivate_others(catalog, instance.model, instance.id).await?;
+        run(tx, deactivate_others(instance.model, instance.id)).await?;
     }
     Ok(())
 }
 
 /// Clear `active` on every instance of `model` except `keep`.
-async fn deactivate_others(catalog: &Catalog, model: ModelId, keep: InstanceId) -> Result<()> {
+fn deactivate_others(model: ModelId, keep: InstanceId) -> Statement {
     let update = Update::new(
         INSTANCES_TABLE,
         vec![Assignment::new(COL_ACTIVE, Expr::lit(false))],
@@ -167,7 +253,7 @@ async fn deactivate_others(catalog: &Catalog, model: ModelId, keep: InstanceId) 
             ))
             .and(Expr::col(COL_ACTIVE).eq(Expr::lit(true))),
     );
-    exec(catalog, Statement::from(update)).await
+    Statement::from(update)
 }
 
 /// Load the instance with this id, if it exists.
@@ -203,7 +289,7 @@ pub async fn list_model_instances(catalog: &Catalog, model: ModelId) -> Result<V
         .collect()
 }
 
-/// The model's active instance, if it has one — what a `predict_row` naming a
+/// The model's active instance, if it has one — what a `predict("…")` naming a
 /// *model* rather than a fit resolves to (§1).
 pub async fn active_model_instance(
     catalog: &Catalog,
@@ -220,21 +306,213 @@ pub async fn active_model_instance(
     }
 }
 
-/// Delete one instance, returning whether one was there to delete.
-pub async fn delete_model_instance(catalog: &Catalog, id: InstanceId) -> Result<bool> {
-    if load_model_instance(catalog, id).await?.is_none() {
+/// Delete one instance **and its draws**, in one transaction, then let its
+/// provider [`discard`](crate::ModelProvider::discard) whatever the fit kept
+/// outside the database. Answers whether there was one to delete.
+///
+/// The rows go first and the discard second, because the rows are what an
+/// admin can see: an instance whose run directory could not be removed is gone
+/// from every list, and the error says what was left behind. The other order
+/// would leave an instance on the screen whose run directory had been deleted.
+pub async fn delete_model_instance(
+    catalog: &Catalog,
+    registry: &ModelRegistry,
+    id: InstanceId,
+) -> Result<bool> {
+    let Some(instance) = load_model_instance(catalog, id).await? else {
         return Ok(false);
+    };
+    let draws = catalog.get(DRAWS_TABLE)?.is_some();
+    let mut tx = catalog.primary().begin().await?;
+    let deleted = async {
+        if draws {
+            delete_instance_draws(tx.as_mut(), id).await?;
+        }
+        let delete = Delete::from(INSTANCES_TABLE).filter(Expr::col(COL_ID).eq(Expr::lit(id.0)));
+        run(tx.as_mut(), Statement::from(delete)).await.map(drop)
     }
-    let delete = Delete::from(INSTANCES_TABLE).filter(Expr::col(COL_ID).eq(Expr::lit(id.0)));
-    exec(catalog, Statement::from(delete)).await?;
+    .await;
+    finish(tx, deleted).await?;
+    discard_states(catalog, registry, instance.model, &[instance.state]).await?;
     Ok(true)
 }
 
-/// Delete every instance of `model` — what [`delete_model`](crate::delete_model)
-/// calls, for the reason documented there.
-pub async fn delete_model_instances(catalog: &Catalog, model: ModelId) -> Result<()> {
+/// Delete every instance of `model` and their draws on `tx` — the half of
+/// [`delete_model`](crate::delete_model) that is about instances, in the
+/// transaction that also deletes the model row.
+pub(crate) async fn delete_instances_on(
+    catalog: &Catalog,
+    tx: &mut dyn Transaction,
+    model: ModelId,
+) -> Result<()> {
+    if catalog.get(DRAWS_TABLE)?.is_some() {
+        delete_model_draws(tx, model).await?;
+    }
     let delete = Delete::from(INSTANCES_TABLE).filter(Expr::col(COL_MODEL).eq(Expr::lit(model.0)));
-    exec(catalog, Statement::from(delete)).await
+    run(tx, Statement::from(delete)).await.map(drop)
+}
+
+/// Let `model`'s provider release what each of these fitted states holds
+/// outside the database (Stan TODO §14), after their rows are gone.
+///
+/// A model whose row or provider has gone — a module uninstalled — has nobody
+/// to ask, and nothing is discarded: the rows were the part that had to go.
+/// Every state is tried; the first failure is reported, saying what happened
+/// to the rows, because an error from a delete otherwise reads as "nothing was
+/// deleted".
+pub(crate) async fn discard_states(
+    catalog: &Catalog,
+    registry: &ModelRegistry,
+    model: ModelId,
+    states: &[Json],
+) -> Result<()> {
+    if states.iter().all(Json::is_null) {
+        return Ok(());
+    }
+    let Some(provider) = load_model(catalog, model)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|m| registry.get(m.provider.trim()))
+    else {
+        return Ok(());
+    };
+    discard_with(provider.as_ref(), states).await
+}
+
+/// [`discard_states`] once the provider is known.
+pub(crate) async fn discard_with(
+    provider: &dyn crate::ModelProvider,
+    states: &[Json],
+) -> Result<()> {
+    let mut first: Option<Error> = None;
+    for state in states.iter().filter(|s| !s.is_null()) {
+        if let Err(e) = provider.discard(state).await {
+            first.get_or_insert(e);
+        }
+    }
+    match first {
+        None => Ok(()),
+        Some(e) => Err(Error::msg(format!(
+            "the rows were deleted, but `{}` could not release what the fit kept outside the \
+             database: {}",
+            provider.name(),
+            sc_error::format_chain(&e)
+        ))),
+    }
+}
+
+/// What [`record_fit_progress`] found on the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressWrite {
+    /// The fit is still running and nobody has asked it to stop; the
+    /// progress, if there was any, is on the row.
+    Running,
+    /// Somebody asked the fit to stop: the job should cancel it. The progress
+    /// was not written.
+    CancelRequested,
+    /// The row is no longer `fitting` (or no longer there): nothing to report
+    /// to.
+    Finished,
+}
+
+/// Write a running fit's [`Progress`](crate::Progress) to its row's
+/// [`ATTR_PROGRESS`](crate::ATTR_PROGRESS), and read back whether it has been
+/// asked to stop (Stan TODO §13) — the one round trip the job makes each
+/// second. With no progress (nothing has changed since the last write) it only
+/// reads.
+///
+/// The attributes are a JSON object and the query language cannot merge one,
+/// so this reads the row and writes the merged object back. The write is
+/// guarded — `WHERE status = 'fitting' AND attributes -> 'cancel_requested'
+/// IS NULL` — so it can neither undo a cancel that landed between the read and
+/// the write (the next call sees it) nor touch a row the fit has already
+/// finished.
+pub async fn record_fit_progress(
+    catalog: &Catalog,
+    id: InstanceId,
+    progress: Option<&crate::Progress>,
+) -> Result<ProgressWrite> {
+    let Some(mut instance) = load_model_instance(catalog, id).await? else {
+        return Ok(ProgressWrite::Finished);
+    };
+    if instance.status != FitStatus::Fitting {
+        return Ok(ProgressWrite::Finished);
+    }
+    if cancel_requested(&instance) {
+        return Ok(ProgressWrite::CancelRequested);
+    }
+    let Some(progress) = progress else {
+        return Ok(ProgressWrite::Running);
+    };
+    instance.attributes.insert(
+        crate::ATTR_PROGRESS.to_owned(),
+        serde_json::to_value(progress).map_err(|e| Error::msg(format!("progress: {e}")))?,
+    );
+    let update = Update::new(
+        INSTANCES_TABLE,
+        vec![Assignment::new(
+            COL_ATTRIBUTES,
+            Expr::lit(Value::Json(Json::Object(instance.attributes))),
+        )],
+    )
+    .filter(
+        Expr::col(COL_ID)
+            .eq(Expr::lit(id.0))
+            .and(Expr::col(COL_STATUS).eq(Expr::lit(FitStatus::Fitting.as_str())))
+            .and(Expr::unary(
+                UnOp::IsNull,
+                Expr::Json {
+                    target: Box::new(Expr::col(COL_ATTRIBUTES)),
+                    path: vec![JsonStep::Field(crate::ATTR_CANCEL_REQUESTED.to_owned())],
+                },
+            )),
+    );
+    let mut tx = catalog.primary().begin().await?;
+    let written = run(tx.as_mut(), Statement::from(update)).await.map(drop);
+    finish(tx, written).await?;
+    Ok(ProgressWrite::Running)
+}
+
+/// Whether the instance's row says somebody asked its fit to stop: the
+/// attribute is there, whatever its value — exactly what the guard on
+/// [`record_fit_progress`]'s write tests, so the two cannot disagree.
+pub fn cancel_requested(instance: &ModelInstance) -> bool {
+    instance
+        .attributes
+        .contains_key(crate::ATTR_CANCEL_REQUESTED)
+}
+
+/// Ask the running fit of instance `id` to stop, by setting
+/// [`ATTR_CANCEL_REQUESTED`](crate::ATTR_CANCEL_REQUESTED) on its row (Stan
+/// TODO §13). The row is the registry, so this works from any node: the job
+/// reads it back with its next progress write and kills what it started.
+///
+/// Answers whether there was a running fit to ask. An instance that has
+/// already finished is left alone.
+pub async fn request_fit_cancel(catalog: &Catalog, id: InstanceId) -> Result<bool> {
+    let instance = require_model_instance(catalog, id).await?;
+    if instance.status != FitStatus::Fitting {
+        return Ok(false);
+    }
+    let mut attributes = instance.attributes;
+    attributes.insert(crate::ATTR_CANCEL_REQUESTED.to_owned(), Json::Bool(true));
+    let update = Update::new(
+        INSTANCES_TABLE,
+        vec![Assignment::new(
+            COL_ATTRIBUTES,
+            Expr::lit(Value::Json(Json::Object(attributes))),
+        )],
+    )
+    .filter(
+        Expr::col(COL_ID)
+            .eq(Expr::lit(id.0))
+            .and(Expr::col(COL_STATUS).eq(Expr::lit(FitStatus::Fitting.as_str()))),
+    );
+    let mut tx = catalog.primary().begin().await?;
+    let written = run(tx.as_mut(), Statement::from(update)).await.map(drop);
+    finish(tx, written).await?;
+    Ok(true)
 }
 
 /// Fail every instance still saying `fitting`, and answer how many there were

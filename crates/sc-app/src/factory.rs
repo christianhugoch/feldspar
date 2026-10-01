@@ -10,6 +10,11 @@
 //! registry is a **named constructor**: the answers the admin UI asks by name
 //! (label, settings, default CSP), plus "mount this application".
 //!
+//! One factory is compiled in rather than installed: [`none`](crate::NONE_FRAMEWORK),
+//! the framework with no UI and no build, which is constructed for the same
+//! reason Saltcorn UI is — there is nothing to build — and so goes through the
+//! same seam.
+//!
 //! The registry is shaped like [`installed_frameworks`](crate::installed_frameworks):
 //! a process-wide set installed at boot, asked by name. It is consulted after the
 //! two built-ins and before the modules' declarations, so a module cannot declare
@@ -79,12 +84,20 @@ pub fn install_framework_factory(factory: Arc<dyn FrameworkFactory>) -> Result<(
     Ok(())
 }
 
-/// Every installed factory, in installation order.
+/// Every installed factory, in installation order, then the ones compiled into
+/// this crate ([`NONE_FRAMEWORK`](crate::NONE_FRAMEWORK)).
+///
+/// The compiled ones come last because they are the least-common choice in the
+/// picker, and an installed factory of the same name would be a mistake the
+/// compiled one should not be displaced by — so it is dropped instead.
 pub fn framework_factories() -> Vec<Arc<dyn FrameworkFactory>> {
-    match INSTALLED.read() {
+    let mut factories = match INSTALLED.read() {
         Ok(guard) => guard.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),
-    }
+    };
+    factories.retain(|f| f.info().name != crate::none::NONE_FRAMEWORK);
+    factories.push(Arc::new(crate::none::NoneFactory));
+    factories
 }
 
 /// The factory installed under `name`, if any.

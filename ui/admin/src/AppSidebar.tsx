@@ -25,7 +25,6 @@ import {
   showAppOutcome,
   targetBuilding,
   targetNotReadyNotice,
-  updateApplicationClient,
   useAppActions,
 } from "./appActions";
 import {
@@ -45,12 +44,12 @@ import {
   IconBooks,
   IconCode,
   IconDeviceMobile,
+  IconExternalLink,
   IconFile,
   IconHammer,
   IconLanguage,
   IconLayoutDashboard,
   IconMessagePlus,
-  IconRefresh,
   IconSettings,
 } from "./icons";
 import { T, useT } from "./i18n";
@@ -61,8 +60,8 @@ type AgentItem = ListAgentsResponse[number];
 const CURRENT_APP_KEY = "saltcorn-admin-application";
 
 const LINK_ICONS: Record<AppNavLink["id"], ReactNode> = {
+  "app-link": <IconExternalLink />,
   "edit-code": <IconCode />,
-  "update-client": <IconRefresh />,
   build: <IconHammer />,
   target: <IconDeviceMobile />,
   chat: <IconMessagePlus />,
@@ -154,7 +153,7 @@ export function ApplicationsNav({ route, folded }: { route: string; folded: bool
     : apps && apps.length === 0
       ? "No applications"
       : "Choose application";
-  const links = current ? appNavLinks(current, builderAgentFor(current, agents)) : [];
+  const links = current ? appNavLinks(current, builderAgentFor(current, agents), window.location) : [];
   const listActive = onApplicationsList(path);
 
   const choose = (app: AppItem) => {
@@ -234,11 +233,9 @@ export function ApplicationsNav({ route, folded }: { route: string; folded: bool
             busy={
               link.id === "build"
                 ? buildStatus(actions, current.id) === "building"
-                : link.id === "update-client"
-                  ? Boolean(actions.updating[current.id])
-                  : link.target
-                    ? targetBuilding(actions, current.id, link.target.name)
-                    : false
+                : link.target
+                  ? targetBuilding(actions, current.id, link.target.name)
+                  : false
             }
           />
         ))}
@@ -246,8 +243,8 @@ export function ApplicationsNav({ route, folded }: { route: string; folded: bool
   );
 }
 
-/** One of the current application's links: somewhere to go, or (Build, Update
- * client) something to do, which reports back through `appActions`. */
+/** One of the current application's links: somewhere to go, or (Build, Build
+ * a target) something to do, which reports back through `appActions`. */
 function AppLink({
   link,
   app,
@@ -262,7 +259,7 @@ function AppLink({
   busy: boolean;
 }) {
   const { t } = useT();
-  const text = busy ? (link.id === "update-client" ? "Updating…" : "Building…") : link.label;
+  const text = busy ? "Building…" : link.label;
   // A target this server cannot build yet: the button says so with a warning
   // and its tooltip, and pressing it shows what is missing instead of building.
   const missing = link.target?.readiness.missing ?? [];
@@ -281,8 +278,8 @@ function AppLink({
     ? missing.join("\n")
     : folded
       ? text
-      : link.id === "update-client"
-        ? "Rewrite this application's generated client, hooks and schema from its current definition — no build"
+      : link.id === "build"
+        ? "Rewrite this application's generated client, hooks and schema from its current definition, then build it"
         : undefined;
 
   return (
@@ -309,9 +306,7 @@ function AppLink({
               ? missing.length
                 ? showAppOutcome(targetNotReadyNotice(app, link.target))
                 : buildApplicationTarget(app, link.target)
-              : link.id === "build"
-                ? buildApplication(app)
-                : updateApplicationClient(app))
+              : buildApplication(app))
           }
         >
           {content}

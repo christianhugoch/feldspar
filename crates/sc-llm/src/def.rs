@@ -423,7 +423,7 @@ mod tests {
         assert_eq!(connected.provider_name, "main");
         assert_eq!(connected.prices.input, Some(3.0));
         assert!(!connected.capabilities.vision, "the row's override");
-        assert_eq!(connected.capabilities.context_window, 200_000, "the rule");
+        assert_eq!(connected.capabilities.context_window, 1_000_000, "the rule");
     }
 
     #[test]

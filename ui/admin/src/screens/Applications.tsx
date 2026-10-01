@@ -16,12 +16,14 @@ import Table from "react-bootstrap/Table";
 import { api, errorMessage } from "../api";
 import type { ListApplicationsResponse } from "../client";
 import { ideUrl, navigate } from "../App";
+import { appUrl } from "../appNav";
 import { graphqlMount } from "../graphqlExplorer";
 import { IconPlus } from "../icons";
 import { AlertBody, PageBody, PageHeader, StatusBadge } from "../layout";
 import {
   buildApplication,
   buildStatus,
+  deepCleanApplication,
   noteApplicationsChanged,
   showAppOutcome,
   updateApplicationClient,
@@ -32,13 +34,6 @@ import { takeNotice } from "../notice";
 import { T, useT } from "../i18n";
 
 type AppItem = ListApplicationsResponse[number];
-
-/** The URL an app is served at: `<subdomain>.<the admin's host>`. The admin runs
- * on the base domain, so its own host (with port) is what the subdomain sits on —
- * `blog.example.com` or, in local dev, `blog.localhost:3032`. */
-function appUrl(subdomain: string): string {
-  return `${window.location.protocol}//${subdomain}.${window.location.host}`;
-}
 
 /** The file-manager route for a directory in a store. */
 function filesUrl(store: string, path: string): string {
@@ -72,6 +67,22 @@ export function Applications() {
     const notice = takeNotice();
     if (notice) showAppOutcome(notice);
   }, []);
+
+  // Not destructive — nothing the admin wrote is touched — but slow: a full
+  // reinstall is minutes on a small server, and the app is rebuilt after it.
+  const deepClean = async (app: AppItem) => {
+    if (
+      !window.confirm(
+        t(
+          'Deep clean "{name}"? Its node_modules is deleted and every dependency is downloaded and installed again before it is built. This can take several minutes.',
+          { name: app.name },
+        ),
+      )
+    ) {
+      return;
+    }
+    await deepCleanApplication(app);
+  };
 
   const remove = async (app: AppItem) => {
     if (
@@ -244,6 +255,20 @@ export function Applications() {
                             >
                               {state === "building" ? "Building…" : "Build"}
                             </Button>
+                            {/* Only where the server installs the dependencies
+                                itself (a React app's `npm install`): for any
+                                other app they are not the server's to delete. */}
+                            {app.installs && (
+                              <Button
+                                size="sm"
+                                variant="outline-warning"
+                                disabled={state === "building"}
+                                onClick={() => void deepClean(app)}
+                                title={t("Delete node_modules, reinstall every dependency and build")}
+                              >
+                                <T text="Deep clean" />
+                              </Button>
+                            )}
                           </>
                         )}
                         <Button size="sm" variant="outline-danger" onClick={() => void remove(app)}>

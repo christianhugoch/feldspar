@@ -251,6 +251,34 @@ async fn a_store_inside_someone_elses_repository_gets_no_git_log() -> Result<()>
     Ok(())
 }
 
+/// Wherever there is an application, every mode's workflow says to ask its
+/// API with `call_api` before relying on an endpoint — the step whose absence
+/// left an agent that had the tool saying no tool could make an HTTP request.
+/// Without an application, no mode names a tool it is not offered.
+#[tokio::test]
+async fn every_mode_says_to_ask_the_api_where_there_is_an_application() -> Result<()> {
+    let env = Env::new().await?;
+    let coding = env.registry.require("coding")?.clone();
+    let caps = ModelCapabilities::built_in("", "");
+    let admin = RunCaller::system();
+    let with = coding_config(&[
+        (CFG_MAY_EDIT, json!(true)),
+        (sc_core_traits::CFG_APPLICATION, json!("todo")),
+    ]);
+    let without = coding_config(&[(CFG_MAY_EDIT, json!(true))]);
+    for mode in [RunMode::Plan, RunMode::Act, RunMode::Explore] {
+        let cx = ToolsContext::new(&env.catalog, mode, &caps).for_caller(&admin);
+        let text = coding.prompt(&cx, &with).unwrap_or_default();
+        assert!(
+            text.contains("call it with `call_api_apps_web` to see what it really returns"),
+            "{mode}:\n{text}"
+        );
+        let text = coding.prompt(&cx, &without).unwrap_or_default();
+        assert!(!text.contains("call_api"), "{mode}:\n{text}");
+    }
+    Ok(())
+}
+
 /// TODO 8.3: the React builder agent's system prompt plus its tools stay within
 /// R§4's budget, in `act` and in `plan`, for either edit tool — as it is
 /// declared (§12: `coding` alone, checking and looking at the application).
@@ -271,9 +299,39 @@ async fn a_store_inside_someone_elses_repository_gets_no_git_log() -> Result<()>
 /// reading the documentation of the library it is writing against instead of
 /// its memory of it. Measured: `act` 1 691 on Claude (`str_replace`), 1 746 on
 /// GPT (`apply_patch`, the larger edit tool); `plan` 1 501 on both.
+///
+/// **2 000 since invitations and forgotten passwords.** The system prompt now
+/// tells the builder about signing in and up, and that emailed links open
+/// `/set-password` — a page it must keep, because nothing else in the project
+/// says a link from outside the application lands there. About 230 tokens.
+/// Measured: `act` 1 919 on Claude, 1 974 on GPT; `plan` 1 729 on both.
+///
+/// **2 100 since agents look at images and at the page while planning.**
+/// `view_image` (about 90 tokens, and only for a model with `vision`, which
+/// both of these have) shows the model a PNG from the code or a static
+/// directory; and `plan` is now offered `view_app`'s looking actions, so a
+/// planner sees the page it is planning a change to — about 200 tokens there,
+/// with the one prompt line saying to. Measured: `act` 2 017 on Claude, 2 072
+/// on GPT; `plan` 2 032 on both.
+///
+/// **2 200 since the builder can call the application's API.** `call_api`
+/// (in `act` every method, in `plan` `GET` only) lets it see what an endpoint
+/// actually answers — the shape a page is written against — as itself, as
+/// another user or as nobody. Its description was cut to one line and its
+/// method list to the five a model sends, and it still costs about 110 tokens.
+/// Measured: `act` 2 136 on Claude, 2 190 on GPT; `plan` 2 138 on both.
+///
+/// **4 000 since the descriptions were written out again.** Cut to fit the
+/// budgets above, they had become too terse to act on: an agent with
+/// `call_api` still reported that nothing could make an HTTP request. Every
+/// tool now says what it returns, when to use it and the rule that trips a
+/// model up, every parameter says what it is for, and the workflow names
+/// `call_api`. That costs about 950 tokens. Measured: `act` 3 130 on Claude,
+/// 3 105 on GPT; `plan` 3 038 on both. The headroom is deliberate, so the next
+/// tool is described properly rather than squeezed.
 #[tokio::test]
-async fn the_react_builder_agents_stable_prefix_is_at_most_1750_tokens() -> Result<()> {
-    const LIMIT: u64 = 1_750;
+async fn the_react_builder_agents_stable_prefix_is_at_most_4000_tokens() -> Result<()> {
+    const LIMIT: u64 = 4_000;
     let env = Env::new().await?;
     let app = Application::new(
         "Todo",

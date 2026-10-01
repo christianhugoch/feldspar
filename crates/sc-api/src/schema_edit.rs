@@ -64,8 +64,9 @@ use sc_catalog::{
     load_field_meta_by_field, load_table_meta_by_name, save_field_meta_row, save_table_meta_row,
     validate_formula,
 };
-use sc_db::{ColumnGenerator, SchemaChange};
+use sc_db::{ColumnGenerator, ColumnRef, SchemaChange};
 use sc_error::{Error, Result};
+use sc_query::{Expr, UnOp};
 use sc_types::{BasicType, RichTypeRef, TypeRef};
 
 /// The column default a `uuid` primary-key column is given, so a row can be
@@ -306,6 +307,11 @@ pub struct FieldSettings {
     /// The rich type's name; `Some("")` clears it back to the basic column type.
     pub type_name: Option<String>,
     /// What the field references.
+    ///
+    /// Not overlay-only for a `Key`: the database's foreign key is what the
+    /// merge reads a key's target from, so a changed target (or a field that
+    /// becomes or stops being a key) also replaces the column's foreign key —
+    /// see `Plan::repoint_reference`.
     pub kind: Option<DataFieldKind>,
     /// Rich-type attributes.
     pub attributes: Option<Attrs>,
@@ -318,8 +324,16 @@ pub struct FieldSettings {
     /// recreated. Setting it emits `SET PRIMARY KEY` over the key's columns plus
     /// this one; clearing it takes this column out, and clearing the last leaves
     /// the table with no key at all. The `NOT NULL` a key column is given is
-    /// **not** taken away again, because that is a retype and this is not.
+    /// **not** taken away again by this; `required: Some(false)` does that,
+    /// once the column is out of the key.
     pub primary_key: Option<bool>,
+    /// Whether the column rejects nulls: `SET NOT NULL` or `DROP NOT NULL`.
+    ///
+    /// Making a field required is refused, by name and before any DDL, while a
+    /// row still holds a null in it — nothing invents a value for those rows.
+    /// A key column is `NOT NULL` whatever this says, so asking for it to be
+    /// optional is refused; a calculated field has no column to constrain.
+    pub required: Option<bool>,
 }
 
 /// One schema operation.
@@ -497,7 +511,8 @@ pub async fn apply(
     // Deferred to here on purpose: an ownership formula naming a field the batch
     // adds, and a calculated field reading one, must both validate against the
     // schema the batch *ends* with (§7.3, Phase 8).
-    plan.validate_deferred(catalog)?;
+    let model_notes = plan.validate_deferred(catalog).await?;
+    plan.applied.notes.extend(model_notes);
     let steps = plan.steps(catalog)?;
 
     if options.dry_run {
@@ -1253,6 +1268,9 @@ impl Plan {
         }
         if let Some(kind) = &settings.kind {
             meta.kind = self.resolve_kind(table, field, kind)?;
+            if !existing.is_calc() {
+                self.repoint_reference(table, &existing, &meta.kind)?;
+            }
         }
         if let Some(attributes) = &settings.attributes {
             meta.attributes = attributes.clone();
@@ -1283,7 +1301,8 @@ impl Plan {
                 && columns.contains(&field)
             {
                 return Err(Error::invalid(format!(
-                    "`{table}.{field}` is a built-in column of `{table}`; its key is not                      the admin's to change"
+                    "`{table}.{field}` is a built-in column of `{table}`; its key is not \
+                     the admin's to change"
                 )));
             }
             if existing.is_calc() {
@@ -1336,6 +1355,12 @@ impl Plan {
                 });
             }
         }
+        // After the key, which it reads: a field keyed by this very operation is
+        // `NOT NULL` already, and one un-keyed by it may now be made optional.
+        if let Some(required) = settings.required {
+            self.set_required(catalog, &mut projected, &existing, required)
+                .await?;
+        }
         self.projection.insert(projected);
 
         self.metas.push(MetaWrite {
@@ -1345,6 +1370,152 @@ impl Plan {
         });
         self.applied.fields_altered.push(format!("{table}.{field}"));
         self.note_changed(table);
+        Ok(())
+    }
+
+    /// Bring the column's foreign key into line with the kind an edit gives it —
+    /// the half of changing a `Key`'s target that the overlay cannot carry.
+    ///
+    /// Where a foreign key stands behind a column, the merge takes the target
+    /// from the database and never from the overlay (§3.2), so an edit that
+    /// only rewrote the overlay would be saved and then read back pointing where
+    /// it always did. The reference is therefore changed where it lives: the
+    /// old key dropped and the new one added, in the same transaction as the
+    /// overlay row. A field that stops being a `Key` loses its foreign key, and
+    /// a plain column that becomes one gains the key a field created that way
+    /// would have had.
+    ///
+    /// The column keeps its storage type — retyping one is a migration (§3.3) —
+    /// so a target stored as something else is refused by name rather than left
+    /// for the database to reject with a type error.
+    fn repoint_reference(
+        &mut self,
+        table: &str,
+        existing: &DataField,
+        kind: &DataFieldKind,
+    ) -> Result<()> {
+        fn target(kind: &DataFieldKind) -> Option<(&str, &str)> {
+            match kind {
+                DataFieldKind::Key {
+                    target_table,
+                    target_field,
+                    ..
+                } => Some((target_table.0.as_str(), target_field.0.as_str())),
+                _ => None,
+            }
+        }
+        let wanted = target(kind);
+        if target(&existing.kind) == wanted {
+            return Ok(());
+        }
+        let field = &existing.base.name;
+        let references = match wanted {
+            Some((target_table, target_field)) => {
+                let storage = self.key_storage_type(
+                    &TableId(target_table.to_owned()),
+                    &FieldId(target_field.to_owned()),
+                )?;
+                let column = TypeRef::from_sql_type(existing.base.type_.sql_type());
+                if storage.sql_type() != column.sql_type() {
+                    return Err(Error::invalid(format!(
+                        "field `{table}.{field}` is stored as `{}` and cannot point at \
+                         `{target_table}.{target_field}`, which is stored as `{}`; \
+                         changing a column's type is not supported, so drop the field \
+                         and add it again as a key onto `{target_table}`",
+                        column.sql_type(),
+                        storage.sql_type()
+                    )));
+                }
+                Some(ColumnRef {
+                    table: target_table.to_owned(),
+                    column: target_field.to_owned(),
+                })
+            }
+            None => None,
+        };
+        self.ddl.push(SchemaChange::SetColumnReference {
+            table: table.to_owned(),
+            column: field.clone(),
+            references,
+        });
+        Ok(())
+    }
+
+    /// Make an existing column reject nulls, or accept them — the `NOT NULL`
+    /// half of [`alter_field`](Self::alter_field).
+    ///
+    /// `projected` is the table as the operation has left it so far, so a key
+    /// switched on or off by the same operation is already reflected in it.
+    async fn set_required(
+        &mut self,
+        catalog: &Catalog,
+        projected: &mut Table,
+        existing: &DataField,
+        required: bool,
+    ) -> Result<()> {
+        let table = projected.name.clone();
+        let field = existing.base.name.clone();
+        let Some(slot) = projected.fields.iter_mut().find(|f| f.base.name == field) else {
+            return Ok(());
+        };
+        if slot.required == required {
+            return Ok(());
+        }
+        if existing.is_calc() {
+            return Err(Error::invalid(format!(
+                "`{table}.{field}` is calculated and has no column to make {}",
+                if required { "required" } else { "optional" }
+            )));
+        }
+        if slot.primary_key {
+            // Only reachable asking for `false`: a key column is `NOT NULL`
+            // already, so asking for `true` on one is the no-op above.
+            return Err(Error::invalid(format!(
+                "`{table}.{field}` is part of the primary key, which never accepts \
+                 nulls; take it out of the key first"
+            )));
+        }
+        if let Some((_, columns)) = PROTECTED_COLUMNS.iter().find(|(t, _)| *t == table)
+            && columns.contains(&field.as_str())
+        {
+            return Err(Error::invalid(format!(
+                "`{table}.{field}` is a built-in column of `{table}`; whether it \
+                 accepts nulls is not the admin's to change"
+            )));
+        }
+        if required {
+            // The database would refuse too, but with a message about a
+            // constraint rather than about the rows the admin has to fix. Only a
+            // column that exists already can hold a null: one added earlier in
+            // this batch is in a table with no rows yet, or has a null in every
+            // row — and the database says so.
+            if let Some(live) = catalog.get(&table)?
+                && live.field(&field).is_some_and(|f| !f.is_calc())
+            {
+                let nulls = crate::rows::count_rows_where(
+                    catalog,
+                    &live,
+                    Some(Expr::unary(UnOp::IsNull, Expr::col(field.as_str()))),
+                    None,
+                )
+                .await?;
+                if nulls > 0 {
+                    return Err(Error::invalid(format!(
+                        "`{table}.{field}` cannot be made required: {nulls} row{} \
+                         {} no value in it. Fill {} in first.",
+                        if nulls == 1 { "" } else { "s" },
+                        if nulls == 1 { "has" } else { "have" },
+                        if nulls == 1 { "it" } else { "them" },
+                    )));
+                }
+            }
+        }
+        slot.required = required;
+        self.ddl.push(SchemaChange::SetColumnNullable {
+            table,
+            column: field,
+            nullable: !required,
+        });
         Ok(())
     }
 
@@ -1894,10 +2065,24 @@ impl Plan {
     /// Everything that can only be checked once every operation has been read:
     /// the calculated-field expressions and the ownership formulas, both against
     /// the schema the batch ends with.
-    fn validate_deferred(&self, catalog: &Catalog) -> Result<()> {
+    ///
+    /// Answers the notices the batch should carry: a calculated field that
+    /// predicts with a model that has no active fit yet is saved, and told
+    /// that its table's reads fail until one is.
+    async fn validate_deferred(&self, catalog: &Catalog) -> Result<Vec<String>> {
         let shape = self.projection.shape();
+        let mut notes = Vec::new();
         for (table, field, expression) in &self.deferred_calc {
-            validate_calc_expression(&shape, table, field, expression)?;
+            let analysis = validate_calc_expression(&shape, table, field, expression)?;
+            let declared = self
+                .projection
+                .get(table)
+                .and_then(|t| t.field(field))
+                .map(|f| f.base.type_.clone());
+            notes.extend(
+                check_calc_predictions(catalog, table, field, expression, &analysis, declared)
+                    .await?,
+            );
         }
         for (table, formula) in &self.deferred_constraints {
             validate_formula(&self.projection, table, formula)?;
@@ -1908,7 +2093,7 @@ impl Plan {
             };
             validate_ownership(catalog, &self.projection, table)?;
         }
-        Ok(())
+        Ok(notes)
     }
 
     /// The whole batch as steps of one transaction: the structured DDL in the
@@ -2040,6 +2225,17 @@ fn validate_ownership(
             table.name, call.function
         )));
     }
+    // And for the same reason no `predict("…")` (milestone 31 §4): a provider
+    // that is slow, or a model with no active fit, would deny every read.
+    if let Some(call) = analysis.first_model_call() {
+        return Err(Error::invalid(format!(
+            "table `{}`: an ownership formula may not call `{}`. A rule that decides who may \
+             read a row must fail closed, so a model that is slow or cannot answer would deny \
+             every read of this table — and every read would wait on it. Use a calculated \
+             field or a trigger instead",
+            table.name, call.key
+        )));
+    }
     if !table.rls_enabled {
         return Ok(());
     }
@@ -2083,7 +2279,7 @@ fn validate_calc_expression(
     table: &str,
     field: &str,
     expression: &str,
-) -> Result<()> {
+) -> Result<sc_expr::Analysis> {
     let formula = sc_expr::Formula::parse(expression)
         .map_err(|e| Error::invalid(format!("calculated field `{table}.{field}`: {e}")))?;
     let analysis = formula
@@ -2095,7 +2291,89 @@ fn validate_calc_expression(
              or the operation flags"
         )));
     }
-    Ok(())
+    Ok(analysis)
+}
+
+/// The save check for a calculated field that calls `predict("…")`
+/// (milestone 31 §4): [`check_model_calls`](sc_catalog::check_model_calls)'s
+/// three (the model exists, is a model of this table, and predicts), and —
+/// when the expression **is** the call, so the field's value is the
+/// prediction — that the field's declared type can hold what the model
+/// produces. That is the check `predict_row` made against its target field.
+///
+/// Answers a notice per model with no active fit: the field is saved, and
+/// every read of its table fails until a fit is activated, which the admin is
+/// told now rather than on the next read.
+async fn check_calc_predictions(
+    catalog: &Catalog,
+    table: &str,
+    field: &str,
+    expression: &str,
+    analysis: &sc_expr::Analysis,
+    declared: Option<TypeRef>,
+) -> Result<Vec<String>> {
+    let named = |e: Error| Error::invalid(format!("calculated field `{table}.{field}`: {e}"));
+    let summaries = sc_catalog::check_model_calls(catalog, table, analysis)
+        .await
+        .map_err(named)?;
+    let whole = sc_expr::Formula::parse(expression)
+        .ok()
+        .and_then(|f| sc_expr::hoisted_call_key(f.ast()));
+    let mut notes = Vec::new();
+    for (call, summary) in analysis.model_calls.iter().zip(&summaries) {
+        if whole.as_deref() == Some(call.key.as_str())
+            && let Some(basic) = declared.as_ref().and_then(TypeRef::as_basic)
+            && !summary
+                .prediction_types
+                .iter()
+                .any(|produced| holds_prediction(basic, produced))
+        {
+            return Err(named(Error::invalid(format!(
+                "the field is {} and `{}` predicts {}; declare the field as {}",
+                basic.name(),
+                summary.name,
+                summary
+                    .prediction_types
+                    .iter()
+                    .map(|p| p.name().to_owned())
+                    .collect::<Vec<_>>()
+                    .join(" or "),
+                summary
+                    .prediction_types
+                    .iter()
+                    .map(|p| p.name().to_owned())
+                    .collect::<Vec<_>>()
+                    .join(" or "),
+            ))));
+        }
+        if summary.active_fit.is_none() {
+            notes.push(format!(
+                "calculated field `{table}.{field}`: `{}` has no active fit yet, so every read \
+                 of `{table}` fails until one is. Fit the model and make a fit active",
+                summary.name
+            ));
+        }
+    }
+    Ok(notes)
+}
+
+/// Whether a field of type `field` can hold a `produced` prediction.
+///
+/// Deliberately narrow, as `predict_row`'s was: a number is numeric, a class
+/// **name** is text, a cluster number is any number, and a vector is JSON and
+/// nothing else, because a vector rendered as text is unreadable by anything
+/// that wanted to use it.
+fn holds_prediction(field: &BasicType, produced: &BasicType) -> bool {
+    match produced {
+        BasicType::Float => matches!(field, BasicType::Float | BasicType::Decimal),
+        BasicType::Int => matches!(
+            field,
+            BasicType::Int | BasicType::Float | BasicType::Decimal
+        ),
+        BasicType::Text => matches!(field, BasicType::Text),
+        BasicType::Json => matches!(field, BasicType::Json),
+        _ => false,
+    }
 }
 
 // --- the type vocabulary ------------------------------------------------------

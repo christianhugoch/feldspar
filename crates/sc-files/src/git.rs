@@ -24,7 +24,7 @@
 //!   naming its directory and leaving the URL blank, and the remote — if it has
 //!   one — is the one the checkout already points at.
 //! - **What else.** [`GitRepo`] carries `pull`, `push`, `stage`, `unstage`,
-//!   `commit` and `status`. These are not [`FileStore`] methods and deliberately
+//!   `discard`, `commit` and `status`. These are not [`FileStore`] methods and deliberately
 //!   so: the
 //!   trait is the contract every backend answers, and three quarters of its
 //!   implementations will never have a remote to push to. A caller that wants
@@ -319,6 +319,15 @@ pub struct GitStatus {
     pub ahead: u32,
     /// Commits the upstream has that the working tree does not.
     pub behind: u32,
+    /// Whether the checked-out branch has an upstream to push to and count
+    /// against. A branch created here has none until its first push, which is
+    /// what a source-control view offers to *publish* rather than push.
+    pub upstream: bool,
+    /// Whether cloning would put a working copy here: there is no clone, and the
+    /// directory is missing or empty. A directory holding someone else's files
+    /// is not one a clone may write into (see [`GitRepo::ensure_cloned`]), so a
+    /// view offers the Clone button only when this is set.
+    pub can_clone: bool,
 }
 
 impl GitStatus {
@@ -538,13 +547,87 @@ impl GitRepo {
         self.checked_owned(&args, "reset").await
     }
 
+    /// Throw away the **unstaged** changes to `paths`: an edited or deleted file
+    /// goes back to what the index holds (its staged or committed contents), and
+    /// an untracked file is deleted. What is staged is left alone — that is
+    /// VS Code's Discard, which sits on the Changes group only.
+    ///
+    /// Irreversible, so narrower than its siblings in three ways:
+    ///
+    /// - `paths` is **required**. An empty list is refused rather than read as
+    ///   *everything*; a client discarding every change names every change.
+    /// - Each path must be one `status` currently lists with an unstaged change.
+    ///   A path that is clean, only staged, or conflicted is refused by name —
+    ///   a conflict is resolved by staging the chosen version, not discarded.
+    /// - The pathspecs are **literal** (`--literal-pathspecs`), so a file named
+    ///   `*.md` discards that file and not every Markdown file in the tree.
+    pub async fn discard(&self, paths: &[String]) -> Result<GitOutput> {
+        let paths = pathspecs(paths)?;
+        if paths.is_empty() {
+            return Err(Error::invalid("name the paths whose changes to discard"));
+        }
+        self.require_cloned()?;
+        let status = self.status().await?;
+        let changes: Vec<GitChange> = status
+            .changes
+            .iter()
+            .filter_map(|line| parse_change(line))
+            .collect();
+
+        let mut tracked = Vec::new();
+        let mut untracked = Vec::new();
+        for path in &paths {
+            let Some(change) = changes.iter().find(|c| &c.path == path) else {
+                return Err(Error::invalid(format!("{path} has no changes to discard")));
+            };
+            let mut code = change.status.chars();
+            let index = code.next().unwrap_or(' ');
+            let worktree = code.next().unwrap_or(' ');
+            if change.status == "??" {
+                untracked.push(path.clone());
+            } else if index == 'U'
+                || worktree == 'U'
+                || matches!(change.status.as_str(), "AA" | "DD")
+            {
+                return Err(Error::invalid(format!(
+                    "{path} has a merge conflict; resolve it and stage the result instead"
+                )));
+            } else if worktree == ' ' {
+                return Err(Error::invalid(format!(
+                    "{path} has only staged changes; unstage them first"
+                )));
+            } else {
+                tracked.push(path.clone());
+            }
+        }
+
+        let mut said = Vec::new();
+        for (files, command) in [(&tracked, "checkout"), (&untracked, "clean")] {
+            if files.is_empty() {
+                continue;
+            }
+            let mut args = vec!["--literal-pathspecs".to_owned(), command.to_owned()];
+            args.push(if command == "clean" { "-fq" } else { "-q" }.to_owned());
+            args.push("--".to_owned());
+            args.extend(files.iter().cloned());
+            let out = self.checked_owned(&args, command).await?;
+            if !out.output.is_empty() {
+                said.push(out.output);
+            }
+        }
+        Ok(GitOutput {
+            success: true,
+            output: said.join("\n"),
+        })
+    }
+
     /// Commit with `message`: the whole working tree when `stage_all`, and
     /// otherwise **only what is in the index**.
     ///
-    /// Both callers are real. The admin screen has no per-file view, so its
-    /// button says "commit all changes" and means it; the IDE's Source Control
-    /// view has an index in front of the admin, and a Commit there that swept up
-    /// the files they had deliberately left unstaged would make staging a lie.
+    /// Both are real. A Source Control view (the IDE's, or the admin screen's
+    /// panel) with something staged commits only that — sweeping up the files
+    /// the admin deliberately left unstaged would make staging a lie — and with
+    /// nothing staged commits everything, VS Code's "smart commit".
     ///
     /// An identity is supplied for the commit only when the repository has none
     /// configured, so an admin's own `user.name`/`user.email` wins where they
@@ -608,7 +691,10 @@ impl GitRepo {
     /// refuses. Only a directory that is not a clone at all short-circuits.
     pub async fn status(&self) -> Result<GitStatus> {
         if !self.is_cloned() {
-            return Ok(GitStatus::default());
+            return Ok(GitStatus {
+                can_clone: self.root_is_empty(),
+                ..GitStatus::default()
+            });
         }
         let branch = self.current_branch().await?;
         let changes = self
@@ -637,6 +723,13 @@ impl GitRepo {
             .run(&self.root, &["log", "-1", "--pretty=%h %s (%an, %ar)"])
             .await?;
         let (ahead, behind) = self.tracking().await?;
+        let upstream = self
+            .run(
+                &self.root,
+                &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            )
+            .await?
+            .success;
         let branches = self.branches().await?;
         Ok(GitStatus {
             cloned: true,
@@ -650,7 +743,17 @@ impl GitRepo {
             },
             ahead,
             behind,
+            upstream,
+            can_clone: false,
         })
+    }
+
+    /// Whether the working-tree directory is missing or has nothing in it.
+    fn root_is_empty(&self) -> bool {
+        match std::fs::read_dir(&self.root) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(_) => !self.root.exists(),
+        }
     }
 
     /// The checked-out branch, or empty when there is none (detached head, or a
@@ -1042,8 +1145,12 @@ pub const OP_PUSH: &str = "push";
 pub const OP_STAGE: &str = "stage";
 /// The name of the operation that takes paths back out of the index.
 pub const OP_UNSTAGE: &str = "unstage";
-/// The `paths` argument of [`OP_STAGE`] and [`OP_UNSTAGE`]: one path per line,
-/// relative to the store root, and empty for *everything*.
+/// The name of the operation that throws away unstaged changes to paths.
+pub const OP_DISCARD: &str = "discard";
+/// The `paths` argument of [`OP_STAGE`], [`OP_UNSTAGE`] and [`OP_DISCARD`]: one
+/// path per line, relative to the store root. Empty means *everything* to the
+/// first two; [`OP_DISCARD`] requires it, because an empty box there would be a
+/// destructive default.
 ///
 /// Lines of text rather than a JSON array because an operation's arguments are
 /// [`FormField`]s and the admin screen renders one control per field (§6.2): a
@@ -1058,9 +1165,8 @@ pub const ARG_MESSAGE: &str = "message";
 /// The `staged_only` argument of [`OP_COMMIT`]: commit what is in the index
 /// rather than staging the working copy first.
 ///
-/// Absent means *no*, which is the admin screen's meaning — its button says
-/// "commit all changes" — and the IDE's Source Control view, which has an index
-/// on display, sends `true`.
+/// Absent means *no*: commit everything. The Source Control views send `true`
+/// whenever something is staged.
 pub const ARG_STAGED_ONLY: &str = "staged_only";
 /// The name of the operation that switches branch.
 pub const OP_CHECKOUT: &str = "checkout";
@@ -1136,6 +1242,16 @@ pub fn git_operations() -> Vec<Operation> {
             .input([FormField::new(ARG_PATHS, BasicType::Text)
                 .label("Paths, one per line")
                 .multiline()]),
+        Operation::new(OP_DISCARD, OperationScope::Instance)
+            .label("Discard changes")
+            .description(
+                "Throws away unstaged changes: edited files go back to their staged or \
+                 committed contents and untracked files are deleted. This cannot be undone.",
+            )
+            .input([FormField::new(ARG_PATHS, BasicType::Text)
+                .label("Paths, one per line")
+                .multiline()
+                .required()]),
         Operation::new(OP_COMMIT, OperationScope::Instance)
             .label("Commit all changes")
             .description(
@@ -1208,6 +1324,18 @@ pub(crate) async fn run_git_operation(
         }
         OP_PULL => repo.pull().await?.output,
         OP_PUSH => repo.push().await?.output,
+        OP_DISCARD => {
+            let paths = lines(input.get(ARG_PATHS));
+            let out = repo.discard(&paths).await?;
+            if out.output.trim().is_empty() {
+                match paths.len() {
+                    1 => format!("Discarded the changes to {}.", paths[0]),
+                    n => format!("Discarded the changes to {n} paths."),
+                }
+            } else {
+                out.output
+            }
+        }
         OP_STAGE | OP_UNSTAGE => {
             let paths = lines(input.get(ARG_PATHS));
             let out = if operation == OP_STAGE {
@@ -1319,6 +1447,8 @@ fn status_payload(status: &GitStatus) -> serde_json::Value {
         "branches": status.branches,
         "ahead": status.ahead,
         "behind": status.behind,
+        "upstream": status.upstream,
+        "can_clone": status.can_clone,
         "last_commit": status.last_commit,
         "changes": status
             .changes

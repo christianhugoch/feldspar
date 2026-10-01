@@ -17,6 +17,11 @@
 --   SQLite non-primary databases and SQLite file stores -> section 4, in each
 --                        such file (they carry `_sc_object_comments`).
 --
+--   Then, for a database older than 2026-09-26, the stored-data upgrade in
+--   section 5 (Postgres) or 6 (SQLite), after the rename. It is not part of the
+--   rename; it lives here so that one file brings an older installation up to
+--   date.
+--
 --   Take a backup first. Run each section as one transaction, with the server
 --   stopped: Feldspar caches the catalog in memory and will not notice a table
 --   changing name underneath it.
@@ -239,3 +244,89 @@ COMMIT;
 -- this step is not silent — introspection reads no comments back, so that
 -- database's constraints lose their messages and stop being recognised as
 -- Feldspar's, and the next comment set there recreates the table empty.
+
+-- ---------------------------------------------------------------------------
+-- 5. Postgres: custom queries store their source as `code` (2026-09-26).
+-- ---------------------------------------------------------------------------
+--
+-- A custom query can now be JavaScript or Python as well as SQL, so its source
+-- field is `code` rather than `sql` (a query with no `language` is still SQL).
+-- The queries live inside the application's `apis` JSON, at
+-- `apis[*].config.queries[*]`, and a stored query that still says `sql` makes
+-- every read of that application's API fail with:
+--
+--   the API's `queries` setting is not a list of custom queries:
+--   missing field `code`
+--
+-- This renames the key in place, keeping the order of the APIs and of their
+-- queries. Run it after section 1, since it names `_fd_applications`. It
+-- touches only rows that still hold a `sql` key, so re-running it is a no-op,
+-- and it does nothing on a database without an applications table.
+
+DO $code$
+BEGIN
+    IF to_regclass('"_fd_applications"') IS NULL THEN
+        RETURN;
+    END IF;
+
+    UPDATE "_fd_applications" a
+       SET apis = (
+           SELECT jsonb_agg(
+                    CASE WHEN jsonb_typeof(api #> '{config,queries}') = 'array'
+                         THEN jsonb_set(api, '{config,queries}', COALESCE((
+                                SELECT jsonb_agg(
+                                         CASE WHEN q ? 'sql' AND NOT q ? 'code'
+                                              THEN (q - 'sql')
+                                                   || jsonb_build_object('code', q -> 'sql')
+                                              ELSE q END
+                                         ORDER BY qi)
+                                  FROM jsonb_array_elements(api #> '{config,queries}')
+                                       WITH ORDINALITY AS qs(q, qi)), '[]'::jsonb))
+                         ELSE api END
+                    ORDER BY ai)
+             FROM jsonb_array_elements(a.apis) WITH ORDINALITY AS aps(api, ai))
+     WHERE jsonb_typeof(a.apis) = 'array'
+       AND EXISTS (
+           SELECT 1
+             FROM jsonb_array_elements(a.apis) api,
+                  jsonb_array_elements(
+                      CASE WHEN jsonb_typeof(api #> '{config,queries}') = 'array'
+                           THEN api #> '{config,queries}' ELSE '[]'::jsonb END) q
+            WHERE q ? 'sql');
+END
+$code$;
+
+-- Check: this should return 0.
+--
+--   SELECT count(*)
+--     FROM "_fd_applications" a,
+--          jsonb_array_elements(a.apis) api,
+--          jsonb_array_elements(COALESCE(api #> '{config,queries}', '[]')) q
+--    WHERE q ? 'sql';
+
+-- ---------------------------------------------------------------------------
+-- 6. SQLite primary: the same upgrade as section 5.
+-- ---------------------------------------------------------------------------
+--
+-- SQLite stores `apis` as JSON text. Run after section 3; skip it if the file
+-- has no `_fd_applications`. Re-running it is a no-op.
+--
+--   UPDATE "_fd_applications"
+--      SET apis = (
+--          SELECT json_group_array(json(
+--                   CASE WHEN json_type(api.value, '$.config.queries') = 'array'
+--                        THEN json_set(api.value, '$.config.queries', json((
+--                               SELECT json_group_array(json(
+--                                        CASE WHEN json_type(q.value, '$.sql') IS NOT NULL
+--                                              AND json_type(q.value, '$.code') IS NULL
+--                                             THEN json_set(json_remove(q.value, '$.sql'),
+--                                                           '$.code', json_extract(q.value, '$.sql'))
+--                                             ELSE q.value END))
+--                                 FROM json_each(api.value, '$.config.queries') q)))
+--                        ELSE api.value END))
+--            FROM json_each("_fd_applications".apis) api)
+--    WHERE EXISTS (
+--          SELECT 1
+--            FROM json_each("_fd_applications".apis) api,
+--                 json_each(api.value, '$.config.queries') q
+--           WHERE json_type(q.value, '$.sql') IS NOT NULL);

@@ -67,8 +67,11 @@ export type ModuleFunctionInfo = {
  *
  * `run` says the body is a **workflow step**, which is the same difference for
  * `context`: a step is bound the run so far and a trigger's own body is bound
- * nothing at all. */
-export type CodeScope = { table?: string; event?: string; run?: boolean };
+ * nothing at all.
+ *
+ * `request` says the body is an application's **custom query** (§13.4): it has
+ * no event, so no `payload`, and is bound the request as `body` and `query`. */
+export type CodeScope = { table?: string; event?: string; run?: boolean; request?: boolean };
 
 /** The join separator between a key field and a column of the table it points
  * at (`customerⱵemail`) — `sc_expr::JOIN`. */
@@ -543,6 +546,158 @@ interface ScTriggers {
 `;
 }
 
+/** The declarations for `models`: `models.get(name)` and the handle it
+ * answers, over the run's own `db` (milestone 31 §3).
+ *
+ * A transcription of `sc-expr`'s `__scMakeModels`, on the same terms as
+ * {@link triggerDeclarations}. The posterior's four are optional members,
+ * because which handle a name answers is decided by the fit, at run time. The
+ * draws and summary answers are the admin API's `getModelDraws` and
+ * `getPosteriorSummary`, typed as far as their shape is fixed; the labels and
+ * keys are whatever the database's are. */
+export function modelDeclarations(): string {
+  return `
+/** Which elements: \`keys\` picks positions of the first axis by key or
+ * label; \`elements\` is the general form — index arrays, or per axis
+ * (by its name) the keys or labels wanted. */
+interface ScModelSelection {
+  keys?: unknown[];
+  elements?: number[][] | Record<string, unknown[]>;
+}
+
+interface ScDrawsOptions extends ScModelSelection {
+  /** Only these chains, from 1. */
+  chains?: number[];
+  /** The warmup draws too, as chains of their own (when the fit kept them). */
+  warmup?: boolean;
+  /** Keep every n-th draw. */
+  thin?: number;
+}
+
+/** One variable's draws, labelled by the database. */
+interface ScDraws {
+  variable: string;
+  /** Positions per axis. */
+  dims: number[];
+  /** Each axis's name: its dimension's, or \`index\`. */
+  axes: string[];
+  /** Per axis, every position's label. */
+  labels: unknown[][];
+  /** Per axis, every position's key. */
+  keys: unknown[][];
+  /** The selected elements as 1-based index arrays, and by name. */
+  elements: number[][];
+  names: string[];
+  thin: number;
+  /** Per chain, one array of draws per selected element. */
+  chains: { chain: number; warmup: boolean; draws: (number | null)[][] }[];
+}
+
+/** A variable's posterior summary, one row per selected element: its labels,
+ * then mean, sd, mcse, q5, q50, q95, rhat, ess_bulk, ess_tail. */
+interface ScSummary {
+  variable: string;
+  source: "draws" | "stored";
+  columns: string[];
+  elements: number[][];
+  names: string[];
+  keys: unknown[][];
+  rows: unknown[][];
+}
+
+/** A fit, as \`m.fit\` holds it. */
+interface ScModelFit {
+  id: string;
+  name: string;
+  status: "fitting" | "fitted" | "failed";
+  active: boolean;
+  created: string;
+  error: string | null;
+  warnings: string[];
+  metrics: any;
+  parameters: any[];
+}
+
+/** What a fit's outcome is, as it was recorded when it was fitted. */
+type ScModelOutcome =
+  | { outcome: "regression"; label: string }
+  | { outcome: "classification"; label: string; classes?: string[] }
+  | { outcome: "cluster" }
+  | { outcome: "embedding"; dimensions: number }
+  | { outcome: "test" }
+  | { outcome: "posterior"; prediction?: string };
+
+/** One prediction with \`{ detail: true }\`: the value, and the class's
+ * probability where there is one. */
+interface ScPrediction {
+  value: any;
+  probability?: number;
+}
+
+/** What \`m.writePosterior\` writes: statistics of a variable into fields —
+ * into the rows the variable is about (\`update\`, the default), or as new rows
+ * of \`table\` (\`insert\`), with each element's coordinates written too. */
+interface ScPosteriorWrite {
+  variable: string;
+  mode?: "update" | "insert";
+  /** Statistic → field: \`{ mean: "alpha_mean", sd: "alpha_sd" }\`. */
+  statistics: Record<string, string>;
+  table?: string;
+  coordinates?: { axis: string; field: string; value?: "key" | "label" | "position" }[];
+  instance_field?: string;
+  elements?: ScModelSelection["elements"];
+}
+
+/** A model, and the fit \`models.get\` resolved — which every call on the
+ * handle keeps using, even if another fit is activated meanwhile.
+ *
+ * \`draws\`, \`summary\`, \`variables\` and \`writePosterior\` exist on a
+ * posterior's handle only; on any other, reaching one throws a sentence
+ * saying what the model is. */
+interface ScModel {
+  readonly name: string;
+  readonly provider: string;
+  /** The table whose rows it predicts. */
+  readonly table: string;
+  readonly outcome: ScModelOutcome | null;
+  readonly fit: ScModelFit;
+  /** One value for a row; one per row, in order, for an array — one request
+   * either way. A row with the table's primary key is read through the
+   * model's dataset; any other must supply every feature. */
+  predict(row: ScRow): Promise<any>;
+  predict(rows: ScRow[]): Promise<any[]>;
+  predict(row: ScRow, options: { detail: true }): Promise<ScPrediction>;
+  predict(rows: ScRow[], options: { detail: true }): Promise<ScPrediction[]>;
+  predict(row: ScRow | ScRow[], options?: { detail?: boolean }): Promise<any>;
+  /** A posterior's draws of one variable, labelled by the database. */
+  draws?(variable: string, options?: ScDrawsOptions): Promise<ScDraws>;
+  /** A posterior's summary of one variable. */
+  summary?(variable: string, options?: ScModelSelection): Promise<ScSummary>;
+  /** What a posterior's fit drew, its \`__\` internals left out. */
+  readonly variables?: readonly string[];
+  /** Write a posterior's summary into rows, under this handle's authority:
+   * ownership is checked and the target table's triggers fire. */
+  writePosterior?(write: ScPosteriorWrite): Promise<{
+    variable: string;
+    mode: "update" | "insert";
+    table: string;
+    instance: string;
+    written: number;
+  }>;
+  /** The same handle, writing back as the event's caller. */
+  asUser(): ScModel;
+  /** The same handle, writing back as the trigger — the default. */
+  asAdmin(): ScModel;
+}
+
+/** The models, by name. */
+interface ScModels {
+  /** A handle on the model's active fit, or on the fit \`fit\` names. */
+  get(model: string, options?: { fit?: string }): Promise<ScModel>;
+}
+`;
+}
+
 /** The TypeScript type one of v1's declared argument types arrives as.
  *
  * v1's own type names, which is the vocabulary `sc_module::spec` already
@@ -732,11 +887,24 @@ export function scopeDeclarations(
     `/** Whoever caused the event, or null for the server's own events. */\n` +
       `declare const user: ScUser | null;`,
   );
-  parts.push(
-    `/** What the trigger was called with: the body posted to a directly-run\n` +
-      ` * trigger, or what the event carried. */\n` +
-      `declare const payload: Record<string, any>;`,
-  );
+  if (scope.request) {
+    parts.push(
+      `/** The request's JSON body — \`{}\` when there was none. A declared\n` +
+        ` * parameter arrives here, converted to its type, for a method with a\n` +
+        ` * body. */\ndeclare const body: any;`,
+    );
+    parts.push(
+      `/** The request's query string, one value per key. A declared parameter\n` +
+        ` * arrives here, converted to its type, for \`GET\` and \`DELETE\`. */\n` +
+        `declare const query: Record<string, any>;`,
+    );
+  } else {
+    parts.push(
+      `/** What the trigger was called with: the body posted to a directly-run\n` +
+        ` * trigger, or what the event carried. */\n` +
+        `declare const payload: Record<string, any>;`,
+    );
+  }
   if (scope.run) {
     // Only a workflow step has it, so it is declared only for one — naming it
     // in a trigger's own body is a `ReferenceError`, and completing it would be
@@ -750,6 +918,22 @@ export function scopeDeclarations(
   parts.push(
     `/** The tables. Only a code body has this — a formula (an \`only if\`, an\n` +
       ` * ownership rule) evaluates without it. */\ndeclare const db: ScDb;`,
+  );
+  parts.push(
+    `/** The models, by name. \`models.get\` answers a handle on a model's\n` +
+      ` * active fit (or \`{ fit: id }\`'s):\n` +
+      ` *\n` +
+      ` * \`\`\`js\n` +
+      ` * const m = await models.get("House prices");\n` +
+      ` * const price = await m.predict(row);\n` +
+      ` * const r = await models.get("Radon");\n` +
+      ` * const alpha = await r.draws("alpha", { keys: [27001] });\n` +
+      ` * await r.writePosterior({ variable: "alpha", statistics: { mean: "alpha_mean" } });\n` +
+      ` * \`\`\`\n` +
+      ` *\n` +
+      ` * Each call is a database call of this run, on its budget; a draws answer\n` +
+      ` * is at most 500 000 numbers — \`thin\` and \`chains\` keep it under. */\n` +
+      `declare const models: ScModels;`,
   );
   parts.push(
     `/** Call an HTTP endpoint. The web's \`fetch\`, with the web's rules: a\n` +
@@ -845,6 +1029,7 @@ export function codeLibrary(
     chainDeclarations(),
     fileDeclarations(),
     triggerDeclarations(),
+    modelDeclarations(),
     moduleFunctionDeclarations(functions),
     tableDeclarations(tables),
     scopeDeclarations(scope, tables, functions),

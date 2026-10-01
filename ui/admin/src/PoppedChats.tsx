@@ -72,7 +72,7 @@ export function PoppedChats() {
         >
           <AgentChat
             agent={chat.agent}
-            initial={{ runId: chat.runId, entries: chat.entries }}
+            initial={{ runId: chat.runId, entries: chat.entries, draft: chat.draft }}
             frame={{
               mode: chat.mode,
               onMinimize: () => setPoppedChatMode(chat.key, "minimized"),

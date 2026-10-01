@@ -91,7 +91,7 @@ fn top_authors() -> Json {
         "name": "topAuthors",
         "description": "Books per author since a year",
         "path": "/reports/top-authors",
-        "sql": "select author, count(*) as books from books where year > :since \
+        "code": "select author, count(*) as books from books where year > :since \
                 group by author",
         "params": [{ "name": "since", "type": "int" }],
     })
@@ -151,7 +151,7 @@ async fn sql_the_database_refuses_leaves_the_application_exactly_as_it_was() -> 
     let mut broken = top_authors();
     broken["name"] = json!("byPublisher");
     broken["path"] = json!("/reports/by-publisher");
-    broken["sql"] = json!("select publisher from books where year > :since");
+    broken["code"] = json!("select publisher from books where year > :since");
     let err = call(&env, &default_grants(), TOOL_SAVE_QUERY, broken)
         .await
         .unwrap_err()
@@ -172,7 +172,7 @@ async fn sql_the_database_refuses_leaves_the_application_exactly_as_it_was() -> 
     two["name"] = json!("twoStatements");
     two["path"] = json!("/reports/two");
     two["params"] = json!([]);
-    two["sql"] = json!("select 1 as n; select 2 as n");
+    two["code"] = json!("select 1 as n; select 2 as n");
     let err = call(&env, &default_grants(), TOOL_SAVE_QUERY, two)
         .await
         .unwrap_err()
@@ -207,7 +207,7 @@ async fn an_edit_merges_into_what_is_stored_and_is_its_own_grant() -> Result<()>
         json!({
             "application": "blog",
             "name": "topAuthors",
-            "sql": "select author, count(*) as books, max(year) as latest from \
+            "code": "select author, count(*) as books, max(year) as latest from \
                     books where year > :since group by author",
         }),
     )
@@ -230,7 +230,7 @@ async fn an_edit_merges_into_what_is_stored_and_is_its_own_grant() -> Result<()>
         &env,
         &create_only,
         TOOL_SAVE_QUERY,
-        json!({ "application": "blog", "name": "topAuthors", "sql": "select 1 as n" }),
+        json!({ "application": "blog", "name": "topAuthors", "code": "select 1 as n" }),
     )
     .await
     .unwrap_err()
@@ -243,7 +243,7 @@ async fn an_edit_merges_into_what_is_stored_and_is_its_own_grant() -> Result<()>
     let mut fresh = top_authors();
     fresh["name"] = json!("newest");
     fresh["path"] = json!("/reports/newest");
-    fresh["sql"] = json!("select title from books where year > :since");
+    fresh["code"] = json!("select title from books where year > :since");
     let err = call(&env, &edit_only, TOOL_SAVE_QUERY, fresh)
         .await
         .unwrap_err()
@@ -318,7 +318,7 @@ async fn deleting_a_query_needs_the_drop_grant_and_says_what_it_was() -> Result<
     // What it was, so an agent that deleted the wrong endpoint can put it back
     // from its own transcript.
     assert!(
-        result["was"]["sql"]
+        result["was"]["code"]
             .as_str()
             .unwrap()
             .contains("count(*) as books"),
@@ -392,17 +392,18 @@ async fn the_areas_decide_which_tools_the_model_is_offered() -> Result<()> {
     let all = offered(&default_grants());
     assert!(all.contains(&TOOL_DESCRIBE_APPS.to_owned()), "{all:?}");
     assert!(all.contains(&TOOL_DESCRIBE_TRIGGERS.to_owned()), "{all:?}");
-    assert_eq!(all.len(), 9, "{all:?}");
+    assert_eq!(all.len(), 10, "{all:?}");
 
     // Switched off, the tools are *gone* rather than present and refusing: a tool
-    // the model can see is a tool it will try.
+    // the model can see is a tool it will try. The code-body reference stays, as
+    // the schema tools do: it belongs to no area and grants nothing.
     let schema_only = config(&[
         (CFG_ALLOW_TRIGGERS, json!(false)),
         (CFG_ALLOW_APPLICATIONS, json!(false)),
     ]);
     assert_eq!(
         offered(&schema_only),
-        vec!["describe_schema", "edit_schema"]
+        vec!["describe_schema", "edit_schema", "describe_code_api"]
     );
     env.check(TRAIT, &schema_only).await?;
 

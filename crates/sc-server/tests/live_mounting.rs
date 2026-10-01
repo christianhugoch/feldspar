@@ -387,16 +387,23 @@ async fn an_unbuilt_app_fails_its_reload_alone() -> sc_error::Result<()> {
 }
 
 #[tokio::test]
-async fn boot_mounts_every_stored_app_and_a_failing_one_does_not_stop_the_others()
+async fn boot_mounts_every_built_app_without_building_and_skips_an_unbuilt_one()
 -> sc_error::Result<()> {
     let tmp = TempDir::new("boot");
     let (apps, router, catalog, _db) = setup(&tmp).await?;
 
-    // One good app whose bundler succeeds...
-    write_bundler(tmp.path(), "good", true);
+    // One app with a build already on disk, and a bundler that would replace it
+    // — so what boot serves says whether boot ran the bundler.
+    write_bundler(tmp.path(), "rebuilt", true);
+    std::fs::create_dir_all(tmp.path().join("web/dist")).unwrap();
+    std::fs::write(
+        tmp.path().join("web/dist/index.html"),
+        "<!doctype html><div id=root>built</div>",
+    )
+    .unwrap();
     save_application(&catalog, &blog_app()).await?;
 
-    // ...and a second app in a *separate* store whose bundler will fail.
+    // ...and a second app in a *separate* store that has never been built.
     let broken_dir = tmp.path().join("broken-store");
     std::fs::create_dir_all(&broken_dir).unwrap();
     catalog.connect_file_store(Arc::new(LocalFileStore::new("broken", &broken_dir)?))?;
@@ -412,15 +419,16 @@ async fn boot_mounts_every_stored_app_and_a_failing_one_does_not_stop_the_others
     );
     save_application(&catalog, &broken).await?;
 
-    // Boot mounts everything it can; the broken app is logged and skipped, not
-    // fatal, so the good app comes up regardless.
+    // Boot mounts what is on disk and builds nothing: the built app serves its
+    // existing output, not what its bundler would have written, and the unbuilt
+    // one is logged and skipped, not fatal.
     mount_all(&apps).await;
 
     let (status, body) = get(&router, "blog.example.com", "/").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, b"<!doctype html><div id=root>good</div>");
+    assert_eq!(body, b"<!doctype html><div id=root>built</div>");
 
-    // The broken app never mounted, so its subdomain is not an app.
+    // The unbuilt app never mounted, so its subdomain is not an app.
     let (_, body) = get(&router, "broken.example.com", "/").await;
     assert_eq!(body, sc_server::BOOTSTRAP_HTML.as_bytes());
 

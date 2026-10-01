@@ -59,7 +59,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use sc_auth::{User, authenticate};
 use sc_catalog::{CallerContext, Catalog, DataFieldKind, Table, load_file_store_by_name};
-use sc_error::{Error, Result};
+use sc_error::{Error, Repr, Result};
 use sc_expr::{JsEvaluator, Operation};
 use sc_files::{ROLE_PUBLIC, check_access, mime_for_path, validate_file_path};
 use sc_query::Value;
@@ -67,6 +67,7 @@ use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Value as Json, json};
 
 pub mod custom;
+pub mod password;
 mod query;
 
 use custom::CustomQuery;
@@ -127,6 +128,12 @@ pub fn rest_config_spec() -> Vec<FormField> {
         FormField::new(CFG_NEW_USER_ROLE, BasicType::Int)
             .label("Role of a signed-up account")
             .default_value(i64::from(DEFAULT_NEW_USER_ROLE)),
+        FormField::new(password::CFG_ALLOW_INVITE, BasicType::Bool)
+            .label("Allow invitations (signed-in users create accounts for others)")
+            .default_value(false),
+        FormField::new(password::CFG_INVITE_MIN_ROLE, BasicType::Int)
+            .label("Least powerful role that may invite")
+            .default_value(i64::from(password::DEFAULT_INVITE_MIN_ROLE)),
     ]
 }
 
@@ -168,7 +175,7 @@ pub fn check_rest_config(config: &Attrs) -> Result<()> {
              anybody can make through sign-up cannot be an administrator"
         )));
     }
-    Ok(())
+    password::check_invite_config(config)
 }
 
 /// Any role but the administrator's.
@@ -239,6 +246,9 @@ const LOGIN: &str = "login";
 const LOGOUT: &str = "logout";
 const WHOAMI: &str = "whoami";
 const SIGNUP: &str = "signup";
+const INVITE: &str = "invite";
+const FORGOT_PASSWORD: &str = "forgotPassword";
+const SET_PASSWORD: &str = "setPassword";
 
 /// The first path segments this provider's own routes claim, which a custom SQL
 /// query's sub-path may therefore not start with (see
@@ -247,11 +257,29 @@ const SIGNUP: &str = "signup";
 /// A table's name is the other half of that rule, and it is not a constant — it
 /// is whatever the application declares. `signup` is reserved whether or not
 /// the application offers it, so turning sign-up on cannot shadow a query.
-pub(crate) const RESERVED_SEGMENTS: [&str; 5] = [ACTIONS_SEGMENT, LOGIN, LOGOUT, WHOAMI, SIGNUP];
+pub(crate) const RESERVED_SEGMENTS: [&str; 8] = [
+    ACTIONS_SEGMENT,
+    LOGIN,
+    LOGOUT,
+    WHOAMI,
+    SIGNUP,
+    INVITE,
+    "forgot-password",
+    "set-password",
+];
 
-/// Every endpoint name the provider's own auth may project — the three every
-/// app has plus `signup` — which a custom query may therefore not be named.
-pub(crate) const RESERVED_AUTH_NAMES: [&str; 4] = [LOGIN, LOGOUT, WHOAMI, SIGNUP];
+/// Every endpoint name the provider's own auth may project — the five every
+/// app has plus `signup` and `invite` — which a custom query may therefore not
+/// be named.
+pub(crate) const RESERVED_AUTH_NAMES: [&str; 7] = [
+    LOGIN,
+    LOGOUT,
+    WHOAMI,
+    SIGNUP,
+    INVITE,
+    FORGOT_PASSWORD,
+    SET_PASSWORD,
+];
 
 /// The app's own auth operations, as a client generator meets them.
 ///
@@ -274,9 +302,17 @@ pub struct RestProvider {
     /// The role a `signup` gives a new account, when the application offers
     /// sign-up at all ([`with_signup`](RestProvider::with_signup)).
     signup_role: Option<u8>,
+    /// The least powerful role that may invite somebody, when the application
+    /// offers invitations at all ([`with_invite`](RestProvider::with_invite)).
+    invite_min_role: Option<u8>,
+    /// The mail transport the password links travel by
+    /// ([`with_mailer`](RestProvider::with_mailer)). Absent where only the
+    /// endpoint shapes are needed; there, an invitation is a configuration
+    /// error and a reset request is logged and answered as usual.
+    mailer: Option<Arc<dyn sc_email::Mailer>>,
     /// Endpoint name → the admin-authored SQL query it runs
     /// ([`with_queries`](RestProvider::with_queries)). Keyed the same way the
-    /// [`HandlerRef::Sql`] on the endpoint names it, so dispatch is a lookup.
+    /// [`HandlerRef::Custom`] on the endpoint names it, so dispatch is a lookup.
     custom_routes: HashMap<String, CustomQuery>,
     /// The dispatcher an exposed trigger is run through. Injected by the server
     /// via [`with_dispatcher`](RestProvider::with_dispatcher); absent in the
@@ -347,6 +383,29 @@ impl RestProvider {
                 .output(user_summary_schema())
                 .auth(AuthRequirement::LoggedIn),
         );
+        // A forgotten password, and the link that sets one (`password`). Public
+        // for `login`'s reason: they are how somebody who cannot sign in gets
+        // back to being able to.
+        endpoints.register(
+            Endpoint::new(
+                FORGOT_PASSWORD,
+                Method::Post,
+                path_at(&mount).lit("forgot-password"),
+            )
+            .input(password::forgot_password_schema())
+            .output(password::ok_schema())
+            .auth(AuthRequirement::Public),
+        );
+        endpoints.register(
+            Endpoint::new(
+                SET_PASSWORD,
+                Method::Post,
+                path_at(&mount).lit("set-password"),
+            )
+            .input(password::set_password_schema())
+            .output(user_summary_schema())
+            .auth(AuthRequirement::Public),
+        );
 
         // The tables as a *generated consumer* sees them (§13.1): the row shapes
         // and which endpoint performs which operation on them. Collected here
@@ -365,8 +424,19 @@ impl RestProvider {
             // endpoint's auth into the handler, where the rule becomes
             // "meets the role floor OR the formula grants the row". A table
             // without a formula keeps the MinRole gate exactly as before.
+            //
+            // A floor at the public role stays a floor, though: it admits
+            // everybody whatever the formula says, and saying so is what
+            // exempts the endpoint from CSRF (`AuthRequirement::is_public_role`).
+            let relaxed = |floor: u8| match AuthRequirement::MinRole(floor) {
+                open if open.is_public_role() => open,
+                _ => AuthRequirement::Public,
+            };
             let (read, write) = if table.ownership.is_some() {
-                (AuthRequirement::Public, AuthRequirement::Public)
+                (
+                    relaxed(table.access.min_role_read),
+                    relaxed(table.access.min_role_write),
+                )
             } else {
                 (
                     AuthRequirement::MinRole(table.access.min_role_read),
@@ -526,6 +596,8 @@ impl RestProvider {
             routes,
             trigger_routes,
             signup_role: None,
+            invite_min_role: None,
+            mailer: None,
             custom_routes: HashMap::new(),
             dispatcher: None,
             evaluator: None,
@@ -560,23 +632,57 @@ impl RestProvider {
             // Public for the reason `login` is: it is how a caller who has no
             // account stops being anonymous.
             .auth(AuthRequirement::Public);
+        self.register_auth_endpoint(signup);
+        self.signup_role = Some(role);
+        self
+    }
+
+    /// Offer invitations: project `POST {mount}/invite` for callers at `min_role`
+    /// or more powerful (see [`password`]). `None` is the default and projects
+    /// nothing.
+    pub fn with_invite(mut self, min_role: Option<u8>) -> RestProvider {
+        self.invite_min_role = min_role;
+        let Some(min_role) = min_role else {
+            return self;
+        };
+        if self.endpoints.find(INVITE).is_none() {
+            let invite = Endpoint::new(INVITE, Method::Post, path_at(&self.mount).lit(INVITE))
+                .input(password::invite_schema())
+                .output(password::invite_output_schema())
+                .auth(AuthRequirement::MinRole(min_role));
+            self.register_auth_endpoint(invite);
+        }
+        self
+    }
+
+    /// Register one of the provider's own auth endpoints **beside the others,
+    /// ahead of every table's**: `resolve` takes the first match, so a table
+    /// that happens to be called `signup` or `invite` cannot shadow it, exactly
+    /// as one called `login` cannot shadow that.
+    fn register_auth_endpoint(&mut self, endpoint: Endpoint) {
         let mut endpoints = EndpointSet::new();
         let mut placed = false;
         for ep in self.endpoints.iter() {
             endpoints.register(ep.clone());
-            if ep.name == WHOAMI {
-                endpoints.register(signup.clone());
+            if ep.name == SET_PASSWORD {
+                endpoints.register(endpoint.clone());
                 placed = true;
             }
         }
         if !placed {
-            endpoints.register(signup);
+            endpoints.register(endpoint);
         }
         for resource in self.endpoints.resources() {
             endpoints.register_resource(resource.clone());
         }
         self.endpoints = endpoints;
-        self.signup_role = Some(role);
+    }
+
+    /// Install the mail transport the password links are sent by — the server's
+    /// one [`Mailer`](sc_email::Mailer), which reads Settings → Email afresh for
+    /// every message.
+    pub fn with_mailer(mut self, mailer: Arc<dyn sc_email::Mailer>) -> RestProvider {
+        self.mailer = Some(mailer);
         self
     }
 
@@ -601,7 +707,7 @@ impl RestProvider {
         for query in queries {
             if self.endpoints.find(&query.name).is_some() {
                 return Err(Error::config(format!(
-                    "custom SQL query `{}` has the same name as an endpoint this \
+                    "custom query `{}` has the same name as an endpoint this \
                      API already projects; rename the query",
                     query.name
                 )));
@@ -629,6 +735,9 @@ impl RestProvider {
         cat: &Catalog,
         user: Option<&User>,
     ) -> Result<ApiResponse> {
+        if let Some(action) = query.language.action() {
+            return self.run_custom_code(query, action, req, cat, user).await;
+        }
         let statement = custom::custom_statement(cat, query, req)?;
         let caller = ownership::caller_context(user);
         let rows = if query.read_only() {
@@ -637,6 +746,37 @@ impl RestProvider {
             sc_catalog::run_in_context(cat, &caller, &statement).await
         }?;
         Ok(ApiResponse::ok(custom::rows_to_json(&rows)))
+    }
+
+    /// Run a JavaScript or Python custom query (§13.4): its body, on the
+    /// action a trigger's body of that language runs on, through *the*
+    /// dispatcher — so it has the same host surfaces, bounds and authority an
+    /// exposed trigger's body has, and the caller travels with it as `user`.
+    ///
+    /// What the body returns is the response. A body that throws is an error
+    /// answer, as an exposed trigger's is: somebody is waiting for this one.
+    async fn run_custom_code(
+        &self,
+        query: &CustomQuery,
+        action: &str,
+        req: &ApiRequest,
+        cat: &Catalog,
+        user: Option<&User>,
+    ) -> Result<ApiResponse> {
+        let dispatcher = self.dispatcher.as_ref().ok_or_else(|| {
+            Error::config(format!(
+                "custom query `{}` is {} code, but no trigger dispatcher is \
+                 available in this context to run it",
+                query.name,
+                query.language.as_str()
+            ))
+        })?;
+        let scope = custom::code_scope(query, req)?;
+        let caller = ownership::caller_context(user);
+        let result = dispatcher
+            .run_code(cat, action, &query.name, &query.code, scope, Some(&caller))
+            .await?;
+        Ok(ApiResponse::ok(result))
     }
 
     /// Inject the JavaScript evaluator ownership formulas' reified path runs
@@ -692,7 +832,7 @@ impl RestProvider {
     ///
     /// The endpoint is projected and typed like any other, but nothing here
     /// knows how to *run* it: a [`HandlerRef::GuestCode`] is `501 Not
-    /// Implemented`, and a [`HandlerRef::Sql`] resolves against the queries
+    /// Implemented`, and a [`HandlerRef::Custom`] resolves against the queries
     /// [`with_queries`](RestProvider::with_queries) registered — which is the
     /// way to add a custom SQL query, since it carries the definition the
     /// handler needs.
@@ -1369,6 +1509,27 @@ impl ApiProvider for RestProvider {
         cat: &Arc<Catalog>,
         user: Option<&User>,
     ) -> Result<ApiResponse> {
+        match self.dispatch(req, cat, user).await {
+            // A signed-in caller who is refused is *forbidden*, not
+            // unauthenticated: signing in again would change nothing. The row
+            // layer and the invitation rules refuse with `Error::auth` because
+            // they sit below any notion of HTTP; this is where it gets one.
+            Err(e) if user.is_some() && matches!(e.repr(), Repr::Auth(_)) => {
+                Ok(ApiResponse::error(403, e.to_string()))
+            }
+            other => other,
+        }
+    }
+}
+
+impl RestProvider {
+    /// Route one request to its handler, the endpoint's auth enforced first.
+    async fn dispatch(
+        &self,
+        req: ApiRequest,
+        cat: &Arc<Catalog>,
+        user: Option<&User>,
+    ) -> Result<ApiResponse> {
         let (endpoint, params) = match self.resolve(&req) {
             Ok(found) => found,
             Err(rejection) => return Ok(rejection),
@@ -1383,6 +1544,15 @@ impl ApiProvider for RestProvider {
         match &endpoint.handler {
             HandlerRef::Named(_) if endpoint.name == LOGIN => self.login(&req.body, cat).await,
             HandlerRef::Named(_) if endpoint.name == SIGNUP => self.signup(&req.body, cat).await,
+            HandlerRef::Named(_) if endpoint.name == INVITE && self.invite_min_role.is_some() => {
+                password::invite(&req, cat, user, self.mailer.as_ref()).await
+            }
+            HandlerRef::Named(_) if endpoint.name == FORGOT_PASSWORD => {
+                password::forgot_password(&req, cat, self.mailer.as_ref()).await
+            }
+            HandlerRef::Named(_) if endpoint.name == SET_PASSWORD => {
+                password::set_password(&req, cat).await
+            }
             HandlerRef::Named(_) if endpoint.name == LOGOUT => {
                 Ok(ApiResponse::end_session(json!({ "ok": true })))
             }
@@ -1408,14 +1578,14 @@ impl ApiProvider for RestProvider {
                 501,
                 format!("custom {language} routes are not implemented yet"),
             )),
-            HandlerRef::Sql(name) => match self.custom_routes.get(name) {
+            HandlerRef::Custom(name) => match self.custom_routes.get(name) {
                 Some(query) => self.run_custom(query, &req, cat, user).await,
                 // A `Sql` endpoint registered by something other than
                 // `with_queries` — the set was extended with a route this
                 // provider has no query for.
                 None => Ok(ApiResponse::error(
                     501,
-                    format!("custom SQL query `{name}` has no definition here"),
+                    format!("custom query `{name}` has no definition here"),
                 )),
             },
         }
@@ -1426,16 +1596,13 @@ impl ApiProvider for RestProvider {
 /// does not pass. Mirrors the server's own dispatch check, in the provider's
 /// JSON vocabulary.
 fn enforce_auth(auth: &AuthRequirement, user: Option<&User>) -> Option<ApiResponse> {
-    let unauthenticated = || ApiResponse::error(401, "authentication required");
-    match auth {
-        AuthRequirement::Public => None,
-        AuthRequirement::LoggedIn => user.is_none().then(unauthenticated),
-        AuthRequirement::MinRole(min) => match user {
-            None => Some(unauthenticated()),
-            Some(u) if u.meets_role(*min) => None,
-            Some(_) => Some(ApiResponse::error(403, "insufficient privilege")),
-        },
+    if auth.admits(user) {
+        return None;
     }
+    Some(match user {
+        None => ApiResponse::error(401, "authentication required"),
+        Some(_) => ApiResponse::error(403, "insufficient privilege"),
+    })
 }
 
 /// A `PathSpec` rooted at the provider's mount.
@@ -1464,6 +1631,10 @@ fn normalize_mount(raw: &str) -> String {
 fn resource_model(table: &Table, exposed: &std::collections::HashSet<&str>) -> ResourceModel {
     let mut model = ResourceModel::new(&table.name);
     for field in &table.fields {
+        // The password hash is no API's (`user_rows`), so no row type has it.
+        if crate::user_rows::is_hidden_column(table, &field.base.name) {
+            continue;
+        }
         let ty = field
             .base
             .type_
@@ -1567,9 +1738,31 @@ mod tests {
         User::new(uuid::Uuid::new_v4(), role).expect("role in range")
     }
 
-    /// Every app's projection carries `login`, `logout`, and `whoami` on top of
-    /// its per-table endpoints.
-    const AUTH_ENDPOINT_COUNT: usize = 3;
+    /// Every app's projection carries `login`, `logout`, `whoami`,
+    /// `forgotPassword` and `setPassword` on top of its per-table endpoints.
+    const AUTH_ENDPOINT_COUNT: usize = 5;
+
+    #[test]
+    fn invite_is_projected_only_when_offered_and_a_table_cannot_shadow_it() {
+        let p = RestProvider::project("/api", &[table("invite", AccessRules::default())]);
+        assert!(p.endpoints().find("invite").is_none(), "off by default");
+        let forgot = p.endpoints().find("forgotPassword").unwrap();
+        assert_eq!(forgot.auth, AuthRequirement::Public);
+        assert_eq!(
+            p.endpoints().find("setPassword").unwrap().auth,
+            AuthRequirement::Public
+        );
+
+        let p = p.with_invite(Some(40));
+        let invite = p.endpoints().find("invite").unwrap();
+        assert_eq!(invite.auth, AuthRequirement::MinRole(40));
+        // `POST /api/invite` is the invitation, not the `invite` table's create.
+        let (found, _) = p
+            .resolve(&ApiRequest::new(Method::Post, "/api/invite"))
+            .unwrap();
+        assert_eq!(found.name, "invite");
+        assert!(p.endpoints().find("createInvite").is_some());
+    }
 
     #[test]
     fn projects_four_rest_endpoints_per_table() {
@@ -1785,6 +1978,73 @@ mod tests {
     }
 
     #[test]
+    fn a_floor_at_the_public_role_admits_a_caller_nobody_is_logged_in_as() {
+        // Role 100 is the role an anonymous caller holds, so a floor at it is
+        // everybody — not "any logged-in user of role 100".
+        let public = AuthRequirement::MinRole(sc_auth::ROLE_PUBLIC);
+        assert!(enforce_auth(&public, None).is_none());
+        assert!(enforce_auth(&public, Some(&user(100))).is_none());
+        assert!(enforce_auth(&public, Some(&user(1))).is_none());
+        // One step stricter and the anonymous caller is out again.
+        assert_eq!(
+            enforce_auth(&AuthRequirement::MinRole(99), None)
+                .unwrap()
+                .status,
+            401
+        );
+    }
+
+    #[test]
+    fn only_endpoints_at_the_public_role_are_open_without_a_session() {
+        use sc_action::{EventKind, Trigger};
+
+        let open = AccessRules {
+            min_role_read: sc_auth::ROLE_PUBLIC,
+            min_role_write: sc_auth::ROLE_PUBLIC,
+        };
+        let read_only = AccessRules {
+            min_role_read: sc_auth::ROLE_PUBLIC,
+            min_role_write: 80,
+        };
+        // An ownership table's endpoints are relaxed to `Public` for its
+        // formula; a floor at the public role must survive that relaxation.
+        let mut owned = table("notes", read_only.clone());
+        owned.ownership = Some(sc_expr::Formula::parse("owner === user.id").unwrap());
+        let p = RestProvider::project_with(
+            "/api",
+            &[table("guestbook", open), table("posts", read_only), owned],
+            &[
+                Trigger::new("sign", EventKind::None, "fetch").min_role(sc_auth::ROLE_PUBLIC),
+                Trigger::new("purge", EventKind::None, "fetch").min_role(80),
+            ],
+        )
+        .with_queries(vec![
+            CustomQuery::new("count", Method::Post, "/stats/count", "SELECT 1")
+                .min_role(sc_auth::ROLE_PUBLIC),
+            CustomQuery::new("audit", Method::Post, "/stats/audit", "SELECT 1").min_role(40),
+        ])
+        .unwrap();
+
+        let open = |method, path| p.open_to_public(method, path);
+        assert!(open(Method::Post, "/api/guestbook"));
+        assert!(open(Method::Delete, "/api/guestbook/7"));
+        assert!(open(Method::Get, "/api/posts"));
+        assert!(!open(Method::Post, "/api/posts"));
+        assert!(open(Method::Get, "/api/notes"));
+        assert!(
+            !open(Method::Post, "/api/notes"),
+            "the formula decides writes"
+        );
+        assert!(open(Method::Post, "/api/actions/sign"));
+        assert!(!open(Method::Post, "/api/actions/purge"));
+        assert!(open(Method::Post, "/api/stats/count"));
+        assert!(!open(Method::Post, "/api/stats/audit"));
+        // The auth plumbing is `Public`, not the public role: it keeps the check.
+        assert!(!open(Method::Post, "/api/login"));
+        assert!(!open(Method::Post, "/api/nowhere"));
+    }
+
+    #[test]
     fn an_exposed_trigger_is_one_post_endpoint_carrying_its_own_role_floor() {
         use sc_action::{EventKind, Trigger};
 
@@ -1837,12 +2097,12 @@ mod tests {
                 Endpoint::new("search", Method::Post, PathSpec::root().lit("api/search"))
                     .input(TypeSchema::json())
                     .output(TypeSchema::json())
-                    .handler(HandlerRef::Sql("select 1".to_owned())),
+                    .handler(HandlerRef::Custom("select 1".to_owned())),
             );
         // The custom route is part of the contract even though it is stubbed.
         assert_eq!(p.endpoints().len(), AUTH_ENDPOINT_COUNT + 4 + 1);
         let ep = p.endpoints().find("search").unwrap();
-        assert!(matches!(ep.handler, HandlerRef::Sql(_)));
+        assert!(matches!(ep.handler, HandlerRef::Custom(_)));
 
         // A generated client types it like any other endpoint.
         let ts = crate::generate_client(p.endpoints());

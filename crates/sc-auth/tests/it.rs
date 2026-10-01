@@ -15,6 +15,8 @@
 mod auth_flow;
 #[path = "db_api_tokens.rs"]
 mod db_api_tokens;
+#[path = "db_password_tokens.rs"]
+mod db_password_tokens;
 #[path = "db_sessions.rs"]
 mod db_sessions;
 #[path = "first_user.rs"]

@@ -46,6 +46,7 @@ mod api;
 mod application;
 mod applications;
 mod build;
+mod build_cache;
 mod builder_agent;
 // The frameworks a module declares (§13.3, §15.1): the same registry answers,
 // written down as data instead of compiled.
@@ -60,6 +61,8 @@ pub mod i18n;
 // The application third of the administrative tool surface (§13.6), and the one
 // constructor of the whole nine-tool set.
 pub mod mcp;
+// The framework with no UI and no build: APIs, static directories and streams.
+mod none;
 mod react;
 mod scaffold;
 mod skill;
@@ -83,9 +86,10 @@ pub use applications::{
 };
 pub use build::{
     AppSource, BuildReport, TargetInfo, TargetReadiness, TargetReport, app_build_targets,
-    app_source_from_config, app_source_in, app_target_readiness, app_target_spec, build_app,
-    build_application, build_application_target, build_code_framework, emit_app_client,
-    emit_client, load_app_bundle, require_target_ready, run_build, target_log_path,
+    app_output_dir, app_source_from_config, app_source_in, app_target_readiness, app_target_spec,
+    build_app, build_application, build_application_if_changed, build_application_target,
+    build_code_framework, emit_app_client, emit_client, load_app_bundle, remove_app_dependencies,
+    remove_dependencies, require_target_ready, run_build, target_log_path,
 };
 pub use builder_agent::{
     BuilderAgentSpec, BuilderTrait, EDIT_FORMAT_AUTO, HTTP_NAME_WEB, TRAIT_CFG_APPLICATION,
@@ -120,6 +124,7 @@ pub use i18n::{
     app_locales, bootstrap_translations, delete_application_translations, i18n_catalog_path,
     i18n_catalog_path_template, i18n_locale_in_path, set_app_locales,
 };
+pub use none::{NONE_FRAMEWORK, NoneFramework, none_config_spec, none_source_dir};
 pub use react::{
     CFG_PROJECT, REACT_BUILD_ARGS, REACT_BUILD_COMMAND, REACT_CLIENT_FILE, REACT_FRAMEWORK,
     REACT_OUTPUT_SUBDIR, REACT_RUNTIME_SUBDIR, check_project_name, project_description,

@@ -151,10 +151,20 @@ export function storeModel(store: string): AgentModel {
   };
 }
 
+/** An item a progress task lists under its line — here, one call of a run. */
+export interface ToolRunItem {
+  value: { variableName: string };
+}
+
 /** The slice of `ChatResponseStream` a turn is relayed into. */
 export interface ResponseStream {
   markdown(value: string): void;
-  progress(value: string): void;
+  /** A progress line; with a task, the line lists what the task reports under
+   * it, and reads as what the task resolves to once it does. */
+  progress(
+    value: string,
+    task?: (progress: { report(item: ToolRunItem): void }) => Thenable<string | void>,
+  ): void;
   /** The collapsible "thinking" section — a proposed API, absent when it is not enabled. */
   thinkingProgress?(delta: { text: string; id?: string }): void;
 }
@@ -190,6 +200,65 @@ export function hasChanges(change: StoreChange): boolean {
   return change.paths.length > 0 || change.everything || change.committed;
 }
 
+/** A run of consecutive calls to one tool, as one progress line. */
+interface ToolRun {
+  readonly name: string;
+  readonly lines: string[];
+  report: ((item: ToolRunItem) => void) | null;
+  settle: ((label: string | void) => void) | null;
+}
+
+/**
+ * The run of calls to one tool a turn is in the middle of.
+ *
+ * An agent reading five files calls one tool five times, and five lines of
+ * progress bury what it said around them. So each call starts a progress
+ * *task*, and a call to the same tool straight after it joins that task
+ * instead of adding a line: the calls become the items the line opens onto,
+ * and when the run ends the line reads `read_file (5)`. A single call settles
+ * as the line it always was. Anything else in between — text, reasoning, a
+ * failure — ends the run, so a transcript still reads in the order it happened.
+ */
+export class ToolRuns {
+  private open: ToolRun | null = null;
+
+  /** Report one call: joining the open run when it is to the same tool. */
+  call(stream: ResponseStream, name: string, line: string): void {
+    const run = this.open;
+    if (run != null && run.name === name) {
+      // The first call was only the line until now; it is an item too.
+      if (run.lines.length === 1) run.report?.(runItem(run.lines[0]));
+      run.lines.push(line);
+      run.report?.(runItem(line));
+      return;
+    }
+    this.close();
+    const next: ToolRun = { name, lines: [line], report: null, settle: null };
+    this.open = next;
+    stream.progress(line, (progress) => {
+      next.report = (item) => progress.report(item);
+      return new Promise((resolve) => {
+        next.settle = resolve;
+      });
+    });
+  }
+
+  /** End the open run, if there is one. Called for anything that is not the
+   * next call to its tool, and when the turn ends. */
+  close(): void {
+    const run = this.open;
+    if (run == null) return;
+    this.open = null;
+    run.settle?.(
+      run.lines.length > 1 ? `${toolName(run.name)} (${run.lines.length})` : undefined,
+    );
+  }
+}
+
+function runItem(line: string): ToolRunItem {
+  return { value: { variableName: line } };
+}
+
 /**
  * Fold one server event into the response stream, and say what it changed in
  * the store.
@@ -208,7 +277,14 @@ export function hasChanges(change: StoreChange): boolean {
 export function relayEvent(
   event: ServerEvent,
   stream: ResponseStream,
+  runs: ToolRuns = new ToolRuns(),
 ): StoreChange {
+  // Only a call to the tool, or a result that worked, keeps a run going.
+  const continuesRun =
+    event.type === "tool_call" ||
+    event.type === "controls" ||
+    (event.type === "tool_result" && !event.is_error);
+  if (!continuesRun) runs.close();
   switch (event.type) {
     case "text":
       stream.markdown(event.delta);
@@ -220,7 +296,7 @@ export function relayEvent(
       stream.thinkingProgress?.({ text: event.delta, id: "agent" });
       return UNCHANGED;
     case "tool_call":
-      stream.progress(toolProgress(event.name, event.arguments));
+      runs.call(stream, event.name, toolProgress(event.name, event.arguments));
       return {
         paths: changedPaths(event.name, event.arguments),
         // Checked at the call, not the result: a command that timed out or
@@ -293,6 +369,29 @@ const VERBS: { prefix: string; label: string; writes?: true }[] = [
   { prefix: "run_script_", label: "Running" },
 ];
 
+/** The coding trait's tools that are not a verb over a path. */
+const OTHER_SCOPED = [
+  "view_app_",
+  "view_image_",
+  "call_api_",
+  "check_",
+  "shell_",
+  "process_",
+  "list_assets_",
+  "save_plan_",
+  "implement_feature_",
+  "explore_",
+];
+
+/** A tool's name without the scope suffix the coding trait adds to it:
+ * `read_file_todoapp_app` is `read_file`. Any other trait's is left alone. */
+export function toolName(tool: string): string {
+  const prefix = [...VERBS.map((verb) => verb.prefix), ...OTHER_SCOPED].find(
+    (candidate) => tool.startsWith(candidate),
+  );
+  return prefix == null ? tool : prefix.slice(0, -1);
+}
+
 /**
  * The one-line "what is it doing" for a tool call.
  *
@@ -307,6 +406,15 @@ export function toolProgress(tool: string, args: unknown): string {
   // Looking at the application: where, when the call says (TODO §7b).
   if (tool.startsWith("view_app_")) {
     return `Looking at ${firstString(args, ["path"]) ?? "the application"}`;
+  }
+  // Looking at an image: a path in this scope, or a URL the application serves.
+  if (tool.startsWith("view_image_")) {
+    return `Looking at ${firstString(args, ["path", "url"]) ?? "an image"}`;
+  }
+  // A request to the application's API: `GET /api/tasks`.
+  if (tool.startsWith("call_api_")) {
+    const method = firstString(args, ["method"]) ?? "GET";
+    return `Calling ${method.toUpperCase()} ${firstString(args, ["path"]) ?? "the API"}`;
   }
   if (tool.startsWith("check_")) return "Running the checks";
   if (tool.startsWith("shell_")) {

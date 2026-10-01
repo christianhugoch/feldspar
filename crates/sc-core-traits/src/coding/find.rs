@@ -41,14 +41,19 @@ pub fn spec(scope: &FileScope, config: &Attrs) -> ToolSpec {
         config_count(config, CFG_MAX_RESULTS, DEFAULT_MAX_RESULTS as u64).unwrap_or(u64::MAX);
     ToolSpec::new(
         tool_name(scope),
-        format!("Find files by glob, newest first, at most {ceiling}. Directories end in `/`."),
+        format!(
+            "List files and directories matching a glob, most recently changed first, at most \
+             {ceiling}. Directories end in `/`. Dependency and build directories \
+             (node_modules, .git, dist, build) are skipped. Use this to find where something \
+             lives by name; use the search tool to find it by content."
+        ),
         json!({
             "type": "object",
             "properties": {
                 ARG_PATTERN: {
                     "type": "string",
-                    "description": "`*.tsx` matches names anywhere, `src/**/*.ts` paths. \
-                                    Omit to list all.",
+                    "description": "`*.tsx` matches file names anywhere; `src/**/*.ts` matches \
+                                    paths; `{a,b}` gives alternatives. Omit to list everything.",
                 },
                 ARG_DIR: {"type": "string", "description": "Start here (default: the root)"},
             },

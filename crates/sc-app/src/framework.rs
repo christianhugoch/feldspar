@@ -929,8 +929,12 @@ mod tests {
     #[test]
     fn both_code_frameworks_are_registered_react_first() {
         // Order is the registry's one editorial statement: React is the path an
-        // admin should take, `code` the escape hatch (§2.4 renders that).
-        assert_eq!(registered_frameworks(), [REACT_FRAMEWORK, CODE_FRAMEWORK]);
+        // admin should take, `code` the escape hatch (§2.4 renders that), and
+        // `none` — no UI at all — the last choice.
+        assert_eq!(
+            registered_frameworks(),
+            [REACT_FRAMEWORK, CODE_FRAMEWORK, crate::NONE_FRAMEWORK]
+        );
         // Every registered name resolves to a spec — the list and the lookup
         // cannot drift apart without this failing.
         for name in registered_frameworks() {

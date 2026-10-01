@@ -34,9 +34,17 @@ own, for every other kind of box. (Design and planning docs live under
 - **Predictive models** over your own tables: a dataset built out of the same formula
   language as calculated fields, fitted by a built-in provider (regression, classification,
   clustering, dimensionality reduction, hypothesis tests) or by one a module supplies, with
-  the coefficients and metrics on a screen and a `predict_row` action to apply a fit to a
-  row. The built-in providers are a **default-on cargo feature** (§3). See
+  the coefficients and metrics on a screen. A fit is applied by `predict("House prices")` in
+  any formula, including a calculated field that predicts every row it lists, and by a model
+  handle in code (`models.get(…)`). `fit_model` refits on a schedule. The built-in providers are a **default-on cargo feature** (§3). See
   [`docs/tutorial-models.md`](docs/tutorial-models.md).
+- **Bayesian models with Stan.** The model is a Stan program in a file store. Its `data` block
+  is bound to your tables: a foreign key becomes a 1-based index, a date column a time grid
+  with a forecast horizon, and a junction table an adjacency graph with BYM2's scaling factor.
+  Every binding is checked before anything compiles. The posterior comes back labelled by your
+  keys and names, with R̂, effective sample sizes and plain-language warnings, trace and forest
+  plots, and a write-back into the rows it is about. It needs CmdStan on the machine, found at
+  run time (§3). See [`docs/tutorial-stan.md`](docs/tutorial-stan.md).
 - **Saltcorn 1's views, running.** An application whose framework is **Saltcorn UI** owns
   views (List, Show, Edit, Feed, Filter, ListShowList — and any a v1 plugin such as
   `@saltcorn/kanban` supplies) and pages, rendered on the server by v1's own view code. Restoring
@@ -503,6 +511,7 @@ database (§7).
 | **libclang** (`libclang-dev`) | any recent | building the module runtime (`deno_runtime` → `bindgen`); build time only |
 | **npm** (and the Node.js it ships with) | **npm 9.3.0+** (Node 18+) | building the four front-end bundles — the admin UI, the IDE, Saltcorn UI and its builder (optional; see §6), **and** *installing* modules (Settings → Modules). Debian's and Ubuntu's own package is npm 9.2.0, which cannot install a module at all — install Node from NodeSource (§2.1) or `npm install -g npm@latest` |
 | **CPython** + `pip`, and `python3-dev` to build against | 3.11+ | **only** for a server that runs Python trigger bodies or installs Python modules — and only in a build that has the `python` feature (below) |
+| **CmdStan**, `make` and a C++ compiler (`g++` or `clang++`) | CmdStan 2.33+ | **only** for Bayesian models with the Stan provider; `feldspar cmdstan install` fetches and builds CmdStan (below) |
 
 **The built-in model providers are a cargo feature, and it is on.** `sc-model`'s
 `smartcore` feature (default) carries `linear_regression`, `logistic_regression`,
@@ -555,6 +564,42 @@ use, so a Saltcorn UI application needs no `node`, no npm and no build step of i
 saving a view is the deployment. A binary built without the UI bundles (`SC_BUILD_ADMIN=0`,
 or `build-static.sh --no-ui`) has no Saltcorn UI and no builder, and there is no run-time flag
 that adds either back. See [`docs/tutorial-saltcorn-ui.md`](docs/tutorial-saltcorn-ui.md).
+
+### Stan, which is found at run time
+
+Bayesian models are Stan programs, compiled and run by
+[CmdStan](https://mc-stan.org/docs/cmdstan-guide/). Nothing of it is linked into the
+binary — CmdStan is a directory, a `make` and a C++ compiler — so every build can fit a
+Stan model, and whether *this machine* can is a run-time fact:
+
+```bash
+feldspar cmdstan status                       # what was found, its version, make and the compiler
+feldspar cmdstan install                      # the latest release, into ~/.cmdstan, `make build -j1`
+feldspar cmdstan install --version 2.40.0 --dir /opt/cmdstan --jobs 4
+```
+
+CmdStan is looked for at `--cmdstan DIR`, else `$CMDSTAN`, else the newest
+`~/.cmdstan/cmdstan-*` — cmdstanpy's convention, so one it installed is picked up — and
+anything older than 2.33 is refused by name. An install outside `~/.cmdstan` (`--dir`) is
+not searched, so point `$CMDSTAN` or `feldspar serve --cmdstan` (or `cmdstan` in
+`feldspar.toml`) at its `cmdstan-<version>` directory; the server says at startup which one
+it found, or why there is none. `install` is a download from GitHub and a
+C++ build of several minutes that an operator runs on purpose; the server never does
+either on its own. `--jobs` defaults to 1 because each job of that build takes 1–2 GB of
+memory. An install that fails or is interrupted removes what it had unpacked.
+The server's Stan flags — where compiled programs go, how many chains run at once, and the
+ceilings on a fit's data and draws — are in the table under "Server options" below, and
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md) §9 is how to size them.
+[`docs/tutorial-stan.md`](docs/tutorial-stan.md) walks three models end to end (radon by
+county, a daily series with a forecast, and a BYM2 over regions and weeks).
+
+The tests that need a real CmdStan are `#[ignore]`d, and find it the way the server does, so
+on a machine where `feldspar cmdstan install` has run they need nothing set:
+
+```bash
+cargo test -p sc-stan -- --ignored                           # compile, sample, stanc agreement
+cargo test -p sc-server --test it -- --ignored stan_models   # the three tutorial models, end to end
+```
 
 ### Python, which is a build and not a flag
 
@@ -1023,6 +1068,13 @@ can read it — including a group that is not its own.
 | `--python-dir <dir>` | the virtual environment Python modules install into | the platform's data directory |
 | `--python-bin <path>` | the interpreter `pip` runs under | `python3` |
 | `--model-max-rows <n>` | ceiling on the rows one model dataset may select | `200000` |
+| `--cmdstan <dir>` | the CmdStan Stan models compile and run with | `$CMDSTAN`, else the newest `~/.cmdstan/cmdstan-*` |
+| `--stan-cache-dir <dir>` | where compiled Stan programs are kept | `stan-cache` in the platform's data directory |
+| `--stan-max-processes <n>` | Stan chain processes this node runs at once, across every fit | half the CPUs, at least `1` |
+| `--stan-max-data-values <n>` | numbers one fit's bound data may hold | `20000000` |
+| `--stan-max-draws-bytes <n>` | bytes of draws one fit may store; over it, the summary is kept and the draws are not | `1000000000` |
+| `--stan-max-draws-response <n>` | numbers one `getModelDraws` answer may carry | `2000000` |
+| `--stan-summary-max-elements <n>` | a generated quantity with more elements is summarised on demand, not at fit time | `1000` |
 | `--browser <path>` | the headless Chromium the coding agent's `view_app` drives | `chromium`, `chromium-browser` or `google-chrome` on `PATH`, not a snap |
 | `--no-browser-sandbox` | start that browser with `--no-sandbox` (a kernel that refuses its sandbox) | sandboxed |
 | `--browser-contexts <n>` | runs that may hold a browser context at once; a call beyond it waits | `4` |

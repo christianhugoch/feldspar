@@ -38,7 +38,7 @@ use crate::context::Elidable;
 use crate::control::Signal;
 use crate::delegate::Delegator;
 use crate::run::{RunId, RunMode};
-use crate::view::{AppPreviewer, BrowserDriver, HostCapabilities};
+use crate::view::{AppPreviewer, AppRequester, BrowserDriver, HostCapabilities};
 
 /// One elementary agent capability: configurable, contributing tools.
 ///
@@ -448,6 +448,9 @@ pub struct TraitContext<'a> {
     /// The headless browser, where the server has one. See
     /// [`require_browser`](TraitContext::require_browser).
     pub browser: Option<&'a dyn BrowserDriver>,
+    /// How this run sends a request to an application, where the server can.
+    /// See [`require_requests`](TraitContext::require_requests).
+    pub requests: Option<&'a dyn AppRequester>,
     /// The signals this call has raised so far. Reach it through
     /// [`signal`](TraitContext::signal).
     pub signals: Vec<Signal>,
@@ -500,6 +503,18 @@ impl TraitContext<'_> {
         self.browser.ok_or_else(|| {
             Error::config(format!(
                 "agent `{}`: this needs the server's headless browser, \
+                 and this context has none",
+                self.agent
+            ))
+        })
+    }
+
+    /// How to send a request to an application, or the configuration error that
+    /// says this context cannot.
+    pub fn require_requests(&self) -> Result<&dyn AppRequester> {
+        self.requests.ok_or_else(|| {
+            Error::config(format!(
+                "agent `{}`: this needs the server's application router, \
                  and this context has none",
                 self.agent
             ))

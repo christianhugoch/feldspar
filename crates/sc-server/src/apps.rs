@@ -23,7 +23,7 @@ use sc_agent::{AppPreviewer, PreviewInfo, RunId};
 use sc_api::ApiProvider;
 use sc_app::{
     Application, CodeFramework, Framework, app_source_from_config, build_application,
-    list_applications,
+    list_applications, load_app_bundle,
 };
 use sc_catalog::{Catalog, ReprojectedApp, SchemaChanged, SchemaObserver};
 use sc_error::{Error, Repr, Result};
@@ -205,9 +205,9 @@ pub struct AppMounts {
     modules: Option<Arc<crate::modules::ModuleServices>>,
     /// The model machinery (TODO "Predictive models"): the provider registry,
     /// the dataset seam and the row cap. Here for the reason the four above are
-    /// — the admin handlers already hold this handle, and the `predict_row`
-    /// action in the trigger registry has to predict with the *same* registry a
-    /// fit was run with. `None` is a process with no models installed, where the
+    /// — the admin handlers already hold this handle, and the `fit_model`
+    /// action in the trigger registry has to fit with the *same* registry the
+    /// admin's Fit button does. `None` is a process with no models installed, where the
     /// Models tab says so rather than pretending.
     models: Option<crate::models::ModelServices>,
     /// The stream machinery (TODO "Streams"): the provider registry and the
@@ -905,6 +905,14 @@ impl AppPreviewer for AppMounts {
         let app = sc_app::load_application_by_subdomain(catalog, subdomain)
             .await?
             .ok_or_else(|| Error::invalid(format!("no application is served at `{subdomain}`")))?;
+        // Nothing was built, so there is no bundle: the preview is constructed
+        // exactly as the live mount is, and serves what it serves.
+        if let Some(factory) = sc_app::framework_factory(&app.framework.name) {
+            let framework = construct(self, &*factory, &app).await?;
+            let mounted =
+                MountedApp::new_with(app, framework, catalog, self.evaluator(), self.triggers())?;
+            return Ok(AppMounts::mount_preview(self, run, mounted));
+        }
         let source = app_source_from_config(&app.framework)?;
         let dir = output_dir.to_owned();
         let bundle = tokio::task::spawn_blocking(move || sc_app::AssetBundle::from_dir(&dir))
@@ -994,31 +1002,7 @@ pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_ap
         Error::config("this server was built with no catalog, so it cannot mount applications")
     })?;
     if let Some(factory) = sc_app::framework_factory(&app.framework.name) {
-        // A framework with nothing to build (Saltcorn UI) is constructed. What
-        // it needs to serve anything — a bundle, a runtime — is checked by the
-        // factory here, on the mount, so a missing one is one line at boot (or
-        // one error on save) rather than a failure on every request.
-        let framework = factory
-            .mount(
-                &app,
-                sc_app::MountContext {
-                    catalog,
-                    evaluator: apps.evaluator(),
-                    triggers: apps.triggers().cloned(),
-                    bundle_dir: apps.framework_bundle(&app.framework.name),
-                },
-            )
-            .await
-            .map_err(|e| {
-                let reason = match e.repr() {
-                    Repr::Config(m) | Repr::Invalid(m) => m.clone(),
-                    _ => e.to_string(),
-                };
-                Error::config(format!("application `{}`: {reason}", app.subdomain))
-            })?;
-        let mounted =
-            MountedApp::new_with(app, framework, catalog, apps.evaluator(), apps.triggers())?;
-        apps.remount(mounted);
+        mount_constructed(apps, &*factory, app).await?;
         // Nothing was built, and the report says so: no bundle, no output, no
         // log.
         return Ok(sc_app::BuildReport {
@@ -1030,6 +1014,7 @@ pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_ap
             client_path: None,
             installed: false,
             install_log: None,
+            reused: false,
         });
     }
     let source = app_source_from_config(&app.framework)?;
@@ -1048,20 +1033,99 @@ pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_ap
     Ok(report)
 }
 
-/// How much longer one application's build may ask the service manager for.
+/// Mount `app` from what its last build left on disk, **running no bundler** —
+/// what boot ([`mount_all`]) and a `SIGHUP` reload both do. Returns how many
+/// assets were read.
 ///
-/// A first build of an application with a cold npm cache is minutes, not
-/// seconds; this is per application and is requested again before each one, so a
-/// server mounting ten of them is not racing a single deadline.
-const APP_BUILD_GRACE: std::time::Duration = std::time::Duration::from_secs(600);
+/// The mount is indistinguishable from the one [`build_and_mount`] produces —
+/// same [`CodeFramework`] with the same build step on it, same providers —
+/// because the only difference between the two paths is who ran the bundler.
+/// An application that has never been built has no output to load, and the
+/// error says to build it first.
+///
+/// A framework with nothing on disk (Saltcorn UI, `none`) is constructed by its
+/// factory, which re-reads its views and pages under a new generation.
+pub(crate) async fn mount_from_disk(apps: &AppMounts, app: Application) -> Result<usize> {
+    let catalog = apps.catalog().ok_or_else(|| {
+        Error::config("this server was built with no catalog, so it cannot mount applications")
+    })?;
+    if let Some(factory) = sc_app::framework_factory(&app.framework.name) {
+        mount_constructed(apps, &*factory, app).await?;
+        return Ok(0);
+    }
+    let source = app_source_from_config(&app.framework)?;
+    let bundle = load_app_bundle(catalog, &source)?;
+    let assets = bundle.len();
+    let framework = Arc::new(
+        CodeFramework::new(app.framework.name.clone(), bundle).with_build(source.build.clone()),
+    );
+    let mounted = MountedApp::new_with(app, framework, catalog, apps.evaluator(), apps.triggers())?;
+    apps.remount(mounted);
+    Ok(assets)
+}
 
-/// Load every stored application and build + mount each — what the server does at
-/// boot (design §13.2).
+/// Construct `app`'s framework through `factory` and mount it.
+async fn mount_constructed(
+    apps: &AppMounts,
+    factory: &dyn sc_app::FrameworkFactory,
+    app: Application,
+) -> Result<()> {
+    let catalog = apps.catalog().ok_or_else(|| {
+        Error::config("this server was built with no catalog, so it cannot mount applications")
+    })?;
+    let framework = construct(apps, factory, &app).await?;
+    let mounted = MountedApp::new_with(app, framework, catalog, apps.evaluator(), apps.triggers())?;
+    apps.remount(mounted);
+    Ok(())
+}
+
+/// Construct `app`'s framework through `factory` — a framework with nothing to
+/// build (Saltcorn UI, `none`).
 ///
-/// **A single app that fails to build must not stop the server or the other
+/// What it needs to serve anything — a bundle, a runtime — is checked by the
+/// factory here, on the mount, so a missing one is one line at boot (or one
+/// error on save) rather than a failure on every request.
+async fn construct(
+    apps: &AppMounts,
+    factory: &dyn sc_app::FrameworkFactory,
+    app: &Application,
+) -> Result<Arc<dyn Framework>> {
+    let catalog = apps.catalog().ok_or_else(|| {
+        Error::config("this server was built with no catalog, so it cannot mount applications")
+    })?;
+    factory
+        .mount(
+            app,
+            sc_app::MountContext {
+                catalog,
+                evaluator: apps.evaluator(),
+                triggers: apps.triggers().cloned(),
+                bundle_dir: apps.framework_bundle(&app.framework.name),
+            },
+        )
+        .await
+        .map_err(|e| {
+            let reason = match e.repr() {
+                Repr::Config(m) | Repr::Invalid(m) => m.clone(),
+                _ => e.to_string(),
+            };
+            Error::config(format!("application `{}`: {reason}", app.subdomain))
+        })
+}
+
+/// Load every stored application and mount each from what its last build left
+/// on disk — what the server does at boot (design §13.2).
+///
+/// **Boot builds nothing**, exactly as a `SIGHUP` reload does not
+/// ([`mount_from_disk`]): running every application's bundler (or even keying
+/// its source tree to decide whether to) was most of the start-up time. An
+/// application that has never been built is skipped with a line saying so, and
+/// the Build button mounts it without a restart.
+///
+/// **A single app that fails to mount must not stop the server or the other
 /// apps**, so a per-app failure is logged and skipped rather than propagated: the
-/// operator gets a running server with the apps that built and a clear line about
-/// the one that did not, which they can fix and rebuild without a restart.
+/// operator gets a running server with the apps that mounted and a clear line
+/// about the one that did not.
 pub async fn mount_all(apps: &AppMounts) {
     let catalog = match apps.catalog() {
         Some(catalog) => catalog,
@@ -1075,23 +1139,11 @@ pub async fn mount_all(apps: &AppMounts) {
             return;
         }
     };
-    // Mounting is the slow half of the boot — `build_and_mount` runs `npm
-    // install` for an application whose dependencies are not on disk yet — and it
-    // is the half that happens before the port opens. So each application asks
-    // the service manager for more time before it starts, rather than the unit
-    // carrying one `TimeoutStartSec` big enough for the worst case and useless
-    // for every real failure. Where no service manager started this process, both
-    // calls do nothing.
-    let service = crate::systemd::ServiceManager::from_env();
     for app in stored {
         let subdomain = app.subdomain.clone();
-        service.notify_status(&format!("building application `{subdomain}`"));
-        service.extend_timeout(APP_BUILD_GRACE);
-        match build_and_mount(apps, app).await {
+        match mount_from_disk(apps, app).await {
             Ok(_) => eprintln!("feldspar: mounted application `{subdomain}`"),
-            Err(e) => {
-                eprintln!("feldspar: application `{subdomain}` failed to build, skipping: {e}")
-            }
+            Err(e) => eprintln!("feldspar: application `{subdomain}` not mounted, skipping: {e}"),
         }
     }
 }

@@ -30,16 +30,19 @@ pub fn tool_name(scope: &FileScope) -> String {
 pub fn spec(scope: &FileScope, format: EditFormat) -> ToolSpec {
     let how = match format {
         EditFormat::WholeFile => "This is the only way to change a file.",
-        _ => "To change part of one, edit it.",
+        _ => "To change part of a file, use the edit tool instead.",
     };
     ToolSpec::new(
         tool_name(scope),
-        format!("Create a file, or replace the whole of one you have read. {how}"),
+        format!(
+            "Create a new file, or replace the whole content of an existing one. An existing \
+             file must have been read in this run, and not changed since. {how}"
+        ),
         json!({
             "type": "object",
             "properties": {
                 ARG_PATH: {"type": "string"},
-                ARG_CONTENT: {"type": "string", "description": "The whole file"},
+                ARG_CONTENT: {"type": "string", "description": "The complete new content of the file"},
             },
             "required": [ARG_PATH, ARG_CONTENT],
             "additionalProperties": false,

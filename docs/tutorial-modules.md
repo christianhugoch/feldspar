@@ -218,6 +218,16 @@ arguments they declared. They are reachable from two places:
   modules supply the same function name there is no short form; name the module:
   `await modfn("@saltcorn/markdown").md_to_html(x)`.
 
+  As in Saltcorn 1, each function is also in scope under its **bare name**, so a v1 body keeps
+  working unchanged:
+
+  ```js
+  const latitude = await geocode_lat({ q: row.postcode });
+  ```
+
+  A name that is already in scope wins, whether it is `row`, `db` or your own `const`. You can
+  always reach the module function as `modfn.name`.
+
 - **A formula** — a calculated field, an `only_if` — written as an ordinary call:
 
   ```

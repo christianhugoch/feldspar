@@ -410,7 +410,10 @@ Four things to know about what it is looking at:
 
 - **It is a preview, not your application.** A green `check` mounts the build it just made as
   *this run's* preview, beside the live mount and replacing nothing. Your users keep getting the
-  old bundle until you press Build. The preview lives at a host of its own —
+  old bundle until you press Build. Before the run has built anything, the preview is **the live
+  build** — what the last Build left on disk — so *what is wrong with the header on /tasks?* can
+  be answered by looking before touching; the first result says which one it is. A planning agent
+  gets `view_app` too, for looking only: `goto`, `wait_for`, `snapshot` and `screenshot`. The preview lives at a host of its own —
   `k3j9x2m4pq--todo.localhost` — which is one DNS label, so the wildcard certificate that covers
   your app covers it too.
 - **It uses your session.** The browser looks at the page **as the person chatting**, with a
@@ -426,6 +429,32 @@ Four things to know about what it is looking at:
 - **Nobody else can open it.** A request to a preview host without the owning run's session is a
   404 — not a 403, because the existence of another run's preview is not a fact to hand out. The
   preview is unmounted when the run ends, and swept after an hour of going unused.
+
+### Looking at an image file
+
+A model with vision also gets `view_image`, with no checkbox, because it only reads. It takes
+either a `path` in the agent's directory (`public/logo.png`) or a `url` your application serves
+from a static directory (`/img/hero.png`, as `list_assets` names it), and shows the model the
+picture. Large images are scaled down to what the model would use anyway (1 568 px on the long
+side) before they are sent. It reads as the person chatting, like every other file tool, so an
+image in a store you cannot open is not shown to your agent either. An SVG is text, and the agent
+reads it with `read_file`.
+
+### Calling the application's API
+
+An agent whose `coding` trait names an application also gets `call_api` — no checkbox — which sends one
+request to your application — `GET /api/tasks?done=false`, or a `POST` with a JSON body — and
+shows the agent the status, the headers and the body. It is how an agent writing a page against
+your API finds out what an endpoint *actually* returns, instead of what it expects: the shape of a
+row, the error a refused write gets, what a custom query hands back.
+
+The request goes to your **live** application, not the run's preview (the API is the same in
+both), through the same router a browser reaches, so your tables' rules and ownership formulas
+decide the answer. By default it is sent **as the person chatting**, with a session made for that
+one request. The agent can also say `user: "public"` to see what a visitor who is not signed in
+gets, or name another user by email to see what *they* get — but only in a run an administrator
+started, because that is acting as them. A planning agent, and the helper it sends questions
+to, may only `GET`; in `act` a `POST`, `PUT`, `PATCH` or `DELETE` changes **real rows**.
 
 ## Step 5f — Turning on the shell
 

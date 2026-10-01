@@ -32,7 +32,7 @@ const said: Entry[] = [{ kind: "user", text: "hello" }];
 
 /** A window, as `openChatWindow` would have made it. */
 function window(key: string, runId: string | null, mode: ChatWindow["mode"] = "docked"): ChatWindow {
-  return { key, agent: "librarian", runId, entries: [], mode };
+  return { key, agent: "librarian", runId, entries: [], draft: "", mode };
 }
 
 describe("opening a window", () => {
@@ -147,6 +147,13 @@ describe("the store the shell renders from", () => {
     closePoppedChat(key);
     expect(changes).toBe(2);
     expect(chatWindows()).toHaveLength(0);
+  });
+
+  it("carries the unsent message in the entry box into the window", () => {
+    popOutChat({ agent: "librarian", runId: null, entries: said, draft: "half a questi" });
+    expect(chatWindows()[0].draft).toBe("half a questi");
+    popOutChat({ agent: "librarian", runId: null, entries: [] });
+    expect(chatWindows()[1].draft).toBe("");
   });
 
   it("gives each window a key of its own", () => {

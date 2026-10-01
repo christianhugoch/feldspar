@@ -110,6 +110,6 @@ pub use store::{
 };
 pub use validate::{AgentIssue, Agents, validate_agent};
 pub use view::{
-    AppPreviewer, BrowserAction, BrowserDriver, BrowserReport, BrowserRequest, HostCapabilities,
-    PreviewInfo, ViewServices,
+    AppHttpRequest, AppHttpResponse, AppPreviewer, AppRequester, BrowserAction, BrowserDriver,
+    BrowserReport, BrowserRequest, HostCapabilities, PreviewInfo, ViewServices,
 };

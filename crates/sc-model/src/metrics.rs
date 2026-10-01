@@ -172,9 +172,93 @@ pub enum Metrics {
     },
     /// A hypothesis test scores nothing: its parameters are the answer.
     None,
+    /// A posterior's sampler diagnostics (Stan TODO §15), computed by the host
+    /// from the stored draws — stored under the `train` split, because every
+    /// row the posterior was fitted from is one it saw.
+    Posterior(PosteriorMetrics),
+    /// An optimiser's posterior mode: one point, so no diagnostics of mixing —
+    /// its log density and how long it took to get there.
+    PosteriorMode(ModeMetrics),
+    /// An approximation's draws (Pathfinder): independent draws, not chains, so
+    /// no R̂ and no sampler diagnostics.
+    PosteriorApproximation(ApproximationMetrics),
+}
+
+/// The convergence diagnostics of one posterior fit (Stan TODO §15).
+///
+/// The host's, like every metric: a second Bayesian provider is scored by the
+/// same code (`sc_model::diagnose`), from the sampler's own variables
+/// (`divergent__`, `treedepth__`, `energy__`) and the summary.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PosteriorMetrics {
+    /// How many chains ran.
+    pub chains: usize,
+    /// Post-warmup draws per chain.
+    pub draws_per_chain: usize,
+    /// Divergent transitions after warmup, across all chains.
+    pub divergent: usize,
+    /// The same, chain by chain.
+    #[serde(default)]
+    pub divergent_per_chain: Vec<usize>,
+    /// Iterations that stopped at `max_treedepth`.
+    pub max_treedepth_hits: usize,
+    /// Energy Bayesian fraction of missing information, per chain.
+    #[serde(default, with = "nullable_list")]
+    pub ebfmi: Vec<f64>,
+    /// The worst rank-normalised split-R̂ across the parameters.
+    #[serde(with = "nullable")]
+    pub max_rhat: f64,
+    /// The smallest bulk effective sample size.
+    #[serde(with = "nullable")]
+    pub min_ess_bulk: f64,
+    /// The smallest tail effective sample size.
+    #[serde(with = "nullable")]
+    pub min_ess_tail: f64,
+    /// Wall time per chain, in seconds.
+    #[serde(default, with = "nullable_list")]
+    pub wall_seconds: Vec<f64>,
+}
+
+/// What an optimiser's posterior mode is scored by (Stan TODO §15).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ModeMetrics {
+    /// The log density at the mode (`lp__`).
+    #[serde(with = "nullable")]
+    pub log_density: f64,
+    /// The optimiser's iterations, when the provider reported them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<u64>,
+    /// Wall time, in seconds.
+    #[serde(default, with = "nullable_list")]
+    pub wall_seconds: Vec<f64>,
+}
+
+/// What an approximation's draws are scored by (Stan TODO §15).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ApproximationMetrics {
+    /// How many draws.
+    pub draws: usize,
+    /// The smallest bulk effective sample size across the parameters.
+    #[serde(with = "nullable")]
+    pub min_ess_bulk: f64,
+    /// The smallest tail effective sample size.
+    #[serde(with = "nullable")]
+    pub min_ess_tail: f64,
+    /// Wall time, in seconds.
+    #[serde(default, with = "nullable_list")]
+    pub wall_seconds: Vec<f64>,
 }
 
 impl Metrics {
+    /// Whether these are a posterior's (any method's) — which sit under the
+    /// `train` split and rank nothing.
+    pub fn is_posterior(&self) -> bool {
+        matches!(
+            self,
+            Metrics::Posterior(_) | Metrics::PosteriorMode(_) | Metrics::PosteriorApproximation(_)
+        )
+    }
+
     /// The one number a hyperparameter search maximises (§11), or `None` for an
     /// outcome with nothing to compare.
     ///
@@ -188,7 +272,11 @@ impl Metrics {
             Metrics::Embedding {
                 explained_variance, ..
             } => Some(explained_variance.iter().sum()),
-            Metrics::None => None,
+            // A posterior is not searched, so there is nothing to rank.
+            Metrics::None
+            | Metrics::Posterior(_)
+            | Metrics::PosteriorMode(_)
+            | Metrics::PosteriorApproximation(_) => None,
         }
     }
 
@@ -200,7 +288,10 @@ impl Metrics {
             Metrics::Classification { .. } => Some("accuracy"),
             Metrics::Clustering { .. } => Some("-wcss"),
             Metrics::Embedding { .. } => Some("explained variance"),
-            Metrics::None => None,
+            Metrics::None
+            | Metrics::Posterior(_)
+            | Metrics::PosteriorMode(_)
+            | Metrics::PosteriorApproximation(_) => None,
         }
     }
 
@@ -211,7 +302,12 @@ impl Metrics {
             | Metrics::Classification { rows, .. }
             | Metrics::Clustering { rows, .. }
             | Metrics::Embedding { rows, .. } => *rows,
-            Metrics::None => 0,
+            // Rows of which dataset? A posterior's data is several, and what it
+            // counts is draws.
+            Metrics::None
+            | Metrics::Posterior(_)
+            | Metrics::PosteriorMode(_)
+            | Metrics::PosteriorApproximation(_) => 0,
         }
     }
 
@@ -222,7 +318,8 @@ impl Metrics {
     /// forest over a text label get" is answered in exactly one place: by its
     /// [`Outcome`].
     pub fn of(outcome: &Outcome, predictions: &[Prediction], encoded: &Encoded) -> Result<Metrics> {
-        if !outcome.predicts() {
+        // A posterior is scored by its draws, not by predictions over a split.
+        if !outcome.predicts() || outcome.is_posterior() {
             return Ok(Metrics::None);
         }
         if predictions.len() != encoded.len() {
@@ -261,7 +358,7 @@ impl Metrics {
                 let vectors = vectors(predictions)?;
                 Ok(embedding(&vectors, &encoded.features))
             }
-            Outcome::Test => Ok(Metrics::None),
+            Outcome::Test | Outcome::Posterior { .. } => Ok(Metrics::None),
         }
     }
 }
@@ -770,5 +867,68 @@ mod tests {
             SplitMetrics::from_json(&Json::Null).unwrap(),
             SplitMetrics::default()
         );
+    }
+
+    #[test]
+    fn a_posteriors_diagnostics_sit_under_train_and_rank_nothing() {
+        let posterior = Metrics::Posterior(PosteriorMetrics {
+            chains: 4,
+            draws_per_chain: 1000,
+            divergent: 3,
+            divergent_per_chain: vec![0, 3, 0, 0],
+            max_treedepth_hits: 0,
+            ebfmi: vec![0.9, 0.8, f64::NAN, 1.1],
+            max_rhat: 1.004,
+            min_ess_bulk: 812.0,
+            min_ess_tail: f64::NAN,
+            wall_seconds: vec![1.5, 1.6, 1.4, 1.5],
+        });
+        assert_eq!(posterior.primary(), None);
+        assert_eq!(posterior.rows(), 0);
+        let mut metrics = SplitMetrics::default();
+        metrics.set(Part::Train, posterior);
+        let json = metrics.to_json().expect("json");
+        assert_eq!(json["train"]["metrics"], "posterior");
+        assert_eq!(json["train"]["divergent"], 3);
+        assert_eq!(json["train"]["min_ess_tail"], Json::Null);
+        let back = SplitMetrics::from_json(&json).expect("read");
+        let Some(Metrics::Posterior(read)) = back.get(Part::Train) else {
+            panic!("wrong set: {back:?}");
+        };
+        assert_eq!(read.divergent_per_chain, vec![0, 3, 0, 0]);
+        assert!(read.ebfmi[2].is_nan() && read.min_ess_tail.is_nan());
+    }
+
+    #[test]
+    fn a_mode_and_an_approximation_have_metrics_of_their_own() {
+        let mode = Metrics::PosteriorMode(ModeMetrics {
+            log_density: -5.0,
+            iterations: Some(7),
+            wall_seconds: vec![0.1],
+        });
+        let approx = Metrics::PosteriorApproximation(ApproximationMetrics {
+            draws: 1000,
+            min_ess_bulk: 950.0,
+            min_ess_tail: f64::NAN,
+            wall_seconds: vec![0.2],
+        });
+        for (metrics, tag) in [
+            (mode, "posterior_mode"),
+            (approx, "posterior_approximation"),
+        ] {
+            assert!(metrics.is_posterior() && metrics.primary().is_none());
+            let mut split = SplitMetrics::default();
+            split.set(Part::Train, metrics.clone());
+            let json = split.to_json().expect("json");
+            assert_eq!(json["train"]["metrics"], tag);
+            let back = SplitMetrics::from_json(&json).expect("read");
+            match (back.get(Part::Train), &metrics) {
+                (Some(Metrics::PosteriorApproximation(a)), Metrics::PosteriorApproximation(_)) => {
+                    assert!(a.min_ess_tail.is_nan());
+                }
+                (Some(read), _) => assert_eq!(read, &metrics),
+                (None, _) => panic!("no train metrics"),
+            }
+        }
     }
 }

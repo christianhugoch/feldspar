@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import {
   NOTHING_SELECTED,
   clickSelection,
+  copyablePaths,
   formatModified,
   formatSize,
   keepPresent,
@@ -130,6 +131,31 @@ describe("the badge above the listing", () => {
     expect(selectionSummary(entries, ["a.txt"])).toBe("1 file selected");
     expect(selectionSummary(entries, ["notes"])).toBe("1 folder selected");
     expect(selectionSummary(entries, ["notes", "a.txt"])).toBe("2 items selected");
+  });
+});
+
+describe("Copy relative path", () => {
+  const entry = (path: string): FileEntry => ({
+    name: path.split("/").pop() ?? path,
+    path,
+    is_dir: false,
+    size: 1,
+  });
+
+  it("copies one path as exactly itself, spaces and all", () => {
+    expect(copyablePaths([entry("docs/my notes.txt")])).toBe("docs/my notes.txt");
+  });
+
+  it("separates several paths by a space", () => {
+    expect(copyablePaths([entry("a.txt"), entry("src/b.tsx"), entry("notes")])).toBe(
+      "a.txt src/b.tsx notes",
+    );
+  });
+
+  it("quotes a path that would split or expand when pasted into a shell", () => {
+    expect(copyablePaths([entry("my notes.txt"), entry("it's.txt"), entry("b.txt")])).toBe(
+      `'my notes.txt' 'it'\\''s.txt' b.txt`,
+    );
   });
 });
 

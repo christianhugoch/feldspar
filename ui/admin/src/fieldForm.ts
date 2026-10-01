@@ -8,11 +8,11 @@
 // object, not in `attributes`" to be got right or wrong independently.
 //
 // What the two do *not* share is what they may change. Adding a field writes a
-// column: its name, its storage type and its NOT NULL are all decided then.
-// Editing one writes only the `_fd_fields` overlay (§3.2) — the label, the rich
-// type, the kind and the attributes — because retyping or re-constraining a
-// column is a migration and a migration framework is out of scope (§3.3). So
-// `updateFieldBody` states the whole overlay and nothing else, and the form
+// column: its name and its storage type are decided then. Editing one writes the
+// `_fd_fields` overlay (§3.2) — the label, the rich type, the kind and the
+// attributes — plus the two column properties an edit may change: whether it is
+// in the primary key and whether it accepts nulls. Retyping or renaming a column
+// is a migration and a migration framework is out of scope (§3.3), so the form
 // disables what an edit cannot carry rather than offering it and losing it.
 //
 // Everything here is a plain function over plain values, which is what makes the
@@ -60,6 +60,12 @@ export type FieldForm = {
   /** The chosen `listFieldTypes` entry's name. */
   typeName: string;
   nullable: boolean;
+  /**
+   * Whether the column accepted nulls when the form opened, so an edit sends
+   * `required` only when the admin changed it — an edit that did not touch the
+   * box must not be refused because of rows it was not about.
+   */
+  wasNullable: boolean;
   /** Part of the table's primary key — a field like any other (GOALS). */
   primaryKey: boolean;
   /**
@@ -90,6 +96,7 @@ export const EMPTY_FIELD_FORM: FieldForm = {
   description: "",
   typeName: "",
   nullable: true,
+  wasNullable: true,
   primaryKey: false,
   generated: false,
   wasPrimaryKey: false,
@@ -123,6 +130,7 @@ export function fieldForm(field: FieldItem): FieldForm {
     description: field.description,
     typeName: field.type,
     nullable: field.nullable,
+    wasNullable: field.nullable,
     primaryKey: field.primary_key,
     generated: field.generated,
     wasPrimaryKey: field.primary_key,
@@ -260,22 +268,37 @@ export function createFieldBody(form: FieldForm, selected: FieldTypeItem): Creat
 }
 
 /**
- * The `updateField` request the form describes: the whole overlay, and only the
- * overlay.
+ * Whether the admin may tick or untick "Nullable" on this form.
+ *
+ * A key column is NOT NULL whatever the box says, and a calculated field has no
+ * column to constrain. Everything else can go either way — making a field
+ * required is refused by the server while a row has no value in it, and the
+ * message says so.
+ */
+export function nullableEditable(form: FieldForm): boolean {
+  return !form.primaryKey && !form.calculated;
+}
+
+/**
+ * The `updateField` request the form describes: the whole overlay, plus the
+ * column properties the admin changed.
  *
  * Whole-object like `updateTable` (§13.1) — what is left out is cleared, not
  * kept — so the label and description are always stated even when the admin only
- * came to change an attribute. The name, the NOT NULL and the column's storage
- * are absent because the endpoint has nowhere to put them: they are the
- * database's, and changing one is a migration (§3.3).
+ * came to change an attribute. The name and the column's storage are absent
+ * because the endpoint has nowhere to put them: they are the database's, and
+ * changing one is a migration (§3.3).
  */
 export function updateFieldBody(form: FieldForm, selected: FieldTypeItem): UpdateFieldRequest {
+  // Stated only when changed, where the endpoint reads "omitted" as "leave it".
+  const nullableChanged = nullableEditable(form) && form.nullable !== form.wasNullable;
   return {
     label: form.label.trim(),
     description: form.description.trim(),
-    // The one column property an edit may change, because a table with no key
-    // could otherwise only get one by being recreated — see the endpoint.
+    // A table with no key could otherwise only get one by being recreated — see
+    // the endpoint.
     primary_key: form.primaryKey,
+    ...(nullableChanged ? { required: !form.nullable } : {}),
     ...fieldTypeBody(form, selected),
   };
 }

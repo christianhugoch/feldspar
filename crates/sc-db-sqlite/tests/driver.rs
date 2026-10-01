@@ -525,6 +525,159 @@ async fn a_key_can_be_added_to_a_table_that_had_none() -> Result<()> {
     Ok(())
 }
 
+/// `NOT NULL` toggled on an existing column: another rebuild, and one that has
+/// to fail — leaving the table as it was — while a row still holds a null.
+#[tokio::test]
+async fn a_column_can_be_made_required_and_optional_again() -> Result<()> {
+    let driver = driver();
+    books(&driver).await?;
+    let insert = |title: &str, pages: Option<i64>| -> Statement {
+        Insert::row(
+            "book",
+            vec!["title".into(), "pages".into()],
+            vec![
+                Expr::lit(title),
+                Expr::lit(pages.map_or(Value::Null, Value::Int)),
+            ],
+        )
+        .into()
+    };
+    let nullable = |tables: &[sc_db::PhysicalTable], column: &str| {
+        let book = tables.iter().find(|t| t.name == "book").expect("book");
+        book.columns
+            .iter()
+            .find(|c| c.name == column)
+            .expect("column")
+            .nullable
+    };
+    rows(&driver, insert("Dune", None)).await?;
+
+    let require_pages = SchemaChange::SetColumnNullable {
+        table: "book".into(),
+        column: "pages".into(),
+        nullable: false,
+    };
+    let err = driver
+        .apply_schema(&require_pages)
+        .await
+        .expect_err("a null is in the way");
+    assert!(format!("{err}").contains("NOT NULL"), "{err}");
+    assert!(nullable(&driver.introspect().await?, "pages"));
+    assert_eq!(
+        rows(&driver, Select::from(Source::table("book")).into())
+            .await?
+            .len(),
+        1,
+        "the failed rebuild kept the row"
+    );
+
+    rows(
+        &driver,
+        Update::new("book", vec![Assignment::new("pages", Expr::lit(412_i64))]).into(),
+    )
+    .await?;
+    driver.apply_schema(&require_pages).await?;
+    assert!(!nullable(&driver.introspect().await?, "pages"));
+    assert!(rows(&driver, insert("Emma", None)).await.is_err());
+
+    // And back: the title was declared NOT NULL when the table was created.
+    driver
+        .apply_schema(&SchemaChange::SetColumnNullable {
+            table: "book".into(),
+            column: "title".into(),
+            nullable: true,
+        })
+        .await?;
+    assert!(nullable(&driver.introspect().await?, "title"));
+
+    // A key column never accepts nulls, and says so rather than being quietly
+    // put back by the rebuild.
+    let err = driver
+        .apply_schema(&SchemaChange::SetColumnNullable {
+            table: "book".into(),
+            column: "id".into(),
+            nullable: true,
+        })
+        .await
+        .expect_err("a key column is NOT NULL");
+    assert!(format!("{err}").contains("primary key"), "{err}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_column_reference_is_repointed_and_removed() -> Result<()> {
+    let driver = driver();
+    books(&driver).await?;
+    for (name, column) in [
+        ("author", ColumnDef::new("id", "int8").not_null().identity()),
+        (
+            "review",
+            ColumnDef::new("about", "int8").references("book", "id"),
+        ),
+    ] {
+        driver
+            .apply_schema(&SchemaChange::CreateTable {
+                name: name.into(),
+                columns: vec![column],
+                primary_key: if name == "author" {
+                    vec!["id".into()]
+                } else {
+                    vec![]
+                },
+                unlogged: false,
+            })
+            .await?;
+    }
+    let target = |tables: &[sc_db::PhysicalTable]| {
+        let review = tables.iter().find(|t| t.name == "review").expect("review");
+        assert!(review.foreign_keys.len() <= 1, "{:?}", review.foreign_keys);
+        review
+            .foreign_keys
+            .first()
+            .map(|k| (k.referenced_table.clone(), k.columns.clone()))
+    };
+    let repoint = |to: Option<&str>| SchemaChange::SetColumnReference {
+        table: "review".into(),
+        column: "about".into(),
+        references: to.map(|t| sc_db::ColumnRef {
+            table: t.into(),
+            column: "id".into(),
+        }),
+    };
+
+    driver.apply_schema(&repoint(Some("author"))).await?;
+    assert_eq!(
+        target(&driver.introspect().await?),
+        Some(("author".into(), vec!["about".into()]))
+    );
+
+    // A value the new target does not have makes the rebuild fail, and the key
+    // stays where it was.
+    rows(
+        &driver,
+        Insert::row("book", vec!["title".into()], vec![Expr::lit("Dune")]).into(),
+    )
+    .await?;
+    driver.apply_schema(&repoint(None)).await?;
+    assert_eq!(target(&driver.introspect().await?), None);
+    rows(
+        &driver,
+        Insert::row("review", vec!["about".into()], vec![Expr::lit(1_i64)]).into(),
+    )
+    .await?;
+    driver
+        .apply_schema(&repoint(Some("author")))
+        .await
+        .expect_err("no author 1");
+    assert_eq!(target(&driver.introspect().await?), None);
+    driver.apply_schema(&repoint(Some("book"))).await?;
+    assert_eq!(
+        target(&driver.introspect().await?),
+        Some(("book".into(), vec!["about".into()]))
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn columns_are_added_and_dropped() -> Result<()> {
     let driver = driver();

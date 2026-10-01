@@ -28,4 +28,4 @@
 # `scripts/test.sh` goes further and sizes the jobs from the memory actually
 # free at the time.
 [build]
-jobs = 2
+jobs = 4

@@ -32,7 +32,6 @@ use sc_catalog::{Catalog, TableProviderHosts};
 use sc_core_actions::CodeSurfaces;
 use sc_error::{Context, Error, Result};
 use sc_expr::ModuleFnHosts;
-use sc_model::builtin_registry;
 use sc_module::{
     BundledModules, Installer, ModuleFrameworks, ModuleFunctions, ModuleHost, ModuleModelProviders,
     ModuleSet, ModuleStreamProviders, ModuleTableProviders, ModuleViewRuntime, bootstrap_modules,
@@ -50,7 +49,7 @@ pub struct ModuleServices {
     dispatcher: Arc<TriggerDispatcher>,
     agents: AgentServices,
     /// The model machinery, for the two things a module change does to it: the
-    /// rebuilt action set carries `predict_row` over the *current* provider
+    /// rebuilt action set carries `fit_model` over the *current* provider
     /// registry, and (Phase 7) a module supplying model providers replaces that
     /// registry.
     models: crate::models::ModelServices,
@@ -284,8 +283,8 @@ impl ModuleServices {
             );
         }
         // And the **model providers**, which is the third source the model
-        // registry composes: the built-ins, whatever the JavaScript modules
-        // supply, and whatever the Python ones do. Rebuilt from the built-ins
+        // registry composes: the built-ins (and Stan), whatever the JavaScript
+        // modules supply, and whatever the Python ones do. Rebuilt from the base
         // rather than mutated, and swapped in whole — so a fit that is already
         // running keeps the registry it started with, which is the rule the
         // action registry follows for the same reason.
@@ -295,7 +294,7 @@ impl ModuleServices {
         // rest kept**: the registry refuses the duplicate naming both sources,
         // and a server that dropped every other estimator over one clash would
         // be answering a name collision with an outage.
-        match builtin_registry() {
+        match self.models.base_registry() {
             Ok(mut providers) => {
                 for (what, outcome) in [
                     (
@@ -326,6 +325,12 @@ impl ModuleServices {
                 sc_error::format_chain(&e)
             ),
         }
+        // And the models on the catalog, for `predict("…")` and a code body's
+        // `models.get` (milestone 31 §4). The services read the registry
+        // swapped in above at every call, so this is the same host again —
+        // installed here too so a catalog whose models were installed from
+        // somewhere else ends a module change pointing at this server's.
+        crate::models::install_model_host(&self.catalog, &self.models)?;
         // And the **stream providers** (TODO "Streams" §12), which is the same
         // two-source composition one entity along: the built-ins (MQTT, unless
         // it was compiled out) plus whatever the JavaScript modules supply as a

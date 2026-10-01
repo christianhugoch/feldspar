@@ -167,10 +167,12 @@ impl std::fmt::Display for ModelRef {
 ///
 /// An agent that will not converge — one that answers every tool result with
 /// another tool call — has to be stopped by a number, because nothing else about
-/// the conversation distinguishes it from one making progress. Twenty is enough
-/// for the coding traits' read-edit-build-read cycle and small enough that a
-/// runaway costs cents rather than a bill.
-pub const DEFAULT_MAX_STEPS: u32 = 20;
+/// the conversation distinguishes it from one making progress. 250 is
+/// mini-SWE-agent's step limit, between the 100 SWE-agent gives a SWE-bench
+/// task and OpenHands' 500: a modest coding task takes several dozen
+/// read-edit-check rounds, and one that is still going after 250 is looping.
+/// The run's cost, time and context budgets bound a runaway before this does.
+pub const DEFAULT_MAX_STEPS: u32 = 250;
 
 /// One enabled trait: which trait, and how it is configured.
 ///

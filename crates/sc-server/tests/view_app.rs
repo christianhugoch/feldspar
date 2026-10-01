@@ -243,6 +243,7 @@ struct Run<'e> {
     caller: RunCaller,
     config: Attrs,
     state: Json,
+    mode: RunMode,
 }
 
 impl<'e> Run<'e> {
@@ -253,6 +254,7 @@ impl<'e> Run<'e> {
             caller,
             config,
             state: Json::Null,
+            mode: RunMode::Act,
         }
     }
 
@@ -267,13 +269,14 @@ impl<'e> Run<'e> {
             caller: &self.caller,
             agent: "builder",
             run: self.id,
-            mode: RunMode::Act,
+            mode: self.mode,
             trait_state: &mut self.state,
             evaluator: None,
             triggers: None,
             delegate: None,
             previews: Some(previews),
             browser: Some(browser),
+            requests: None,
             signals: Vec::new(),
             images: Vec::new(),
         };
@@ -319,8 +322,8 @@ async fn a_user_run_builds_looks_clicks_fills_and_hears_about_errors() -> Result
     let env = setup("user", executable).await?;
     let mut run = Run::new(&env, RunCaller::user(env.alice.clone()), config(&[]));
 
-    // Before a green check there is nothing to look at, and the tool says what
-    // to do.
+    // Before a green check — and with no build on disk to look at instead —
+    // there is nothing to look at, and the tool says what to do.
     let err = run.call("view_app", json!({"action": "snapshot"})).await.0;
     let err = err.unwrap_err().to_string();
     assert!(err.contains("run the check tool"), "{err}");
@@ -408,6 +411,66 @@ async fn a_user_run_builds_looks_clicks_fills_and_hears_about_errors() -> Result
     let (shot, images) = run.call("view_app", json!({"action": "screenshot"})).await;
     assert!(shot?.contains("screenshot: attached"));
     assert_eq!(images, 1);
+
+    run.end();
+    env.driver.shutdown();
+    Ok(())
+}
+
+/// A run that has built nothing looks at what is live — in `plan`, where it may
+/// only look — and a green check then shows it its own build instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_that_has_built_nothing_looks_at_the_live_build() -> Result<()> {
+    let Some(executable) = browser("a_run_that_has_built_nothing_looks_at_the_live_build") else {
+        return Ok(());
+    };
+    let env = setup("live", executable).await?;
+    // What the last build left on disk, told apart from the source by its
+    // heading.
+    let dist = env._tmp.0.join("web/dist");
+    std::fs::create_dir_all(&dist).unwrap();
+    std::fs::write(
+        dist.join("index.html"),
+        INDEX_HTML.replace("<h1>Notes</h1>", "<h1>Live notes</h1>"),
+    )
+    .unwrap();
+    std::fs::write(dist.join("app.js"), APP_JS).unwrap();
+
+    let mut run = Run::new(&env, RunCaller::user(env.alice.clone()), config(&[]));
+    run.mode = RunMode::Plan;
+    let opened = run.view(json!({"action": "goto", "path": "/"})).await;
+    assert!(
+        opened.contains("no green check yet, so this is the live build of `notes`"),
+        "{opened}"
+    );
+    let page = run
+        .view(json!({"action": "wait_for", "text": "loaded", "timeout": 10}))
+        .await;
+    assert!(page.contains("heading \"Live notes\""), "{page}");
+    let (shot, images) = run.call("view_app", json!({"action": "screenshot"})).await;
+    assert!(shot?.contains("screenshot: attached"));
+    assert_eq!(images, 1);
+
+    // A plan only looks.
+    let add = reference(&page, "button \"Add\"");
+    let err = run
+        .call("view_app", json!({"action": "click", "ref": add}))
+        .await
+        .0
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("only looks"), "{err}");
+
+    // A green check re-mounts the preview with the run's own build.
+    run.mode = RunMode::Act;
+    let (report, _) = run.call("check", json!({})).await;
+    assert!(report?.contains("preview: this build of `notes` is mounted"));
+    run.view(json!({"action": "goto", "path": "/"})).await;
+    let page = run
+        .view(json!({"action": "wait_for", "text": "loaded", "timeout": 10}))
+        .await;
+    assert!(page.contains("heading \"Notes\""), "{page}");
+    assert!(!page.contains("live build"), "{page}");
 
     run.end();
     env.driver.shutdown();

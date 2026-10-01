@@ -22,6 +22,14 @@
 //! feature and two of them hypothesis tests that are there either way (see
 //! [`BUILTINS_COMPILED_OUT`]).
 //!
+//! The Bayesian milestone (the Stan TODO) widens the seam without adding a
+//! second one: a model gains **related datasets** ([`NamedDataset`]) and a
+//! dataset an **order** ([`DatasetOrder`]); a provider may declare what its
+//! program needs ([`Interface`]) and sample a posterior
+//! ([`ModelProvider::fit_posterior`]); and the draws that come back get a table
+//! of their own ([`DrawsReader`]), written in the transaction that marks the
+//! instance fitted.
+//!
 //! ## Layering: why this is at layer 6 and not above the row layer
 //!
 //! Its data comes from `sc-api::rows`, which is layer 8, so the obvious place
@@ -66,45 +74,84 @@
 //!   hold in memory — so [`DatasetSource::materialise`] takes a cap and refuses
 //!   by name rather than by the OOM killer. See [`DEFAULT_MAX_ROWS`].
 
+mod bind;
 mod dataset;
+mod diagnose;
+mod draws;
 mod encode;
 mod fit;
 mod frame;
 mod instance;
 mod instance_store;
+mod interface;
 mod metrics;
 mod model;
+mod posterior;
 mod predict;
 mod provider;
 mod providers;
+mod reading;
 mod registry;
 mod source;
 mod split;
 mod store;
+mod summary;
 mod validate;
 
+pub use bind::{
+    Aggregate, Along, Axis, BINDINGS_KEY, BindReport, Binding, BoundData, Coordinates,
+    DEFAULT_MAX_DATA_VALUES, DIMENSIONS_KEY, DataPreview, DatasetReport, DesignCoordinates,
+    DimensionCoordinates, DimensionKind, DimensionSpec, DropReport, EXCLUDE_VARIABLES_KEY, Edges,
+    KEEP_DRAWS_KEY, LABEL_COLUMN, LABELS_KEY, Labeller, MAX_DISTANCE_SITES, MAX_GRID_STEPS,
+    MAX_ICAR_NODES, POLICIES_KEY, Points, Policies, Policy, RecordedAxes, Suggestions, Symmetric,
+    TimeScale, VariablePreview, VariableReport, bind_data, binding_dataset, check_bindings,
+    check_bindings_declared, element_label, excluded_variables, keeps_draws, named_axes,
+    preview_data, recorded_axes, suggest_bindings,
+};
 pub use dataset::{
-    Dataset, DatasetColumn, DatasetColumnShape, DatasetShape, translate_filter, validate_dataset,
+    Dataset, DatasetColumn, DatasetColumnShape, DatasetOrder, DatasetShape, translate_filter,
+    validate_dataset,
+};
+pub use diagnose::{
+    EBFMI_THRESHOLD, ESS_PER_CHAIN_THRESHOLD, PosteriorReport, RHAT_THRESHOLD, ebfmi,
+    report as diagnose_posterior,
+};
+pub use draws::{
+    BYTES_PER_DRAW, BYTES_PER_ROW, DRAWS_TABLE, DrawsQuery, DrawsReader, PlannedDraws,
+    bootstrap_model_draws, check_planned_draws, declared_elements, human_bytes, plan_draws,
+    stored_bytes,
 };
 pub use encode::{
     ColumnEncoding, Encoded, Encoding, Matrix, TargetEncoding, apply_encoding,
     apply_encoding_dropping, fit_encoding,
 };
 pub use fit::{
-    ATTR_OUTCOME, ATTR_ROWS, ATTR_SEARCH, Fit, GridPoint, MAX_GRID_POINTS, RowCounts, fit_model,
-    grid, run_fit,
+    ATTR_AXES, ATTR_BINDING, ATTR_CANCEL_REQUESTED, ATTR_COORDINATES, ATTR_OUTCOME, ATTR_PROGRESS,
+    ATTR_ROWS, ATTR_SEARCH, ATTR_WARNINGS, Activation, Fit, FitStarter, GridPoint, MAX_GRID_POINTS,
+    RowCounts,
+    fit_model, fit_model_with, fitted_cleanly, grid, run_fit, run_fit_with,
 };
 pub use frame::{Column, ColumnType, Frame, canonical_key};
 pub use instance::{ATTR_ERROR, FitStatus, InstanceId, ModelInstance, RESTARTED};
 pub use instance_store::{
-    INSTANCES_TABLE, active_model_instance, bootstrap_model_instances, delete_model_instance,
-    delete_model_instances, fitted, list_model_instances, load_model_instance,
-    reap_fitting_instances, require_model_instance, save_model_instance,
+    INSTANCES_TABLE, ProgressWrite, active_model_instance, bootstrap_model_instances,
+    cancel_requested, delete_model_instance, fitted, list_model_instances, load_model_instance,
+    reap_fitting_instances, record_fit_progress, request_fit_cancel, require_model_instance,
+    save_fitted_instance, save_model_instance,
 };
-pub use metrics::{ClassMetrics, Metrics, SplitMetrics};
-pub use model::{Model, ModelId};
+pub use interface::{Declaration, Element, Interface, SizeExpr, SizeOp, SizeTree};
+pub use metrics::{
+    ApproximationMetrics, ClassMetrics, Metrics, ModeMetrics, PosteriorMetrics, SplitMetrics,
+};
+pub use model::{MAIN_DATASET, Model, ModelId, NamedDataset};
+pub use posterior::{
+    ChainPhase, ChainProgress, DEFAULT_MAX_DRAWS_BYTES, DEFAULT_SUMMARY_MAX_ELEMENTS, DrawPlan,
+    DrawSeries, FitContext, FitProgress, FitStage, NoProgress, PosteriorInput, PosteriorLimits,
+    PosteriorMethod, PosteriorResult, PosteriorRun, Progress,
+};
 pub use predict::{
-    Predictions, Subject, name_classes, predict_rows, predict_subject, prediction_values,
+    Predictions, Subject, name_classes, no_per_row_prediction, predict_rows, predict_subject,
+    prediction_values,
 };
 pub use provider::{
     CATEGORICAL_COLUMNS_QUERY, COLUMNS_QUERY, FitResult, HostProvider, ModelProvider,
@@ -113,6 +160,12 @@ pub use provider::{
     is_column_query, numeric_column_field, resolve_column_options,
 };
 pub use providers::{BUILTINS_COMPILED_OUT, SMARTCORE, builtin_providers, builtin_registry};
+pub use reading::{
+    ChainDraws, CoordinatePart, CoordinateWrite, DEFAULT_MAX_DRAWS_RESPONSE, DrawsRequest,
+    PlannedRow, PosteriorView, PosteriorWrite, Selection, VariableDraws, VariableSummary,
+    WriteMode, WritePlan, draws_csv, instance_coordinates, plan_write, posterior_method,
+    posterior_variables, read_draws, statistic_names, summarise_variable,
+};
 pub use registry::ModelRegistry;
 pub use source::{DEFAULT_MAX_ROWS, DatasetSource, Read, SPLIT_KEY};
 pub use split::{Part, Split, SplitCounts, Splits};
@@ -120,4 +173,5 @@ pub use store::{
     MODELS_QUERY, MODELS_TABLE, bootstrap_models, delete_model, list_models, load_model,
     load_model_by_name, models_for_table, require_model, save_model,
 };
+pub use summary::{ElementSummary, ess_bulk, ess_mean, ess_tail, quantile, rhat};
 pub use validate::{ModelIssue, Models, validate_model};

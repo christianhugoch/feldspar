@@ -53,7 +53,52 @@ pub struct ApiRequest {
     /// something other than JSON — a file upload's bytes (§4). `None` for every
     /// JSON request, so a provider that never asks for bytes never sees them.
     pub raw: Option<Bytes>,
+    /// Where this request arrived and which applications are served beside it —
+    /// what an emailed link is built from. Set by the transport for a request
+    /// that reached an application; `None` in a test or a tool call, where a
+    /// provider asked to build a link says so rather than guessing a host.
+    pub links: Option<AppLinks>,
 }
+
+/// The applications a request can link to, as the transport that received it
+/// knows them.
+///
+/// A password link names *an* application — an invitation made in the
+/// therapists' app is accepted in the patients' — and only the server knows
+/// which applications it serves and under what host. A trait, so `sc-api`
+/// needs neither the router's types nor `sc-app`'s.
+pub trait AppDirectory: Send + Sync {
+    /// The origin (`scheme://host[:port]`) the request arrived at.
+    fn own_origin(&self) -> String;
+
+    /// The origin the application served on `subdomain` has, reached the way
+    /// this request reached its own — or `None` when no application is served
+    /// there.
+    fn app_origin(&self, subdomain: &str) -> Option<String>;
+}
+
+/// An [`AppDirectory`] as a request carries it.
+///
+/// A newtype so [`ApiRequest`] keeps its derives: two requests are equal when
+/// they name the *same* directory, which is all a test comparing them means.
+#[derive(Clone)]
+pub struct AppLinks(pub Arc<dyn AppDirectory>);
+
+impl std::fmt::Debug for AppLinks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("AppLinks")
+            .field(&self.0.own_origin())
+            .finish()
+    }
+}
+
+impl PartialEq for AppLinks {
+    fn eq(&self, other: &AppLinks) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for AppLinks {}
 
 impl ApiRequest {
     /// A request with no query parameters and no body.
@@ -64,7 +109,15 @@ impl ApiRequest {
             query: Vec::new(),
             body: Json::Null,
             raw: None,
+            links: None,
         }
+    }
+
+    /// Attach the applications a link may point at, returning `self` for
+    /// chaining.
+    pub fn links(mut self, links: Arc<dyn AppDirectory>) -> ApiRequest {
+        self.links = Some(AppLinks(links));
+        self
     }
 
     /// The first value given for `key`, or `None`.
@@ -253,6 +306,23 @@ pub trait ApiProvider: Send + Sync {
     /// rendered into this protocol. The server mounts these and the TypeScript
     /// generator types them.
     fn endpoints(&self) -> &EndpointSet;
+
+    /// Whether the endpoint a `method` request to `path` reaches is open to the
+    /// public role ([`AuthRequirement::is_public_role`]) — one anybody may call
+    /// with no session, and so with no CSRF token.
+    ///
+    /// The server asks this of a mutating request that failed the CSRF check,
+    /// and serves it as an anonymous caller when the answer is yes. The endpoint
+    /// is found the way a provider routes: the first one registered whose method
+    /// and path match.
+    ///
+    /// [`AuthRequirement::is_public_role`]: crate::AuthRequirement::is_public_role
+    fn open_to_public(&self, method: Method, path: &str) -> bool {
+        self.endpoints()
+            .iter()
+            .find(|ep| ep.method == method && ep.path.match_path(path).is_some())
+            .is_some_and(|ep| ep.auth.is_public_role())
+    }
 
     /// Handle one request. `user` is the authenticated caller, or `None` for an
     /// anonymous one; the provider is responsible for enforcing each endpoint's

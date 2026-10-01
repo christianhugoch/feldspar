@@ -128,8 +128,8 @@ pub use files::{CFG_ROOT, CFG_STORE, FileScope, configured_scope, slugify};
 pub use admin_copilot::{
     AdminCopilot, CFG_ALLOW_ACCESS, CFG_ALLOW_APPLICATIONS, CFG_ALLOW_CREATE, CFG_ALLOW_DROP,
     CFG_ALLOW_EDIT, CFG_ALLOW_TRIGGERS, TOOL_DELETE_QUERY, TOOL_DELETE_TRIGGER, TOOL_DESCRIBE,
-    TOOL_DESCRIBE_ACTION, TOOL_DESCRIBE_APPS, TOOL_DESCRIBE_TRIGGERS, TOOL_EDIT, TOOL_SAVE_QUERY,
-    TOOL_SAVE_TRIGGER,
+    TOOL_DESCRIBE_ACTION, TOOL_DESCRIBE_APPS, TOOL_DESCRIBE_CODE_API, TOOL_DESCRIBE_TRIGGERS,
+    TOOL_EDIT, TOOL_SAVE_QUERY, TOOL_SAVE_TRIGGER,
 };
 pub use build_application::{BuildApplication, CFG_APPLICATION};
 pub use coding::{
@@ -176,14 +176,15 @@ pub mod tool_names {
     pub use crate::build_application::tool_name as build_application;
     pub use crate::coding::tool_names as coding;
     pub use crate::coding::{
-        apply_patch_tool_name as apply_patch, check_checks_tool_name as check,
-        edit_file_tool_name as edit_file, explore_tool_name as explore,
-        find_files_tool_name as find_files, implement_feature_tool_name as implement_feature,
-        list_assets_tool_name as list_assets, process_tool_name as process,
-        read_file_tool_name as read_file, repo_map_tool_name as repo_map,
-        run_script_tool_name as run_project_script, save_plan_tool_name as save_plan,
-        search_files_tool_name as search_files, shell_tool_name as shell,
-        view_app_tool_name as view_app, write_file_tool_name as write_file,
+        apply_patch_tool_name as apply_patch, call_api_tool_name as call_api,
+        check_checks_tool_name as check, edit_file_tool_name as edit_file,
+        explore_tool_name as explore, find_files_tool_name as find_files,
+        implement_feature_tool_name as implement_feature, list_assets_tool_name as list_assets,
+        process_tool_name as process, read_file_tool_name as read_file,
+        repo_map_tool_name as repo_map, run_script_tool_name as run_project_script,
+        save_plan_tool_name as save_plan, search_files_tool_name as search_files,
+        shell_tool_name as shell, view_app_tool_name as view_app,
+        view_image_tool_name as view_image, write_file_tool_name as write_file,
     };
     pub use crate::delete_rows::tool_name as delete_rows;
     pub use crate::http::tool_name as http;
@@ -422,9 +423,11 @@ mod tests {
             tool_names::search_files(&scope),
             tool_names::repo_map(&scope),
             tool_names::list_assets(&scope),
+            tool_names::view_image(&scope),
             tool_names::run_project_script(&scope),
             tool_names::check(&scope),
             tool_names::view_app(&scope),
+            tool_names::call_api(&scope),
             tool_names::shell(&scope),
             tool_names::process(&scope),
             tool_names::save_plan(&scope),
@@ -449,9 +452,11 @@ mod tests {
                 "search_files_app_src_web",
                 "repo_map_app_src_web",
                 "list_assets_app_src_web",
+                "view_image_app_src_web",
                 "run_script_app_src_web",
                 "check_app_src_web",
                 "view_app_app_src_web",
+                "call_api_app_src_web",
                 "shell_app_src_web",
                 "process_app_src_web",
                 "save_plan_app_src_web",
@@ -462,7 +467,7 @@ mod tests {
         );
         let unique: std::collections::BTreeSet<&String> = names.iter().collect();
         assert_eq!(unique.len(), names.len());
-        // The sixteen file names above are `coding`'s whole set, which is what the
+        // The eighteen file names above are `coding`'s whole set, which is what the
         // collision check compares when the trait is enabled twice: two
         // instances over one scope produce these same names and are refused.
         assert_eq!(
@@ -473,6 +478,7 @@ mod tests {
                 tool_names::search_files(&scope),
                 tool_names::repo_map(&scope),
                 tool_names::list_assets(&scope),
+                tool_names::view_image(&scope),
                 tool_names::save_plan(&scope),
                 tool_names::implement_feature(&scope),
                 tool_names::explore(&scope),
@@ -482,13 +488,15 @@ mod tests {
                 tool_names::run_project_script(&scope),
                 tool_names::check(&scope),
                 tool_names::view_app(&scope),
+                tool_names::call_api(&scope),
                 tool_names::shell(&scope),
                 tool_names::process(&scope),
             ]
         );
         // `admin_copilot`'s names are fixed rather than derived, and say the
-        // same nine things every deployment's do — two over the schema, four over
-        // the triggers, three over an application's custom SQL queries.
+        // same ten things every deployment's do — two over the schema, four over
+        // the triggers, one reference for a code body, three over an
+        // application's custom SQL queries.
         assert_eq!(
             tool_names::admin_copilot(),
             [
@@ -498,6 +506,7 @@ mod tests {
                 "describe_action",
                 "save_trigger",
                 "delete_trigger",
+                "describe_code_api",
                 "describe_applications",
                 "save_api_query",
                 "delete_api_query",

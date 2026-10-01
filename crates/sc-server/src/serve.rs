@@ -58,6 +58,8 @@ pub async fn serve(
     // The coding agent's headless browser, and the loopback listener it reaches
     // previews through (TODO §7b), where this host has a browser.
     let browser = serve_browser(&config, &endpoints, &handlers, &sessions, &apps).await?;
+    // And `call_api`'s way into the applications, which needs no browser.
+    crate::requests::install_app_requests(&config, &endpoints, &handlers, &sessions, &apps)?;
     // An application mounted from here on is served on a subdomain the
     // certificate has to cover, so the mount registry is given the certificate
     // before the first request can arrive (§13.5). Only ACME has anything to do
