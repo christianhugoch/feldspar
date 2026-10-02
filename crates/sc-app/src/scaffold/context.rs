@@ -29,7 +29,7 @@ use serde_json::{Value as Json, json};
 
 use super::files::{
     CreateForm, ProjectContext, basic_type, client_object, exposed_tables, has_auth, has_op,
-    key_ts_type, pascal, single_pk, storable, title, ts_empty,
+    key_ts_type, pascal, shown_fields, single_pk, storable, title, ts_empty,
 };
 
 /// The whole context one call to a declared framework's generator receives.
@@ -94,7 +94,7 @@ fn table_json(table: &Table, endpoints: &EndpointSet) -> Json {
             "update": has_op(endpoints, "update", name),
             "delete": has_op(endpoints, "delete", name),
         },
-        "fields": table.fields.iter().map(|f| field_json(f, endpoints, name)).collect::<Vec<_>>(),
+        "fields": shown_fields(table, endpoints).into_iter().map(|f| field_json(f, endpoints, name)).collect::<Vec<_>>(),
         "form": {
             "inputs": form.inputs.iter().map(|f| field_json(f, endpoints, name)).collect::<Vec<_>>(),
             // Required UUID keys the page mints at submit time. Typing one into a

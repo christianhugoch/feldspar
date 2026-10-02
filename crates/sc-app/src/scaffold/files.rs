@@ -2232,14 +2232,13 @@ fn page_tsx(table: &Table, endpoints: &EndpointSet) -> String {
     let can_create = has_op(endpoints, "create", &table.name);
     let can_delete = has_op(endpoints, "delete", &table.name);
 
-    let headers = table
-        .fields
+    let shown = shown_fields(table, endpoints);
+    let headers = shown
         .iter()
         .map(|f| format!("            <th>{{t({:?})}}</th>", f.base.label))
         .collect::<Vec<_>>()
         .join("\n");
-    let cells = table
-        .fields
+    let cells = shown
         .iter()
         .map(|f| {
             format!(
@@ -2379,14 +2378,13 @@ fn store_page_tsx(table: &Table, endpoints: &EndpointSet) -> String {
     let pascal = pascal(name);
     let pk = single_pk(table).unwrap_or_default();
 
-    let headers = table
-        .fields
+    let shown = shown_fields(table, endpoints);
+    let headers = shown
         .iter()
         .map(|f| format!("            <th>{{t({:?})}}</th>", f.base.label))
         .collect::<Vec<_>>()
         .join("\n");
-    let cells = table
-        .fields
+    let cells = shown
         .iter()
         .map(|f| {
             format!(
@@ -2510,7 +2508,7 @@ impl<'a> CreateForm<'a> {
             inputs: Vec::new(),
             minted: Vec::new(),
         };
-        for field in &table.fields {
+        for field in shown_fields(table, endpoints) {
             let modelled =
                 resource.and_then(|r| r.fields.iter().find(|f| f.name == field.base.name));
             let writable = modelled.map_or(
@@ -2571,6 +2569,26 @@ impl<'a> CreateForm<'a> {
             .join(", ");
         format!("{{ ...form, {keys} }}")
     }
+}
+
+/// The columns of `table` its API shows: those the endpoint set's model of the
+/// table declares, in the table's order. The users table's password hash is
+/// no API's (`sc_api`'s row layer), so a page that named it would not compile
+/// against the generated row type. A table with no model shows every column.
+pub(super) fn shown_fields<'a>(
+    table: &'a Table,
+    endpoints: &EndpointSet,
+) -> Vec<&'a sc_catalog::DataField> {
+    let resource = endpoints.resource(&table.name);
+    let modelled = |name: &str| match resource {
+        Some(r) => r.fields.iter().any(|f| f.name == name),
+        None => true,
+    };
+    table
+        .fields
+        .iter()
+        .filter(|f| modelled(&f.base.name))
+        .collect()
 }
 
 /// Whether the app's API exposes `op` on `table` — the single question every
@@ -3418,6 +3436,43 @@ mod tests {
 
     fn endpoints(tables: &[Table]) -> EndpointSet {
         RestProvider::project("/api", tables).endpoints().clone()
+    }
+
+    /// The users table's password hash is no API's, so the generated row type
+    /// has no such field: a page that showed it, or a form that set it, would
+    /// not compile. Neither the React page nor the context a declared framework
+    /// (React Native) generates from names it.
+    #[test]
+    fn the_password_hash_is_on_no_generated_page_or_form() {
+        let mut users = tasks();
+        users.id = TableId(sc_auth::USERS_TABLE.to_owned());
+        users.name = sc_auth::USERS_TABLE.to_owned();
+        users.label = sc_auth::USERS_TABLE.to_owned();
+        users.fields = vec![
+            DataField::plain("id", TypeRef::from_sql_type("bigint"))
+                .required()
+                .primary_key()
+                .generated(sc_db::ColumnGenerator::Identity),
+            DataField::plain("email", TypeRef::Basic(BasicType::Text)).required(),
+            DataField::plain(sc_auth::COL_PASSWORD_HASH, TypeRef::Basic(BasicType::Text)),
+        ];
+        let tables = [users];
+        let eps = endpoints(&tables);
+
+        let names: Vec<_> = shown_fields(&tables[0], &eps)
+            .iter()
+            .map(|f| f.base.name.as_str())
+            .collect();
+        assert_eq!(names, ["id", "email"]);
+        let form: Vec<_> = CreateForm::of(&tables[0], &eps)
+            .inputs
+            .iter()
+            .map(|f| f.base.name.as_str())
+            .collect();
+        assert_eq!(form, ["email"]);
+        let page = page_tsx(&tables[0], &eps);
+        assert!(!page.contains(sc_auth::COL_PASSWORD_HASH), "{page}");
+        assert!(page.contains("row.email"), "{page}");
     }
 
     /// The `todo` application these files are generated for.

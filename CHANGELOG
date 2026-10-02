@@ -2,6 +2,20 @@
 
 Changes in reverse chronological order.
 
+## Fix: scaffolded pages no longer name the users table's password hash
+
+main hid `password_hash` from every API (`sc_api`'s `user_rows`), so the generated `UsersRow` has
+no such field, but the scaffolds still drew a column and a form input for it, and a scaffolded app
+exposing `users` failed `tsc` ("Property 'password_hash' does not exist on type 'UsersRow'").
+
+- `shown_fields` (`crates/sc-app/src/scaffold/files.rs`): a table's columns that its API models.
+  Used by the React pages (`page_tsx`, `store_page_tsx`), the create form (`CreateForm::of`, which
+  treated an unmodelled column as writable) and the `fields` of the context declared frameworks
+  generate from (React Native's screens).
+- An app scaffolded before this keeps its screen: scaffolding never overwrites. Remove the
+  `password_hash` lines from `src/screens/Users.tsx` by hand.
+- Test: `the_password_hash_is_on_no_generated_page_or_form`.
+
 ## Review fixes after the merge: a native app's lost token
 
 - **A native app reopened while signed in recovers its CSRF token.**
