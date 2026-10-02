@@ -2,6 +2,311 @@
 
 Changes in reverse chronological order.
 
+## Analytics: models are not a workspace
+
+A design change before A3 starts (`TODO.md` A3.0): a model opens in a **model editor** at
+`#/models/<id>`, listed on the Analytics front page beside the datasets, rather than in a *Model
+fit* workspace. A model is a global, named entity other things refer to (`predict("…")`, the
+Model predictions operation, simulation, map layers), as a dataset is, and a workspace that only
+pointed at one would have had no state of its own — while creating one per model, finding the
+right one from a bookmark or from **Open as model**, and keeping its name in step with the
+model's would all have been the person's problem.
+
+- **The `model_fit` workspace kind goes** (`sc-analytics`'s `WorkspaceKind`, now six kinds, and
+  `ui/analytics`'s labels). `createWorkspace` refuses `model_fit` as not a kind of workspace.
+  Tests: `workspace.rs`'s kinds test and `analytics_api.rs`'s workspaces test.
+- **Model view state** is planned (A3.4): a `view_state` JSON object on `_fd_models`, outside
+  the model's definition — not validated, not recorded by a fit, ignored by the "changed since
+  fit" checks — written by `patchModelViewState` key by key, so that the model editor reopens
+  as it was left, which was the one thing the workspace would have given.
+- **Split view** (A4.1) holds the Dataset editor or the model editor as well as a workspace on
+  either side.
+- **Documents**: `analytics-ui-goals.md` (the model editor beside the Dataset editor, the rule
+  separating entities from workspaces, view state, split view, comparison from the model
+  list), `TECHNICAL_DESIGN.md` §14.2 (`view_state`) and §14.5 (front page, routes, six kinds),
+  `TODO.md`'s A3 rewritten (A3.0–A3.10) and A4.1, `tutorial-analytics.md`.
+
+## Analytics A2 phase 6: demo data, documentation, definition of done
+
+Milestone A2's last phase (`TODO.md` A2.15–A2.16): the demo's paired measurements and a million
+events, the plot spec and stat compiler documented, the tutorial's part 2, and the Try it as a
+server test checked against R. Walking it in the browser found four rendering faults, fixed here.
+
+- **Demo data** (A2.15). `feldspar demo analytics` now also makes `patients` (90, a third each
+  on a placebo, a low and a high dose) and `measurements` (a key to the patient, a date, a blood
+  pressure `before` and `after`; the doses lower it), generated in Rust from a seed of their own
+  so the houses are the rows they were; and `events`, a million web requests (`kind`,
+  `duration_ms`, `size_kb`, `hour`) made by one `INSERT … SELECT` over a recursive CTE whose text
+  is the same on Postgres and SQLite — integer hashes of the row number modulo 2³¹ − 1, every
+  product under 2⁶², and a final division both backends round alike, so they make identical rows.
+  About 4 s on Postgres and 2.5 s on SQLite. It also makes the datasets `Houses`, `Measurements`
+  (with `treatment = patientⱵtreatment` and `change = after - before`) and `Events`, since the
+  explorer reads datasets; a dataset of one of those names that is there is kept, and the report
+  and the command's output say which were made and which kept. `--replace` covers the six tables
+  and never drops a dataset.
+- **Documentation.** `TECHNICAL_DESIGN.md` §14.5 gains *The plot spec* (its JSON, layers, stats,
+  scales, facets, validation and the "show me" rules) and *The stat compiler* (data → points →
+  stat queries, percentiles by `row_number()`, what is computed in memory, seeded sampling, the
+  caps, data by channel), and the demo data and definitions of done. `tutorial-analytics.md`
+  part 2 walks the Try it with the numbers the demo gives; part 1 mentions the demo's datasets.
+  `OPERATIONS.md` §8.6 lists the new tables and datasets.
+- **Definition of done** (A2.16). `analytics_done.rs` gains `the_try_it_of_milestone_a2`, over
+  `feldspar demo analytics`'s rows through the API: a Data explorer workspace; the scatter
+  preset, `price` on Y and `neighbourhood` on Color, the mark to a line and back; `year_built`
+  binned on Wrap, each decade's points counted against the stage's rows; a linear smoother on a
+  log scale with a reference line, against R's `lm`; the box plot's quartiles and whiskers against
+  R's type-7 quantiles; the ANOVA, Kruskal–Wallis and all ten Tukey comparisons, then Welch and
+  Mann–Whitney after a Filter to two neighbourhoods, then the paired t-test and signed-rank test,
+  all against R; the summary table's means; a histogram of the million events (0.8 s) whose
+  fullest bin holds the rows a Filter over its range leaves, and a scatter plot that samples; the
+  workspace state reopened. R's values come from `crates/sc-server/tests/r/demo_reference.R`
+  (base R, over the demo's tables exported as CSV) → `demo_reference.json`. The A1 test now
+  expects the demo's three datasets on the front page.
+- **Fixed on the walk through the Try it** (in Chromium, against a scratch database):
+  - A number alone on Y — `price` on Y, or `before` and `after` — is a histogram binned along Y,
+    and `plot/echarts.ts` drew it as vertical bars at the counts. Histogram bars are now drawn
+    along whichever channel is binned (and so also right in flipped coordinates).
+  - With Wrap, the tests column has a section per group; the plot beside it was stretched to that
+    height (2,300 px for eight decades) and its percentage margins became blank bands. The tests
+    column now scrolls on its own.
+  - A reference line's label was drawn past the plot's right edge and cut off ("30" for "300k");
+    it is now inside, above the line's end.
+  - The tests' Wrap headings and levels wrote years with a thousands separator ("1,950–1,960");
+    a column's value is now written as the plot's axes write it, with no separator below 10,000.
+- **Deviations.**
+  - The Try it's "drop two neighbourhoods" read as if there were three; the demo has five, so it
+    now says to filter down to two.
+  - Price by neighbourhood is not significant in the demo (ANOVA p = 0.56; area dominates), and
+    Harbour's prices fail the normality check, so the sentence reports Kruskal–Wallis. The demo's
+    houses were left as they were rather than tuned for a result; the tutorial says what the
+    answer means, and the measurements' change by treatment gives a significant ANOVA instead.
+- **Tests.** Rust: `sc-cli`'s demo test checks the new tables, the datasets (made once, kept on
+  `--replace`, each compiling) and that Postgres and SQLite make the same events; the A2 Try it
+  above. Vitest: a histogram binned along Y, its bars' geometry; the reference line's label
+  position; years without separators in the tests' headings.
+
+## Analytics A2 phase 5: hypothesis tests in the Data explorer
+
+The tests of the goals document's "Fit Y by X" table (`TODO.md` A2.12–A2.14), chosen from the Y, X
+and Wrap drop zones, computed on the server and shown beside the plot with a plain-language
+sentence.
+
+- **The tests** (A2.12). A new module `sc_analytics::stats`: one-sample t, Shapiro–Wilk,
+  chi-square goodness of fit, the exact binomial test, Welch's t, Mann–Whitney, one-way ANOVA,
+  Kruskal–Wallis, Tukey's honest significant differences, Levene (Brown–Forsythe), the
+  chi-square test of independence, Fisher's exact test (2 × 2 with the conditional odds ratio
+  and its interval; r × c by a simplified network algorithm), Pearson and Spearman correlation,
+  simple linear and logistic regression, the paired t-test and the Wilcoxon signed-rank test
+  (one sample and paired). Each is a pure function answering a `TestResult` — statistic, degrees
+  of freedom, two-sided p-value, an estimate with its interval, an effect size — or a sentence
+  saying why it cannot be computed. R's conventions throughout; what `statrs` lacks is ported
+  from R's C in `stats/dist.rs` (`ptukey`/`qtukey`, `swilk`, the exact rank-sum and signed-rank
+  distributions, AS 89). `run_tests` computes the sufficient statistics in SQL (moments per
+  group, contingency counts, the centred sums of two columns) and reads values only for the
+  tests that need them, at most 5,000 per Wrap group by a seeded sample, saying so.
+- **Choosing the tests** (A2.13). `stats/choose.rs` maps the roles' column types to a design
+  (number, category — a binned number or a foreign key is a category — dates refused with a
+  sentence; paired mode for two numbers on Y). Assumption checks — group sizes, normality
+  (Shapiro–Wilk; not counted against groups of 50 or more), equal variances, expected counts,
+  events per outcome — pick the test the sentence reports (`Section.preferred`); the main test
+  and its non-parametric alternative are both always shown. The sentence and the notes are made
+  in the browser (`ui/analytics/src/explorer/tests.ts`) in the `analytics` i18n domain: "The mean
+  of price differs between North and South (p = 0.003)."
+- **The panel** (A2.14). `runTests` (`POST /api/plots/tests`) answers one section per Wrap value;
+  `TestResults` shows each beside the plot (or the summary table) in one `an-panel`: its
+  sentence, a short table (test with statistic, estimate and effect size beneath; p-value), the
+  pairwise comparisons folded away, and the notes. A **Tests** toggle, a **Paired** switch when
+  Y has two columns, and the value a mean is tested against are part of the workspace's state.
+- **Plumbing.** The plot renderer's query helpers (`Renderer::key`, `points`, `linear_sums`, the
+  key and sampling helpers) are now `pub(crate)` so the tests reuse them; `field_check` too.
+  Clients regenerated in all four UIs.
+- **Docs.** `TECHNICAL_DESIGN.md` §14.5 gains *Hypothesis tests*: the design table, sufficient
+  statistics and sampling, R's conventions, the checks and where the sentence is made.
+- **Deviations from the plan.**
+  - The rank tests' estimate is the Hodges–Lehmann median of the pairwise differences (Walsh
+    averages) whenever there are at most two million of them; R reports that only in its exact
+    case, and otherwise a `uniroot` of the statistic that approximates it. The intervals are R's,
+    found by bisection rather than `uniroot` (and agree to R's tolerance).
+  - Fisher's exact odds-ratio interval is solved to full precision; `fisher.test` uses
+    `uniroot`'s default tolerance and is up to 0.7% off at the upper end on small tables. The
+    fixture records both.
+  - The chi-square test of independence has no continuity correction (as JMP and SPSS report
+    it); Fisher's exact test stands beside it for small tables.
+  - Tukey's comparisons are made for up to 20 groups, a test compares up to 50, and Wrap repeats
+    the analysis for up to 48 groups; past those, a sentence.
+  - A single mean is tested against 0 by default, settable in the panel; the binomial test is of
+    an even split.
+- **Tests.** Rust: every test against R's answers on R's own data sets
+  (`crates/sc-analytics/tests/r/test_reference.R` → `test_reference.json`, base R and MASS),
+  the distributions' edge cases, the chooser's table and its refusals, the preferred test after
+  a failed check; on Postgres and SQLite, every design over the ten houses of `plots.rs` against
+  R's values for the same rows, Wrap (including a group with one level and binned groups), and
+  sampling above 5,000 rows that is the same each time; an `sc-server` test of `runTests`
+  (Welch and Mann–Whitney against R, a million rows sampled, Wrap, the sentence for no test).
+  Vitest: the spec from the drop zones, p-values and numbers as written, a sentence for every
+  design, the notes gathered per check, and every name the server can answer. Checked in
+  Chromium against `feldspar demo analytics`, which caught the results table overflowing the
+  side panel (now a two-column table with details beneath).
+
+## Analytics A2 phases 3–4: rendering and the Data explorer
+
+The browser half of the Data explorer (`TODO.md` A2.7–A2.11): ECharts rendering of the server's
+plot data, summary tables, the explorer workspace with its gallery, drop zones and mark palette,
+the layers panel, and the gallery presets that reshape their data. The Data explorer is the
+first workspace kind that can be created.
+
+- **ECharts** (A2.7). `ui/analytics` depends on `echarts` 5, imported per chart type in
+  `src/plot/runtime.ts` (bar, line, scatter, box plot, heatmap, custom, parallel; canvas and SVG
+  renderers). `src/plot/echarts.ts` compiles a spec and its `renderPlot` data to an option, as a
+  pure function: small multiples to grids laid out in percentages (wrapped, or rows × columns
+  with column titles above and row titles beside), fixed facet scales to round shared bounds and
+  free ones left to ECharts per axis; layers to series per small multiple and colour group, with
+  `custom` series for what ECharts lacks (histogram bars from bin edges, stacked by colour;
+  confidence bands; error bars; mosaic tiles); discrete colour to series in the palette slot of
+  the value's place in the domain, with a legend, and numeric colour to a `visualMap`
+  (sequential, or diverging for a correlation); log scales, flipped and polar coordinates,
+  reference lines as `markLine`s, and the axis titles once for all the plots. `PlotView` mounts
+  it, resizes with its box and follows the colour scheme. The palette (`src/plot/palette.ts`) is
+  a validated eight-slot categorical one, a one-hue sequential ramp and a blue–grey–red diverging
+  one, each stepped separately for dark mode.
+- **Summary tables** (A2.8). `sc_analytics::plot::render_table` over a new `TableSpec { data,
+  fold, rows, columns, cells, totals }` (cells are an aggregate of a column, or a count of rows),
+  by the plot renderer's machinery: the body, and with totals the Total column, the Total row and
+  the corner, each its own grouped query so that a total summarises rows rather than cells
+  (medians from the percentile query). `validate_table` refuses an unbinned float as a dimension
+  and a summary that does not suit its column, in sentences. `renderTable` (`POST
+  /api/plots/table`) answers the parts as small tables (`r0`…, `c0`…, `n`, `v0`…), which
+  `src/plot/table.ts` lays out and `SummaryTable` draws. From the drop zones: X, Facet rows and
+  Wrap are rows, Color and Facet columns are columns, each number on Y is a cell (a category on Y
+  another column), and floats are binned.
+- **The Data explorer** (A2.9). `WorkspaceKind::DataExplorer` is available. The workspace
+  (`src/explorer/DataExplorer.tsx`): a dataset drop-down (with links to edit it or make a new
+  one), the column list with each column's type, the gallery (the map disabled until A5), nine
+  drop zones taking columns by drag and drop (from the list or from another zone) or from a menu,
+  each chip binnable and removable, the mark palette (Auto underlines the mark the explorer
+  chose), Plot or Summary table, Clear, and the sample and warning sentences under the plot. Its
+  state (`src/explorer/state.ts`) is the choices — dataset, drop zones, mark, a reshaping preset,
+  view, the table's summary and totals, the layers panel's changes — never the spec, which is
+  `suggestPlot`'s answer recomputed on open. A drop on Y replaces what is there; Shift-drop or
+  the zone's **+** adds a column, and several on Y are compared as one variable. The explorer is
+  a lazily loaded chunk, so the front page does not load ECharts.
+- **The layers panel** (A2.10). Add a linear fit, a loess smoother, points, a line, a mean with
+  its interval, a density curve or count labels; change an added layer's mark and stat (a
+  smoother's method, a summary's function) or the first layer's stat; one smoother per colour
+  group or one for all; the X and Y scales (linear, log, square root; from zero or fitted;
+  reversed), the colour scheme, reference lines on X or Y with a label, and the coordinates. Its
+  changes are laid over the explorer's spec (`composeSpec`): an added layer takes X, Y and Color
+  from the first unless its stat makes its own Y (a density, a count), and does not bin what its
+  stat reads as values.
+- **Presets that reshape** (A2.11). The spec gained what they need: `Fold.pairs` (each row once
+  per pair of the columns, as `variable_x`, `value_x`, `variable_y`, `value_y`, the diagonal
+  optional), `Facet.scales: free`, `Stat::Correlation { x, y }` (Pearson's, from the same centred
+  sums as the linear smoother, now shared as `linear_sums`), `Mark::Mosaic` (a count, drawn on
+  Size; X and Y must be categories or binned) and `Coord::Parallel` (the identity layer returns
+  the folded columns side by side as `y_0`, `y_1`…, named in `info.axes`, sampled by row). The
+  gallery's new items — *Scatterplot matrix*, *Parallel coordinates*, *Correlation heatmap*,
+  *Mosaic plot* — are marked `reshapes`, and the explorer keeps them in force so that later drops
+  are read by them again. Each uses the number columns on Y (or the dataset's first four), and
+  Color where it can; the matrix names each column on its diagonal.
+- **Docs.** `TECHNICAL_DESIGN.md` §14.5 describes the explorer, its rendering, summary tables and
+  the reshaping presets (the plot spec's own write-up is A2.15's); §2's crate table and diagram
+  gain the `sc-analytics → sc-dataset` dependency the previous milestone added, which
+  `repo_hygiene` had flagged.
+- **Deviations from the plan.**
+  - The reshaping presets are spec features (pairs, a correlation stat, a mosaic mark, parallel
+    coordinates) rather than reshaping in the browser, so that their stats run in SQL like every
+    other plot's and a panel copied in A4 is still a spec.
+  - Summary tables are their own spec and endpoint rather than a plot with a text mark: their
+    totals need grouping sets that a plot's layers cannot express.
+  - The explorer stores the drop zones, not the spec; `PlotView` is told which columns are
+    categories, since a foreign key's ids are numbers in the server's domains.
+- **Tests.** Rust: summary tables on Postgres and SQLite against the ten houses worked by hand
+  (body, Total column and row, corner; medians by binned rows; no dimensions; refusals); a
+  correlation heatmap, a scatterplot matrix, parallel coordinates and a mosaic through `preset`
+  and `render_plot`; their refusals; an `sc-server` test of `renderTable` and the correlation
+  preset through the API; the workspace kind tests updated now the explorer is here. vitest: the
+  ECharts compiler (histogram stacking, box plots with outliers, flipped bars, log scale with a
+  reference line and a smoother band, wrapped facets with shared bounds, a scatterplot matrix's
+  free axes and titles, a correlation heatmap's diverging scale, parallel coordinates, a foreign
+  key as categories, dark mode, round bounds, mosaic tiles, the notes), the table layout (all
+  four parts, binned rows, columns only), and the explorer's state (drop zones, binning, reading
+  stored state, the table spec, the layers panel). Walked by hand in headless Chromium against
+  `feldspar demo analytics`: every gallery item, drag and drop onto the zones, the mark palette,
+  the layers panel, the summary table, reopening, and dark mode, with no console errors.
+
+## Analytics A2 phases 1–2: the plot spec and stats on the server
+
+The server half of the Data explorer (`TODO.md` A2.1–A2.6): a plot is a declarative **spec**,
+checked against its dataset, and drawn by compiling each layer's stat to SQL over the dataset's
+query, so the browser receives bins, boxes and curves rather than rows. No UI yet (A2.7 on).
+
+- **The spec** (`sc-analytics::plot`, A2.1). `PlotSpec { data, fold, layers, scales, coord,
+  facet, references, selections }`; a layer is a mark (point, line, bar, area, box, band,
+  errorbar, text, rect), an encoding (x, y, color, size, shape, label — each a column, optionally
+  binned) and a stat (identity, count, aggregate, quantiles, boxplot, summary, density, smooth).
+  `DataRef` has one kind, a stored dataset; A3 adds fit output. `validate(spec, shape)` returns
+  every reason a spec cannot be drawn as a sentence ("Size shows an amount, and `street` is
+  text; put it on Color or Shape"), and makes each layer's plan: the channels that group its
+  rows, the columns its stat reads, and where a count or summary is drawn.
+- **Show me and the gallery** (A2.2). `show_me(data, shape, assignment, mark)` picks the mark
+  and stat from the types on the drop zones (a number alone is a histogram, a number by a
+  category a box plot, a number by a category on the other axis a flipped box plot, two
+  categories a heatmap…), honours the mark palette, folds several Y columns into
+  `variable`/`value` coloured by column, and bins a float on a grouping channel. `preset(…)`
+  fills the zones a gallery item needs from the dataset's columns (never the row key);
+  `gallery()` lists the map disabled until A5.
+- **The stat compiler** (A2.3–A2.5). Every layer is `points` (group keys `_g…` and inputs `_v…`
+  over the dataset's unordered last stage, or a `UNION ALL` per folded column) and a stat over
+  it. A binned key is `floor((x − origin)/width)`, the bins shared by every layer and facet;
+  Freedman–Diaconis by default, rounded to 1/2/2.5/5×10ᵏ (whole numbers for integers), at most
+  200. Box plots follow ggplot2: type-7 quartiles, whiskers to the furthest value within 1.5 IQR,
+  outliers returned separately (fences applied per group by a `CASE`). Summary is a mean with a
+  t interval; densities are Gaussian KDEs with `bw.nrd0` on R's 512-point grid, from the values
+  up to 20,000 rows and from 2,048 fine bins above; the linear smoother's sums come from SQL,
+  centred by window means; loess (local quadratic, tricube) is fitted in memory on a sample of at
+  most 1,000. Layers that draw rows sample above 10,000 (`sample` on the layer), reproducibly,
+  and say `sampled` with the `total`. A log or square-root scale leaves out what it cannot show
+  and warns with the count.
+- **`render_plot` and the endpoints** (A2.6). Each layer's data comes back as a small table
+  whose columns are named by channel (`x`, `x_end`, `y`, `y_lower`, `y_q1`, `color`, `wrap`…),
+  with the domains each channel spans over every layer, the facet values, the bins and the
+  warnings. `renderPlot` (`POST /api/plots/render`), plus `plotGallery` and `suggestPlot` so
+  the explorer (A2.9) does not re-implement the rules in TypeScript. The four `client.ts` copies
+  are regenerated.
+- **`sc-dataset`.** `Stage::unordered_query()` (a stage without its `ORDER BY`, which a histogram
+  of a million rows would only pay for), and `scramble`, the Limit's seeded sample order, made
+  public so plots sample the same way.
+- **`sc-db-sqlite`.** A Postgres-compatible `floor`, for bin numbers and percentile positions.
+- **Deviations from the plan.**
+  - Percentiles are taken with `row_number()` over each group on *both* databases, not with
+    `percentile_cont` on Postgres and in memory on SQLite: one code path, tested on both, and
+    no million-row read on SQLite.
+  - A spec that cannot be drawn answers `200` with `error` and `problems` rather than a `400`:
+    in the explorer it is a normal state, shown in place of the plot. A body that is not a spec
+    is still a `400`.
+  - Loess is R's `loess(degree = 2, surface = "direct")`, not ggplot2's default
+    `surface = "interpolate"` (a k-d tree of vertex fits blended by cubics), which differs from
+    it by up to about 0.5% near the ends of the range. Its band is ggplot2's: `predict(se = TRUE)`
+    with R's default approximation of δ₁ and δ₂ from the operator's trace (`ehg141`/`ehg176` in
+    R's `loessf.f`, ported), O(n) where the exact δ₂ costs an n×n matrix product. A span above
+    1 widens the radius by √span, as R's code does (`?loess` says span¹ᐟᵖ).
+- **Tests.** Unit tests for the spec (JSON round trip, a refusal sentence per kind of mismatch,
+  where a count is drawn), show me and every preset, bins, quantiles, intervals, KDE and both
+  smoothers. Integration tests on Postgres and SQLite against ten houses worked by hand: bins by
+  width and by Freedman–Diaconis, counts, means, medians, quartiles, a box plot with an outlier
+  and its shortened whisker, a t interval, reproducible samples, wrap facets, a fold, a log
+  scale's warning, densities per group, both smoothers, and the refusals. An `sc-server` test
+  drives the three endpoints, including a histogram of a million rows that returns its 100 bins
+  (under a second in a debug build) and a scatter plot of them that returns a 10,000-row sample.
+- **Reference values from R.** `crates/sc-analytics/tests/r/plot_reference.R` (base R only, on
+  R's `cars` and `faithful`) records `plot_reference.json`, which the `plot::math` tests read:
+  `quantile()` type 7 and `t.test()` intervals to 1e-12; `lm` coefficients, σ and the 80-point
+  confidence band at two levels to 1e-10; `bw.nrd0` and `density()`'s grid to 1e-14, the exact
+  Gaussian estimate at it to 1e-12, and `density()`'s binned values within 0.03% of the peak (our
+  fine-bin estimate within 0.05%); and three `loess(surface = "direct")` fits (spans 0.3, 0.75
+  and 2, with ties) whose curves agree to 1e-10, bands to 1e-8 and δs to 1e-10. Re-record with
+  `Rscript crates/sc-analytics/tests/r/plot_reference.R` (recorded with R 4.5.0).
+
 ## Analytics: the Dataset editor is not a workspace
 
 The Analytics UI's front page now lists the **datasets** and, below them, the **workspaces**.

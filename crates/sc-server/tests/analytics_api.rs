@@ -421,24 +421,53 @@ async fn datasets_are_created_read_edited_and_deleted_through_the_api() -> sc_er
 async fn workspaces_are_listed_renamed_saved_and_deleted() -> sc_error::Result<()> {
     let (mut client, db) = setup().await?;
 
-    // Seven kinds, none here before A2's Data explorer; the Dataset editor is
-    // not a kind of workspace.
+    // Six kinds, of which A2's Data explorer is the first here; the
+    // Dataset editor and the model editor are not kinds of workspace.
     let kinds = client.ok("GET", "/api/workspace-kinds", None).await;
     let kinds = kinds.as_array().unwrap();
-    assert_eq!(kinds.len(), 7);
-    assert!(kinds.iter().all(|k| k["available"] == json!(false)));
+    assert_eq!(kinds.len(), 6);
+    let here: Vec<&Value> = kinds
+        .iter()
+        .filter(|k| k["available"] == json!(true))
+        .collect();
+    assert_eq!(here.len(), 1);
+    assert_eq!(here[0]["kind"], json!("data_explorer"));
+    assert_eq!(here[0]["arrives_in"], Value::Null);
     assert!(!kinds.iter().any(|k| k["kind"] == "dataset_editor"));
-    let explorer = kinds.iter().find(|k| k["kind"] == "data_explorer").unwrap();
-    assert_eq!(explorer["arrives_in"], json!("A2"));
+    assert!(!kinds.iter().any(|k| k["kind"] == "model_fit"));
 
     let err = client
         .refused(
             "POST",
             "/api/workspaces",
+            Some(json!({ "name": "Draft", "kind": "report" })),
+        )
+        .await;
+    assert!(err.contains("milestone A4"), "{err}");
+    // Models open in the model editor, not in a workspace.
+    let err = client
+        .refused(
+            "POST",
+            "/api/workspaces",
+            Some(json!({ "name": "Fits", "kind": "model_fit" })),
+        )
+        .await;
+    assert!(err.contains("not a kind of workspace"), "{err}");
+    let created = client
+        .ok(
+            "POST",
+            "/api/workspaces",
             Some(json!({ "name": "Plots", "kind": "data_explorer" })),
         )
         .await;
-    assert!(err.contains("milestone A2"), "{err}");
+    assert_eq!(created["kind"], json!("data_explorer"));
+    client
+        .ok(
+            "DELETE",
+            &format!("/api/workspaces/{}", created["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
     let err = client
         .refused(
             "POST",

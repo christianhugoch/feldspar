@@ -192,3 +192,296 @@
 .an-completion.active {
   background: var(--tblr-primary-lt);
 }
+
+/* The Data explorer: the column list, the gallery, drop zones and plot, and
+   the layers panel when it is open. */
+.an-explorer {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+
+.an-columns {
+  flex: 0 0 14rem;
+  border-right: 1px solid var(--tblr-border-color);
+  overflow-y: auto;
+  padding: 0.75rem;
+}
+
+.an-column {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.4rem;
+  margin-bottom: 0.2rem;
+  border: 1px solid var(--tblr-border-color);
+  border-radius: 4px;
+  background: var(--tblr-bg-surface);
+  cursor: grab;
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.an-column-type {
+  flex: 0 0 1.4rem;
+  text-align: center;
+  font-size: 0.7rem;
+  color: var(--tblr-secondary);
+}
+
+.an-explorer-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 0.75rem;
+}
+
+.an-gallery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-bottom: 0.6rem;
+}
+
+.an-zones {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+}
+
+.an-zone {
+  border: 1px dashed var(--tblr-border-color);
+  border-radius: 4px;
+  min-height: 2.6rem;
+  padding: 0.2rem 0.35rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.2rem;
+}
+
+.an-zone.over {
+  border-color: var(--tblr-primary);
+  background: var(--tblr-primary-lt);
+}
+
+.an-zone-name {
+  flex: 0 0 100%;
+  display: flex;
+  align-items: center;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--tblr-secondary);
+}
+
+.an-zone-add::after {
+  display: none;
+}
+
+.an-zone-menu {
+  max-height: 18rem;
+  overflow-y: auto;
+}
+
+.an-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0 0.1rem 0 0.4rem;
+  border-radius: 999px;
+  background: var(--tblr-primary-lt);
+  font-size: 0.8rem;
+  cursor: grab;
+  max-width: 100%;
+}
+
+.an-chip button {
+  border: 0;
+  background: none;
+  padding: 0 0.25rem;
+  color: var(--tblr-secondary);
+  line-height: 1.3;
+}
+
+.an-chip-bin {
+  font-size: 0.65rem;
+  border-radius: 3px;
+}
+
+.an-chip-bin.on {
+  color: var(--tblr-primary) !important;
+  font-weight: 600;
+}
+
+/* The mark the explorer chose, while Auto is on. */
+.an-mark-auto {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.an-output {
+  flex: 1 1 auto;
+  min-height: 24rem;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.an-plot-box {
+  flex: 1 1 auto;
+  min-height: 24rem;
+  display: flex;
+}
+
+.an-plot-box.an-stale {
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+
+.an-plot {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 24rem;
+}
+
+.an-notes {
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+  font-size: 0.8rem;
+  color: var(--tblr-secondary);
+}
+
+.an-layers {
+  flex: 0 0 21rem;
+  border-left: 1px solid var(--tblr-border-color);
+  overflow-y: auto;
+  padding: 0.75rem;
+}
+
+.an-layer {
+  border: 1px solid var(--tblr-border-color);
+  border-radius: 4px;
+  padding: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+
+/* A summary table: numbers aligned, totals set apart. */
+.an-table-wrap {
+  overflow: auto;
+}
+
+.an-summary {
+  width: auto;
+  font-size: 0.85rem;
+}
+
+.an-summary .numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.an-summary th.an-summary-dim {
+  vertical-align: bottom;
+}
+
+.an-summary-across {
+  color: var(--tblr-secondary);
+  font-weight: normal;
+}
+
+.an-summary .an-summary-total {
+  font-weight: 600;
+  background: var(--tblr-bg-surface-secondary);
+}
+
+/* The plot (or table) and its hypothesis tests, as one panel: side by side,
+   the tests below the plot when there is no room (A2.14). */
+.an-panel {
+  flex: 1 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  min-height: 0;
+}
+
+.an-panel > .an-output {
+  flex: 1 1 28rem;
+  min-width: 0;
+}
+
+/* The tests scroll on their own: one section per Wrap group would otherwise
+   make the panel, and the plot stretched beside them, thousands of pixels
+   tall, with the plot's margins (in percent) growing into blank bands. */
+.an-tests {
+  flex: 0 1 26rem;
+  min-width: 18rem;
+  max-height: calc(100vh - 14rem);
+  overflow-x: auto;
+  overflow-y: auto;
+  font-size: 0.85rem;
+  border-left: 1px solid var(--tblr-border-color);
+  padding-left: 0.75rem;
+}
+
+.an-tests.an-stale {
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+
+.an-tests-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.an-tests-section + .an-tests-section {
+  border-top: 1px solid var(--tblr-border-color);
+  padding-top: 0.5rem;
+}
+
+.an-test-sentence {
+  font-size: 0.95rem;
+  margin-bottom: 0.5rem;
+}
+
+.an-test-table {
+  font-size: 0.8rem;
+  margin-bottom: 0.5rem;
+}
+
+.an-test-table td,
+.an-test-table th {
+  font-variant-numeric: tabular-nums;
+}
+
+.an-test-preferred .an-test-name,
+.an-test-preferred .an-test-p {
+  font-weight: 600;
+}
+
+.an-test-p {
+  text-align: end;
+  white-space: nowrap;
+}
+
+.an-test-detail {
+  color: var(--tblr-secondary);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.an-test-alt {
+  margin-inline-start: 0.35rem;
+  padding: 0 0.3rem;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  background: var(--tblr-bg-surface-secondary, rgba(127, 127, 127, 0.15));
+  color: var(--tblr-secondary);
+}

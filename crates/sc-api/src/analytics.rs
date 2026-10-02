@@ -1,5 +1,5 @@
-//! The Analytics UI's endpoints (analytics TODO A1.13): datasets and
-//! workspaces.
+//! The Analytics UI's endpoints (analytics TODO A1.13, A2.6, A2.8): datasets, plots
+//! and workspaces.
 //!
 //! Admin-only in this milestone, like everything else under `/api`: A9 is
 //! where a restricted application's users reach a subset of them under their
@@ -206,6 +206,162 @@ pub(crate) fn register(set: &mut EndpointSet) {
             StructField::new("columns", TypeSchema::array(TypeSchema::json())),
             StructField::new("primary_key", TypeSchema::optional(TypeSchema::text())),
         ])))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // --- plots ---------------------------------------------------------------
+
+    // A plot's data (A2.6): each layer's rows after its stat — bins, boxes,
+    // curves, or a sample of the rows — and the domains each channel spans.
+    // A spec that cannot be drawn is not an error of the request: it answers
+    // `error` (the first reason, as a sentence) and `problems` (all of them),
+    // which the explorer shows in place of the plot.
+    set.register(
+        Endpoint::new("renderPlot", Method::Post, api().lit("plots").lit("render"))
+            .input(TypeSchema::struct_of([StructField::new(
+                "spec",
+                TypeSchema::json(),
+            )]))
+            .output(TypeSchema::struct_of([
+                StructField::new("error", TypeSchema::optional(TypeSchema::text())),
+                StructField::new(
+                    "problems",
+                    TypeSchema::optional(TypeSchema::array(TypeSchema::text())),
+                ),
+                StructField::new(
+                    "layers",
+                    TypeSchema::optional(TypeSchema::array(TypeSchema::json())),
+                ),
+                StructField::new("domains", TypeSchema::optional(TypeSchema::json())),
+                StructField::new("facets", TypeSchema::optional(TypeSchema::json())),
+                StructField::new("bins", TypeSchema::optional(TypeSchema::json())),
+                StructField::new(
+                    "warnings",
+                    TypeSchema::optional(TypeSchema::array(TypeSchema::text())),
+                ),
+            ]))
+            .auth(AuthRequirement::admin()),
+    );
+
+    // A summary table's data (A2.8): the cells for each combination of the
+    // row and column dimensions' values, and the totals. Answers `error` and
+    // `problems`, as `renderPlot` does, for a spec that cannot be made.
+    set.register(
+        Endpoint::new("renderTable", Method::Post, api().lit("plots").lit("table"))
+            .input(TypeSchema::struct_of([StructField::new(
+                "spec",
+                TypeSchema::json(),
+            )]))
+            .output(TypeSchema::struct_of([
+                StructField::new("error", TypeSchema::optional(TypeSchema::text())),
+                StructField::new(
+                    "problems",
+                    TypeSchema::optional(TypeSchema::array(TypeSchema::text())),
+                ),
+                StructField::new(
+                    "rows",
+                    TypeSchema::optional(TypeSchema::array(TypeSchema::text())),
+                ),
+                StructField::new(
+                    "columns",
+                    TypeSchema::optional(TypeSchema::array(TypeSchema::text())),
+                ),
+                StructField::new(
+                    "cells",
+                    TypeSchema::optional(TypeSchema::array(TypeSchema::text())),
+                ),
+                StructField::new("body", TypeSchema::optional(TypeSchema::json())),
+                StructField::new("row_totals", TypeSchema::optional(TypeSchema::json())),
+                StructField::new("column_totals", TypeSchema::optional(TypeSchema::json())),
+                StructField::new("grand_total", TypeSchema::optional(TypeSchema::json())),
+                StructField::new("bins", TypeSchema::optional(TypeSchema::json())),
+                StructField::new("total", TypeSchema::optional(TypeSchema::int())),
+                StructField::new("truncated", TypeSchema::optional(TypeSchema::bool())),
+            ]))
+            .auth(AuthRequirement::admin()),
+    );
+
+    // The gallery's items, the map shown disabled until A5. `reshapes` marks
+    // the presets that build their spec from what is dropped every time
+    // (scatterplot matrix, parallel coordinates, correlation heatmap, mosaic).
+    set.register(
+        Endpoint::new(
+            "plotGallery",
+            Method::Get,
+            api().lit("plots").lit("gallery"),
+        )
+        .output(TypeSchema::array(TypeSchema::struct_of([
+            StructField::new("preset", TypeSchema::text()),
+            StructField::new("label", TypeSchema::text()),
+            StructField::new("available", TypeSchema::bool()),
+            StructField::new("reshapes", TypeSchema::bool()),
+            StructField::new("arrives_in", TypeSchema::optional(TypeSchema::text())),
+        ])))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // The hypothesis tests for the Y, X and Wrap drop zones (A2.12–A2.14):
+    // chosen from the columns' types, computed over the dataset (sufficient
+    // statistics in SQL, the rank tests on a sample), repeated for each value
+    // of Wrap. Answers `design` and one section per Wrap value, each with its
+    // tests, assumption checks and the test its sentence reports; or `error`
+    // (and `problems`), as `renderPlot` does, when the roles have no test.
+    set.register(
+        Endpoint::new("runTests", Method::Post, api().lit("plots").lit("tests"))
+            .input(TypeSchema::struct_of([StructField::new(
+                "spec",
+                TypeSchema::json(),
+            )]))
+            .output(TypeSchema::struct_of([
+                StructField::new("error", TypeSchema::optional(TypeSchema::text())),
+                StructField::new(
+                    "problems",
+                    TypeSchema::optional(TypeSchema::array(TypeSchema::text())),
+                ),
+                StructField::new("design", TypeSchema::optional(TypeSchema::text())),
+                StructField::new(
+                    "y",
+                    TypeSchema::optional(TypeSchema::array(TypeSchema::text())),
+                ),
+                StructField::new("x", TypeSchema::optional(TypeSchema::text())),
+                StructField::new("by", TypeSchema::optional(TypeSchema::text())),
+                StructField::new(
+                    "mu",
+                    TypeSchema::optional(TypeSchema::Value(ValueType::Float)),
+                ),
+                StructField::new(
+                    "level",
+                    TypeSchema::optional(TypeSchema::Value(ValueType::Float)),
+                ),
+                StructField::new(
+                    "sections",
+                    TypeSchema::optional(TypeSchema::array(TypeSchema::json())),
+                ),
+            ]))
+            .auth(AuthRequirement::admin()),
+    );
+
+    // The spec for what is on the drop zones (A2.2): by a gallery preset, which
+    // fills the zones it needs, or by the column types, drawn as `mark` when
+    // the mark palette chose one. Answers the spec and the drop zones as the
+    // preset left them, or `error` when nothing can be drawn yet.
+    set.register(
+        Endpoint::new(
+            "suggestPlot",
+            Method::Post,
+            api().lit("plots").lit("suggest"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("dataset", TypeSchema::uuid()),
+            StructField::new("assignment", TypeSchema::optional(TypeSchema::json())),
+            StructField::new("preset", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("mark", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .output(TypeSchema::struct_of([
+            StructField::new("spec", TypeSchema::optional(TypeSchema::json())),
+            StructField::new("assignment", TypeSchema::optional(TypeSchema::json())),
+            StructField::new("error", TypeSchema::optional(TypeSchema::text())),
+        ]))
         .auth(AuthRequirement::admin()),
     );
 

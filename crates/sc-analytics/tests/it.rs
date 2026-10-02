@@ -4,3 +4,12 @@
 
 #[path = "workspaces.rs"]
 mod workspaces;
+
+#[path = "plots.rs"]
+mod plots;
+
+#[path = "reshaped.rs"]
+mod reshaped;
+
+#[path = "hypothesis.rs"]
+mod hypothesis;

@@ -195,6 +195,7 @@ graph TD
   analytics --> catalog
   model --> dataset["sc-dataset"]
   api --> dataset
+  analytics --> dataset
   dataset --> catalog
   cli --> stan["sc-stan"]
   server --> stan
@@ -268,7 +269,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-action` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-dataset` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-model` | `sc-catalog` `sc-dataset` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
-| `sc-analytics` | `sc-catalog` `sc-db` `sc-error` `sc-query` `sc-types` |
+| `sc-analytics` | `sc-catalog` `sc-dataset` `sc-db` `sc-error` `sc-query` `sc-types` |
 | `sc-stream` | `sc-catalog` `sc-db` `sc-error` `sc-query` `sc-types` |
 | `sc-stan` | `sc-catalog` `sc-error` `sc-files` `sc-model` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
@@ -1523,6 +1524,7 @@ erDiagram
     json hyperparameters "per key a value, or a list to search over"
     json split "train/validation/test fractions + the hash seed"
     json attributes
+    json view_state "A3.4: the model editor's, never read by a fit"
   }
   DATASETS["_fd_datasets"] {
     uuid id PK
@@ -1535,7 +1537,7 @@ erDiagram
   WORKSPACES["_fd_workspaces"] {
     uuid id PK
     text name
-    text kind "one of the eight; only those whose milestone arrived can be made"
+    text kind "one of the six; only those whose milestone arrived can be made"
     json state "the kind's own, restored when it is opened"
     uuid created_by "-> users.id, by value"
     timestamp updated_at
@@ -7313,7 +7315,16 @@ dataset's rows start from, written on save), `provider`, `dataset` (JSON, `{ "da
 `related` (JSON, nullable — a posterior's related datasets, `[{ name, dataset_id, label }]`),
 `configuration` (JSON),
 `hyperparameters` (JSON — values or lists), `split` (JSON — fractions and seed), `attributes`
-(JSON).
+(JSON), `view_state` (JSON object, A3.4).
+
+`view_state` is **not part of the model**: a dictionary the Analytics UI's model editor (and any
+other screen showing the model) keeps its layout in — which outputs are open, the optional plots
+chosen, the selected fit, the Bayesian workflow stage — so that a model reopens as it was left,
+as a workspace's `state` does. `validate_model` does not read it, a fit does not record it, the
+"changed since fit" checks ignore it and `updateModel` leaves it alone; it is written only by
+`patchModelViewState`, which sets or (with `null`) removes top-level keys so that two screens
+keeping different keys do not overwrite each other. It is shared by everyone who opens the model
+and copied by a clone.
 
 `_fd_model_instances`: `id` (uuid pk), `model` (uuid), `name`, `description`, `status`
 (`fitting` | `fitted` | `failed`), `created`, `active` (bool), `state` (JSON — the provider's
@@ -7933,16 +7944,20 @@ sections 7 (Postgres) and 8 (SQLite): one named dataset per old dataset, built a
 
 The Analytics UI (`docs/analytics-ui-goals.md`) is where datasets are built and, milestone by
 milestone, explored, modelled, mapped and reported. Milestone A1 is its frame, the workspaces'
-persistence and the Dataset editor. Its front page (`#/`) lists the datasets and, below them,
-the workspaces; a dataset opens in the Dataset editor at `#/datasets/<id>`, which is not a
-workspace and keeps no state of its own beyond the dataset.
+persistence and the Dataset editor. Its front page (`#/`) lists the datasets, the models (A3)
+and the workspaces; a dataset opens in the Dataset editor at `#/datasets/<id>` and a model in
+the model editor at `#/models/<id>`. Neither editor is a workspace. Datasets and models are
+global, named entities that other things refer to, while a workspace is a composition with state
+of its own. The Dataset editor keeps no state beyond the dataset; the model editor keeps how it
+was left in the model's **view state** (§14.2, A3.4), which nothing about fitting or prediction
+reads. Split view (A4) holds either editor or a workspace on each side.
 
 **Workspaces** (`sc-analytics`, `_fd_workspaces`: `id`, `name`, `kind`, `state`, `created_by`,
-`updated_at`). `kind` is one of the seven of the goals document (Data explorer, Model fit,
-Report, Map, Dashboard, Simulation, Notebook). The store keeps any kind; `createWorkspace`
+`updated_at`). `kind` is one of the six of the goals document (Data explorer, Report, Map,
+Dashboard, Simulation, Notebook). The store keeps any kind; `createWorkspace`
 refuses one whose milestone has not arrived, naming it ("arrives with milestone A2"), and
-`listWorkspaceKinds` says which are here so the create dialog lists the rest disabled — until
-A2, that is all of them. `state` is JSON owned by the kind — an explorer's is its dataset and
+`listWorkspaceKinds` says which are here so the create dialog lists the rest disabled — since
+A2, all but the Data explorer. `state` is JSON owned by the kind — an explorer's is its dataset and
 drop zones — saved as it changes (`saveWorkspaceState`) and restored when the workspace is
 opened.
 
@@ -7962,7 +7977,7 @@ visitor is sent to sign in, a non-admin refused), under its own CSP
 (`ANALYTICS_CONTENT_SECURITY_POLICY`, strict for now, widened by later milestones' renderers
 without touching the admin UI's), built into the binary by `sc-cli`'s build script, and sharing
 the admin UI's session cookie. It routes on the hash (`#/` the front page, `#/w/<id>`,
-`#/datasets/<id>`, `#/datasets/new`), uses the admin UI's vendored Tabler stylesheet and its colour-scheme setting,
+`#/datasets/<id>`, `#/datasets/new`, and from A3 `#/models/<id>`, `#/models/new`), uses the admin UI's vendored Tabler stylesheet and its colour-scheme setting,
 and its strings are the `analytics` i18n domain. The admin sidebar's **Analytics** entry leads
 to it; *Predictive models* stays beside it until A3.
 
@@ -7975,8 +7990,185 @@ beside a read-only, virtualised spreadsheet of the stage selected, paged with th
 own helpers. The formula input offers the stage's columns, one step along each foreign key and,
 while rows are a table's rows, the child tables' counts and totals.
 
-**Demo data** (`sc_analytics::demo`, `feldspar demo analytics [--replace]`): `neighbourhoods`,
-`houses` and `viewings`, deterministic and synthetic, shaped as the models tutorial has them.
+**The Data explorer** (A2.7–A2.14; `ui/analytics/src/explorer`, `src/plot`). Its state is what
+the person chose — the dataset, the columns on the nine drop zones (X, Y, Color, Size, Shape,
+Label, Facet rows, Facet columns, Wrap; several on Y compared as one variable), the mark
+palette's choice, a gallery preset that reshapes, plot or summary table, the layers panel's
+changes and the tests' settings — never the spec. The spec is the server's answer to the drop zones (`suggestPlot`: the
+"show me" rules, a gallery preset or the chosen mark), with the layers panel's `Extras` laid over
+it in the browser (`composeSpec`: the first layer's stat, added layers that take X, Y and Color
+from the first unless the stat makes its own, scales, reference lines, coordinates); `renderPlot`
+draws it. So an old workspace picks up better rules, and the layers panel's changes survive new
+drops. A gallery preset fills the zones once and becomes the mark — except the four that
+reshape (scatterplot matrix, parallel coordinates, correlation heatmap, mosaic), which stay in
+force and read the zones again on every drop. A drop on Y replaces; Shift-drop or the zone's
+**+** adds a column beside it.
+
+*The plot spec* (A2.1; `sc_analytics::plot::spec`) is a declarative subset of Vega-Lite's ideas
+in Feldspar's own JSON, so that the stats are computed on the server and the renderer can change
+without changing what is stored:
+
+```json
+{ "data": { "kind": "dataset", "dataset": "…uuid…" },
+  "fold": { "columns": ["before", "after"] },
+  "layers": [
+    { "mark": "point", "encoding": { "x": { "field": "area" }, "y": { "field": "price" },
+                                     "color": { "field": "neighbourhood" } } },
+    { "mark": "line", "stat": { "kind": "smooth", "method": "linear" },
+      "encoding": { "x": { "field": "area" }, "y": { "field": "price" } } } ],
+  "scales": { "y": { "kind": "log" } },
+  "facet": { "wrap": { "field": "year_built", "bin": {} } },
+  "references": [ { "channel": "y", "value": 300000, "label": "300k" } ] }
+```
+
+`data` is a stored dataset's last stage (A3 adds a fit's output data); `fold` stacks several
+number columns into `variable` and `value` before any layer reads them (the explorer's several
+columns on Y), or into pairs (A2.11). A **layer** is a mark (point, line, bar, area, box, band,
+error bar, text, rect, mosaic), an encoding of the six channels (X, Y, Color, Size, Shape, Label;
+each a column, optionally binned — `{}` is Freedman–Diaconis, or a `width`, or about `bins`) and
+a **stat**: identity, count, aggregate (count, sum, mean, median, minimum, maximum, standard
+deviation),
+quantiles, box plot (`coef` 1.5), summary (a mean with its confidence interval), density
+(Gaussian, `bw.nrd0` unless a bandwidth is given), smooth (linear or loess, with a band) or
+correlation. Scales are linear, log or square root, from zero or fitted (or a fixed domain), reversed, with a
+colour scheme; coordinates are Cartesian, flipped or polar; facets are rows, columns or wrap (fixed or
+free scales); references are lines at a value of X or Y; selections are declared and validated
+now, and dashboards (A6) turn them into filters.
+
+`validate` checks a spec against the dataset's shape and answers **every** refusal at once, each
+a sentence naming the channel and the column ("X: `colour` is not a column of the dataset"): the
+columns exist, their types suit their channels and the layer's stat, the marks suit the stats,
+a number with many values is binned before it is a facet, a Shape or a group. The same walk makes each layer's **plan** — the channels that
+group its rows, the columns its stat reads, the channel a count or summary is drawn on — so a
+spec that validates is one that renders. `show_me` and the gallery's presets (A2.2) are
+functions from a dataset shape and the drop zones to a spec: a number alone is a histogram, a
+category a bar chart of counts, a number by a category a box plot, two numbers a scatter plot, a
+date by a number a line of the mean, two categories a heatmap of counts; a binned number counts
+as a category, a foreign key too (its ids are numbers to the database, values to the reader).
+
+*The stat compiler* (A2.3–A2.6; `sc_analytics::plot::render`, `render_plot` behind `POST
+/api/plots/render`). Datasets are not materialised, so a layer is one or a few queries over the
+dataset's compiled query: `data` (the last stage, or a `UNION ALL` per folded column) → `points`
+(the group keys as `_g0…` — X for a bar chart, Color, the facets, a binned channel's key being
+its bin number `floor((x − origin)/width)` — and the stat's inputs as `_v0…`, leaving out what a
+log scale cannot show) → the stat, a `GROUP BY` of the keys. Percentiles (box plots, medians,
+the interquartile range a bin width or bandwidth needs) are taken with `row_number()` and a count
+over each group, R's type 7, on both databases alike: neither has a percentile aggregate the
+other shares. What SQL cannot do is done in memory on what it returns: a density from 2,048 fine
+bins (from the values themselves below 20,000), a loess on a seeded sample of 1,000 points
+(`loess(degree = 2, surface = "direct")` with ggplot2's band), confidence intervals from counts,
+means and deviations; a linear smoother is `lm`'s line and band from the centred sums SQL
+returns. Layers that draw rows show at most 10,000 (up to 100,000 if asked) and above that a
+**seeded sample** — the rows numbered in order of every column, the numbers scrambled from a
+fixed seed as a dataset's Limit does, the smallest kept — and say `sampled: true` with the total.
+Capped answers say so too (5,000 groups, 48 small multiples, 50 curves, 500 boxes, 2,000
+outliers). A layer's data comes back **by channel** — `x`, `x_end` for a bin's upper edge, `y`,
+`y_lower`/`y_upper` for a band, `y_q1`/`y_median`/`y_q3` for a box, `color`, `wrap` — with the
+resolved domains of every channel over every layer, the facet values and each binned column's
+origin and width, so the renderer needs no knowledge of the stat to place a value. A histogram of
+the demo's million events is a few hundred bins, drawn in under a second; `tests/r/
+plot_reference.R` records R's densities and smoothers for the unit tests.
+
+*Rendering.* `plot/echarts.ts` compiles a spec and its layer data to an ECharts option, a pure
+function: a grid and axis pair per small multiple, laid out in percentages (column titles above,
+row titles beside, a free facet scale left to ECharts per axis, a fixed one given round shared
+bounds); a series per layer, small multiple and colour group, ECharts' own where it has the
+mark and a `custom` series where not (histogram bars from bin edges, stacked, along X or —
+for a number on Y alone — along Y; confidence bands;
+error bars; mosaic tiles); a discrete colour as series in the palette slot of the value's place
+in the domain, a numeric one as a `visualMap`. It is told which columns are categories (a
+foreign key's ids are numbers to the server). ECharts is imported per chart type
+(`plot/runtime.ts`), and the explorer is a lazily loaded chunk, so the front page does not load
+it. The palette is a validated categorical eight, a one-hue sequential ramp and a blue–grey–red
+diverging one, stepped separately for the dark scheme.
+
+*Summary tables* (A2.8) use the same drop zones: X, Facet rows and Wrap are rows, Color and Facet
+columns are columns, each number on Y a cell (a category on Y another column), floats binned.
+`renderTable` (`sc_analytics::plot::render_table`, the plot renderer's machinery over a
+`TableSpec { data, fold, rows, columns, cells, totals }`) answers the body and, with totals, the
+Total column (by rows), the Total row (by columns) and the corner, each a query of its own so a
+total is a summary of rows, not of cells; `plot/table.ts` lays them out.
+
+*Reshaping presets* (A2.11) are grammar plots over reshaped data, so the spec grew what they
+need: a fold into **pairs** (`Fold.pairs`, one row per pair of columns: `variable_x`, `value_x`,
+`variable_y`, `value_y`), **free facet scales**, a **correlation** stat (Pearson's, from the
+linear smoother's centred sums), a **mosaic** mark (a count drawn on Size, tiles laid out in the
+browser) and **parallel** coordinates (the identity layer reads the folded columns side by side,
+`y_0`, `y_1`…, so that a row is one line). A scatterplot matrix is points of `value_y` against
+`value_x` faceted by the pairs, sampled at 1,000 rows per plot.
+
+*Hypothesis tests* (A2.12–A2.14; `sc_analytics::stats`, `ui/analytics/src/explorer/tests.ts`)
+sit beside the plot, as JMP's "Fit Y by X" does: the person assigns roles, never a test. The
+roles are the Y, X and Wrap drop zones; `runTests` (`POST /api/plots/tests`, a `TestSpec { data,
+y, x, by, paired, mu, level }`) chooses the **design** from their types — a *number* is an
+integer, number or decimal that is neither a foreign key nor binned, a *category* is text, a
+boolean, a key or a binned number, and dates are refused with a sentence:
+
+| Y | X | design | main tests | alternative |
+|---|---|---|---|---|
+| number | — | `one_number` | one-sample t, Shapiro–Wilk | signed-rank |
+| category | — | `one_category` | chi-square fit; binomial for two values | — |
+| number | category | `number_by_groups` | Welch t (two groups); ANOVA and Tukey (more) | Mann–Whitney; Kruskal–Wallis |
+| category | category | `two_categories` | chi-square independence | Fisher's exact |
+| number | number | `two_numbers` | Pearson, linear regression | Spearman |
+| category (two values) | number | `category_by_number` | logistic regression | — |
+| two numbers, paired | — | `paired` | paired t | signed-rank |
+
+The tests are pure functions over **sufficient statistics** where the test allows it — each
+group's count, mean and deviation, the counts of a contingency table, the centred sums the
+linear smoother already uses — and SQL computes those over any number of rows, Wrap's value one
+more `GROUP BY` key so that Wrap repeats the analysis without repeating the queries. The tests
+that need the **values** (the rank tests, Shapiro–Wilk, logistic regression, the assumption
+checks) read at most `TEST_SAMPLE` (5,000) of each Wrap group, a seeded sample taken as a plot's
+is, and say so (`Section.sampled`, `TestResult.sampled`). Each answers a `TestResult`: the
+statistic, its degrees of freedom, the two-sided p-value, an estimate with its interval and an
+effect size. The conventions are R's — Welch's t by default, rank tests exact below 50 values
+without ties and otherwise normal with a continuity correction, the Hodges–Lehmann estimate with
+R's interval, `TukeyHSD`'s studentized range, `fisher.test`'s conditional odds ratio, `glm`'s
+fitting with a likelihood-ratio test — and what `statrs` lacks is ported from R's C
+(`stats/dist.rs`: `ptukey`/`qtukey`, `swilk`, the exact rank-sum and signed-rank
+distributions, AS 89 for Spearman). An r × c Fisher test is a simplified network algorithm
+(columns placed one at a time, partial tables leaving the same row totals merged, the last two
+columns settled in closed form), giving up past two million partial tables with a sentence.
+`tests/r/test_reference.R` records R's answers on R's own data sets, and the unit tests compare.
+The chi-square test of independence has no continuity correction (Fisher's test is beside it).
+
+**Assumption checks** (`Check`): each group's size (fewer than 10 rows is small), normality by
+Shapiro–Wilk at 0.05 (each group's values, the residuals of the fitted line, or the paired
+differences — not counted against a group of 50 or more), equal variances by Brown–Forsythe's
+Levene test (three groups or more; Welch's t needs none), expected counts of at least 5, and at
+least 10 of the rarer outcome for a logistic regression. When one fails, the section's
+`preferred` test — the one the sentence reports — is the alternative; both are always shown. The
+server answers numbers and the names of things only: the **plain-language sentence** ("The mean
+of price differs between North and South (p = 0.003).") and the notes on the checks are composed
+in the browser (`sentence`, `notes`), so they are in the `analytics` i18n domain. The panel shows
+each Wrap group's sentence, a short table (test, statistic and degrees of freedom, estimate with
+its interval, effect size, p-value), Tukey's pairwise comparisons folded away, and the notes; the
+explorer's state keeps whether it is shown, paired mode (two numbers on Y measured on the same
+rows) and the value a single mean is tested against.
+
+Beside the plot, the tests column scrolls on its own (`.an-tests`'s `max-height`): with Wrap it
+has a section per group, and stretching the plot to its height made the plot thousands of
+pixels tall, its percentage margins blank bands.
+
+**Demo data** (`sc_analytics::demo`, `feldspar demo analytics [--replace]`), deterministic and
+synthetic: `neighbourhoods`, `houses` and `viewings` (A1), shaped as the models tutorial has
+them; `patients` and `measurements` (A2: 90 patients, a third on each of placebo, a low and a high
+dose, with a blood pressure before and after); and `events` (A2: a million requests to a web
+site — a kind, a duration, a size, an hour). The events are one `INSERT … SELECT` over a recursive
+CTE, the same SQL text on Postgres and SQLite: integer hashes of the row number modulo 2³¹ − 1
+(every product under 2⁶²), each computed from the row number alone and one CTE `MATERIALIZED`,
+because a database inlines a CTE read once and a chain of hashes each squaring the one before is
+an expression that doubles at every step (18 s rather than 3 on Postgres). Both backends make the
+same rows. The demo also makes the datasets `Houses`, `Measurements` (with `treatment =
+patientⱵtreatment` and `change = after - before`) and `Events`, since the explorer reads datasets;
+one of those names that is there already is kept, and `--replace` never drops a dataset.
+
+**Definitions of done** (`sc-server`'s `tests/analytics_done.rs`): each milestone's Try it through
+the API over the demo's rows. A2's checks the bins and box statistics against the rows read
+through the dataset, and every test statistic and p-value against R's answers for the same rows
+(`tests/r/demo_reference.R` reads the demo's tables exported as CSV and writes
+`demo_reference.json`).
 
 ## 15. Code adapters and polyglot plugins (`sc-module`, `sc-python`)
 
