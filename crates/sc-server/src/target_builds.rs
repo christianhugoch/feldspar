@@ -14,9 +14,11 @@
 //! page that polls a moment late still reads the outcome.
 //!
 //! The registry lives in this process and nowhere else. A restart ends the
-//! builds it was running (their processes are killed with the server) and
-//! forgets their outcomes; the artifact of a finished one is still in the file
-//! store, which is the record that matters.
+//! builds it was running and forgets their outcomes; the artifact of a finished
+//! one is still in the file store, which is the record that matters. A server
+//! stopped with Ctrl-C or `systemctl stop` takes its builds with it — the
+//! terminal and systemd signal every process the server started — but one
+//! killed on its own, or crashing, leaves a Gradle to finish or fail by itself.
 
 use std::collections::HashMap;
 use std::future::Future;

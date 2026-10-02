@@ -2,21 +2,32 @@
 
 Changes in reverse chronological order.
 
-## Merge of main into the React Native branch: build locks combined
+## Review fixes after the merge: a native app's lost token
 
-- **Two locks, both kept.** main's process-wide `BUILD_LOCK` (one install + bundle at a time) and
-  this branch's per-project `lock_project` (a second build of the same project is refused).
-  `build_application`, `build_application_if_changed` and target builds take the project lock.
-- **An APK build holds `BUILD_LOCK` only for its install step** (`run_target`): the installer's
-  cache is shared, but holding the lock through Gradle would stall every web build for minutes.
-- **Deep clean also takes the project lock** (`remove_dependencies`), so it cannot delete
-  `node_modules` under a running APK build, which no longer holds `BUILD_LOCK` then.
+- **A native app reopened while signed in recovers its CSRF token.**
+  - Server (`csrf_middleware`): a native request with a session but no valid token is refused
+    even on a public endpoint, naming the token, instead of being served as nobody.
+  - Generated client (`trackCsrf`): a write refused `403` with a token it did not send is sent
+    once more with that token. The checked-in `helper.ts` files are regenerated.
+- **No per-project build lock.** The branch's `lock_project` is removed: main's `BUILD_LOCK` is
+  the only build lock. A web build, deep clean or rewrite of the generated code started while an
+  APK build of the same project runs can still corrupt that APK (see TODO.md).
+- **The target-build docs say what stopping the server does** (`target_builds.rs`): Ctrl-C and
+  `systemctl stop` end a running Gradle too; a server killed on its own or crashing leaves it.
+- Tests: `a_signed_in_native_app_without_its_token_is_refused_not_anonymised`,
+  `a_write_refused_for_a_stale_token_is_retried_once_with_the_named_one`.
+
+## Merge of main into the React Native branch
+
+- **An APK build holds main's `BUILD_LOCK` only for its install step** (`run_target`): the
+  installer's cache is shared, but holding the lock through Gradle would stall every web build of
+  every application for minutes.
 - **Sidebar**: main dropped "Update client" (Build regenerates the client); the target buttons
   ("Build Android APK") stay, right under Build.
 - `build_application_target` now uses main's `emit_generated`. The generated clients
   (`ui/{admin,builder,ide}/src/client.ts`) are regenerated.
 
-## Review fixes: stuck builds, the CSRF header and caches, log pruning, one build per project
+## Review fixes: stuck builds, the CSRF header and caches, log pruning
 
 From a code review of the build-target, mobile and login work.
 
@@ -35,19 +46,13 @@ From a code review of the build-target, mobile and login work.
 - **Log pruning matches its own target exactly**: `is_target_log` requires
   `<target>-YYYYMMDD-HHMMSS.log`. A prefix match meant `android`'s pruning also deleted
   `android-debug`'s logs.
-- **One build per project at a time** (`lock_project`, `crates/sc-app/src/build.rs`). The web build
-  (`build_application`) and every target build of one project directory share a lock, because
-  each rewrites `src/feldspar/` and then runs a bundler over the same tree. A second build is
-  **refused at once**, naming the project, rather than queued: a web build waiting behind a
-  15-minute APK build would be a request held open that long.
 - **Doc comments put back**: `SessionStore::login` / `ttl`, and `build_result_schema` /
   `target_build_schema`.
 - Tests:
   - a panicking build is recorded as failed and frees the target;
   - cached assets and documents carry no token, API answers are `private` and the refusal is
     `no-store` (`router.rs`);
-  - pruning leaves `android-debug`'s logs alone, and log names are matched exactly;
-  - one project refuses a second build and frees again, and another project is unaffected.
+  - pruning leaves `android-debug`'s logs alone, and log names are matched exactly.
 
 ## Build targets check what the machine needs before they build
 

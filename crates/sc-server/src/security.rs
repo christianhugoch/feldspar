@@ -370,7 +370,14 @@ pub(crate) async fn csrf_middleware(
             });
             request = Request::from_parts(parts, axum::body::Body::from(bytes));
         }
-        if !valid && (policy.open_to_public)(&request) {
+        // A native app that is signed in but holds no token — its session
+        // cookie outlives the app, the token it remembered does not — is refused
+        // even here, so its client learns the token and retries as itself rather
+        // than writing as nobody while it shows the user signed in. A browser
+        // sends no such header, so for it the public-endpoint rule is unchanged.
+        let signed_in_native =
+            is_native_client(request.headers()) && jar.get(SESSION_COOKIE).is_some();
+        if !valid && !signed_in_native && (policy.open_to_public)(&request) {
             request.extensions_mut().insert(AnonymousCaller);
         } else if !valid {
             // Reject, but still hand out a token — as the cookie and as the

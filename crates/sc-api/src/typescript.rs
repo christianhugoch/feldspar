@@ -92,12 +92,22 @@ function csrfToken(): string | undefined {{
 }}
 
 /** `fetchImpl`, remembering the CSRF token each response names — how a client
- * with no `document.cookie` learns what its next write must echo. */
+ * with no `document.cookie` learns what its next write must echo.
+ *
+ * A write refused `403` with a token it did not send is sent **once more** with
+ * that token: a native app reopened while still signed in has its session but
+ * not the token it remembered, and its first write is how it finds out. */
 export function trackCsrf(fetchImpl: typeof fetch): typeof fetch {{
   return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {{
     const res = await fetchImpl(input, init);
     const token = res.headers.get("{header}");
     if (token) rememberedCsrf = token;
+    const sent = new Headers(init?.headers).get("{header}");
+    if (res.status === 403 && token && token !== sent) {{
+      const headers = new Headers(init?.headers);
+      headers.set("{header}", token);
+      return fetchImpl(input, {{ ...init, headers }});
+    }}
     return res;
   }}) as typeof fetch;
 }}

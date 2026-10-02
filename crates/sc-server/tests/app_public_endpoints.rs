@@ -507,3 +507,115 @@ async fn a_session_without_the_token_is_served_as_nobody() -> sc_error::Result<(
     assert_eq!(body["email"], json!(EDITOR), "{body}");
     Ok(())
 }
+
+/// One `POST` from a native app: the client-kind header, exactly the cookies
+/// given, and the CSRF header when there is one. Answers the status, the token
+/// the response names, and the cookies it sets.
+async fn native_post(
+    router: &Router,
+    path: &str,
+    body: Value,
+    cookies: &[(&str, &str)],
+    csrf: Option<&str>,
+) -> (StatusCode, Option<String>, Vec<String>) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(header::HOST, APP_HOST)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(
+            sc_api::auth::CLIENT_KIND_HEADER,
+            sc_api::auth::NATIVE_CLIENT,
+        );
+    if !cookies.is_empty() {
+        let jar = cookies
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        builder = builder.header(header::COOKIE, jar);
+    }
+    if let Some(token) = csrf {
+        builder = builder.header(CSRF_HEADER, token);
+    }
+    let request = builder
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    let token = response
+        .headers()
+        .get(CSRF_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let set_cookies = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(str::to_owned))
+        .collect();
+    (response.status(), token, set_cookies)
+}
+
+/// A native app reopened while signed in keeps its session cookie but not its
+/// token. Its write to a public endpoint is **refused**, naming a token, rather
+/// than served as nobody while the app shows the user signed in; with that token
+/// it is the user's. A native app with no session is still anybody.
+#[tokio::test]
+async fn a_signed_in_native_app_without_its_token_is_refused_not_anonymised() -> sc_error::Result<()>
+{
+    let server = setup().await?;
+    let r = &server.router;
+    let (session, _) = server.editor_session().await;
+
+    // After the restart: the session, and no CSRF cookie or token.
+    let restarted = [(SESSION_COOKIE, session.as_str())];
+    let (status, token, set) = native_post(
+        r,
+        "/api/actions/sign",
+        json!({ "message": "lost" }),
+        &restarted,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        server.guestbook().await.is_empty(),
+        "nothing written as nobody"
+    );
+    let token = token.expect("the refusal names a token");
+    assert_eq!(cookie(&set, CSRF_COOKIE).as_deref(), Some(token.as_str()));
+
+    // Retried with it, the write is the editor's.
+    let jar = [
+        (SESSION_COOKIE, session.as_str()),
+        (CSRF_COOKIE, token.as_str()),
+    ];
+    let (status, _, _) = native_post(
+        r,
+        "/api/actions/sign",
+        json!({ "message": "mine" }),
+        &jar,
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Signed out, a native app is anybody, as a browser is.
+    let (status, _, _) = native_post(
+        r,
+        "/api/actions/sign",
+        json!({ "message": "guest" }),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        server.guestbook().await,
+        vec![
+            ("mine".to_owned(), Some(EDITOR.to_owned())),
+            ("guest".to_owned(), None),
+        ]
+    );
+    Ok(())
+}

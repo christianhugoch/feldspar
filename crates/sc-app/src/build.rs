@@ -15,7 +15,7 @@
 //! and [`build_app`] resolves the store through the [`Catalog`] and delegates to
 //! it.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output};
@@ -345,9 +345,8 @@ pub async fn remove_app_dependencies(cat: &Catalog, source: &AppSource) -> Resul
 /// [`remove_app_dependencies`] over a plain directory, as [`run_build`] is to
 /// [`build_app`].
 ///
-/// Under [`BUILD_LOCK`] and the project's own lock ([`lock_project`]), so a
-/// build of the same project is never left running against a tree that is
-/// being deleted underneath it.
+/// Under [`BUILD_LOCK`], so a build of the same project is never left running
+/// against a tree that is being deleted underneath it.
 pub async fn remove_dependencies(spec: &BuildSpec, root: &Path) -> Result<bool> {
     let install = spec.install.as_ref().ok_or_else(|| {
         Error::invalid(
@@ -356,9 +355,6 @@ pub async fn remove_dependencies(spec: &BuildSpec, root: &Path) -> Result<bool> 
         )
     })?;
     let marker = resolve_under(&resolve_under(root, &spec.source_dir)?, &install.marker)?;
-    // And refused while an APK build of the project runs: that one holds
-    // [`BUILD_LOCK`] only for its install, not for the native build after it.
-    let _building = lock_project(root, &spec.source_dir)?;
     let _serialised = BUILD_LOCK.lock().await;
     if !marker.exists() {
         return Ok(false);
@@ -437,10 +433,6 @@ pub async fn build_application(
     source: &AppSource,
     dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
 ) -> Result<BuildReport> {
-    // Held for the whole build — the generated code it writes and the bundler
-    // that reads it — so an APK build cannot rewrite `src/feldspar/` under it.
-    let store = cat.require_file_store(&source.store.0)?;
-    let _building = lock_project(&store_root(&store, source)?, &source.build.source_dir)?;
     let (client_path, _) = emit_generated(cat, app, source, dispatcher).await?;
     let mut report = build_app(cat, source).await?;
     report.client_path = client_path;
@@ -468,11 +460,9 @@ pub async fn build_application_if_changed(
     source: &AppSource,
     dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
 ) -> Result<BuildReport> {
+    let (client_path, generated) = emit_generated(cat, app, source, dispatcher).await?;
     let store = cat.require_file_store(&source.store.0)?;
     let root = store_root(&store, source)?;
-    // As in `build_application`: no APK build rewrites the tree meanwhile.
-    let _building = lock_project(&root, &source.build.source_dir)?;
-    let (client_path, generated) = emit_generated(cat, app, source, dispatcher).await?;
     let source_dir = resolve_under(&root, &source.build.source_dir)?;
     let output_dir = resolve_under(&root, &source.build.output_dir)?;
     let mut contents = Vec::with_capacity(generated.len());
@@ -888,9 +878,6 @@ pub async fn build_application_target(
     let source = app_source_from_config(&app.framework)?;
     let store = cat.require_file_store(&source.store.0)?;
     let root = store_root(&store, &source)?;
-    // The same lock the web build takes: both rewrite `src/feldspar/` and then
-    // run a bundler over the project, so two at once tear each other's output.
-    let _building = lock_project(&root, &spec.source_dir)?;
     emit_generated(cat, app, &source, dispatcher).await?;
 
     let mut report = run_target(spec, &root, log_path).await?;
@@ -1143,39 +1130,6 @@ pub async fn run_build(spec: &BuildSpec, root: &Path) -> Result<BuildReport> {
         installed: install_log.is_some(),
         install_log,
         reused: false,
-    })
-}
-
-/// One build at a time **per project**: the web build and every build target of
-/// one project directory share a lock, because each rewrites `src/feldspar/` and
-/// then runs a bundler over the same tree — two at once give a bundle or an APK
-/// assembled from half of each, or a spurious failure. Keyed by the project's
-/// directory on disk, so two applications of one project are one project.
-static PROJECT_BUILDS: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<Mutex<()>>>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
-
-/// Take project `source_dir`'s build lock, or **refuse** at once when a build of
-/// it is already running.
-///
-/// Refused rather than waited for, because the build already running may be an
-/// APK of a quarter of an hour, and a web build queued behind it would be one
-/// HTTP request held open for as long — the very thing target builds stopped
-/// doing. The admin reads the refusal and presses Build again when it is done.
-fn lock_project(root: &Path, source_dir: &str) -> Result<tokio::sync::OwnedMutexGuard<()>> {
-    let dir = resolve_under(root, source_dir)?;
-    let lock = {
-        let mut builds = PROJECT_BUILDS
-            .lock()
-            .map_err(|_| Error::msg("the project build registry is unavailable"))?;
-        std::sync::Arc::clone(builds.entry(dir.clone()).or_default())
-    };
-    lock.try_lock_owned().map_err(|_| {
-        Error::invalid(format!(
-            "another build of this project ({}) is already running — its web bundle or one \
-             of its build targets; build again when it has finished",
-            dir.display()
-        ))
     })
 }
 
@@ -2076,20 +2030,6 @@ touch ran
     }
 
     #[test]
-    fn one_project_builds_one_thing_at_a_time() {
-        let tmp = TempDir::new("projectlock");
-        let held = lock_project(tmp.path(), "web").unwrap();
-        // The same project refuses a second build, naming why.
-        let msg = lock_project(tmp.path(), "web").unwrap_err().to_string();
-        assert!(msg.contains("already running"), "{msg}");
-        // Another project is not held up by it.
-        assert!(lock_project(tmp.path(), "mobile").is_ok());
-        // And once the first finishes, the project builds again.
-        drop(held);
-        assert!(lock_project(tmp.path(), "web").is_ok());
-    }
-
-    #[test]
     fn a_targets_logs_are_named_exactly() {
         assert!(is_target_log("android-20260927-101500.log", "android"));
         assert!(!is_target_log(
@@ -2414,29 +2354,6 @@ touch ran
             .unwrap_err()
             .to_string();
         assert!(err.contains("does not install its dependencies"), "{err}");
-    }
-
-    /// An APK build holds [`BUILD_LOCK`] only for its install, so the project
-    /// lock is what keeps a deep clean from deleting `node_modules` under it.
-    #[tokio::test]
-    async fn removing_dependencies_waits_for_no_build_of_the_project() {
-        let tmp = TempDir::new("deepclean-busy");
-        good_source(tmp.path());
-        let web = tmp.path().join("web");
-        std::fs::create_dir_all(web.join("node_modules")).unwrap();
-        let mut spec = spec(&["build.sh"]);
-        spec.install = Some(install_step());
-
-        let building = lock_project(tmp.path(), "web").unwrap();
-        let err = remove_dependencies(&spec, tmp.path())
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("already running"), "{err}");
-        assert!(web.join("node_modules").exists(), "nothing was deleted");
-
-        drop(building);
-        assert!(remove_dependencies(&spec, tmp.path()).await.unwrap());
     }
 
     /// A build is a few hundred megabytes of `tsc` and `vite`, and the server

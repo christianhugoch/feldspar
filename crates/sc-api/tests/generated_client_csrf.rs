@@ -247,3 +247,64 @@ console.log(JSON.stringify(sent));
 fn for_node(client_ts: &str) -> String {
     client_ts.replace("from \"./helper\"", "from \"./helper.ts\"")
 }
+
+/// A native app reopened while still signed in has its session cookie but not
+/// the token it remembered. Its first write is refused `403`, naming a fresh
+/// token, and the client sends that write once more with it — once, so a server
+/// that keeps refusing is reported rather than retried forever.
+#[test]
+fn a_write_refused_for_a_stale_token_is_retried_once_with_the_named_one() -> std::io::Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        eprintln!("skipping: no `node` on PATH to run the generated client");
+        return Ok(());
+    }
+    const DRIVER: &str = r#"
+import { createClient } from "./client.ts";
+const sent: string[] = [];
+let refuse = 1;
+(globalThis as any).fetch = async (_url: string, init: any) => {
+  sent.push(new Headers(init.headers).get("x-csrf-token") ?? "none");
+  const status = refuse-- > 0 ? 403 : 200;
+  return new Response('{"id":"u","email":"a@b.c","role":1}', {
+    status,
+    headers: { "content-type": "application/json", "x-csrf-token": "fresh" },
+  });
+};
+const api = createClient();
+await api.login({ email: "a@b.c", password: "pw" });
+// A server that refuses even the named token is answered once, not looped on.
+refuse = 5;
+let failed = false;
+try { await api.login({ email: "a@b.c", password: "pw" }); } catch { failed = true; }
+console.log(JSON.stringify({ sent, failed }));
+"#;
+
+    let provider = RestProvider::project("/api", &[]);
+    let client_ts = sc_api::generate_client(ApiProvider::endpoints(&provider));
+    let dir = std::env::temp_dir().join(format!("sc-api-csrf-retry-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("client.ts"), for_node(&client_ts))?;
+    std::fs::write(
+        dir.join(sc_api::CLIENT_HELPER_FILE),
+        sc_api::client_helper(),
+    )?;
+    std::fs::write(dir.join("driver.ts"), DRIVER)?;
+
+    let output = Command::new("node").arg(dir.join("driver.ts")).output()?;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "running the generated client failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let out: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    // First login: refused without a token, retried with the one it was given.
+    // Second: sent with that token, refused, and not retried.
+    assert_eq!(
+        out["sent"],
+        serde_json::json!(["none", "fresh", "fresh"]),
+        "{out}"
+    );
+    assert_eq!(out["failed"], serde_json::json!(true), "{out}");
+    Ok(())
+}
