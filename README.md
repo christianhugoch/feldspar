@@ -34,7 +34,7 @@ own, for every other kind of box. (Design and planning docs live under
 - **Predictive models** over your own tables: a dataset built out of the same formula
   language as calculated fields, fitted by a built-in provider (regression, classification,
   clustering, dimensionality reduction, hypothesis tests) or by one a module supplies, with
-  the coefficients and metrics on a screen. A fit is applied by `predict("House prices")` in
+  the coefficients, metrics and diagnostic plots in the Analytics UI's model editor. A fit is applied by `predict("House prices")` in
   any formula, including a calculated field that predicts every row it lists, and by a model
   handle in code (`models.get(…)`). `fit_model` refits on a schedule. The built-in providers are a **default-on cargo feature** (§3). See
   [`docs/tutorial-models.md`](docs/tutorial-models.md).
@@ -45,6 +45,12 @@ own, for every other kind of box. (Design and planning docs live under
   keys and names, with R̂, effective sample sizes and plain-language warnings, trace and forest
   plots, and a write-back into the rows it is about. It needs CmdStan on the machine, found at
   run time (§3). See [`docs/tutorial-stan.md`](docs/tutorial-stan.md).
+- **Analytics.** A separate UI under `/analytics/` for looking at data. Its front page lists
+  the datasets and the workspaces, and a dataset opens in the **Dataset editor**: a named dataset is a table (or another dataset) and an ordered
+  list of operations — calculated columns, filters, window columns, aggregates, stacks, splits,
+  joins, unions and more — each one a stage you can look at in a spreadsheet, all compiled to one
+  SQL query on Postgres or SQLite. Models read these datasets. `feldspar demo analytics` makes
+  data to try it on. See [`docs/tutorial-analytics.md`](docs/tutorial-analytics.md).
 - **Saltcorn 1's views, running.** An application whose framework is **Saltcorn UI** owns
   views (List, Show, Edit, Feed, Filter, ListShowList — and any a v1 plugin such as
   `@saltcorn/kanban` supplies) and pages, rendered on the server by v1's own view code. Restoring
@@ -519,7 +525,7 @@ database (§7).
 --no-default-features` is the opt-out, and it is a supported build rather than a broken
 one — `t_test` and `anova` are not behind the feature (they need a distribution function
 and nothing else), so such a server can still answer whether two groups differ, and the
-Models tab says on the screen that the machine-learning built-ins were compiled out
+Analytics UI's model list says on the screen that the machine-learning built-ins were compiled out
 rather than showing an empty list that reads like a bug. A module can supply more
 providers either way: `feldspar-sklearn` is bundled, and needs the Python build below.
 

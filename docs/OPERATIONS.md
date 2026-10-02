@@ -54,7 +54,7 @@ Two consequences of the static build are worth knowing before you choose it:
   `smartcore` feature carries `linear_regression`, `logistic_regression`,
   `random_forest`, `kmeans` and `pca`; a build with `--no-default-features` leaves
   only `t_test` and `anova`, which need a distribution function and nothing else. That
-  is a supported build, not a broken one — the Models tab says on the screen that the
+  is a supported build, not a broken one — the Analytics UI's model list says on the screen that the
   machine-learning built-ins were compiled out, and a module can still supply
   providers. Like `--features python`, it is decided at build time and no run-time flag
   substitutes for it.
@@ -211,7 +211,7 @@ Build-environment options worth knowing:
 | `--native` | build with this machine's toolchain. Needs the target added to rustup, clang/libclang, cmake, a C compiler, `libz.a` (`zlib1g-dev`) and, unless `--no-ui`, node and npm |
 | `--target aarch64-unknown-linux-gnu` | the other supported target. The **musl** targets are refused by name: V8 reaches this build as `rusty_v8`'s prebuilt static archive, which upstream publishes for gnu, darwin and Windows only |
 | `--prefix PATH` | the absolute directory the artifact will be installed to, compiled into the binary |
-| `--no-ui` | skip the three front-end bundles (`SC_BUILD_ADMIN=0`), so no Node toolchain is needed — and the artifact has no admin UI, no IDE, **no Saltcorn UI** and no builder (§5.3) |
+| `--no-ui` | skip the five front-end bundles (`SC_BUILD_ADMIN=0`), so no Node toolchain is needed — and the artifact has no admin UI, no IDE, **no Saltcorn UI**, no builder and no Analytics UI (§5.3) |
 | `-j N` | lower cargo's parallelism if the linker runs the machine out of memory. This workspace links V8 |
 | `--no-verify` | skip the post-build checks — static linkage, and a smoke run in Debian and Alpine containers |
 
@@ -662,9 +662,9 @@ effect.**
 
 | Variable | Effect |
 |---|---|
-| `SC_BUILD_ADMIN` | set to `0`, `false`, `False` or `FALSE` to skip building the four front-end bundles, leaving a Rust-only build that needs no JS toolchain. Any other value, and leaving it unset, builds them |
-| `SC_BUNDLE_PREFIX` | absolute path the artifact will be *installed* at. The recorded bundle paths become `$SC_BUNDLE_PREFIX/ui/admin/dist`, `.../ui/ide/dist`, `.../ui/saltcorn-ui/dist`, `.../ui/builder/dist` and `.../plugins`, so they describe the target machine rather than the build machine. This is what `build-static.sh --prefix` sets |
-| `SC_ADMIN_BUNDLE_DIR`, `SC_IDE_BUNDLE_DIR`, `SC_SALTCORN_UI_BUNDLE_DIR`, `SC_BUILDER_BUNDLE_DIR`, `SC_PLUGINS_DIR` | the compile-time paths the four bundles and the bundled-module catalog are recorded at, set by the build script |
+| `SC_BUILD_ADMIN` | set to `0`, `false`, `False` or `FALSE` to skip building the five front-end bundles, leaving a Rust-only build that needs no JS toolchain. Any other value, and leaving it unset, builds them |
+| `SC_BUNDLE_PREFIX` | absolute path the artifact will be *installed* at. The recorded bundle paths become `$SC_BUNDLE_PREFIX/ui/admin/dist`, `.../ui/ide/dist`, `.../ui/saltcorn-ui/dist`, `.../ui/builder/dist`, `.../ui/analytics/dist` and `.../plugins`, so they describe the target machine rather than the build machine. This is what `build-static.sh --prefix` sets |
+| `SC_ADMIN_BUNDLE_DIR`, `SC_IDE_BUNDLE_DIR`, `SC_SALTCORN_UI_BUNDLE_DIR`, `SC_BUILDER_BUNDLE_DIR`, `SC_ANALYTICS_BUNDLE_DIR`, `SC_PLUGINS_DIR` | the compile-time paths the five bundles and the bundled-module catalog are recorded at, set by the build script |
 
 **What `SC_BUILD_ADMIN=0` (and `--no-ui`) costs, bundle by bundle.** The admin UI can
 be supplied at run time with `--static-dir`. The IDE and Saltcorn UI cannot: their
@@ -1158,12 +1158,36 @@ looking hung. Ctrl-C does the same interactively.
 | a model fit says "the server restarted while this fit was running" | it did. A fit is a spawned job whose only record is its instance row, so boot marks a `fitting` row failed rather than leaving it running for ever (§3.5). Press **Fit** again |
 | every read of a table fails with "`estimated_price` of `houses` could not be computed … has no active fit" | a calculated field calls `predict("…")` and its model has no active fit, perhaps because the active one was deleted. Activate a fit on the model's Fits list. A read fails rather than answering null, so a model a field depends on must always have an active fit. A nightly `fit_model` with `activate: if_clean` never deactivates one |
 | a fit fails with "the dataset selects more than … rows" | the dataset is over `--model-max-rows` (§8.3). Add a filter to the dataset, or raise the flag |
-| the Models tab lists only `t_test` and `anova` | the binary was built `--no-default-features`, so the smartcore providers were compiled out (§1). It is a build, not a setting |
+| the model editor offers only `t_test` and `anova` | the binary was built `--no-default-features`, so the smartcore providers were compiled out (§1). It is a build, not a setting |
 | the `stan` provider says "CmdStan was not found" | the server looked where §9.1 says and found none, or found one it refused (too old, not built, a named directory that is not there). The startup log has the same sentence. Under systemd, `~` is `/var/lib/feldspar`, not your home |
 | a Stan fit says `queued` for a long time | every chain process the node allows is taken by other fits (§9.2). It starts when one finishes; raise `--stan-max-processes` if the machine has the cores |
 | a Stan fit fails with "more than the … allowed (`--stan-max-data-values`)" | the bound data is too large for the ceiling (§9.4). Filter the datasets or raise the flag |
 | a Stan fit finishes with "the draws … were not kept" | they were over `--stan-max-draws-bytes` (§9.4). The summary and diagnostics are there; to keep the draws, `thin`, `exclude_variables`, or raise the flag |
 | `getModelDraws` refuses with "… numbers" and suggests `thin` | the answer would be over `--stan-max-draws-response` (§9.4). Ask for fewer elements, chains or draws |
+| `/analytics/` says "the Analytics UI bundle is not built" | the binary was built with `SC_BUILD_ADMIN=0` or `--no-ui` (§5.3), or `ui/analytics/dist` is missing under the install prefix — a release tarball from before the packaging staged it did not include it; rebuild and reinstall. Rebuild with the variable unset, or run `npm ci && npm run build` in `ui/analytics` for a source tree |
+| `feldspar demo analytics` says "the database already has `houses` …" | the demo never touches a table that is there. Use `--replace` to drop and remake its tables, or run it against another database (§8.6) |
+
+### 8.6 Demo data for the Analytics UI
+
+```bash
+feldspar demo analytics [--replace] [database flags]
+```
+
+makes tables for trying the Analytics UI (`/analytics/`, linked from the admin sidebar):
+`neighbourhoods` (5 rows), `houses` (200, a key to `neighbourhoods`, some unsold with no
+`price`), `viewings` (a key to `houses`, with dates), `patients` (90) and `measurements` (a key
+to `patients`, a blood pressure `before` and `after` a treatment), and `events` (a million rows,
+generated by the database in one statement: a few seconds, and about 90 MB on Postgres). The
+data is synthetic and generated from a fixed seed, so every run on every machine makes the same
+rows, on Postgres or SQLite. It also makes three datasets for the Data explorer — `Houses`,
+`Measurements` and `Events` — unless a dataset of that name is already there. It takes the same
+database flags as `feldspar serve` and writes where the server would read.
+
+It refuses to touch a table that is already there, naming it. `--replace` drops and remakes
+the demo's six tables — and only those, so anything else in the database, including datasets
+and models that read them, is left alone (a dataset over a dropped table reports its error until
+the table is back), and the demo's datasets are kept as they are. Run it on a scratch database,
+not on one whose `houses` table is yours.
 
 ---
 
@@ -1241,7 +1265,7 @@ CmdStan version is part of the compile cache's key.
 Every chain of every fit is **one CmdStan process**, and every chain process on the node
 draws from one budget: `--stan-max-processes` (default: half the available CPUs, at least
 one). A fit's own `parallel_chains` setting caps it further. A chain waiting for the budget
-leaves its fit saying `queued` on the instance screen; nothing is refused.
+leaves its fit saying `queued` in the model editor; nothing is refused.
 
 A chain is single-threaded (the server compiles without `STAN_THREADS`), so the budget is
 roughly the cores Stan may keep busy. The default leaves half of them for the server, the
@@ -1267,7 +1291,7 @@ radon model).
 
 **One compile at a time per node**: a second fit of the same program waits for the first
 compile and then finds it cached; a fit of another program waits its turn. The **Compile**
-button on the model form warms the cache without fitting.
+button in the model editor warms the cache without fitting.
 
 Nothing prunes the cache — old entries are only disk. Deleting the directory, or any entry in
 it, is always safe while no compile is running: the next fit recompiles. A compile interrupted
@@ -1287,7 +1311,7 @@ Four ceilings, each a server flag because each is about this host's memory, and 
 
 And one that is a trade rather than a ceiling: **`--stan-summary-max-elements`** (default
 1 000). A generated quantity with more elements than this — a `y_rep` over every row — is not
-summarised when the fit finishes; the instance screen summarises it on demand from the stored
+summarised when the fit finishes; the model editor summarises it on demand from the stored
 draws. `0` summarises every generated quantity on demand. On demand needs the draws: a
 generated quantity over the ceiling whose draws are not kept (§9.5) is not read back from
 CmdStan at all.

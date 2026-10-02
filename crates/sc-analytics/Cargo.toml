@@ -1,0 +1,44 @@
+[package]
+name = "sc-analytics"
+description = "The Analytics UI's server half: workspaces, and later panels, plots, tests and maps (layer 6)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+autotests = false
+
+[dependencies]
+sc-error.workspace = true
+sc-query.workspace = true
+sc-types.workspace = true
+# `_fd_workspaces` is stored metadata, bootstrapped through the catalog.
+sc-catalog.workspace = true
+sc-db.workspace = true
+# A plot reads a dataset: its shape, and its compiled query as the source of
+# every stat (A2.3).
+sc-dataset.workspace = true
+# A plot over a fit's output data (A3.1) reads the frame the fit stored, and
+# runs its stats on a private in-memory SQLite database — the same SQL the
+# stat compiler writes for a dataset.
+sc-model.workspace = true
+sc-db-sqlite.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The t quantiles of confidence intervals and bands (A2.3, A2.4).
+statrs.workspace = true
+
+[dev-dependencies]
+sc-db-postgres.workspace = true
+sc-test-harness.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it.rs"

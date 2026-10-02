@@ -66,35 +66,35 @@ viewings. A model is only as interesting as its rows; if you would rather not ty
 `insert_row` trigger with a `run_js_code` body will fill the table in a loop, and
 [tutorial-triggers.md](tutorial-triggers.md) step 5 shows how.
 
+Or skip the typing altogether: `feldspar demo analytics` makes these three tables with 200
+houses in them, on a fixed seed ([OPERATIONS.md](OPERATIONS.md) §8.6).
+
 ---
 
-## Step 2 — The Models tab, and a dataset that is a list of formulas
+## Step 2 — A named dataset, built in the Analytics UI
 
-**Models** is in the sidebar. It is empty; press **New model** and call it `House prices`.
+A model reads a **dataset**: a named, saved definition of rows — a base table and a list of
+operations applied to it in order. Datasets are built in the **Analytics** UI (the sidebar link
+of that name), in its *Dataset editor*, and every model that wants those rows picks the
+same one. [tutorial-analytics.md](tutorial-analytics.md) part 1 walks through the editor; this
+step builds just what the model needs.
 
-The first card is the **Dataset**, and it is where the interesting decision of this whole feature
-lives. A dataset is a table, a list of named columns, and one optional filter — and every column
-is a **formula in the language you already use for calculated fields and ownership rules**. There
-is no separate "add a field / add a joinfield / add an aggregation" vocabulary: the picker below
-the list writes a formula into the row, and you can type over what it wrote.
+Open **Analytics**, and in the front page's **New dataset** box call it
+`Sold houses` and choose the table `houses`. The spreadsheet shows the rows of `houses`. Now add
+these operations, in this order — the **+** in the last column header adds a Calculated column,
+and **Add an operation** adds the rest:
 
-Set **Table** to `houses`, then build these five columns. Use the picker (its three groups are
-the table's own fields, one join path per column of each table a key points at, and one
-aggregation per incoming key) or type them:
-
-| Column | Formula | What it is |
+| Operation | What to type | What it is |
 |---|---|---|
-| `price` | `price` | a field — the label |
-| `area` | `area` | a field |
-| `bedrooms` | `bedrooms` | a field |
-| `neighbourhood_income` | `neighbourhoodⱵaverage_income` | a **join path**: follow the key, take a column |
-| `viewings_count` | `viewingsↃhouse.length` | an **aggregation** over the incoming key |
+| Calculated column | `neighbourhood_income = neighbourhoodⱵaverage_income` | a **join path**: follow the key, take a column |
+| Calculated column | `viewings_count = viewingsↃhouse.length` | an **aggregation** over the incoming key |
+| Filter | `sold === true` | the rows the model is fitted from |
+| Select columns | `price`, `area`, `bedrooms`, `neighbourhood_income`, `viewings_count` | the columns the model sees |
 
-Then put this in **Filter**:
-
-```
-sold === true
-```
+Every formula is **in the language you already use for calculated fields and ownership rules**.
+There is no separate "add a field / add a joinfield / add an aggregation" vocabulary: as you type,
+the formula box offers the columns, one step along each key, and each child table's count and
+totals.
 
 The filter is one boolean formula, and it must be an explicit **comparison** — `sold` on its own
 is refused with a sentence saying so, because a bare value in boolean position has no `WHERE` to
@@ -110,18 +110,33 @@ an answer. That is the point of a model of house prices, and a prediction theref
 the filter — while still reading through the dataset, so the join path and the aggregation are
 computed exactly as they were at fit time.
 
-Because it is the ordinary formula language, `price / area` is a column too if you want one, and
-so is `log(price)`. Two things it may **not** mention are `user` and the operation flags
-(`_insert` and friends) — a dataset has no caller, and a fit that meant something different
-depending on who pressed the button would be indefensible.
+Two things a dataset formula may **not** mention are `user` and the operation flags (`_insert`
+and friends) — a dataset has no caller, and a fit that meant something different depending on who
+pressed the button would be indefensible. And a model that predicts per row needs a dataset whose
+rows are still rows of `houses`: an Aggregate, a Stack or a Join that changes what a row is makes
+a fine dataset to look at, but the model editor refuses it with a sentence naming the operation.
 
-### The preview is the point of the card
+Click each operation in the side panel: the spreadsheet shows the rows as they are after it.
+That is how you check a dataset — one step at a time — before any model reads it.
 
-As you type, the **Preview** below the column list fills in: the first rows, and — above them —
-**the type each column actually came back as**. That matters more than it looks. Nothing in your
-schema says what `viewingsↃhouse.length` is; the preview does, and the provider's form further down the
-page is built out of exactly those types. If a formula is wrong you get a sentence here rather
-than a failed fit five minutes later.
+### The model editor, and its preview
+
+Models live in the Analytics UI too: its front page lists the **Models** between the datasets and
+the workspaces. The list is empty; press **New model** (or **New model** on the `Sold houses`
+row, which picks the dataset for you). The **model editor** opens at `#/models/new`; call the
+model `House prices`. The first card is the **Dataset**: a dropdown of the named datasets. Choose
+`Sold houses`. **Edit dataset** beside it opens the dataset in the Dataset editor, whose **Back to
+the model** returns here; **New dataset** starts another.
+
+Below the dropdown, the **Preview** fills in: the first rows, and — above them — **the type each
+column actually came back as**. That matters more than it looks. Nothing in your schema says what
+`viewingsↃhouse.length` is; the preview does, and the provider's form further down the page is
+built out of exactly those types. If a dataset has an error you get its sentence here rather than
+a failed fit five minutes later.
+
+**A dataset is shared, and a fit remembers the one it read.** Edit `Sold houses` after fitting
+and the fit keeps the version it was fitted against — its predictions read the dataset as it was
+— while the model editor says the dataset has changed since, so you know a refit is due.
 
 ---
 
@@ -190,15 +205,17 @@ The button saves the model first, deliberately: a fit of what is on the screen a
 is on the screen are the same intention, and the alternative is a button that quietly fits the
 version you last saved rather than the one you have been editing.
 
-The **Fits** table below gains a row saying `fitting`, and the screen polls. Fitting is a **job,
-not a request** — a fit reads every row and runs an optimiser, which is seconds at best and
-minutes at worst, and it must not be an HTTP request that a proxy gives up on while the work
-carries on invisibly. The instance row *is* the job record; there is nothing in memory to wait
-on. (Which is also why a server that is restarted mid-fit marks that fit **failed** at boot,
-saying "the server restarted while this fit was running", rather than leaving a row that says
-`fitting` for ever.)
+A card appears below the form saying what the fit is doing — *reading the data*, *fitting*,
+*scoring* — with **Cancel**, and the **Fits** table gains a row saying `fitting`. Fitting is a
+**job, not a request** — a fit reads every row and runs an optimiser, which is seconds at best
+and minutes at worst, and it must not be an HTTP request that a proxy gives up on while the work
+carries on invisibly. The instance row *is* the job record; the server watches it and pushes
+each change of stage to the editor over a socket. (Which is also why a server that is restarted
+mid-fit marks that fit **failed** at boot, saying "the server restarted while this fit was
+running", rather than leaving a row that says `fitting` for ever.)
 
-A second later it says `fitted`. Open it.
+A second later the fit is `fitted`, and its **outputs** appear below the form, each a card you
+can fold from its header.
 
 **Rows** counts where everything went: *Selected*, *Train*, *Validation*, *Test*, *Dropped*. A
 dropped row is one the encoding could not represent — a null in a feature, most often — and it is
@@ -210,22 +227,36 @@ measured on the rows the fit was computed from and is optimistic by construction
 are computed by Saltcorn, not by the provider — the same code over the same splits for every
 provider — which is what will make step 7's comparison mean something.
 
-**Parameters** is the provider's own, and for a regression it is the point:
+**Coefficients** and **Statistics** are the provider's own, and for a regression they are the
+point:
 
 ```
 Coefficients
 term                   estimate    std. error      t        p
-(intercept)           41230.55      9128.31     4.517    0.000
-area                   1873.42       132.07    14.185    0.000
-bedrooms               8420.10      4102.66     2.052    0.051
-neighbourhood_income      0.94         0.21     4.476    0.000
+(intercept)           41230.55      9128.31     4.517    0.000   ***
+area                   1873.42       132.07    14.185    0.000   ***
+bedrooms               8420.10      4102.66     2.052    0.051   .
+neighbourhood_income      0.94         0.21     4.476    0.000   ***
 viewings_count          311.28       902.44     0.345    0.733
+
+Statistics
 R²                        0.918
 adjusted R²               0.905
 residual standard error   14882.3
 observations              24
 residual degrees of freedom 19
 ```
+
+Two plots follow: **Residuals against fitted values**, with a smoother through them (a curve
+says the relationship is not a straight line; a funnel says the errors grow with the price), and
+**Actual against predicted**, with the line a perfect fit would lie on. **More plots** offers the
+two a regression does not show unasked: a **normal Q-Q plot of the residuals** and their
+histogram. Every one of them is a plot spec over the fit's own output data — the scored rows with
+their residuals — so it can be copied into a report later.
+
+The editor remembers how you left it: which outputs are folded, which of the More plots are open,
+and which fit is selected. That is the model's **view state**, kept beside the model and never
+read by a fit, so folding a table does not make the fit out of date.
 
 Standard errors, *t* and *p* are computed here from the residual variance and `(XᵀX)⁻¹`;
 smartcore does not supply them, and without them a slope coefficient is a number with no way of
@@ -242,8 +273,10 @@ categories this fit was shown, because a value it was not shown is refused by na
 encoded as a row of zeros — a row of zeros would be a confident answer from a model that was
 never shown the input.
 
-Press **Activate** at the top. Exactly one fit of a model can be active, and it is what lets the
-next step name the *model* rather than pinning a particular fit.
+Press **Activate** on the fit's row in the **Fits** table. Exactly one fit of a model can be
+active, and it is what lets the next step name the *model* rather than pinning a particular fit.
+The table lists every fit with what it scored; clicking one shows its outputs, and a fit whose
+dataset has since been edited is marked *dataset changed*.
 
 ---
 
@@ -337,7 +370,11 @@ Houses keep selling, so the model should keep learning. **Triggers → New trigg
 Each night fits the model again over whatever is `sold` by then. With **`if_clean`**, the new fit
 becomes the active one only if it fitted with **no warnings**, and the next read of
 `estimated_price` follows it. A fit with a warning is kept for you to read on the Fits list but
-left inactive, so yesterday's fit goes on answering. (`never` only fits. `always` activates any
+left inactive, so yesterday's fit goes on answering.
+
+The field and the trigger both name the model, so deleting `House prices` from the front page's
+list warns with them: *the calculated field houses.estimated_price* and *the trigger
+refit_house_prices, which fits it*. (`never` only fits. `always` activates any
 fit that did not fail.) What counts as a warning is the provider's to say. A scikit-learn
 estimator that did not converge is one, and so is a Stan fit with divergences.
 
@@ -355,12 +392,10 @@ Go to **Settings → Modules**. `feldspar-sklearn` is in the bundled catalog —
 release; scikit-learn itself does not, and pip fetches it now. Press **Install**. The card comes
 back saying **5 model providers**.
 
-Now open **Models → New model** and build the *same* five columns and the same `sold` filter
-again, calling it `House prices (boosted)`. Retyping is on purpose: a dataset belongs to its
-model and is not shared, which is why there is no Datasets tab. A shared, named dataset would
-need a lifecycle — what happens to the four models fitted against it when somebody adds a column,
-whether a fit made against version 1 is still readable — and that is a versioning problem bought
-for a saving that copying a column list answers instead.
+Now open **Analytics → New model**, call it `House prices (boosted)`, and pick the *same*
+dataset, `Sold houses`. Nothing is retyped: both models read one definition, and each fit
+records the version it read, so editing the dataset later cannot quietly change what either fit
+means.
 
 Change the provider to **`sklearn_gradient_boosting`**. The Settings card looks the way the
 regression's did — a **Label** dropdown over your dataset's columns — because a Python provider
@@ -380,38 +415,39 @@ split, the winner is refit, and the reported test metrics are the winner's. So s
 `train 0.6`, `validation 0.2`, `test 0.2` — with no list you would leave validation at 0, and a
 fit with no search must not pay for one.
 
-Press **Fit**. When it finishes, the instance screen has a **Hyperparameter search** card: every
-point tried, its validation score, and the chosen row highlighted. The search is inspectable
-rather than a number that appeared.
+Press **Fit**. When it finishes, the fit has a **Hyperparameter search** card: every point
+tried, its validation score, and the chosen row highlighted. The search is inspectable rather
+than a number that appeared.
 
-**Parameters** is a feature-importance table and a "Trees fitted" scalar — scikit-learn's own
+Its tables are a feature-importance table and a "Trees fitted" statistic — scikit-learn's own
 vocabulary, rendered by the same three block kinds (a scalar, a table, a block of text) that the
-regression used. And **Metrics** is the same five numbers as before, computed by the same host
-code over the same splits.
+regression used — and the same two residual plots. **Metrics** is the same five numbers as
+before, computed by the same host code over the same splits.
 
-Which is the point of the whole arrangement: put the two instance screens side by side and
-compare test RMSE. The comparison is honest because the rows are the same rows (the split is a
-hash of the primary key, so both fits held out the same houses) and the metric is the same code.
-Nothing on either screen knows that one of the two answers came from Python.
+Which is the point of the whole arrangement: back on the front page, tick both models and press
+**Compare**. Their outputs sit side by side, metrics beside metrics, and the comparison of test
+RMSE is honest because the rows are the same rows (the split is a hash of the primary key, so
+both fits held out the same houses) and the metric is the same code. Nothing on either side knows
+that one of the two answers came from Python.
 
 ---
 
 ## What to remember
 
-- **A dataset is a list of formulas**, in the language you already know, plus one filter. The
-  picker writes them; you can type over them. The filter chooses the rows the model is fitted
-  **from**, and never the rows it may be asked about.
-- **A dataset belongs to its model.** There is no Datasets tab and no sharing — *Duplicate model*
-  is the answer to wanting the same columns twice.
+- **A dataset is a named list of operations** over a table, and its formulas are in the language
+  you already know. It is built in the Analytics UI and picked by the model. Its filter chooses
+  the rows the model is fitted **from**, and never the rows it may be asked about.
+- **A dataset is shared; a fit is not.** Several models may read one dataset. Each fit records
+  the version it read, and the model editor says when the dataset has changed since.
 - **The split is a hash of the primary key**, so fits of one model are comparable and new rows do
   not reshuffle the old ones.
 - **The encoding is fitted once, on the training rows, and stored on the fit.** A category at
   predict time that the fit never saw is an error naming the column and the value — not a row of
   zeros.
 - **Metrics are Saltcorn's; parameters are the provider's.** That is what makes a scikit-learn
-  RMSE comparable with a smartcore one on the same screen.
-- **Fitting is a job.** The instance row is the job record, the screen polls, and a restart marks
-  a running fit failed rather than leaving it running for ever.
+  RMSE comparable with a smartcore one, side by side in **Compare**.
+- **Fitting is a job.** The instance row is the job record, the server pushes its progress to the
+  model editor, and a restart marks a running fit failed rather than leaving it running for ever.
 - **Prediction is a formula.** `predict("House prices")` in a calculated field is a live
   column, computed a page at a time through the active fit. The same call in an `update_rows`
   trigger stores it. `fit_model` with `activate: if_clean` keeps the active fit current without

@@ -61,8 +61,19 @@ describe("the admin sidebar", () => {
   });
 
   it("gives every entry a route that lights it up", () => {
-    for (const item of NAV) {
+    // Every entry that is a screen of this SPA; Analytics is a page of its own.
+    for (const item of NAV.filter((entry) => entry.href.startsWith("#"))) {
       expect(activeLabels(item.href.replace(/^#/, ""))).toContain(item.label);
     }
+  });
+
+  /** The Analytics UI is a bundle of its own, so its entry is a page and not
+   * a hash route; it replaced *Predictive models* (analytics TODO A3.8). */
+  it("links to the Analytics UI where Predictive models was", () => {
+    const labels = NAV.map((item) => item.label);
+    expect(labels).not.toContain("Predictive models");
+    expect(labels.indexOf("Analytics")).toBe(labels.indexOf("Agents") + 1);
+    expect(NAV.find((item) => item.label === "Analytics")?.href).toBe("/analytics/");
+    expect(activeLabels("/models")).toEqual([]);
   });
 });

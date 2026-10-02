@@ -72,36 +72,38 @@ where the code shows a better way, and record the deviation in the CHANGELOG.
 # A1 — Workspaces and the dataset editor
 
 The new dataset model (a base and an ordered list of operations, goals document "Dataset
-operations"), workspace persistence, the Analytics UI shell, and the Dataset editor workspace.
+operations"), workspace persistence, the Analytics UI shell, and the Dataset editor. The
+Dataset editor is not a workspace: the front page lists the datasets beside the workspaces.
 
 **Try it.** Run `feldspar demo analytics`, then `feldspar serve`, and log in as the admin.
 1. The admin sidebar has an **Analytics** link (beside *Predictive models*, which stays until
-   A3). It opens the Analytics UI with an empty list of workspaces.
-2. Create a workspace "Houses data" of type *Dataset editor*. The other types are listed but
-   disabled, each labelled with the milestone that brings it.
-3. Create a dataset "House prices by area" on the base table `houses`. The spreadsheet shows
-   the rows of `houses`.
-4. Click the **+** in the last column header and add `price_per_m2 = price / area`. Add
+   A3). It opens the Analytics UI's front page: an empty list of datasets, and below it an
+   empty list of workspaces whose kinds are all listed but disabled, each labelled with the
+   milestone that brings it.
+2. Create a dataset "House prices by area" on the base table `houses`. The Dataset editor
+   opens, and the spreadsheet shows the rows of `houses`.
+3. Click the **+** in the last column header and add `price_per_m2 = price / area`. Add
    `neighbourhoodⱵname` the same way.
-5. From the `price` column header's menu, add a Filter `price > 100000`. Then add an Aggregate
+4. From the `price` column header's menu, add a Filter `price > 100000`. Then add an Aggregate
    by `neighbourhood` with the mean of `price_per_m2` and a count.
-6. Click each operation in the side panel: the spreadsheet shows the data after that
+5. Click each operation in the side panel: the spreadsheet shows the data after that
    operation. Disable the Filter and watch the counts change. Rename the column the Aggregate
    uses in the Calculated column: the Aggregate is marked with an error naming the missing
    column.
-7. Close the browser tab and reopen the workspace: it opens on the same dataset and operation.
-8. In the admin's *Predictive models*, create a linear regression. Its dataset is picked from
+6. Go back to **All datasets**: the front page lists the dataset with its four operations.
+   Open it again: it is as it was saved.
+7. In the admin's *Predictive models*, create a linear regression. Its dataset is picked from
    the named datasets, with a link to edit it in the Analytics UI. Fit it, and check that the
    `estimated_price` calculated field from the models tutorial still returns numbers.
 
 ## Phase 1 — The dataset model (`sc-dataset`)
 
-- [ ] A1.1 The `sc-dataset` crate: `DatasetDef { id, name, description, base, operations }`,
+- [x] A1.1 The `sc-dataset` crate: `DatasetDef { id, name, description, base, operations }`,
       `Base::Table(name) | Base::Dataset(id)`, `Operation { id, kind, enabled, params }`. The
       `_fd_datasets` table with bootstrap and a store (create, read, update, delete, clone,
       list; names unique). Move `sc-model`'s `Dataset` code here. Tests: the store round-trips
       every operation kind; a duplicate name is refused with a sentence.
-- [ ] A1.2 Stage shapes and grain: for each position in the list, the columns and their types
+- [x] A1.2 Stage shapes and grain: for each position in the list, the columns and their types
       after that operation, and the grain (`Table { table, key }`, `Group { keys }` or
       `Derived`). A foreign key column stays a foreign key through every operation. Formulas in
       an operation are validated against a `SchemaShape` built from the stage before it:
@@ -109,74 +111,74 @@ operations"), workspace persistence, the Analytics UI shell, and the Dataset edi
       foreign key column (goals document, "How this fits Feldspar's relational model").
       Tests: `customerⱵregion` after an Aggregate grouped by `customer`; `ordersↃcustomer`
       refused after an Aggregate by month, with a sentence naming the grain.
-- [ ] A1.3 The operations that keep the grain: Calculated column, Filter, Select columns, Sort,
+- [x] A1.3 The operations that keep the grain: Calculated column, Filter, Select columns, Sort,
       Window column (lag, lead, difference, cumulative sum and mean, rank, row number, group
       summary, last non-missing value). Compiled to `sc-query` as nested subqueries, one per
       operation, collapsed where an operation can be merged into the one before. Tests on both
       drivers, comparing with rows computed by hand.
-- [ ] A1.4 The operations that change the grain: Aggregate (the summaries of the goals
+- [x] A1.4 The operations that change the grain: Aggregate (the summaries of the goals
       document except geometry union, which is A5; with no summaries it is `distinct`), Limit
       (first N, random sample with a seed, top N per group), Stack, Split (its new columns fixed
       when the operation is defined, pre-filled from the data), Complete (values from the data,
       from a date or number range, or from all rows of the table a foreign key refers to).
       Tests on both drivers.
-- [ ] A1.5 The operations that combine: Join (inner, left, full; equality keys; "nearest
+- [x] A1.5 The operations that combine: Join (inner, left, full; equality keys; "nearest
       earlier" on a date column) and Union (columns matched by name, an optional source
       column). Add `UNION ALL` to `sc-query` and both dialects. Tests on both drivers,
       including an as-of join.
-- [ ] A1.6 Datasets over datasets, and invalid operations: a base that is another dataset
+- [x] A1.6 Datasets over datasets, and invalid operations: a base that is another dataset
       contributes its operations first; a cycle is refused. Disabled operations are skipped.
       Evaluation stops at the first invalid enabled operation and reports it by id with its
       sentence, and the stages before it still read. Tests.
-- [ ] A1.7 Reading a stage: `read_stage(def, upto, page)` returns a page of rows, the column
+- [x] A1.7 Reading a stage: `read_stage(def, upto, page)` returns a page of rows, the column
       types and the total row count, reading as the caller (for now, only the admin reads).
       Tests: paging is stable under the dataset's order; the count matches.
 
 ## Phase 2 — Models use named datasets
 
-- [ ] A1.8 `Model.dataset` and each related dataset become references to named datasets
+- [x] A1.8 `Model.dataset` and each related dataset become references to named datasets
       (`dataset_id`, and `{ name, dataset_id, label }` for related ones). A fit snapshots the
       resolved definition and its hash into the instance, and the instance reports "the
       dataset has changed since this fit" when the hash differs. `DatasetSource` reads through
       `sc-dataset`. Tests: the existing `sc-model` and `sc-stan` tests pass with their
       datasets stored as named datasets; editing a dataset flags its existing fits.
-- [ ] A1.9 Row keys: a dataset that keeps its base table's grain has the table's primary key as
+- [x] A1.9 Row keys: a dataset that keeps its base table's grain has the table's primary key as
       its row key, so `predict("…")` in a calculated field works as before. Saving a
       `predict("…")` over a model whose dataset changes the grain is refused with a sentence.
       The Stan binder accepts a dataset that keeps the grain as before, and refuses one that
       does not with a sentence (A8 lifts this where it can). Tests.
-- [ ] A1.10 `TABLES_RENAME.sql`: an idempotent section, for Postgres and SQLite, creating a
+- [x] A1.10 `TABLES_RENAME.sql`: an idempotent section, for Postgres and SQLite, creating a
       named dataset from each `_fd_models.dataset` and `related` entry and setting the model's
       references. Test: running it twice over a database with old-style models gives the
       same result as running it once, and those models then fit.
-- [ ] A1.11 The admin's model form: `DatasetBuilder.tsx` gives way to a picker of named
+- [x] A1.11 The admin's model form: `DatasetBuilder.tsx` gives way to a picker of named
       datasets with "New dataset" and "Edit in Analytics" links. Tests (vitest).
 
 ## Phase 3 — Workspaces (`sc-analytics`)
 
-- [ ] A1.12 The `sc-analytics` crate and `_fd_workspaces { id, name, kind, state, created_by,
+- [x] A1.12 The `sc-analytics` crate and `_fd_workspaces { id, name, kind, state, created_by,
       updated_at }`. `kind` lists all eight workspace types of the goals document; creating
       one that is not implemented yet is refused with a sentence naming the milestone that
       brings it. `state` is JSON owned by the workspace type. Tests.
-- [ ] A1.13 `sc-api` endpoints: datasets (create, read, update, delete, clone, list),
+- [x] A1.13 `sc-api` endpoints: datasets (create, read, update, delete, clone, list),
       validating one operation, reading a stage, stage shapes; workspaces (create, read,
       update, delete, list, save state). Admin only in this milestone (A9 opens them up).
       Regenerate the clients. Tests in `sc-server`.
 
 ## Phase 4 — The Analytics UI
 
-- [ ] A1.14 `ui/analytics`: the bundle, served under `/analytics/` with its CSP, built into
+- [x] A1.14 `ui/analytics`: the bundle, served under `/analytics/` with its CSP, built into
       the binary, sharing the admin's session. A hash router, the `analytics` i18n domain, a
       light and dark theme following the admin's. The admin sidebar gains **Analytics**. Tests:
       an `analytics_spa_typecheck` test in `sc-server` like `admin_spa_typecheck`; a
       non-admin is refused.
-- [ ] A1.15 The workspace list: create by name and type (types not yet implemented shown
+- [x] A1.15 The workspace list: create by name and type (types not yet implemented shown
       disabled with their milestone), rename, delete with confirmation, open. The workspace
       frame saves state as it changes (debounced) and restores it on open. Tests (vitest).
-- [ ] A1.16 The Dataset editor workspace, list mode: the global list of datasets with edit,
+- [x] A1.16 The Dataset editor workspace, list mode: the global list of datasets with edit,
       clone and delete (delete warns and lists the models that use the dataset), and new with
       a base picker (a table, or another dataset). Tests.
-- [ ] A1.17 The Dataset editor workspace, edit mode: the operations side panel (add from a
+- [x] A1.17 The Dataset editor workspace, edit mode: the operations side panel (add from a
       menu, edit in a form for each kind, reorder by dragging, disable, delete, errors shown on
       the operation); the read-only spreadsheet of the selected stage, virtualised, reusing
       the admin's grid code where it fits; **+** in the last column header adds a Calculated
@@ -186,16 +188,21 @@ operations"), workspace persistence, the Analytics UI shell, and the Dataset edi
 
 ## Phase 5 — Demo data, documentation, definition of done
 
-- [ ] A1.18 `feldspar demo analytics [--replace]`: creates `neighbourhoods`, `houses` and
+- [x] A1.18 `feldspar demo analytics [--replace]`: creates `neighbourhoods`, `houses` and
       `viewings` (compatible with the models tutorial) with deterministic synthetic rows, and
       refuses to touch existing tables without `--replace`. Tests.
-- [ ] A1.19 Documentation: `TECHNICAL_DESIGN.md` (§14.2's dataset rewritten for named
+- [x] A1.19 Documentation: `TECHNICAL_DESIGN.md` (§14.2's dataset rewritten for named
       datasets and operations; new sections for `sc-dataset`, `sc-analytics` and the
       Analytics UI bundle); `docs/tutorial-analytics.md` part 1 (the Try it above);
       `tutorial-models.md` updated for named datasets; `OPERATIONS.md` for the demo command.
-- [ ] A1.20 Definition of done: an `sc-server` test that creates the Try it's dataset through
+- [x] A1.20 Definition of done: an `sc-server` test that creates the Try it's dataset through
       the API, reads every stage and checks the rows, breaks and repairs the Aggregate, and
       fits and predicts with a model over a named dataset. Walk the Try it by hand.
+- [x] A1.21 The Dataset editor is not a workspace: the Analytics UI's front page lists the
+      datasets and the workspaces, and a dataset opens in the Dataset editor at
+      `#/datasets/<id>`. The `dataset_editor` workspace kind goes (no kind can be created
+      until A2's Data explorer); the store keeps any kind and the API refuses the ones not
+      here yet. Tests.
 
 ---
 
@@ -215,8 +222,8 @@ explorer"). No drag and drop yet.
    line.
 5. Start again with `price` on Y and `neighbourhood` on X: a box plot appears with a one-way
    ANOVA, a Kruskal-Wallis test and pairwise comparisons, and a sentence saying what they mean.
-   Drop two neighbourhoods from the dataset with a Filter: the explorer switches to a Welch
-   t-test and Mann-Whitney.
+   Filter the dataset down to two neighbourhoods: the explorer switches to a Welch t-test and
+   Mann-Whitney.
 6. Pick the demo `measurements` dataset, choose *paired* mode with `before` and `after` on Y:
    a paired t-test and a Wilcoxon signed-rank test.
 7. Switch the same assignment to a *summary table*: rows by neighbourhood, cells with the mean
@@ -227,53 +234,53 @@ explorer"). No drag and drop yet.
 
 ## Phase 1 — The plot spec
 
-- [ ] A2.1 The spec types in `sc-analytics`: data (a dataset reference), layers (mark,
+- [x] A2.1 The spec types in `sc-analytics`: data (a dataset reference), layers (mark,
       encodings, stat), scales, coordinates, facets and selections (declared now, used in
       A6), serialised as JSON. Validation against the dataset's shape: the columns exist and
       their types suit the encodings, with sentences for each refusal. Tests.
-- [ ] A2.2 Mark choice from column types (the "show me" rules) and the gallery presets as
+- [x] A2.2 Mark choice from column types (the "show me" rules) and the gallery presets as
       functions from a dataset shape to a spec: histogram, bar, line, scatter, box, heatmap,
       area, and the map item shown disabled until A5. Tests.
 
 ## Phase 2 — Stats on the server
 
-- [ ] A2.3 The stat compiler: a spec's stats become SQL over the dataset's compiled query, with
+- [x] A2.3 The stat compiler: a spec's stats become SQL over the dataset's compiled query, with
       facets and colour groups as extra `GROUP BY` keys. Bin (Freedman-Diaconis by default),
       count, aggregate, quantiles and the box plot's five-number summary (percentiles in SQL
       on Postgres; computed in memory on SQLite), summary with a confidence interval. Tests on
       both drivers.
-- [ ] A2.4 Density (kernel density estimate) and smoothers (linear from SQL regression
+- [x] A2.4 Density (kernel density estimate) and smoothers (linear from SQL regression
       aggregates; loess in memory on a sample) computed on the server and returned as shapes.
-      Tests against R reference values.
-- [ ] A2.5 Layers that draw rows take a random sample above a limit (10,000 by default) and
+      Tests against R reference values (`crates/sc-analytics/tests/r/plot_reference.R`).
+- [x] A2.5 Layers that draw rows take a random sample above a limit (10,000 by default) and
       return `sampled: true` with the total. Tests.
-- [ ] A2.6 The `render_plot(spec)` endpoint: each layer's data and the resolved scale domains,
+- [x] A2.6 The `render_plot(spec)` endpoint: each layer's data and the resolved scale domains,
       or the sentence saying why the spec cannot be drawn. Tests in `sc-server`, including a
       histogram of a million rows that returns only the bins.
 
 ## Phase 3 — Rendering
 
-- [ ] A2.7 ECharts in `ui/analytics` (imported per chart type, so unused parts are left out of
+- [x] A2.7 ECharts in `ui/analytics` (imported per chart type, so unused parts are left out of
       the bundle) and the compiler from spec plus layer data to an ECharts option: layers to
       series, facets to grids, colour to series or a `visualMap`, log scales, flipped
       coordinates, themes. Tests (vitest): spec in, option out.
-- [ ] A2.8 The summary table renderer from the same drop zones: row and column dimensions,
+- [x] A2.8 The summary table renderer from the same drop zones: row and column dimensions,
       aggregate cells, totals. Tests.
 
 ## Phase 4 — The explorer
 
-- [ ] A2.9 The Data explorer workspace: dataset drop-down, gallery, the column list and the
+- [x] A2.9 The Data explorer workspace: dataset drop-down, gallery, the column list and the
       drop zones (X, Y, Color, Size, Shape, Label, Facet rows, Facet columns, Wrap), the mark
       palette, several columns on Y compared as one variable. State saved in the workspace.
       Tests.
-- [ ] A2.10 The layers panel: add and remove layers, change a layer's stat, scales, reference
+- [x] A2.10 The layers panel: add and remove layers, change a layer's stat, scales, reference
       lines, coordinates. Tests.
-- [ ] A2.11 The presets that do their own reshaping: scatterplot matrix, parallel coordinates,
+- [x] A2.11 The presets that do their own reshaping: scatterplot matrix, parallel coordinates,
       correlation heatmap, mosaic plot. Tests.
 
 ## Phase 5 — Hypothesis tests
 
-- [ ] A2.12 The tests of the goals document's table, in `sc-analytics::stats`: one-sample t,
+- [x] A2.12 The tests of the goals document's table, in `sc-analytics::stats`: one-sample t,
       normality (Shapiro-Wilk), chi-square goodness of fit, binomial, Welch t, Mann-Whitney,
       one-way ANOVA, Kruskal-Wallis, pairwise comparisons (Tukey HSD), chi-square test of
       independence, Fisher's exact, Pearson and Spearman correlation, simple linear and
@@ -281,51 +288,69 @@ explorer"). No drag and drop yet.
       computed in SQL where the test allows it; rank tests read the column (sampling above a
       limit, and saying so). Each returns the statistic, degrees of freedom, p-value, effect
       size and confidence interval. Tests against R reference values.
-- [ ] A2.13 Choosing the tests from the Y, X and Wrap roles and the column types; assumption
+- [x] A2.13 Choosing the tests from the Y, X and Wrap roles and the column types; assumption
       checks (group sizes, normality, equal variances) with the non-parametric alternative
       shown alongside; the plain-language sentence in the `analytics` domain. Tests.
-- [ ] A2.14 The results beside the plot as one panel; paired mode; Wrap repeating the analysis
+- [x] A2.14 The results beside the plot as one panel; paired mode; Wrap repeating the analysis
       per group. Tests.
 
 ## Phase 6 — Demo data, documentation, definition of done
 
-- [ ] A2.15 Demo data: `patients` and `measurements` (before and after), and `events` with a
+- [x] A2.15 Demo data: `patients` and `measurements` (before and after), and `events` with a
       million rows (generated in SQL so it is quick). Documentation: `TECHNICAL_DESIGN.md`
       (the plot spec, the stat compiler, the tests); `tutorial-analytics.md` part 2.
-- [ ] A2.16 Definition of done: an `sc-server` test that renders the Try it's specs and checks
+- [x] A2.16 Definition of done: an `sc-server` test that renders the Try it's specs and checks
       the returned bins, box statistics and test results. Walk the Try it by hand.
 
 ---
 
-# A3 — The model fit workspace
+# A3 — Models in the Analytics UI
 
 Models are created, fitted and inspected in the Analytics UI, with their outputs as panels,
 and the admin's *Predictive models* screens are retired. No drag and drop yet.
 
+A model is not a workspace, for the reason a dataset is not: it is a global, named entity that
+other things refer to (`predict("…")`, the Model predictions operation, simulation, map layers),
+and a workspace that only pointed at one would have no state of its own. The front page lists
+the models between the datasets and the workspaces, and a model opens in the **model editor**
+at `#/models/<id>`. What a workspace would have given — reopening as it was left — is the
+model's **view state**: a dictionary on the model that the editor reads and writes freely and
+that nothing about fitting or prediction reads.
+
 **Try it.**
 1. The admin sidebar's *Predictive models* is gone; **Analytics** is the way in. An old
-   bookmark to a model opens it in the Model fit workspace.
-2. Create a *Model fit* workspace. Its list shows the same global models the admin saw. Create
-   a linear regression on "House prices by area" (or a dataset on `houses`), predicting
-   `price` from `area` and `neighbourhood`.
+   bookmark to a model opens it in the model editor.
+2. The Analytics front page lists the same global models the admin saw. Create a linear
+   regression on "House prices by area" (or a dataset on `houses`), predicting `price` from
+   `area` and `neighbourhood`.
 3. Fit it. Progress shows while it runs; the outputs appear below: a coefficient table, a
    plot of residuals against fitted values, and actual against predicted. A normal Q-Q plot
    of the residuals is in the "More plots" drop-down.
-4. Clone the model, add `year_built`, fit it, and compare the two coefficient tables.
-5. Edit the model's dataset in a Dataset editor workspace, then return: the fit says the
+4. Open the Q-Q plot from "More plots" and collapse the coefficient table. Go back to the
+   front page and open the model again: the Q-Q plot is still open and the table still
+   collapsed. None of this marks the fit as out of date.
+5. Clone the model, add `year_built`, fit it, then select both in the model list and press
+   **Compare**: the two coefficient tables side by side.
+6. Edit the model's dataset in the Dataset editor, then return: the fit says the
    dataset has changed since it was fitted.
-6. With CmdStan installed, open the Radon model from the Stan tutorial: edit the program,
+7. With CmdStan installed, open the Radon model from the Stan tutorial: edit the program,
    check the bindings, fit, and see the posterior summary with trace and rank plots.
-7. In the Data explorer, from a box plot with an ANOVA, press **Open as model**: a linear
-   regression opens with the same dataset, response and factor.
+8. In the Data explorer, from a box plot with an ANOVA, press **Open as model**: a linear
+   regression opens in the model editor with the same dataset, response and factor.
+
+## Phase 0 — Models are not a workspace
+
+- [x] A3.0 The `model_fit` workspace kind goes: the goals document lists the model editor
+      beside the Dataset editor, and split view (A4.1) holds either editor as well as a
+      workspace. `createWorkspace` refuses `model_fit` as not a kind. Tests.
 
 ## Phase 1 — Outputs as panels
 
-- [ ] A3.1 Model providers declare their outputs: tables, and plots as plot specs over **fit
+- [x] A3.1 Model providers declare their outputs: tables, and plots as plot specs over **fit
       output data** (a new kind of data reference, `FitOutput { instance, name }`, read from
       the instance rather than through SQL, so stats on it are computed in memory). Plots
       can be marked optional. Tests.
-- [ ] A3.2 Outputs of the built-in providers: linear and logistic regression (coefficients,
+- [x] A3.2 Outputs of the built-in providers: linear and logistic regression (coefficients,
       residuals against fitted values, actual against predicted, Q-Q), k-means (cluster
       sizes, centroids, a scatter plot coloured by cluster), Stan (the posterior summary, and
       trace, rank and density plots per parameter over the draws). Python module providers
@@ -333,38 +358,57 @@ and the admin's *Predictive models* screens are retired. No drag and drop yet.
 
 ## Phase 2 — The API
 
-- [ ] A3.3 Endpoints for the workspace: a model's outputs with each plot rendered by
+- [x] A3.3 Endpoints for the model editor: a model's outputs with each plot rendered by
       `render_plot`, fit progress (the existing `Progress`, pushed to the browser), cancelling
       a fit, and the list of a model's fits with the "dataset changed" flag. Tests in
       `sc-server`.
+- [x] A3.4 **Model view state.** A `view_state` JSON object column on `_fd_models` (`{}` for
+      a new model), outside the model's definition: `validate_model` does not look at it, a
+      fit does not record it, the "dataset changed" and "settings changed since fit" checks
+      ignore it, and `updateModel` neither reads nor writes it. It is written by its own
+      endpoint, `patchModelViewState(id, { key: value | null })`, which sets or (with `null`)
+      removes top-level keys and leaves the others, so two screens that keep different keys
+      (the editor's open plots, a comparison's choices, a split view's other side) do not
+      overwrite each other without a read first; `getModel` returns it. No schema: the keys
+      are the screens' business, as a workspace's `state` is. Shared by everyone who opens
+      the model, last write wins per key. Cloning copies it; deleting the model removes it.
+      The column is added on bootstrap, and `TABLE_RENAME.sql` gets the idempotent
+      `ALTER TABLE … ADD COLUMN IF NOT EXISTS` for running systems. Tests: a patch leaves the
+      other keys, `null` removes one, `updateModel` leaves the view state alone, a clone
+      carries it, and a patch does not mark the model's fits as out of date.
 
-## Phase 3 — The workspace
+## Phase 3 — The model editor
 
-- [ ] A3.4 The Model fit workspace: the global model list (edit, clone, delete, new); the
-      editor (dataset picker, provider picker, the provider's configuration form from its
-      `config_spec`, hyperparameters, split); fit with progress; the outputs below, with the
-      optional plots in a drop-down; earlier fits. Tied to one model in its state. Tests.
-- [ ] A3.5 Stan models in the workspace: the program in an embedded editor (opening the IDE
+- [x] A3.5 The model list on the front page (edit, clone, delete with a warning naming what
+      uses the model, new — also from a dataset's row, which picks the dataset — and a
+      multi-select **Compare**). The model editor at `#/models/<id>` and `#/models/new`: the
+      dataset picker (with a link to the dataset in the Dataset editor), provider picker, the
+      provider's configuration form from its `config_spec`, hyperparameters, split; fit with
+      progress; the outputs below, with the optional plots in a drop-down; earlier fits. The
+      editor keeps which outputs are open or collapsed, the optional plots chosen and the
+      selected fit in the view state, and restores them on open. Compare shows the selected
+      models' key outputs side by side, without persistence. Tests.
+- [x] A3.6 Stan models in the model editor: the program in an embedded editor (opening the IDE
       for the file store as now), the bindings, the posterior plots. Move `ModelForm.tsx`,
       `ModelBindings.tsx`, `ModelInstance.tsx`, `PosteriorInstance.tsx` and
       `PosteriorPlots.tsx` from `ui/admin` into `ui/analytics`, replacing their plots with
       plot specs. Tests moved with them.
-- [ ] A3.6 **Open as model** in the Data explorer: a linear or logistic regression, by the
-      response's type, with the explorer's dataset, Y and X, opened in a Model fit workspace.
+- [x] A3.7 **Open as model** in the Data explorer: a linear or logistic regression, by the
+      response's type, with the explorer's dataset, Y and X, opened in the model editor.
       Tests.
 
 ## Phase 4 — Retiring *Predictive models*
 
-- [ ] A3.7 The admin sidebar entry and its routes go; `#/models/…` and `#/model-instances/…`
-      redirect to the Analytics UI. `repo_hygiene.rs` fragments and the admin's `models.ts`
+- [x] A3.8 The admin sidebar entry and its routes go; `#/models/…` and `#/model-instances/…`
+      redirect to the model editor. `repo_hygiene.rs` fragments and the admin's `models.ts`
       follow. Tests.
 
 ## Phase 5 — Documentation, definition of done
 
-- [ ] A3.8 `tutorial-models.md` and `tutorial-stan.md` rewritten around the Model fit
-      workspace; `TECHNICAL_DESIGN.md` §14.2 (outputs, fit output data); `tutorial-analytics.md`
+- [x] A3.9 `tutorial-models.md` and `tutorial-stan.md` rewritten around the model
+      editor; `TECHNICAL_DESIGN.md` §14.2 (outputs, fit output data); `tutorial-analytics.md`
       part 3.
-- [ ] A3.9 Definition of done: an `sc-server` test that fits a linear regression and the stub
+- [x] A3.10 Definition of done: an `sc-server` test that fits a linear regression and the stub
       posterior provider through the API and renders every declared output; the Radon half
       behind `#[ignore]` in `stan_models.rs`. Walk the Try it by hand.
 
@@ -372,7 +416,7 @@ and the admin's *Predictive models* screens are retired. No drag and drop yet.
 
 # A4 — Reports, and drag and drop
 
-Split view, the panel model, drag and drop from the data explorer and model fits, and the
+Split view, the panel model, drag and drop from the data explorer and the model editor, and the
 Report workspace with PDF output.
 
 **Try it.**
@@ -381,7 +425,7 @@ Report workspace with PDF output.
 2. Drag the current plot from the explorer into the report. Change the plot in the explorer:
    the report's copy does not change.
 3. Add a heading and a text block (Markdown) above the plot, and a page break. Drag a
-   coefficient table and a residual plot from a Model fit workspace into the report.
+   coefficient table and a residual plot from the model editor into the report.
    Reorder the blocks.
 4. Add a row to `houses` in the admin, then reopen the report: its plots include the new row
    (panels are live views of their datasets).
@@ -392,14 +436,16 @@ Report workspace with PDF output.
 
 ## Phase 1 — Panels and split view
 
-- [ ] A4.1 Split view: two workspaces side by side with a movable divider, each with its own
-      state; the URL records both. Tests.
+- [ ] A4.1 Split view: two things side by side with a movable divider, each a workspace, the
+      Dataset editor or the model editor, each with its own state; the URL records both. A
+      dataset or model edited on one side refreshes what the other side shows of it (a
+      model beside its dataset, an explorer beside the model being built from it). Tests.
 - [ ] A4.2 The panel model in `sc-analytics`: `Panel { id, kind, content }` with kinds plot,
       summary table, test result, text and custom; panels reference datasets by id and render
       live. A usage index answers "what uses this dataset" for the delete warning, and a
       panel whose dataset is gone shows a sentence instead of failing. Tests.
 - [ ] A4.3 Drag and drop: a panel's JSON as the drag payload; sources are the explorer's
-      current output and a model fit's output panels; the report is a sink; always a copy.
+      current output and the model editor's output panels; the report is a sink; always a copy.
       Tests.
 
 ## Phase 2 — The Report workspace
@@ -696,7 +742,7 @@ end users (goals document, the introduction's "application").
 2. Log in as a `staff` user at the application's address: the dashboard is there and
    interactive, and nothing else is: no workspace list, no admin links.
 3. Create a second application in *self-serve* mode with the tables `houses` and
-   `neighbourhoods` allowed and the Data explorer and Dataset editor types enabled.
+   `neighbourhoods` allowed, the Dataset editor on and the Data explorer type enabled.
 4. As a `staff` user there, create a dataset on `houses` and explore it. `incidents` is not
    offered as a base, and asking the API for it directly is refused.
 5. Give `staff` read access to only some `houses` rows (an ownership formula): the user's

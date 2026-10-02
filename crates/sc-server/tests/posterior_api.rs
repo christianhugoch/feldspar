@@ -259,6 +259,20 @@ impl Client {
     }
 
     async fn send(&mut self, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+        let body = match body {
+            Some(mut b) if crate::named_datasets::carries_a_model(method, path) => {
+                let mut ids = Vec::new();
+                for (pointer, create) in crate::named_datasets::inline_datasets(&b) {
+                    let (status, made) =
+                        Box::pin(self.send("POST", "/api/datasets", Some(create))).await;
+                    assert!(status.is_success(), "creating a dataset: {status} {made}");
+                    ids.push((pointer, made["dataset"]["id"].as_str().unwrap().to_owned()));
+                }
+                crate::named_datasets::use_ids(&mut b, ids);
+                Some(b)
+            }
+            other => other,
+        };
         let (status, _, bytes) = self.raw(method, path, body).await;
         let value = if bytes.is_empty() {
             Value::Null
@@ -829,7 +843,7 @@ async fn the_stan_flags_reach_the_provider_the_preview_and_the_fit() -> Result<(
 }
 
 #[tokio::test]
-async fn a_running_posterior_is_cancelled_and_the_others_say_why_not() -> Result<()> {
+async fn a_running_posterior_is_cancelled_and_so_is_any_other_fit() -> Result<()> {
     let mut server = setup().await?;
     let client = &mut server.client;
 
@@ -861,7 +875,8 @@ async fn a_running_posterior_is_cancelled_and_the_others_say_why_not() -> Result
     assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
     assert!(refused.to_string().contains("no running fit"), "{refused}");
 
-    // And a provider whose fit is not a process cannot be stopped at all.
+    // A provider whose fit is not a process is asked too (analytics TODO
+    // A3.3): the fit stops at its next stage.
     let saved = client
         .ok(
             "POST",
@@ -878,20 +893,14 @@ async fn a_running_posterior_is_cancelled_and_the_others_say_why_not() -> Result
     let plain = sc_model::ModelId(uuid::Uuid::parse_str(saved["id"].as_str().unwrap()).unwrap());
     let running = sc_model::ModelInstance::starting(plain);
     sc_model::save_model_instance(&server.catalog, &running).await?;
-    let (status, refused) = client
-        .send(
+    let asked = client
+        .ok(
             "POST",
             &format!("/api/model-instances/{}/cancel", running.id),
             None,
         )
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
-    assert!(
-        refused
-            .to_string()
-            .contains("a fit of `linear_regression` cannot be cancelled"),
-        "{refused}"
-    );
+    assert_eq!(asked["cancel_requested"], json!(true), "{asked}");
     Ok(())
 }
 

@@ -19,9 +19,10 @@ use sc_model::{
     Dataset, DatasetOrder, FitResult, FitStatus, Frame, INSTANCES_TABLE, MODELS_TABLE, Model,
     ModelInstance, ModelProvider, ModelProviderKind, ModelRegistry, Models, NamedDataset,
     OutcomeSpec, ParameterBlock, ParameterRow, Prediction, RESTARTED, Split, active_model_instance,
-    bootstrap_model_instances, bootstrap_models, delete_model, delete_model_instance,
-    list_model_instances, list_models, load_model, load_model_by_name, models_for_table,
-    numeric_column_field, reap_fitting_instances, require_model, save_model, save_model_instance,
+    bootstrap_model_instances, bootstrap_models, clone_model, delete_model, delete_model_instance,
+    list_model_instances, list_models, load_model, load_model_by_name, model_view_state,
+    models_for_table, numeric_column_field, patch_model_view_state, reap_fitting_instances,
+    require_model, save_model, save_model_instance,
 };
 use sc_query::{Assignment, Expr, Statement, Update, Value};
 use sc_test_harness::TestDb;
@@ -119,20 +120,30 @@ async fn a_model_round_trips_through_its_row() -> Result<()> {
     let loaded = load_model(&cat, model.id)
         .await?
         .expect("the row that was just written");
-    assert_eq!(loaded, model);
+    assert_same(&loaded, &model);
 
     // And by name, which is how `predict_row` resolves it.
-    assert_eq!(
-        load_model_by_name(&cat, "house prices").await?.as_ref(),
-        Some(&model)
+    assert_same(
+        &load_model_by_name(&cat, "house prices")
+            .await?
+            .expect("by name"),
+        &model,
     );
-    assert_eq!(require_model(&cat, "house prices").await?, model);
+    assert_same(&require_model(&cat, "house prices").await?, &model);
 
-    // The dataset survives whole — the columns in order, the filter, and the
-    // formula that is not a bare field name.
+    // The dataset is a named one now, stored beside the model and resolved
+    // with it: the columns in order, and the formula that is not a bare field
+    // name.
     assert_eq!(loaded.dataset.columns.len(), 3);
     assert_eq!(loaded.dataset.columns[2].expr, "area / bedrooms");
-    assert_eq!(loaded.dataset.filter.as_deref(), Some("sold === true"));
+    let def = sc_dataset::load_dataset(&cat, model.dataset.id)
+        .await?
+        .expect("the dataset was saved as a named one");
+    assert!(
+        def.operations
+            .iter()
+            .any(|o| o.op == sc_dataset::Op::filter("sold === true"))
+    );
     // As does the split, which is what makes two instances comparable.
     assert_eq!(loaded.split, Split::new(0.6, 0.2, 0.2, 42));
     assert_eq!(loaded.attributes["note"], json!("fitted from the tutorial"));
@@ -627,6 +638,29 @@ async fn a_modules_provider_is_saved_against_like_any_other() -> Result<()> {
     Ok(())
 }
 
+/// Two models store the same thing: every field of the row, the dataset by
+/// its id. (A model built in a test carries its dataset's formulas; one loaded
+/// carries the dataset resolved, so they are not `==`.)
+#[track_caller]
+fn assert_same(a: &Model, b: &Model) {
+    assert_eq!(a.id, b.id);
+    assert_eq!(a.name, b.name);
+    assert_eq!(a.description, b.description);
+    assert_eq!(a.provider, b.provider);
+    assert_eq!(a.dataset.id, b.dataset.id);
+    assert_eq!(a.configuration, b.configuration);
+    assert_eq!(a.hyperparameters, b.hyperparameters);
+    assert_eq!(a.split, b.split);
+    assert_eq!(a.attributes, b.attributes);
+    let related = |m: &Model| -> Vec<(String, sc_dataset::DatasetId, Option<String>)> {
+        m.related
+            .iter()
+            .map(|r| (r.name.clone(), r.dataset.id, r.label.clone()))
+            .collect()
+    };
+    assert_eq!(related(a), related(b));
+}
+
 /// A `counties` table beside `houses`, for related datasets to be over.
 async fn with_counties(cat: &Catalog) -> Result<()> {
     cat.create_table(
@@ -663,8 +697,11 @@ async fn related_datasets_round_trip_and_validate_against_their_own_tables() -> 
     let model = house_prices().related(counties());
     save_model(&cat, &reg, &model, None).await?;
     let loaded = load_model(&cat, model.id).await?.expect("stored");
-    assert_eq!(loaded.related, vec![counties()]);
-    assert_eq!(loaded, model);
+    assert_eq!(loaded.related.len(), 1);
+    assert_eq!(loaded.related[0].name, "counties");
+    assert_eq!(loaded.related[0].label.as_deref(), Some("name"));
+    assert_eq!(loaded.related[0].dataset.columns[0].name, "u");
+    assert_same(&loaded, &model);
 
     // Each way a related dataset can be wrong, refused by name.
     let refused = |model: Model, expected: &'static str| {
@@ -699,7 +736,7 @@ async fn related_datasets_round_trip_and_validate_against_their_own_tables() -> 
     .await;
     refused(
         house_prices().related(counties().labelled("no_such_field")),
-        "dataset label on `counties`",
+        "the label `no_such_field`",
     )
     .await;
     // Validated against its *own* table: `price` is a column of houses, not
@@ -709,7 +746,7 @@ async fn related_datasets_round_trip_and_validate_against_their_own_tables() -> 
             "counties",
             Dataset::new("counties").column("p", "price"),
         )),
-        "dataset column `p` on `counties`",
+        "unknown identifier `price`",
     )
     .await;
     Ok(())
@@ -750,6 +787,79 @@ async fn an_existing_models_table_gains_the_related_column_on_boot() -> Result<(
     // … and the old row reads back with no related datasets.
     let loaded = load_model(&cat, model.id).await?.expect("stored");
     assert!(loaded.related.is_empty());
-    assert_eq!(loaded, model);
+    assert_same(&loaded, &model);
+    Ok(())
+}
+
+/// The view state (analytics TODO A3.4): beside the model, never part of it.
+#[tokio::test]
+async fn a_view_state_is_patched_key_by_key_and_a_save_leaves_it_alone() -> Result<()> {
+    let db = TestDb::new().await?;
+    let cat = setup(&db).await?;
+    let reg = registry()?;
+    let model = house_prices();
+    save_model(&cat, &reg, &model, None).await?;
+
+    // A new model starts with an empty one.
+    assert!(model_view_state(&cat, model.id).await?.is_empty());
+
+    // Two screens, two keys: the second patch leaves the first's key.
+    let patch = |v: Json| v.as_object().cloned().expect("an object");
+    patch_model_view_state(&cat, model.id, &patch(json!({ "open": ["qq"] }))).await?;
+    let state = patch_model_view_state(
+        &cat,
+        model.id,
+        &patch(json!({ "collapsed": ["coefficients"], "fit": "abc" })),
+    )
+    .await?;
+    assert_eq!(
+        Json::Object(state),
+        json!({ "open": ["qq"], "collapsed": ["coefficients"], "fit": "abc" })
+    );
+
+    // `null` removes a key; one key's last write wins.
+    let state = patch_model_view_state(
+        &cat,
+        model.id,
+        &patch(json!({ "fit": null, "open": ["qq", "residual_histogram"] })),
+    )
+    .await?;
+    assert_eq!(
+        Json::Object(state),
+        json!({ "open": ["qq", "residual_histogram"], "collapsed": ["coefficients"] })
+    );
+
+    // Saving the model — what `saveModel` does with the whole definition —
+    // neither reads nor writes it.
+    let mut edited = load_model(&cat, model.id).await?.expect("stored");
+    edited.description = "edited".to_owned();
+    save_model(&cat, &reg, &edited, None).await?;
+    assert_eq!(
+        Json::Object(model_view_state(&cat, model.id).await?),
+        json!({ "open": ["qq", "residual_histogram"], "collapsed": ["coefficients"] })
+    );
+
+    // A clone carries it, under a free name, reading the same dataset.
+    let copy = clone_model(&cat, &reg, model.id, None).await?;
+    assert_eq!(copy.name, "house prices (copy)");
+    assert_eq!(copy.dataset.id, model.dataset.id);
+    assert_eq!(
+        model_view_state(&cat, copy.id).await?,
+        model_view_state(&cat, model.id).await?
+    );
+    let again = clone_model(&cat, &reg, model.id, None).await?;
+    assert_eq!(again.name, "house prices (copy 2)");
+    let named = clone_model(&cat, &reg, model.id, Some("bigger model")).await?;
+    assert_eq!(named.name, "bigger model");
+
+    // A model that is not there is named.
+    let err = patch_model_view_state(&cat, sc_model::ModelId::new(), &Attrs::new())
+        .await
+        .expect_err("no such model");
+    assert!(err.to_string().contains("no model"), "{err}");
+
+    // Deleting the model takes the view state with the row.
+    delete_model(&cat, &reg, copy.id).await?;
+    assert!(model_view_state(&cat, copy.id).await.is_err());
     Ok(())
 }

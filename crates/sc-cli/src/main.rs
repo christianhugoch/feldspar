@@ -54,6 +54,7 @@ async fn run(args: &[String]) -> Result<()> {
         Some("agent") => agent_command(&args[1..]).await,
         Some("i18n") => i18n_command(&args[1..]).await,
         Some("cmdstan") => cmdstan_command(&args[1..]).await,
+        Some("demo") => demo_command(&args[1..]).await,
         Some(other) => Err(sc_error::Error::config(format!(
             "unknown command `{other}`"
         ))),
@@ -83,6 +84,20 @@ fn ide_bundle_dir() -> Option<std::path::PathBuf> {
     path.join("index.html").exists().then_some(path)
 }
 
+/// The Analytics UI's bundle in the checkout this binary was built in — the
+/// IDE's arrangement, for the IDE's reason: it is reached from the admin UI's
+/// sidebar, so there is nothing for an operator to decide.
+const ANALYTICS_BUNDLE_IN_CHECKOUT: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/analytics/dist");
+
+/// Where the Analytics UI bundle is: the one built into this binary, else the
+/// checkout's (analytics TODO A1.14).
+fn analytics_bundle_dir() -> Option<std::path::PathBuf> {
+    let candidate = option_env!("SC_ANALYTICS_BUNDLE_DIR").unwrap_or(ANALYTICS_BUNDLE_IN_CHECKOUT);
+    let path = std::path::PathBuf::from(candidate);
+    path.join("index.html").exists().then_some(path)
+}
+
 /// `feldspar serve [--database-url URL | --db-host H ...] [--bind ADDR] [...]`.
 ///
 /// Database flags are consumed by [`DbConfig::extract`]; whatever is left over is
@@ -103,6 +118,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
         }
     }
     config.ide_dir = ide_bundle_dir();
+    config.analytics_dir = analytics_bundle_dir();
     // Saltcorn UI's view runtime, when this binary was built with it. Unlike the
     // IDE there is no fallback to the checkout: a build with `SC_BUILD_ADMIN=0`
     // records no directory, and an application that needs one says so on mount.
@@ -1193,6 +1209,35 @@ async fn i18n_command(args: &[String]) -> Result<()> {
     }
 }
 
+/// `feldspar demo analytics [--replace] [database flags]`: the Analytics UI's
+/// demo tables and datasets (analytics TODO A1.18, A2.15).
+async fn demo_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let parsed = sc_cli::demo::DemoArgs::parse(&rest)?;
+    if let Some(source) = db.source() {
+        eprintln!("feldspar: database configured from {source}");
+    }
+    let catalog = connect_catalog(&db).await?;
+    let report = sc_analytics::demo::demo_analytics(&catalog, parsed.replace).await?;
+    for table in &report.replaced {
+        println!("dropped {table}");
+    }
+    for (table, rows) in &report.tables {
+        println!("made {table}: {rows} rows");
+    }
+    for name in &report.datasets {
+        println!("made the dataset {name}");
+    }
+    for name in &report.kept {
+        println!("kept the dataset {name}, which was already there");
+    }
+    println!(
+        "Now run `feldspar serve`, sign in, and open Analytics in the admin sidebar \
+         (docs/tutorial-analytics.md)."
+    );
+    Ok(())
+}
+
 /// `feldspar cmdstan status | install` (TODO "Bayesian models with Stan" §20).
 ///
 /// No database: `status` reports what is on this machine, and `install` is a
@@ -1494,13 +1539,16 @@ fn print_usage() {
     eprintln!("  feldspar set-cfg KEY [VALUE] [database flags]   (no VALUE: read it from stdin)");
     eprintln!("  feldspar agent eval SUITE [--model provider/model] [--strong P/M] [--cheap P/M]");
     eprintln!("                            [--task NAME]… [--out DIR] [--keep] [database flags]");
-    eprintln!("  feldspar i18n extract|lint|check [--domain core|admin|builder] [--locale TAG]");
+    eprintln!(
+        "  feldspar i18n extract|lint|check [--domain core|admin|builder|analytics] [--locale TAG]"
+    );
     eprintln!("  feldspar i18n lint PATH…");
     eprintln!(
         "  feldspar i18n translate --domain NAME --locale TAG [--provider NAME] [--model NAME]"
     );
     eprintln!("                          [database flags]");
     eprintln!("  feldspar auth token --app SUBDOMAIN (--email EMAIL | --admin | --role NAME)");
+    eprintln!("  feldspar demo analytics [--replace] [database flags]");
     eprintln!("  feldspar cmdstan status [--cmdstan DIR]");
     eprintln!("  feldspar cmdstan install [--version V] [--dir D] [--jobs J]");
     eprintln!("                      [--format playwright|netscape] [--out PATH] [--url ORIGIN]");

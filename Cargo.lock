@@ -8288,6 +8288,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "sc-analytics"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "sc-catalog",
+ "sc-dataset",
+ "sc-db",
+ "sc-db-postgres",
+ "sc-db-sqlite",
+ "sc-error",
+ "sc-model",
+ "sc-query",
+ "sc-test-harness",
+ "sc-types",
+ "serde",
+ "serde_json",
+ "statrs",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "sc-api"
 version = "0.1.0"
 dependencies = [
@@ -8301,6 +8323,7 @@ dependencies = [
  "sc-action",
  "sc-auth",
  "sc-catalog",
+ "sc-dataset",
  "sc-db",
  "sc-db-postgres",
  "sc-db-sqlite",
@@ -8399,6 +8422,7 @@ dependencies = [
  "chrono",
  "reqwest",
  "sc-agent",
+ "sc-analytics",
  "sc-api",
  "sc-app",
  "sc-auth",
@@ -8406,6 +8430,7 @@ dependencies = [
  "sc-config",
  "sc-config-file",
  "sc-core-traits",
+ "sc-dataset",
  "sc-db",
  "sc-db-postgres",
  "sc-db-sqlite",
@@ -8520,6 +8545,27 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "similar",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "sc-dataset"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "sc-catalog",
+ "sc-db",
+ "sc-db-postgres",
+ "sc-db-sqlite",
+ "sc-error",
+ "sc-expr",
+ "sc-query",
+ "sc-test-harness",
+ "sc-types",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "uuid",
 ]
@@ -8694,6 +8740,7 @@ dependencies = [
  "chrono",
  "nalgebra",
  "sc-catalog",
+ "sc-dataset",
  "sc-db",
  "sc-db-postgres",
  "sc-db-sqlite",
@@ -8820,6 +8867,7 @@ dependencies = [
  "rustls-pemfile",
  "sc-action",
  "sc-agent",
+ "sc-analytics",
  "sc-api",
  "sc-app",
  "sc-auth",
@@ -8827,6 +8875,7 @@ dependencies = [
  "sc-config",
  "sc-core-actions",
  "sc-core-traits",
+ "sc-dataset",
  "sc-db",
  "sc-db-postgres",
  "sc-db-sqlite",
