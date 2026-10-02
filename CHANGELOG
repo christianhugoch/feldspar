@@ -2,6 +2,194 @@
 
 Changes in reverse chronological order.
 
+## Analytics A3 phases 3–5: the model editor, and *Predictive models* retired
+
+Milestone A3's second half (`TODO.md` A3.5–A3.10): models are made, fitted, read and compared in
+the Analytics UI's **model editor**, the admin UI's *Predictive models* screens are gone (their
+links redirect), **Open as model** turns a box plot into a regression, and the tutorials walk it.
+
+- **The model list** (A3.5; `ui/analytics/src/models/ModelList.tsx`), on the front page between
+  the datasets and the workspaces: each model's dataset, provider, outcome and last fit; edit,
+  clone, delete, new, and ticked models **compared**. A dataset's row gains **New model**, which
+  opens the editor on it (`#/models/new?dataset=`). Delete warns with what names the model, from
+  a new endpoint, **`modelUsage`** (`GET /api/models/{id}/usage`; `sc-server`'s `model_usage`):
+  calculated fields whose formula calls `predict("…")` on it (by the formula's analysis, or its
+  text when it no longer validates), and triggers, or steps of a workflow's current version, that
+  `fit_model` it (`fits`) or mention `predict("…")` / `models.get("…")` in any string of their
+  configuration (`names`). Not a refusal: each reports the missing model when it next runs.
+- **The model editor** (A3.5; `ModelEditor.tsx`, `FitView.tsx`, `FitRunning.tsx`, `Outputs.tsx`,
+  `progress.ts`, `viewState.ts`) at `#/models/<id>` (`?fit=` selects a fit) and `#/models/new`:
+  the admin's model form moved over (dataset picker and preview, provider, its `config_spec`
+  form, hyperparameters, split; "Fit saves first"), then a running fit's stage, chains and Cancel
+  from the **progress socket** (falling back to reading the row every 1.5 s when the socket does
+  not open), then the fit shown — its outputs from `getModelOutputs`, a card each, folded from its
+  header, the optional plots added from **More plots** and closed from their card — with the row
+  counts, the search, a posterior's reading and **Try a row**; then the list of fits (select,
+  activate, remove, *dataset changed*). The editor's **view state** is three keys, each patched on
+  its own as it changes and read back on open: `editor_collapsed`, `editor_plots`, `editor_fit`.
+  A new model is saved before its first fit and its address replaced in place.
+  **Compare** (`ModelCompare.tsx`, `#/models/compare?ids=`) shows each model's outputs for the fit
+  it would show, the ones that are not optional lined up by name, a column per model, nothing kept.
+- **The dataset picker** links to the Dataset editor in this bundle, whose Back then returns to
+  the model (`#/datasets/<id>?back=`); the model is saved first so it comes back as it was. **Use
+  a copy** clones the chosen dataset and saves the model onto the copy — a cloned model shares its
+  datasets, and this is how the clone changes its columns without changing the original's.
+- **Stan in the editor** (A3.6). `ModelForm.tsx`, `ModelBindings.tsx`, `ModelInstance.tsx` (now
+  `FitView.tsx`), `PosteriorInstance.tsx`, `DatasetPicker.tsx` and `models.ts` moved from
+  `ui/admin` to `ui/analytics/src/models` (`git mv`), with `models.test.ts` and
+  `posterior.test.ts`; the settings form and status badge copied as small local modules. The
+  program is shown in an embedded editor (`ProgramEditor.tsx`): Monaco, a new dependency of
+  `ui/analytics`, loaded on demand as the admin's code editor is (a lazy chunk; its worker a
+  same-origin file the strict CSP allows), with a small Stan grammar; it reads the file from its
+  store and **Save program** writes it back and re-reads the interface; **Open in IDE** stays.
+  `PosteriorPlots.tsx`'s hand-drawn SVG became `posteriorPlots.ts`: the trace per chain, the
+  histogram and the forest plot as **plot specs** with data made in the browser from
+  `getModelDraws`, drawn by the explorer's ECharts compiler; the admin's `.viz` styles went with
+  them. A posterior's warnings now sit above its outputs.
+- **Open as model** (A3.7; `explorer/openAsModel.ts`) at the top of the Data explorer's tests,
+  when the roles are one column on Y and one on X, not paired: a dataset based on the explorer's
+  keeping the two columns (a model's features are every column but its label) and a linear
+  regression of Y — logistic when Y is not a number — opened in the editor.
+- **Retiring *Predictive models*** (A3.8). The admin sidebar entry, its routes and
+  `screens/Models.tsx` are gone; `modelRedirect.ts` sends `#/models`, `#/models/<id>` and
+  `#/model-instances/<id>` to the Analytics UI, whose `#/model-instances/<id>` finds the fit's
+  model and opens it with the fit selected. `downloadModelRun` moved to the Analytics UI's
+  `api.ts`. `repo_hygiene.rs`: the models tutorial must cover the model editor, More plots and
+  Compare, and a new test refuses documents that still teach the retired screens and the old
+  screens' files coming back.
+- **The plot compiler**: a category axis follows a fixed `scale.domain`'s order when one is given
+  (values it does not list after), which the forest plot uses for its sort. `DataRef` in the
+  browser's spec types gains `fit_output`.
+- **Documentation** (A3.9). `tutorial-models.md` and `tutorial-stan.md` rewritten around the
+  model editor (named datasets for Radon, the program pane, pushed progress, the outputs and More
+  plots, Compare); `tutorial-analytics.md` part 3; `TECHNICAL_DESIGN.md` §14.2 (the screens are
+  the model editor's, `modelUsage`, pushed progress) and §14.5 (the routes, the model editor,
+  Compare, the program editor, the posterior's plots, Open as model); `OPERATIONS.md`, `README.md`
+  and `tutorial-python.md` no longer name the Models tab.
+- **Definition of done** (A3.10). `analytics_done.rs`'s `the_try_it_of_milestone_a3`, over the
+  demo with the stub posterior provider registered: a linear regression of price on area and the
+  neighbourhood's name, fitted, every declared output drawn (the Q-Q plot a point per scored row),
+  the view state kept without making the fit out of date, a clone on a copied dataset with
+  `year_built` compared output by output, the dataset edited and the fit flagged, the stub
+  sampler bound over the houses and neighbourhoods with its summaries and trace, rank and density
+  plots drawn, Open as model's dataset and regression, and `modelUsage` before and after a
+  predicting field and a `fit_model` trigger. `stan_models.rs`'s `radon_in_the_model_editor`
+  (`#[ignore]`, real CmdStan; passes here, 64 s): the program read and written back through the
+  store, bound, fitted, every output drawn, `alpha` 85 rows. `model_editor_api.rs` gains
+  `what_uses_a_model_is_listed_for_the_delete_warning`. Vitest: the routes, the view-state keys,
+  the outputs shown and compared, the socket's frames, the posterior plots compiled to ECharts,
+  Open as model's plan, the admin redirect and sidebar.
+- **Walked by hand** in headless Chromium against a scratch database with the demo: no
+  *Predictive models* in the sidebar and an old link landing in the editor; a model from a
+  dataset's row, fitted, its outputs drawn, the Q-Q plot opened and the coefficients folded and
+  both there on reopening; the dataset edited and the fit flagged; a clone on a copy with
+  `year_built` and the two compared; Open as model from a box plot; the delete warning; and a
+  real Stan model with the program in Monaco under the Analytics CSP, *compiling* shown while it
+  ran, its outputs, rank plots and forest plot.
+- **Deviations.**
+  - **Open as model names a key factor by its target's label**, a Calculated column
+    `neighbourhood_name = neighbourhoodⱵname` (from the first text field of the key's table): the
+    walk found that a key's numeric ids were fitted as one slope, not a level per group. The A3
+    Try it's dataset does the same, and the tutorial says why.
+  - The forest plot, trace and histogram are plot specs drawn **with data made in the browser**
+    rather than by `render_plot` over a fit output: they are one element chosen by a click, and
+    `getModelDraws` already answers it. The fit's own trace, rank and density plots of its first
+    parameters (A3.2) are server-drawn outputs above them.
+  - The settings form is a cut-down copy of the admin's (`code_language` settings are a text area
+    here, not Monaco with the sandbox's types: no model provider declares one).
+  - Delete warns rather than refuses: a predicting field or trigger fails with the model's name
+    when it next runs, which is the same as a model renamed.
+- **Not passing, not mine**: `sc-cli`'s `i18n::every_declared_domain_scans_without_an_unreadable_call_site`
+  fails on three `t(variable)` calls in `ui/admin/src/screens/SourceControl.tsx`, a file this work
+  does not touch (last changed in 1778f68).
+
+## Analytics A3 phases 1–2: a fit's outputs, and the model editor's API
+
+Milestone A3's server half (`TODO.md` A3.1–A3.4): a fit now says what it shows — tables, and plots
+as plot specs over **fit output data** stored beside the instance — and the endpoints the model
+editor (A3.5) will be built on: the outputs drawn, a fit's progress pushed over a socket, cancel
+for any fit, the fits saying which are out of date, and the model's **view state**.
+
+- **Outputs** (A3.1; `sc-model`'s `outputs.rs`). `OutputDecl { name, label, optional, kind }`,
+  `kind` being a parameter block, the metrics, an output frame as a table, or a plot spec (JSON,
+  without its `data`) over an output frame. `ModelProvider::outputs(&OutputContext)` declares them
+  after the fit — the context is the outcome, the configuration, the features, the parameter
+  blocks and the stored frames — and the instance records them (`ATTR_OUTPUTS`). Output frames go
+  to a new `_fd_model_outputs` table (bootstrapped with the instances), written in the transaction
+  that marks the instance fitted and deleted with the instance or the model. A provider may return
+  frames of its own in `FitResult::outputs`.
+- **`DataRef::FitOutput { instance, name }`** (A3.1; `sc-analytics`). `render_plot`,
+  `render_table` and `run_tests` read their rows through a `PlotRows` (a query, its shape and the
+  database it runs on): a dataset's last stage on the primary database, or a fit's output frame
+  loaded into a private in-memory SQLite database for the length of the render, so every stat
+  runs on it unchanged. `sc-analytics` now depends on `sc-model` and `sc-db-sqlite`.
+- **The standard outputs** (A3.2), what every built-in provider shows: a table per parameter block
+  (and the scalars as one), the metrics, and by outcome — regression: residuals against fitted
+  values with a loess, actual against predicted, and optional Q-Q plot and residual histogram;
+  classification: actual against predicted classes, how often the predicted class is right by its
+  probability, an optional probability box plot; clustering: cluster sizes and the clusters on
+  the first two numeric features; embedding: the first two components; posterior: trace plots,
+  and optional rank and density plots, faceted by parameter. The host makes the data: `rows`
+  (every scored row with the model's columns, `split`, `actual`, `fitted`, `residual`,
+  `standardised_residual`, `theoretical_quantile` — R's `ppoints` — and the rest by outcome; at
+  most 20 000, thinned by a stride) and `draws` (at most eight parameters, scalars first, 500
+  draws a chain, with each draw's rank; made before `keep_draws` discards any). A JavaScript or
+  Python module's provider declares `outputs` in its manifest in the same JSON and returns frames
+  as `outputs: { name: frame }`; the Python decorator takes `outputs=[…]`.
+- **The model editor's API** (A3.3). `getModelOutputs` (`GET /api/models/{id}/outputs?fit=
+  &include=`): the outputs of the named fit, else the active one, else the newest fitted, with
+  `dataset_changed`; tables filled, plot specs pointed at the fit, every plot drawn but the
+  optional ones not named in `include` (`sc_analytics::model_outputs`). **Progress pushed**:
+  `GET /api/model-instances/{id}/progress` is a WebSocket (`sc-server`'s `fit_progress.rs`) that
+  re-reads the fit's row twice a second, sends a `progress` frame when it changes and a
+  `finished` one at the end, then closes; every fit now reports `reading`, `fitting` and
+  `scoring` stages beside a posterior's. **Cancel for any fit**: `cancelModelFit` no longer
+  refuses a provider that is not `cancellable` — such a fit stops at its next stage (after
+  reading, between grid points, before scoring) with "the fit was cancelled". `dataset_changed`
+  is on every fit in `listModelInstances`' schema (it was answered but only declared on the
+  detail).
+- **Model view state** (A3.4). `_fd_models.view_state`, a nullable JSON object (`{}` for a new
+  model), outside the model: `saveModel` neither reads nor writes it (`save_model`'s update leaves
+  the column out), a fit does not record it, and the changed-since-fit checks never see it.
+  `patchModelViewState` (`PATCH /api/models/{id}/view-state`, `{ patch }`) sets or (with `null`)
+  removes top-level keys, one patch at a time in a process; `getModel` (and every model answer)
+  returns it. **`cloneModel`** (`POST /api/models/{id}/clone`) copies a model under a free name
+  ("… (copy)", "… (copy 2)") or the one given, sharing its datasets, with no fits and the view
+  state. `TABLES_RENAME.sql` section 10 adds the column on Postgres (`ADD COLUMN IF NOT EXISTS`)
+  and says how on SQLite; the server adds it on start anyway.
+- **Clients** regenerated in `ui/admin`, `ui/ide`, `ui/builder` and `ui/analytics`. The admin's
+  instance screen took any progress to mean a posterior; it now looks for a posterior's own
+  stages (`isPosteriorStage`), and its stage label names the three new ones.
+- **Documentation.** `TECHNICAL_DESIGN.md` §14.2 (*What a fit shows*, cancel and progress,
+  `_fd_model_outputs`, the API list), §14.5 (`fit_output` data, the model editor's endpoints),
+  §2 (the dependency table and graph), §9.2's ER diagram (`_fd_model_outputs`).
+  `repo_hygiene.rs` pinned "There is no cancel"; it now pins the sentence that replaced it.
+- **Tests.** `sc-model`: the declarations' JSON, the standard outputs per outcome, the Q-Q
+  positions against `ppoints`, a posterior's draws thinned and ranked, a fit storing its outputs
+  and losing them with the instance, a cancelled fit, the view state patched key by key and left
+  alone by a save and carried by a clone, section 10 on both databases. `sc-analytics`: plots over
+  stored output data on both databases; linear regression, logistic regression and k-means fitted
+  over the plot fixture with every declared output drawn on both databases; a posterior's three
+  plots. `sc-module`/`sc-python`: a module provider's declared outputs and its own frame crossing
+  the seam. `sc-server` (`model_editor_api.rs`): a fit watched over its socket, its outputs and
+  optional plots drawn, the fits flagged after a dataset edit; the view state through the API, a
+  save and a clone. `posterior_api.rs` now expects a linear regression's cancel to be accepted.
+- **Deviations.**
+  - The output declarations are made **after** the fit and recorded on the instance, rather than
+    being a static list per provider: the k-means scatter plot names the model's first two
+    numeric columns and the posterior plots exist only when there are draws, so the provider
+    declares from what it fitted. A module's manifest declares a static list.
+  - The fit output data is computed on with SQL on an in-memory SQLite database rather than by an
+    in-memory implementation of each stat: the TODO's "computed in memory" without a second
+    stat compiler.
+  - "The list of a model's fits with the dataset changed flag" is the existing
+    `listModelInstances`, whose schema now declares the flag, rather than a new endpoint; cancel
+    is the existing `cancelModelFit`, widened to every fit.
+  - Logistic regression's plots are a classification's (confusion heatmap, calibration, and the
+    probability by class) rather than residual plots, which mean little for a class.
+  - The `python-host` tests could not be run on this machine (no `libpython3.13` to link); the
+    decorator's manifest was checked with the system Python and `sc-python` compiles.
+
 ## Analytics: models are not a workspace
 
 A design change before A3 starts (`TODO.md` A3.0): a model opens in a **model editor** at

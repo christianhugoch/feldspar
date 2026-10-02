@@ -346,11 +346,11 @@ that nothing about fitting or prediction reads.
 
 ## Phase 1 — Outputs as panels
 
-- [ ] A3.1 Model providers declare their outputs: tables, and plots as plot specs over **fit
+- [x] A3.1 Model providers declare their outputs: tables, and plots as plot specs over **fit
       output data** (a new kind of data reference, `FitOutput { instance, name }`, read from
       the instance rather than through SQL, so stats on it are computed in memory). Plots
       can be marked optional. Tests.
-- [ ] A3.2 Outputs of the built-in providers: linear and logistic regression (coefficients,
+- [x] A3.2 Outputs of the built-in providers: linear and logistic regression (coefficients,
       residuals against fitted values, actual against predicted, Q-Q), k-means (cluster
       sizes, centroids, a scatter plot coloured by cluster), Stan (the posterior summary, and
       trace, rank and density plots per parameter over the draws). Python module providers
@@ -358,11 +358,11 @@ that nothing about fitting or prediction reads.
 
 ## Phase 2 — The API
 
-- [ ] A3.3 Endpoints for the model editor: a model's outputs with each plot rendered by
+- [x] A3.3 Endpoints for the model editor: a model's outputs with each plot rendered by
       `render_plot`, fit progress (the existing `Progress`, pushed to the browser), cancelling
       a fit, and the list of a model's fits with the "dataset changed" flag. Tests in
       `sc-server`.
-- [ ] A3.4 **Model view state.** A `view_state` JSON object column on `_fd_models` (`{}` for
+- [x] A3.4 **Model view state.** A `view_state` JSON object column on `_fd_models` (`{}` for
       a new model), outside the model's definition: `validate_model` does not look at it, a
       fit does not record it, the "dataset changed" and "settings changed since fit" checks
       ignore it, and `updateModel` neither reads nor writes it. It is written by its own
@@ -379,7 +379,7 @@ that nothing about fitting or prediction reads.
 
 ## Phase 3 — The model editor
 
-- [ ] A3.5 The model list on the front page (edit, clone, delete with a warning naming what
+- [x] A3.5 The model list on the front page (edit, clone, delete with a warning naming what
       uses the model, new — also from a dataset's row, which picks the dataset — and a
       multi-select **Compare**). The model editor at `#/models/<id>` and `#/models/new`: the
       dataset picker (with a link to the dataset in the Dataset editor), provider picker, the
@@ -388,27 +388,27 @@ that nothing about fitting or prediction reads.
       editor keeps which outputs are open or collapsed, the optional plots chosen and the
       selected fit in the view state, and restores them on open. Compare shows the selected
       models' key outputs side by side, without persistence. Tests.
-- [ ] A3.6 Stan models in the model editor: the program in an embedded editor (opening the IDE
+- [x] A3.6 Stan models in the model editor: the program in an embedded editor (opening the IDE
       for the file store as now), the bindings, the posterior plots. Move `ModelForm.tsx`,
       `ModelBindings.tsx`, `ModelInstance.tsx`, `PosteriorInstance.tsx` and
       `PosteriorPlots.tsx` from `ui/admin` into `ui/analytics`, replacing their plots with
       plot specs. Tests moved with them.
-- [ ] A3.7 **Open as model** in the Data explorer: a linear or logistic regression, by the
+- [x] A3.7 **Open as model** in the Data explorer: a linear or logistic regression, by the
       response's type, with the explorer's dataset, Y and X, opened in the model editor.
       Tests.
 
 ## Phase 4 — Retiring *Predictive models*
 
-- [ ] A3.8 The admin sidebar entry and its routes go; `#/models/…` and `#/model-instances/…`
+- [x] A3.8 The admin sidebar entry and its routes go; `#/models/…` and `#/model-instances/…`
       redirect to the model editor. `repo_hygiene.rs` fragments and the admin's `models.ts`
       follow. Tests.
 
 ## Phase 5 — Documentation, definition of done
 
-- [ ] A3.9 `tutorial-models.md` and `tutorial-stan.md` rewritten around the model
+- [x] A3.9 `tutorial-models.md` and `tutorial-stan.md` rewritten around the model
       editor; `TECHNICAL_DESIGN.md` §14.2 (outputs, fit output data); `tutorial-analytics.md`
       part 3.
-- [ ] A3.10 Definition of done: an `sc-server` test that fits a linear regression and the stub
+- [x] A3.10 Definition of done: an `sc-server` test that fits a linear regression and the stub
       posterior provider through the API and renders every declared output; the Radon half
       behind `#[ignore]` in `stan_models.rs`. Walk the Try it by hand.
 

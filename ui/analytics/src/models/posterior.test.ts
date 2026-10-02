@@ -37,9 +37,9 @@ import {
   kindsFor,
   matchElements,
   metricRows,
-  niceTicks,
   orderWarnings,
   outcomeSummary,
+  isPosteriorStage,
   parseDraft,
   parseDrafts,
   printDraft,
@@ -272,6 +272,14 @@ describe("reading what the API carries about a posterior", () => {
     expect(readProgress(null)).toBeNull();
   });
 
+  it("tells a posterior's stages from the ones every fit reports", () => {
+    // Every fit reports where it is now, so progress alone no longer means a
+    // posterior: only its own four stages do.
+    expect(["queued", "compiling", "sampling", "summarising"].every(isPosteriorStage)).toBe(true);
+    expect(["reading", "fitting", "scoring"].some(isPosteriorStage)).toBe(false);
+    expect(isPosteriorStage(undefined)).toBe(false);
+  });
+
   it("leaves the sampler's own variables out of the list", () => {
     expect(
       Object.keys(readVariables({ alpha: { dims: [3], dimensions: ["counties"] }, lp__: { dims: [], dimensions: [] }, beta: { dims: [] } })),
@@ -389,12 +397,6 @@ describe("the plots' arithmetic", () => {
     expect(histogram([])).toEqual([]);
   });
 
-  it("puts ticks on round numbers", () => {
-    expect(niceTicks(0, 1, 5)).toEqual([0, 0.2, 0.4, 0.6, 0.8, 1]);
-    expect(niceTicks(-0.37, 2.1, 4)).toEqual([0, 1, 2]);
-    expect(niceTicks(0, 1000, 4)).toEqual([0, 500, 1000]);
-    expect(niceTicks(3, 3)).toEqual([3]);
-  });
 });
 
 describe("the write-back", () => {
