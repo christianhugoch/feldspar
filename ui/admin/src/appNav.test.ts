@@ -5,7 +5,14 @@
 
 import { describe, expect, it } from "vitest";
 
-import { appIdFromRoute, appNavLinks, builderAgentFor, linkActive, onApplicationsList } from "./appNav";
+import {
+  appIdFromRoute,
+  appNavLinks,
+  builderAgentFor,
+  linkActive,
+  linkKey,
+  onApplicationsList,
+} from "./appNav";
 
 const react = {
   id: "a1",
@@ -13,9 +20,17 @@ const react = {
   builds: true,
   has_views: false,
   source: { store: "code", path: "todo" },
+  targets: [],
 };
 
-const saltcornUi = { id: "a2", subdomain: "crm", builds: false, has_views: true, source: null };
+const saltcornUi = {
+  id: "a2",
+  subdomain: "crm",
+  builds: false,
+  has_views: true,
+  source: null,
+  targets: [],
+};
 
 /** Where the admin is served; applications sit on subdomains of it. */
 const admin = { protocol: "https:", host: "example.com:3032" };
@@ -26,6 +41,26 @@ const builder = {
 };
 
 describe("the current application's sidebar links", () => {
+  it("offers each of the framework's build targets right after Build", () => {
+    const android = {
+      name: "android",
+      label: "Android APK",
+      readiness: { ready: true, missing: [] },
+    };
+    const native = { ...react, targets: [android] };
+    const links = appNavLinks(native, null, admin);
+    const build = links.findIndex((l) => l.id === "build");
+    const target = links[build + 1];
+    expect(target.id).toBe("target");
+    expect(target.label).toBe("Build Android APK");
+    expect(target.target).toEqual(android);
+    // Something to do, not somewhere to go.
+    expect(target.href).toBeUndefined();
+    // One key per target, so two targets are two links.
+    expect(linkKey(target)).toBe("target:android");
+    expect(linkKey(links[build])).toBe("build");
+  });
+
   it("gives a built application edit code and build, then settings", () => {
     const links = appNavLinks(react, null, admin);
     expect(links.map((l) => l.label)).toEqual([
@@ -75,6 +110,7 @@ describe("the current application's sidebar links", () => {
       builds: false,
       has_views: false,
       source: { store: "site", path: "public" },
+      targets: [],
     };
     const links = appNavLinks(none, null, admin);
     expect(links.map((l) => l.id)).toEqual(["app-link", "edit-code", "settings"]);

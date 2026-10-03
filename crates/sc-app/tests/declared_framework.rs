@@ -94,6 +94,7 @@ fn vue() -> FrameworkDecl {
         )),
         checks: vec!["typecheck".to_owned()],
         scaffolds: true,
+        targets: Vec::new(),
     }
 }
 
@@ -131,7 +132,12 @@ impl FrameworkHost for StubHost {
         if phase == FilePhase::Scaffold {
             files.push(DeclaredFile {
                 path: "src/App.vue".to_owned(),
-                contents: format!("<template>{}</template>\n", context["name"]),
+                // The framework's own settings reach the generator, so a
+                // framework can use one it declared (the project, here).
+                contents: format!(
+                    "<template>{} {}</template>\n",
+                    context["name"], context["settings"]["project"]
+                ),
             });
             for table in &tables {
                 files.push(DeclaredFile {
@@ -310,6 +316,11 @@ async fn the_server_writes_the_modules_project_and_its_own_generated_half() -> R
     ] {
         assert!(files.iter().any(|f| f == expected), "{expected}: {files:?}");
     }
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("todo/src/App.vue"))?,
+        "<template>\"todo\" \"todo\"</template>\n",
+        "the generator sees the application's framework settings"
+    );
 
     // And Saltcorn's half, in the directory the framework named — written for a
     // declared framework exactly as it is for `react`, because it comes from the

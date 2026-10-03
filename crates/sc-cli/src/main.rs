@@ -450,6 +450,10 @@ fn serving_defaults(db: &DbConfig) -> Vec<String> {
         flags.push("--base-domain".to_owned());
         flags.push(domain.to_owned());
     }
+    for domain in serving.extra_base_domains() {
+        flags.push("--extra-base-domain".to_owned());
+        flags.push(domain.to_owned());
+    }
     if let Some(bind) = serving.bind() {
         flags.push("--bind".to_owned());
         flags.push(bind.to_owned());
@@ -1611,6 +1615,10 @@ fn print_usage() {
     eprintln!("    --bind ADDR  --static-dir DIR  --session-ttl-hours N  --secure-cookies");
     eprintln!("    --base-domain DOMAIN     apps are served at <subdomain>.<domain>");
     eprintln!(
+        "    --extra-base-domain D    …and also at <subdomain>.<D> (repeatable), e.g. 10.0.2.2.nip.io
+                             for an Android emulator"
+    );
+    eprintln!(
         "    --browser PATH           the headless Chromium view_app drives (default: chromium,
                              chromium-browser or google-chrome on PATH, not a snap)
     --no-browser-sandbox     start that browser with --no-sandbox
@@ -1660,7 +1668,7 @@ fn print_usage() {
     );
     eprintln!();
     eprintln!(
-        "  a feldspar.toml environment may also carry `base_domain`, `bind`,
+        "  a feldspar.toml environment may also carry `base_domain`, `extra_base_domains`, `bind`,
   `secure_cookies`, `browser`, `browser_sandbox`, `cmdstan` and the `stan_*` keys, so `serve --environment NAME` needs none of those flags —
   and so a build from the command line writes the same application URL into the
   generated documentation that the server would."

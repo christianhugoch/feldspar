@@ -2,6 +2,78 @@
 
 Changes in reverse chronological order.
 
+## React Native application framework, with Android APK builds
+
+A new bundled module, `plugins/react-native` (`@feldspar/react-native`), declares the application
+framework `react-native`. An admin installs it under Settings → Modules, picks **React Native** for
+an application, and Saltcorn scaffolds an Expo (SDK 57) project, serves it on the web and builds
+it into an Android APK. The same source becomes both.
+
+- **The project**: one screen per exposed table, written with React Native components and
+  `StyleSheet` only (no DOM), and a small navigator that follows browser history on the web.
+  - `src/feldspar/` is generated on every build: the typed client, `hooks.ts` (the React scaffold's
+    `useX` / `useCreateX` / `useUpdateX` / `useDeleteX` hooks) and `config.ts`.
+  - The web bundle comes from `expo export --platform web`.
+  - The APK comes from `expo prebuild` plus `./gradlew assembleRelease`.
+  - The Android package is `com.feldspar.<subdomain>`.
+- **CSP**: React's policy plus `style-src 'unsafe-inline'`, because react-native-web's
+  `StyleSheet` writes a `<style>` element at run time without a nonce. `script-src` stays strict.
+- **Build targets (generic)**: a declared framework can offer builds that produce a file (rather
+  than a bundle to serve) next to its web bundle:
+  `targets: { android: { label, command, artifact, env, requires } }`.
+  - `artifact` is a path template over the framework's settings.
+  - `env` holds extra environment variables for the build; a blank value falls back to the
+    server's own.
+  - `requires` lists what the machine needs: an environment variable (optionally an existing
+    directory), a command on `PATH`, or an operating system, each with a hint on how to fix it.
+    Unmet requirements are shown on the target's button and refuse the build before anything runs.
+  - A malformed declaration is refused when the module loads.
+- **Target builds run as background jobs**: `POST /api/applications/{id}/targets/{target}/build`
+  starts a build and answers at once; `GET` on the same path reports `running`, `succeeded` (with
+  artifact and size) or `failed`.
+  - One build per application and target at a time; pressing the button again joins the running
+    build.
+  - The generated code is rewritten before the build. The install step shares the web build's
+    lock; Gradle runs outside it.
+  - The log is written as the build runs to `<project>/build-logs/<target>-<timestamp>.log`, and
+    the last 10 per target are kept.
+  - The admin sidebar has a **Build Android APK** button under Build. It polls until the build is
+    done, picks up a build still running after a reload, and its toast names the APK and the log.
+- **Android toolchain**: `ANDROID_HOME` and `JAVA_HOME` are the module's own settings
+  (Settings → Modules → React Native), passed to the APK build. The shell that started the server
+  doesn't need them.
+- **Reaching the server from a phone**:
+  - `extra_base_domains` (`feldspar.toml`, or `--extra-base-domain`, repeatable): every
+    application also answers under these domains, e.g. `todo.10.0.2.2.nip.io` for an emulator.
+    Only routing uses them; app URLs and cookies stay on `base_domain`.
+  - A new framework setting, "Server URL for the mobile app" (`mobile_url`): where the APK sends
+    its requests (blank means the application's URL). An `http://` URL enables cleartext traffic
+    in the APK.
+  - Declared frameworks receive their settings as `ctx.settings` when they generate files.
+- **Login from a native app**:
+  - Every JSON API answer and the CSRF refusal carry the token in an `x-csrf-token` header. It is
+    never sent on a response a shared cache may store; JSON answers get `Cache-Control: private`.
+  - The generated client remembers the token (`trackCsrf`), since a phone has no
+    `document.cookie`, and retries a write once when it is refused because its token is stale.
+  - A client without `document` sends `x-feldspar-client: native` and gets a session cookie with a
+    `Max-Age`, so the session survives closing the app. Browser sessions are unchanged.
+  - A native request that has a session but no valid token is refused rather than treated as
+    anonymous.
+- Known gaps are listed in TODO.md (RN.6–RN.12).
+
+## Fix: Reinstall picks up an edited local or bundled module
+
+npm kept the copy it had made earlier (`--install-links`) because the name and version were
+unchanged, so Reinstall silently kept the old code. A reinstall of a local directory now moves the
+previous copy aside and lets npm copy the directory afresh. If npm fails (offline, full disk), the
+old copy is put back. Only a copy of that same directory is moved.
+
+## Fix: scaffolded pages no longer use the users table's password hash
+
+The API hides `password_hash`, but the React and React Native scaffolds still generated a column
+and a form input for it, so an app exposing `users` failed `tsc`. Scaffolds now show only the
+columns the table's API models (`shown_fields`).
+
 ## Analytics A3 phases 3–5: the model editor, and *Predictive models* retired
 
 Milestone A3's second half (`TODO.md` A3.5–A3.10): models are made, fitted, read and compared in

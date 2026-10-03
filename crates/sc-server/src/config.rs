@@ -94,6 +94,17 @@ pub struct ServerConfig {
     /// request reaches the admin. App routing is opt-in because without a base
     /// domain to anchor it, a request's own `Host` header would choose its app.
     pub base_domain: Option<String>,
+    /// Further domains the same applications answer under
+    /// (`--extra-base-domain`, repeatable): `blog.<extra>` reaches the app `blog`
+    /// as `blog.<base_domain>` does.
+    ///
+    /// For reaching a development server from somewhere `localhost` does not
+    /// mean this machine — `10.0.2.2.nip.io` from an Android emulator,
+    /// `192.168.1.50.nip.io` from a phone on the LAN. Only routing reads these:
+    /// an application's URL, its cookies' scope and the admin's framing policy
+    /// all stay with the base domain. Ignored without a base domain, which is
+    /// what turns application routing on at all.
+    pub extra_base_domains: Vec<String>,
     /// How many V8 isolates the **code** pool runs (`--code-workers`), and how
     /// many runs each of them keeps resident at once (`--code-max-inflight`).
     ///
@@ -248,6 +259,7 @@ impl Default for ServerConfig {
             session_ttl_hours: sc_auth::DEFAULT_TTL_HOURS,
             secure_cookies: false,
             base_domain: None,
+            extra_base_domains: Vec::new(),
             code_workers: sc_expr::DEFAULT_CODE_WORKERS,
             code_max_inflight: sc_expr::DEFAULT_MAX_INFLIGHT,
             module_workers: sc_module::DEFAULT_MODULE_WORKERS,
@@ -273,7 +285,8 @@ impl ServerConfig {
     ///
     /// Recognised flags: `--bind <addr>`, `--static-dir <path>`,
     /// `--session-ttl-hours <n>`, `--secure-cookies`, `--base-domain <domain>`,
-    /// `--code-workers <n>`, `--code-max-inflight <n>`, `--module-workers <n>`,
+    /// `--extra-base-domain <domain>` (repeatable), `--code-workers <n>`,
+    /// `--code-max-inflight <n>`, `--module-workers <n>`,
     /// `--modules-dir <path>`, `--python <auto|off>`,
     /// `--python-max-inflight <n>`, `--python-max-stuck <n>`,
     /// `--python-dir <path>`, `--python-bin <path>`, `--model-max-rows <n>`,
@@ -453,6 +466,13 @@ impl ServerConfig {
                 "--base-domain" => {
                     cfg.base_domain = Some(next_value(&mut it, "--base-domain")?);
                 }
+                "--extra-base-domain" => {
+                    let domain = next_value(&mut it, "--extra-base-domain")?;
+                    let domain = domain.trim().trim_end_matches('.').to_owned();
+                    if !domain.is_empty() && !cfg.extra_base_domains.contains(&domain) {
+                        cfg.extra_base_domains.push(domain);
+                    }
+                }
                 other => {
                     return Err(Error::config(format!("unknown server argument `{other}`")));
                 }
@@ -539,6 +559,12 @@ mod tests {
             "--secure-cookies",
             "--base-domain",
             "example.com",
+            "--extra-base-domain",
+            "10.0.2.2.nip.io",
+            "--extra-base-domain",
+            "192.168.1.50.nip.io.",
+            "--extra-base-domain",
+            "10.0.2.2.nip.io",
             "--code-workers",
             "4",
             "--code-max-inflight",
@@ -569,6 +595,11 @@ mod tests {
         assert_eq!(cfg.session_ttl_hours, 12);
         assert!(cfg.secure_cookies);
         assert_eq!(cfg.base_domain.as_deref(), Some("example.com"));
+        // Repeatable, in order, each once, and a trailing dot is the same name.
+        assert_eq!(
+            cfg.extra_base_domains,
+            ["10.0.2.2.nip.io", "192.168.1.50.nip.io"]
+        );
         assert_eq!(cfg.code_workers, 4);
         assert_eq!(cfg.code_max_inflight, 64);
         assert_eq!(cfg.module_workers, 3);

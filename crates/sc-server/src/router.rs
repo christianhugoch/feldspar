@@ -37,7 +37,7 @@ use tower::ServiceExt;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::apps::{AppMounts, MountedApp, subdomain_of};
+use crate::apps::{AppMounts, MountedApp, subdomain_in};
 use crate::backup::{BACKUP_CREATE_ROUTE, BACKUP_UPLOAD_ROUTE};
 use crate::chat::{AGENT_CHAT_ROUTE, agent_chat_upgrade};
 use crate::config::ServerConfig;
@@ -49,7 +49,7 @@ use crate::observe::{STREAM_OBSERVE_ROUTE, stream_observe_by_name, stream_observ
 use crate::security::{
     ANALYTICS_CONTENT_SECURITY_POLICY, AnonymousCaller, CONTENT_SECURITY_POLICY, CSRF_COOKIE,
     CSRF_HEADER, CsrfPolicy, IDE_CONTENT_SECURITY_POLICY, SESSION_COOKIE,
-    admin_content_security_policy, build_cookie, csrf_middleware,
+    admin_content_security_policy, build_cookie, csrf_middleware, is_native_client,
 };
 
 /// A WebSocket upgrade, **if this request is one** — the extractor the fallback
@@ -157,6 +157,8 @@ pub(crate) struct AppState {
     pub(crate) apps: Arc<AppMounts>,
     /// The domain apps are served under; `None` disables app routing.
     base_domain: Option<Arc<String>>,
+    /// Further domains the same apps answer under (`--extra-base-domain`).
+    extra_base_domains: Arc<Vec<String>>,
     /// How many more language servers the IDE may start (design §12.1).
     lsp_slots: ServerSlots,
     /// The tier-2 MCP tools: one per endpoint tagged
@@ -243,6 +245,7 @@ pub fn build_router_with_apps(
         secure_cookies: config.secure_cookies,
         apps,
         base_domain: config.base_domain.clone().map(Arc::new),
+        extra_base_domains: Arc::new(config.extra_base_domains.clone()),
         lsp_slots: server_slots(),
         mcp_endpoint_tools,
     };
@@ -445,7 +448,9 @@ async fn upload(
         locale: sc_i18n::active().default_locale().clone(),
     };
     match handler(ctx).await {
-        Ok(resp) => apply_response(&state, jar, session_token, resp).await,
+        // `false` rather than `is_native_client`: this handler never starts a
+        // session, and `native` only matters for a login's cookie (`apply_session`).
+        Ok(resp) => apply_response(&state, jar, session_token, false, resp).await,
         Err(e) => {
             error_out(
                 &state,
@@ -498,7 +503,9 @@ async fn create_backup(State(state): State<AppState>, jar: CookieJar, body: Byte
         locale: sc_i18n::active().default_locale().clone(),
     };
     match handler(ctx).await {
-        Ok(resp) => apply_response(&state, jar, session_token, resp).await,
+        // `false` rather than `is_native_client`: this handler never starts a
+        // session, and `native` only matters for a login's cookie (`apply_session`).
+        Ok(resp) => apply_response(&state, jar, session_token, false, resp).await,
         Err(e) => {
             error_out(
                 &state,
@@ -551,7 +558,9 @@ async fn upload_backup(State(state): State<AppState>, jar: CookieJar, body: Body
         locale: sc_i18n::active().default_locale().clone(),
     };
     match handler(ctx).await {
-        Ok(resp) => apply_response(&state, jar, session_token, resp).await,
+        // `false` rather than `is_native_client`: this handler never starts a
+        // session, and `native` only matters for a login's cookie (`apply_session`).
+        Ok(resp) => apply_response(&state, jar, session_token, false, resp).await,
         Err(e) => {
             error_out(
                 &state,
@@ -887,7 +896,7 @@ fn open_to_public(state: &AppState, request: &axum::extract::Request) -> bool {
 fn resolve_app(state: &AppState, headers: &axum::http::HeaderMap, jar: &CookieJar) -> Resolved {
     let Some(label) = state.base_domain.as_ref().and_then(|base| {
         let host = headers.get(header::HOST)?.to_str().ok()?;
-        subdomain_of(host, Some(base.as_str()))
+        subdomain_in(host, Some(base.as_str()), &state.extra_base_domains)
     }) else {
         return Resolved::Admin;
     };
@@ -1073,6 +1082,7 @@ async fn dispatch_app(
                     state,
                     jar,
                     session_token,
+                    is_native_client(headers),
                     HandlerResponse {
                         body: resp.body,
                         status: resp.status,
@@ -1166,7 +1176,8 @@ async fn dispatch_app(
             let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
             // The same session code an API provider's response goes through, so
             // an application's rendered login sets the same cookie the same way.
-            let jar = match apply_session(state, jar, session_token, resp.session).await {
+            let native = is_native_client(headers);
+            let jar = match apply_session(state, jar, session_token, native, resp.session).await {
                 Ok(jar) => jar,
                 Err(rejection) => return with_csp(*rejection, &csp),
             };
@@ -1762,7 +1773,9 @@ async fn handle_api(
     // a language too, and a cache in front of this must vary on the same things
     // whether the answer was a 200 or a 403.
     let out = match handler(ctx).await {
-        Ok(resp) => apply_response(state, jar, session_token, resp).await,
+        Ok(resp) => {
+            apply_response(state, jar, session_token, is_native_client(headers), resp).await
+        }
         Err(e) => {
             error_out(
                 state,
@@ -1810,10 +1823,11 @@ async fn apply_response(
     state: &AppState,
     jar: CookieJar,
     session_token: Option<String>,
+    native: bool,
     resp: HandlerResponse,
 ) -> Response {
     let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
-    let jar = match apply_session(state, jar, session_token, resp.session).await {
+    let jar = match apply_session(state, jar, session_token, native, resp.session).await {
         Ok(jar) => jar,
         Err(rejection) => return *rejection,
     };
@@ -1844,11 +1858,16 @@ async fn apply_response(
 /// [`apply_response`] an application framework's response goes through too, so
 /// there is one session story (TODO "Saltcorn UI" §8).
 ///
+/// `native` is [`is_native_client`] of the request: a session it starts gets a
+/// cookie that lasts as long as the session, where a browser's lasts until the
+/// browser closes, as it always has.
+///
 /// `Err` is the response to send instead, when a session could not be started.
 async fn apply_session(
     state: &AppState,
     jar: CookieJar,
     session_token: Option<String>,
+    native: bool,
     session: SessionAction,
 ) -> std::result::Result<CookieJar, Box<Response>> {
     Ok(match session {
@@ -1867,12 +1886,12 @@ async fn apply_session(
                 // After the session exists, not before: an event that says
                 // someone logged in must not fire for a login that then failed.
                 fire_login(state, &user).await;
-                jar.add(build_cookie(
-                    SESSION_COOKIE,
-                    token,
-                    true,
-                    state.secure_cookies,
-                ))
+                let mut cookie = build_cookie(SESSION_COOKIE, token, true, state.secure_cookies);
+                if native {
+                    let ttl = state.sessions.ttl().num_seconds();
+                    cookie.set_max_age(time::Duration::seconds(ttl));
+                }
+                jar.add(cookie)
             }
             Err(e) => {
                 log_failure("could not start session", &e);

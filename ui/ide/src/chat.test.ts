@@ -80,6 +80,7 @@ function application(
     builds: true,
     installs: true,
     has_views: false,
+    targets: [],
   };
 }
 

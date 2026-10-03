@@ -9,6 +9,11 @@ import {
   buildFinished,
   buildStarted,
   buildStatus,
+  jobResult,
+  targetBuilding,
+  targetFinished,
+  targetStarted,
+  targetNotReadyNotice,
   updateFinished,
   updateStarted,
 } from "./appActions";
@@ -58,5 +63,99 @@ describe("client updates", () => {
     expect(state.outcome?.title).toBe("Project scaffolded — Todo");
     state = updateFinished(updateStarted(state, "a1"), app, { ok: true, scaffolded: false, log: "" });
     expect(state.outcome?.title).toBe("Generated code updated — Todo");
+  });
+});
+
+describe("target builds", () => {
+  const android = { name: "android", label: "Android APK" };
+
+  it("tracks a target apart from the web build, and says where the file is", () => {
+    let state = targetStarted(INITIAL_APP_ACTIONS, "a1", "android");
+    expect(targetBuilding(state, "a1", "android")).toBe(true);
+    // Building an APK changes nothing the application serves.
+    expect(buildStatus(state, "a1")).toBe("unbuilt");
+    state = targetFinished(state, app, android, {
+      ok: true,
+      store: "rn",
+      artifact: "android/app/build/outputs/apk/release/app-release.apk",
+      size: 5 * 1024 * 1024,
+      logPath: "android/build-logs/android-20260927-101500.log",
+      log: "BUILD SUCCESSFUL\n",
+    });
+    expect(targetBuilding(state, "a1", "android")).toBe(false);
+    expect(state.outcome?.ok).toBe(true);
+    expect(state.outcome?.title).toBe("Android APK built — Todo");
+    expect(state.outcome?.text).toContain("app-release.apk (5.0 MB)");
+    expect(state.outcome?.text).toContain('file store "rn"');
+    expect(state.outcome?.text).toContain("BUILD SUCCESSFUL");
+    expect(state.outcome?.text).toContain("android/build-logs/android-20260927-101500.log");
+  });
+
+  it("reports a failed target build with the tools' own message", () => {
+    let state = targetStarted(INITIAL_APP_ACTIONS, "a1", "android");
+    state = targetFinished(state, app, android, { ok: false, error: "SDK location not found" });
+    expect(targetBuilding(state, "a1", "android")).toBe(false);
+    expect(state.outcome).toEqual({
+      ok: false,
+      title: "Android APK build failed — Todo",
+      text: "SDK location not found",
+    });
+  });
+});
+
+describe("a polled target job", () => {
+  const job = {
+    target: "android",
+    label: "Android APK",
+    store: "rn",
+    log_path: "build-logs/android-1.log",
+    started_at: "2026-09-27T10:15:00Z",
+  };
+
+  it("reads a finished job as the file and its log", () => {
+    expect(
+      jobResult({
+        ...job,
+        status: "succeeded",
+        artifact: "android/app-release.apk",
+        size: 7,
+        log: "BUILD SUCCESSFUL",
+      }),
+    ).toEqual({
+      ok: true,
+      store: "rn",
+      artifact: "android/app-release.apk",
+      size: 7,
+      logPath: "build-logs/android-1.log",
+      log: "BUILD SUCCESSFUL",
+    });
+  });
+
+  it("reads a failed job as its error, and a success with no file as a failure", () => {
+    expect(jobResult({ ...job, status: "failed", error: "SDK location not found" })).toEqual({
+      ok: false,
+      error: "SDK location not found",
+    });
+    expect(jobResult({ ...job, status: "succeeded" }).ok).toBe(false);
+  });
+});
+
+describe("a target this server cannot build yet", () => {
+  it("lists everything missing, one line each", () => {
+    expect(
+      targetNotReadyNotice(app, {
+        label: "Android APK",
+        readiness: {
+          missing: [
+            "`ANDROID_HOME` is not set. Set it under Settings → Modules.",
+            "`JAVA_HOME` is not set.",
+          ],
+        },
+      }),
+    ).toEqual({
+      ok: false,
+      title: "Android APK cannot be built yet — Todo",
+      text: "• `ANDROID_HOME` is not set. Set it under Settings → Modules.\n• `JAVA_HOME` is not set.",
+    });
   });
 });

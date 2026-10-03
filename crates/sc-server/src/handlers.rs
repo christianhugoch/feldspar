@@ -5615,6 +5615,89 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    // Start a build of a target the application's framework offers beside its
+    // web bundle, and answer at once (§13.3): a native build is minutes long, so
+    // it runs as a job of its own and the admin UI polls
+    // `getApplicationTargetBuild`. A target the framework does not declare is
+    // refused here, before anything starts. A build already running for this
+    // target answers itself — a second click joins it rather than starting a
+    // second Gradle in the same project directory.
+    reg.register("buildApplicationTarget", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let id = parse_app_id(ctx.path_param("id")?)?;
+                let target = ctx.path_param("target")?.to_owned();
+                let app = load_application(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no application with id {id}")))?;
+                let spec = sc_app::app_target_spec(&app, &target)?;
+                // A machine without the toolchain is told so now, as a refusal,
+                // rather than by a job that fails minutes into an install.
+                sc_app::require_target_ready(&spec)?;
+                let store = app_source_from_config(&app.framework)?.store.0;
+                let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+                let log_path = sc_app::target_log_path(&spec, &stamp);
+                // Owned, because `spec` moves into the build below.
+                let (name, label) = (spec.name.clone(), spec.label.clone());
+                let job = crate::target_builds::NewJob {
+                    target: &name,
+                    label: &label,
+                    store: &store,
+                    log_path: &log_path,
+                };
+                let triggers = apps.triggers().cloned();
+                let build = {
+                    let catalog = catalog.clone();
+                    let log_path = log_path.clone();
+                    async move {
+                        let report = sc_app::build_application_target(
+                            &catalog,
+                            &app,
+                            &spec,
+                            &log_path,
+                            triggers.as_ref(),
+                        )
+                        .await?;
+                        Ok(crate::target_builds::TargetArtifact {
+                            path: report.artifact,
+                            size: report.size,
+                            log: report.log,
+                        })
+                    }
+                };
+                let job = apps.target_builds().start(&id.to_string(), job, build);
+                Ok(HandlerResponse::ok(target_job_json(&job)))
+            }
+        }
+    });
+
+    // The latest build of a target: what the UI polls while one runs, and asks
+    // after a reload to pick up a build that is still going.
+    reg.register("getApplicationTargetBuild", {
+        let apps = apps.clone();
+        move |ctx| {
+            let apps = apps.clone();
+            async move {
+                let id = parse_app_id(ctx.path_param("id")?)?;
+                let target = ctx.path_param("target")?;
+                let job = apps
+                    .target_builds()
+                    .get(&id.to_string(), target)
+                    .ok_or_else(|| {
+                        Error::not_found(format!(
+                            "`{target}` has not been built for this application since the \
+                             server started"
+                        ))
+                    })?;
+                Ok(HandlerResponse::ok(target_job_json(&job)))
+            }
+        }
+    });
+
     // Rewrite an application's generated code on demand, without building.
     //
     // The button beside "Build", and deliberately a different button: a build
@@ -6414,6 +6497,24 @@ pub(crate) fn application_json(app: &Application) -> Json {
         "installs": sc_app::framework_factory(&app.framework.name).is_none()
             && app_source_from_config(&app.framework).is_ok_and(|s| s.build.install.is_some()),
         "has_views": app.framework.name == sc_viewpattern::SALTCORN_UI_FRAMEWORK,
+        "targets": sc_app::app_build_targets(app)
+            .into_iter()
+            .map(|t| {
+                // A state of this machine, next to the target's description: what
+                // the button needs to warn before it is pressed. A target whose
+                // paths do not resolve for this app has nothing to check; its
+                // build says why.
+                let readiness = sc_app::app_target_readiness(app, &t.name).unwrap_or_default();
+                json!({
+                    "name": t.name,
+                    "label": t.label,
+                    "readiness": {
+                        "ready": readiness.is_ready(),
+                        "missing": readiness.missing,
+                    },
+                })
+            })
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -8910,6 +9011,23 @@ fn build_log(report: &sc_app::BuildReport) -> String {
         log.push_str(&report.stderr);
     }
     log
+}
+
+/// One target build as the API answers it (`target_build_schema`).
+fn target_job_json(job: &crate::target_builds::TargetJob) -> Json {
+    json!({
+        "target": job.target,
+        "label": job.label,
+        "status": job.status.as_str(),
+        "store": job.store,
+        "log_path": job.log_path,
+        "started_at": job.started_at.to_rfc3339(),
+        "finished_at": job.finished_at.map(|t| t.to_rfc3339()),
+        "artifact": job.artifact.as_ref().map(|a| a.path.clone()),
+        "size": job.artifact.as_ref().map(|a| a.size),
+        "log": job.artifact.as_ref().map(|a| a.log.clone()),
+        "error": job.error,
+    })
 }
 
 /// The settings screen's whole payload: what may be set, and what is set

@@ -47,12 +47,14 @@ mod security;
 mod serve;
 mod streams;
 mod systemd;
+// Build targets as background jobs the admin UI polls (§13.3).
+pub mod target_builds;
 mod tls;
 pub mod translations;
 mod triggers;
 
 pub use agents::{AgentServices, install_agents, install_agents_on};
-pub use apps::{AppMounts, MountedApp, build_and_mount, mount_all, subdomain_of};
+pub use apps::{AppMounts, MountedApp, build_and_mount, mount_all, subdomain_in, subdomain_of};
 pub use backup::{
     Available as BackupContents, BACKUP_CREATE_ROUTE, BACKUP_UPLOAD_ROUTE, BackupPreferences,
     RestoreReport, Selection as BackupSelection,

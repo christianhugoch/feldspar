@@ -83,6 +83,103 @@ pub struct BuildTemplate {
     pub client_file: String,
 }
 
+/// A build a framework offers **beside** its web bundle — an Android APK — before
+/// its settings are known.
+///
+/// The web bundle is what an application *serves*; a target is something an
+/// application *produces*: one file, left in the file store for the admin to take
+/// away. So a target has a command and an artifact path, and no output directory
+/// to load and no mount to replace. It runs in the framework's source directory,
+/// after the same install step the web build runs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TargetTemplate {
+    /// The key a build request names — `android`. Unique within the framework.
+    pub name: String,
+    /// What the admin UI's button says — `Android APK`.
+    pub label: String,
+    /// The command line, split on whitespace as the build command is.
+    pub command: String,
+    /// The file the command produces, relative to the store — a template over the
+    /// framework's settings, as the build's `output` is.
+    pub artifact: PathTemplate,
+    /// Environment variables the command and its install step are started
+    /// with, on top of the server's own — the toolchain a target needs on this
+    /// machine (`ANDROID_HOME`, `JAVA_HOME`). A module fills them from its own
+    /// settings, so they are adjusted on the Modules tab, not in the shell that
+    /// started the server.
+    pub env: BTreeMap<String, String>,
+    /// What this machine must have before the target can build — checked before
+    /// a build starts and shown beside its button, so an admin hears "the Android
+    /// SDK is not configured" at once rather than from Gradle minutes later.
+    pub requires: Vec<TargetRequirement>,
+}
+
+/// One thing a build target needs from the machine it builds on.
+///
+/// Data, like the rest of a declaration, so the server can check it
+/// synchronously — when it lists an application's targets and before it starts
+/// a build — without a round trip to the module. Three kinds cover the targets
+/// in sight: an Android APK needs its SDK and JDK directories, an iOS build a
+/// Mac with `xcodebuild` and CocoaPods on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetRequirement {
+    /// What is required.
+    pub kind: TargetRequirementKind,
+    /// How to meet it, in the admin's words — "Set the Android SDK directory
+    /// under Settings → Modules → React Native." Empty when the check says
+    /// enough on its own.
+    pub hint: String,
+}
+
+/// The kinds of [`TargetRequirement`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetRequirementKind {
+    /// An environment variable the build sees — from the target's own `env`, or
+    /// else the server's — is set, and with `directory`, names a directory that
+    /// exists: `ANDROID_HOME`, `JAVA_HOME`.
+    Env {
+        /// The variable's name.
+        name: String,
+        /// Whether its value must be an existing directory.
+        directory: bool,
+    },
+    /// A program is on the build's `PATH`: `xcodebuild`, `pod`.
+    Command {
+        /// The program's name.
+        name: String,
+    },
+    /// The server runs on this operating system, as Rust names it: `macos`,
+    /// `linux`, `windows`.
+    Os {
+        /// The operating system's name.
+        name: String,
+    },
+}
+
+/// A build target resolved for one application: what to run, where, and which
+/// file it must leave behind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetSpec {
+    /// The target's key — `android`.
+    pub name: String,
+    /// The target's label — `Android APK`.
+    pub label: String,
+    /// The executable.
+    pub command: String,
+    /// Its arguments.
+    pub args: Vec<String>,
+    /// Where it runs, relative to the store: the framework's source directory.
+    pub source_dir: String,
+    /// The file it produces, relative to the store.
+    pub artifact: String,
+    /// The dependency install step the web build also runs first.
+    pub install: Option<InstallSpec>,
+    /// Environment variables the command and its install step are given.
+    pub env: BTreeMap<String, String>,
+    /// What the machine must have first; see [`TargetRequirement`].
+    pub requires: Vec<TargetRequirement>,
+}
+
 /// A framework a module supplies: everything the registry in
 /// [`crate::framework`] answers for `react`, written down instead of compiled.
 #[derive(Debug, Clone, PartialEq)]
@@ -118,6 +215,9 @@ pub struct FrameworkDecl {
     /// scaffold phase — i.e. whether an application of this framework has a
     /// project Saltcorn writes, or one the admin brought.
     pub scaffolds: bool,
+    /// The builds it offers beside the web bundle, in declaration order. Empty
+    /// for a framework that only serves.
+    pub targets: Vec<TargetTemplate>,
 }
 
 impl FrameworkDecl {
@@ -205,6 +305,51 @@ impl FrameworkDecl {
             source_dir: render(&self.build.source)?,
             output_dir: render(&self.build.output)?,
             install: self.build.install.clone(),
+        })
+    }
+
+    /// Build target `name` resolved for an application configured with `config`.
+    ///
+    /// It runs where the web build runs — the source directory — and after the
+    /// same install step, because it builds the same project. The artifact path
+    /// goes through the same traversal check every other rendered path does.
+    pub fn target_spec(&self, name: &str, config: &Attrs) -> Result<TargetSpec> {
+        let target = self
+            .targets
+            .iter()
+            .find(|t| t.name == name)
+            .ok_or_else(|| {
+                let known: Vec<&str> = self.targets.iter().map(|t| t.name.as_str()).collect();
+                Error::not_found(if known.is_empty() {
+                    format!(
+                        "framework `{}` declares no build targets, so there is no `{name}` \
+                         to build",
+                        self.name
+                    )
+                } else {
+                    format!(
+                        "framework `{}` has no build target `{name}`; it declares {}",
+                        self.name,
+                        known.join(", ")
+                    )
+                })
+            })?;
+        let bindings = self.bindings(config);
+        let render = |t: &PathTemplate| -> Result<String> {
+            let rendered = t.render_static(&bindings).map_err(|e| self.blame(e))?;
+            self.safe_path(&rendered)
+        };
+        let (command, args) = split_command(&target.command, &self.name)?;
+        Ok(TargetSpec {
+            name: target.name.clone(),
+            label: target.label.clone(),
+            command,
+            args,
+            source_dir: render(&self.build.source)?,
+            artifact: render(&target.artifact)?,
+            install: self.build.install.clone(),
+            env: target.env.clone(),
+            requires: target.requires.clone(),
         })
     }
 
@@ -509,6 +654,22 @@ pub(crate) mod tests {
             )),
             checks: vec!["typecheck".to_owned()],
             scaffolds: true,
+            targets: vec![TargetTemplate {
+                name: "android".to_owned(),
+                label: "Android APK".to_owned(),
+                command: "npm run build:android".to_owned(),
+                artifact: template("{{ project }}/android/app-release.apk"),
+                env: [("ANDROID_HOME".to_owned(), "/opt/sdk".to_owned())]
+                    .into_iter()
+                    .collect(),
+                requires: vec![TargetRequirement {
+                    kind: TargetRequirementKind::Env {
+                        name: "ANDROID_HOME".to_owned(),
+                        directory: true,
+                    },
+                    hint: "Set the Android SDK directory.".to_owned(),
+                }],
+            }],
         }
     }
 
@@ -602,6 +763,61 @@ pub(crate) mod tests {
             .to_string();
         assert!(msg.contains("climbs out"), "{msg}");
         assert!(msg.contains("vue"), "{msg}");
+    }
+
+    #[test]
+    fn a_build_target_runs_in_the_source_directory_and_names_its_artifact() {
+        let decl = vue_decl();
+        let spec = decl
+            .target_spec(
+                "android",
+                &config(&[("store", "apps"), ("project", "todo")]),
+            )
+            .unwrap();
+        assert_eq!(spec.label, "Android APK");
+        assert_eq!(spec.command, "npm");
+        assert_eq!(spec.args, ["run", "build:android"]);
+        assert_eq!(spec.source_dir, "todo");
+        assert_eq!(spec.artifact, "todo/android/app-release.apk");
+        // The web build's install step comes first: it is the same project.
+        assert_eq!(spec.install.unwrap().marker, "node_modules");
+        // And the toolchain the target declared travels with it, as do its
+        // requirements.
+        assert_eq!(spec.env["ANDROID_HOME"], "/opt/sdk");
+        assert_eq!(spec.requires.len(), 1);
+        // Blank means the store root, for an artifact as for every other path.
+        let spec = decl
+            .target_spec("android", &config(&[("store", "apps")]))
+            .unwrap();
+        assert_eq!(spec.artifact, "android/app-release.apk");
+    }
+
+    #[test]
+    fn an_unknown_target_names_the_ones_there_are() {
+        let msg = vue_decl()
+            .target_spec("ios", &config(&[("store", "apps")]))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("ios") && msg.contains("android"), "{msg}");
+        let mut plain = vue_decl();
+        plain.targets.clear();
+        let msg = plain
+            .target_spec("android", &config(&[("store", "apps")]))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("declares no build targets"), "{msg}");
+    }
+
+    #[test]
+    fn an_artifact_that_climbs_out_of_the_store_is_refused() {
+        let msg = vue_decl()
+            .target_spec(
+                "android",
+                &config(&[("store", "apps"), ("project", "../../etc")]),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("climbs out"), "{msg}");
     }
 
     #[tokio::test]

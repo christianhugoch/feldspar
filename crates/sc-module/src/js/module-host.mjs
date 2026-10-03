@@ -1147,12 +1147,27 @@ const reservedFrameworks = new Set(["react", "code"]);
  * }
  * ```
  *
+ * A framework can also offer **build targets** beside the web bundle, as the
+ * bundled `react-native` module does for its APK:
+ *
+ * ```js
+ * targets: {
+ *   android: {
+ *     label: "Android APK",
+ *     command: "npm run build:android",
+ *     artifact: "{{ project }}/android/…/app-release.apk",
+ *     env: { ANDROID_HOME: configuration.android_home },
+ *     requires: [{ env: "ANDROID_HOME", directory: true, hint: "…" }],
+ *   },
+ * },
+ * ```
+ *
  * Read the two ways every other facility key is read — a plain object, and a
  * function of the module's own configuration — because that is v1's `withCfg`
  * rule and a plugin author should not have to learn a third.
  *
  * What crosses is the **declaration**, evaluated once: the settings, the path
- * templates, the CSP, the prompt. `scaffold` and `runtime` stay here and are
+ * templates, the CSP, the prompt, the targets. `scaffold` and `runtime` stay here and are
  * called again through the `framework_files` op — they are the only part that
  * depends on the application, which is a thing the plugin author did not know.
  *
@@ -1210,6 +1225,7 @@ async function evalFrameworks(plugin, configuration) {
       builder_prompt: typeof impl.builder_prompt === "string" ? impl.builder_prompt : "",
       checks: Array.isArray(impl.checks) ? impl.checks.filter((c) => typeof c === "string") : [],
       scaffolds: typeof impl.scaffold === "function",
+      targets: impl.targets && typeof impl.targets === "object" ? impl.targets : {},
     });
   }
   return { frameworks, set, issues };

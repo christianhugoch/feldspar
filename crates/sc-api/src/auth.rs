@@ -29,6 +29,13 @@ use crate::schema::{StructField, TypeSchema};
 pub const CSRF_COOKIE: &str = "sc_csrf";
 /// Header a mutating request must echo the [`CSRF_COOKIE`] value in.
 pub const CSRF_HEADER: &str = "x-csrf-token";
+/// Header a client sends, with the value [`NATIVE_CLIENT`], when it is **not a
+/// browser** — the generated client running in a React Native app, where there
+/// is no `document`. A native app's login gets a session cookie that outlives
+/// the app being closed; a browser's keeps ending with the browser.
+pub const CLIENT_KIND_HEADER: &str = "x-feldspar-client";
+/// The [`CLIENT_KIND_HEADER`] value a native app sends.
+pub const NATIVE_CLIENT: &str = "native";
 
 /// Email + password, the body of a login (and of first-user creation).
 pub fn credentials_schema() -> TypeSchema {

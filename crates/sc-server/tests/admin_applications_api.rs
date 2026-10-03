@@ -335,6 +335,33 @@ async fn applications_are_managed_over_http_and_serve_without_a_restart() -> sc_
     // A `code` app states its source in five settings; the listing still reports
     // it in one shape, which is the whole point of deriving it server-side.
     assert_eq!(list[0]["source"], json!({ "store": "apps", "path": "web" }));
+    // A built-in framework only serves: it offers no build targets, and asking it
+    // for one is a 404 that says so rather than a build of something else.
+    assert_eq!(list[0]["targets"], json!([]));
+    let (status, err) = admin
+        .send(
+            "POST",
+            &format!("/api/applications/{id}/targets/android/build"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{err}");
+    assert!(
+        err["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("declares no build targets"),
+        "{err}"
+    );
+    // …and there is no build of it to poll, either.
+    let (status, _) = admin
+        .send(
+            "GET",
+            &format!("/api/applications/{id}/targets/android/build"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
     // Saved but unbuilt: the subdomain does not serve the app yet.
     let mut app = Client::new(router.clone(), APP_HOST);

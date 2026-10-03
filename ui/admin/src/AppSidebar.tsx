@@ -19,8 +19,12 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import {
   buildApplication,
+  buildApplicationTarget,
   buildStatus,
+  resumeTargetBuilds,
   showAppOutcome,
+  targetBuilding,
+  targetNotReadyNotice,
   useAppActions,
 } from "./appActions";
 import {
@@ -28,15 +32,18 @@ import {
   appNavLinks,
   builderAgentFor,
   linkActive,
+  linkKey,
   onApplicationsList,
   type AppNavLink,
 } from "./appNav";
 import { splitRoute } from "./builder";
 import type { ListAgentsResponse, ListApplicationsResponse } from "./client";
 import {
+  IconAlertTriangle,
   IconApps,
   IconBooks,
   IconCode,
+  IconDeviceMobile,
   IconExternalLink,
   IconFile,
   IconHammer,
@@ -56,6 +63,7 @@ const LINK_ICONS: Record<AppNavLink["id"], ReactNode> = {
   "app-link": <IconExternalLink />,
   "edit-code": <IconCode />,
   build: <IconHammer />,
+  target: <IconDeviceMobile />,
   chat: <IconMessagePlus />,
   views: <IconLayoutDashboard />,
   pages: <IconFile />,
@@ -130,6 +138,16 @@ export function ApplicationsNav({ route, folded }: { route: string; folded: bool
   }, [open]);
 
   const current = apps?.find((app) => app.id === currentId) ?? null;
+
+  // A target build still running on the server — started before a reload, or in
+  // another tab — is picked up when its application is the current one, so its
+  // button says it is building and its news arrives here. Keyed by the app and
+  // its targets rather than the object, which is refetched on every route.
+  const resumeKey = current ? `${current.id}:${current.targets.map((t) => t.name).join(",")}` : "";
+  useEffect(() => {
+    if (current) void resumeTargetBuilds(current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeKey]);
   const label = current
     ? current.name
     : apps && apps.length === 0
@@ -207,20 +225,26 @@ export function ApplicationsNav({ route, folded }: { route: string; folded: bool
       {current &&
         links.map((link) => (
           <AppLink
-            key={link.id}
+            key={linkKey(link)}
             link={link}
             app={current}
             active={linkActive(link, path)}
             folded={folded}
-            busy={link.id === "build" && buildStatus(actions, current.id) === "building"}
+            busy={
+              link.id === "build"
+                ? buildStatus(actions, current.id) === "building"
+                : link.target
+                  ? targetBuilding(actions, current.id, link.target.name)
+                  : false
+            }
           />
         ))}
     </>
   );
 }
 
-/** One of the current application's links: somewhere to go, or (Build)
- * something to do, which reports back through `appActions`. */
+/** One of the current application's links: somewhere to go, or (Build, Build
+ * a target) something to do, which reports back through `appActions`. */
 function AppLink({
   link,
   app,
@@ -234,16 +258,29 @@ function AppLink({
   folded: boolean;
   busy: boolean;
 }) {
+  const { t } = useT();
   const text = busy ? "Building…" : link.label;
+  // A target this server cannot build yet: the button says so with a warning
+  // and its tooltip, and pressing it shows what is missing instead of building.
+  const missing = link.target?.readiness.missing ?? [];
   const content = (
     <>
       <span className="nav-link-icon d-md-none d-lg-inline-block">{LINK_ICONS[link.id]}</span>
       <span className="nav-link-title">{text}</span>
+      {missing.length > 0 && (
+        <span className="ms-auto text-warning" aria-label={t("setup needed")}>
+          <IconAlertTriangle />
+        </span>
+      )}
     </>
   );
-  const title = folded ? text : link.id === "build"
-    ? "Rewrite this application's generated client, hooks and schema from its current definition, then build it"
-    : undefined;
+  const title = missing.length
+    ? missing.join("\n")
+    : folded
+      ? text
+      : link.id === "build"
+        ? "Rewrite this application's generated client, hooks and schema from its current definition, then build it"
+        : undefined;
 
   return (
     <li className={active ? "nav-item active" : "nav-item"}>
@@ -264,7 +301,13 @@ function AppLink({
           className="nav-link w-100"
           disabled={busy}
           title={title}
-          onClick={() => void buildApplication(app)}
+          onClick={() =>
+            void (link.target
+              ? missing.length
+                ? showAppOutcome(targetNotReadyNotice(app, link.target))
+                : buildApplicationTarget(app, link.target)
+              : buildApplication(app))
+          }
         >
           {content}
         </button>

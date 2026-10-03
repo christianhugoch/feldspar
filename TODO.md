@@ -777,6 +777,36 @@ end users (goals document, the introduction's "application").
 
 ---
 
+# React Native: Android APK build targets (branch `react-native-plugin`)
+
+Outside the analytics milestones. See CHANGELOG for what each item covers.
+
+- [x] RN.1 `plugins/react-native`: an Expo project as a bundled application framework, with
+      "Android SDK" / "Java" module settings and a "Server URL for the mobile app".
+- [x] RN.2 Build targets: a framework declares them with their requirements; the admin sidebar
+      offers "Build <target>" and says what is missing before anything runs.
+- [x] RN.3 Target builds run as background jobs the admin UI polls; logs and the artifact go to
+      the application's file store.
+- [x] RN.4 Login from a native app: the CSRF token as a response header, a session cookie that
+      outlives the app, and recovery of the token after the app is reopened.
+- [x] RN.5 Extra base domains (`extra_base_domains`), so a phone or emulator reaches the server.
+- [ ] RN.6 A build of the same project while an APK build runs. Only main's process-wide
+      `BUILD_LOCK` exists, and an APK build holds it only for its install: a web build, a deep
+      clean or a rewrite of `src/feldspar/` during an APK build can corrupt the APK. Needs a
+      per-project lock that does not hold other builds for the length of a Gradle build.
+- [ ] RN.7 Links to sibling applications (`RequestLinks::app_origin`) use `base_domain` even for
+      a request that arrived on an extra base domain.
+- [ ] RN.8 Cleartext HTTP is allowed in the APK only if the app's URL was `http://` when it was
+      scaffolded; changing `mobile_url` to `http://` later breaks every API call at runtime.
+- [ ] RN.9 The generated client takes "no `document`" to mean native, which is also true in a
+      browser Web Worker; a login from a worker gets the lasting session cookie.
+- [ ] RN.10 `listApplications` checks every target's readiness (environment, directories,
+      `PATH`) on every call; compute it on demand or cache it.
+- [ ] RN.11 `file_tail` reads a whole build log to keep its last 32 KB; seek to the end instead.
+- [ ] RN.12 A build dropped while the server runs (a future "cancel build", or a server killed
+      on its own) kills only `npm`, not the `sh` / `gradlew` / Gradle under it: run the command
+      in its own process group and kill the group.
+
 # Not in a milestone yet
 
 The goals document describes these, but its milestones do not schedule them. They are listed

@@ -127,6 +127,7 @@ async-trait.workspace = true
 # the chat socket both ride on (§12.1, §11.4).
 futures.workspace = true
 axum-extra.workspace = true
+time.workspace = true
 tower = { workspace = true, features = ["util"] }
 tower-http.workspace = true
 matchit.workspace = true

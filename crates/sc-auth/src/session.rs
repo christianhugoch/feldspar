@@ -272,6 +272,13 @@ impl SessionStore {
         }
     }
 
+    /// How long a session lasts from login — what its cookie's `Max-Age` says,
+    /// so a client that keeps cookies across restarts (a phone app) keeps the
+    /// session exactly as long as the server honours it.
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
     /// Start a session for `user` and return its token (to be set as a cookie).
     pub async fn login(&self, user: User) -> Result<String> {
         let token = new_token();

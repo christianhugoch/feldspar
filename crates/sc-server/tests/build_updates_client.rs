@@ -75,6 +75,7 @@ fn shell_framework() -> FrameworkDecl {
         builder_prompt: None,
         checks: Vec::new(),
         scaffolds: true,
+        targets: Vec::new(),
     }
 }
 

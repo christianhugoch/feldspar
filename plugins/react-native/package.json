@@ -1,0 +1,8 @@
+{
+  "name": "@feldspar/react-native",
+  "version": "0.1.0",
+  "description": "The React Native (web) application framework for Saltcorn Feldspar.",
+  "main": "index.js",
+  "license": "MIT",
+  "private": true
+}

@@ -1,0 +1,11 @@
+{
+  "name": "@feldspar/react-native",
+  "language": "javascript",
+  "title": "React Native (web)",
+  "description": "Build an application's UI with React Native components, rendered in the browser by react-native-web: the same scaffold, typed client and build, in React Native's idiom.",
+  "supplies": [
+    "An application framework, \"React Native (web)\": pick it when creating an application, and Saltcorn writes a React Native project for the web — Vite, react-native-web, a screen and typed hooks for every table the app exposes."
+  ],
+  "installs": [],
+  "permissions": {}
+}

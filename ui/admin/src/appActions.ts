@@ -18,10 +18,13 @@
 import { useSyncExternalStore } from "react";
 
 import { api, errorMessage } from "./api";
-import type { ListApplicationsResponse } from "./client";
+import type { GetApplicationTargetBuildResponse, ListApplicationsResponse } from "./client";
+import { formatSize } from "./fileSelection";
 import type { Notice } from "./notice";
 
 type AppItem = ListApplicationsResponse[number];
+/** One build of a target, as the server reports it while it runs and after. */
+type TargetJob = GetApplicationTargetBuildResponse;
 
 /** Per-app build state. */
 export type BuildStatus = "unbuilt" | "building" | "built" | "failed";
@@ -33,6 +36,10 @@ export type AppActionsState = {
    * build status: regenerating does not build, so it must not claim an app is
    * built — nor forget that it was. */
   updating: Record<string, true>;
+  /** Target builds in progress, keyed by {@link targetKey}. Separate from the
+   * build status: an APK is a file to take away, and building one changes
+   * nothing the application serves. */
+  targets: Record<string, true>;
   /** The most recent outcome, shown until dismissed. */
   outcome: Notice | null;
   /** Bumped whenever the set of applications (or their agents) changes without
@@ -43,6 +50,7 @@ export type AppActionsState = {
 export const INITIAL_APP_ACTIONS: AppActionsState = {
   build: {},
   updating: {},
+  targets: {},
   outcome: null,
   version: 0,
 };
@@ -113,6 +121,90 @@ export function updateFinished(
   };
 }
 
+/** The key one application's one target is tracked under. */
+export function targetKey(appId: string, target: string): string {
+  return `${appId}/${target}`;
+}
+
+/** Whether a target of an application is being built. */
+export function targetBuilding(state: AppActionsState, appId: string, target: string): boolean {
+  return Boolean(state.targets[targetKey(appId, target)]);
+}
+
+/** A target build has started. */
+export function targetStarted(
+  state: AppActionsState,
+  appId: string,
+  target: string,
+): AppActionsState {
+  return {
+    ...state,
+    targets: { ...state.targets, [targetKey(appId, target)]: true },
+    outcome: null,
+  };
+}
+
+/** Why a target is not ready to build here, as the news: everything missing,
+ * one line each, so the admin fixes it all before pressing the button again. The
+ * server refuses the same build with the same reasons; this says so without
+ * asking. */
+export function targetNotReadyNotice(
+  app: Pick<AppItem, "name">,
+  target: { label: string; readiness: { missing: string[] } },
+): Notice {
+  return {
+    ok: false,
+    title: `${target.label} cannot be built yet — ${app.name}`,
+    text: target.readiness.missing.map((line) => `• ${line}`).join("\n"),
+  };
+}
+
+/** What a finished job means for the news: the file, or why there is none. */
+export type TargetResult =
+  | { ok: true; store: string; artifact: string; size: number; logPath: string; log: string }
+  | { ok: false; error: string };
+
+/** A finished job as a {@link TargetResult}. A job that says it succeeded but
+ * names no artifact is reported as the failure it is, not as a file of size 0. */
+export function jobResult(job: TargetJob): TargetResult {
+  if (job.status === "succeeded" && job.artifact) {
+    return {
+      ok: true,
+      store: job.store,
+      artifact: job.artifact,
+      size: job.size ?? 0,
+      logPath: job.log_path,
+      log: job.log ?? "",
+    };
+  }
+  return { ok: false, error: job.error || `The build ended as "${job.status}".` };
+}
+
+/** A target build has finished. The news leads with where the file is, because
+ * that is what the admin wants next; then where the whole log is, and its end. */
+export function targetFinished(
+  state: AppActionsState,
+  app: Pick<AppItem, "id" | "name">,
+  target: { name: string; label: string },
+  result: TargetResult,
+): AppActionsState {
+  const targets = { ...state.targets };
+  delete targets[targetKey(app.id, target.name)];
+  return {
+    ...state,
+    targets,
+    outcome: result.ok
+      ? {
+          ok: true,
+          title: `${target.label} built — ${app.name}`,
+          text:
+            `${result.artifact} (${formatSize(result.size)}) in file store "${result.store}". ` +
+            `Download it from Files.\nThe whole log: ${result.logPath}\n\n${result.log.trim()}`,
+        }
+      : { ok: false, title: `${target.label} build failed — ${app.name}`, text: result.error },
+  };
+}
+
 /* ------------------------------------------------------------------ *
  * The store.
  * ------------------------------------------------------------------ */
@@ -150,6 +242,84 @@ export async function buildApplication(app: AppItem): Promise<void> {
     publish(buildFinished(state, app, { ok: true, log: report.log }));
   } catch (err) {
     publish(buildFinished(state, app, { ok: false, error: errorMessage(err, "The build failed.") }));
+  }
+}
+
+/** How often a running target build is asked how it is going. */
+const POLL_MS = 3000;
+
+/** Target builds this page is already following, so a build is polled once
+ * however many buttons and screens ask about it. */
+const following = new Set<string>();
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Poll a running job until it is done, then publish the news. */
+async function follow(
+  app: AppItem,
+  target: { name: string; label: string },
+  job: TargetJob,
+): Promise<void> {
+  const key = targetKey(app.id, target.name);
+  if (following.has(key)) return;
+  following.add(key);
+  try {
+    let current = job;
+    while (current.status === "running") {
+      await sleep(POLL_MS);
+      current = await api.getApplicationTargetBuild(app.id, target.name);
+    }
+    publish(targetFinished(state, app, target, jobResult(current)));
+  } catch (err) {
+    publish(
+      targetFinished(state, app, target, {
+        ok: false,
+        error: errorMessage(err, `Lost track of the ${target.label} build.`),
+      }),
+    );
+  } finally {
+    following.delete(key);
+  }
+}
+
+/** Build one of the targets an application's framework offers — an Android APK.
+ * The server starts it and answers at once; this then polls until it is done, so
+ * a build of a quarter of an hour is not one request any proxy may cut off. */
+export async function buildApplicationTarget(
+  app: AppItem,
+  target: { name: string; label: string },
+): Promise<void> {
+  publish(targetStarted(state, app.id, target.name));
+  try {
+    const job = await api.buildApplicationTarget(app.id, target.name);
+    await follow(app, target, job);
+  } catch (err) {
+    publish(
+      targetFinished(state, app, target, {
+        ok: false,
+        error: errorMessage(err, `The ${target.label} build could not be started.`),
+      }),
+    );
+  }
+}
+
+/** Pick up the builds of `app`'s targets that are still running — after a
+ * reload, or in a second tab — so their buttons say so and their news arrives.
+ * A target that was never built, or whose build has finished, needs nothing. */
+export async function resumeTargetBuilds(app: AppItem): Promise<void> {
+  for (const target of app.targets) {
+    if (targetBuilding(state, app.id, target.name)) continue;
+    let job: TargetJob;
+    try {
+      job = await api.getApplicationTargetBuild(app.id, target.name);
+    } catch {
+      continue;
+    }
+    if (job.status !== "running") continue;
+    publish(targetStarted(state, app.id, target.name));
+    void follow(app, target, job);
   }
 }
 

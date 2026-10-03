@@ -300,6 +300,11 @@ Notes on that file, all of which §7 covers in full:
   environment writes the application's real URL into the documentation it generates.
 - **Without `base_domain` no application is served at all**, only the admin UI: the
   server has no way to address an app.
+- `extra_base_domains = ["10.0.2.2.nip.io", "192.168.1.50.nip.io"]` (or
+  `--extra-base-domain`, repeatable) makes every application answer under those domains
+  too — `todo.10.0.2.2.nip.io` is the app `todo`. That is how an Android emulator
+  (`10.0.2.2` is the host machine) or a phone on the LAN reaches a development server;
+  bind to `0.0.0.0` for the second. An application's URL stays on `base_domain`.
 - A remote database goes in as a URL instead of the socket parts:
   `url = "postgres://feldspar:change-me@db.internal:5432/feldspar"`.
 - Add a `[environments.staging]` section when you have a second database, and select
@@ -1060,6 +1065,7 @@ can read it — including a group that is not its own.
 | `--session-ttl-hours <n>` | session lifetime | `24` |
 | `--secure-cookies` | set the `Secure` attribute on session/CSRF cookies (use behind HTTPS) | off |
 | `--base-domain <domain>` | domain that applications are served under: an app with subdomain `blog` is served at `blog.<domain>` | none (app routing off) |
+| `--extra-base-domain <domain>` | a further domain the same applications answer under (repeatable): `blog.<domain>` is the app `blog` too | none |
 | `--code-workers <n>` | V8 isolates serving `run_js_code` trigger bodies | `2` |
 | `--code-max-inflight <n>` | runs each of those isolates keeps resident at once | `256` |
 | `--python <auto\|off>` | whether this process starts its Python interpreter (never in a binary built without the `python` feature) | `auto` |

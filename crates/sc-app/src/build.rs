@@ -15,6 +15,7 @@
 //! and [`build_app`] resolves the store through the [`Catalog`] and delegates to
 //! it.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output};
@@ -31,10 +32,13 @@ use tokio::sync::Mutex;
 use crate::api::app_endpoints_with;
 use crate::application::{Application, FrameworkRef};
 use crate::build_cache::build_key;
-use crate::declared::{FrameworkDecl, FrameworkSet, installed_frameworks};
+use crate::declared::{
+    FrameworkDecl, FrameworkSet, TargetRequirement, TargetRequirementKind, TargetSpec,
+    installed_frameworks,
+};
 use crate::framework::{
     AssetBundle, BuildSpec, CFG_CLIENT, CFG_COMMAND, CFG_OUTPUT, CFG_SOURCE, CFG_STORE,
-    CODE_FRAMEWORK, CodeFramework, code_config_spec, validate_config_structure_in,
+    CODE_FRAMEWORK, CodeFramework, InstallSpec, code_config_spec, validate_config_structure_in,
     validate_framework_config_structure,
 };
 use crate::react::{
@@ -638,6 +642,424 @@ pub async fn build_code_framework(
     Ok(CodeFramework::new(name, report.bundle).with_build(source.build.clone()))
 }
 
+/// One build target an application's framework offers — what a button says and
+/// what a build request names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetInfo {
+    /// The key — `android`.
+    pub name: String,
+    /// The label — `Android APK`.
+    pub label: String,
+}
+
+/// The build targets `app`'s framework declares, in declaration order. Empty for
+/// the built-in frameworks, which only serve.
+pub fn app_build_targets(app: &Application) -> Vec<TargetInfo> {
+    installed_frameworks()
+        .find(&app.framework.name)
+        .map(|decl| {
+            decl.targets
+                .iter()
+                .map(|t| TargetInfo {
+                    name: t.name.clone(),
+                    label: if t.label.trim().is_empty() {
+                        t.name.clone()
+                    } else {
+                        t.label.clone()
+                    },
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The directory a target's build logs are written to, inside the project —
+/// `todo/build-logs/android-20260927-101500.log`. In the file store, so the admin
+/// opens a running build's log in the file manager and a finished one stays
+/// there to read; not in git, which is the project's `.gitignore`'s business.
+const TARGET_LOG_DIR: &str = "build-logs";
+
+/// How many logs of one target are kept; older ones are removed as a new build
+/// starts. An APK build logs megabytes, and ten is enough history to compare a
+/// failing build with the last one that worked.
+const TARGET_LOGS_KEPT: usize = 10;
+
+/// How much of a finished target build's log a report carries. The whole of it
+/// is in the file; this is the part a response and a toast can hold.
+const TARGET_LOG_TAIL_BYTES: usize = 32 * 1024;
+
+/// The outcome of a successful target build: the file it left in the store.
+#[derive(Debug, Clone)]
+pub struct TargetReport {
+    /// The target's key — `android`.
+    pub target: String,
+    /// The target's label — `Android APK`.
+    pub label: String,
+    /// The file store the artifact and the log are in.
+    pub store: String,
+    /// The artifact's path, relative to the store — where the file manager finds it.
+    pub artifact: String,
+    /// The artifact's size in bytes.
+    pub size: u64,
+    /// Whether the source store is a git repository.
+    pub git_repo: bool,
+    /// The build's log, relative to the store: the install and the command,
+    /// written as they ran.
+    pub log_path: String,
+    /// The end of that log.
+    pub log: String,
+    /// Whether dependencies were installed first.
+    pub installed: bool,
+}
+
+/// Target `target` of `app`, resolved against the app's settings — or the
+/// reason there is none to build: a framework that declares no targets, or a
+/// name it does not declare. Asked before a build starts, so a wrong name is a
+/// refusal of the request rather than a job that fails.
+pub fn app_target_spec(app: &Application, target: &str) -> Result<TargetSpec> {
+    let set = installed_frameworks();
+    let decl = set.find(&app.framework.name).ok_or_else(|| {
+        Error::not_found(format!(
+            "framework `{}` declares no build targets, so there is no `{target}` to build",
+            app.framework.name
+        ))
+    })?;
+    decl.target_spec(target, &app.framework.config)
+}
+
+/// Whether this machine can build a target now — a **state**, checked against
+/// the file system and the environment each time it is asked, not a property of
+/// the target. Its opposite is the list of what is missing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TargetReadiness {
+    /// What the target requires that this machine does not have, one sentence
+    /// each with its hint — empty when it is ready.
+    pub missing: Vec<String>,
+}
+
+impl TargetReadiness {
+    /// Whether nothing is missing.
+    pub fn is_ready(&self) -> bool {
+        self.missing.is_empty()
+    }
+}
+
+/// Whether this machine can build `spec`: each of its requirements checked
+/// against the environment the build would see — the target's own `env` first,
+/// then the server's.
+///
+/// Asked before a build starts, so a missing SDK is a refusal the admin reads at
+/// once rather than a Gradle failure minutes later, and asked when the targets
+/// are listed, so the button can say so before it is pressed.
+pub fn target_readiness(spec: &TargetSpec) -> TargetReadiness {
+    readiness_in(spec, |name| std::env::var(name).ok(), std::env::consts::OS)
+}
+
+/// [`target_readiness`] of target `target` of `app`.
+pub fn app_target_readiness(app: &Application, target: &str) -> Result<TargetReadiness> {
+    Ok(target_readiness(&app_target_spec(app, target)?))
+}
+
+/// Refuse `spec` when this machine lacks something it needs, naming everything
+/// missing at once: an admin who fixes one setting should not discover the next
+/// only on the next attempt. What the server asks before it starts a build job,
+/// and [`run_target`] again before it runs anything.
+pub fn require_target_ready(spec: &TargetSpec) -> Result<()> {
+    let readiness = target_readiness(spec);
+    if readiness.is_ready() {
+        return Ok(());
+    }
+    Err(Error::invalid(format!(
+        "the {} cannot be built on this server yet:\n- {}",
+        spec.label,
+        readiness.missing.join("\n- ")
+    )))
+}
+
+/// [`target_readiness`] against a given server environment and operating
+/// system, so it is testable without depending on the machine running the test.
+fn readiness_in(
+    spec: &TargetSpec,
+    server_env: impl Fn(&str) -> Option<String>,
+    os: &str,
+) -> TargetReadiness {
+    let var = |name: &str| {
+        spec.env
+            .get(name)
+            .cloned()
+            .or_else(|| server_env(name))
+            .filter(|v| !v.trim().is_empty())
+    };
+    TargetReadiness {
+        missing: spec
+            .requires
+            .iter()
+            .filter_map(|requirement| why_missing(requirement, &var, os))
+            .collect(),
+    }
+}
+
+/// Why one requirement is not met, with its hint — or `None` when it is.
+fn why_missing(
+    requirement: &TargetRequirement,
+    var: &impl Fn(&str) -> Option<String>,
+    os: &str,
+) -> Option<String> {
+    let problem = match &requirement.kind {
+        TargetRequirementKind::Env { name, directory } => match var(name) {
+            None => format!("`{name}` is not set."),
+            Some(value) if *directory && !Path::new(&value).is_dir() => {
+                format!("`{name}` is `{value}`, which is not a directory.")
+            }
+            Some(_) => return None,
+        },
+        TargetRequirementKind::Command { name } => {
+            let path = var("PATH").unwrap_or_default();
+            let found = std::env::split_paths(&path).any(|dir| {
+                let candidate = dir.join(name);
+                candidate.is_file() && is_executable(&candidate)
+            });
+            if found {
+                return None;
+            }
+            format!("`{name}` is not on the PATH.")
+        }
+        TargetRequirementKind::Os { name } => {
+            if os == name {
+                return None;
+            }
+            format!("This target builds only on {name}; this server runs on {os}.")
+        }
+    };
+    Some(match requirement.hint.trim() {
+        "" => problem,
+        hint => format!("{problem} {hint}"),
+    })
+}
+
+/// Whether a file may be executed — its permission bits, where there are any.
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+/// Where a build of `spec` started at `stamp` (e.g. `20260927-101500`) writes its
+/// log, relative to the store: `<source>/build-logs/<target>-<stamp>.log`.
+pub fn target_log_path(spec: &TargetSpec, stamp: &str) -> String {
+    crate::declared::clean_path(&format!(
+        "{}/{TARGET_LOG_DIR}/{}-{stamp}.log",
+        spec.source_dir, spec.name
+    ))
+}
+
+/// Build `spec` for `app`: regenerate its client and runtime, as a web build
+/// does, then run the target's command, logging to `log_path`, and check it
+/// left its artifact.
+///
+/// The generated code is rewritten first for the reason [`build_application`]
+/// rewrites it: an APK bundles the project's JavaScript, which imports the typed
+/// client, so a target built against a stale client ships a stale contract.
+/// Nothing is mounted — a target is a file to take away, not something this
+/// server serves.
+pub async fn build_application_target(
+    cat: &Catalog,
+    app: &Application,
+    spec: &TargetSpec,
+    log_path: &str,
+    dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
+) -> Result<TargetReport> {
+    let source = app_source_from_config(&app.framework)?;
+    let store = cat.require_file_store(&source.store.0)?;
+    let root = store_root(&store, &source)?;
+    emit_generated(cat, app, &source, dispatcher).await?;
+
+    let mut report = run_target(spec, &root, log_path).await?;
+    report.store = source.store.0.clone();
+    report.git_repo = store.is_git_repo();
+    Ok(report)
+}
+
+/// Run `spec` with `root` as the file-store root: install when needed, run the
+/// command in the source directory with its output going **straight into the
+/// log** at `log_path`, and check the artifact is there.
+///
+/// Written as it runs rather than collected and written at the end, so a build
+/// that takes a quarter of an hour can be followed in the file manager, and a
+/// server that stops mid-build leaves the log of how far it got. A failure's
+/// error carries the log's last lines and names the file for the rest.
+///
+/// Catalog-free, as [`run_build`] is, so it is testable without a database.
+/// [`TargetReport::store`] is empty and [`TargetReport::git_repo`] `false` here.
+pub async fn run_target(spec: &TargetSpec, root: &Path, log_path: &str) -> Result<TargetReport> {
+    let source_dir = resolve_under(root, &spec.source_dir)?;
+    if !source_dir.is_dir() {
+        return Err(Error::config(format!(
+            "build source directory {} does not exist",
+            source_dir.display()
+        )));
+    }
+    require_target_ready(spec)?;
+    let log_file = resolve_under(root, log_path)?;
+    let mut log = open_target_log(&log_file, spec)?;
+    let line = std::iter::once(spec.command.as_str())
+        .chain(spec.args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let failed = |status: String| {
+        Error::config(format!(
+            "the {} build `{line}` failed in {} with {status}\n{}\nThe whole log is {log_path} in \
+             the file store.",
+            spec.label,
+            source_dir.display(),
+            last_bytes(&file_tail(&log_file, OUTPUT_TAIL_BYTES)).trim_end()
+        ))
+    };
+
+    use std::io::Write as _;
+    // The install shares the installer's cache with every other build, so it
+    // waits its turn under [`BUILD_LOCK`]; the native build after it does not,
+    // or one APK would hold every web build for a quarter of an hour.
+    let install = {
+        let _serialised = BUILD_LOCK.lock().await;
+        run_install(spec.install.as_ref(), &source_dir, &spec.env).await
+    };
+    let install_log = match install {
+        Ok(output) => output,
+        Err(e) => {
+            let _ = writeln!(log, "{}", sc_error::format_chain(&e));
+            return Err(failed("its install step failing".to_owned()));
+        }
+    };
+    if let Some(output) = &install_log {
+        let _ = writeln!(log, "{output}");
+    }
+    let _ = writeln!(log, "$ {line}");
+
+    let status = Command::new(&spec.command)
+        .args(&spec.args)
+        .envs(&spec.env)
+        .current_dir(&source_dir)
+        .stdout(log.try_clone().with_context(|| log_path.to_owned())?)
+        .stderr(log.try_clone().with_context(|| log_path.to_owned())?)
+        // A server that stops takes its builds with it, rather than leaving a
+        // Gradle nobody will read the result of.
+        .kill_on_drop(true)
+        .status()
+        .await
+        .with_context(|| {
+            format!(
+                "launching the {} build `{line}` in {}",
+                spec.label,
+                source_dir.display()
+            )
+        })?;
+    if !status.success() {
+        return Err(failed(status.to_string()));
+    }
+
+    // A command that succeeded without producing the file is a declaration and a
+    // project that disagree about where the file goes; saying so names the path
+    // the admin would otherwise look for in vain.
+    let artifact = resolve_under(root, &spec.artifact)?;
+    let size = std::fs::metadata(&artifact)
+        .ok()
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .ok_or_else(|| {
+            Error::config(format!(
+                "the {} build `{line}` succeeded but left no file at {}",
+                spec.label,
+                artifact.display()
+            ))
+        })?;
+
+    Ok(TargetReport {
+        target: spec.name.clone(),
+        label: spec.label.clone(),
+        store: String::new(),
+        artifact: spec.artifact.clone(),
+        size,
+        git_repo: false,
+        log_path: log_path.to_owned(),
+        log: file_tail(&log_file, TARGET_LOG_TAIL_BYTES),
+        installed: install_log.is_some(),
+    })
+}
+
+/// Create a target build's log file, and remove the oldest logs of the same
+/// target beyond [`TARGET_LOGS_KEPT`]. Names sort by their timestamp, so the
+/// oldest are the first in order.
+fn open_target_log(path: &Path, spec: &TargetSpec) -> Result<std::fs::File> {
+    let dir = path.parent().ok_or_else(|| {
+        Error::invalid(format!(
+            "a build log at {} has no directory",
+            path.display()
+        ))
+    })?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let mut older: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| is_target_log(n, &spec.name))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    older.sort();
+    // The one about to be written counts towards the ten.
+    let excess = (older.len() + 1).saturating_sub(TARGET_LOGS_KEPT);
+    for old in older.iter().take(excess) {
+        let _ = std::fs::remove_file(old);
+    }
+    std::fs::File::create(path)
+        .with_context(|| format!("creating the build log {}", path.display()))
+}
+
+/// Whether `file` is one of target `target`'s logs: exactly
+/// `<target>-<YYYYMMDD>-<HHMMSS>.log`, as [`target_log_path`] names them with the
+/// stamp the server writes.
+///
+/// Exact rather than a prefix, because a prefix is another target's logs as soon
+/// as two names share one: `android-` also begins `android-debug-…`, and pruning
+/// `android`'s history must not delete `android-debug`'s.
+fn is_target_log(file: &str, target: &str) -> bool {
+    let Some(stamp) = file
+        .strip_prefix(target)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .and_then(|rest| rest.strip_suffix(".log"))
+    else {
+        return false;
+    };
+    let bytes = stamp.as_bytes();
+    bytes.len() == 15
+        && bytes[8] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 8 || b.is_ascii_digit())
+}
+
+/// The last `bytes` of a file, as text — what a report or an error quotes from
+/// a log whose whole is on disk. Empty when the file cannot be read.
+fn file_tail(path: &Path, bytes: usize) -> String {
+    let Ok(data) = std::fs::read(path) else {
+        return String::new();
+    };
+    let start = data.len().saturating_sub(bytes);
+    String::from_utf8_lossy(&data[start..]).into_owned()
+}
+
 /// Run `spec` with `root` as the file-store root: invoke the bundler in the
 /// source directory and load the bundle from the output directory.
 ///
@@ -655,7 +1077,7 @@ pub async fn run_build(spec: &BuildSpec, root: &Path) -> Result<BuildReport> {
     // One build at a time, install included; see [`BUILD_LOCK`].
     let _serialised = BUILD_LOCK.lock().await;
 
-    let install_log = run_install(spec, &source_dir).await?;
+    let install_log = run_install(spec.install.as_ref(), &source_dir, &BTreeMap::new()).await?;
 
     let output = run_bundler(spec, &source_dir).await.with_context(|| {
         format!(
@@ -885,8 +1307,12 @@ static BUILD_LOCK: Mutex<()> = Mutex::const_new(());
 /// (§16), exactly as a failed build is: "npm install failed" tells an admin
 /// nothing, while the registry error, the missing peer dependency or the ENOSPC
 /// underneath it tells them what to do.
-async fn run_install(spec: &BuildSpec, source_dir: &Path) -> Result<Option<String>> {
-    let Some(install) = &spec.install else {
+async fn run_install(
+    install: Option<&InstallSpec>,
+    source_dir: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<Option<String>> {
+    let Some(install) = install else {
         return Ok(None);
     };
     if source_dir.join(&install.marker).exists() {
@@ -896,6 +1322,7 @@ async fn run_install(spec: &BuildSpec, source_dir: &Path) -> Result<Option<Strin
     let line = format!("{} {}", install.command, install.args.join(" "));
     let output = Command::new(&install.command)
         .args(&install.args)
+        .envs(env)
         .current_dir(source_dir)
         .output()
         .await
@@ -1373,6 +1800,317 @@ mod tests {
         let deep = fw.serve(&AppRequest::get("/posts/42"));
         assert_eq!(deep.status, 200);
         assert_eq!(&deep.body[..], b"<!doctype html><div id=root>");
+    }
+
+    fn target_spec(script: &str) -> TargetSpec {
+        TargetSpec {
+            name: "android".to_owned(),
+            label: "Android APK".to_owned(),
+            command: "sh".to_owned(),
+            args: vec![script.to_owned()],
+            source_dir: "web".to_owned(),
+            artifact: "web/out/app.apk".to_owned(),
+            install: None,
+            env: BTreeMap::new(),
+            requires: Vec::new(),
+        }
+    }
+
+    fn env_requirement(name: &str, hint: &str) -> TargetRequirement {
+        TargetRequirement {
+            kind: TargetRequirementKind::Env {
+                name: name.to_owned(),
+                directory: true,
+            },
+            hint: hint.to_owned(),
+        }
+    }
+
+    #[test]
+    fn an_env_requirement_is_met_by_the_targets_env_or_the_servers_and_must_be_a_directory() {
+        let tmp = TempDir::new("reqenv");
+        let sdk = tmp.path().display().to_string();
+        let mut spec = target_spec("apk.sh");
+        spec.requires = vec![
+            env_requirement("ANDROID_HOME", "Set the Android SDK directory."),
+            env_requirement("JAVA_HOME", ""),
+        ];
+        let no_server = |_: &str| None;
+
+        // Nothing set: both named, the hint appended to the one that has one.
+        let missing = readiness_in(&spec, no_server, "linux").missing;
+        assert_eq!(
+            missing,
+            [
+                "`ANDROID_HOME` is not set. Set the Android SDK directory.",
+                "`JAVA_HOME` is not set."
+            ]
+        );
+
+        // The target's own env (the module's settings) meets one; the server's
+        // environment the other.
+        spec.env.insert("ANDROID_HOME".to_owned(), sdk.clone());
+        let server = |name: &str| (name == "JAVA_HOME").then(|| sdk.clone());
+        assert!(readiness_in(&spec, server, "linux").is_ready());
+
+        // A value that is not a directory is not met, and says what it was.
+        spec.env
+            .insert("ANDROID_HOME".to_owned(), "/no/such/sdk".to_owned());
+        let missing = readiness_in(&spec, server, "linux").missing;
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].contains("/no/such/sdk"), "{missing:?}");
+    }
+
+    #[test]
+    fn a_command_requirement_looks_on_the_builds_path_and_an_os_requirement_at_the_host() {
+        let tmp = TempDir::new("reqcmd");
+        write_script(
+            tmp.path(),
+            "xcodebuild",
+            "#!/bin/sh
+",
+        );
+        let mut spec = target_spec("ios.sh");
+        spec.requires = vec![
+            TargetRequirement {
+                kind: TargetRequirementKind::Os {
+                    name: "macos".to_owned(),
+                },
+                hint: String::new(),
+            },
+            TargetRequirement {
+                kind: TargetRequirementKind::Command {
+                    name: "xcodebuild".to_owned(),
+                },
+                hint: "Install Xcode.".to_owned(),
+            },
+        ];
+        let path = tmp.path().display().to_string();
+        let with_path = |name: &str| (name == "PATH").then(|| path.clone());
+        let empty_path = |_: &str| None;
+
+        assert!(readiness_in(&spec, with_path, "macos").is_ready());
+        assert_eq!(
+            readiness_in(&spec, empty_path, "linux").missing,
+            [
+                "This target builds only on macos; this server runs on linux.",
+                "`xcodebuild` is not on the PATH. Install Xcode."
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_target_whose_requirements_are_unmet_is_refused_before_anything_runs() {
+        let tmp = TempDir::new("requnmet");
+        let web = tmp.path().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        write_script(
+            &web,
+            "apk.sh",
+            "#!/bin/sh
+touch ran
+",
+        );
+        let mut spec = target_spec("apk.sh");
+        spec.requires = vec![env_requirement(
+            "FELDSPAR_TEST_NO_SUCH_SDK",
+            "Set the Android SDK directory.",
+        )];
+        let msg = run_target(&spec, tmp.path(), LOG)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("cannot be built on this server yet"), "{msg}");
+        assert!(msg.contains("FELDSPAR_TEST_NO_SUCH_SDK"), "{msg}");
+        // Nothing ran and no log was started.
+        assert!(!web.join("ran").exists());
+        assert!(!tmp.path().join(LOG).exists());
+    }
+
+    /// Where the tests below log: the path a server would name, in the store.
+    const LOG: &str = "web/build-logs/android-20260927-101500.log";
+
+    fn read_log(tmp: &TempDir) -> String {
+        std::fs::read_to_string(tmp.path().join(LOG)).expect("the build log is written")
+    }
+
+    #[tokio::test]
+    async fn a_target_build_runs_in_the_source_directory_and_reports_its_artifact() {
+        let tmp = TempDir::new("target");
+        let web = tmp.path().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        write_script(
+            &web,
+            "apk.sh",
+            "#!/bin/sh\nset -e\nmkdir -p out\nprintf 'PK-apk' > out/app.apk\necho gradle done\n",
+        );
+        let mut spec = target_spec("apk.sh");
+        spec.install = Some(install_step());
+        write_script(
+            &web,
+            "install.sh",
+            "#!/bin/sh\nmkdir -p node_modules\necho installed\n",
+        );
+
+        let report = run_target(&spec, tmp.path(), LOG).await.unwrap();
+        assert_eq!(report.target, "android");
+        assert_eq!(report.artifact, "web/out/app.apk");
+        assert_eq!(report.size, 6);
+        // The same install step the web build runs comes first.
+        assert!(report.installed);
+        // Both are in the log in the store, in order, and the report quotes it.
+        assert_eq!(report.log_path, LOG);
+        let log = read_log(&tmp);
+        let installed = log.find("installed").expect("the install is logged");
+        let built = log.find("gradle done").expect("the build is logged");
+        assert!(installed < built, "{log}");
+        assert!(log.contains("$ sh apk.sh"), "{log}");
+        assert!(report.log.contains("gradle done"), "{}", report.log);
+    }
+
+    #[test]
+    fn a_target_logs_under_its_projects_build_logs_directory() {
+        let spec = target_spec("apk.sh");
+        assert_eq!(
+            target_log_path(&spec, "20260927-101500"),
+            "web/build-logs/android-20260927-101500.log"
+        );
+        // A project at the store root logs at the store root's `build-logs`.
+        let mut root = spec.clone();
+        root.source_dir = String::new();
+        assert_eq!(target_log_path(&root, "1"), "build-logs/android-1.log");
+    }
+
+    #[tokio::test]
+    async fn only_the_latest_logs_of_a_target_are_kept() {
+        let tmp = TempDir::new("targetprune");
+        let web = tmp.path().join("web");
+        let logs = web.join(TARGET_LOG_DIR);
+        std::fs::create_dir_all(&logs).unwrap();
+        for n in 0..12 {
+            std::fs::write(logs.join(format!("android-20260901-0000{n:02}.log")), "old").unwrap();
+        }
+        // Another target's logs are not this one's to remove — including one
+        // whose name merely begins with this one's.
+        std::fs::write(logs.join("ios-20260901-000000.log"), "other").unwrap();
+        for n in 0..3 {
+            std::fs::write(
+                logs.join(format!("android-debug-20260801-0000{n:02}.log")),
+                "debug",
+            )
+            .unwrap();
+        }
+        write_script(
+            &web,
+            "apk.sh",
+            "#!/bin/sh\nmkdir -p out\nprintf x > out/app.apk\n",
+        );
+
+        run_target(&target_spec("apk.sh"), tmp.path(), LOG)
+            .await
+            .unwrap();
+        let mut kept: Vec<String> = std::fs::read_dir(&logs)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| is_target_log(n, "android"))
+            .collect();
+        kept.sort();
+        assert_eq!(kept.len(), TARGET_LOGS_KEPT, "{kept:?}");
+        // The oldest went; the newest — the one just written — stayed.
+        assert!(!kept.contains(&"android-20260901-000000.log".to_owned()));
+        assert_eq!(kept.last().unwrap(), "android-20260927-101500.log");
+        assert!(logs.join("ios-20260901-000000.log").exists());
+        for n in 0..3 {
+            assert!(
+                logs.join(format!("android-debug-20260801-0000{n:02}.log"))
+                    .exists(),
+                "android's pruning removed android-debug's log {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_targets_logs_are_named_exactly() {
+        assert!(is_target_log("android-20260927-101500.log", "android"));
+        assert!(!is_target_log(
+            "android-debug-20260927-101500.log",
+            "android"
+        ));
+        assert!(is_target_log(
+            "android-debug-20260927-101500.log",
+            "android-debug"
+        ));
+        assert!(!is_target_log("android-2026092-101500.log", "android"));
+        assert!(!is_target_log("android-20260927-101500.txt", "android"));
+        assert!(!is_target_log("android-notes.log", "android"));
+    }
+
+    /// The toolchain a target declares — the React Native module's SDK paths,
+    /// from its settings — reaches the install step and the command, rather than
+    /// depending on whatever shell started the server.
+    #[tokio::test]
+    async fn a_targets_environment_reaches_its_install_and_its_command() {
+        let tmp = TempDir::new("targetenv");
+        let web = tmp.path().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        write_script(
+            &web,
+            "install.sh",
+            "#!/bin/sh\nmkdir -p node_modules\necho \"install sees $ANDROID_HOME\"\n",
+        );
+        write_script(
+            &web,
+            "apk.sh",
+            "#!/bin/sh\nset -e\nmkdir -p out\nprintf x > out/app.apk\necho \"gradle sees $ANDROID_HOME and $JAVA_HOME\"\n",
+        );
+        let mut spec = target_spec("apk.sh");
+        spec.install = Some(install_step());
+        spec.env = [
+            ("ANDROID_HOME".to_owned(), "/opt/sdk".to_owned()),
+            ("JAVA_HOME".to_owned(), "/opt/jdk".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+
+        run_target(&spec, tmp.path(), LOG).await.unwrap();
+        let log = read_log(&tmp);
+        assert!(log.contains("install sees /opt/sdk"), "{log}");
+        assert!(log.contains("gradle sees /opt/sdk and /opt/jdk"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn a_target_that_leaves_no_artifact_says_where_it_looked() {
+        let tmp = TempDir::new("targetnone");
+        let web = tmp.path().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        write_script(&web, "apk.sh", "#!/bin/sh\necho nothing\n");
+        let msg = run_target(&target_spec("apk.sh"), tmp.path(), LOG)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("left no file"), "{msg}");
+        assert!(msg.contains("app.apk"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_failing_target_carries_the_logs_end_and_names_the_log() {
+        let tmp = TempDir::new("targetfail");
+        let web = tmp.path().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        write_script(
+            &web,
+            "apk.sh",
+            "#!/bin/sh\necho 'SDK location not found' >&2\nexit 1\n",
+        );
+        let msg = run_target(&target_spec("apk.sh"), tmp.path(), LOG)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("Android APK"), "{msg}");
+        assert!(msg.contains("SDK location not found"), "{msg}");
+        assert!(msg.contains(LOG), "{msg}");
+        // And the log in the store has it too, for the admin who opens it.
+        assert!(read_log(&tmp).contains("SDK location not found"));
     }
 
     /// A stand-in installer: creates the marker directory, as `npm install`

@@ -29,7 +29,7 @@ use serde_json::{Value as Json, json};
 
 use super::files::{
     CreateForm, ProjectContext, basic_type, client_object, exposed_tables, has_auth, has_op,
-    key_ts_type, pascal, single_pk, storable, title, ts_empty,
+    key_ts_type, pascal, shown_fields, single_pk, storable, title, ts_empty,
 };
 
 /// The whole context one call to a declared framework's generator receives.
@@ -51,6 +51,10 @@ pub fn context_json(ctx: &ProjectContext<'_>, runtime: &str, client: &str) -> Js
             "description": ctx.app.description,
             "url": ctx.app_url_or_placeholder(),
         },
+        // The framework's own settings as the admin filled them in: a setting
+        // is the framework's to declare, so it is the framework's to read when
+        // it generates — the store and project as much as anything it added.
+        "settings": Json::Object(ctx.app.framework.config.clone()),
         "tables": exposed
             .iter()
             .map(|t| table_json(t, ctx.endpoints))
@@ -90,7 +94,7 @@ fn table_json(table: &Table, endpoints: &EndpointSet) -> Json {
             "update": has_op(endpoints, "update", name),
             "delete": has_op(endpoints, "delete", name),
         },
-        "fields": table.fields.iter().map(|f| field_json(f, endpoints, name)).collect::<Vec<_>>(),
+        "fields": shown_fields(table, endpoints).into_iter().map(|f| field_json(f, endpoints, name)).collect::<Vec<_>>(),
         "form": {
             "inputs": form.inputs.iter().map(|f| field_json(f, endpoints, name)).collect::<Vec<_>>(),
             // Required UUID keys the page mints at submit time. Typing one into a

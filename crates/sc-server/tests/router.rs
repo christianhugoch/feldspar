@@ -203,6 +203,12 @@ async fn hashed_assets_are_immutable_and_the_document_is_not() {
             expected,
             "{path}"
         );
+        // A cached asset or document never carries a user's CSRF token: a
+        // shared cache would hand it to everyone who asked for the same URL.
+        assert!(
+            response.headers().get(CSRF_HEADER).is_none(),
+            "{path} carried the CSRF token"
+        );
     }
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -364,6 +370,122 @@ async fn csrf_allows_mutations_with_a_matching_token() {
     );
 }
 
+/// A client that cannot read cookies — a React Native app, whose cookie store is
+/// native and invisible to its JavaScript — learns the token from the
+/// `x-csrf-token` response header, which names the same value as the cookie on
+/// every response, the refusal included.
+#[tokio::test]
+async fn every_response_names_the_csrf_token_for_a_client_that_cannot_read_cookies() {
+    let (router, _) = test_router();
+    let header_of = |response: &axum::http::Response<Body>| {
+        response
+            .headers()
+            .get(CSRF_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+
+    // A refused write hands out the token it wanted, so the client can retry.
+    let refused = router
+        .clone()
+        .oneshot(
+            Request::post("/api/echo")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    let minted = header_of(&refused).expect("the refusal names the token");
+    let cookies: Vec<String> = refused
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        cookie_value(&cookies, CSRF_COOKIE).as_deref(),
+        Some(minted.as_str())
+    );
+
+    // An ordinary response names the token the request's cookie carries.
+    let ping = router
+        .clone()
+        .oneshot(
+            Request::get("/api/ping")
+                .header(header::COOKIE, format!("{CSRF_COOKIE}={minted}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(header_of(&ping).as_deref(), Some(minted.as_str()));
+    // …and marks itself as one user's answer, so no shared cache keeps it.
+    assert_eq!(
+        ping.headers().get(header::CACHE_CONTROL).unwrap(),
+        "private"
+    );
+    assert_eq!(
+        refused.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+
+    // And echoing what the header said — with the cookie the native store sends
+    // on its own — is accepted.
+    let (status, _, _) = call(
+        &router,
+        Request::post("/api/echo")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::COOKIE, format!("{CSRF_COOKIE}={minted}"))
+            .header(CSRF_HEADER, &minted)
+            .body(Body::from("{\"a\":1}"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// A native app — the generated client with no `document` says so — gets a
+/// session cookie that lasts as long as the session, so closing the app does not
+/// sign its user out. A browser's login is unchanged (see the test above).
+#[tokio::test]
+async fn a_native_apps_login_outlives_the_app_being_closed() {
+    let (router, _) = test_router();
+    let (_, cookies, _) = call(
+        &router,
+        Request::get("/api/ping").body(Body::empty()).unwrap(),
+    )
+    .await;
+    let csrf = cookie_value(&cookies, CSRF_COOKIE).expect("csrf cookie");
+    let login = Request::post("/api/login")
+        .header(header::COOKIE, format!("{CSRF_COOKIE}={csrf}"))
+        .header(CSRF_HEADER, &csrf)
+        .header(
+            sc_api::auth::CLIENT_KIND_HEADER,
+            sc_api::auth::NATIVE_CLIENT,
+        )
+        .body(Body::empty())
+        .unwrap();
+    let (status, cookies, _) = call(&router, login).await;
+    assert_eq!(status, StatusCode::OK);
+    let set_session = cookies
+        .iter()
+        .find(|c| c.starts_with(&format!("{SESSION_COOKIE}=")))
+        .unwrap();
+    assert!(
+        set_session.contains(&format!("Max-Age={}", sc_auth::DEFAULT_TTL_HOURS * 3600)),
+        "{set_session}"
+    );
+    // The CSRF cookie is not the session, and is left as it was.
+    assert!(
+        cookies
+            .iter()
+            .filter(|c| c.starts_with(&format!("{CSRF_COOKIE}=")))
+            .all(|c| !c.contains("Max-Age"))
+    );
+}
+
 /// TODO "Saltcorn UI" 6.4: the same double-submit check, with the token where
 /// v1's browser code puts it — `saltcorn.js`'s `CSRF-Token` header, and a
 /// rendered form's `_csrf` field — and still refused when it is wrong.
@@ -439,6 +561,16 @@ async fn login_starts_a_session_that_unlocks_admin_routes() {
     let (status, cookies, _) = call(&router, login).await;
     assert_eq!(status, StatusCode::OK);
     let session = cookie_value(&cookies, SESSION_COOKIE).expect("session cookie");
+    // A browser's session cookie has no lifetime of its own: it ends with the
+    // browser, which is what a shared machine relies on.
+    let set_session = cookies
+        .iter()
+        .find(|c| c.starts_with(&format!("{SESSION_COOKIE}=")))
+        .unwrap();
+    assert!(
+        !set_session.to_ascii_lowercase().contains("max-age"),
+        "{set_session}"
+    );
 
     // 3. The session grants access to the admin-only route.
     let secret = Request::get("/api/secret")

@@ -69,10 +69,13 @@ impl ScaffoldReport {
     }
 }
 
-/// Generate a complete React project for `app` into its file store.
+/// Generate a complete project for `app` into its file store: a React project
+/// for a `react` app, or whatever a module framework's scaffold writes (Vue,
+/// React Native, …), plus the generated client every framework gets.
 ///
-/// Refuses if the app is not a `react` app, if its store is unreachable, or if
-/// the project directory already has anything in it.
+/// Refuses if the app's framework does not scaffold (`code`, or a module
+/// framework without a `scaffold`), if its store is unreachable, or if the
+/// project directory already has anything in it.
 pub async fn scaffold_app(
     cat: &Catalog,
     app: &Application,

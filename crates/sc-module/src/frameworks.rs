@@ -47,11 +47,13 @@
 //! reason [`crate::spec`] gives: a module with one odd declaration is a module
 //! with one odd declaration.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use sc_app::{
     BuildTemplate, CspPolicy, DeclaredFile, FilePhase, FrameworkDecl, FrameworkHost, InstallSpec,
+    TargetRequirement, TargetRequirementKind, TargetTemplate,
 };
 use sc_error::{Error, Result};
 use sc_expr::Template;
@@ -238,6 +240,7 @@ fn declaration(manifest: &FrameworkManifest, module: &str) -> Result<FrameworkDe
         module: module.to_owned(),
         label: manifest.label.trim().to_owned(),
         description: manifest.description.trim().to_owned(),
+        targets: targets(&manifest.targets, &config_spec)?,
         build: build_template(&manifest.build, &config_spec)?,
         config_spec,
         csp: csp(&manifest.csp),
@@ -269,6 +272,172 @@ fn checks(declared: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// The `targets` object — the extra things a framework can build besides the web
+/// app, such as an Android APK:
+///
+/// ```js
+/// targets: {
+///   android: { label, command, artifact, env: { … }, requires: [ … ] },
+/// }
+/// ```
+///
+/// This is the load-time half, the sibling of [`build_template`]: it reads and
+/// checks the declaration once, when the module loads. The per-application half
+/// is `sc_app::FrameworkDecl::target_spec`, which fills the templates in with
+/// one app's settings.
+///
+/// Refused whole when one target is malformed, for the reason a bad `build` is:
+/// the author hears about it on the module's card when it loads, not the admin
+/// when they press the button.
+fn targets(declared: &Json, spec: &[sc_types::FormField]) -> Result<Vec<TargetTemplate>> {
+    let Json::Object(entries) = declared else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for (name, target) in entries {
+        let text = |key: &str| {
+            target
+                .get(key)
+                .and_then(Json::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        };
+        let missing =
+            |key: &str| Error::invalid(format!("its target `{name}` declares no `{key}`"));
+        let command = text("command").ok_or_else(|| missing("command"))?;
+        let artifact_source = text("artifact").ok_or_else(|| missing("artifact"))?;
+        out.push(TargetTemplate {
+            name: name.clone(),
+            label: text("label").unwrap_or(name).to_owned(),
+            command: command.to_owned(),
+            artifact: settings_template(
+                artifact_source,
+                spec,
+                &format!("target `{name}`'s `artifact`"),
+            )?,
+            env: target_env(name, target.get("env"))?,
+            requires: target_requires(name, target.get("requires"))?,
+        });
+    }
+    Ok(out)
+}
+
+/// A target's `env`: `{ ANDROID_HOME: "/opt/sdk" }`, the variables its command is
+/// started with.
+///
+/// No `.env` file is written: the map is kept in memory, rebuilt whenever the
+/// module (re)loads with its settings, and handed to the build process alone
+/// when it starts (`Command::envs` in `sc_app`'s `run_target`).
+///
+/// A **blank value is left out** rather than set to nothing: a module fills
+/// these from its own settings, and a setting the admin has not filled in should
+/// leave the variable to the server's environment, not blank it for the build.
+/// A name a process environment cannot carry — empty, or with `=` or a NUL — is
+/// refused, as is a value that is not text.
+fn target_env(target: &str, declared: Option<&Json>) -> Result<BTreeMap<String, String>> {
+    let mut env = BTreeMap::new();
+    let Some(json) = declared.filter(|v| !v.is_null()) else {
+        return Ok(env);
+    };
+    let Json::Object(vars) = json else {
+        return Err(Error::invalid(format!(
+            "its target `{target}`'s `env` is not an object of variable names and values"
+        )));
+    };
+    for (key, value) in vars {
+        if key.is_empty() || key.contains('=') || key.contains('\0') {
+            return Err(Error::invalid(format!(
+                "its target `{target}`'s `env` names {key:?}, which is not an environment \
+                 variable a process can be started with"
+            )));
+        }
+        let value = match value {
+            Json::Null => continue,
+            Json::String(text) => text.trim(),
+            _ => {
+                return Err(Error::invalid(format!(
+                    "its target `{target}`'s `env` gives `{key}` a value that is not text"
+                )));
+            }
+        };
+        if value.contains('\0') {
+            return Err(Error::invalid(format!(
+                "its target `{target}`'s `env` gives `{key}` a value with a NUL in it"
+            )));
+        }
+        if !value.is_empty() {
+            env.insert(key.clone(), value.to_owned());
+        }
+    }
+    Ok(env)
+}
+
+/// A target's `requires`: what the machine must have before it can build.
+///
+/// ```js
+/// requires: [
+///   { env: "ANDROID_HOME", directory: true, hint: "Set the Android SDK directory …" },
+///   { command: "pod", hint: "Install CocoaPods." },
+///   { os: "macos" },
+/// ]
+/// ```
+///
+/// Each entry names **exactly one** of `env`, `command` and `os`; `directory`
+/// belongs with `env` alone, and `hint` with any. Anything else is refused when
+/// the module loads — a check that silently checks nothing would let a target
+/// reach Gradle with the SDK it says it needs still missing.
+fn target_requires(target: &str, declared: Option<&Json>) -> Result<Vec<TargetRequirement>> {
+    let Some(json) = declared.filter(|v| !v.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let Json::Array(entries) = json else {
+        return Err(Error::invalid(format!(
+            "its target `{target}`'s `requires` is not a list"
+        )));
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let bad = |why: &str| {
+            Error::invalid(format!(
+                "its target `{target}`'s `requires` entry {index} {why}"
+            ))
+        };
+        let Json::Object(entry) = entry else {
+            return Err(bad("is not an object"));
+        };
+        let text = |key: &str| -> Result<Option<String>> {
+            match entry.get(key) {
+                None | Some(Json::Null) => Ok(None),
+                Some(Json::String(s)) if !s.trim().is_empty() => Ok(Some(s.trim().to_owned())),
+                Some(_) => Err(bad(&format!("gives `{key}` something that is not a name"))),
+            }
+        };
+        let (env, command, os) = (text("env")?, text("command")?, text("os")?);
+        let directory = match entry.get("directory") {
+            None | Some(Json::Null) => false,
+            Some(Json::Bool(b)) => *b,
+            Some(_) => return Err(bad("gives `directory` a value that is not true or false")),
+        };
+        let kind = match (env, command, os) {
+            (Some(name), None, None) => TargetRequirementKind::Env { name, directory },
+            (None, Some(name), None) if !directory => TargetRequirementKind::Command { name },
+            (None, None, Some(name)) if !directory => TargetRequirementKind::Os { name },
+            (None, None, None) => return Err(bad("names none of `env`, `command` and `os`")),
+            _ if directory && entry.get("env").is_none() => {
+                return Err(bad("sets `directory`, which only an `env` requirement has"));
+            }
+            _ => return Err(bad("names more than one of `env`, `command` and `os`")),
+        };
+        let hint = match entry.get("hint") {
+            None | Some(Json::Null) => String::new(),
+            Some(Json::String(s)) => s.trim().to_owned(),
+            Some(_) => return Err(bad("gives `hint` something that is not text")),
+        };
+        out.push(TargetRequirement { kind, hint });
+    }
+    Ok(out)
+}
+
 /// The `build` object: five templates, a command and an optional install step.
 ///
 /// Every template is checked **here** against the framework's own settings, so a
@@ -277,23 +446,11 @@ fn checks(declared: &[String]) -> Result<Vec<String>> {
 /// an admin presses Build.
 fn build_template(build: &Json, spec: &[sc_types::FormField]) -> Result<BuildTemplate> {
     let optional = |key: &str| -> Result<Option<Template>> {
-        match build.get(key).and_then(Json::as_str) {
-            Some(source) => {
-                let template = Template::parse(source)
-                    .map_err(|e| Error::invalid(format!("its `{key}`: {e}")))?;
-                for name in template.identifiers()? {
-                    if !spec.iter().any(|f| f.name() == name) {
-                        return Err(Error::invalid(format!(
-                            "its `{key}` interpolates `{name}`, which is not one of its \
-                             settings ({})",
-                            settings_list(spec)
-                        )));
-                    }
-                }
-                Ok(Some(template))
-            }
-            None => Ok(None),
-        }
+        build
+            .get(key)
+            .and_then(Json::as_str)
+            .map(|source| settings_template(source, spec, &format!("`{key}`")))
+            .transpose()
     };
     // A path the framework must have: absent is a declaration that cannot resolve
     // to a directory, which is the same failure as one that will not parse.
@@ -321,6 +478,23 @@ fn build_template(build: &Json, spec: &[sc_types::FormField]) -> Result<BuildTem
             .unwrap_or(sc_app::REACT_CLIENT_FILE)
             .to_owned(),
     })
+}
+
+/// Parse a template and check that every `{{ name }}` in it is one of the
+/// framework's settings. `what` names the field in the error, as in "its
+/// `store`" or "its target `android`'s `artifact`".
+fn settings_template(source: &str, spec: &[sc_types::FormField], what: &str) -> Result<Template> {
+    let template =
+        Template::parse(source).map_err(|e| Error::invalid(format!("its {what}: {e}")))?;
+    for setting in template.identifiers()? {
+        if !spec.iter().any(|f| f.name() == setting) {
+            return Err(Error::invalid(format!(
+                "its {what} interpolates `{setting}`, which is not one of its settings ({})",
+                settings_list(spec)
+            )));
+        }
+    }
+    Ok(template)
 }
 
 /// The settings a framework has, for an error message that must show the author
@@ -510,6 +684,146 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(msg.contains("output"), "{msg}");
+    }
+
+    #[test]
+    fn declared_targets_become_templates_over_the_frameworks_settings() {
+        let mut with_targets = vue();
+        with_targets["targets"] = json!({
+            "android": {
+                "label": "Android APK",
+                "command": "npm run build:android",
+                "artifact": "{{ project }}/android/app-release.apk"
+            }
+        });
+        let decl = declaration(&manifest(with_targets), "@feldspar/vue").unwrap();
+        assert_eq!(decl.targets.len(), 1);
+        let config = [
+            ("store".to_owned(), json!("apps")),
+            ("project".to_owned(), json!("todo")),
+        ]
+        .into_iter()
+        .collect();
+        let spec = decl.target_spec("android", &config).unwrap();
+        assert_eq!(spec.label, "Android APK");
+        assert_eq!(spec.args, ["run", "build:android"]);
+        assert_eq!(spec.artifact, "todo/android/app-release.apk");
+
+        // None declared is none, and costs nothing.
+        assert!(
+            declaration(&manifest(vue()), "@feldspar/vue")
+                .unwrap()
+                .targets
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_targets_env_is_carried_and_a_blank_value_left_to_the_server() {
+        let mut with_env = vue();
+        with_env["targets"] = json!({
+            "android": {
+                "command": "npm run build:android",
+                "artifact": "{{ project }}/a.apk",
+                "env": { "ANDROID_HOME": " /opt/sdk ", "JAVA_HOME": "", "EXTRA": null }
+            }
+        });
+        let decl = declaration(&manifest(with_env), "@feldspar/vue").unwrap();
+        let env = &decl.targets[0].env;
+        assert_eq!(
+            env.get("ANDROID_HOME").map(String::as_str),
+            Some("/opt/sdk")
+        );
+        // Unfilled settings do not blank the server's own variables.
+        assert!(!env.contains_key("JAVA_HOME") && !env.contains_key("EXTRA"));
+
+        let mut bad = vue();
+        bad["targets"] = json!({
+            "android": { "command": "x", "artifact": "a.apk", "env": { "A=B": "1" } }
+        });
+        let msg = declaration(&manifest(bad), "@feldspar/vue")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("android") && msg.contains("A=B"), "{msg}");
+    }
+
+    #[test]
+    fn a_targets_requirements_are_read_and_a_malformed_one_is_refused() {
+        let mut with_requires = vue();
+        with_requires["targets"] = json!({
+            "android": {
+                "command": "npm run build:android",
+                "artifact": "a.apk",
+                "requires": [
+                    { "env": "ANDROID_HOME", "directory": true, "hint": "Set the SDK." },
+                    { "command": "pod" },
+                    { "os": "macos" }
+                ]
+            }
+        });
+        let decl = declaration(&manifest(with_requires), "@feldspar/vue").unwrap();
+        let requires = &decl.targets[0].requires;
+        assert_eq!(
+            requires[0].kind,
+            TargetRequirementKind::Env {
+                name: "ANDROID_HOME".to_owned(),
+                directory: true
+            }
+        );
+        assert_eq!(requires[0].hint, "Set the SDK.");
+        assert_eq!(
+            requires[1].kind,
+            TargetRequirementKind::Command {
+                name: "pod".to_owned()
+            }
+        );
+        assert_eq!(
+            requires[2].kind,
+            TargetRequirementKind::Os {
+                name: "macos".to_owned()
+            }
+        );
+
+        for (bad, says) in [
+            (json!([{ "env": "A", "command": "b" }]), "more than one"),
+            (json!([{ "hint": "x" }]), "none of"),
+            (
+                json!([{ "command": "pod", "directory": true }]),
+                "`directory`",
+            ),
+            (json!({ "env": "A" }), "not a list"),
+        ] {
+            let mut broken = vue();
+            broken["targets"] = json!({
+                "android": { "command": "x", "artifact": "a.apk", "requires": bad }
+            });
+            let msg = declaration(&manifest(broken), "@feldspar/vue")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                msg.contains(says) && msg.contains("android"),
+                "{says}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_target_is_refused_on_load_naming_it() {
+        let mut no_artifact = vue();
+        no_artifact["targets"] = json!({ "android": { "command": "npm run apk" } });
+        let msg = declaration(&manifest(no_artifact), "@feldspar/vue")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("android") && msg.contains("artifact"), "{msg}");
+
+        let mut typo = vue();
+        typo["targets"] = json!({
+            "android": { "command": "npm run apk", "artifact": "{{ projekt }}/a.apk" }
+        });
+        let msg = declaration(&manifest(typo), "@feldspar/vue")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("projekt"), "{msg}");
     }
 
     #[test]
