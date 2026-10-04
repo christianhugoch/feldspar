@@ -289,6 +289,9 @@ export type GetPythonStatusResponse = { state: string; version?: string | null; 
 export type GetBackupOptionsResponse = { available: { tables: Array<{ name: string; label: string; count?: number | null }>; applications: Array<{ name: string; label: string; count?: number | null }>; file_stores: Array<{ name: string; label: string; count?: number | null }>; users: number; agents: number; triggers: number; views: number; pages: number; ssl: boolean }; include: { tables: Array<string>; table_data: Array<string>; applications: Array<string>; file_stores: Array<string>; users: boolean; agents: boolean; triggers: boolean; views: boolean; pages: boolean; ssl: boolean } };
 export type RestoreBackupRequest = { id: string; include: { tables: Array<string>; table_data: Array<string>; applications: Array<string>; file_stores: Array<string>; users: boolean; agents: boolean; triggers: boolean; views: boolean; pages: boolean; ssl: boolean } };
 export type RestoreBackupResponse = { restored: Array<string>; warnings: Array<string> };
+export type GetClearAllPreviewResponse = { file_stores: Array<{ name: string; backend: string; directory?: string | null }> };
+export type ClearAllRequest = { delete_from_disk: Array<string> };
+export type ClearAllResponse = { cleared: Array<string>; warnings: Array<string> };
 export type ListDatasetsResponse = Array<{ id: string; name: string; description: string; base: unknown; table: string; operations: number; columns: Array<unknown>; error?: string | null; grain?: unknown | null }>;
 export type GetDatasetResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown } };
 export type CreateDatasetRequest = { name: string; description?: string | null; base: unknown; operations?: unknown | null };
@@ -518,6 +521,8 @@ export interface ApiClient {
   getPythonStatus(): Promise<GetPythonStatusResponse>;
   getBackupOptions(): Promise<GetBackupOptionsResponse>;
   restoreBackup(body: RestoreBackupRequest): Promise<RestoreBackupResponse>;
+  getClearAllPreview(): Promise<GetClearAllPreviewResponse>;
+  clearAll(body: ClearAllRequest): Promise<ClearAllResponse>;
   listDatasets(): Promise<ListDatasetsResponse>;
   getDataset(id: string): Promise<GetDatasetResponse>;
   createDataset(body: CreateDatasetRequest): Promise<CreateDatasetResponse>;
@@ -2194,6 +2199,23 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("restoreBackup", res);
       return (await res.json()) as RestoreBackupResponse;
+    },
+    async getClearAllPreview() {
+      const res = await doFetch(`${baseUrl}/api/clear-all`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getClearAllPreview", res);
+      return (await res.json()) as GetClearAllPreviewResponse;
+    },
+    async clearAll(body) {
+      const res = await doFetch(`${baseUrl}/api/clear-all`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("clearAll", res);
+      return (await res.json()) as ClearAllResponse;
     },
     async listDatasets() {
       const res = await doFetch(`${baseUrl}/api/datasets`, {

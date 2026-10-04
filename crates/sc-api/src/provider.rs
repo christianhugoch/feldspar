@@ -195,6 +195,9 @@ pub enum SessionAction {
     /// being disabled or deleted. The caller's own cookie is left alone — if
     /// they named themselves, it simply stops resolving.
     EndUser(Uuid),
+    /// End **every** session there is, the caller's cookie included — what
+    /// Clear all does once it has deleted every account.
+    EndAll,
 }
 
 /// A raw-bytes response body — a file download — with the content type the

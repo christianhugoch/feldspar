@@ -430,6 +430,22 @@ impl SessionStore {
         }
     }
 
+    /// End every session there is: the rows (or the in-memory map) and this
+    /// node's cached copies. What Clear all does once it has deleted every
+    /// account, so a session resolved a moment before cannot outlive its user.
+    pub async fn end_all_sessions(&self) -> Result<()> {
+        match &self.backend {
+            Backend::Memory(entries) => {
+                entries.write().map_err(|_| poisoned())?.clear();
+                Ok(())
+            }
+            Backend::Database { catalog, .. } => {
+                self.invalidate_all()?;
+                run(catalog, Statement::from(Delete::from(SESSIONS_TABLE))).await
+            }
+        }
+    }
+
     /// Drop this node's cached answer for `token`, without touching the
     /// database.
     ///

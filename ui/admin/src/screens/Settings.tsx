@@ -48,6 +48,7 @@ import {
   type FieldSpec,
 } from "../settings";
 import { BackupTab } from "./BackupTab";
+import { ClearAllPanel } from "./ClearAll";
 import { McpTokensPanel } from "./McpTokens";
 import { ModulesTab } from "./ModulesTab";
 import { PythonStatusPanel } from "./PythonStatus";
@@ -339,6 +340,7 @@ function SectionExtra({
       <>
         <PythonStatusPanel />
         <McpTokensPanel enabled={mcpEnabled(stored)} />
+        <ClearAllPanel />
       </>
     );
   return null;

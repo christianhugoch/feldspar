@@ -1917,6 +1917,12 @@ async fn apply_session(
             }
             jar
         }
+        SessionAction::EndAll => {
+            if let Err(e) = state.sessions.end_all_sessions().await {
+                log_failure("could not end every session", &e);
+            }
+            jar.remove(Cookie::build((SESSION_COOKIE, "")).path("/").build())
+        }
     })
 }
 

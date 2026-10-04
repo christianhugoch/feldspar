@@ -65,6 +65,8 @@ mod backup_api;
 mod builder_route;
 #[path = "call_api.rs"]
 mod call_api;
+#[path = "clear_all_api.rs"]
+mod clear_all_api;
 #[path = "code_body_tables.rs"]
 mod code_body_tables;
 #[path = "concurrent_code_bodies.rs"]

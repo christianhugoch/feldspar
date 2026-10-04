@@ -196,6 +196,17 @@ impl HandlerResponse {
         }
     }
 
+    /// A `200 OK` response that ends **every** session, the caller's cookie
+    /// included — after Clear all has deleted every account.
+    pub fn end_all_sessions(body: Value) -> HandlerResponse {
+        HandlerResponse {
+            body,
+            status: 200,
+            session: SessionAction::EndAll,
+            download: None,
+        }
+    }
+
     /// Override the HTTP status (e.g. `201` for a created resource).
     pub fn with_status(mut self, status: u16) -> HandlerResponse {
         self.status = status;

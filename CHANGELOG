@@ -2,6 +2,41 @@
 
 Changes in reverse chronological order.
 
+## Clear all: reset an installation to the empty state
+
+Settings → Development has a **Clear all** panel, as Saltcorn 1 did. Pressing the button opens a
+dialog listing every file store with the directory it occupies on disk, each with a ticked
+checkbox; nothing is cleared until **OK**.
+
+- Every table the admin made in the **primary database** is dropped, and every column an admin
+  added to `users` (one schema-editor batch, ordered so a table goes after whatever references
+  it; keys round a cycle are dropped as fields first). A failure here stops the clear before
+  anything else changes.
+- **Everything else** goes: every row of every `_fd_*` table and of `users` — applications,
+  file stores, connections, LLM providers, agents, triggers, streams, models, datasets,
+  workspaces, modules, roles, settings, sessions, tokens and every user account, the caller's
+  included. The two built-in roles are seeded again (the first user is created with one).
+  Applications are unmounted, modules unloaded and uninstalled, file stores and database
+  connections disconnected, and the catalog, triggers, streams, modules and the
+  localisation/development settings reloaded. Settings read only at boot (listen address, TLS)
+  take their defaults at the next restart. Tables in other connected databases are forgotten,
+  not dropped.
+- **Every session ends** (new `SessionAction::EndAll` / `SessionStore::end_all_sessions`, which
+  also empties the session cache so a session resolved a moment earlier cannot outlive its
+  user). The dialog then shows what was cleared with a **Continue** button that reloads the
+  admin UI, which finds no user and shows the existing create-first-user screen. Until someone
+  creates that account, anyone who can reach the server can.
+- Each ticked file store's directory is removed from disk (and a git store's generated deploy
+  key). `sc_files::remove_store_from_disk` refuses a directory that is or contains `/`, `$HOME`,
+  the data directory or the server's working directory.
+- New endpoints `getClearAllPreview` (`GET /api/clear-all`) and `clearAll` (`POST /api/clear-all`,
+  `{ delete_from_disk: [store names] }`), admin-only and not projected as MCP tools. Clients
+  regenerated.
+- Tests: `crates/sc-server/tests/clear_all_api.rs` (mutually-referencing tables and a `users` key
+  into one are dropped; an extra role and a stored setting go; only the ticked store leaves the
+  disk; the caller is signed out, the status reports no user, and creating the first user works
+  again; clearing twice is fine), `sc-files` `disk::tests`, `ui/admin/src/clearAll.test.ts`.
+
 ## Restored file stores are placed where this server can reach them
 
 A backup carries a local or git file store's directory as the absolute path it had on the machine

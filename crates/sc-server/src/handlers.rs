@@ -4482,6 +4482,53 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    // --- clear all ----------------------------------------------------------
+
+    reg.register("getClearAllPreview", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                Ok(HandlerResponse::ok(
+                    crate::clear_all::preview(&catalog).await?,
+                ))
+            }
+        }
+    });
+
+    reg.register("clearAll", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let obj = require_object(&ctx.body)?;
+                let delete_from_disk: Vec<String> = match obj.get("delete_from_disk") {
+                    Some(Json::Array(names)) => names
+                        .iter()
+                        .filter_map(Json::as_str)
+                        .map(str::to_owned)
+                        .collect(),
+                    _ => {
+                        return Err(Error::invalid(
+                            "`delete_from_disk` must list the file stores to remove from disk",
+                        ));
+                    }
+                };
+                let report =
+                    crate::clear_all::clear_all(&catalog, &apps, &delete_from_disk).await?;
+                // Every account is gone, the caller's included, so every session
+                // goes too: the next status says no user exists and the admin UI
+                // shows the create-first-user screen.
+                Ok(HandlerResponse::end_all_sessions(json!({
+                    "cleared": report.cleared,
+                    "warnings": report.warnings,
+                })))
+            }
+        }
+    });
+
     reg.register("listApplications", {
         let catalog = catalog.clone();
         move |_ctx| {

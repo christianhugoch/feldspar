@@ -3797,6 +3797,38 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // **Clear all**: back to an empty installation (Settings → Development).
+    //
+    // Two calls because the dialog asks a question first: every file store and
+    // the directory it occupies, so the admin can choose which ones leave the
+    // disk as well as the database. `delete_from_disk` names stores by name; a
+    // store left out keeps its files where they are.
+    set.register(
+        Endpoint::new("getClearAllPreview", Method::Get, api().lit("clear-all"))
+            .output(TypeSchema::struct_of([StructField::new(
+                "file_stores",
+                TypeSchema::array(TypeSchema::struct_of([
+                    StructField::new("name", TypeSchema::text()),
+                    StructField::new("backend", TypeSchema::text()),
+                    StructField::new("directory", TypeSchema::optional(TypeSchema::text())),
+                ])),
+            )]))
+            .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new("clearAll", Method::Post, api().lit("clear-all"))
+            .input(TypeSchema::struct_of([StructField::new(
+                "delete_from_disk",
+                TypeSchema::array(TypeSchema::text()),
+            )]))
+            .output(TypeSchema::struct_of([
+                StructField::new("cleared", TypeSchema::array(TypeSchema::text())),
+                StructField::new("warnings", TypeSchema::array(TypeSchema::text())),
+            ]))
+            .auth(AuthRequirement::admin()),
+    );
+
     // The Analytics UI's datasets and workspaces (analytics TODO A1.13).
     crate::analytics::register(&mut set);
 
@@ -6156,6 +6188,7 @@ mod tests {
             "writeFile",
             // Backup, restore and user management.
             "restoreBackup",
+            "clearAll",
             "listUsers",
             "createUser",
             // And above all: a token that could mint tokens could not be

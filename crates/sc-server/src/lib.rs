@@ -26,6 +26,7 @@ mod backup;
 mod browser;
 mod builder;
 mod chat;
+mod clear_all;
 mod config;
 mod fit_progress;
 mod handler;

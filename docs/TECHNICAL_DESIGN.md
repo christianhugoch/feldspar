@@ -9163,6 +9163,24 @@ dependency — both detailed in §13.5.
 React layer; structural SQL-injection safety in `sc-query`; per-CRUD authorization enforced
 at the query layer or via RLS; passwords argon2id; optional OAuth2 IdP; new-device detection.
 
+**Clear all** (Settings → Development, `sc-server`'s `clear_all.rs`) resets a running
+installation to the empty state, as Saltcorn 1's button of the same name did. Every table the
+admin made in the primary database, and every column an admin added to `users`, is dropped
+through one schema-editor batch, ordered so a table goes after everything referencing it (keys
+round a cycle are dropped as fields first); a failure there stops the clear before anything else
+has changed. Then every row of every `_fd_*` table and of `users` is deleted — settings, roles,
+sessions and accounts included, so a system table a later feature adds is cleared without being
+named — and the two built-in roles are seeded again. Applications are unmounted, modules
+unloaded and uninstalled, file stores and database connections disconnected, and the catalog,
+triggers, streams, modules and the localisation/development settings reloaded; boot-time
+settings (listen address, TLS) revert at the next restart. Tables in other connected databases
+are forgotten, not dropped. The response ends every session (`SessionAction::EndAll`, which also
+empties the session cache), and the admin UI then finds no user and shows the create-first-user
+screen. The dialog lists each file store with its directory (`sc_files::store_directory`), all
+ticked; a ticked store's directory — and a git store's Saltcorn-generated deploy key — is
+removed (`sc_files::remove_store_from_disk`), which refuses a directory that is or contains `/`,
+`$HOME`, the data directory or the working directory.
+
 ### 16.1 Internationalisation
 
 Every string this product puts in front of a person starts out English, and there are three

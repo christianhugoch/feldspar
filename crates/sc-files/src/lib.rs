@@ -17,6 +17,7 @@
 mod access;
 mod backend;
 mod def;
+mod disk;
 mod git;
 mod local;
 mod paths;
@@ -37,6 +38,7 @@ pub use def::{
     ATTR_CLONE_PATH, CFG_BRANCH, CFG_CREATE, CFG_DIR, CFG_KEY_PATH, CFG_PATH, CFG_PUBLIC_KEY,
     CFG_URL, FileStoreDef, FileStoreDefId, GIT_BACKEND, LOCAL_BACKEND,
 };
+pub use disk::{remove_store_from_disk, store_directory};
 pub use git::{
     ARG_BRANCH, ARG_CREATE, ARG_MESSAGE, ARG_PATHS, ARG_STAGED_ONLY, CommitOutcome, DeployKey,
     GitChange, GitFileStore, GitOutput, GitRepo, GitStatus, OP_CHECKOUT, OP_CLONE, OP_COMMIT,
