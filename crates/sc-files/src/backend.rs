@@ -37,6 +37,7 @@
 //! its path, which they could not do if saving demanded a reachable directory.
 //! So reachability is reported, never enforced at save time.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use sc_error::{Context, Error, Repr, Result};
@@ -46,8 +47,9 @@ use crate::def::{
     CFG_BRANCH, CFG_CREATE, CFG_DIR, CFG_KEY_PATH, CFG_PATH, CFG_PUBLIC_KEY, CFG_URL, FileStoreDef,
     GIT_BACKEND, LOCAL_BACKEND,
 };
-use crate::git::{GitFileStore, GitRepo, git_operations, validate_git_config};
+use crate::git::{GitFileStore, GitRepo, clone_path, git_operations, validate_git_config};
 use crate::local::{LocalFileStore, local_operations};
+use crate::paths::suggest_local_dir;
 use crate::store::FileStore;
 
 /// The settings the [`local`](LOCAL_BACKEND) backend needs: which directory, and
@@ -285,6 +287,74 @@ pub fn display_config(def: &FileStoreDef) -> Attrs {
     config
 }
 
+/// Where a store definition arriving from **another installation** (a restored
+/// backup) moved to, when its directory had to be moved: `(from, to)`.
+pub type Relocation = (String, PathBuf);
+
+/// Point a definition that came from another machine at a directory *this*
+/// machine has, returning where it moved from and to — or `None` when it was
+/// left alone.
+///
+/// A backup carries a store's directory as the absolute path it had where the
+/// backup was taken, and that path usually means nothing here: another user's
+/// home, another data directory, a mount this server cannot see. Restored as it
+/// stands, the store would either fail to connect or — with `create` on — make
+/// directories wherever the old path happens to be writable. So the rule is:
+///
+/// - **The path exists here: keep it.** That is a store on a shared drive, or a
+///   restore onto the very machine the backup came from, and the directory is
+///   the one the admin meant.
+/// - **It does not: move it to where this installation puts such a store** — the
+///   [`suggest_local_dir`] a new local store is offered (with `create` on, since
+///   nothing is there yet), or the [`clone_dir`](crate::clone_dir) a git store is
+///   checked out into when the admin names no directory. A git store with a URL
+///   simply loses its directory setting, so the location is derived as it would
+///   be for any store that let Saltcorn choose; one with no URL needs a
+///   directory to be valid at all, so it is given that location explicitly.
+///
+/// Only the working directory is moved. A git store's `key_path` names a key the
+/// backup does not carry, so moving it would point at nothing either way.
+pub fn relocate_for_restore(def: &mut FileStoreDef) -> Result<Option<Relocation>> {
+    let setting = match def.backend.as_str() {
+        LOCAL_BACKEND => CFG_PATH,
+        GIT_BACKEND => CFG_DIR,
+        _ => return Ok(None),
+    };
+    let Some(from) = def
+        .setting(setting)
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+    else {
+        return Ok(None);
+    };
+    if std::path::Path::new(&from).exists() {
+        return Ok(None);
+    }
+    let to = if def.backend == LOCAL_BACKEND {
+        let to = suggest_local_dir(&def.name)?;
+        def.config.insert(
+            CFG_PATH.to_owned(),
+            serde_json::Value::String(to.to_string_lossy().into_owned()),
+        );
+        def.config
+            .insert(CFG_CREATE.to_owned(), serde_json::Value::Bool(true));
+        to
+    } else {
+        def.config.remove(CFG_DIR);
+        let has_url = def.setting(CFG_URL).is_some_and(|u| !u.trim().is_empty());
+        let to = clone_path(def)?;
+        if !has_url {
+            def.config.insert(
+                CFG_DIR.to_owned(),
+                serde_json::Value::String(to.to_string_lossy().into_owned()),
+            );
+        }
+        to
+    };
+    Ok(Some((from, to)))
+}
+
 /// Check a [`FileStoreDef`]'s settings against its backend's declared spec.
 ///
 /// Called **on save** (see `sc_catalog::save_file_store`), which is the point of
@@ -424,6 +494,53 @@ mod tests {
                 .map(|d| d.as_nanos())
                 .unwrap_or_default()
         ))
+    }
+
+    /// A restored store keeps a directory this machine has and is otherwise
+    /// moved to where this installation puts such a store.
+    #[test]
+    fn a_restored_store_is_relocated_only_when_its_directory_is_missing() {
+        crate::paths::testing::temp_env(|| {
+            unsafe { std::env::set_var(crate::DATA_DIR_ENV, "/tmp/sc-relocate") };
+            let missing = temp_path("missing").to_string_lossy().into_owned();
+            let here = std::env::temp_dir().to_string_lossy().into_owned();
+
+            // Local: a path that exists is kept, untouched.
+            let mut kept = FileStoreDef::local("docs", here.clone());
+            assert_eq!(relocate_for_restore(&mut kept).unwrap(), None);
+            assert_eq!(kept.setting(CFG_PATH), Some(here.as_str()));
+
+            // Local: a missing one becomes the suggested directory, created.
+            let mut local = FileStoreDef::local("my docs", missing.clone());
+            let (from, to) = relocate_for_restore(&mut local).unwrap().unwrap();
+            assert_eq!(from, missing);
+            assert_eq!(to, PathBuf::from("/tmp/sc-relocate/local-stores/my_docs"));
+            assert_eq!(
+                local.setting(CFG_PATH),
+                Some("/tmp/sc-relocate/local-stores/my_docs")
+            );
+            assert_eq!(local.config.get(CFG_CREATE), Some(&serde_json::json!(true)));
+
+            // Git with a URL: the directory is dropped, so it is derived.
+            let mut git = FileStoreDef::git("app", "u").with(CFG_DIR, missing.clone());
+            let (_, to) = relocate_for_restore(&mut git).unwrap().unwrap();
+            assert_eq!(to, PathBuf::from("/tmp/sc-relocate/git-stores/app"));
+            assert!(git.config.get(CFG_DIR).is_none());
+            assert_eq!(clone_path(&git).unwrap(), to);
+
+            // Git without one: still valid, so the directory is named outright.
+            let mut adopted = FileStoreDef::new("app", GIT_BACKEND).with(CFG_DIR, missing);
+            relocate_for_restore(&mut adopted).unwrap().unwrap();
+            assert_eq!(
+                adopted.setting(CFG_DIR),
+                Some("/tmp/sc-relocate/git-stores/app")
+            );
+            assert!(validate_file_store_config(&adopted).is_ok());
+
+            // Git that let Saltcorn choose has nothing to move.
+            let mut derived = FileStoreDef::git("app", "u");
+            assert_eq!(relocate_for_restore(&mut derived).unwrap(), None);
+        });
     }
 
     #[test]

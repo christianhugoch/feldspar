@@ -29,9 +29,9 @@ pub use access::{
     ROLE_PUBLIC, VisibleEntry, check_access, effective_min_role, filter_visible, visible_entries,
 };
 pub use backend::{
-    OperationOutcome, backend_config_spec, backend_operations, connect_from_def, display_config,
-    git_config_spec, local_config_spec, registered_backends, run_backend_operation,
-    validate_file_store_config,
+    OperationOutcome, Relocation, backend_config_spec, backend_operations, connect_from_def,
+    display_config, git_config_spec, local_config_spec, registered_backends, relocate_for_restore,
+    run_backend_operation, validate_file_store_config,
 };
 pub use def::{
     ATTR_CLONE_PATH, CFG_BRANCH, CFG_CREATE, CFG_DIR, CFG_KEY_PATH, CFG_PATH, CFG_PUBLIC_KEY,

@@ -7275,7 +7275,7 @@ async fn discard_file_stores(catalog: &Catalog, defs: &[FileStoreDef]) {
 /// nothing here — its one operation configures the form rather than creating
 /// anything — and a backend added later, an object store creating its bucket,
 /// gets the same transactional create by declaring one.
-async fn create_backend_resources(def: &mut FileStoreDef) -> Result<()> {
+pub(crate) async fn create_backend_resources(def: &mut FileStoreDef) -> Result<()> {
     for op in backend_operations(&def.backend)? {
         if op.on_create {
             run_backend_operation(def, &op.name, &sc_types::Attrs::new()).await?;
@@ -7526,9 +7526,14 @@ pub(crate) fn backup_store_def_json(def: &FileStoreDef) -> Json {
 /// for a screen and the wrong one to restore: it is computed from the
 /// directories above the file, so writing it back would turn an inherited rule
 /// into a rule of its own.
-pub(crate) fn backup_file_meta_json(path: &str, meta: &FileMeta) -> Json {
+///
+/// `mode` is the file's permission bits where the store is a directory on disk,
+/// so a restore gives an executable script back its executable bit; `None` (an
+/// object store, or a platform without Unix modes) leaves it out.
+pub(crate) fn backup_file_meta_json(path: &str, meta: &FileMeta, mode: Option<u32>) -> Json {
     json!({
         "path": path,
+        "mode": mode,
         "min_role": meta.min_role,
         // Who created the file travels with it. It is an id, so it only means
         // anything on a restore into the same installation — but dropping it

@@ -2,6 +2,41 @@
 
 Changes in reverse chronological order.
 
+## Restored file stores are placed where this server can reach them
+
+A backup carries a local or git file store's directory as the absolute path it had on the machine
+the backup was taken from. Restoring onto a different machine created the store at that path,
+which usually did not exist or was not writable.
+
+- When a restore **defines** a store, its directory is kept only if that absolute path exists on
+  this server (a shared drive, or the same machine). Otherwise it is moved to the location this
+  installation recommends (`sc_files::relocate_for_restore`):
+  - **local**: `<data dir>/local-stores/<name>` (the "Suggest a directory" answer), with `create`
+    on so the directory is made;
+  - **git** with a URL: the `directory` setting is dropped, so the working copy goes to the derived
+    `<data dir>/git-stores/<name>`; without a URL the directory is set to that path explicitly.
+- The restore report says where the store was moved from and to.
+- A restored **git** store is brought up, not just defined (a git store only connects over a
+  checkout, so before this its files were skipped as "not connected"):
+  - A git store's backup contains its whole directory, `.git` included. When it does, the checkout
+    is written back as it was (branch, unpushed commits, uncommitted edits), with no network or
+    deploy key needed. A Pull brings it up to date with the remote.
+  - When the backup has no `.git`, the store is cloned from its URL, as creating it in the admin UI
+    does (`create_backend_resources`), and the backup's files are written over the clone. A failed
+    clone still saves the store and reports why.
+  - A `.git` from the backup is never written into a repository already there (a restore onto the
+    same machine); that repository is kept and the report says so.
+- **File modes travel with a store's files.** Each file's entry in `store.json` now records its
+  permission bits (`mode`, the `rwx` bits only) where the store is a directory on disk, and the
+  restore sets them after writing the file. Executable scripts stay executable, and a restored git
+  checkout shows no spurious mode changes. setuid/setgid/sticky are never restored. A read-only
+  file already in the store is made writable for the overwrite and gets the backup's mode back, so
+  restoring the same backup twice works.
+- A store already defined on the server is still left exactly as it is.
+- Tests: `backend::tests::a_restored_store_is_relocated_only_when_its_directory_is_missing`
+  (sc-files), `backup_api::a_restored_store_whose_directory_is_missing_is_placed_in_the_data_directory`
+  and `backup_api::a_restored_git_store_is_checked_out_from_the_backup_or_cloned`.
+
 ## React Native application framework, with Android APK builds
 
 A new bundled module, `plugins/react-native` (`@feldspar/react-native`), declares the application

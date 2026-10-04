@@ -25,6 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
+use std::sync::Arc;
 
 use sc_api::{rows, schema_edit};
 use sc_catalog::{
@@ -39,8 +40,9 @@ use super::{Available, MANIFEST_FILE, SSL_SECTION, Selection};
 use crate::apps::AppMounts;
 use crate::handlers::{
     agent_from_body, agents_of, application_from_body, backup_file_meta_from_json,
-    field_spec_from_body, file_store_from_body, library_item_from_body, page_from_body,
-    table_settings_from_body, trigger_from_body, trigger_table, triggers_of, view_from_body,
+    create_backend_resources, field_spec_from_body, file_store_from_body, library_item_from_body,
+    page_from_body, table_settings_from_body, trigger_from_body, trigger_table, triggers_of,
+    view_from_body,
 };
 
 /// What a restore did, and what it declined to do.
@@ -729,6 +731,23 @@ async fn insert_row(catalog: &Catalog, table: &Table, value: &Json) -> Result<()
 /// not repoint a working store at a directory that is not there. The files are
 /// restored into whatever the store here already is, which is what an admin who
 /// set the store up before restoring meant.
+///
+/// **A new store is placed where this server can reach it.** Its definition's
+/// directory is kept only when that absolute path exists here; otherwise it is
+/// moved to the location this installation recommends for a store of that
+/// backend ([`sc_files::relocate_for_restore`]), and the report says so.
+///
+/// **A new git store is brought up, not just defined.** A git store connects
+/// only over a checkout, so a definition alone would leave its files nowhere to
+/// go. The backup normally *is* the checkout — a store's files are everything in
+/// its directory, `.git` included — and then the checkout is written back as it
+/// was: its branch, its unpushed commits, its uncommitted edits, with no network
+/// and no deploy key needed (a pull brings it up to date). Only a backup with no
+/// `.git` in it is cloned from the store's URL, as creating the store would.
+///
+/// **A `.git` is never written into a repository that is already there.** That
+/// repository is the one the admin meant, and the backup's refs and index laid
+/// over it would corrupt it rather than restore it.
 async fn restore_file_store(
     catalog: &Catalog,
     entries: &Entries,
@@ -742,15 +761,32 @@ async fn restore_file_store(
             return;
         }
     };
+    let prefix = format!("file-stores/{name}/files/");
+    let files: Vec<(&str, &Vec<u8>)> = entries
+        .iter()
+        .filter_map(|(entry, bytes)| Some((entry.strip_prefix(&prefix)?, bytes)))
+        .filter(|(path, _)| !path.is_empty())
+        .collect();
+    let carries_checkout = files.iter().any(|(path, _)| is_git_path(path));
 
+    // Set when this restore defined a git store whose checkout is in the backup:
+    // the store is connected once that checkout has been written.
+    let mut checkout_to_write = None;
     match load_file_store_by_name(catalog, name).await {
         Ok(Some(_)) => report.skipped(format!(
             "file store `{name}` is already defined here; its definition was kept and the \
              backup's files were written into it"
         )),
         Ok(None) => {
-            let result = define_store(catalog, document.get("definition")).await;
-            report.outcome(&format!("file store `{name}`"), result);
+            match define_store(catalog, document.get("definition"), carries_checkout).await {
+                Ok((def, detail, write_checkout)) => {
+                    if write_checkout {
+                        checkout_to_write = Some(def);
+                    }
+                    report.outcome(&format!("file store `{name}`"), Ok(detail));
+                }
+                Err(e) => report.outcome(&format!("file store `{name}`"), Err(e)),
+            }
         }
         Err(e) => {
             report.skipped(format!("file store `{name}`: {}", e.causes()));
@@ -758,13 +794,29 @@ async fn restore_file_store(
         }
     }
 
-    let Ok(store) = catalog.require_file_store(name) else {
-        report.skipped(format!(
-            "files of `{name}`: the store is not connected on this server"
-        ));
-        return;
+    let store: Arc<dyn sc_files::FileStore> = if let Some(def) = &checkout_to_write {
+        match checkout_store(def) {
+            Ok(store) => store,
+            Err(e) => {
+                report.skipped(format!("files of `{name}`: {}", e.causes()));
+                return;
+            }
+        }
+    } else {
+        match catalog.require_file_store(name) {
+            Ok(store) => store,
+            Err(_) => {
+                report.skipped(format!(
+                    "files of `{name}`: the store is not connected on this server"
+                ));
+                return;
+            }
+        }
     };
-    let prefix = format!("file-stores/{name}/files/");
+    // Checked once, before anything is written: whether there is a repository
+    // here that is not the one this restore is writing.
+    let keep_existing_git = checkout_to_write.is_none() && store.is_git_repo();
+
     let mut written = 0;
     let mut metadata: BTreeMap<String, Json> = BTreeMap::new();
     for value in array_field(&document, "files") {
@@ -772,13 +824,8 @@ async fn restore_file_store(
             metadata.insert(path.to_owned(), value.clone());
         }
     }
-    for (entry, bytes) in entries {
-        let Some(path) = entry.strip_prefix(&prefix) else {
-            continue;
-        };
-        if path.is_empty() {
-            continue;
-        }
+    let mut kept_git = false;
+    for (path, bytes) in files {
         // The store itself refuses a path that escapes its root, and this refuses
         // it before the bytes are read: a zip is a file somebody can hand us, and
         // `..` in an entry name is the oldest trick there is.
@@ -788,12 +835,32 @@ async fn restore_file_store(
             ));
             continue;
         }
+        if keep_existing_git && is_git_path(path) {
+            kept_git = true;
+            continue;
+        }
+        let mode = metadata
+            .get(path)
+            .and_then(|value| value.get("mode"))
+            .and_then(Json::as_u64)
+            .and_then(|mode| u32::try_from(mode).ok());
+        if mode.is_some() {
+            make_writable(store.as_ref(), path);
+        }
         match store.write(path, bytes.clone().into()).await {
             Ok(()) => written += 1,
             Err(e) => {
                 report.skipped(format!("file `{path}` of `{name}`: {}", e.causes()));
                 continue;
             }
+        }
+        if let Some(mode) = mode
+            && let Err(e) = set_mode(store.as_ref(), path, mode)
+        {
+            report.skipped(format!(
+                "permissions of `{path}` in `{name}`: {}",
+                e.causes()
+            ));
         }
         // The rules the file carried, after the bytes it carried them for.
         if let Some(value) = metadata.get(path)
@@ -807,20 +874,141 @@ async fn restore_file_store(
     if written > 0 {
         report.did(format!("{written} files into `{name}`"));
     }
+    if kept_git {
+        report.skipped(format!(
+            "the `.git` of `{name}` in the backup was not written: the store already has a \
+             repository, which was left as it is"
+        ));
+    }
+    if let Some(def) = checkout_to_write {
+        match sc_catalog::connect_file_store_def(catalog, &def) {
+            Ok(()) => report.did(format!(
+                "the git working copy of `{name}`, restored from the backup"
+            )),
+            Err(e) => report.skipped(format!(
+                "file store `{name}` was restored but is not connected: {}",
+                e.causes()
+            )),
+        }
+    }
 }
 
-async fn define_store(catalog: &Catalog, definition: Option<&Json>) -> Result<String> {
+/// Give a file the permission bits the backup recorded for it — what keeps an
+/// executable script executable.
+///
+/// Only the `rwx` bits, whatever the file says: setuid, setgid and sticky are not
+/// something a zip somebody handed us gets to set. A store with no directory on
+/// disk, or a platform without Unix modes, has nothing to set.
+#[cfg(unix)]
+fn set_mode(store: &dyn sc_files::FileStore, path: &str, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(local) = store.local_path(path)? else {
+        return Ok(());
+    };
+    std::fs::set_permissions(&local, std::fs::Permissions::from_mode(mode & 0o777))
+        .map_err(|e| Error::msg(format!("setting the mode of {}: {e}", local.display())))
+}
+
+#[cfg(not(unix))]
+fn set_mode(_store: &dyn sc_files::FileStore, _path: &str, _mode: u32) -> Result<()> {
+    Ok(())
+}
+
+/// Let the owner write a file that is already there, so the backup's copy can
+/// replace it.
+///
+/// A file restored with its recorded mode may be read-only — every object in a
+/// `.git` is — and restoring the same backup again would otherwise fail on each
+/// one. The backup's own mode is put back straight after the write. Best-effort:
+/// a file this cannot change is reported by the write that follows.
+#[cfg(unix)]
+fn make_writable(store: &dyn sc_files::FileStore, path: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(Some(local)) = store.local_path(path) else {
+        return;
+    };
+    if let Ok(meta) = std::fs::metadata(&local)
+        && meta.is_file()
+        && meta.permissions().mode() & 0o200 == 0
+    {
+        let _ = std::fs::set_permissions(
+            &local,
+            std::fs::Permissions::from_mode(meta.permissions().mode() | 0o200),
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn make_writable(_store: &dyn sc_files::FileStore, _path: &str) {}
+
+/// Whether a store-relative path is in (or is) a repository's `.git` — a
+/// directory in an ordinary checkout, a file in a worktree.
+fn is_git_path(path: &str) -> bool {
+    path == ".git" || path.starts_with(".git/")
+}
+
+/// A plain directory store over where a git store's checkout belongs, for writing
+/// that checkout before the git store itself can connect to it.
+fn checkout_store(def: &sc_files::FileStoreDef) -> Result<Arc<dyn sc_files::FileStore>> {
+    let root = sc_files::clone_path(def)?;
+    std::fs::create_dir_all(&root)
+        .map_err(|e| Error::msg(format!("creating {}: {e}", root.display())))?;
+    Ok(Arc::new(sc_files::LocalFileStore::new(&def.name, &root)?))
+}
+
+/// Define a store from a backup's definition, returning what was saved, a note
+/// for the report, and whether the caller is to write the backup's checkout and
+/// then connect the store ([`restore_file_store`]).
+///
+/// A git store whose backup does **not** carry its checkout is cloned here, as
+/// creating it in the admin UI would. One whose directory already holds a
+/// checkout (a restore onto the machine the backup came from) is simply
+/// connected to it.
+async fn define_store(
+    catalog: &Catalog,
+    definition: Option<&Json>,
+    carries_checkout: bool,
+) -> Result<(sc_files::FileStoreDef, String, bool)> {
     let definition =
         definition.ok_or_else(|| Error::invalid("the entry carries no store definition"))?;
-    let def = file_store_from_body(sc_files::FileStoreDefId::new(), definition)?;
+    let mut def = file_store_from_body(sc_files::FileStoreDefId::new(), definition)?;
+    // The backup's directory is the one the store had on the machine it was taken
+    // from. Unless that path exists here too (a shared drive, or the same machine),
+    // the store goes where this installation puts its stores.
+    let moved = sc_files::relocate_for_restore(&mut def)?;
     sc_catalog::check_file_store_saveable(catalog, &def).await?;
-    sc_catalog::save_file_store(catalog, &def).await?;
-    // Connected straight away, as `createFileStore` does, so the files below have
-    // somewhere to go — and so an unreachable directory is reported now.
-    match sc_catalog::connect_file_store_def(catalog, &def) {
-        Ok(()) => Ok(String::new()),
-        Err(e) => Ok(format!("defined, but not connected: {}", e.causes())),
+    let mut notes = Vec::new();
+    if let Some((from, to)) = moved {
+        notes.push(format!(
+            "{from} does not exist on this server, so the store was placed in {}",
+            to.display()
+        ));
     }
+    let mut write_checkout = false;
+    if def.backend == sc_files::GIT_BACKEND {
+        write_checkout = carries_checkout && !sc_files::GitRepo::from_def(&def)?.is_cloned();
+        // Where the checkout goes is recorded either way, so a later rename of
+        // the store cannot orphan it — exactly what the clone operation records.
+        let root = sc_files::clone_path(&def)?;
+        sc_files::record_clone_path(&mut def, &root);
+        if !carries_checkout && !write_checkout {
+            // A clone that fails still leaves a saved store: the definition is
+            // what the admin repairs (a deploy key to install, a URL to fix), and
+            // the Clone button retries.
+            if let Err(e) = create_backend_resources(&mut def).await {
+                notes.push(format!("defined, but not cloned: {}", e.causes()));
+            }
+        }
+    }
+    sc_catalog::save_file_store(catalog, &def).await?;
+    // Connected straight away, as `createFileStore` does, so the files have
+    // somewhere to go — and so an unreachable directory is reported now. A git
+    // store whose checkout is still to be written cannot connect yet, and is
+    // connected once it has been.
+    if !write_checkout && let Err(e) = sc_catalog::connect_file_store_def(catalog, &def) {
+        notes.push(format!("defined, but not connected: {}", e.causes()));
+    }
+    Ok((def, notes.join("; "), write_checkout))
 }
 
 /// One application, under the id it had, so what references it still does.

@@ -1622,3 +1622,274 @@ async fn every_backup_route_is_admin_only() -> sc_error::Result<()> {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     Ok(())
 }
+
+/// The data directory a store restored from another machine is moved into.
+///
+/// Set once for the whole binary, as `git_store_api`'s is: the environment is
+/// process-wide and these tests run in parallel. Only this test defines a store
+/// the restore has to place; every other one prepares its store first.
+fn data_dir() -> &'static std::path::Path {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = temp_dir();
+        unsafe { std::env::set_var(sc_files::DATA_DIR_ENV, &dir) };
+        dir
+    })
+}
+
+/// A store restored onto a server where its directory does not exist goes where
+/// this server puts its stores; one whose directory does exist (a shared drive)
+/// keeps it.
+#[tokio::test]
+async fn a_restored_store_whose_directory_is_missing_is_placed_in_the_data_directory()
+-> sc_error::Result<()> {
+    let data = data_dir().to_owned();
+    let mut source = setup().await?;
+    let shared = temp_dir();
+    for (name, path) in [("moved", &source.files), ("shared", &shared)] {
+        let (status, body) = source
+            .client
+            .send(
+                "POST",
+                "/api/file-stores",
+                Some(json!({
+                    "name": name,
+                    "backend": "local",
+                    "config": { "path": path.to_string_lossy() },
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let (status, body) = source
+            .client
+            .send(
+                "POST",
+                &format!("/api/file-stores/{name}/write"),
+                Some(json!({ "path": "a/b.txt", "text": format!("from {name}") })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    // An executable script and a read-only file, whose modes travel with them.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = source.files.join("run.sh");
+        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let frozen = source.files.join("frozen.txt");
+        std::fs::write(&frozen, "do not touch").unwrap();
+        std::fs::set_permissions(&frozen, std::fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    let archive = backup_everything(&mut source).await;
+    // The machine the backup was taken on, gone: its store directory with it.
+    std::fs::remove_dir_all(&source.files).unwrap();
+
+    let mut target = setup().await?;
+    let report = restore_everything(&mut target, &archive).await;
+    assert!(
+        report_has(&report, "restored", "does not exist on this server"),
+        "{report}"
+    );
+
+    let (status, stores) = target.client.send("GET", "/api/file-stores", None).await;
+    assert_eq!(status, StatusCode::OK, "{stores}");
+    let path_of = |name: &str| {
+        stores
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == json!(name))
+            .unwrap_or_else(|| panic!("store `{name}` restored: {stores}"))["config"]["path"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let moved = data.join("local-stores").join("moved");
+    assert_eq!(path_of("moved"), moved.to_string_lossy());
+    assert_eq!(path_of("shared"), shared.to_string_lossy());
+    assert!(!source.files.exists(), "nothing recreated at the old path");
+
+    // The files went with each store to where it now is.
+    assert_eq!(
+        std::fs::read_to_string(moved.join("a/b.txt")).unwrap(),
+        "from moved"
+    );
+    assert_eq!(
+        std::fs::read_to_string(shared.join("a/b.txt")).unwrap(),
+        "from shared"
+    );
+
+    // …and so did their modes.
+    let mode = |path: std::path::PathBuf| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    };
+    assert_eq!(mode(moved.join("run.sh")), 0o755);
+    assert_eq!(mode(moved.join("frozen.txt")), 0o444);
+
+    // The same backup restored again overwrites the read-only file rather than
+    // failing on it, and leaves it read-only.
+    let again = restore_everything(&mut target, &archive).await;
+    assert!(!report_has(&again, "warnings", "frozen.txt"), "{again}");
+    assert_eq!(mode(moved.join("frozen.txt")), 0o444);
+    Ok(())
+}
+
+/// Run git in `dir`, returning its output and asserting it worked.
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .unwrap_or_else(|e| panic!("running `git {}`: {e}", args.join(" ")));
+    assert!(
+        out.status.success(),
+        "`git {}` failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// The same zip without the entries `drop` picks out.
+fn without_entries(archive: &[u8], drop: impl Fn(&str) -> bool) -> Vec<u8> {
+    let mut source = zip::ZipArchive::new(std::io::Cursor::new(archive)).expect("a zip");
+    let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for i in 0..source.len() {
+        let file = source.by_index_raw(i).unwrap();
+        if !drop(file.name()) {
+            out.raw_copy_file(file).unwrap();
+        }
+    }
+    out.finish().unwrap().into_inner()
+}
+
+/// A git store restored onto another machine comes back as a working copy: from
+/// the backup's own `.git` when it carries one (unpushed commits and uncommitted
+/// edits included, no network needed), and by cloning its URL when it does not.
+#[tokio::test]
+async fn a_restored_git_store_is_checked_out_from_the_backup_or_cloned() -> sc_error::Result<()> {
+    let data = data_dir().to_owned();
+    // The remote both stores were cloned from: one commit.
+    let remotes = temp_dir();
+    let bare = remotes.join("origin.git");
+    let seed = remotes.join("seed");
+    std::fs::create_dir_all(&bare).unwrap();
+    std::fs::create_dir_all(&seed).unwrap();
+    git(&bare, &["init", "--bare", "--initial-branch=main", "."]);
+    git(&seed, &["init", "--initial-branch=main", "."]);
+    std::fs::write(seed.join("README.md"), "# from the remote\n").unwrap();
+    // Executable in the repository: a restore that lost the bit would show it
+    // as a change.
+    std::fs::write(seed.join("build.sh"), "#!/bin/sh\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            seed.join("build.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    git(&seed, &["add", "-A"]);
+    git(
+        &seed,
+        &[
+            "-c",
+            "user.email=s@example.com",
+            "-c",
+            "user.name=S",
+            "commit",
+            "-m",
+            "initial",
+        ],
+    );
+    git(&seed, &["push", &bare.to_string_lossy(), "main"]);
+
+    let mut source = setup().await?;
+    let checkouts = temp_dir();
+    for name in ["restoredrepo", "clonedrepo"] {
+        let (status, body) = source
+            .client
+            .send(
+                "POST",
+                "/api/file-stores",
+                Some(json!({
+                    "name": name,
+                    "backend": "git",
+                    "config": {
+                        "url": bare.to_string_lossy(),
+                        "directory": checkouts.join(name).to_string_lossy(),
+                    },
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        // A commit that was never pushed, and an edit that was never committed.
+        let tree = checkouts.join(name);
+        std::fs::write(tree.join("local.txt"), "committed here only\n").unwrap();
+        git(&tree, &["add", "-A"]);
+        git(
+            &tree,
+            &[
+                "-c",
+                "user.email=s@example.com",
+                "-c",
+                "user.name=S",
+                "commit",
+                "-m",
+                "unpushed",
+            ],
+        );
+        std::fs::write(tree.join("README.md"), "# edited, not committed\n").unwrap();
+    }
+    let archive = backup_everything(&mut source).await;
+    assert!(has_entry(
+        &archive,
+        "file-stores/restoredrepo/files/.git/HEAD"
+    ));
+    // A backup of `clonedrepo` with no checkout in it.
+    let archive = without_entries(&archive, |entry| {
+        entry.starts_with("file-stores/clonedrepo/files/.git/")
+    });
+    // The machine the backup was taken on, gone.
+    std::fs::remove_dir_all(&checkouts).unwrap();
+
+    let mut target = setup().await?;
+    let report = restore_everything(&mut target, &archive).await;
+    assert!(
+        report_has(&report, "restored", "working copy of `restoredrepo`"),
+        "{report}"
+    );
+
+    let (status, stores) = target.client.send("GET", "/api/file-stores", None).await;
+    assert_eq!(status, StatusCode::OK, "{stores}");
+    for name in ["restoredrepo", "clonedrepo"] {
+        let store = stores
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == json!(name))
+            .unwrap_or_else(|| panic!("store `{name}` restored: {stores}"));
+        assert_eq!(store["connected"], json!(true), "{store}");
+    }
+
+    // From the backup: the checkout exactly as it was.
+    let restored = data.join("git-stores").join("restoredrepo");
+    assert_eq!(git(&restored, &["log", "-1", "--format=%s"]), "unpushed");
+    assert_eq!(
+        std::fs::read_to_string(restored.join("README.md")).unwrap(),
+        "# edited, not committed\n"
+    );
+    assert_eq!(git(&restored, &["status", "--porcelain"]), "M README.md");
+
+    // Cloned: the remote's history, with the backup's files laid over it.
+    let cloned = data.join("git-stores").join("clonedrepo");
+    assert_eq!(git(&cloned, &["log", "-1", "--format=%s"]), "initial");
+    assert_eq!(
+        std::fs::read_to_string(cloned.join("README.md")).unwrap(),
+        "# edited, not committed\n"
+    );
+    assert!(cloned.join("local.txt").exists());
+    Ok(())
+}

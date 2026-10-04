@@ -233,7 +233,8 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
                 let bytes = store.read(&path).await?;
                 let meta = store.get_meta(&path).await.unwrap_or_default();
                 zip.bytes(&format!("{dir}/files/{path}"), &bytes)?;
-                files.push(backup_file_meta_json(&path, &meta));
+                let mode = file_mode(store.as_ref(), &path);
+                files.push(backup_file_meta_json(&path, &meta, mode));
             }
         }
         let count = i64::try_from(files.len()).unwrap_or(i64::MAX);
@@ -407,6 +408,24 @@ async fn table_rows(catalog: &Catalog, table: &Table) -> Result<Vec<Json>> {
         .try_collect()
         .await?;
     Ok(fetched.iter().map(rows::row_to_json).collect())
+}
+
+/// A file's permission bits, where the store keeps it on disk and the platform
+/// has them.
+///
+/// Only the `rwx` bits: setuid, setgid and sticky are not something a restore
+/// should hand back to whoever restores the file.
+#[cfg(unix)]
+fn file_mode(store: &dyn sc_files::FileStore, path: &str) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    let local = store.local_path(path).ok()??;
+    let meta = std::fs::metadata(local).ok()?;
+    Some(meta.permissions().mode() & 0o777)
+}
+
+#[cfg(not(unix))]
+fn file_mode(_store: &dyn sc_files::FileStore, _path: &str) -> Option<u32> {
+    None
 }
 
 /// Every file in a store, depth-first, as store-relative paths.

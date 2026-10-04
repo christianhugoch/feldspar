@@ -22,7 +22,7 @@
 //! applications/<subdomain>/views.json its Saltcorn UI views, when chosen
 //! applications/<subdomain>/pages.json its Saltcorn UI pages, when chosen
 //! applications/<subdomain>/library.json its Saltcorn UI library, with the views
-//! file-stores/<store>/store.json      { definition, files: [ { path, meta } ] }
+//! file-stores/<store>/store.json      { definition, files: [ { path, mode, meta } ] }
 //! file-stores/<store>/files/<path>    the bytes, as they are
 //! users.json                          { roles, users, fields } — hashes included
 //! agents.json                         [ agent, … ]
