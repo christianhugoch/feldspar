@@ -11,7 +11,7 @@
 //!   set of allowed values and a `secret` flag, and the admin UI renders the
 //!   settings screen without knowing what any particular setting means.
 //! - [`store`] is the table: writing checks the value against its declaration,
-//!   so `https_port = "yes"` is refused where the admin can fix it rather than
+//!   so `smtp_port = "yes"` is refused where the admin can fix it rather than
 //!   at the next restart.
 //! - [`ssl`] is the first section of settings — how this server obtains the
 //!   certificates it serves HTTPS with (§13.5) — and [`acme`] is where the ACME
@@ -59,10 +59,10 @@ pub use localisation::{
     localisation_settings, localisation_settings_from,
 };
 pub use ssl::{
-    ACME_CONTACT_EMAIL, ACME_DIRECTORY_URL, HTTPS_PORT, LETSENCRYPT_PRODUCTION,
-    LETSENCRYPT_STAGING, MODE_CUSTOM, MODE_LETSENCRYPT, MODE_OFF, REDIRECT_HTTP_TO_HTTPS,
-    SSL_CERTIFICATE, SSL_EXTRA_DOMAINS, SSL_MODE, SSL_PRIVATE_KEY, SslMode, SslSettings,
-    parse_domains, ssl_settings, ssl_settings_from,
+    ACME_CONTACT_EMAIL, ACME_DIRECTORY_URL, LETSENCRYPT_PRODUCTION, LETSENCRYPT_STAGING,
+    MODE_CUSTOM, MODE_LETSENCRYPT, MODE_OFF, REDIRECT_HTTP_TO_HTTPS, SSL_CERTIFICATE,
+    SSL_EXTRA_DOMAINS, SSL_MODE, SSL_PRIVATE_KEY, SslMode, SslSettings, parse_domains,
+    ssl_settings, ssl_settings_from,
 };
 pub use store::{
     CONFIG_TABLE, all_config, bootstrap_config, config_value, delete_config, set_config,

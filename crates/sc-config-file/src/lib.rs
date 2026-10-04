@@ -44,11 +44,12 @@
 //! url = "postgres://saltcorn:…@db.internal/saltcorn"
 //! base_domain = "example.com"      # apps are at <subdomain>.example.com
 //! extra_base_domains = []          # …and also at <subdomain>.<each of these>
-//! bind = "0.0.0.0:443"
+//! bind = "0.0.0.0:80"
+//! https_port = 8443                # only when TLS is not on 443
 //! secure_cookies = true
 //! ```
 //!
-//! Those three mirror `serve`'s flags of the same names, so `feldspar serve
+//! Those mirror `serve`'s flags of the same names, so `feldspar serve
 //! --environment production` needs none of them on the command line — and, less
 //! obviously but more usefully, a `feldspar build-app` run against the same
 //! environment writes the application's real URL into the documentation it
@@ -182,6 +183,13 @@ pub struct Environment {
     /// name says what it does to cookies and which equally decides whether an
     /// application's URL is `https`.
     pub secure_cookies: Option<bool>,
+    /// The port TLS is served on, when the TLS settings turn it on —
+    /// `--https-port`. Only needed when it is not 443.
+    ///
+    /// A property of this host, like `bind`, and not a stored setting: a port
+    /// kept in the database travels with a backup into a deployment whose
+    /// firewall knows nothing about it.
+    pub https_port: Option<u16>,
     /// The headless Chromium the coding agent's `view_app` drives — `--browser`
     /// (TODO §7b). Unset, the server looks on `PATH` for `chromium`,
     /// `chromium-browser` and `google-chrome`, skipping a snap shim.
@@ -670,6 +678,18 @@ test_template = "saltcorn_template"
         let text = format!("{error}");
         assert!(text.contains("SQLite"), "{text}");
         assert!(text.contains("host") && text.contains("database"), "{text}");
+    }
+
+    /// The HTTPS port is a property of the host, so it lives here and not in
+    /// the database; absent is the default (443), not an error.
+    #[test]
+    fn an_environment_may_name_its_https_port() {
+        let file = parse("[environments.production]\ndatabase = \"a\"\nhttps_port = 8443\n")
+            .expect("parse");
+        assert_eq!(file.environments["production"].https_port, Some(8443));
+        let file = parse("[environments.production]\ndatabase = \"a\"\n").expect("parse");
+        assert_eq!(file.environments["production"].https_port, None);
+        assert!(parse("[environments.production]\nhttps_port = 70000\n").is_err());
     }
 
     #[test]

@@ -183,7 +183,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // to open, and this is the only place that knows it (§13.2).
     if let Some(domain) = &config.base_domain {
         let port = if ssl.enabled() {
-            ssl.https_port
+            config.https_port
         } else {
             config.addr.port()
         };
@@ -370,6 +370,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // and got HTTP would not find out from the server.
     config.tls = sc_server::TlsSettings::from_ssl(
         &ssl,
+        config.https_port,
         sc_server::TlsNames::new(
             config.base_domain.clone(),
             apps.subdomains(),
@@ -460,6 +461,10 @@ fn serving_defaults(db: &DbConfig) -> Vec<String> {
     }
     if serving.secure_cookies() == Some(true) {
         flags.push("--secure-cookies".to_owned());
+    }
+    if let Some(port) = serving.https_port() {
+        flags.push("--https-port".to_owned());
+        flags.push(port.to_string());
     }
     if let Some(browser) = serving.browser() {
         flags.push("--browser".to_owned());
@@ -922,7 +927,7 @@ async fn remove_query_command(args: &[String]) -> Result<()> {
 /// (§13.5).
 ///
 /// With a key it prints that value and nothing else, so a script can capture it:
-/// `port=$(feldspar get-cfg https_port)`. With no key it prints every declared
+/// `port=$(feldspar get-cfg smtp_port)`. With no key it prints every declared
 /// setting as `key=value`, one per line, which is the answer to "what is this
 /// installation actually configured to do" — the question that otherwise needs a
 /// browser and a session.
@@ -952,7 +957,7 @@ async fn get_cfg_command(args: &[String]) -> Result<()> {
     // This command's stdout **is** the value, so nothing else may go there.
     // The SQL echo is a stored setting meant for a *server's* stdout, which
     // nobody captures an answer out of (see `sc-log`); leaving it on here would
-    // mean `port=$(feldspar get-cfg https_port)` picking up the select that
+    // mean `port=$(feldspar get-cfg smtp_port)` picking up the select that
     // found the port, because of a checkbox somebody ticked days ago in another
     // process. It stays on for every other command, `set-cfg` included, where
     // stdout is not an answer.
@@ -1015,13 +1020,13 @@ async fn print_all_config(catalog: &sc_catalog::Catalog) -> Result<()> {
 ///
 /// ```text
 /// feldspar set-cfg ssl_certificate < fullchain.pem
-/// feldspar set-cfg https_port 8443
+/// feldspar set-cfg smtp_port 2525
 /// ```
 ///
 /// A terminal has only strings, so the *declaration* decides the type
 /// ([`sc_cli::config::value_for`]) and [`sc_config::set_config`] checks the
 /// result against that same declaration — the one check every writer goes
-/// through, so `https_port = "yes"` is refused here exactly as it is in the
+/// through, so `smtp_port = "yes"` is refused here exactly as it is in the
 /// admin UI, and nothing is written.
 ///
 /// It does not restart anything. A stored setting is read by the server at the
@@ -1588,14 +1593,14 @@ fn print_usage() {
   get-cfg / set-cfg: the settings an admin edits in Settings, from a terminal.
        They are rows in the primary database, so these commands need the database
        and nothing else — no running server, no session. `get-cfg KEY` prints that
-       value alone, ready to capture (`port=$(feldspar get-cfg https_port)`);
+       value alone, ready to capture (`port=$(feldspar get-cfg smtp_port)`);
        `get-cfg` with no key prints every declared setting as `key=value`, one per
        line, with secrets shown as the redaction the admin UI shows — name a
        secret's key to see it in full. `set-cfg` takes the value from the command
        line, or from stdin when there is none, which is how a multi-line PEM block
        is set: `feldspar set-cfg ssl_certificate < fullchain.pem`. The value is
        checked against the key's declared type before it is written, so
-       `set-cfg https_port yes` is a message rather than a stored string. Nothing
+       `set-cfg smtp_port yes` is a message rather than a stored string. Nothing
        is restarted: when a setting takes effect is the setting's own business.
 
   auth token: mints a session on the *running* server and writes the cookies a
@@ -1613,6 +1618,9 @@ fn print_usage() {
   server:"
     );
     eprintln!("    --bind ADDR  --static-dir DIR  --session-ttl-hours N  --secure-cookies");
+    eprintln!(
+        "    --https-port N           the port HTTPS is served on when TLS is on (default 443)"
+    );
     eprintln!("    --base-domain DOMAIN     apps are served at <subdomain>.<domain>");
     eprintln!(
         "    --extra-base-domain D    …and also at <subdomain>.<D> (repeatable), e.g. 10.0.2.2.nip.io
@@ -1669,7 +1677,7 @@ fn print_usage() {
     eprintln!();
     eprintln!(
         "  a feldspar.toml environment may also carry `base_domain`, `extra_base_domains`, `bind`,
-  `secure_cookies`, `browser`, `browser_sandbox`, `cmdstan` and the `stan_*` keys, so `serve --environment NAME` needs none of those flags —
+  `secure_cookies`, `https_port`, `browser`, `browser_sandbox`, `cmdstan` and the `stan_*` keys, so `serve --environment NAME` needs none of those flags —
   and so a build from the command line writes the same application URL into the
   generated documentation that the server would."
     );

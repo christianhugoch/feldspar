@@ -42,8 +42,6 @@ pub const ACME_DIRECTORY_URL: &str = "acme_directory_url";
 /// Domains to include in the certificate beyond the ones the server already
 /// knows it serves.
 pub const SSL_EXTRA_DOMAINS: &str = "ssl_extra_domains";
-/// The port TLS is served on.
-pub const HTTPS_PORT: &str = "https_port";
 /// Whether the plain-HTTP listener redirects to HTTPS.
 pub const REDIRECT_HTTP_TO_HTTPS: &str = "redirect_http_to_https";
 
@@ -60,9 +58,6 @@ pub const LETSENCRYPT_PRODUCTION: &str = "https://acme-v02.api.letsencrypt.org/d
 /// limits. Named here because it is what an admin should try first, and having
 /// to find the URL is what stops them.
 pub const LETSENCRYPT_STAGING: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
-
-/// The default TLS port.
-pub const DEFAULT_HTTPS_PORT: i64 = 443;
 
 /// The TLS settings, as one section of the settings screen.
 pub fn ssl_section() -> ConfigSection {
@@ -113,12 +108,6 @@ pub fn ssl_section() -> ConfigSection {
                     .multiline()
                     .secret(),
                 "PKCS#8, PKCS#1 or SEC1. Stored in the database and never returned by the API.",
-            ),
-            ConfigDef::help(
-                FormField::new(HTTPS_PORT, BasicType::Int)
-                    .label("HTTPS port")
-                    .default_value(DEFAULT_HTTPS_PORT),
-                "The plain-HTTP listener stays on the bind address the server was started with.",
             ),
             ConfigDef::help(
                 FormField::new(REDIRECT_HTTP_TO_HTTPS, BasicType::Bool)
@@ -182,8 +171,6 @@ pub struct SslSettings {
     pub directory_url: String,
     /// Domains to certify beyond the ones the server derives for itself.
     pub extra_domains: Vec<String>,
-    /// The port TLS is served on.
-    pub https_port: u16,
     /// Whether plain HTTP redirects to HTTPS.
     pub redirect_http: bool,
 }
@@ -197,7 +184,6 @@ impl Default for SslSettings {
             contact_email: String::new(),
             directory_url: LETSENCRYPT_PRODUCTION.to_owned(),
             extra_domains: Vec::new(),
-            https_port: DEFAULT_HTTPS_PORT as u16,
             redirect_http: true,
         }
     }
@@ -272,20 +258,6 @@ pub fn ssl_settings_from(config: &Attrs) -> Result<SslSettings> {
             raw.trim().to_owned()
         }
     };
-    let https_port = match config.get(HTTPS_PORT) {
-        Some(Json::Number(n)) => match n.as_i64().and_then(|p| u16::try_from(p).ok()) {
-            Some(port) if port > 0 => port,
-            // A port that is not a port is refused rather than quietly swapped
-            // for 443: binding somewhere the admin did not ask for is worse
-            // than not starting.
-            _ => {
-                return Err(Error::invalid(format!(
-                    "`{HTTPS_PORT}` should be a TCP port (1–65535), got {n}"
-                )));
-            }
-        },
-        _ => defaults.https_port,
-    };
     Ok(SslSettings {
         mode,
         certificate: text(SSL_CERTIFICATE),
@@ -293,7 +265,6 @@ pub fn ssl_settings_from(config: &Attrs) -> Result<SslSettings> {
         contact_email: text(ACME_CONTACT_EMAIL).trim().to_owned(),
         directory_url,
         extra_domains: parse_domains(&text(SSL_EXTRA_DOMAINS)),
-        https_port,
         redirect_http: match config.get(REDIRECT_HTTP_TO_HTTPS) {
             Some(Json::Bool(b)) => *b,
             _ => defaults.redirect_http,
@@ -340,7 +311,6 @@ mod tests {
         let settings = ssl_settings_from(&Attrs::new()).unwrap();
         assert_eq!(settings.mode, SslMode::Off);
         assert!(!settings.enabled());
-        assert_eq!(settings.https_port, 443);
         assert!(settings.redirect_http);
         assert_eq!(settings.directory_url, LETSENCRYPT_PRODUCTION);
         settings.check().unwrap();
@@ -353,7 +323,6 @@ mod tests {
             (ACME_CONTACT_EMAIL, json!(" admin@example.com ")),
             (ACME_DIRECTORY_URL, json!(LETSENCRYPT_STAGING)),
             (SSL_EXTRA_DOMAINS, json!("www.example.com\nExample.com,")),
-            (HTTPS_PORT, json!(8443)),
             (REDIRECT_HTTP_TO_HTTPS, json!(false)),
         ]))
         .unwrap();
@@ -361,7 +330,6 @@ mod tests {
         assert_eq!(settings.contact_email, "admin@example.com");
         assert_eq!(settings.directory_url, LETSENCRYPT_STAGING);
         assert_eq!(settings.extra_domains, ["www.example.com", "example.com"]);
-        assert_eq!(settings.https_port, 8443);
         assert!(!settings.redirect_http);
         settings.check().unwrap();
     }
@@ -385,13 +353,6 @@ mod tests {
         .unwrap();
         let err = keyless.check().unwrap_err().to_string();
         assert!(err.contains(SSL_PRIVATE_KEY), "{err}");
-    }
-
-    #[test]
-    fn a_port_that_is_not_a_port_is_an_error_not_a_default() {
-        let err = ssl_settings_from(&attrs(&[(HTTPS_PORT, json!(70000))])).unwrap_err();
-        assert!(err.to_string().contains(HTTPS_PORT), "{err}");
-        assert!(ssl_settings_from(&attrs(&[(HTTPS_PORT, json!(0))])).is_err());
     }
 
     #[test]

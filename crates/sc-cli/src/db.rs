@@ -87,6 +87,11 @@ impl Serving<'_> {
         self.section.and_then(|s| s.secure_cookies)
     }
 
+    /// The configured HTTPS port, if the file gave one.
+    pub fn https_port(&self) -> Option<u16> {
+        self.section.and_then(|s| s.https_port)
+    }
+
     /// The configured headless browser, if the file named one.
     pub fn browser(&self) -> Option<&str> {
         self.section.and_then(|s| s.browser.as_deref())

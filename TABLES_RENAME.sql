@@ -584,3 +584,17 @@ UPDATE "_fd_models" SET "view_state" = '{}'::jsonb WHERE "view_state" IS NULL;
 --
 --   ALTER TABLE "_fd_models" ADD COLUMN "view_state" json;
 --   UPDATE "_fd_models" SET "view_state" = '{}' WHERE "view_state" IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- 11. Postgres and SQLite: `https_port` is no longer a stored setting
+--    (2026-10-04).
+-- ---------------------------------------------------------------------------
+--
+-- The HTTPS port is a property of the host, so it moved out of `_fd_config`
+-- (and out of backups) into `feldspar.toml` (`https_port = N` in the
+-- environment section, only when it is not 443) or `serve --https-port N`. A
+-- leftover row is ignored (`get-cfg` reports it as a stray key); delete it, and
+-- if it held anything other than 443, write that into `feldspar.toml` first.
+-- Re-running it is a no-op.
+
+DELETE FROM "_fd_config" WHERE "key" = 'https_port';

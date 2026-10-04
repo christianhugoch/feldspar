@@ -28,12 +28,11 @@ fn self_signed() -> (String, String) {
 }
 
 /// Stored settings in `custom` mode, as `_fd_config` would yield them.
-fn custom_settings(certificate: String, private_key: String, port: u16) -> SslSettings {
+fn custom_settings(certificate: String, private_key: String) -> SslSettings {
     SslSettings {
         mode: SslMode::Custom,
         certificate,
         private_key,
-        https_port: port,
         ..SslSettings::default()
     }
 }
@@ -57,7 +56,8 @@ async fn a_pasted_certificate_terminates_a_real_handshake() {
     let (listener, addr) = ephemeral();
 
     let tls = TlsSettings::from_ssl(
-        &custom_settings(certificate.clone(), private_key, addr.port()),
+        &custom_settings(certificate.clone(), private_key),
+        addr.port(),
         TlsNames::default(),
         None,
     )
@@ -102,7 +102,8 @@ async fn a_client_that_does_not_trust_the_certificate_is_refused() {
     let (listener, addr) = ephemeral();
 
     let tls = TlsSettings::from_ssl(
-        &custom_settings(certificate, private_key, addr.port()),
+        &custom_settings(certificate, private_key),
+        addr.port(),
         TlsNames::default(),
         None,
     )

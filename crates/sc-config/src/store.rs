@@ -325,13 +325,13 @@ mod tests {
     }
 
     /// The whole point of the declaration: the type is checked before the write,
-    /// so `https_port = "yes"` is a message rather than a row.
+    /// so `smtp_port = "yes"` is a message rather than a row.
     #[test]
     fn a_value_is_checked_against_its_declared_type() {
-        let port = require_definition(crate::ssl::HTTPS_PORT).unwrap();
-        assert!(check(&port, &json!(8443)).is_ok());
+        let port = require_definition(crate::email::SMTP_PORT).unwrap();
+        assert!(check(&port, &json!(2525)).is_ok());
         let err = check(&port, &json!("yes")).unwrap_err().to_string();
-        assert!(err.contains(crate::ssl::HTTPS_PORT), "{err}");
+        assert!(err.contains(crate::email::SMTP_PORT), "{err}");
 
         let mode = require_definition(crate::ssl::SSL_MODE).unwrap();
         assert!(check(&mode, &json!("letsencrypt")).is_ok());

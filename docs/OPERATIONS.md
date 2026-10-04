@@ -517,7 +517,8 @@ url = "postgres://feldspar:secret@db.internal:5432/feldspar"
 
 # The serving half — these mirror `serve` flags exactly.
 base_domain    = "example.com"        # apps are served at <subdomain>.example.com
-bind           = "0.0.0.0:443"
+bind           = "0.0.0.0:80"
+https_port     = 8443                 # only when TLS is not on the default 443
 secure_cookies = true
 browser        = "/usr/bin/chromium"  # view_app's browser; unset searches PATH
 
@@ -1096,13 +1097,13 @@ server, no session, no browser:
 
 ```bash
 feldspar get-cfg                                   # every setting, key=value
-port=$(feldspar get-cfg https_port)                # one value, ready to capture
+port=$(feldspar get-cfg smtp_port)                 # one value, ready to capture
 feldspar set-cfg smtp_host smtp.example.com
 feldspar set-cfg ssl_certificate < fullchain.pem   # multi-line values on stdin
 ```
 
 The value's type comes from the key and is checked before anything is written, so
-`set-cfg https_port yes` is a message and not a stored string. Secrets are redacted
+`set-cfg smtp_port yes` is a message and not a stored string. Secrets are redacted
 in the listing (`smtp_password=••••••••`) because a listing ends up in scrollback
 and in CI logs; naming the key prints it in full. **Nothing is restarted** — when a
 setting takes effect is the setting's own business: the logging switches are

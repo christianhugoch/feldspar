@@ -2,6 +2,26 @@
 
 Changes in reverse chronological order.
 
+## `https_port` moves from the settings to `feldspar.toml`
+
+An application restored from a backup brought its old `https_port` with it. The HTTPS port is
+a property of the host — what its firewall and proxy expect — not of the data, so it is no
+longer a stored setting.
+
+- `https_port` is gone from the SSL section of `_fd_config` (`sc_config::HTTPS_PORT`,
+  `DEFAULT_HTTPS_PORT` and `SslSettings::https_port` removed). It no longer appears on the
+  settings screen, in `get-cfg`, or in a backup's `settings/ssl.json`; restoring an older
+  backup that carries it skips it, as it skips any key outside the SSL section.
+- It is now `https_port` in a `feldspar.toml` environment section, or `serve --https-port N`
+  (flag wins), and only needs to appear when it is not the default 443
+  (`sc_server::DEFAULT_HTTPS_PORT`). `ServerConfig::https_port` carries it, and
+  `TlsSettings::from_ssl` takes it as an argument.
+- `TABLES_RENAME.sql` §11 deletes the leftover `_fd_config` row. Until it is run, the row is
+  ignored and listed as a stray key; copy a non-443 value into `feldspar.toml` first.
+- Tests and docs that used `https_port` as their example integer setting now use `smtp_port`.
+  New tests: `an_environment_may_name_its_https_port` (`sc-config-file`), `--https-port` in
+  `sc-server`'s `config` tests (parsed, defaulted, `0`/`70000` refused).
+
 ## Clear all: reset an installation to the empty state
 
 Settings → Development has a **Clear all** panel, as Saltcorn 1 did. Pressing the button opens a

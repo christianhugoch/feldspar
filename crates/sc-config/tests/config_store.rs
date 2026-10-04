@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use sc_catalog::Catalog;
 use sc_config::{
-    ACME_CONTACT_EMAIL, HTTPS_PORT, MODE_CUSTOM, MODE_LETSENCRYPT, REDIRECT_HTTP_TO_HTTPS,
+    ACME_CONTACT_EMAIL, MODE_CUSTOM, MODE_LETSENCRYPT, REDIRECT_HTTP_TO_HTTPS, SMTP_PORT,
     SSL_CERTIFICATE, SSL_MODE, SSL_PRIVATE_KEY, SslMode, all_config, bootstrap, config_value,
     delete_config, set_config, set_config_many, ssl_settings, stored_config, stray_config_keys,
 };
@@ -43,31 +43,27 @@ async fn a_declared_value_round_trips_as_its_declared_type() -> Result<()> {
 
     // Nothing stored: the declared default is what the server acts on, and
     // `stored_config` still says "unset", which is the distinction a form needs.
-    assert_eq!(stored_config(&catalog, HTTPS_PORT).await?, None);
-    assert_eq!(config_value(&catalog, HTTPS_PORT).await?, json!(443));
+    assert_eq!(stored_config(&catalog, SMTP_PORT).await?, None);
+    assert_eq!(config_value(&catalog, SMTP_PORT).await?, json!(587));
 
-    set_config(&catalog, HTTPS_PORT, json!(8443)).await?;
+    set_config(&catalog, SMTP_PORT, json!(2525)).await?;
     set_config(&catalog, SSL_MODE, json!(MODE_LETSENCRYPT)).await?;
     set_config(&catalog, REDIRECT_HTTP_TO_HTTPS, json!(false)).await?;
 
     // An int comes back an int and a bool a bool — the JSON column does not
     // flatten them to text on the way through the driver.
-    assert_eq!(
-        stored_config(&catalog, HTTPS_PORT).await?,
-        Some(json!(8443))
-    );
+    assert_eq!(stored_config(&catalog, SMTP_PORT).await?, Some(json!(2525)));
     assert_eq!(
         stored_config(&catalog, REDIRECT_HTTP_TO_HTTPS).await?,
         Some(json!(false))
     );
 
     // A second write of the same key updates rather than duplicating.
-    set_config(&catalog, HTTPS_PORT, json!(9443)).await?;
-    assert_eq!(config_value(&catalog, HTTPS_PORT).await?, json!(9443));
+    set_config(&catalog, SMTP_PORT, json!(2526)).await?;
+    assert_eq!(config_value(&catalog, SMTP_PORT).await?, json!(2526));
 
     let settings = ssl_settings(&catalog).await?;
     assert_eq!(settings.mode, SslMode::LetsEncrypt);
-    assert_eq!(settings.https_port, 9443);
     assert!(!settings.redirect_http);
     Ok(())
 }
@@ -76,12 +72,12 @@ async fn a_declared_value_round_trips_as_its_declared_type() -> Result<()> {
 async fn a_wrongly_typed_or_unknown_key_is_refused_and_writes_nothing() -> Result<()> {
     let (catalog, _db) = fixture().await?;
 
-    let err = set_config(&catalog, HTTPS_PORT, json!("eight thousand"))
+    let err = set_config(&catalog, SMTP_PORT, json!("eight thousand"))
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains(HTTPS_PORT), "{err}");
-    assert_eq!(stored_config(&catalog, HTTPS_PORT).await?, None);
+    assert!(err.contains(SMTP_PORT), "{err}");
+    assert_eq!(stored_config(&catalog, SMTP_PORT).await?, None);
 
     // An option a declaration does not offer is the same kind of mistake.
     let err = set_config(&catalog, SSL_MODE, json!("sometimes"))
@@ -104,17 +100,17 @@ async fn a_wrongly_typed_or_unknown_key_is_refused_and_writes_nothing() -> Resul
 async fn clearing_a_key_returns_it_to_its_default() -> Result<()> {
     let (catalog, _db) = fixture().await?;
 
-    set_config(&catalog, HTTPS_PORT, json!(8443)).await?;
-    assert!(delete_config(&catalog, HTTPS_PORT).await?);
-    assert_eq!(config_value(&catalog, HTTPS_PORT).await?, json!(443));
+    set_config(&catalog, SMTP_PORT, json!(2525)).await?;
+    assert!(delete_config(&catalog, SMTP_PORT).await?);
+    assert_eq!(config_value(&catalog, SMTP_PORT).await?, json!(587));
     // Deleting what is not there is not an error, it is just false.
-    assert!(!delete_config(&catalog, HTTPS_PORT).await?);
+    assert!(!delete_config(&catalog, SMTP_PORT).await?);
 
     // A null does the same thing through the write path, which is how a form
     // clears a box.
-    set_config(&catalog, HTTPS_PORT, json!(8443)).await?;
-    set_config(&catalog, HTTPS_PORT, json!(null)).await?;
-    assert_eq!(stored_config(&catalog, HTTPS_PORT).await?, None);
+    set_config(&catalog, SMTP_PORT, json!(2525)).await?;
+    set_config(&catalog, SMTP_PORT, json!(null)).await?;
+    assert_eq!(stored_config(&catalog, SMTP_PORT).await?, None);
     Ok(())
 }
 
@@ -130,18 +126,18 @@ async fn a_batch_save_is_checked_whole_before_any_of_it_lands() -> Result<()> {
         SSL_CERTIFICATE.to_owned(),
         json!("-----BEGIN CERTIFICATE-----"),
     );
-    values.insert(HTTPS_PORT.to_owned(), json!("not a port"));
+    values.insert(SMTP_PORT.to_owned(), json!("not a port"));
 
     let err = set_config_many(&catalog, &values).await.unwrap_err();
-    assert!(err.to_string().contains(HTTPS_PORT), "{err}");
+    assert!(err.to_string().contains(SMTP_PORT), "{err}");
     assert_eq!(stored_config(&catalog, SSL_MODE).await?, None);
     assert_eq!(stored_config(&catalog, SSL_CERTIFICATE).await?, None);
 
-    values.insert(HTTPS_PORT.to_owned(), json!(8443));
+    values.insert(SMTP_PORT.to_owned(), json!(2525));
     set_config_many(&catalog, &values).await?;
     let stored = all_config(&catalog).await?;
     assert_eq!(stored.get(SSL_MODE), Some(&json!(MODE_CUSTOM)));
-    assert_eq!(stored.get(HTTPS_PORT), Some(&json!(8443)));
+    assert_eq!(stored.get(SMTP_PORT), Some(&json!(2525)));
     // A key that was never set still reports its default in the same bag.
     assert_eq!(stored.get(ACME_CONTACT_EMAIL), None);
     assert_eq!(stored.get(REDIRECT_HTTP_TO_HTTPS), Some(&json!(true)));

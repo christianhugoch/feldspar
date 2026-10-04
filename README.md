@@ -1126,14 +1126,20 @@ the admin UI and every application:
 | `custom` | paste a PEM certificate chain and private key. Refused on save if they are not valid PEM or do not match each other |
 
 With TLS on, the server binds **two** listeners: the `--bind` address, which answers
-plain HTTP, and the `https_port` setting (default 443) beside it. The plain one
+plain HTTP, and HTTPS on port 443 beside it. The plain one
 redirects to HTTPS by default (`redirect_http_to_https`); switch it off to serve the
 application on both. Session cookies become `Secure` automatically.
+
+The HTTPS port is **not** a stored setting: it is a property of the host, so it lives in
+the environment's section of `feldspar.toml` (`https_port = 8443`) or on the command line
+(`serve --https-port 8443`), and only needs saying when it is not 443. Keeping it out of
+the database keeps it out of backups, so a restore cannot move a server onto a port its
+firewall does not know about.
 
 ACME notes:
 
 - Validation uses the **TLS-ALPN-01** challenge, inside the TLS handshake — so the CA
-  must reach `https_port` on a public address (443 for Let's Encrypt), and there is no
+  must reach the HTTPS port on a public address (443 for Let's Encrypt), and there is no
   HTTP challenge route to keep clear.
 - The certificate covers the base domain, every mounted application's subdomain, and
   anything listed in `ssl_extra_domains`. **Creating an application orders a new
@@ -1191,13 +1197,13 @@ else: no running server, no session, no browser.
 feldspar set-cfg smtp_host smtp.example.com
 feldspar set-cfg smtp_port 587
 feldspar set-cfg ssl_certificate < fullchain.pem     # multi-line values on stdin
-port=$(feldspar get-cfg https_port)                  # one value, ready to capture
+port=$(feldspar get-cfg smtp_port)                   # one value, ready to capture
 feldspar get-cfg                                     # every setting, key=value
 ```
 
-- **The value's type comes from the key**, not from how it was typed: `8443` is a
-  number because `https_port` is declared one, and it is checked against that
-  declaration before anything is written — so `set-cfg https_port yes` is a message
+- **The value's type comes from the key**, not from how it was typed: `587` is a
+  number because `smtp_port` is declared one, and it is checked against that
+  declaration before anything is written — so `set-cfg smtp_port yes` is a message
   and not a stored string. A yes/no setting takes `true`/`false`, and also the
   `yes`/`no`, `on`/`off`, `1`/`0` a shell script tends to produce.
 - **Without a value, `set-cfg` reads stdin**, which is how a PEM block is set without

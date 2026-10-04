@@ -30,9 +30,9 @@ use axum::http::{Request, StatusCode, header};
 use sc_auth::SessionStore;
 use sc_catalog::Catalog;
 use sc_config::{
-    ACME_CONTACT_EMAIL, EMAIL_FROM, HTTPS_PORT, LOG_SQL, LOG_VERBOSITY, MCP_ENABLED,
-    MCP_LOOPBACK_ONLY, MODE_CUSTOM, MODE_LETSENCRYPT, MODE_OFF, SECURITY_NONE, SECURITY_STARTTLS,
-    SMTP_HOST, SMTP_PASSWORD, SMTP_PORT, SMTP_SECURITY, SMTP_USERNAME, SSL_CERTIFICATE, SSL_MODE,
+    ACME_CONTACT_EMAIL, EMAIL_FROM, LOG_SQL, LOG_VERBOSITY, MCP_ENABLED, MCP_LOOPBACK_ONLY,
+    MODE_CUSTOM, MODE_LETSENCRYPT, MODE_OFF, SECURITY_NONE, SECURITY_STARTTLS, SMTP_HOST,
+    SMTP_PASSWORD, SMTP_PORT, SMTP_SECURITY, SMTP_USERNAME, SSL_CERTIFICATE, SSL_MODE,
     SSL_PRIVATE_KEY, SslMode, mcp_settings, ssl_settings, stored_config,
 };
 use sc_db::DatabaseDriver;
@@ -200,7 +200,8 @@ async fn the_screen_is_handed_the_declarations_and_the_values() -> sc_error::Res
 
     // Nothing is stored yet, so the values are the declared defaults.
     assert_eq!(body["values"][SSL_MODE], json!(MODE_OFF));
-    assert_eq!(body["values"][HTTPS_PORT], json!(443));
+    // The HTTPS port is the host's (`feldspar.toml`), not a stored setting.
+    assert!(body["values"].get("https_port").is_none(), "{body}");
     Ok(())
 }
 
@@ -217,7 +218,6 @@ async fn a_save_stores_what_the_server_then_serves_with() -> sc_error::Result<()
                 SSL_MODE: MODE_CUSTOM,
                 SSL_CERTIFICATE: certificate,
                 SSL_PRIVATE_KEY: private_key,
-                HTTPS_PORT: 8443,
             }})),
         )
         .await;
@@ -226,10 +226,14 @@ async fn a_save_stores_what_the_server_then_serves_with() -> sc_error::Result<()
     // The boot path reads exactly what was saved.
     let settings = ssl_settings(&catalog).await?;
     assert_eq!(settings.mode, SslMode::Custom);
-    assert_eq!(settings.https_port, 8443);
     assert!(settings.certificate.contains("BEGIN CERTIFICATE"));
     // ...and it is servable, which is what the save promised.
-    sc_server::TlsSettings::from_ssl(&settings, sc_server::TlsNames::default(), None)?;
+    sc_server::TlsSettings::from_ssl(
+        &settings,
+        sc_server::DEFAULT_HTTPS_PORT,
+        sc_server::TlsNames::default(),
+        None,
+    )?;
     Ok(())
 }
 
@@ -275,7 +279,7 @@ async fn the_private_key_never_crosses_the_wire_and_a_save_does_not_destroy_it()
                 SSL_MODE: MODE_CUSTOM,
                 SSL_CERTIFICATE: read["values"][SSL_CERTIFICATE].clone(),
                 SSL_PRIVATE_KEY: SECRET_SENTINEL,
-                HTTPS_PORT: 9443,
+                ACME_CONTACT_EMAIL: "admin@example.com",
             }})),
         )
         .await;
@@ -285,7 +289,10 @@ async fn the_private_key_never_crosses_the_wire_and_a_save_does_not_destroy_it()
         Some(json!(private_key)),
         "the stored key must survive a save that never saw it"
     );
-    assert_eq!(ssl_settings(&catalog).await?.https_port, 9443);
+    assert_eq!(
+        ssl_settings(&catalog).await?.contact_email,
+        "admin@example.com"
+    );
     Ok(())
 }
 
@@ -300,7 +307,7 @@ async fn a_configuration_that_cannot_serve_is_refused_whole() -> sc_error::Resul
         .send(
             "POST",
             "/api/settings",
-            Some(json!({ "values": { SSL_MODE: MODE_CUSTOM, HTTPS_PORT: 8443 }})),
+            Some(json!({ "values": { SSL_MODE: MODE_CUSTOM, SMTP_PORT: 2525 }})),
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -309,7 +316,7 @@ async fn a_configuration_that_cannot_serve_is_refused_whole() -> sc_error::Resul
         "{body}"
     );
     // Nothing landed — not even the port, which was fine on its own.
-    assert_eq!(stored_config(&catalog, HTTPS_PORT).await?, None);
+    assert_eq!(stored_config(&catalog, SMTP_PORT).await?, None);
     assert_eq!(stored_config(&catalog, SSL_MODE).await?, None);
 
     // A key that does not go with the chain: valid PEM, wrong pair.
@@ -346,7 +353,7 @@ async fn a_configuration_that_cannot_serve_is_refused_whole() -> sc_error::Resul
         .send(
             "POST",
             "/api/settings",
-            Some(json!({ "values": { HTTPS_PORT: "eight thousand" }})),
+            Some(json!({ "values": { SMTP_PORT: "eight thousand" }})),
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -689,28 +696,24 @@ async fn a_null_clears_a_setting_back_to_its_default() -> sc_error::Result<()> {
         .send(
             "POST",
             "/api/settings",
-            Some(json!({ "values": { HTTPS_PORT: 8443 }})),
+            Some(json!({ "values": { SMTP_PORT: 2525 }})),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        stored_config(&catalog, HTTPS_PORT).await?,
-        Some(json!(8443))
-    );
+    assert_eq!(stored_config(&catalog, SMTP_PORT).await?, Some(json!(2525)));
 
     let (status, body) = client
         .send(
             "POST",
             "/api/settings",
-            Some(json!({ "values": { HTTPS_PORT: Value::Null }})),
+            Some(json!({ "values": { SMTP_PORT: Value::Null }})),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(stored_config(&catalog, HTTPS_PORT).await?, None);
+    assert_eq!(stored_config(&catalog, SMTP_PORT).await?, None);
     // ...and what comes back is the declared default, which is what the screen
     // then shows in the box the admin just emptied.
-    assert_eq!(body["values"][HTTPS_PORT], json!(443));
-    assert_eq!(ssl_settings(&catalog).await?.https_port, 443);
+    assert_eq!(body["values"][SMTP_PORT], json!(587));
     Ok(())
 }
 

@@ -6450,7 +6450,9 @@ remains available.
 
 **As built.** `sc-config` declares the TLS section of `_fd_config` (`ssl_mode` ∈
 `off`/`letsencrypt`/`custom`, the pasted chain and key, the ACME contact and directory URL,
-extra domains, `https_port`, `redirect_http_to_https`); `sc-server::tls` turns those into a
+extra domains, `redirect_http_to_https`); the HTTPS port is the host's, not a stored
+setting — `https_port` in the `feldspar.toml` environment or `serve --https-port`, default
+443 — so a backup does not carry it to another deployment; `sc-server::tls` turns those into a
 serving plan and an `axum-server` acceptor — a fixed `rustls::ServerConfig` for a pasted
 certificate, `rustls-acme`'s resolver for an ACME one — and `sc-cli` reads the settings at
 boot, after the mounts, so the certificate covers the base domain plus every mounted app's

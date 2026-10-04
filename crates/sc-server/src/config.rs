@@ -223,6 +223,14 @@ pub struct ServerConfig {
     /// ([`TlsSettings::from_ssl`](crate::tls::TlsSettings::from_ssl)); the
     /// default is [`Off`](TlsSettings::Off), which is plain HTTP.
     pub tls: TlsSettings,
+    /// The port HTTPS is served on when [`tls`](Self::tls) is on
+    /// (`--https-port`, or `https_port` in `feldspar.toml`; default 443).
+    ///
+    /// A flag rather than a stored setting, although the certificates are
+    /// stored: the port is a property of this host — what its firewall and its
+    /// proxy expect — and a stored one would travel with a backup into a
+    /// deployment that does not listen there.
+    pub https_port: u16,
     /// The headless Chromium `view_app` drives (`--browser`, TODO §7b). `None`
     /// searches `PATH`; see [`detect_browser`](crate::browser::detect_browser).
     pub browser: Option<PathBuf>,
@@ -236,6 +244,9 @@ pub struct ServerConfig {
     /// (`--preview-idle-minutes`, default an hour).
     pub preview_idle: std::time::Duration,
 }
+
+/// The port HTTPS is served on when `--https-port` is not given.
+pub const DEFAULT_HTTPS_PORT: u16 = 443;
 
 /// How many runs may hold a browser context at once, by default.
 pub const DEFAULT_BROWSER_CONTEXTS: usize = 4;
@@ -272,6 +283,7 @@ impl Default for ServerConfig {
             stan: crate::models::StanSettings::default(),
             streams: sc_stream::StreamConfig::default(),
             tls: TlsSettings::Off,
+            https_port: DEFAULT_HTTPS_PORT,
             browser: None,
             browser_sandbox: true,
             browser_contexts: DEFAULT_BROWSER_CONTEXTS,
@@ -284,7 +296,8 @@ impl ServerConfig {
     /// Parse configuration from CLI arguments (everything after the subcommand).
     ///
     /// Recognised flags: `--bind <addr>`, `--static-dir <path>`,
-    /// `--session-ttl-hours <n>`, `--secure-cookies`, `--base-domain <domain>`,
+    /// `--session-ttl-hours <n>`, `--secure-cookies`, `--https-port <n>`,
+    /// `--base-domain <domain>`,
     /// `--extra-base-domain <domain>` (repeatable), `--code-workers <n>`,
     /// `--code-max-inflight <n>`, `--module-workers <n>`,
     /// `--modules-dir <path>`, `--python <auto|off>`,
@@ -446,6 +459,20 @@ impl ServerConfig {
                     })?;
                 }
                 "--secure-cookies" => cfg.secure_cookies = true,
+                "--https-port" => {
+                    let raw = next_value(&mut it, "--https-port")?;
+                    // A port that is not a port is refused rather than quietly
+                    // swapped for 443: binding somewhere the operator did not
+                    // ask for is worse than not starting.
+                    cfg.https_port = match raw.parse::<u16>() {
+                        Ok(port) if port > 0 => port,
+                        _ => {
+                            return Err(Error::config(format!(
+                                "invalid --https-port `{raw}`: should be a TCP port (1–65535)"
+                            )));
+                        }
+                    };
+                }
                 "--browser" => {
                     cfg.browser = Some(PathBuf::from(next_value(&mut it, "--browser")?));
                 }
@@ -526,6 +553,7 @@ mod tests {
         assert!(cfg.ide_dir.is_none());
         assert!(cfg.plugins_dir.is_none());
         assert!(!cfg.secure_cookies);
+        assert_eq!(cfg.https_port, DEFAULT_HTTPS_PORT);
         // App subdomain routing is opt-in.
         assert!(cfg.base_domain.is_none());
         // The code pool's defaults are the engine's own (design §10.1).
@@ -557,6 +585,8 @@ mod tests {
             "--session-ttl-hours",
             "12",
             "--secure-cookies",
+            "--https-port",
+            "8443",
             "--base-domain",
             "example.com",
             "--extra-base-domain",
@@ -594,6 +624,7 @@ mod tests {
         );
         assert_eq!(cfg.session_ttl_hours, 12);
         assert!(cfg.secure_cookies);
+        assert_eq!(cfg.https_port, 8443);
         assert_eq!(cfg.base_domain.as_deref(), Some("example.com"));
         // Repeatable, in order, each once, and a trailing dot is the same name.
         assert_eq!(
@@ -780,6 +811,8 @@ mod tests {
     #[test]
     fn rejects_bad_bind_and_unknown_flags() {
         assert!(ServerConfig::from_args(["--bind", "not-an-addr"]).is_err());
+        assert!(ServerConfig::from_args(["--https-port", "0"]).is_err());
+        assert!(ServerConfig::from_args(["--https-port", "70000"]).is_err());
         assert!(ServerConfig::from_args(["--bind"]).is_err()); // missing value
         assert!(ServerConfig::from_args(["--nope"]).is_err()); // unknown flag
     }

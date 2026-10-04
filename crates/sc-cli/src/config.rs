@@ -17,10 +17,10 @@
 //!
 //! **A value arrives as a string** — that is what a terminal has — and its type
 //! comes from the declaration ([`sc_config::definition`]), not from the way it
-//! was written. `8443` is an integer because `https_port` is declared `int`, and
+//! was written. `2525` is an integer because `smtp_port` is declared `int`, and
 //! `on` is refused for `log_sql` because `bool` means `true` or `false` (plus
 //! the handful of spellings below, which a shell script is likely to produce).
-//! The alternative — guessing the type from the text — would store `"8443"` for
+//! The alternative — guessing the type from the text — would store `"2525"` for
 //! a port and leave the server reading a string where it wants a number.
 
 use sc_error::{Error, Result};
@@ -174,7 +174,7 @@ pub fn refuse_sentinel(key: &str, value: &Json) -> Result<()> {
 
 /// Strip the one trailing newline a pipe or a heredoc adds, and nothing else.
 ///
-/// `echo 8443 | feldspar set-cfg https_port` should not store a newline, and a
+/// `echo 2525 | feldspar set-cfg smtp_port` should not store a newline, and a
 /// certificate read from a file should keep every byte of its interior. One
 /// newline is the artefact of the *transport*; a second would be part of the
 /// value.
@@ -271,11 +271,11 @@ mod tests {
 
     #[test]
     fn a_value_takes_the_type_its_declaration_gives_it() {
-        let port = FormField::new("https_port", BasicType::Int);
+        let port = FormField::new("smtp_port", BasicType::Int);
         assert_eq!(value_for(&port, "8443").unwrap(), json!(8443));
         assert_eq!(value_for(&port, " 8443\t").unwrap(), json!(8443));
         let msg = value_for(&port, "yes").unwrap_err().to_string();
-        assert!(msg.contains("https_port"), "{msg}");
+        assert!(msg.contains("smtp_port"), "{msg}");
 
         let echo = FormField::new("log_sql", BasicType::Bool);
         assert_eq!(value_for(&echo, "true").unwrap(), json!(true));

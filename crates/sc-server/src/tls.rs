@@ -173,6 +173,7 @@ impl TlsSettings {
     /// to, and it needs the base domain to make a name out of one.
     pub fn from_ssl(
         settings: &SslSettings,
+        https_port: u16,
         names: TlsNames,
         cache: Option<AcmeCache>,
     ) -> Result<TlsSettings> {
@@ -184,7 +185,7 @@ impl TlsSettings {
                 Ok(TlsSettings::Custom {
                     certificate: settings.certificate.clone(),
                     private_key: settings.private_key.clone(),
-                    port: settings.https_port,
+                    port: https_port,
                     redirect_http: settings.redirect_http,
                 })
             }
@@ -206,7 +207,7 @@ impl TlsSettings {
                         settings.directory_url.clone(),
                         cache,
                     ),
-                    port: settings.https_port,
+                    port: https_port,
                     redirect_http: settings.redirect_http,
                 })
             }
@@ -919,7 +920,7 @@ mod tests {
     #[test]
     fn tls_off_is_the_default_and_serves_nothing_extra() {
         let plan =
-            TlsSettings::from_ssl(&settings(SslMode::Off), TlsNames::default(), None).unwrap();
+            TlsSettings::from_ssl(&settings(SslMode::Off), 443, TlsNames::default(), None).unwrap();
         assert!(!plan.enabled());
         assert_eq!(plan.port(), None);
         assert!(!plan.redirect_http());
@@ -951,13 +952,14 @@ mod tests {
     fn acme_without_a_domain_or_a_cache_is_refused() {
         let mut acme = settings(SslMode::LetsEncrypt);
         acme.contact_email = "admin@example.com".to_owned();
-        let err = TlsSettings::from_ssl(&acme, TlsNames::default(), None)
+        let err = TlsSettings::from_ssl(&acme, 443, TlsNames::default(), None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("domain"), "{err}");
 
         let err = TlsSettings::from_ssl(
             &acme,
+            443,
             TlsNames::new(Some("example.com".to_owned()), vec![], vec![]),
             None,
         )

@@ -7,7 +7,7 @@
  * noticing:
  *
  * - a value typed in a form is a string, and a `bool` or `int` setting sent as
- *   `"true"` or `"8443"` is refused by the server's own type check;
+ *   `"true"` or `"2525"` is refused by the server's own type check;
  * - the private key is shown as the redaction sentinel, and *not* sending it
  *   back unchanged would clear the stored certificate's key on the next save of
  *   an unrelated setting.
@@ -67,11 +67,11 @@ const sections = [
         help: "Stored in the database.",
       },
       {
-        name: "https_port",
-        label: "HTTPS port",
+        name: "smtp_port",
+        label: "SMTP port",
         type: "int",
         required: false,
-        default: 443,
+        default: 587,
         options: [],
         multiline: false,
         secret: false,
@@ -99,7 +99,7 @@ describe("the settings screen's model", () => {
     expect(allFields(sections).map((f) => f.name)).toEqual([
       "ssl_mode",
       "ssl_private_key",
-      "https_port",
+      "smtp_port",
       "redirect_http_to_https",
     ]);
   });
@@ -108,12 +108,12 @@ describe("the settings screen's model", () => {
     const stored = readConfig({
       ssl_mode: "custom",
       ssl_private_key: SECRET_SENTINEL,
-      https_port: 8443,
+      smtp_port: 2525,
       redirect_http_to_https: false,
     });
     const values = initialValues(allFields(sections), stored);
     // What the form holds is text — that is what an input is.
-    expect(values.https_port).toBe("8443");
+    expect(values.smtp_port).toBe("2525");
     expect(values.redirect_http_to_https).toBe("false");
 
     const payload = buildConfig(allFields(sections), values);
@@ -122,7 +122,7 @@ describe("the settings screen's model", () => {
       // Untouched: the sentinel goes back, and the server reads it as "keep
       // what is stored". Anything else here would clear a working key.
       ssl_private_key: SECRET_SENTINEL,
-      https_port: 8443,
+      smtp_port: 2525,
       redirect_http_to_https: false,
     });
   });
@@ -130,9 +130,9 @@ describe("the settings screen's model", () => {
   it("falls back to each declared default for a setting nobody has set", () => {
     const values = initialValues(allFields(sections), readConfig({}));
     expect(values.ssl_mode).toBe("off");
-    expect(values.https_port).toBe("443");
+    expect(values.smtp_port).toBe("587");
     const payload = buildConfig(allFields(sections), values);
-    expect(payload.https_port).toBe(443);
+    expect(payload.smtp_port).toBe(587);
     // An empty optional box is left out rather than sent as "", which is what
     // makes clearing a setting mean "use the default".
     expect(payload).not.toHaveProperty("ssl_private_key");
@@ -150,7 +150,7 @@ describe("the settings screen's model", () => {
     expect(payload.ssl_private_key).toBeNull();
     // Everything else still travels as its declared type.
     expect(payload.ssl_mode).toBe("custom");
-    expect(payload.https_port).toBe(443);
+    expect(payload.smtp_port).toBe(587);
   });
 
   it("sends a replaced secret as what was typed", () => {

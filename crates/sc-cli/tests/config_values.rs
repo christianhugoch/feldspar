@@ -58,13 +58,13 @@ async fn a_value_set_from_the_cli_is_the_one_the_server_reads() -> sc_error::Res
 
     // An int is stored as a number, not as the string it was typed as…
     let (ok, _, stderr) = feldspar(
-        &["set-cfg", "https_port", "8443", "--database-url", &url],
+        &["set-cfg", "smtp_port", "2525", "--database-url", &url],
         None,
     );
     assert!(ok, "set-cfg failed: {stderr}");
     assert_eq!(
-        sc_config::stored_config(&catalog, "https_port").await?,
-        Some(serde_json::json!(8443))
+        sc_config::stored_config(&catalog, "smtp_port").await?,
+        Some(serde_json::json!(2525))
     );
     // …and a bool takes the spellings a shell script produces.
     let (ok, _, stderr) = feldspar(&["set-cfg", "log_sql", "yes", "--database-url", &url], None);
@@ -76,17 +76,19 @@ async fn a_value_set_from_the_cli_is_the_one_the_server_reads() -> sc_error::Res
 
     // What the *server* reads back is what was written: the settings the boot
     // path acts on, not a second reading of the same rows.
-    let ssl = sc_config::ssl_settings(&catalog).await?;
-    assert_eq!(ssl.https_port, 8443);
+    assert_eq!(
+        sc_config::config_value(&catalog, "smtp_port").await?,
+        serde_json::json!(2525)
+    );
     assert!(sc_config::development_settings(&catalog).await?.log_sql);
 
     // `get-cfg KEY` prints the value alone, ready for `$(…)` — no quotes around
     // a string, and nothing else on stdout. Note what was just switched on: with
     // `log_sql` set, every other command echoes its statements to stdout, and a
     // value captured out of this one would carry the select that found it.
-    let (ok, stdout, stderr) = feldspar(&["get-cfg", "https_port", "--database-url", &url], None);
+    let (ok, stdout, stderr) = feldspar(&["get-cfg", "smtp_port", "--database-url", &url], None);
     assert!(ok, "get-cfg failed: {stderr}");
-    assert_eq!(stdout, "8443\n");
+    assert_eq!(stdout, "2525\n");
     let (ok, stdout, _) = feldspar(
         &["set-cfg", "ssl_mode", "custom", "--database-url", &url],
         None,
@@ -106,15 +108,12 @@ async fn a_value_of_the_wrong_type_is_refused_and_nothing_is_written() -> sc_err
     let catalog = connect_catalog(&DbConfig::from_url(&url)).await?;
 
     let (ok, _, stderr) = feldspar(
-        &["set-cfg", "https_port", "yes", "--database-url", &url],
+        &["set-cfg", "smtp_port", "yes", "--database-url", &url],
         None,
     );
     assert!(!ok);
-    assert!(stderr.contains("https_port"), "{stderr}");
-    assert_eq!(
-        sc_config::stored_config(&catalog, "https_port").await?,
-        None
-    );
+    assert!(stderr.contains("smtp_port"), "{stderr}");
+    assert_eq!(sc_config::stored_config(&catalog, "smtp_port").await?, None);
 
     // A value outside the declared options is refused by the store's own check,
     // which is what lists the options.
@@ -129,18 +128,18 @@ async fn a_value_of_the_wrong_type_is_refused_and_nothing_is_written() -> sc_err
     // A key nobody declared never reaches the table, and the message names the
     // keys there are — the typo is fixed from it, without a second command.
     let (ok, _, stderr) = feldspar(
-        &["set-cfg", "https_prot", "8443", "--database-url", &url],
+        &["set-cfg", "smtp_prot", "2525", "--database-url", &url],
         None,
     );
     assert!(!ok);
-    assert!(stderr.contains("https_prot"), "{stderr}");
-    assert!(stderr.contains("https_port"), "{stderr}");
+    assert!(stderr.contains("smtp_prot"), "{stderr}");
+    assert!(stderr.contains("smtp_port"), "{stderr}");
     // …and it is refused *before* stdin is read, so a typo does not leave the
     // command waiting on a terminal. (No stdin is given here: with the pipe
     // closed a read would end the command, but with `--database-url` pointing at
     // a live database it would also have connected first, which is what the
     // absent "database configured from" work below shows.)
-    let (ok, _, stderr) = feldspar(&["set-cfg", "https_prot", "--database-url", &url], None);
+    let (ok, _, stderr) = feldspar(&["set-cfg", "smtp_prot", "--database-url", &url], None);
     assert!(!ok);
     assert!(stderr.contains("known keys are"), "{stderr}");
     Ok(())
@@ -210,7 +209,7 @@ async fn the_listing_shows_every_key_and_hides_the_secrets() -> sc_error::Result
     // Every declared key is a line, set or not…
     assert_eq!(line(&listing, "smtp_host"), "smtp_host=");
     // …a default is what the server would act on…
-    assert_eq!(line(&listing, "https_port"), "https_port=443");
+    assert_eq!(line(&listing, "smtp_port"), "smtp_port=587");
     assert_eq!(line(&listing, "log_sql"), "log_sql=false");
     // …and a secret is the redaction, not the key.
     assert!(!listing.contains("hunter2"), "{listing}");
