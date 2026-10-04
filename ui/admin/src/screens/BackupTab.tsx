@@ -23,8 +23,10 @@ import {
   NO_CONTENTS,
   choices,
   dataChoices,
+  hasAnalytics,
   isEmpty,
   summarise,
+  withAnalytics,
   withTableData,
   withTables,
   type BackupContents,
@@ -139,7 +141,7 @@ export function BackupTab() {
           <div>
             <h3 className="card-title"><T text="Backup" /></h3>
             <p className="card-subtitle text-secondary mb-0">
-              <T text="One zip file holding this installation: table definitions and their rows, applications, file stores and their contents, users, agents, triggers and the SSL settings. Choose what goes in when you take it." />
+              <T text="One zip file holding this installation: table definitions and their rows, applications, file stores and their contents, users, modules, database connections, streams, analytics, LLM providers, agents, triggers (with their workflows) and settings. Choose what goes in when you take it." />
             </p>
           </div>
         </div>
@@ -391,6 +393,128 @@ function IncludeDialog({
               }
             />
           )}
+          {contents.modules > 0 && (
+            <Form.Check
+              type="checkbox"
+              id="backup-modules"
+              className="mb-2"
+              checked={selection.modules}
+              onChange={(e) => onChange({ ...selection, modules: e.target.checked })}
+              label={
+                <>
+                  <span className="fw-semibold"><T text="Modules" /></span>
+                  <div className="text-muted small">
+                    {t(
+                      "{count} installed modules, with their settings and permissions. A restore reinstalls each one from where it came, so the server needs npm or pip and whatever the module was installed from.",
+                      { count: contents.modules },
+                    )}
+                  </div>
+                </>
+              }
+            />
+          )}
+          {contents.db_connections > 0 && (
+            <Form.Check
+              type="checkbox"
+              id="backup-db-connections"
+              className="mb-2"
+              checked={selection.db_connections}
+              onChange={(e) => onChange({ ...selection, db_connections: e.target.checked })}
+              label={
+                <>
+                  <span className="fw-semibold"><T text="Database connections" /></span>
+                  <div className="text-muted small">
+                    {t(
+                      "{count} connections to other databases, with their passwords. Their tables stay in those databases and are not copied into the backup.",
+                      { count: contents.db_connections },
+                    )}
+                  </div>
+                </>
+              }
+            />
+          )}
+          {contents.streams > 0 && (
+            <Form.Check
+              type="checkbox"
+              id="backup-streams"
+              className="mb-2"
+              checked={selection.streams}
+              onChange={(e) => onChange({ ...selection, streams: e.target.checked })}
+              label={
+                <>
+                  <span className="fw-semibold"><T text="Streams" /></span>
+                  <div className="text-muted small">
+                    {t(
+                      "{count} streams, with their connection settings and secrets. What they have delivered is not included.",
+                      { count: contents.streams },
+                    )}
+                  </div>
+                </>
+              }
+            />
+          )}
+          {hasAnalytics(contents) && (
+            <Form.Check
+              type="checkbox"
+              id="backup-analytics"
+              className="mb-2"
+              checked={selection.analytics}
+              onChange={(e) => onChange(withAnalytics(selection, e.target.checked))}
+              label={
+                <>
+                  <span className="fw-semibold"><T text="Analytics" /></span>
+                  <div className="text-muted small">
+                    {t("Datasets: {datasets}. Models: {models}. Workspaces: {workspaces}.", {
+                      datasets: contents.datasets,
+                      models: contents.models,
+                      workspaces: contents.workspaces,
+                    })}
+                  </div>
+                </>
+              }
+            />
+          )}
+          {contents.fits > 0 && (
+            <Form.Check
+              type="checkbox"
+              id="backup-fits"
+              className="mb-2"
+              checked={selection.fits}
+              disabled={!selection.analytics}
+              onChange={(e) => onChange({ ...selection, fits: e.target.checked })}
+              label={
+                <>
+                  <span className="fw-semibold"><T text="Model fits" /></span>
+                  <div className="text-muted small">
+                    {t(
+                      "{count} fitted model instances, with their output frames and posterior draws. These can be large; without them a restored model has to be fitted again.",
+                      { count: contents.fits },
+                    )}
+                  </div>
+                </>
+              }
+            />
+          )}
+          {contents.llm_providers > 0 && (
+            <Form.Check
+              type="checkbox"
+              id="backup-llm-providers"
+              className="mb-2"
+              checked={selection.llm_providers}
+              onChange={(e) => onChange({ ...selection, llm_providers: e.target.checked })}
+              label={
+                <>
+                  <span className="fw-semibold"><T text="LLM providers" /></span>
+                  <div className="text-muted small">
+                    {t(
+                      "{count} LLM providers, with their models and API keys. An agent is only restored if the provider it uses is.",
+                      { count: contents.llm_providers },
+                    )}
+                  </div>
+                </>
+              }
+            />
+          )}
           {contents.agents > 0 && (
             <Form.Check
               type="checkbox"
@@ -485,6 +609,23 @@ function IncludeDialog({
                   <span className="fw-semibold"><T text="SSL settings" /></span>
                   <div className="text-muted small">
                     <T text="The certificate source and, in" /> <code>custom</code> <T text="mode, the certificate and its private key." />
+                  </div>
+                </>
+              }
+            />
+          )}
+          {contents.settings && (
+            <Form.Check
+              type="checkbox"
+              id="backup-settings"
+              className="mb-2"
+              checked={selection.settings}
+              onChange={(e) => onChange({ ...selection, settings: e.target.checked })}
+              label={
+                <>
+                  <span className="fw-semibold"><T text="Other settings" /></span>
+                  <div className="text-muted small">
+                    <T text="Email, localisation and development settings, including the SMTP password." />
                   </div>
                 </>
               }

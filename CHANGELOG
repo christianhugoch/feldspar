@@ -2,6 +2,89 @@
 
 Changes in reverse chronological order.
 
+## Backups carry everything else an installation is made of
+
+Until now a backup skipped every `_fd_*` table it had no section for. Restoring one lost the
+streams, datasets, models, fits, analytics workspaces, modules, database connections, every
+settings section except SSL, and a Saltcorn UI application's translations. It also broke
+workflow triggers: the trigger came back, but its steps live in `_fd_workflow_versions`, so
+running it failed with "no version of it has been saved yet".
+
+New choices in the backup/restore dialog (`Available`, `Selection`, `BackupPreferences`, both
+`getBackupOptions` schemas; clients regenerated):
+
+- **Modules** (`modules.json`): each module's row, with configuration and permissions
+  (`handlers::backup_module_json` / `module_from_backup`). A restore reinstalls the package from
+  its recorded source (`ModuleServices::install_package`), saves the row and reloads once. Modules
+  go first, before tables, because they can supply table providers, frameworks, actions, stream
+  providers and model providers.
+- **Database connections** (`db-connections.json`, passwords included). Postgres connections are
+  restored and connected before the tables; SQLite ones after the file stores, since saving one
+  needs its store. **Tables on a non-primary database are no longer in the backup's table
+  list**: the connection brings them back, and a restore no longer copies their rows into the
+  primary database (or into the live external one).
+- **Streams** (`streams.json`, secrets unredacted, through `stream_from_body`), restored before
+  the applications that expose them and the triggers that listen to them.
+- **Analytics** (`analytics/datasets.json`, `models.json`, `workspaces.json`). Datasets are
+  written so each base comes before the datasets built on it. Ids are kept where free. A dataset
+  already present by name is kept, and every base or model reference to the backup's id is
+  pointed at it. Models go through `model_from_body` / `save_model` and get their view state back.
+- **Model fits**, **off by default**, and only with Analytics (`Selection::from_json` and
+  `intersect` enforce this, as rows with their table). Fitted and failed instances and their
+  output frames are in `analytics/fits.json`. Each fit's posterior draws get their own
+  `analytics/draws/<instance>.json`, inserted 250 rows per statement. Only fits of models this
+  restore created are added. The restore dialog still offers fits whenever the file has them.
+- **Other settings**: email, localisation and development, as `settings/<section>.json`. The SSL
+  restore now goes through the same section-checked `restore_settings_section`.
+
+Travelling with things already in the backup:
+
+- **Workflow steps**: a workflow trigger's entry in `triggers.json` carries its current version
+  under `workflow` (only the current one; history matters only to runs, which are not backed up).
+  The restore validates it as the editor's save does and saves it as the trigger's first
+  version, unless the trigger already has steps.
+- **Translations**: a Saltcorn UI application's row catalogues go in
+  `applications/<subdomain>/translations.json`. A locale the application already has is kept. A
+  code application's translations are files in its repository and already travel with its store.
+
+As everywhere else, the restore adds and never overwrites. Anything already present (matched by
+name, or by id for workspaces) is kept and reported as a warning.
+
+Also: `available()` and the LLM-provider section no longer fail on a server that never
+bootstrapped `_fd_llm_providers`. The `draws.rs` module comment no longer claims draws were in
+every backup.
+
+Tests: `backup_api::analytics_streams_workflows_settings_translations_and_connections_travel`
+backs up two datasets (one on the other), a model, a fit with an output frame and a draw, a
+workspace, a stream with a secret, a two-step workflow, the email settings, a French catalogue
+and a SQLite connection inside a file store. It restores them into a second installation, then
+restores again to check nothing is added twice. `modules_api::a_backed_up_module_is_reinstalled_with_its_settings_and_permissions`
+reinstalls the echo fixture from a backup with its secret setting and network permission.
+Unit tests cover fits being off by default and never travelling without their models; the
+admin UI tests cover the same rule for the dialog.
+
+## Backups carry LLM providers and their models, API keys included
+
+A backup did not include LLM providers or models. Restoring one onto a fresh server also lost
+every agent: an agent's validation refuses a provider that does not exist, so each one became a
+warning in the restore report.
+
+- A new **LLM providers** choice in the backup/restore dialog (`llm_providers` in
+  `Available`, `Selection`, `BackupPreferences` and the `getBackupOptions` schemas; the clients
+  are regenerated). It writes `llm-providers.json`: each provider in the `createLlmProvider`
+  shape with its config **not redacted**, followed by its models in the `llm_model_json`
+  shape (`handlers::backup_llm_provider_json`). Like a file store's credentials and the SSL
+  private key, the API key is in the zip so a restored agent can be used straight away.
+- The restore puts providers back before agents and triggers, through `llm_provider_from_body` /
+  `llm_model_from_body`. As with everything else, it adds and does not overwrite. A provider
+  already defined by name keeps its settings and key (reported as a warning). The backup's
+  models that it lacks are still added to it, but never as its default. A backup id already
+  used by another row gets a fresh id instead of overwriting that row.
+- Test: `backup_api::llm_providers_travel_with_their_key_and_their_agents_come_back` restores
+  a provider (key, two models, default), and an agent naming one of the models, into a second
+  installation. It then restores again over a rotated key and checks that the key is kept and
+  nothing is duplicated.
+
 ## `https_port` moves from the settings to `feldspar.toml`
 
 An application restored from a backup brought its old `https_port` with it. The HTTPS port is

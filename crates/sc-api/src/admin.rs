@@ -3900,6 +3900,18 @@ fn backup_contents_schema() -> TypeSchema {
         // Counts rather than flags, because "back up the users" is a different
         // decision when there are two of them and when there are twelve thousand.
         StructField::new("users", TypeSchema::int()),
+        StructField::new("modules", TypeSchema::int()),
+        StructField::new("db_connections", TypeSchema::int()),
+        StructField::new("streams", TypeSchema::int()),
+        // The Analytics choice carries all three; they are counted apart so
+        // the dialog can say what is in it.
+        StructField::new("datasets", TypeSchema::int()),
+        StructField::new("models", TypeSchema::int()),
+        StructField::new("workspaces", TypeSchema::int()),
+        // Fitted model instances, with their draws and output frames: a
+        // choice of their own because they can outweigh everything else.
+        StructField::new("fits", TypeSchema::int()),
+        StructField::new("llm_providers", TypeSchema::int()),
         StructField::new("agents", TypeSchema::int()),
         StructField::new("triggers", TypeSchema::int()),
         // The views and pages of every application on offer. They travel with
@@ -3908,6 +3920,8 @@ fn backup_contents_schema() -> TypeSchema {
         StructField::new("views", TypeSchema::int()),
         StructField::new("pages", TypeSchema::int()),
         StructField::new("ssl", TypeSchema::bool()),
+        // Every other settings section: email, localisation, development.
+        StructField::new("settings", TypeSchema::bool()),
     ])
 }
 
@@ -3924,11 +3938,20 @@ fn backup_selection_schema() -> TypeSchema {
         StructField::new("applications", TypeSchema::array(TypeSchema::text())),
         StructField::new("file_stores", TypeSchema::array(TypeSchema::text())),
         StructField::new("users", TypeSchema::bool()),
+        StructField::new("modules", TypeSchema::bool()),
+        StructField::new("db_connections", TypeSchema::bool()),
+        StructField::new("streams", TypeSchema::bool()),
+        StructField::new("analytics", TypeSchema::bool()),
+        // Only with `analytics`, which the server enforces as it does rows
+        // with their table.
+        StructField::new("fits", TypeSchema::bool()),
+        StructField::new("llm_providers", TypeSchema::bool()),
         StructField::new("agents", TypeSchema::bool()),
         StructField::new("triggers", TypeSchema::bool()),
         StructField::new("views", TypeSchema::bool()),
         StructField::new("pages", TypeSchema::bool()),
         StructField::new("ssl", TypeSchema::bool()),
+        StructField::new("settings", TypeSchema::bool()),
     ])
 }
 

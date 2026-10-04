@@ -415,7 +415,7 @@
   "One of these is an empty list, which is a search over nothing.": "أحد هذه الخيارات قائمة فارغة، أي بحث في لا شيء.",
   "One schema per connection: its tables are the ones that join the tables list.": "مخطط واحد لكل اتصال: جداوله هي التي تُضاف إلى قائمة الجداول.",
   "One statement. Write a parameter as": "عبارة واحدة. اكتب المعلَمة بصيغة",
-  "One zip file holding this installation: table definitions and their rows, applications, file stores and their contents, users, agents, triggers and the SSL settings. Choose what goes in when you take it.": "ملف ZIP واحد يحتوي على هذا التثبيت: تعريفات الجداول وصفوفها، والتطبيقات، ومخازن الملفات ومحتوياتها، والمستخدمين، والوكلاء، والمشغلات، وإعدادات SSL. اختر ما يتضمنه عند تنزيله.",
+  "One zip file holding this installation: table definitions and their rows, applications, file stores and their contents, users, modules, database connections, streams, analytics, LLM providers, agents, triggers (with their workflows) and settings. Choose what goes in when you take it.": "ملف ZIP واحد يحتوي على هذا التثبيت: تعريفات الجداول وصفوفها، والتطبيقات، ومخازن الملفات ومحتوياتها، والمستخدمين، والوحدات، واتصالات قواعد البيانات، والتدفقات، والتحليلات، وموفري LLM، والوكلاء، والمشغلات (مع سير عملها)، والإعدادات. اختر ما يتضمنه عند تنزيله.",
   "Only if": "فقط إذا",
   "Open": "فتح",
   "Open in a new tab": "فتح في علامة تبويب جديدة",
@@ -925,5 +925,51 @@
   "← up": "← لأعلى",
   "Delete all rows": "حذف كل الصفوف",
   "Delete all {count} rows of \"{name}\"? The table and its fields stay. This cannot be undone.": "حذف كل الصفوف البالغ عددها {count} من «{name}»؟ يبقى الجدول وحقوله. لا يمكن التراجع عن ذلك.",
-  "Code": "الشيفرة"
+  "Code": "الشيفرة",
+  "{count} LLM providers, with their models and API keys. An agent is only restored if the provider it uses is.": {
+    "zero": "{count} من موفري LLM، مع نماذجه ومفاتيح API الخاصة به. لا تتم استعادة الوكيل إلا إذا تمت استعادة الموفر الذي يستخدمه.",
+    "one": "{count} موفر LLM، مع نماذجه ومفاتيح API الخاصة به. لا تتم استعادة الوكيل إلا إذا تمت استعادة الموفر الذي يستخدمه.",
+    "two": "{count} موفرا LLM، مع نماذجه ومفاتيح API الخاصة به. لا تتم استعادة الوكيل إلا إذا تمت استعادة الموفر الذي يستخدمه.",
+    "few": "{count} موفري LLM، مع نماذجه ومفاتيح API الخاصة به. لا تتم استعادة الوكيل إلا إذا تمت استعادة الموفر الذي يستخدمه.",
+    "many": "{count} موفر LLM، مع نماذجه ومفاتيح API الخاصة به. لا تتم استعادة الوكيل إلا إذا تمت استعادة الموفر الذي يستخدمه.",
+    "other": "{count} من موفري LLM، مع نماذجه ومفاتيح API الخاصة به. لا تتم استعادة الوكيل إلا إذا تمت استعادة الموفر الذي يستخدمه."
+  },
+  "Modules": "الوحدات",
+  "Analytics": "التحليلات",
+  "Model fits": "ملاءمات النماذج",
+  "Other settings": "إعدادات أخرى",
+  "{count} installed modules, with their settings and permissions. A restore reinstalls each one from where it came, so the server needs npm or pip and whatever the module was installed from.": {
+    "zero": "{count} من الوحدات المثبتة، مع إعداداتها وأذوناتها. تعيد الاستعادة تثبيت كل وحدة من مصدرها، لذا يحتاج الخادم إلى npm أو pip وإلى المصدر الذي ثُبّتت منه الوحدة.",
+    "one": "{count} وحدة مثبتة، مع إعداداتها وأذوناتها. تعيد الاستعادة تثبيت كل وحدة من مصدرها، لذا يحتاج الخادم إلى npm أو pip وإلى المصدر الذي ثُبّتت منه الوحدة.",
+    "two": "{count} وحدتان مثبتتان، مع إعداداتها وأذوناتها. تعيد الاستعادة تثبيت كل وحدة من مصدرها، لذا يحتاج الخادم إلى npm أو pip وإلى المصدر الذي ثُبّتت منه الوحدة.",
+    "few": "{count} وحدات مثبتة، مع إعداداتها وأذوناتها. تعيد الاستعادة تثبيت كل وحدة من مصدرها، لذا يحتاج الخادم إلى npm أو pip وإلى المصدر الذي ثُبّتت منه الوحدة.",
+    "many": "{count} وحدة مثبتة، مع إعداداتها وأذوناتها. تعيد الاستعادة تثبيت كل وحدة من مصدرها، لذا يحتاج الخادم إلى npm أو pip وإلى المصدر الذي ثُبّتت منه الوحدة.",
+    "other": "{count} من الوحدات المثبتة، مع إعداداتها وأذوناتها. تعيد الاستعادة تثبيت كل وحدة من مصدرها، لذا يحتاج الخادم إلى npm أو pip وإلى المصدر الذي ثُبّتت منه الوحدة."
+  },
+  "{count} connections to other databases, with their passwords. Their tables stay in those databases and are not copied into the backup.": {
+    "zero": "{count} من الاتصالات بقواعد بيانات أخرى، مع كلمات مرورها. تبقى جداولها في تلك القواعد ولا تُنسخ إلى النسخة الاحتياطية.",
+    "one": "{count} اتصال بقاعدة بيانات أخرى، مع كلمات مرورها. تبقى جداولها في تلك القواعد ولا تُنسخ إلى النسخة الاحتياطية.",
+    "two": "{count} اتصالان بقواعد بيانات أخرى، مع كلمات مرورها. تبقى جداولها في تلك القواعد ولا تُنسخ إلى النسخة الاحتياطية.",
+    "few": "{count} اتصالات بقواعد بيانات أخرى، مع كلمات مرورها. تبقى جداولها في تلك القواعد ولا تُنسخ إلى النسخة الاحتياطية.",
+    "many": "{count} اتصالًا بقواعد بيانات أخرى، مع كلمات مرورها. تبقى جداولها في تلك القواعد ولا تُنسخ إلى النسخة الاحتياطية.",
+    "other": "{count} من الاتصالات بقواعد بيانات أخرى، مع كلمات مرورها. تبقى جداولها في تلك القواعد ولا تُنسخ إلى النسخة الاحتياطية."
+  },
+  "{count} streams, with their connection settings and secrets. What they have delivered is not included.": {
+    "zero": "{count} من التدفقات، مع إعدادات اتصالها وأسرارها. لا يُضمَّن ما سلّمته.",
+    "one": "{count} تدفق، مع إعدادات اتصالها وأسرارها. لا يُضمَّن ما سلّمته.",
+    "two": "{count} تدفقان، مع إعدادات اتصالها وأسرارها. لا يُضمَّن ما سلّمته.",
+    "few": "{count} تدفقات، مع إعدادات اتصالها وأسرارها. لا يُضمَّن ما سلّمته.",
+    "many": "{count} تدفقًا، مع إعدادات اتصالها وأسرارها. لا يُضمَّن ما سلّمته.",
+    "other": "{count} من التدفقات، مع إعدادات اتصالها وأسرارها. لا يُضمَّن ما سلّمته."
+  },
+  "Datasets: {datasets}. Models: {models}. Workspaces: {workspaces}.": "مجموعات البيانات: {datasets}. النماذج: {models}. مساحات العمل: {workspaces}.",
+  "{count} fitted model instances, with their output frames and posterior draws. These can be large; without them a restored model has to be fitted again.": {
+    "zero": "{count} من مثيلات النماذج الملاءمة، مع جداول مخرجاتها وسحوباتها اللاحقة. قد تكون كبيرة؛ ومن دونها يجب ملاءمة النموذج المستعاد من جديد.",
+    "one": "{count} مثيل نموذج ملاءم، مع جداول مخرجاتها وسحوباتها اللاحقة. قد تكون كبيرة؛ ومن دونها يجب ملاءمة النموذج المستعاد من جديد.",
+    "two": "{count} مثيلا نموذج ملاءمان، مع جداول مخرجاتها وسحوباتها اللاحقة. قد تكون كبيرة؛ ومن دونها يجب ملاءمة النموذج المستعاد من جديد.",
+    "few": "{count} مثيلات نماذج ملاءمة، مع جداول مخرجاتها وسحوباتها اللاحقة. قد تكون كبيرة؛ ومن دونها يجب ملاءمة النموذج المستعاد من جديد.",
+    "many": "{count} مثيلًا لنماذج ملاءمة، مع جداول مخرجاتها وسحوباتها اللاحقة. قد تكون كبيرة؛ ومن دونها يجب ملاءمة النموذج المستعاد من جديد.",
+    "other": "{count} من مثيلات النماذج الملاءمة، مع جداول مخرجاتها وسحوباتها اللاحقة. قد تكون كبيرة؛ ومن دونها يجب ملاءمة النموذج المستعاد من جديد."
+  },
+  "Email, localisation and development settings, including the SMTP password.": "إعدادات البريد الإلكتروني والترجمة والتطوير، بما في ذلك كلمة مرور SMTP."
 }

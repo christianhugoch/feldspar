@@ -34,12 +34,26 @@ export const NO_CONTENTS: BackupContents = {
   applications: [],
   file_stores: [],
   users: 0,
+  modules: 0,
+  db_connections: 0,
+  streams: 0,
+  datasets: 0,
+  models: 0,
+  workspaces: 0,
+  fits: 0,
+  llm_providers: 0,
   agents: 0,
   triggers: 0,
   views: 0,
   pages: 0,
   ssl: false,
+  settings: false,
 };
+
+/** Whether there is anything for the Analytics choice to carry. */
+export function hasAnalytics(contents: BackupContents): boolean {
+  return contents.datasets > 0 || contents.models > 0 || contents.workspaces > 0;
+}
 
 /** Everything on offer, selected. The restore dialog's starting point, and the
  * backup dialog's until the admin has narrowed it. */
@@ -54,11 +68,18 @@ export function everything(contents: BackupContents): BackupSelection {
     applications: names(contents.applications),
     file_stores: names(contents.file_stores),
     users: contents.users > 0,
+    modules: contents.modules > 0,
+    db_connections: contents.db_connections > 0,
+    streams: contents.streams > 0,
+    analytics: hasAnalytics(contents),
+    fits: contents.fits > 0 && hasAnalytics(contents),
+    llm_providers: contents.llm_providers > 0,
     agents: contents.agents > 0,
     triggers: contents.triggers > 0,
     views: contents.views > 0,
     pages: contents.pages > 0,
     ssl: contents.ssl,
+    settings: contents.settings,
   };
 }
 
@@ -108,6 +129,12 @@ export function withTableData(selection: BackupSelection, data: string[]): Backu
   return { ...selection, table_data: data.filter((t) => selection.tables.includes(t)) };
 }
 
+/** Turn the Analytics choice on or off. Fits belong to models, so turning it
+ * off takes the fits with it — the "data needs metadata" rule again. */
+export function withAnalytics(selection: BackupSelection, analytics: boolean): BackupSelection {
+  return { ...selection, analytics, fits: analytics && selection.fits };
+}
+
 /** Whether the selection would produce an empty backup — the one state the
  * confirm button is not offered in, since a zip of nothing is not what anybody
  * pressed the button for. */
@@ -117,9 +144,15 @@ export function isEmpty(selection: BackupSelection): boolean {
     selection.applications.length === 0 &&
     selection.file_stores.length === 0 &&
     !selection.users &&
+    !selection.modules &&
+    !selection.db_connections &&
+    !selection.streams &&
+    !selection.analytics &&
+    !selection.llm_providers &&
     !selection.agents &&
     !selection.triggers &&
-    !selection.ssl
+    !selection.ssl &&
+    !selection.settings
   );
 }
 
@@ -147,8 +180,14 @@ export function summarise(selection: BackupSelection, contents: BackupContents):
   if (selection.file_stores.length > 0)
     parts.push(count(selection.file_stores.length, "file store", "file stores"));
   if (selection.users) parts.push("users");
+  if (selection.modules) parts.push("modules");
+  if (selection.db_connections) parts.push("database connections");
+  if (selection.streams) parts.push("streams");
+  if (selection.analytics) parts.push(selection.fits ? "analytics with fits" : "analytics");
+  if (selection.llm_providers) parts.push("LLM providers");
   if (selection.agents) parts.push("agents");
   if (selection.triggers) parts.push("triggers");
   if (selection.ssl) parts.push("SSL settings");
+  if (selection.settings) parts.push("other settings");
   return parts.length === 0 ? "Nothing selected." : `${parts.join(", ")}.`;
 }

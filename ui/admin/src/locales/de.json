@@ -409,7 +409,7 @@
   "One of these is an empty list, which is a search over nothing.": "Eines davon ist eine leere Liste, also eine Suche über nichts.",
   "One schema per connection: its tables are the ones that join the tables list.": "Ein Schema pro Verbindung: Seine Tabellen sind diejenigen, die in die Tabellenliste aufgenommen werden.",
   "One statement. Write a parameter as": "Eine Anweisung. Schreiben Sie einen Parameter als",
-  "One zip file holding this installation: table definitions and their rows, applications, file stores and their contents, users, agents, triggers and the SSL settings. Choose what goes in when you take it.": "Eine ZIP-Datei mit dieser Installation: Tabellendefinitionen und deren Zeilen, Anwendungen, Dateispeicher und deren Inhalte, Benutzer, Agents, Trigger und SSL-Einstellungen. Wählen Sie beim Erstellen aus, was enthalten sein soll.",
+  "One zip file holding this installation: table definitions and their rows, applications, file stores and their contents, users, modules, database connections, streams, analytics, LLM providers, agents, triggers (with their workflows) and settings. Choose what goes in when you take it.": "Eine ZIP-Datei mit dieser Installation: Tabellendefinitionen und deren Zeilen, Anwendungen, Dateispeicher und deren Inhalte, Benutzer, Module, Datenbankverbindungen, Datenströme, Analysen, LLM-Anbieter, Agents, Trigger (mit ihren Workflows) und Einstellungen. Wählen Sie beim Erstellen aus, was enthalten sein soll.",
   "Only if": "Nur wenn",
   "Open": "Öffnen",
   "Open in a new tab": "In einem neuen Tab öffnen",
@@ -887,5 +887,31 @@
   "← up": "← nach oben",
   "Delete all rows": "Alle Zeilen löschen",
   "Delete all {count} rows of \"{name}\"? The table and its fields stay. This cannot be undone.": "Alle {count} Zeilen von „{name}“ löschen? Die Tabelle und ihre Felder bleiben erhalten. Dies kann nicht rückgängig gemacht werden.",
-  "Code": "Code"
+  "Code": "Code",
+  "{count} LLM providers, with their models and API keys. An agent is only restored if the provider it uses is.": {
+    "one": "{count} LLM-Anbieter, mit seinen Modellen und API-Schlüsseln. Ein Agent wird nur wiederhergestellt, wenn der von ihm verwendete Anbieter wiederhergestellt wird.",
+    "other": "{count} LLM-Anbieter, mit ihren Modellen und API-Schlüsseln. Ein Agent wird nur wiederhergestellt, wenn der von ihm verwendete Anbieter wiederhergestellt wird."
+  },
+  "Modules": "Module",
+  "Analytics": "Analysen",
+  "Model fits": "Modellanpassungen",
+  "Other settings": "Weitere Einstellungen",
+  "{count} installed modules, with their settings and permissions. A restore reinstalls each one from where it came, so the server needs npm or pip and whatever the module was installed from.": {
+    "one": "{count} installiertes Modul, mit seinen Einstellungen und Berechtigungen. Eine Wiederherstellung installiert es erneut von seiner Quelle, daher braucht der Server npm oder pip und die Quelle, aus der das Modul installiert wurde.",
+    "other": "{count} installierte Module, mit ihren Einstellungen und Berechtigungen. Eine Wiederherstellung installiert jedes erneut von seiner Quelle, daher braucht der Server npm oder pip und die Quelle, aus der das Modul installiert wurde."
+  },
+  "{count} connections to other databases, with their passwords. Their tables stay in those databases and are not copied into the backup.": {
+    "one": "{count} Verbindung zu einer anderen Datenbank, mit ihrem Passwort. Ihre Tabellen bleiben in dieser Datenbank und werden nicht in die Sicherung kopiert.",
+    "other": "{count} Verbindungen zu anderen Datenbanken, mit ihren Passwörtern. Ihre Tabellen bleiben in diesen Datenbanken und werden nicht in die Sicherung kopiert."
+  },
+  "{count} streams, with their connection settings and secrets. What they have delivered is not included.": {
+    "one": "{count} Datenstrom, mit seinen Verbindungseinstellungen und Geheimnissen. Was er geliefert hat, ist nicht enthalten.",
+    "other": "{count} Datenströme, mit ihren Verbindungseinstellungen und Geheimnissen. Was sie geliefert haben, ist nicht enthalten."
+  },
+  "Datasets: {datasets}. Models: {models}. Workspaces: {workspaces}.": "Datensätze: {datasets}. Modelle: {models}. Arbeitsbereiche: {workspaces}.",
+  "{count} fitted model instances, with their output frames and posterior draws. These can be large; without them a restored model has to be fitted again.": {
+    "one": "{count} angepasste Modellinstanz, mit ihren Ausgabetabellen und Posterior-Ziehungen. Diese können groß sein; ohne sie muss ein wiederhergestelltes Modell erneut angepasst werden.",
+    "other": "{count} angepasste Modellinstanzen, mit ihren Ausgabetabellen und Posterior-Ziehungen. Diese können groß sein; ohne sie muss ein wiederhergestelltes Modell erneut angepasst werden."
+  },
+  "Email, localisation and development settings, including the SMTP password.": "E-Mail-, Lokalisierungs- und Entwicklungseinstellungen, einschließlich des SMTP-Passworts."
 }

@@ -415,7 +415,7 @@
   "One of these is an empty list, which is a search over nothing.": "其中一个是空列表，表示在空集合中搜索。",
   "One schema per connection: its tables are the ones that join the tables list.": "每个连接一个架构：其中的表就是加入表列表的表。",
   "One statement. Write a parameter as": "一条语句。参数写作",
-  "One zip file holding this installation: table definitions and their rows, applications, file stores and their contents, users, agents, triggers and the SSL settings. Choose what goes in when you take it.": "一个包含此安装内容的 ZIP 文件：表定义及其行、应用、文件存储及其内容、用户、代理、触发器和 SSL 设置。创建时选择要包含的内容。",
+  "One zip file holding this installation: table definitions and their rows, applications, file stores and their contents, users, modules, database connections, streams, analytics, LLM providers, agents, triggers (with their workflows) and settings. Choose what goes in when you take it.": "一个包含此安装内容的 ZIP 文件：表定义及其行、应用、文件存储及其内容、用户、模块、数据库连接、数据流、分析、LLM 提供商、代理、触发器（及其工作流）和设置。创建时选择要包含的内容。",
   "Only if": "仅当",
   "Open": "打开",
   "Open in a new tab": "在新标签页中打开",
@@ -877,5 +877,26 @@
   "← up": "← 向上",
   "Delete all rows": "删除所有行",
   "Delete all {count} rows of \"{name}\"? The table and its fields stay. This cannot be undone.": "删除“{name}”的全部 {count} 行？表格及其字段将保留。此操作无法撤销。",
-  "Code": "代码"
+  "Code": "代码",
+  "{count} LLM providers, with their models and API keys. An agent is only restored if the provider it uses is.": {
+    "other": "{count} 个 LLM 提供商，包括其模型和 API 密钥。只有当代理所用的提供商也被恢复时，该代理才会被恢复。"
+  },
+  "Modules": "模块",
+  "Analytics": "分析",
+  "Model fits": "模型拟合",
+  "Other settings": "其他设置",
+  "{count} installed modules, with their settings and permissions. A restore reinstalls each one from where it came, so the server needs npm or pip and whatever the module was installed from.": {
+    "other": "{count} 个已安装的模块，包括其设置和权限。恢复时会从原来的来源重新安装每个模块，因此服务器需要 npm 或 pip，以及该模块的安装来源。"
+  },
+  "{count} connections to other databases, with their passwords. Their tables stay in those databases and are not copied into the backup.": {
+    "other": "{count} 个到其他数据库的连接，包括其密码。它们的表保留在那些数据库中，不会复制到备份里。"
+  },
+  "{count} streams, with their connection settings and secrets. What they have delivered is not included.": {
+    "other": "{count} 个数据流，包括其连接设置和密钥。不包括它们已传送的内容。"
+  },
+  "Datasets: {datasets}. Models: {models}. Workspaces: {workspaces}.": "数据集：{datasets}。模型：{models}。工作区：{workspaces}。",
+  "{count} fitted model instances, with their output frames and posterior draws. These can be large; without them a restored model has to be fitted again.": {
+    "other": "{count} 个已拟合的模型实例，包括其输出表和后验抽样。这些内容可能很大；没有它们，恢复的模型需要重新拟合。"
+  },
+  "Email, localisation and development settings, including the SMTP password.": "电子邮件、本地化和开发设置，包括 SMTP 密码。"
 }

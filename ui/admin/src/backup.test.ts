@@ -22,6 +22,7 @@ import {
   isEmpty,
   itemDescription,
   summarise,
+  withAnalytics,
   withTableData,
   withTables,
   type BackupContents,
@@ -36,11 +37,20 @@ const contents: BackupContents = {
   applications: [{ name: "blog", label: "The blog", count: null }],
   file_stores: [{ name: "assets", label: "Uploaded files", count: null }],
   users: 2,
+  modules: 1,
+  db_connections: 1,
+  streams: 2,
+  datasets: 2,
+  models: 1,
+  workspaces: 1,
+  fits: 3,
+  llm_providers: 1,
   agents: 1,
   triggers: 4,
   views: 7,
   pages: 1,
   ssl: true,
+  settings: true,
 };
 
 describe("what a backup includes", () => {
@@ -53,7 +63,15 @@ describe("what a backup includes", () => {
     expect(selection.users && selection.agents && selection.triggers && selection.ssl).toBe(
       true,
     );
-    expect(selection.views && selection.pages).toBe(true);
+    expect(selection.views && selection.pages && selection.llm_providers).toBe(true);
+    expect(
+      selection.modules &&
+        selection.db_connections &&
+        selection.streams &&
+        selection.analytics &&
+        selection.fits &&
+        selection.settings,
+    ).toBe(true);
     expect(isEmpty(selection)).toBe(false);
   });
 
@@ -65,11 +83,20 @@ describe("what a backup includes", () => {
       applications: [],
       file_stores: [],
       users: 0,
+      modules: 0,
+      db_connections: 0,
+      streams: 0,
+      datasets: 0,
+      models: 0,
+      workspaces: 0,
+      fits: 0,
+      llm_providers: 0,
       agents: 0,
       triggers: 0,
       views: 0,
       pages: 0,
       ssl: false,
+      settings: false,
     });
     expect(isEmpty(selection)).toBe(true);
   });
@@ -129,16 +156,16 @@ describe("what a backup includes", () => {
 
   it("says what is ticked in a sentence", () => {
     expect(summarise(everything(contents), contents)).toBe(
-      "all 2 tables, 1 application, views, pages, 1 file store, users, agents, triggers, SSL settings.",
+      "all 2 tables, 1 application, views, pages, 1 file store, users, modules, database connections, streams, analytics with fits, LLM providers, agents, triggers, SSL settings, other settings.",
     );
 
     const narrowed = withTableData(withTables(everything(contents), ["books"]), []);
     expect(summarise({ ...narrowed, agents: false, ssl: false, pages: false }, contents)).toBe(
-      "1 table, no rows, 1 application, views, 1 file store, users, triggers.",
+      "1 table, no rows, 1 application, views, 1 file store, users, modules, database connections, streams, analytics with fits, LLM providers, triggers, other settings.",
     );
     // With no application to carry them, views and pages are not worth a word.
     expect(summarise({ ...narrowed, applications: [], file_stores: [] }, contents)).toBe(
-      "1 table, no rows, users, agents, triggers, SSL settings.",
+      "1 table, no rows, users, modules, database connections, streams, analytics with fits, LLM providers, agents, triggers, SSL settings, other settings.",
     );
 
     expect(
@@ -149,14 +176,35 @@ describe("what a backup includes", () => {
           applications: [],
           file_stores: [],
           users: false,
+          modules: false,
+          db_connections: false,
+          streams: false,
+          analytics: false,
+          fits: false,
+          llm_providers: false,
           agents: false,
           triggers: false,
           views: false,
           pages: false,
           ssl: false,
+          settings: false,
         },
         contents,
       ),
     ).toBe("Nothing selected.");
+  });
+});
+
+describe("the fits", () => {
+  /** Fits belong to models: unticking Analytics takes them with it, and
+   * ticking it again does not bring them back unasked. */
+  it("go when the Analytics choice goes", () => {
+    const off = withAnalytics(everything(contents), false);
+    expect(off.analytics).toBe(false);
+    expect(off.fits).toBe(false);
+    const on = withAnalytics(off, true);
+    expect(on.analytics).toBe(true);
+    expect(on.fits).toBe(false);
+    expect(summarise({ ...on, fits: false }, contents)).toContain("analytics,");
   });
 });

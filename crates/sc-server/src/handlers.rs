@@ -7727,7 +7727,7 @@ fn db_connection_json(catalog: &Catalog, def: &DbConnectionDef) -> Result<Json> 
 /// without retyping the password" work, and passing `None` on a create is what
 /// makes a literal sentinel there mean itself rather than a lookup that would
 /// find nothing.
-fn db_connection_from_body(
+pub(crate) fn db_connection_from_body(
     id: DbConnectionId,
     body: &Json,
     existing: Option<&DbConnectionDef>,
@@ -7835,6 +7835,138 @@ fn llm_provider_json(def: &LlmProviderDef) -> Json {
     })
 }
 
+/// An LLM provider for a **backup**: the `createLlmProvider` shape with the
+/// config *not* redacted, and the provider's models beside it.
+///
+/// The second place a secret is written out deliberately, for the reason
+/// [`backup_store_def_json`] gives: a provider restored with the sentinel where
+/// its API key was is a provider no agent can call through, and an admin who
+/// restores a backup expects the agents in it to answer.
+pub(crate) fn backup_llm_provider_json(def: &LlmProviderDef, models: &[LlmModelDef]) -> Json {
+    json!({
+        "id": def.id.0,
+        "name": def.name,
+        "description": def.description,
+        "backend": def.backend,
+        "config": Json::Object(def.config.clone()),
+        "models": models.iter().map(|m| llm_model_json(def, m)).collect::<Vec<_>>(),
+    })
+}
+
+/// A module for a **backup**: its row, configuration and permissions included,
+/// so a restore can reinstall the package from where it came and hand it back
+/// the settings — a password among them — and the reach the admin granted it.
+pub(crate) fn backup_module_json(module: &sc_module::Module) -> Json {
+    json!({
+        "id": module.id.0,
+        "name": module.name,
+        "language": module.language.as_str(),
+        "source": module.source.as_str(),
+        "location": module.location,
+        "version": module.version,
+        "configuration": Json::Object(module.configuration.clone()),
+        "permissions": Json::Object(module.permissions.to_json()),
+        "attributes": Json::Object(module.attributes.clone()),
+    })
+}
+
+/// A module back from a backup, not yet installed: the name is the backup's,
+/// and the install that follows is what says whether it is still true.
+pub(crate) fn module_from_backup(value: &Json) -> Result<sc_module::Module> {
+    let obj = require_object(value)?;
+    let source = sc_module::ModuleSource::parse(non_empty_str_field(obj, "source")?)?;
+    let mut module = sc_module::Module::new(
+        non_empty_str_field(obj, "name")?,
+        source,
+        non_empty_str_field(obj, "location")?,
+    )
+    .in_language(match obj.get("language").and_then(Json::as_str) {
+        Some(language) => sc_module::ModuleLanguage::parse(language)?,
+        None => sc_module::ModuleLanguage::JavaScript,
+    });
+    if let Some(id) = obj
+        .get("id")
+        .and_then(Json::as_str)
+        .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+    {
+        module.id = sc_module::ModuleId(id);
+    }
+    module.configuration = object_or_empty(obj, "configuration")?;
+    module.attributes = object_or_empty(obj, "attributes")?;
+    if let Some(permissions) = obj.get("permissions").filter(|v| !v.is_null()) {
+        module.permissions = sc_module::ModulePermissions::from_json(permissions)?;
+    }
+    Ok(module)
+}
+
+/// A connection to another database for a **backup**: the
+/// `createDatabaseConnection` shape with the password as it is stored, for the
+/// reason [`backup_store_def_json`] gives.
+pub(crate) fn backup_db_connection_json(def: &DbConnectionDef) -> Json {
+    json!({
+        "id": def.id.0,
+        "backend": def.backend,
+        "name": def.name,
+        "description": def.description,
+        "host": def.host,
+        "port": def.port,
+        "database": def.database,
+        "username": def.username,
+        "password": def.password,
+        "schema": def.schema,
+        "file_store": def.file_store,
+        "file_path": def.file_path,
+    })
+}
+
+/// A stream for a **backup**: the `saveStream` shape with its configuration
+/// unredacted — a broker password replaced by the sentinel is a stream that
+/// will not connect.
+pub(crate) fn backup_stream_json(stream: &sc_stream::Stream) -> Json {
+    json!({
+        "id": stream.id.0,
+        "name": stream.name,
+        "description": stream.description,
+        "provider": stream.provider,
+        "configuration": Json::Object(stream.configuration.clone()),
+        "min_role": stream.min_role,
+        "attributes": Json::Object(stream.attributes.clone()),
+        "enabled": stream.is_enabled(),
+    })
+}
+
+/// A model for a **backup**: the `saveModel` body — datasets by id, which a
+/// restore puts back first — plus the view state, which no save carries.
+pub(crate) async fn backup_model_json(catalog: &Catalog, model: &sc_model::Model) -> Result<Json> {
+    Ok(json!({
+        "id": model.id.0,
+        "name": model.name,
+        "description": model.description,
+        "provider": model.provider,
+        "dataset": { "dataset_id": model.dataset.id },
+        "related": model
+            .related
+            .iter()
+            .map(|r| json!({ "name": r.name, "dataset_id": r.dataset.id, "label": r.label }))
+            .collect::<Vec<_>>(),
+        "configuration": Json::Object(model.configuration.clone()),
+        "hyperparameters": Json::Object(model.hyperparameters.clone()),
+        "split": serde_json::to_value(model.split)
+            .map_err(|e| Error::msg(format!("split: {e}")))?,
+        "attributes": Json::Object(model.attributes.clone()),
+        "view_state": Json::Object(sc_model::model_view_state(catalog, model.id).await?),
+    }))
+}
+
+/// An optional object field, empty when absent or null.
+fn object_or_empty(obj: &Map<String, Json>, key: &str) -> Result<sc_types::Attrs> {
+    match obj.get(key) {
+        None | Some(Json::Null) => Ok(sc_types::Attrs::new()),
+        Some(Json::Object(map)) => Ok(map.clone()),
+        Some(_) => Err(Error::invalid(format!("field `{key}` must be an object"))),
+    }
+}
+
 /// A provider config with its backend's [`secret`](FormField::secret) settings
 /// replaced by the sentinel.
 ///
@@ -7863,7 +7995,7 @@ fn unredacted_provider_config(
 }
 
 /// Rebuild a provider definition from a create/update body.
-fn llm_provider_from_body(id: LlmProviderDefId, body: &Json) -> Result<LlmProviderDef> {
+pub(crate) fn llm_provider_from_body(id: LlmProviderDefId, body: &Json) -> Result<LlmProviderDef> {
     let obj = require_object(body)?;
     Ok(LlmProviderDef {
         id,
@@ -7903,7 +8035,7 @@ async fn require_provider_by_id(catalog: &Catalog, raw: &str) -> Result<LlmProvi
 
 /// A model row as the API returns it (matching `llm_model_schema`): the row,
 /// plus the capabilities and prices it resolves to on its provider's backend.
-fn llm_model_json(provider: &LlmProviderDef, model: &LlmModelDef) -> Json {
+pub(crate) fn llm_model_json(provider: &LlmProviderDef, model: &LlmModelDef) -> Json {
     json!({
         "id": model.id.0,
         "provider_id": model.provider_id.0,
@@ -7917,7 +8049,7 @@ fn llm_model_json(provider: &LlmProviderDef, model: &LlmModelDef) -> Json {
 }
 
 /// Rebuild a model row from a create/update body.
-fn llm_model_from_body(
+pub(crate) fn llm_model_from_body(
     id: LlmModelDefId,
     provider: LlmProviderDefId,
     body: &Json,
@@ -8072,7 +8204,7 @@ fn parse_module_id(raw: &str) -> Result<sc_module::ModuleId> {
 /// saying it has none — the same shape [`triggers_of`] has, and for the same
 /// reason: a test or an admin-only server may have booted without them, and the
 /// Modules tab should say so rather than appear to work.
-fn modules_of(apps: &AppMounts) -> Result<Arc<crate::ModuleServices>> {
+pub(crate) fn modules_of(apps: &AppMounts) -> Result<Arc<crate::ModuleServices>> {
     apps.modules().cloned().ok_or_else(|| {
         Error::config("this server has no module support installed, so modules cannot be managed")
     })
@@ -8395,7 +8527,7 @@ async fn require_workflow_trigger(catalog: &Catalog, id: &str) -> Result<Trigger
 /// answer (`save_workflow` reads the maximum and mints the next). Everything else
 /// is read strictly through the stored serde shape, so what the editor may send
 /// and what the engine will run cannot drift apart.
-fn workflow_from_document(
+pub(crate) fn workflow_from_document(
     id: sc_action::TriggerId,
     posted: &Json,
 ) -> Result<sc_workflow::Workflow> {
@@ -9431,7 +9563,7 @@ fn stream_json(streams: &crate::StreamServices, stream: &sc_stream::Stream) -> J
 /// secret setting may arrive as the sentinel; putting the stored value back
 /// behind it is the caller's job, because only the caller knows which row this
 /// is replacing.
-fn stream_from_body(body: &Map<String, Json>) -> Result<sc_stream::Stream> {
+pub(crate) fn stream_from_body(body: &Map<String, Json>) -> Result<sc_stream::Stream> {
     let id = match body.get("id") {
         None | Some(Json::Null) => sc_stream::StreamId::new(),
         Some(Json::String(raw)) => sc_stream::StreamId(parse_uuid(raw, "stream")?),
@@ -9546,7 +9678,7 @@ fn with_dataset_changed(
 /// validation that needs the shape is the half only a read knows, and a save of
 /// a model whose table is momentarily unreadable should still be checked for
 /// everything else and still be storable — because editing it is the repair.
-async fn dataset_shape(
+pub(crate) async fn dataset_shape(
     models: &crate::ModelServices,
     dataset: &sc_model::Dataset,
 ) -> Option<sc_model::DatasetShape> {
@@ -9720,7 +9852,10 @@ async fn model_json(
 /// an id is read from a payload here: there is no path-addressed update, because
 /// the form always sends the whole definition and two endpoints would be one
 /// behaviour under two names.
-async fn model_from_body(catalog: &Catalog, body: &Map<String, Json>) -> Result<sc_model::Model> {
+pub(crate) async fn model_from_body(
+    catalog: &Catalog,
+    body: &Map<String, Json>,
+) -> Result<sc_model::Model> {
     let id = match body.get("id") {
         None | Some(Json::Null) => sc_model::ModelId::new(),
         Some(Json::String(raw)) => sc_model::ModelId(parse_uuid(raw, "model")?),

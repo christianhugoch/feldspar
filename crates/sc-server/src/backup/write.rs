@@ -6,8 +6,8 @@
 //!
 //! Two things it does *not* do, deliberately:
 //!
-//! - **It does not redact.** A file store's backend settings and the SSL private
-//!   key are written as they are stored. A backup with the private key replaced by
+//! - **It does not redact.** A file store's backend settings, an LLM provider's
+//!   API key and the SSL private key are written as they are stored. A backup with the private key replaced by
 //!   the redaction sentinel would restore an installation that cannot serve HTTPS,
 //!   and one with a store's credentials removed would restore a store that cannot
 //!   connect. The zip is therefore as sensitive as the database, and the dialog
@@ -29,9 +29,10 @@ use zip::write::SimpleFileOptions;
 
 use super::{Available, Item, MANIFEST_FILE, SSL_SECTION, Selection};
 use crate::handlers::{
-    agent_json, application_json, backup_file_meta_json, backup_store_def_json, constraint_json,
-    field_json, library_item_json, page_json, role_json, table_json, trigger_json, trigger_table,
-    view_json,
+    agent_json, application_json, backup_db_connection_json, backup_file_meta_json,
+    backup_llm_provider_json, backup_model_json, backup_module_json, backup_store_def_json,
+    backup_stream_json, constraint_json, field_json, library_item_json, page_json, role_json,
+    table_json, trigger_json, trigger_table, view_json,
 };
 
 /// What can be included in a backup of this server, right now.
@@ -40,10 +41,20 @@ use crate::handlers::{
 /// choice, which carries the table's rows (password hashes included) along with
 /// the roles they point at. Offering it twice would let an admin tick "users" and
 /// untick the `users` table and get something incoherent.
+///
+/// Tables on another database connection are not among them either: the
+/// connection is.
 pub async fn available(catalog: &Catalog) -> Result<Available> {
     let mut tables = Vec::new();
     for table in catalog.tables()? {
         if table.is_system() || table.name == sc_auth::USERS_TABLE {
+            continue;
+        }
+        // A table on another database is that database's to back up: the
+        // connection travels (passwords and all) and brings its tables back
+        // with it, and a restore that wrote this archive's rows into a live
+        // external database would be writing somewhere the admin never chose.
+        if table.database != sc_catalog::DbId::primary() {
             continue;
         }
         let count = rows::count_rows(catalog, &table, None).await.unwrap_or(0);
@@ -82,11 +93,59 @@ pub async fn available(catalog: &Catalog) -> Result<Available> {
         None => 0,
     };
 
+    let modules = if has_table(catalog, sc_module::MODULES_TABLE)? {
+        count(sc_module::list_modules(catalog).await?.len())
+    } else {
+        0
+    };
+    let db_connections = if has_table(catalog, sc_catalog::DB_CONNECTIONS_TABLE)? {
+        count(sc_catalog::list_db_connections(catalog).await?.len())
+    } else {
+        0
+    };
+    let streams = if has_table(catalog, sc_stream::STREAMS_TABLE)? {
+        count(sc_stream::list_streams(catalog).await?.len())
+    } else {
+        0
+    };
+    let datasets = if has_table(catalog, sc_dataset::DATASETS_TABLE)? {
+        count(sc_dataset::list_datasets(catalog).await?.len())
+    } else {
+        0
+    };
+    let workspaces = if has_table(catalog, sc_analytics::WORKSPACES_TABLE)? {
+        count(sc_analytics::list_workspaces(catalog).await?.len())
+    } else {
+        0
+    };
+    let (models, fits) = if has_table(catalog, sc_model::MODELS_TABLE)? {
+        let models = sc_model::list_models(catalog).await?;
+        let mut fits = 0;
+        for model in &models {
+            fits += kept_fits(catalog, model).await?.len();
+        }
+        (count(models.len()), count(fits))
+    } else {
+        (0, 0)
+    };
+
     Ok(Available {
         tables,
         applications,
         file_stores,
         users,
+        modules,
+        db_connections,
+        streams,
+        datasets,
+        models,
+        workspaces,
+        fits,
+        llm_providers: if has_table(catalog, sc_llm::LLM_PROVIDERS_TABLE)? {
+            count(sc_llm::list_llm_providers(catalog).await?.len())
+        } else {
+            0
+        },
         agents: i64::try_from(sc_agent::list_agents(catalog).await?.len()).unwrap_or(i64::MAX),
         triggers: i64::try_from(sc_action::list_triggers(catalog).await?.len()).unwrap_or(i64::MAX),
         views: i64::try_from(views).unwrap_or(i64::MAX),
@@ -95,7 +154,34 @@ pub async fn available(catalog: &Catalog) -> Result<Available> {
         // is the default — "serve plain HTTP" is a setting an admin may well want
         // restored onto a copy of a production server.
         ssl: true,
+        // Likewise every other section: "no SMTP server" is a setting too.
+        settings: true,
     })
+}
+
+/// A length as a count.
+fn count(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+/// Whether a system table has been bootstrapped on this server. A server that
+/// never ran the feature has no rows to back up, rather than an error.
+fn has_table(catalog: &Catalog, name: &str) -> Result<bool> {
+    Ok(catalog.get(name)?.is_some())
+}
+
+/// The fits of `model` a backup carries: every one that finished, fitted or
+/// failed. One still fitting has no result yet, and the boot reap would mark
+/// it failed on the server it was restored to anyway.
+async fn kept_fits(
+    catalog: &Catalog,
+    model: &sc_model::Model,
+) -> Result<Vec<sc_model::ModelInstance>> {
+    Ok(sc_model::list_model_instances(catalog, model.id)
+        .await?
+        .into_iter()
+        .filter(|i| i.status != sc_model::FitStatus::Fitting)
+        .collect())
 }
 
 /// Build the zip for `selection`.
@@ -216,6 +302,15 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
                 &Json::Array(pages),
             )?;
         }
+        // A Saltcorn UI application's translations are rows, so they travel
+        // here; a code application's are files in its repository, and travel
+        // with its file store.
+        if let Some(catalogues) = row_translations(catalog, &app).await? {
+            zip.json(
+                &format!("applications/{}/translations.json", app.subdomain),
+                &catalogues,
+            )?;
+        }
     }
 
     // --- file stores: the definition, the metadata, and the bytes -----------
@@ -294,6 +389,65 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
         )?;
     }
 
+    // --- modules -----------------------------------------------------------
+    //
+    // The rows, not the packages: a restore reinstalls each from where it came,
+    // which is what an install already does, and a `node_modules` tree in a zip
+    // would be built for the machine that took the backup.
+    if selection.modules && has_table(catalog, sc_module::MODULES_TABLE)? {
+        let modules: Vec<Json> = sc_module::list_modules(catalog)
+            .await?
+            .iter()
+            .map(backup_module_json)
+            .collect();
+        contents.modules = count(modules.len());
+        zip.json("modules.json", &Json::Array(modules))?;
+    }
+
+    // --- connections to other databases ------------------------------------
+    if selection.db_connections && has_table(catalog, sc_catalog::DB_CONNECTIONS_TABLE)? {
+        let connections: Vec<Json> = sc_catalog::list_db_connections(catalog)
+            .await?
+            .iter()
+            .map(backup_db_connection_json)
+            .collect();
+        contents.db_connections = count(connections.len());
+        zip.json("db-connections.json", &Json::Array(connections))?;
+    }
+
+    // --- streams -----------------------------------------------------------
+    if selection.streams && has_table(catalog, sc_stream::STREAMS_TABLE)? {
+        let streams: Vec<Json> = sc_stream::list_streams(catalog)
+            .await?
+            .iter()
+            .map(backup_stream_json)
+            .collect();
+        contents.streams = count(streams.len());
+        zip.json("streams.json", &Json::Array(streams))?;
+    }
+
+    // --- analytics: datasets, models, workspaces, and the fits -------------
+    if selection.analytics {
+        write_analytics(catalog, selection, &mut zip, &mut contents).await?;
+    }
+
+    // --- LLM providers, each with its models --------------------------------
+    //
+    // One entry rather than two, because a model is a row *of* its provider —
+    // the same model name under two providers is two models — and a model
+    // restored without its provider has nothing to belong to. The API keys are
+    // in it (see the module comment): an agent is only restored if its provider
+    // validates, and a provider without its key does not.
+    if selection.llm_providers && has_table(catalog, sc_llm::LLM_PROVIDERS_TABLE)? {
+        let mut providers = Vec::new();
+        for def in sc_llm::list_llm_providers(catalog).await? {
+            let models = sc_llm::list_llm_models(catalog, &def).await?;
+            providers.push(backup_llm_provider_json(&def, &models));
+        }
+        contents.llm_providers = i64::try_from(providers.len()).unwrap_or(i64::MAX);
+        zip.json("llm-providers.json", &Json::Array(providers))?;
+    }
+
     // --- agents -------------------------------------------------------------
     if selection.agents {
         let agents: Vec<Json> = sc_agent::list_agents(catalog)
@@ -307,12 +461,28 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
 
     // --- triggers ----------------------------------------------------------
     if selection.triggers {
+        let has_versions = has_table(catalog, sc_workflow::VERSIONS_TABLE)?;
         let mut triggers = Vec::new();
         for trigger in sc_action::list_triggers(catalog).await? {
             if !selection.includes_trigger(trigger_table(&trigger)) {
                 continue;
             }
-            triggers.push(trigger_json(&trigger, None));
+            let mut value = trigger_json(&trigger, None);
+            // A workflow's steps are not on the trigger row: they are its
+            // current version (§10.3), and a workflow restored without them is
+            // one that refuses to run. Only the current one — the history is
+            // there for runs to pin to, and runs are not backed up.
+            if has_versions
+                && let Some(workflow) = sc_workflow::current_workflow(catalog, trigger.id).await?
+                && let Json::Object(map) = &mut value
+            {
+                map.insert(
+                    "workflow".to_owned(),
+                    serde_json::to_value(&workflow)
+                        .map_err(|e| Error::msg(format!("workflow `{}`: {e}", trigger.name)))?,
+                );
+            }
+            triggers.push(value);
         }
         contents.triggers = i64::try_from(triggers.len()).unwrap_or(i64::MAX);
         zip.json("triggers.json", &Json::Array(triggers))?;
@@ -333,6 +503,27 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
         }
         contents.ssl = true;
         zip.json("settings/ssl.json", &Json::Object(values))?;
+    }
+
+    // --- every other settings section, one file each ------------------------
+    if selection.settings {
+        let stored = sc_config::all_config(catalog).await?;
+        for section in sc_config::config_sections()
+            .iter()
+            .filter(|section| section.name != SSL_SECTION)
+        {
+            let mut values = Map::new();
+            for field in &section.fields {
+                if let Some(value) = stored.get(field.key()) {
+                    values.insert(field.key().to_owned(), value.clone());
+                }
+            }
+            zip.json(
+                &format!("settings/{}.json", section.name),
+                &Json::Object(values),
+            )?;
+        }
+        contents.settings = true;
     }
 
     // The manifest goes in last so it can describe what was actually written —
@@ -357,6 +548,144 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
     )?;
 
     zip.finish()
+}
+
+/// Datasets, models and workspaces — and, when chosen, the models' fits.
+///
+/// Datasets are written in the order a restore can save them in, every base
+/// before the datasets built on it, so the restore does not have to sort.
+async fn write_analytics(
+    catalog: &Catalog,
+    selection: &Selection,
+    zip: &mut ZipBuilder,
+    contents: &mut Available,
+) -> Result<()> {
+    if has_table(catalog, sc_dataset::DATASETS_TABLE)? {
+        let datasets = bases_first(sc_dataset::list_datasets(catalog).await?);
+        contents.datasets = count(datasets.len());
+        let datasets: Vec<Json> = datasets
+            .iter()
+            .map(|def| serde_json::to_value(def).map_err(|e| Error::msg(e.to_string())))
+            .collect::<Result<_>>()?;
+        zip.json("analytics/datasets.json", &Json::Array(datasets))?;
+    }
+    if has_table(catalog, sc_model::MODELS_TABLE)? {
+        let models = sc_model::list_models(catalog).await?;
+        let mut out = Vec::with_capacity(models.len());
+        for model in &models {
+            out.push(backup_model_json(catalog, model).await?);
+        }
+        contents.models = count(out.len());
+        zip.json("analytics/models.json", &Json::Array(out))?;
+
+        if selection.fits {
+            let mut instances = Vec::new();
+            let mut outputs = Vec::new();
+            for model in &models {
+                for fit in kept_fits(catalog, model).await? {
+                    instances
+                        .extend(rows_of(catalog, sc_model::INSTANCES_TABLE, "id", fit.id.0).await?);
+                    outputs.extend(
+                        rows_of(catalog, sc_model::OUTPUTS_TABLE, "instance", fit.id.0).await?,
+                    );
+                    // One entry per fit, because a posterior's draws are the
+                    // one thing here that can be large: a restore reads them a
+                    // fit at a time rather than as one document.
+                    let draws =
+                        rows_of(catalog, sc_model::DRAWS_TABLE, "instance", fit.id.0).await?;
+                    if !draws.is_empty() {
+                        zip.json(
+                            &format!("analytics/draws/{}.json", fit.id.0),
+                            &Json::Array(draws),
+                        )?;
+                    }
+                }
+            }
+            contents.fits = count(instances.len());
+            zip.json(
+                "analytics/fits.json",
+                &json!({ "instances": instances, "outputs": outputs }),
+            )?;
+        }
+    }
+    if has_table(catalog, sc_analytics::WORKSPACES_TABLE)? {
+        let workspaces: Vec<Json> = sc_analytics::list_workspaces(catalog)
+            .await?
+            .iter()
+            .map(crate::analytics::workspace_json)
+            .collect();
+        contents.workspaces = count(workspaces.len());
+        zip.json("analytics/workspaces.json", &Json::Array(workspaces))?;
+    }
+    Ok(())
+}
+
+/// Datasets ordered so that each comes after the dataset it is built on. A
+/// dataset whose base is missing, or in a cycle, goes at the end, where the
+/// restore will report it.
+fn bases_first(mut pending: Vec<sc_dataset::DatasetDef>) -> Vec<sc_dataset::DatasetDef> {
+    let mut ordered: Vec<sc_dataset::DatasetDef> = Vec::with_capacity(pending.len());
+    loop {
+        let before = pending.len();
+        let mut rest = Vec::new();
+        for def in pending {
+            let ready = match &def.base {
+                sc_dataset::Base::Table { .. } => true,
+                sc_dataset::Base::Dataset { dataset } => ordered.iter().any(|d| d.id == *dataset),
+            };
+            if ready {
+                ordered.push(def);
+            } else {
+                rest.push(def);
+            }
+        }
+        pending = rest;
+        if pending.is_empty() || pending.len() == before {
+            break;
+        }
+    }
+    ordered.extend(pending);
+    ordered
+}
+
+/// The rows of a system table whose `column` is `id`, as JSON — the fits'
+/// rows, which have no admin-API shape to borrow.
+async fn rows_of(
+    catalog: &Catalog,
+    table: &str,
+    column: &str,
+    id: uuid::Uuid,
+) -> Result<Vec<Json>> {
+    let select = Select::from(Source::table(table.to_owned()))
+        .columns(vec![Projection::all()])
+        .filter(Expr::col(column).eq(Expr::lit(id)));
+    let fetched = catalog
+        .primary()
+        .query(&Statement::from(select))
+        .await?
+        .try_collect()
+        .await?;
+    Ok(fetched.iter().map(rows::row_to_json).collect())
+}
+
+/// A Saltcorn UI application's translations, `{ locale: catalogue }` — `None`
+/// for a code application, whose catalogues are files in its repository, and
+/// for a server that has never stored a translation.
+async fn row_translations(catalog: &Catalog, app: &sc_app::Application) -> Result<Option<Json>> {
+    if sc_app::app_source_from_config(&app.framework).is_ok()
+        || !has_table(catalog, sc_app::TRANSLATIONS_TABLE)?
+    {
+        return Ok(None);
+    }
+    use sc_app::CatalogStore;
+    let store = sc_app::RowCatalogStore::new(app.id);
+    let mut out = Map::new();
+    for locale in store.locales(catalog).await? {
+        if let Some(messages) = store.load(catalog, &locale).await? {
+            out.insert(locale.as_str().to_owned(), messages.to_json());
+        }
+    }
+    Ok(Some(Json::Object(out)))
 }
 
 /// An application's views — none on a database whose views table was never

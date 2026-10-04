@@ -40,9 +40,11 @@ use super::{Available, MANIFEST_FILE, SSL_SECTION, Selection};
 use crate::apps::AppMounts;
 use crate::handlers::{
     agent_from_body, agents_of, application_from_body, backup_file_meta_from_json,
-    create_backend_resources, field_spec_from_body, file_store_from_body, library_item_from_body,
-    page_from_body, table_settings_from_body, trigger_from_body, trigger_table, triggers_of,
-    view_from_body,
+    create_backend_resources, dataset_shape, db_connection_from_body, field_spec_from_body,
+    file_store_from_body, library_item_from_body, llm_model_from_body, llm_provider_from_body,
+    model_from_body, models_of, module_from_backup, modules_of, page_from_body, stream_from_body,
+    streams_of, table_settings_from_body, trigger_from_body, trigger_table, triggers_of,
+    view_from_body, workflow_from_document,
 };
 
 /// What a restore did, and what it declined to do.
@@ -125,6 +127,24 @@ pub async fn restore_backup(
         restore_users(catalog, &entries, &mut report).await;
     }
 
+    // --- modules, before anything that might be one of theirs ----------------
+    //
+    // A module can supply a table provider, a framework, an action, a stream
+    // provider or a model provider — so it is installed before every one of the
+    // things below that could name what it supplies.
+    if selection.modules {
+        restore_modules(apps, catalog, &entries, &mut report).await;
+    }
+
+    // --- connections to other databases, before the tables -------------------
+    //
+    // So a table that lives on one is found there rather than created here. A
+    // SQLite connection is a file in a file store, and saving one needs the
+    // store; those wait for the file stores below.
+    if selection.db_connections {
+        restore_db_connections(catalog, &entries, false, &mut report).await;
+    }
+
     // --- tables: every table, then every column, then the rows --------------
     //
     // In that order because a `Key` field can only resolve against a table that
@@ -191,13 +211,32 @@ pub async fn restore_backup(
     for name in &selection.file_stores {
         restore_file_store(catalog, &entries, name, &mut report).await;
     }
+    if selection.db_connections {
+        restore_db_connections(catalog, &entries, true, &mut report).await;
+    }
 
-    // --- applications, agents, triggers -------------------------------------
+    // --- analytics: datasets over the tables, models over the datasets -------
+    if selection.analytics {
+        restore_analytics(catalog, apps, &entries, &selection, &mut report).await;
+    }
+
+    // --- streams, before the applications that expose them and the triggers
+    // that listen to them ------------------------------------------------------
+    if selection.streams {
+        restore_streams(catalog, apps, &entries, &mut report).await;
+    }
+
+    // --- applications, LLM providers, agents, triggers ----------------------
     //
     // Applications after the file stores, deliberately: building one is a bundler
     // run over its source tree, and that tree is what the stores just restored.
+    // LLM providers before agents and triggers, because an agent is refused
+    // unless the provider (and model) it names exists.
     for subdomain in &selection.applications {
         restore_application(catalog, apps, &entries, subdomain, &selection, &mut report).await;
+    }
+    if selection.llm_providers {
+        restore_llm_providers(catalog, &entries, &mut report).await;
     }
     if selection.agents {
         restore_agents(catalog, apps, &entries, &mut report).await;
@@ -210,6 +249,19 @@ pub async fn restore_backup(
     if selection.ssl {
         let result = restore_ssl(catalog, &entries).await;
         report.outcome("the SSL settings", result);
+    }
+    if selection.settings {
+        for section in sc_config::config_sections()
+            .iter()
+            .filter(|section| section.name != SSL_SECTION)
+        {
+            let path = format!("settings/{}.json", section.name);
+            if !entries.contains_key(&path) {
+                continue;
+            }
+            let result = restore_settings_section(catalog, &entries, section.name).await;
+            report.outcome(&format!("the {} settings", section.name), result);
+        }
     }
 
     Ok(report)
@@ -1072,6 +1124,7 @@ async fn restore_application(
 
     // Before the build: mounting a Saltcorn UI application is reading its views.
     restore_views_and_pages(catalog, entries, key, &app, selection, report).await;
+    restore_translations(catalog, entries, key, &app, report).await;
 
     // A framework constructed from a factory (Saltcorn UI) has no build and no
     // Build button, so "build it once its source is in place" would send the
@@ -1474,6 +1527,124 @@ fn counted(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
+/// LLM providers, each followed by its models.
+///
+/// **A provider already defined here — by name or by id — is kept as it is**: its
+/// key and endpoint are the ones this server is using, and a restore does not
+/// overwrite them. Models of the backup's that it lacks are still added to it,
+/// never as its default, so an agent naming one of them can be restored; a model
+/// it already has is left alone.
+async fn restore_llm_providers(catalog: &Catalog, entries: &Entries, report: &mut RestoreReport) {
+    let document = match json_entry(entries, "llm-providers.json") {
+        Ok(document) => document,
+        Err(e) => {
+            report.skipped(format!("LLM providers: {}", e.causes()));
+            return;
+        }
+    };
+    for value in array_list(&document) {
+        let name = value
+            .get("name")
+            .and_then(Json::as_str)
+            .unwrap_or("an LLM provider")
+            .to_owned();
+        let what = format!("LLM provider `{name}`");
+        let (provider, existed) = match restore_llm_provider(catalog, &value).await {
+            Ok(found) => found,
+            Err(e) => {
+                report.outcome(&what, Err(e));
+                continue;
+            }
+        };
+        if existed {
+            report.skipped(format!(
+                "{what} is already defined here; its settings and key were kept"
+            ));
+        }
+        let mut added = 0;
+        for model in array_field(&value, "models") {
+            let model_name = model
+                .get("name")
+                .and_then(Json::as_str)
+                .unwrap_or("a model")
+                .to_owned();
+            match restore_llm_model(catalog, &provider, &model, existed).await {
+                Ok(true) => added += 1,
+                Ok(false) => {}
+                Err(e) => report.skipped(format!("model `{model_name}` of {what}: {}", e.causes())),
+            }
+        }
+        if existed {
+            if added > 0 {
+                report.did(format!(
+                    "{} added to {what}",
+                    counted(added, "model", "models")
+                ));
+            }
+        } else {
+            report.did(format!("{what}: {}", counted(added, "model", "models")));
+        }
+    }
+}
+
+/// The provider `value` describes, created unless one by its name or id is
+/// already here — and whether it was.
+async fn restore_llm_provider(
+    catalog: &Catalog,
+    value: &Json,
+) -> Result<(sc_llm::LlmProviderDef, bool)> {
+    let backed_up = value
+        .get("id")
+        .and_then(Json::as_str)
+        .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+        .map(sc_llm::LlmProviderDefId);
+    let def = llm_provider_from_body(backed_up.unwrap_or_default(), value)?;
+    if let Some(existing) = sc_llm::load_llm_provider_by_name(catalog, def.name.trim()).await? {
+        return Ok((existing, true));
+    }
+    // The backup's id where it is free, so a restore into the installation it
+    // came from gives the provider back its identity; a fresh one where some
+    // other provider holds it, rather than overwriting that provider.
+    let mut def = def;
+    if sc_llm::load_llm_provider(catalog, def.id).await?.is_some() {
+        def.id = sc_llm::LlmProviderDefId::new();
+    }
+    sc_llm::save_llm_provider(catalog, &def).await?;
+    Ok((def, false))
+}
+
+/// One model of `provider`, added unless the provider has one by that name.
+/// `Ok(false)` is "already there".
+async fn restore_llm_model(
+    catalog: &Catalog,
+    provider: &sc_llm::LlmProviderDef,
+    value: &Json,
+    provider_existed: bool,
+) -> Result<bool> {
+    let backed_up = value
+        .get("id")
+        .and_then(Json::as_str)
+        .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+        .map(sc_llm::LlmModelDefId);
+    let mut model = llm_model_from_body(backed_up.unwrap_or_default(), provider.id, value)?;
+    if sc_llm::load_llm_model_by_name(catalog, provider, &model.name)
+        .await?
+        .is_some()
+    {
+        return Ok(false);
+    }
+    if sc_llm::load_llm_model(catalog, model.id).await?.is_some() {
+        model.id = sc_llm::LlmModelDefId::new();
+    }
+    // Saving a default clears the flag on the provider's other models, and a
+    // provider that was already here keeps the default it had.
+    if provider_existed {
+        model.is_default = false;
+    }
+    sc_llm::save_llm_model(catalog, &model).await?;
+    Ok(true)
+}
+
 async fn restore_agents(
     catalog: &Catalog,
     apps: &AppMounts,
@@ -1563,10 +1734,17 @@ async fn restore_triggers(
                 ));
             }
             sc_action::save_trigger(catalog, &dispatcher.registry(), &trigger).await?;
-            Ok(String::new())
+            Ok(trigger)
         }
         .await;
         any |= result.is_ok();
+        let result = match result {
+            Ok(trigger) => match value.get("workflow").filter(|w| !w.is_null()) {
+                Some(steps) => restore_workflow(catalog, &dispatcher, &trigger, steps).await,
+                None => Ok(String::new()),
+            },
+            Err(e) => Err(e),
+        };
         report.outcome(&format!("trigger `{name}`"), result);
     }
     // One reload for the batch: the live set is what will fire, and it must match
@@ -1583,22 +1761,36 @@ async fn restore_triggers(
 /// other save. Not applied to the running listener: a certificate takes effect
 /// when the server restarts, which is what the settings screen says too.
 async fn restore_ssl(catalog: &Catalog, entries: &Entries) -> Result<String> {
-    let document = json_entry(entries, "settings/ssl.json")?;
+    match restore_settings_section(catalog, entries, SSL_SECTION).await? {
+        detail if detail.is_empty() => Ok("they take effect when the server restarts".to_owned()),
+        detail => Ok(detail),
+    }
+}
+
+/// One settings section's stored values, checked against their declarations on
+/// the way in like any other save. Empty on success; a detail when there was
+/// nothing to restore.
+async fn restore_settings_section(
+    catalog: &Catalog,
+    entries: &Entries,
+    section: &str,
+) -> Result<String> {
+    let document = json_entry(entries, &format!("settings/{section}.json"))?;
     let values = document
         .as_object()
-        .ok_or_else(|| Error::invalid("the SSL settings must be an object"))?;
-    // Only the SSL section's own keys. The entry is written by this system, but a
+        .ok_or_else(|| Error::invalid(format!("the {section} settings must be an object")))?;
+    // Only the section's own keys. The entry is written by this system, but a
     // zip is a file somebody can edit: without the check, `settings/ssl.json` would
     // be a way to write *any* declared configuration value — including the ones no
     // settings form shows — under a heading that says certificates.
-    let ssl_keys: Vec<&str> = sc_config::config_sections()
+    let keys: Vec<&str> = sc_config::config_sections()
         .iter()
-        .filter(|section| section.name == SSL_SECTION)
-        .flat_map(|section| section.fields.iter().map(|def| def.key()))
+        .filter(|s| s.name == section)
+        .flat_map(|s| s.fields.iter().map(|def| def.key()))
         .collect();
     let mut attrs = sc_types::Attrs::new();
     for (key, value) in values {
-        if !ssl_keys.contains(&key.as_str()) {
+        if !keys.contains(&key.as_str()) {
             continue;
         }
         attrs.insert(key.clone(), value.clone());
@@ -1607,7 +1799,663 @@ async fn restore_ssl(catalog: &Catalog, entries: &Entries) -> Result<String> {
         return Ok("nothing to restore".to_owned());
     }
     sc_config::set_config_many(catalog, &attrs).await?;
-    Ok("they take effect when the server restarts".to_owned())
+    Ok(String::new())
+}
+
+/// A workflow trigger's steps, as its first version here — unless it already
+/// has steps, which are kept: the trigger was here before the restore, and its
+/// current version is the one its runs and its admin are using.
+///
+/// Checked as a save from the editor is, so a workflow naming a table or an
+/// action this server has not got is reported rather than stored broken.
+async fn restore_workflow(
+    catalog: &Catalog,
+    dispatcher: &sc_action::TriggerDispatcher,
+    trigger: &sc_action::Trigger,
+    steps: &Json,
+) -> Result<String> {
+    if sc_workflow::current_workflow(catalog, trigger.id)
+        .await?
+        .is_some()
+    {
+        return Ok("its workflow was already here and was kept".to_owned());
+    }
+    let workflow = workflow_from_document(trigger.id, steps)?;
+    sc_workflow::validate_workflow(
+        catalog,
+        &dispatcher.registry(),
+        &workflow,
+        trigger.channel.as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        Error::invalid(format!(
+            "its workflow could not be restored: {}",
+            e.causes()
+        ))
+    })?;
+    sc_workflow::save_workflow(catalog, &workflow, "restored from a backup", None).await?;
+    Ok(format!(
+        "with its workflow ({})",
+        counted(workflow.steps.len(), "step", "steps")
+    ))
+}
+
+/// Modules, each reinstalled from where its row says it came, then given back
+/// the configuration and permissions it had. **One already installed here — by
+/// package name — is kept as it is.** One reload for the batch, so what they
+/// supply is live before anything below names it.
+async fn restore_modules(
+    apps: &AppMounts,
+    catalog: &Catalog,
+    entries: &Entries,
+    report: &mut RestoreReport,
+) {
+    let document = match json_entry(entries, "modules.json") {
+        Ok(document) => document,
+        Err(e) => {
+            report.skipped(format!("modules: {}", e.causes()));
+            return;
+        }
+    };
+    let services = match modules_of(apps) {
+        Ok(services) => services,
+        Err(e) => {
+            report.skipped(format!("modules: {}", e.causes()));
+            return;
+        }
+    };
+    let mut any = false;
+    for value in array_list(&document) {
+        let name = value
+            .get("name")
+            .and_then(Json::as_str)
+            .unwrap_or("a module")
+            .to_owned();
+        let result: Result<_> = async {
+            let mut module = module_from_backup(&value)?;
+            if sc_module::load_module_by_name(catalog, &module.name)
+                .await?
+                .is_some()
+            {
+                return Ok(None);
+            }
+            let package = services
+                .install_package(module.language, module.source, &module.location)
+                .await?;
+            if sc_module::load_module(catalog, module.id).await?.is_some() {
+                module.id = sc_module::ModuleId::new();
+            }
+            module.name = package.name;
+            module.version = Some(package.version.clone());
+            sc_module::save_module(catalog, &module).await?;
+            Ok(Some(package.version))
+        }
+        .await;
+        match result {
+            Ok(None) => report.skipped(format!(
+                "module `{name}` is already installed here; its settings and permissions were kept"
+            )),
+            Ok(Some(version)) => {
+                any = true;
+                report.did(format!("module `{name}` {version}, installed"));
+            }
+            Err(e) => report.skipped(format!("module `{name}`: {}", e.causes())),
+        }
+    }
+    if any && let Err(e) = services.reload().await {
+        report.skipped(format!(
+            "the restored modules are installed but not loaded yet: {}",
+            e.causes()
+        ));
+    }
+}
+
+/// Connections to other databases — the SQLite ones (`sqlite == true`), whose
+/// file is in a file store, or every other kind — each saved and dialled. **One
+/// already defined here by name is kept.** A connection that is saved but does
+/// not answer is reported with the reason, as one the Connections screen can
+/// repair.
+async fn restore_db_connections(
+    catalog: &Catalog,
+    entries: &Entries,
+    sqlite: bool,
+    report: &mut RestoreReport,
+) {
+    let document = match json_entry(entries, "db-connections.json") {
+        Ok(document) => document,
+        Err(e) => {
+            // Said once, by the first pass.
+            if !sqlite {
+                report.skipped(format!("database connections: {}", e.causes()));
+            }
+            return;
+        }
+    };
+    let mut any = false;
+    for value in array_list(&document) {
+        let name = value
+            .get("name")
+            .and_then(Json::as_str)
+            .unwrap_or("a database connection")
+            .to_owned();
+        let what = format!("database connection `{name}`");
+        let id = value
+            .get("id")
+            .and_then(Json::as_str)
+            .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+            .map(sc_catalog::DbConnectionId)
+            .unwrap_or_default();
+        // No stored row to merge a sentinel against: the password is the
+        // backup's, as it was stored.
+        let mut def = match db_connection_from_body(id, &value, None) {
+            Ok(def) => def,
+            Err(e) => {
+                if !sqlite {
+                    report.skipped(format!("{what}: {}", e.causes()));
+                }
+                continue;
+            }
+        };
+        if def.is_sqlite() != sqlite {
+            continue;
+        }
+        let result: Result<bool> = async {
+            if sc_catalog::load_db_connection_by_name(catalog, def.name.trim())
+                .await?
+                .is_some()
+            {
+                return Ok(false);
+            }
+            if sc_catalog::load_db_connection(catalog, def.id)
+                .await?
+                .is_some()
+            {
+                def.id = sc_catalog::DbConnectionId::new();
+            }
+            sc_catalog::check_db_connection_saveable(catalog, &def).await?;
+            sc_catalog::save_db_connection(catalog, &def).await?;
+            Ok(true)
+        }
+        .await;
+        match result {
+            Ok(false) => report.skipped(format!(
+                "{what} is already defined here; its settings and password were kept"
+            )),
+            Ok(true) => {
+                any = true;
+                match sc_catalog::connect_db_connection(catalog, &def).await {
+                    Ok(()) => report.did(what),
+                    Err(e) => report.skipped(format!(
+                        "{what} is restored but not connected: {}",
+                        e.causes()
+                    )),
+                }
+            }
+            Err(e) => report.skipped(format!("{what}: {}", e.causes())),
+        }
+    }
+    if any && let Err(e) = catalog.reload().await {
+        report.skipped(format!(
+            "the restored database connections' tables are not listed yet: {}",
+            e.causes()
+        ));
+    }
+}
+
+/// Streams, each saved against the providers this server has — so one whose
+/// provider came with a module is restored after the module is. **One already
+/// defined here by name is kept.** One reload for the batch.
+async fn restore_streams(
+    catalog: &Catalog,
+    apps: &AppMounts,
+    entries: &Entries,
+    report: &mut RestoreReport,
+) {
+    let document = match json_entry(entries, "streams.json") {
+        Ok(document) => document,
+        Err(e) => {
+            report.skipped(format!("streams: {}", e.causes()));
+            return;
+        }
+    };
+    let services = match streams_of(apps) {
+        Ok(services) => services,
+        Err(e) => {
+            report.skipped(format!("streams: {}", e.causes()));
+            return;
+        }
+    };
+    let registry = services.registry();
+    let mut any = false;
+    for value in array_list(&document) {
+        let name = value
+            .get("name")
+            .and_then(Json::as_str)
+            .unwrap_or("a stream")
+            .to_owned();
+        let result: Result<_> = async {
+            let obj = value
+                .as_object()
+                .ok_or_else(|| Error::invalid("a stream must be an object"))?;
+            let mut stream = stream_from_body(obj)?;
+            if sc_stream::load_stream_by_name(catalog, stream.name.trim())
+                .await?
+                .is_some()
+            {
+                return Ok(false);
+            }
+            if sc_stream::load_stream(catalog, stream.id).await?.is_some() {
+                stream.id = sc_stream::StreamId::new();
+            }
+            sc_stream::save_stream(catalog, &registry, &stream).await?;
+            Ok(true)
+        }
+        .await;
+        match result {
+            Ok(false) => report.skipped(format!(
+                "stream `{name}` is already defined here; its settings were kept"
+            )),
+            Ok(true) => {
+                any = true;
+                report.did(format!("stream `{name}`"));
+            }
+            Err(e) => report.skipped(format!("stream `{name}`: {}", e.causes())),
+        }
+    }
+    if any && let Err(e) = services.reload(catalog).await {
+        report.skipped(format!(
+            "the restored streams are saved but not running yet: {}",
+            e.causes()
+        ));
+    }
+}
+
+/// A Saltcorn UI application's translations, a locale at a time. **A locale
+/// this application already has a catalogue for keeps it**: those are the
+/// translations its visitors are reading.
+async fn restore_translations(
+    catalog: &Catalog,
+    entries: &Entries,
+    key: &str,
+    app: &sc_app::Application,
+    report: &mut RestoreReport,
+) {
+    let path = format!("applications/{key}/translations.json");
+    if !entries.contains_key(&path) || sc_app::app_source_from_config(&app.framework).is_ok() {
+        return;
+    }
+    let result = async {
+        let document = json_entry(entries, &path)?;
+        let catalogues = document
+            .as_object()
+            .ok_or_else(|| Error::invalid("translations must be an object of locales"))?;
+        use sc_app::CatalogStore;
+        let store = sc_app::RowCatalogStore::new(app.id);
+        let (mut restored, mut kept) = (Vec::new(), Vec::new());
+        for (tag, messages) in catalogues {
+            let locale = sc_i18n::Locale::parse(tag)?;
+            if store.load(catalog, &locale).await?.is_some() {
+                kept.push(tag.clone());
+                continue;
+            }
+            store
+                .save(catalog, &sc_i18n::Catalog::from_json(locale, messages)?)
+                .await?;
+            restored.push(tag.clone());
+        }
+        Ok(match (restored.is_empty(), kept.is_empty()) {
+            (_, true) => restored.join(", "),
+            (true, false) => format!("{} already here and kept", kept.join(", ")),
+            (false, false) => format!(
+                "{}; {} already here and kept",
+                restored.join(", "),
+                kept.join(", ")
+            ),
+        })
+    }
+    .await;
+    report.outcome(&format!("translations of `{}`", app.subdomain), result);
+}
+
+/// Datasets, then models, then — when chosen — their fits, then workspaces.
+///
+/// **Ids are kept where they are free**, because a model names its datasets by
+/// id and a dataset its base. A dataset already here *by name* is kept as it is,
+/// and everything that named the backup's id is pointed at the one here
+/// instead; a model already here by name is kept, and the backup's fits of it
+/// are not added to it.
+async fn restore_analytics(
+    catalog: &Catalog,
+    apps: &AppMounts,
+    entries: &Entries,
+    selection: &Selection,
+    report: &mut RestoreReport,
+) {
+    // The backup's dataset ids, as the ids they have here.
+    let mut datasets: BTreeMap<String, String> = BTreeMap::new();
+    if entries.contains_key("analytics/datasets.json") {
+        restore_datasets(catalog, entries, &mut datasets, report).await;
+    }
+    // The backup's model ids, for the models this restore created.
+    let mut models: BTreeMap<String, uuid::Uuid> = BTreeMap::new();
+    if entries.contains_key("analytics/models.json") {
+        restore_models(catalog, apps, entries, &datasets, &mut models, report).await;
+    }
+    if selection.fits && entries.contains_key("analytics/fits.json") {
+        restore_fits(catalog, entries, &models, report).await;
+    }
+    if entries.contains_key("analytics/workspaces.json") {
+        restore_workspaces(catalog, entries, report).await;
+    }
+}
+
+async fn restore_datasets(
+    catalog: &Catalog,
+    entries: &Entries,
+    ids: &mut BTreeMap<String, String>,
+    report: &mut RestoreReport,
+) {
+    let document = match json_entry(entries, "analytics/datasets.json") {
+        Ok(document) => document,
+        Err(e) => {
+            report.skipped(format!("datasets: {}", e.causes()));
+            return;
+        }
+    };
+    // Bases first is the order the writer put them in, so one pass will do.
+    for mut value in array_list(&document) {
+        let name = value
+            .get("name")
+            .and_then(Json::as_str)
+            .unwrap_or("a dataset")
+            .to_owned();
+        let backed_up = value
+            .get("id")
+            .and_then(Json::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let result: Result<_> = async {
+            if let Some(existing) = sc_dataset::load_dataset_by_name(catalog, name.trim()).await? {
+                ids.insert(backed_up.clone(), existing.id.to_string());
+                return Ok(false);
+            }
+            if let Some(base) = value.pointer_mut("/base/dataset")
+                && let Some(here) = base.as_str().and_then(|b| ids.get(b))
+            {
+                *base = Json::String(here.clone());
+            }
+            let mut id: sc_dataset::DatasetId = backed_up
+                .parse()
+                .unwrap_or_else(|_| sc_dataset::DatasetId::new());
+            if sc_dataset::load_dataset(catalog, id).await?.is_some() {
+                id = sc_dataset::DatasetId::new();
+            }
+            let def = crate::analytics::def_from_input(&value, id)?;
+            sc_dataset::save_dataset(catalog, &def).await?;
+            ids.insert(backed_up.clone(), id.to_string());
+            Ok(true)
+        }
+        .await;
+        match result {
+            Ok(false) => report.skipped(format!(
+                "dataset `{name}` is already defined here; its operations were kept"
+            )),
+            Ok(true) => report.did(format!("dataset `{name}`")),
+            Err(e) => report.skipped(format!("dataset `{name}`: {}", e.causes())),
+        }
+    }
+}
+
+async fn restore_models(
+    catalog: &Catalog,
+    apps: &AppMounts,
+    entries: &Entries,
+    datasets: &BTreeMap<String, String>,
+    created: &mut BTreeMap<String, uuid::Uuid>,
+    report: &mut RestoreReport,
+) {
+    let document = match json_entry(entries, "analytics/models.json") {
+        Ok(document) => document,
+        Err(e) => {
+            report.skipped(format!("models: {}", e.causes()));
+            return;
+        }
+    };
+    let services = match models_of(apps) {
+        Ok(services) => services,
+        Err(e) => {
+            report.skipped(format!("models: {}", e.causes()));
+            return;
+        }
+    };
+    let registry = services.registry();
+    for mut value in array_list(&document) {
+        let name = value
+            .get("name")
+            .and_then(Json::as_str)
+            .unwrap_or("a model")
+            .to_owned();
+        let backed_up = value
+            .get("id")
+            .and_then(Json::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let result: Result<_> = async {
+            if sc_model::load_model_by_name(catalog, name.trim())
+                .await?
+                .is_some()
+            {
+                return Ok(false);
+            }
+            // Every dataset reference pointed at the dataset it is here.
+            let remap = |slot: Option<&mut Json>| {
+                if let Some(slot) = slot
+                    && let Some(here) = slot.as_str().and_then(|d| datasets.get(d))
+                {
+                    *slot = Json::String(here.clone());
+                }
+            };
+            remap(value.pointer_mut("/dataset/dataset_id"));
+            if let Some(Json::Array(related)) = value.get_mut("related") {
+                for item in related {
+                    remap(item.get_mut("dataset_id"));
+                }
+            }
+            let id = match uuid::Uuid::parse_str(&backed_up) {
+                Ok(id)
+                    if sc_model::load_model(catalog, sc_model::ModelId(id))
+                        .await?
+                        .is_none() =>
+                {
+                    id
+                }
+                _ => uuid::Uuid::new_v4(),
+            };
+            if let Json::Object(map) = &mut value {
+                map.insert("id".to_owned(), Json::String(id.to_string()));
+            }
+            let obj = value
+                .as_object()
+                .ok_or_else(|| Error::invalid("a model must be an object"))?;
+            let model = model_from_body(catalog, obj).await?;
+            let shape = dataset_shape(&services, &model.dataset).await;
+            sc_model::save_model(catalog, &registry, &model, shape.as_ref()).await?;
+            if let Some(Json::Object(view_state)) = value.get("view_state")
+                && !view_state.is_empty()
+            {
+                sc_model::patch_model_view_state(catalog, model.id, view_state).await?;
+            }
+            created.insert(backed_up.clone(), id);
+            Ok(true)
+        }
+        .await;
+        match result {
+            Ok(false) => report.skipped(format!(
+                "model `{name}` is already defined here; it and its fits were kept"
+            )),
+            Ok(true) => report.did(format!("model `{name}`")),
+            Err(e) => report.skipped(format!("model `{name}`: {}", e.causes())),
+        }
+    }
+}
+
+/// The fits of the models this restore created, as the rows they were — each
+/// with its output frames and its draws. A fit is all or nothing: its rows go
+/// in one after another and a failure is reported against the fit.
+async fn restore_fits(
+    catalog: &Catalog,
+    entries: &Entries,
+    models: &BTreeMap<String, uuid::Uuid>,
+    report: &mut RestoreReport,
+) {
+    let result = async {
+        let document = json_entry(entries, "analytics/fits.json")?;
+        let instances = catalog.require(sc_model::INSTANCES_TABLE)?;
+        let outputs = catalog.require(sc_model::OUTPUTS_TABLE)?;
+        let draws = catalog.require(sc_model::DRAWS_TABLE)?;
+        let all_outputs = array_field(&document, "outputs");
+        let mut restored = 0;
+        for mut fit in array_field(&document, "instances") {
+            let id = fit
+                .get("id")
+                .and_then(Json::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let Some(model) = fit
+                .get("model")
+                .and_then(Json::as_str)
+                .and_then(|m| models.get(m))
+            else {
+                // A fit of a model this restore did not create: the model here
+                // keeps the fits it has.
+                continue;
+            };
+            if let Json::Object(map) = &mut fit {
+                map.insert("model".to_owned(), Json::String(model.to_string()));
+            }
+            let fit_result = async {
+                insert_row(catalog, &instances, &fit).await?;
+                for output in all_outputs
+                    .iter()
+                    .filter(|o| o.get("instance").and_then(Json::as_str) == Some(id.as_str()))
+                {
+                    insert_row(catalog, &outputs, output).await?;
+                }
+                let path = format!("analytics/draws/{id}.json");
+                if entries.contains_key(&path) {
+                    let rows = array_list(&json_entry(entries, &path)?);
+                    insert_rows_batched(catalog, &draws, &rows).await?;
+                }
+                Ok::<(), Error>(())
+            }
+            .await;
+            match fit_result {
+                Ok(()) => restored += 1,
+                Err(e) => report.skipped(format!("fit {id}: {}", e.causes())),
+            }
+        }
+        Ok(counted(restored, "fit", "fits"))
+    }
+    .await;
+    report.outcome("model fits", result);
+}
+
+/// Rows into a table a batch at a time — a posterior's draws, which one
+/// `INSERT` a row would take minutes over. Every row must carry the same
+/// columns, which rows written by [`super::write`] do.
+async fn insert_rows_batched(catalog: &Catalog, table: &Table, values: &[Json]) -> Result<()> {
+    const BATCH: usize = 250;
+    for chunk in values.chunks(BATCH) {
+        let Some(first) = chunk.first().and_then(Json::as_object) else {
+            continue;
+        };
+        let columns: Vec<String> = first
+            .keys()
+            .filter(|c| table.field(c).is_some_and(|f| !f.is_calc()))
+            .cloned()
+            .collect();
+        let mut rows = Vec::with_capacity(chunk.len());
+        for value in chunk {
+            let obj = value
+                .as_object()
+                .ok_or_else(|| Error::invalid("a row must be an object"))?;
+            let mut row = Vec::with_capacity(columns.len());
+            for column in &columns {
+                let json = obj.get(column).unwrap_or(&Json::Null);
+                row.push(Expr::lit(rows::column_value(table, column, json)?));
+            }
+            rows.push(row);
+        }
+        let insert = Insert {
+            rows,
+            ..Insert::row(table.name.clone(), columns, Vec::new())
+        };
+        catalog
+            .primary()
+            .query(&Statement::from(insert))
+            .await?
+            .try_collect()
+            .await?;
+    }
+    Ok(())
+}
+
+/// Analytics workspaces. One already here — by id — is kept: workspace names
+/// are not unique, so the id is the only thing that says it is the same one.
+async fn restore_workspaces(catalog: &Catalog, entries: &Entries, report: &mut RestoreReport) {
+    let document = match json_entry(entries, "analytics/workspaces.json") {
+        Ok(document) => document,
+        Err(e) => {
+            report.skipped(format!("workspaces: {}", e.causes()));
+            return;
+        }
+    };
+    for value in array_list(&document) {
+        let name = value
+            .get("name")
+            .and_then(Json::as_str)
+            .unwrap_or("a workspace")
+            .to_owned();
+        let result: Result<_> = async {
+            let kind = sc_analytics::WorkspaceKind::parse(
+                value.get("kind").and_then(Json::as_str).unwrap_or_default(),
+            )?;
+            let mut workspace = sc_analytics::Workspace::new(
+                name.clone(),
+                kind,
+                value
+                    .get("created_by")
+                    .and_then(Json::as_str)
+                    .and_then(|raw| uuid::Uuid::parse_str(raw).ok()),
+            );
+            if let Some(id) = value
+                .get("id")
+                .and_then(Json::as_str)
+                .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+            {
+                if sc_analytics::load_workspace(catalog, sc_analytics::WorkspaceId(id))
+                    .await?
+                    .is_some()
+                {
+                    return Ok(false);
+                }
+                workspace.id = sc_analytics::WorkspaceId(id);
+            }
+            workspace.state = value.get("state").cloned().unwrap_or(Json::Null);
+            if workspace.state.is_null() {
+                workspace.state = Json::Object(Map::new());
+            }
+            sc_analytics::create_workspace(catalog, &workspace).await?;
+            Ok(true)
+        }
+        .await;
+        match result {
+            Ok(false) => report.skipped(format!("workspace `{name}` is already here and was kept")),
+            Ok(true) => report.did(format!("workspace `{name}`")),
+            Err(e) => report.skipped(format!("workspace `{name}`: {}", e.causes())),
+        }
+    }
 }
 
 // --- reading the file ----------------------------------------------------------

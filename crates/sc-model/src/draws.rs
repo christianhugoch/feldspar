@@ -7,7 +7,7 @@
 //! one place every node of an installation already shares; it is written **in
 //! the same transaction that marks the instance fitted**, so a fitted instance
 //! always has all of its draws and a failed one has none; it is deleted with the
-//! instance; and it is in every backup without a second mechanism.
+//! instance; and a backup that includes fits carries them, one entry per fit.
 //!
 //! **One row per element per chain** is the granularity, because it is the one
 //! whose every read is cheap: "the chains of `alpha`" is one indexed read on

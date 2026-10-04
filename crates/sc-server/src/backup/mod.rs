@@ -22,12 +22,22 @@
 //! applications/<subdomain>/views.json its Saltcorn UI views, when chosen
 //! applications/<subdomain>/pages.json its Saltcorn UI pages, when chosen
 //! applications/<subdomain>/library.json its Saltcorn UI library, with the views
+//! applications/<subdomain>/translations.json { locale: catalogue } — a Saltcorn UI app's
 //! file-stores/<store>/store.json      { definition, files: [ { path, mode, meta } ] }
 //! file-stores/<store>/files/<path>    the bytes, as they are
 //! users.json                          { roles, users, fields } — hashes included
+//! modules.json                        [ module, … ] — reinstalled from where they came
+//! db-connections.json                 [ connection, … ] — passwords included
+//! analytics/datasets.json             [ dataset, … ]
+//! analytics/models.json               [ model, … ]
+//! analytics/workspaces.json           [ workspace, … ]
+//! analytics/fits.json                 { instances, outputs } — fitted model instances
+//! analytics/draws/<instance>.json     [ draw row, … ] — one entry per fit that sampled
+//! streams.json                        [ stream, … ] — secrets included
+//! llm-providers.json                  [ { provider, models: [ model, … ] }, … ] — keys included
 //! agents.json                         [ agent, … ]
-//! triggers.json                       [ trigger, … ]
-//! settings/ssl.json                   the SSL section's stored values
+//! triggers.json                       [ trigger, … ] — a workflow's current steps inside
+//! settings/<section>.json             one settings section's stored values
 //! ```
 //!
 //! Three rules the rest of this module implements:
@@ -261,6 +271,24 @@ pub struct Available {
     pub file_stores: Vec<Item>,
     /// How many user accounts (with their roles) there are to include.
     pub users: i64,
+    /// How many installed modules.
+    pub modules: i64,
+    /// How many connections to other databases.
+    pub db_connections: i64,
+    /// How many streams.
+    pub streams: i64,
+    /// How many datasets, models and analytics workspaces — the Analytics
+    /// choice, counted separately because the dialog says which.
+    pub datasets: i64,
+    /// How many models.
+    pub models: i64,
+    /// How many analytics workspaces.
+    pub workspaces: i64,
+    /// How many fitted (or failed) model instances, with their draws and output
+    /// frames. A separate choice from the models, because they can be large.
+    pub fits: i64,
+    /// How many LLM providers (each carrying its models).
+    pub llm_providers: i64,
     /// How many agents.
     pub agents: i64,
     /// How many triggers.
@@ -272,6 +300,9 @@ pub struct Available {
     pub pages: i64,
     /// Whether there are SSL settings to include.
     pub ssl: bool,
+    /// Whether there are other settings — email, localisation, development — to
+    /// include.
+    pub settings: bool,
 }
 
 impl Available {
@@ -282,11 +313,20 @@ impl Available {
             "applications": self.applications.iter().map(Item::to_json).collect::<Vec<_>>(),
             "file_stores": self.file_stores.iter().map(Item::to_json).collect::<Vec<_>>(),
             "users": self.users,
+            "modules": self.modules,
+            "db_connections": self.db_connections,
+            "streams": self.streams,
+            "datasets": self.datasets,
+            "models": self.models,
+            "workspaces": self.workspaces,
+            "fits": self.fits,
+            "llm_providers": self.llm_providers,
             "agents": self.agents,
             "triggers": self.triggers,
             "views": self.views,
             "pages": self.pages,
             "ssl": self.ssl,
+            "settings": self.settings,
         })
     }
 
@@ -295,17 +335,32 @@ impl Available {
         let obj = value
             .as_object()
             .ok_or_else(|| Error::invalid("a backup's contents must be an object"))?;
+        let count = |key: &str| obj.get(key).and_then(Json::as_i64).unwrap_or(0);
         Ok(Available {
             tables: items(obj, "tables")?,
             applications: items(obj, "applications")?,
             file_stores: items(obj, "file_stores")?,
-            users: obj.get("users").and_then(Json::as_i64).unwrap_or(0),
-            agents: obj.get("agents").and_then(Json::as_i64).unwrap_or(0),
-            triggers: obj.get("triggers").and_then(Json::as_i64).unwrap_or(0),
-            views: obj.get("views").and_then(Json::as_i64).unwrap_or(0),
-            pages: obj.get("pages").and_then(Json::as_i64).unwrap_or(0),
+            users: count("users"),
+            modules: count("modules"),
+            db_connections: count("db_connections"),
+            streams: count("streams"),
+            datasets: count("datasets"),
+            models: count("models"),
+            workspaces: count("workspaces"),
+            fits: count("fits"),
+            llm_providers: count("llm_providers"),
+            agents: count("agents"),
+            triggers: count("triggers"),
+            views: count("views"),
+            pages: count("pages"),
             ssl: obj.get("ssl").and_then(Json::as_bool).unwrap_or(false),
+            settings: obj.get("settings").and_then(Json::as_bool).unwrap_or(false),
         })
+    }
+
+    /// Whether there is anything for the Analytics choice to carry.
+    pub fn has_analytics(&self) -> bool {
+        self.datasets > 0 || self.models > 0 || self.workspaces > 0
     }
 
     fn table_names(&self) -> Vec<String> {
@@ -340,9 +395,25 @@ pub struct Selection {
     pub file_stores: Vec<String>,
     /// Whether user accounts and roles are included.
     pub users: bool,
+    /// Whether installed modules are included — their rows, from which a restore
+    /// reinstalls each package.
+    pub modules: bool,
+    /// Whether connections to other databases are included, passwords and all.
+    pub db_connections: bool,
+    /// Whether streams are included.
+    pub streams: bool,
+    /// Whether datasets, models and analytics workspaces are included.
+    pub analytics: bool,
+    /// Whether fitted model instances are included. Only with
+    /// [`analytics`](Selection::analytics): a fit restored without its model
+    /// belongs to nothing.
+    pub fits: bool,
+    /// Whether LLM providers, their models and their API keys are included.
+    pub llm_providers: bool,
     /// Whether agents are included.
     pub agents: bool,
-    /// Whether triggers are included. A trigger on a table whose metadata is
+    /// Whether triggers — and a workflow trigger's current steps — are
+    /// included. A trigger on a table whose metadata is
     /// *not* included is left out even so — see [`Selection::includes_trigger`].
     pub triggers: bool,
     /// Whether the included applications' views are — and, with them, a Saltcorn
@@ -355,6 +426,8 @@ pub struct Selection {
     pub pages: bool,
     /// Whether the SSL settings are included.
     pub ssl: bool,
+    /// Whether the other settings sections are included.
+    pub settings: bool,
 }
 
 impl Selection {
@@ -382,11 +455,18 @@ impl Selection {
                 .map(|i| i.name.clone())
                 .collect(),
             users: available.users > 0,
+            modules: available.modules > 0,
+            db_connections: available.db_connections > 0,
+            streams: available.streams > 0,
+            analytics: available.has_analytics(),
+            fits: available.fits > 0 && available.has_analytics(),
+            llm_providers: available.llm_providers > 0,
             agents: available.agents > 0,
             triggers: available.triggers > 0,
             views: available.views > 0,
             pages: available.pages > 0,
             ssl: available.ssl,
+            settings: available.settings,
         }
     }
 
@@ -411,11 +491,20 @@ impl Selection {
             applications: names(obj, "applications")?,
             file_stores: names(obj, "file_stores")?,
             users: flag(obj, "users"),
+            modules: flag(obj, "modules"),
+            db_connections: flag(obj, "db_connections"),
+            streams: flag(obj, "streams"),
+            analytics: flag(obj, "analytics"),
+            // Fits without their models, narrowed for the reason rows without
+            // their table are.
+            fits: flag(obj, "fits") && flag(obj, "analytics"),
+            llm_providers: flag(obj, "llm_providers"),
             agents: flag(obj, "agents"),
             triggers: flag(obj, "triggers"),
             views: flag(obj, "views"),
             pages: flag(obj, "pages"),
             ssl: flag(obj, "ssl"),
+            settings: flag(obj, "settings"),
         })
     }
 
@@ -427,11 +516,18 @@ impl Selection {
             "applications": self.applications,
             "file_stores": self.file_stores,
             "users": self.users,
+            "modules": self.modules,
+            "db_connections": self.db_connections,
+            "streams": self.streams,
+            "analytics": self.analytics,
+            "fits": self.fits,
+            "llm_providers": self.llm_providers,
             "agents": self.agents,
             "triggers": self.triggers,
             "views": self.views,
             "pages": self.pages,
             "ssl": self.ssl,
+            "settings": self.settings,
         })
     }
 
@@ -502,11 +598,18 @@ impl Selection {
                 .cloned()
                 .collect(),
             users: self.users && available.users > 0,
+            modules: self.modules && available.modules > 0,
+            db_connections: self.db_connections && available.db_connections > 0,
+            streams: self.streams && available.streams > 0,
+            analytics: self.analytics && available.has_analytics(),
+            fits: self.fits && self.analytics && available.fits > 0 && available.has_analytics(),
+            llm_providers: self.llm_providers && available.llm_providers > 0,
             agents: self.agents && available.agents > 0,
             triggers: self.triggers && available.triggers > 0,
             views: self.views && available.views > 0,
             pages: self.pages && available.pages > 0,
             ssl: self.ssl && available.ssl,
+            settings: self.settings && available.settings,
         }
     }
 }
@@ -533,6 +636,19 @@ pub struct BackupPreferences {
     pub exclude_file_stores: Vec<String>,
     /// Whether users are included.
     pub users: bool,
+    /// Whether modules are included.
+    pub modules: bool,
+    /// Whether database connections are included.
+    pub db_connections: bool,
+    /// Whether streams are included.
+    pub streams: bool,
+    /// Whether datasets, models and workspaces are included.
+    pub analytics: bool,
+    /// Whether fitted model instances are included — **off** until an admin
+    /// ticks it, because a posterior's draws can outweigh everything else.
+    pub fits: bool,
+    /// Whether LLM providers, their models and their API keys are included.
+    pub llm_providers: bool,
     /// Whether agents are included.
     pub agents: bool,
     /// Whether triggers are included.
@@ -543,6 +659,8 @@ pub struct BackupPreferences {
     pub pages: bool,
     /// Whether the SSL settings are included.
     pub ssl: bool,
+    /// Whether the other settings sections are included.
+    pub settings: bool,
 }
 
 impl Default for BackupPreferences {
@@ -555,11 +673,18 @@ impl Default for BackupPreferences {
             exclude_applications: Vec::new(),
             exclude_file_stores: Vec::new(),
             users: true,
+            modules: true,
+            db_connections: true,
+            streams: true,
+            analytics: true,
+            fits: false,
+            llm_providers: true,
             agents: true,
             triggers: true,
             views: true,
             pages: true,
             ssl: true,
+            settings: true,
         }
     }
 }
@@ -591,11 +716,20 @@ impl BackupPreferences {
             exclude_applications: list("exclude_applications"),
             exclude_file_stores: list("exclude_file_stores"),
             users: on("users"),
+            modules: on("modules"),
+            db_connections: on("db_connections"),
+            streams: on("streams"),
+            analytics: on("analytics"),
+            // Off unless it was ticked: absent is the default, and the default
+            // is to leave the fits out.
+            fits: obj.get("fits").and_then(Json::as_bool).unwrap_or(false),
+            llm_providers: on("llm_providers"),
             agents: on("agents"),
             triggers: on("triggers"),
             views: on("views"),
             pages: on("pages"),
             ssl: on("ssl"),
+            settings: on("settings"),
         }
     }
 
@@ -607,11 +741,18 @@ impl BackupPreferences {
             "exclude_applications": self.exclude_applications,
             "exclude_file_stores": self.exclude_file_stores,
             "users": self.users,
+            "modules": self.modules,
+            "db_connections": self.db_connections,
+            "streams": self.streams,
+            "analytics": self.analytics,
+            "fits": self.fits,
+            "llm_providers": self.llm_providers,
             "agents": self.agents,
             "triggers": self.triggers,
             "views": self.views,
             "pages": self.pages,
             "ssl": self.ssl,
+            "settings": self.settings,
         })
     }
 
@@ -662,11 +803,18 @@ impl BackupPreferences {
                 &previous.exclude_file_stores,
             ),
             users: selection.users,
+            modules: selection.modules,
+            db_connections: selection.db_connections,
+            streams: selection.streams,
+            analytics: selection.analytics,
+            fits: selection.fits,
+            llm_providers: selection.llm_providers,
             agents: selection.agents,
             triggers: selection.triggers,
             views: selection.views,
             pages: selection.pages,
             ssl: selection.ssl,
+            settings: selection.settings,
         }
     }
 
@@ -690,11 +838,18 @@ impl BackupPreferences {
             applications: keep(&available.applications, &self.exclude_applications),
             file_stores: keep(&available.file_stores, &self.exclude_file_stores),
             users: self.users && available.users > 0,
+            modules: self.modules && available.modules > 0,
+            db_connections: self.db_connections && available.db_connections > 0,
+            streams: self.streams && available.streams > 0,
+            analytics: self.analytics && available.has_analytics(),
+            fits: self.fits && self.analytics && available.fits > 0 && available.has_analytics(),
+            llm_providers: self.llm_providers && available.llm_providers > 0,
             agents: self.agents && available.agents > 0,
             triggers: self.triggers && available.triggers > 0,
             views: self.views && available.views > 0,
             pages: self.pages && available.pages > 0,
             ssl: self.ssl && available.ssl,
+            settings: self.settings && available.settings,
         }
     }
 }
@@ -734,29 +889,71 @@ mod tests {
             applications: vec![Item::new("blog").labelled("The blog")],
             file_stores: vec![Item::new("assets")],
             users: 2,
+            modules: 1,
+            db_connections: 1,
+            streams: 2,
+            datasets: 2,
+            models: 1,
+            workspaces: 1,
+            fits: 3,
+            llm_providers: 1,
             agents: 1,
             triggers: 4,
             views: 7,
             pages: 1,
             ssl: true,
+            settings: true,
         }
     }
 
     #[test]
-    fn everything_is_the_default_and_it_means_everything() {
+    fn everything_but_the_fits_is_the_default() {
         let selection = BackupPreferences::default().selection(&available());
-        assert_eq!(selection, Selection::everything(&available()));
+        assert_eq!(
+            selection,
+            Selection {
+                fits: false,
+                ..Selection::everything(&available())
+            }
+        );
         assert_eq!(selection.tables, vec!["books", "authors"]);
         assert_eq!(selection.table_data, vec!["books", "authors"]);
         assert!(selection.users && selection.agents && selection.triggers && selection.ssl);
+        assert!(selection.llm_providers && selection.modules && selection.db_connections);
+        assert!(selection.streams && selection.analytics && selection.settings);
         assert!(selection.views && selection.pages);
+        // Off until ticked — and remembered once it is.
+        assert!(!selection.fits);
+        let ticked = Selection {
+            fits: true,
+            ..selection
+        };
+        let prefs = BackupPreferences::of(&BackupPreferences::default(), &available(), &ticked);
+        let read = BackupPreferences::from_json(&prefs.to_json());
+        assert!(read.selection(&available()).fits);
+        // The restore dialog offers everything a file holds, fits included.
+        assert!(Selection::everything(&available()).fits);
+    }
+
+    /// Fits belong to models: neither a payload nor a stored choice can carry
+    /// them without the Analytics choice.
+    #[test]
+    fn fits_are_never_included_without_their_models() {
+        let read = Selection::from_json(&serde_json::json!({ "fits": true })).unwrap();
+        assert!(!read.fits);
+        let asked = Selection {
+            analytics: false,
+            fits: true,
+            ..Selection::everything(&available())
+        };
+        assert!(!asked.intersect(&available()).fits);
     }
 
     /// The round trip the dialog makes: untick two things, save, come back.
     #[test]
     fn a_choice_is_remembered_as_what_was_left_out() {
         let available = available();
-        let mut selection = Selection::everything(&available);
+        let mut selection = BackupPreferences::default().selection(&available);
         selection.tables.retain(|t| t != "authors");
         selection.table_data.retain(|t| t != "authors");
         selection.table_data.retain(|t| t != "books");
@@ -841,11 +1038,18 @@ mod tests {
             applications: vec!["blog".to_owned(), "absent".to_owned()],
             file_stores: vec!["assets".to_owned()],
             users: true,
+            modules: true,
+            db_connections: true,
+            streams: true,
+            analytics: true,
+            fits: true,
+            llm_providers: true,
             agents: true,
             triggers: true,
             views: true,
             pages: true,
             ssl: true,
+            settings: true,
         };
         let narrowed = asked.intersect(&available);
         assert_eq!(narrowed.tables, vec!["books"]);
@@ -855,7 +1059,9 @@ mod tests {
         // …and against a manifest holding nothing, the flags go off too.
         let empty = asked.intersect(&Available::default());
         assert!(!empty.users && !empty.agents && !empty.triggers && !empty.ssl);
-        assert!(!empty.views && !empty.pages);
+        assert!(!empty.views && !empty.pages && !empty.llm_providers);
+        assert!(!empty.modules && !empty.db_connections && !empty.streams);
+        assert!(!empty.analytics && !empty.fits && !empty.settings);
     }
 
     /// A backup can hold a table's definition and not its rows, and the restore

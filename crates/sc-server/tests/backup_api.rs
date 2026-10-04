@@ -141,7 +141,7 @@ struct Server {
     catalog: Arc<Catalog>,
     /// Where this server's file store keeps its files.
     files: std::path::PathBuf,
-    _db: TestDb,
+    db: TestDb,
 }
 
 async fn setup() -> sc_error::Result<Server> {
@@ -170,13 +170,40 @@ async fn setup() -> sc_error::Result<Server> {
     sc_catalog::bootstrap_file_stores(&catalog).await?;
     sc_llm::bootstrap_llm_providers(&catalog).await?;
     sc_viewpattern::bootstrap(&catalog).await?;
+    sc_catalog::bootstrap_db_connections(&catalog).await?;
+    sc_analytics::bootstrap_workspaces(&catalog).await?;
     let agents = install_agents(&catalog).await?;
     let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
     let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents, &models).await?;
+    // A scripted stream provider, so a stream can be saved and restored without
+    // a broker: what matters here is the row, secret setting and all.
+    let mut streams = sc_stream::StreamRegistry::new();
+    streams.register(Arc::new(
+        sc_stream::testing::ScriptedProvider::new(
+            "scripted",
+            sc_stream::ElementType::json([sc_stream::ElementField::new(
+                "temperature",
+                BasicType::Float,
+            )]),
+        )
+        .config(vec![
+            sc_types::FormField::new("broker", TypeRef::Basic(BasicType::Text)),
+            sc_types::FormField::new("password", TypeRef::Basic(BasicType::Text)).secret(),
+        ]),
+    ) as Arc<dyn sc_stream::StreamProvider>)?;
+    let streams = sc_server::install_streams_with(
+        &catalog,
+        &dispatcher,
+        Arc::new(streams),
+        sc_stream::StreamConfig::default(),
+    )
+    .await?;
 
     let apps = Arc::new(
         AppMounts::new(catalog.clone())
             .with_agents(agents)
+            .with_models(models)
+            .with_streams(streams)
             .with_triggers(dispatcher),
     );
     let router = build_router_with_apps(
@@ -205,7 +232,7 @@ async fn setup() -> sc_error::Result<Server> {
         client,
         catalog,
         files: temp_dir(),
-        _db: db,
+        db,
     })
 }
 
@@ -1891,5 +1918,594 @@ async fn a_restored_git_store_is_checked_out_from_the_backup_or_cloned() -> sc_e
         "# edited, not committed\n"
     );
     assert!(cloned.join("local.txt").exists());
+    Ok(())
+}
+
+/// An LLM provider — key, models and default included — and the agent calling
+/// through it, so a restore has the dependency the agent's validation checks.
+async fn furnish_llm(server: &mut Server) -> sc_error::Result<()> {
+    sc_llm::save_llm_provider(
+        &server.catalog,
+        &sc_llm::LlmProviderDef::new("house", sc_llm::ANTHROPIC_BACKEND)
+            .with(sc_llm::CFG_API_KEY, "sk-ant-backed-up"),
+    )
+    .await?;
+    let provider = sc_llm::require_llm_provider(&server.catalog, "house").await?;
+    sc_llm::save_llm_model(
+        &server.catalog,
+        &sc_llm::LlmModelDef::new(provider.id, "claude-sonnet-4-5").default_model(),
+    )
+    .await?;
+    sc_llm::save_llm_model(
+        &server.catalog,
+        &sc_llm::LlmModelDef::new(provider.id, "claude-opus-4-1"),
+    )
+    .await?;
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            "/api/agents",
+            Some(json!({
+                "name": "librarian",
+                "description": "answers questions",
+                "provider": "house",
+                "model": "claude-opus-4-1",
+                "system_prompt": "You are helpful.",
+                "traits": [],
+                "min_role": null,
+                "attributes": {},
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn llm_providers_travel_with_their_key_and_their_agents_come_back() -> sc_error::Result<()> {
+    let mut source = setup().await?;
+    furnish_llm(&mut source).await?;
+
+    let (_, options) = source.client.send("GET", "/api/backup", None).await;
+    assert_eq!(options["available"]["llm_providers"], json!(1), "{options}");
+    assert_eq!(
+        options["include"]["llm_providers"],
+        json!(true),
+        "{options}"
+    );
+    let archive = backup_everything(&mut source).await;
+
+    // The key is in the file as it is stored — not the sentinel the admin API
+    // shows — because a provider restored without it is one no agent can use.
+    let providers: Value = serde_json::from_str(&entry(&archive, "llm-providers.json")).unwrap();
+    assert_eq!(providers[0]["name"], json!("house"));
+    assert_eq!(
+        providers[0]["config"][sc_llm::CFG_API_KEY],
+        json!("sk-ant-backed-up")
+    );
+    assert_eq!(providers[0]["models"].as_array().unwrap().len(), 2);
+
+    let mut target = setup().await?;
+    let report = restore_everything(&mut target, &archive).await;
+    assert!(
+        report_has(&report, "restored", "LLM provider `house`: 2 models"),
+        "{report}"
+    );
+    assert!(
+        report_has(&report, "restored", "agent `librarian`"),
+        "{report}"
+    );
+
+    let provider = sc_llm::require_llm_provider(&target.catalog, "house").await?;
+    assert_eq!(
+        provider.config.get(sc_llm::CFG_API_KEY),
+        Some(&json!("sk-ant-backed-up"))
+    );
+    let models = sc_llm::list_llm_models(&target.catalog, &provider).await?;
+    let default: Vec<&str> = models
+        .iter()
+        .filter(|m| m.is_default)
+        .map(|m| m.name.as_str())
+        .collect();
+    assert_eq!(default, vec!["claude-sonnet-4-5"]);
+    assert_eq!(models.len(), 2);
+    let agents = sc_agent::list_agents(&target.catalog).await?;
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].provider, "house");
+    assert_eq!(agents[0].model.as_deref(), Some("claude-opus-4-1"));
+
+    // A second restore adds nothing and overwrites nothing: the provider here
+    // keeps the key it has, even when the backup's differs.
+    let mut changed = provider.clone();
+    changed.config.insert(
+        sc_llm::CFG_API_KEY.to_owned(),
+        json!("sk-ant-rotated-since"),
+    );
+    sc_llm::save_llm_provider(&target.catalog, &changed).await?;
+    let report = restore_everything(&mut target, &archive).await;
+    assert!(
+        report_has(
+            &report,
+            "warnings",
+            "LLM provider `house` is already defined here"
+        ),
+        "{report}"
+    );
+    let kept = sc_llm::require_llm_provider(&target.catalog, "house").await?;
+    assert_eq!(
+        kept.config.get(sc_llm::CFG_API_KEY),
+        Some(&json!("sk-ant-rotated-since"))
+    );
+    assert_eq!(sc_llm::list_llm_providers(&target.catalog).await?.len(), 1);
+    assert_eq!(
+        sc_llm::list_llm_models(&target.catalog, &kept).await?.len(),
+        2
+    );
+    Ok(())
+}
+
+/// Send, and insist it worked.
+async fn ok(server: &mut Server, method: &str, path: &str, body: Option<Value>) -> Value {
+    let (status, value) = server.client.send(method, path, body).await;
+    assert!(status.is_success(), "{method} {path}: {status} {value}");
+    value
+}
+
+/// Fit model `id`, wait for it, and activate it.
+async fn fit(server: &mut Server, id: &str) -> String {
+    let started = ok(
+        server,
+        "POST",
+        &format!("/api/models/{id}/fit"),
+        Some(json!({})),
+    )
+    .await;
+    let instance = started["id"].as_str().unwrap().to_owned();
+    for _ in 0..600 {
+        let body = ok(
+            server,
+            "GET",
+            &format!("/api/model-instances/{instance}"),
+            None,
+        )
+        .await;
+        if body["status"] != json!("fitting") {
+            assert_eq!(body["status"], json!("fitted"), "{body}");
+            ok(
+                server,
+                "POST",
+                &format!("/api/model-instances/{instance}/activate"),
+                None,
+            )
+            .await;
+            return instance;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("the fit never finished");
+}
+
+/// Everything the second round of backup work added, on one server: analytics
+/// (two datasets, one built on the other; a model; a fit with an output frame
+/// and a draw; a workspace), a stream with a secret, a workflow trigger with
+/// steps, the email settings, a Saltcorn UI application's translations, and a
+/// SQLite connection whose file lives in a file store.
+async fn furnish_the_rest(server: &mut Server) -> sc_error::Result<()> {
+    // --- a table to analyse -----------------------------------------------
+    server
+        .db
+        .client()
+        .await?
+        .batch_execute(
+            "CREATE TABLE houses (id bigint primary key, area double precision, \
+                 bedrooms bigint, price double precision); \
+             INSERT INTO houses (id, area, bedrooms, price) \
+               SELECT i, 50 + i, 1 + (i % 5), 1000 * (50 + i) + 20000 * (1 + (i % 5)) \
+               FROM generate_series(1, 60) AS i;",
+        )
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?;
+    server.catalog.reload().await?;
+
+    // --- datasets, the second built on the first, a model over the first ----
+    let op = |id: &str, kind: &str, params: Value| json!({ "id": id, "enabled": true, "kind": kind, "params": params });
+    let prices = ok(
+        server,
+        "POST",
+        "/api/datasets",
+        Some(json!({
+            "name": "prices",
+            "base": { "kind": "table", "table": "houses" },
+            "operations": [op("a", "select", json!({ "columns": [
+                { "column": "price" }, { "column": "area" }, { "column": "bedrooms" }
+            ]}))],
+        })),
+    )
+    .await;
+    let prices_id = prices["dataset"]["id"].as_str().unwrap().to_owned();
+    ok(
+        server,
+        "POST",
+        "/api/datasets",
+        Some(json!({
+            "name": "big houses",
+            "base": { "kind": "dataset", "dataset": prices_id },
+            "operations": [op("f", "filter", json!({ "formula": "area > 80" }))],
+        })),
+    )
+    .await;
+    let model = ok(
+        server,
+        "POST",
+        "/api/models",
+        Some(json!({
+            "name": "House prices",
+            "provider": "linear_regression",
+            "dataset": { "dataset_id": prices_id },
+            "configuration": { "label": "price" },
+            "split": { "train": 0.8, "validation": 0.0, "test": 0.2, "seed": 7 },
+        })),
+    )
+    .await;
+    let model_id = model["id"].as_str().unwrap().to_owned();
+    let instance = fit(server, &model_id).await;
+    // A posterior's draws, by hand: a linear regression has none, and the
+    // backup's one large thing should still be exercised.
+    server
+        .db
+        .client()
+        .await?
+        .execute(
+            "INSERT INTO _fd_model_draws (id, instance, variable, element, chain, warmup, draws) \
+             VALUES ($1, $2, 'alpha', '[]', 1, false, '[1.0, 2.0, 3.0]')",
+            &[
+                &uuid::Uuid::new_v4(),
+                &uuid::Uuid::parse_str(&instance).unwrap(),
+            ],
+        )
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?;
+    let workspace = ok(
+        server,
+        "POST",
+        "/api/workspaces",
+        Some(json!({ "name": "Explore prices", "kind": "data_explorer" })),
+    )
+    .await;
+    ok(
+        server,
+        "PUT",
+        &format!(
+            "/api/workspaces/{}/state",
+            workspace["id"].as_str().unwrap()
+        ),
+        Some(json!({ "state": { "dataset": prices_id } })),
+    )
+    .await;
+
+    // --- a stream with a secret ------------------------------------------
+    ok(
+        server,
+        "POST",
+        "/api/streams",
+        Some(json!({
+            "name": "boiler",
+            "description": "",
+            "provider": "scripted",
+            "configuration": { "broker": "tcp://localhost:1883", "password": "hunter2" },
+            "min_role": null,
+            "enabled": false,
+        })),
+    )
+    .await;
+
+    // --- a workflow trigger, with steps saved after the create ------------
+    let trigger = ok(
+        server,
+        "POST",
+        "/api/triggers",
+        Some(json!({
+            "name": "note_title",
+            "description": "",
+            "when": "insert",
+            "channel": "books",
+            "only_if": null,
+            "body": "workflow",
+            "action": null,
+            "configuration": null,
+            "min_role": null,
+            "enabled": true,
+        })),
+    )
+    .await;
+    ok(
+        server,
+        "POST",
+        &format!("/api/workflows/{}", trigger["id"].as_str().unwrap()),
+        Some(json!({ "workflow": {
+            "start": "note",
+            "trace": false,
+            "steps": [
+                {
+                    "name": "note",
+                    "kind": {
+                        "type": "set",
+                        "assignments": [{ "target": "title", "formula": "row.title" }]
+                    },
+                    "next": { "type": "step", "step": "again" }
+                },
+                {
+                    "name": "again",
+                    "kind": {
+                        "type": "set",
+                        "assignments": [{ "target": "twice", "formula": "row.title" }]
+                    },
+                    "next": { "type": "end" }
+                }
+            ]
+        }})),
+    )
+    .await;
+
+    // --- the email settings --------------------------------------------------
+    ok(
+        server,
+        "POST",
+        "/api/settings",
+        Some(json!({ "values": {
+            "smtp_host": "mail.example.com",
+            "smtp_password": "smtp-secret",
+            "email_from": "shop@example.com",
+            "smtp_username": "shop",
+        }})),
+    )
+    .await;
+
+    // --- a Saltcorn UI application, translated into French ---------------
+    let mut app = sc_app::Application::new(
+        "Shop",
+        "shop",
+        sc_app::FrameworkRef::new(sc_viewpattern::SALTCORN_UI_FRAMEWORK),
+    );
+    sc_app::set_app_locales(&mut app, &[sc_i18n::Locale::parse("fr").unwrap()], None);
+    let app = sc_app::save_application(&server.catalog, &app).await?;
+    use sc_app::CatalogStore;
+    sc_app::RowCatalogStore::new(app.id)
+        .save(
+            &server.catalog,
+            &sc_i18n::Catalog::from_json(
+                sc_i18n::Locale::parse("fr").unwrap(),
+                &json!({ "Hello": "Bonjour" }),
+            )?,
+        )
+        .await?;
+
+    // --- a SQLite file in the `assets` store, and a connection to it --------
+    {
+        let driver = sc_db_sqlite::SqliteDriver::open(server.files.join("reporting.sqlite"))?;
+        driver
+            .apply_schema(&sc_db::SchemaChange::CreateTable {
+                name: "invoice".into(),
+                columns: vec![
+                    sc_db::ColumnDef::new("id", "int8").not_null().identity(),
+                    sc_db::ColumnDef::new("total", "numeric"),
+                ],
+                primary_key: vec!["id".into()],
+                unlogged: false,
+            })
+            .await?;
+    }
+    let connection = ok(
+        server,
+        "POST",
+        "/api/db-connections",
+        Some(json!({
+            "name": "reporting",
+            "description": "",
+            "backend": "sqlite",
+            "host": "",
+            "port": 0,
+            "database": "",
+            "username": "",
+            "password": "",
+            "schema": "",
+            "file_store": "assets",
+            "file_path": "reporting.sqlite",
+        })),
+    )
+    .await;
+    assert_eq!(connection["connected"], json!(true), "{connection}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn analytics_streams_workflows_settings_translations_and_connections_travel()
+-> sc_error::Result<()> {
+    let mut source = setup().await?;
+    furnish(&mut source).await?;
+    furnish_the_rest(&mut source).await?;
+
+    let (_, options) = source.client.send("GET", "/api/backup", None).await;
+    let available = &options["available"];
+    assert_eq!(available["datasets"], json!(2), "{options}");
+    assert_eq!(available["models"], json!(1), "{options}");
+    assert_eq!(available["workspaces"], json!(1), "{options}");
+    assert_eq!(available["fits"], json!(1), "{options}");
+    assert_eq!(available["streams"], json!(1), "{options}");
+    assert_eq!(available["db_connections"], json!(1), "{options}");
+    // Everything is ticked except the fits, which wait to be asked for.
+    let mut include = options["include"].clone();
+    assert_eq!(include["analytics"], json!(true));
+    assert_eq!(include["fits"], json!(false));
+    assert_eq!(include["settings"], json!(true));
+    // A table on another database is that connection's, not this archive's.
+    assert!(
+        !include["tables"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("invoice")),
+        "{include}"
+    );
+    include["fits"] = json!(true);
+    let (status, archive, _) = source
+        .client
+        .raw(
+            "POST",
+            "/backup/create",
+            Some((
+                serde_json::to_vec(&json!({ "include": include })).unwrap(),
+                "application/json",
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The secrets are in the file as they are stored.
+    let streams: Value = serde_json::from_str(&entry(&archive, "streams.json")).unwrap();
+    assert_eq!(streams[0]["configuration"]["password"], json!("hunter2"));
+    let email: Value = serde_json::from_str(&entry(&archive, "settings/email.json")).unwrap();
+    assert_eq!(email["smtp_password"], json!("smtp-secret"));
+    // The workflow's steps ride inside its trigger.
+    let triggers: Value = serde_json::from_str(&entry(&archive, "triggers.json")).unwrap();
+    let workflow = triggers
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == json!("note_title"))
+        .unwrap();
+    assert_eq!(workflow["workflow"]["steps"].as_array().unwrap().len(), 2);
+    assert!(has_entry(&archive, "applications/shop/translations.json"));
+    assert!(!has_entry(&archive, "tables/invoice/table.json"));
+
+    // --- into a second installation ----------------------------------------
+    let mut target = setup().await?;
+    let report = restore_everything(&mut target, &archive).await;
+    for line in [
+        "dataset `prices`",
+        "dataset `big houses`",
+        "model `House prices`",
+        "model fits: 1 fit",
+        "workspace `Explore prices`",
+        "stream `boiler`",
+        "trigger `note_title`: with its workflow (2 steps)",
+        "the email settings",
+        "translations of `shop`: fr",
+        "database connection `reporting`",
+    ] {
+        assert!(report_has(&report, "restored", line), "{line}: {report}");
+    }
+
+    let catalog = &target.catalog.clone();
+    // The derived dataset is built on the restored one.
+    let prices = sc_dataset::load_dataset_by_name(catalog, "prices")
+        .await?
+        .unwrap();
+    let big = sc_dataset::load_dataset_by_name(catalog, "big houses")
+        .await?
+        .unwrap();
+    assert_eq!(big.base, sc_dataset::Base::dataset(prices.id));
+    // The model, its active fit, the fit's output frames and its draw.
+    let model = sc_model::require_model(catalog, "House prices").await?;
+    assert_eq!(model.dataset.id, prices.id);
+    let fits = sc_model::list_model_instances(catalog, model.id).await?;
+    assert_eq!(fits.len(), 1);
+    assert!(fits[0].active);
+    assert_eq!(fits[0].status, sc_model::FitStatus::Fitted);
+    let count = |table: &'static str| {
+        let id = fits[0].id.0;
+        let db = &target.db;
+        async move {
+            let row = db
+                .client()
+                .await
+                .unwrap()
+                .query_one(
+                    &format!("SELECT count(*) FROM {table} WHERE instance = $1"),
+                    &[&id],
+                )
+                .await
+                .unwrap();
+            row.get::<_, i64>(0)
+        }
+    };
+    assert_eq!(count("_fd_model_draws").await, 1);
+    assert!(count("_fd_model_outputs").await > 0);
+    let workspaces = sc_analytics::list_workspaces(catalog).await?;
+    assert_eq!(workspaces.len(), 1);
+    assert_eq!(workspaces[0].state["dataset"], json!(prices.id.to_string()));
+    // The stream, secret intact.
+    let stream = sc_stream::load_stream_by_name(catalog, "boiler")
+        .await?
+        .unwrap();
+    assert_eq!(stream.configuration["password"], json!("hunter2"));
+    // The workflow's steps, as a first version here.
+    let trigger = sc_action::list_triggers(catalog)
+        .await?
+        .into_iter()
+        .find(|t| t.name == "note_title")
+        .unwrap();
+    let workflow = sc_workflow::current_workflow(catalog, trigger.id)
+        .await?
+        .unwrap();
+    assert_eq!(workflow.steps.len(), 2);
+    // The settings.
+    let stored = sc_config::all_config(catalog).await?;
+    assert_eq!(stored.get("smtp_host"), Some(&json!("mail.example.com")));
+    // The translations.
+    let shop = sc_app::list_applications(catalog)
+        .await?
+        .into_iter()
+        .find(|a| a.subdomain == "shop")
+        .unwrap();
+    use sc_app::CatalogStore;
+    let french = sc_app::RowCatalogStore::new(shop.id)
+        .load(catalog, &sc_i18n::Locale::parse("fr").unwrap())
+        .await?
+        .unwrap();
+    assert_eq!(french.to_json()["Hello"], json!("Bonjour"));
+    // The connection, dialled once its store was back, with its table listed.
+    let invoice = catalog.get("invoice")?.expect("the connection's table");
+    assert_eq!(invoice.database, sc_catalog::DbId("reporting".to_owned()));
+
+    // --- a second restore adds nothing and overwrites nothing ----------------
+    let report = restore_everything(&mut target, &archive).await;
+    for line in [
+        "dataset `prices` is already defined here",
+        "model `House prices` is already defined here",
+        "workspace `Explore prices` is already here",
+        "stream `boiler` is already defined here",
+        "database connection `reporting` is already defined here",
+        "translations of `shop`: fr already here and kept",
+    ] {
+        assert!(
+            report_has(&report, "warnings", line) || report_has(&report, "restored", line),
+            "{line}: {report}"
+        );
+    }
+    assert!(
+        report_has(
+            &report,
+            "restored",
+            "its workflow was already here and was kept"
+        ),
+        "{report}"
+    );
+    assert_eq!(sc_dataset::list_datasets(catalog).await?.len(), 2);
+    assert_eq!(sc_model::list_models(catalog).await?.len(), 1);
+    assert_eq!(
+        sc_model::list_model_instances(catalog, model.id)
+            .await?
+            .len(),
+        1
+    );
+    assert_eq!(sc_analytics::list_workspaces(catalog).await?.len(), 1);
+    assert_eq!(sc_stream::list_streams(catalog).await?.len(), 1);
+    assert_eq!(
+        sc_workflow::list_workflow_versions(catalog, trigger.id)
+            .await?
+            .len(),
+        1
+    );
     Ok(())
 }

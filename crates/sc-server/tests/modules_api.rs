@@ -125,6 +125,41 @@ impl Client {
         };
         (status, value)
     }
+
+    /// A request whose body and answer are bytes — the backup's zip.
+    async fn raw(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: Vec<u8>,
+        content_type: &str,
+    ) -> Vec<u8> {
+        let mut builder = Request::builder().method(method).uri(path);
+        let jar = self
+            .cookies
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        builder = builder.header(header::COOKIE, jar);
+        if let Some(csrf) = self.cookies.get(CSRF_COOKIE) {
+            builder = builder.header(CSRF_HEADER, csrf);
+        }
+        let request = builder
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from(body))
+            .unwrap();
+        let response = self.router.clone().oneshot(request).await.unwrap();
+        assert!(
+            response.status().is_success(),
+            "{method} {path}: {}",
+            response.status()
+        );
+        axum::body::to_bytes(response.into_body(), 32 * 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec()
+    }
 }
 
 /// A server with the module machinery installed over a throwaway modules root,
@@ -158,6 +193,9 @@ async fn setup(tag: &str) -> sc_error::Result<Server> {
     sc_auth::bootstrap(&catalog).await?;
     sc_app::bootstrap(&catalog).await?;
     sc_catalog::bootstrap_file_stores(&catalog).await?;
+    // Where the Backup tab keeps the admin's last choice: the backup test below
+    // takes one, as every real server can.
+    sc_config::bootstrap(&catalog).await?;
 
     let agents = install_agents(&catalog).await?;
     let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
@@ -933,5 +971,109 @@ async fn a_bundled_module_installs_in_one_call_with_the_permissions_its_card_pro
     let (_, listing) = client.send("GET", "/api/modules", None).await;
     assert!(listing["modules"].as_array().unwrap().is_empty());
     assert_eq!(rss_entry(&listing)["installed"], json!(false));
+    Ok(())
+}
+
+/// A backup carries the module rows, and a restore onto a server that has never
+/// seen the module installs it from where it came — then gives it back the
+/// settings (the secret one included) and the reach the admin granted it.
+#[tokio::test]
+async fn a_backed_up_module_is_reinstalled_with_its_settings_and_permissions()
+-> sc_error::Result<()> {
+    skip_without_npm!();
+    let mut source = setup("backup-source").await?;
+    let installed = install_echo(&mut source.client).await;
+    let id = installed["id"].as_str().unwrap().to_owned();
+    let (status, body) = source
+        .client
+        .send(
+            "PUT",
+            &format!("/api/modules/{id}"),
+            Some(json!({
+                "configuration": { "endpoint": "https://example.test", "token": "s3cret" },
+                "permissions": { "net": ["example.test"], "read": [], "write": [], "env": [] },
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (_, options) = source.client.send("GET", "/api/backup", None).await;
+    assert_eq!(options["available"]["modules"], json!(1), "{options}");
+    let archive = source
+        .client
+        .raw(
+            "POST",
+            "/backup/create",
+            serde_json::to_vec(&json!({ "include": options["include"] })).unwrap(),
+            "application/json",
+        )
+        .await;
+
+    let mut target = setup("backup-target").await?;
+    let uploaded: Value = serde_json::from_slice(
+        &target
+            .client
+            .raw("POST", "/backup/upload", archive.clone(), "application/zip")
+            .await,
+    )
+    .unwrap();
+    let (status, report) = target
+        .client
+        .send(
+            "POST",
+            "/api/backup/restore",
+            Some(json!({ "id": uploaded["id"], "include": uploaded["include"] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert!(
+        report["restored"].as_array().unwrap().iter().any(|l| l
+            .as_str()
+            .unwrap()
+            .starts_with("module `@saltcorn-test/echo` 0.1.0")),
+        "{report}"
+    );
+
+    let restored = sc_module::load_module_by_name(&target.catalog, "@saltcorn-test/echo")
+        .await?
+        .expect("the module is installed on the second server");
+    assert_eq!(restored.configuration["token"], json!("s3cret"));
+    assert_eq!(
+        restored.permissions.to_json()["net"],
+        json!(["example.test"])
+    );
+    // Loaded, not just stored: its action is one a trigger can use.
+    assert!(
+        target
+            .modules
+            .modules()
+            .get("@saltcorn-test/echo")
+            .is_some()
+    );
+
+    // A second restore keeps what is installed.
+    let uploaded: Value = serde_json::from_slice(
+        &target
+            .client
+            .raw("POST", "/backup/upload", archive, "application/zip")
+            .await,
+    )
+    .unwrap();
+    let (_, report) = target
+        .client
+        .send(
+            "POST",
+            "/api/backup/restore",
+            Some(json!({ "id": uploaded["id"], "include": uploaded["include"] })),
+        )
+        .await;
+    assert!(
+        report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l.as_str().unwrap().contains("is already installed here")),
+        "{report}"
+    );
     Ok(())
 }

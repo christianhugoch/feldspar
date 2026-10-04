@@ -643,7 +643,7 @@ fn optional_usize(body: &Json, key: &str) -> Option<usize> {
 }
 
 /// A definition from `createDataset`'s or `updateDataset`'s body, under `id`.
-fn def_from_input(body: &Json, id: DatasetId) -> Result<DatasetDef> {
+pub(crate) fn def_from_input(body: &Json, id: DatasetId) -> Result<DatasetDef> {
     let base: Base = serde_json::from_value(
         body.get("base")
             .cloned()
@@ -740,7 +740,7 @@ fn report(schema: &Schema, compiled: &Compilation) -> Json {
     })
 }
 
-fn workspace_json(ws: &Workspace) -> Json {
+pub(crate) fn workspace_json(ws: &Workspace) -> Json {
     json!({
         "id": ws.id.0,
         "name": ws.name,
