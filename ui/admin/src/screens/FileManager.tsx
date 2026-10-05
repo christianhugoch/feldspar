@@ -42,7 +42,7 @@ import Modal from "react-bootstrap/Modal";
 import Spinner from "react-bootstrap/Spinner";
 import Table from "react-bootstrap/Table";
 
-import { api, errorMessage, uploadFile } from "../api";
+import { api, downloadUrl, errorMessage, uploadFile } from "../api";
 import type { GetFileMetaResponse } from "../client";
 import { ideUrl, navigate } from "../App";
 import {
@@ -292,26 +292,15 @@ export function FileManager({
     });
   };
 
-  const download = async (entries: Entry[]) => {
+  const download = (entries: Entry[]) => {
     setError(null);
-    try {
-      // One file at a time: there is no archive endpoint, and the browser is
-      // happy to be handed several blobs in a row.
-      for (const entry of entries.filter((e) => !e.is_dir)) {
-        const file = await api.readFile(store, { path: entry.path });
-        // Rebuild the bytes from base64 and hand them to the browser as a blob —
-        // `readFile` always provides base64 precisely so binary survives.
-        const binary = atob(file.base64);
-        const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
-        const url = URL.createObjectURL(new Blob([bytes]));
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = entry.name;
-        link.click();
-        URL.revokeObjectURL(url);
-      }
-    } catch (err) {
-      setError(errorMessage(err, "Could not download the file."));
+    // One link per file: the browser fetches and saves each itself, at any
+    // size, rather than this page holding the bytes (an APK is 100 MB).
+    for (const entry of entries.filter((e) => !e.is_dir)) {
+      const link = document.createElement("a");
+      link.href = downloadUrl(store, entry.path);
+      link.download = entry.name;
+      link.click();
     }
   };
 
@@ -460,7 +449,7 @@ export function FileManager({
             busy={busy}
             onOpen={openEntry}
             onEdit={(entry) => void openEditor(entry)}
-            onDownload={() => void download(selected)}
+            onDownload={() => download(selected)}
             onRename={rename}
             onPermissions={(entry) => void openPermissions(entry)}
             onDelete={() => removeSelected(selected)}
@@ -568,7 +557,7 @@ export function FileManager({
                         busy={busy}
                         onOpen={openEntry}
                         onEdit={(e) => void openEditor(e)}
-                        onDownload={() => void download([entry])}
+                        onDownload={() => download([entry])}
                         onRename={rename}
                         onPermissions={(e) => void openPermissions(e)}
                         onDelete={() => removeSelected([entry])}

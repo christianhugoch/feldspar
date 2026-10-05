@@ -8763,6 +8763,7 @@ name = "sc-module"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "deno_core",
  "deno_error",
  "deno_path_util",

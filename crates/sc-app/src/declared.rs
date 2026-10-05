@@ -83,35 +83,87 @@ pub struct BuildTemplate {
     pub client_file: String,
 }
 
-/// A build a framework offers **beside** its web bundle — an Android APK — before
-/// its settings are known.
+/// An extra build a framework offers next to its web build, such as an Android
+/// APK, as declared — before any application's settings are filled in.
 ///
-/// The web bundle is what an application *serves*; a target is something an
-/// application *produces*: one file, left in the file store for the admin to take
-/// away. So a target has a command and an artifact path, and no output directory
-/// to load and no mount to replace. It runs in the framework's source directory,
-/// after the same install step the web build runs.
+/// The web build produces the site the application serves. A target instead
+/// produces a single file (the artifact) that is left in the file store for the
+/// admin to download; nothing is served from it. It runs in the same project
+/// directory as the web build, after the same dependency install.
+///
+/// `sc-module` builds one per declared target when a module loads (on
+/// [`FrameworkDecl::targets`]); [`FrameworkDecl::target_spec`] fills in one
+/// application's settings to get the [`TargetSpec`] a build actually runs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TargetTemplate {
     /// The key a build request names — `android`. Unique within the framework.
     pub name: String,
     /// What the admin UI's button says — `Android APK`.
     pub label: String,
-    /// The command line, split on whitespace as the build command is.
-    pub command: String,
+    /// The command that builds the target, e.g. `npm run build:android:{{ build_type }}`.
+    ///
+    /// `{{ name }}` is replaced by the application's value for that setting
+    /// before the command runs, so a setting can choose what is built: with
+    /// `build_type` set to `debug`, the line above runs `npm run build:android:debug`.
+    /// The result is then split on spaces into the program and its arguments;
+    /// there is no quoting, so no single argument can contain a space.
+    pub command: Template,
     /// The file the command produces, relative to the store — a template over the
     /// framework's settings, as the build's `output` is.
     pub artifact: PathTemplate,
     /// Environment variables the command and its install step are started
     /// with, on top of the server's own — the toolchain a target needs on this
-    /// machine (`ANDROID_HOME`, `JAVA_HOME`). A module fills them from its own
-    /// settings, so they are adjusted on the Modules tab, not in the shell that
-    /// started the server.
-    pub env: BTreeMap<String, String>,
+    /// machine (`ANDROID_HOME`, `JAVA_HOME`), which a module fills from its own
+    /// settings, and values from the application's settings (a keystore
+    /// password), which reach the build this way rather than through a file in
+    /// the project. Templates over the framework's settings, as `artifact` is;
+    /// a value that renders blank is left out, so the server's own applies.
+    pub env: BTreeMap<String, Template>,
     /// What this machine must have before the target can build — checked before
     /// a build starts and shown beside its button, so an admin hears "the Android
     /// SDK is not configured" at once rather than from Gradle minutes later.
     pub requires: Vec<TargetRequirement>,
+    /// The names of the settings that configure this target alone — an APK's
+    /// application id, version and icon. They are part of the framework's
+    /// `config_spec` (stored, validated and handed to its generators like any
+    /// other setting); this list is what lets a form show them under the target
+    /// rather than among the framework's own.
+    pub options: Vec<String>,
+    /// What the admin can have the module **do** for this target, as buttons
+    /// beside its settings — generate a signing keystore.
+    pub operations: Vec<TargetOperation>,
+}
+
+/// One thing a module does for a target on request: a button under the
+/// target's settings, which runs the module's code with the application's
+/// settings and answers files to write into its store and settings to set.
+///
+/// Declared as data, like the rest of a target, so the form can show the button
+/// without asking the module; only running it is a call ([`FrameworkHost::call_target_operation`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TargetOperation {
+    /// The key a request names — `generate_keystore`. Unique within the target.
+    pub name: String,
+    /// The button's text.
+    pub label: String,
+    /// A sentence beside the button saying what pressing it does. May be empty.
+    pub description: String,
+    /// When it is offered, in the vocabulary of a setting's
+    /// [`show_if`](sc_types::FormField::show_if): the keystore generator only
+    /// once "Sign with your own keystore" is ticked.
+    pub show_if: Vec<sc_types::ShowIfCondition>,
+}
+
+/// What a [`TargetOperation`] answered: files for the application's store and
+/// settings to set on it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OperationAnswer {
+    /// Files to write, relative to the **store** (not the project), as bytes.
+    pub files: Vec<(String, Vec<u8>)>,
+    /// Settings to set on the application, by name.
+    pub settings: Attrs,
+    /// What to tell the admin.
+    pub message: String,
 }
 
 /// One thing a build target needs from the machine it builds on.
@@ -339,7 +391,11 @@ impl FrameworkDecl {
             let rendered = t.render_static(&bindings).map_err(|e| self.blame(e))?;
             self.safe_path(&rendered)
         };
-        let (command, args) = split_command(&target.command, &self.name)?;
+        let command = target
+            .command
+            .render_static(&bindings)
+            .map_err(|e| self.blame(e))?;
+        let (command, args) = split_command(&command, &self.name)?;
         Ok(TargetSpec {
             name: target.name.clone(),
             label: target.label.clone(),
@@ -348,9 +404,40 @@ impl FrameworkDecl {
             source_dir: render(&self.build.source)?,
             artifact: render(&target.artifact)?,
             install: self.build.install.clone(),
-            env: target.env.clone(),
+            env: self.target_env(target, &bindings)?,
             requires: target.requires.clone(),
         })
+    }
+
+    /// A target's environment rendered for one application: blank values left
+    /// out, so the server's own environment applies to them.
+    ///
+    /// For example, declared as
+    /// `{ JAVA_HOME: "/opt/jdk", KEYSTORE_PASSWORD: "{{ keystore_password }}" }`:
+    /// with the password set to `s3cret`, the build gets both variables; with
+    /// it blank, only `JAVA_HOME`.
+    fn target_env(
+        &self,
+        target: &TargetTemplate,
+        bindings: &BTreeMap<String, String>,
+    ) -> Result<BTreeMap<String, String>> {
+        let mut env = BTreeMap::new();
+        for (name, template) in &target.env {
+            let value = template
+                .render_static(bindings)
+                .map_err(|e| self.blame(e))?;
+            let value = value.trim();
+            if value.contains('\0') {
+                return Err(self.blame(Error::invalid(format!(
+                    "target `{}`'s `{name}` has a NUL in it, which no process can be given",
+                    target.name
+                ))));
+            }
+            if !value.is_empty() {
+                env.insert(name.clone(), value.to_owned());
+            }
+        }
+        Ok(env)
     }
 
     /// Where its generated runtime goes, relative to the store — or `None` for a
@@ -506,6 +593,22 @@ pub trait FrameworkHost: Send + Sync {
         phase: FilePhase,
         context: Json,
     ) -> Result<Vec<DeclaredFile>>;
+
+    /// Run operation `operation` of framework `name`'s target `target` for
+    /// `context` (see [`TargetOperation`]). A host whose frameworks declare no
+    /// operations need not answer.
+    async fn call_target_operation(
+        &self,
+        name: &str,
+        target: &str,
+        operation: &str,
+        context: Json,
+    ) -> Result<OperationAnswer> {
+        let _ = context;
+        Err(Error::not_found(format!(
+            "framework `{name}`'s target `{target}` has no operation `{operation}` this host runs"
+        )))
+    }
 }
 
 /// The installed set: the declarations, and the host that generates their files.
@@ -570,6 +673,34 @@ impl FrameworkSet {
             ))
         })?;
         host.framework_files(name, phase, context).await
+    }
+
+    /// Run a target's operation through the host (see [`TargetOperation`]).
+    /// Refused here, before any call, when the framework does not declare it.
+    pub async fn call_target_operation(
+        &self,
+        name: &str,
+        target: &str,
+        operation: &str,
+        context: Json,
+    ) -> Result<OperationAnswer> {
+        let declared = self
+            .find(name)
+            .and_then(|f| f.targets.iter().find(|t| t.name == target))
+            .is_some_and(|t| t.operations.iter().any(|o| o.name == operation));
+        if !declared {
+            return Err(Error::not_found(format!(
+                "framework `{name}` has no target `{target}` with an operation `{operation}`"
+            )));
+        }
+        let host = self.host.as_ref().ok_or_else(|| {
+            Error::config(format!(
+                "framework `{name}` is declared by a module, but no module host is running \
+                 to run its operations"
+            ))
+        })?;
+        host.call_target_operation(name, target, operation, context)
+            .await
     }
 }
 
@@ -657,9 +788,9 @@ pub(crate) mod tests {
             targets: vec![TargetTemplate {
                 name: "android".to_owned(),
                 label: "Android APK".to_owned(),
-                command: "npm run build:android".to_owned(),
+                command: template("npm run build:android"),
                 artifact: template("{{ project }}/android/app-release.apk"),
-                env: [("ANDROID_HOME".to_owned(), "/opt/sdk".to_owned())]
+                env: [("ANDROID_HOME".to_owned(), template("/opt/sdk"))]
                     .into_iter()
                     .collect(),
                 requires: vec![TargetRequirement {
@@ -669,6 +800,8 @@ pub(crate) mod tests {
                     },
                     hint: "Set the Android SDK directory.".to_owned(),
                 }],
+                options: Vec::new(),
+                operations: Vec::new(),
             }],
         }
     }
@@ -790,6 +923,32 @@ pub(crate) mod tests {
             .target_spec("android", &config(&[("store", "apps")]))
             .unwrap();
         assert_eq!(spec.artifact, "android/app-release.apk");
+    }
+
+    #[test]
+    fn a_targets_command_and_artifact_follow_its_settings() {
+        let mut decl = vue_decl();
+        decl.config_spec
+            .push(FormField::new("variant", BasicType::Text).default_value(json!("release")));
+        decl.targets[0].command = template("npm run build:android:{{ variant }}");
+        decl.targets[0].artifact =
+            template("{{ project }}/apk/{{ variant }}/app-{{ variant }}.apk");
+        let spec = decl
+            .target_spec(
+                "android",
+                &config(&[("store", "apps"), ("project", "todo"), ("variant", "debug")]),
+            )
+            .unwrap();
+        assert_eq!(spec.args, ["run", "build:android:debug"]);
+        assert_eq!(spec.artifact, "todo/apk/debug/app-debug.apk");
+        // A setting left unset renders as its default.
+        let spec = decl
+            .target_spec(
+                "android",
+                &config(&[("store", "apps"), ("project", "todo")]),
+            )
+            .unwrap();
+        assert_eq!(spec.args, ["run", "build:android:release"]);
     }
 
     #[test]

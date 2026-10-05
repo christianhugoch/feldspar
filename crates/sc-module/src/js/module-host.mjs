@@ -1397,6 +1397,25 @@ async function frameworkFiles({ module: name, framework: frameworkName, phase, c
   });
 }
 
+/** Run an operation a framework's build target declares: the module's `run`,
+ * with the application's context. Its answer — `{ files: [{ path, base64 }],
+ * settings, message }` — is checked on the Rust side, which writes the files
+ * and saves the settings. */
+async function callTargetOperation({ module: name, framework: frameworkName, target, operation, context }) {
+  const entry = loaded.get(name);
+  if (!entry) throw new Error(`the module ${name} is not loaded in this host`);
+  const impl = entry.frameworks && entry.frameworks[frameworkName];
+  if (!impl) throw new Error(`the module ${name} has no framework ${frameworkName}`);
+  const declared = impl.targets && impl.targets[target];
+  const op = declared && declared.operations && declared.operations[operation];
+  if (!op || typeof op.run !== "function")
+    throw new Error(
+      `framework ${frameworkName} of module ${name} has no operation ${operation} on target ${target}`,
+    );
+  const answer = await op.run(context || {});
+  return answer && typeof answer === "object" ? answer : {};
+}
+
 /** The loaded model provider, or a sentence naming what is missing. */
 function requireModelProvider(name, providerName) {
   const entry = loaded.get(name);
@@ -3852,6 +3871,11 @@ async function handle(request) {
       const pending = loading.get(request.module);
       if (pending) await pending;
       return await frameworkFiles(request);
+    }
+    case "call_target_operation": {
+      const pending = loading.get(request.module);
+      if (pending) await pending;
+      return await callTargetOperation(request);
     }
     // Saltcorn UI's view runtime (TODO "Saltcorn UI" §3). No module to wait
     // on: the runtime is not a module in `loaded`, and imports itself.

@@ -53,7 +53,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use sc_app::{
     BuildTemplate, CspPolicy, DeclaredFile, FilePhase, FrameworkDecl, FrameworkHost, InstallSpec,
-    TargetRequirement, TargetRequirementKind, TargetTemplate,
+    OperationAnswer, TargetOperation, TargetRequirement, TargetRequirementKind, TargetTemplate,
 };
 use sc_error::{Error, Result};
 use sc_expr::Template;
@@ -61,7 +61,7 @@ use serde_json::Value as Json;
 
 use crate::host::{FrameworkManifest, ModuleHost};
 use crate::modules::ModuleSet;
-use crate::spec::config_fields_to_form_fields;
+use crate::spec::{config_fields_to_form_fields, show_if_conditions};
 
 /// The frameworks this server's JavaScript modules supply, over the pool they
 /// run on.
@@ -183,6 +183,66 @@ impl FrameworkHost for ModuleFrameworks {
             .map(|file| declared_file(file, name, &module, phase))
             .collect()
     }
+
+    async fn call_target_operation(
+        &self,
+        name: &str,
+        target: &str,
+        operation: &str,
+        context: Json,
+    ) -> Result<OperationAnswer> {
+        let module = self.require(name)?.to_owned();
+        let answer = self
+            .host
+            .call_target_operation(&module, name, target, operation, &context)
+            .await?;
+        operation_answer(&answer, operation, &module)
+    }
+}
+
+/// An operation's answer, `{ files: [{ path, base64 }], settings, message }`,
+/// checked rather than trusted, as a generated file is ([`declared_file`]): it
+/// is whatever the module's JavaScript returned.
+fn operation_answer(answer: &Json, operation: &str, module: &str) -> Result<OperationAnswer> {
+    use base64::Engine as _;
+    let bad = |what: String| {
+        Error::config(format!(
+            "operation `{operation}` of module {module} answered {what}"
+        ))
+    };
+    let mut out = OperationAnswer {
+        message: answer
+            .get("message")
+            .and_then(Json::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        ..OperationAnswer::default()
+    };
+    match answer.get("settings") {
+        None | Some(Json::Null) => {}
+        Some(Json::Object(settings)) => out.settings = settings.clone(),
+        Some(other) => return Err(bad(format!("settings that are not an object: {other}"))),
+    }
+    let files = match answer.get("files") {
+        None | Some(Json::Null) => Vec::new(),
+        Some(Json::Array(files)) => files.clone(),
+        Some(other) => return Err(bad(format!("files that are not a list: {other}"))),
+    };
+    for file in &files {
+        let path = file
+            .get("path")
+            .and_then(Json::as_str)
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| bad("a file with no path".to_owned()))?;
+        let bytes = file
+            .get("base64")
+            .and_then(Json::as_str)
+            .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
+            .ok_or_else(|| bad(format!("the file `{path}` without base64 contents")))?;
+        out.files.push((path.to_owned(), bytes));
+    }
+    Ok(out)
 }
 
 /// One `{ path, contents }` answer.
@@ -233,14 +293,15 @@ fn declaration(manifest: &FrameworkManifest, module: &str) -> Result<FrameworkDe
     // the module's, the loader records them on its card, and reporting them again
     // on every application form would put a module's problem in front of an admin
     // creating an unrelated app.
-    let (config_spec, _) =
+    let (mut config_spec, _) =
         config_fields_to_form_fields(&manifest.config_fields, &format!("the framework `{name}`"));
+    let options = target_options(&manifest.targets, &mut config_spec, name)?;
     Ok(FrameworkDecl {
         name: name.to_owned(),
         module: module.to_owned(),
         label: manifest.label.trim().to_owned(),
         description: manifest.description.trim().to_owned(),
-        targets: targets(&manifest.targets, &config_spec)?,
+        targets: targets(&manifest.targets, &config_spec, &options)?,
         build: build_template(&manifest.build, &config_spec)?,
         config_spec,
         csp: csp(&manifest.csp),
@@ -289,7 +350,11 @@ fn checks(declared: &[String]) -> Result<Vec<String>> {
 /// Refused whole when one target is malformed, for the reason a bad `build` is:
 /// the author hears about it on the module's card when it loads, not the admin
 /// when they press the button.
-fn targets(declared: &Json, spec: &[sc_types::FormField]) -> Result<Vec<TargetTemplate>> {
+fn targets(
+    declared: &Json,
+    spec: &[sc_types::FormField],
+    options: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<TargetTemplate>> {
     let Json::Object(entries) = declared else {
         return Ok(Vec::new());
     };
@@ -309,21 +374,139 @@ fn targets(declared: &Json, spec: &[sc_types::FormField]) -> Result<Vec<TargetTe
         out.push(TargetTemplate {
             name: name.clone(),
             label: text("label").unwrap_or(name).to_owned(),
-            command: command.to_owned(),
+            command: settings_template(command, spec, &format!("target `{name}`'s `command`"))?,
             artifact: settings_template(
                 artifact_source,
                 spec,
                 &format!("target `{name}`'s `artifact`"),
             )?,
-            env: target_env(name, target.get("env"))?,
+            env: target_env(name, target.get("env"), spec)?,
             requires: target_requires(name, target.get("requires"))?,
+            options: options.get(name).cloned().unwrap_or_default(),
+            operations: parse_target_operations(name, target.get("operations"))?,
         });
+    }
+    Ok(out)
+}
+
+/// Read a target's buttons — its `operations` — from the module's declaration.
+///
+/// In the plugin, an operation looks like this:
+///
+/// ```js
+/// operations: {
+///   generate_keystore: {
+///     label: "Generate a keystore",           // the button's text (required)
+///     description: "Creates a new key …",     // shown under the button
+///     showIf: { own_keystore: true },         // when the button is shown
+///     run: generateKeystore,                  // what pressing it does
+///   },
+/// }
+/// ```
+///
+/// Everything except `run` is read here, once, when the module loads, so the
+/// form can show the button without asking the module. `run` is a function, so
+/// it stays inside the module, where it is called when the button is pressed.
+///
+/// No `operations` means no buttons. A malformed one — not an object, or a
+/// button without a label — is refused when the module loads, so its author
+/// sees the mistake on the module's card rather than an admin seeing a broken
+/// button.
+fn parse_target_operations(target: &str, declared: Option<&Json>) -> Result<Vec<TargetOperation>> {
+    let entries = match declared {
+        None | Some(Json::Null) => return Ok(Vec::new()),
+        Some(Json::Object(by_name)) => by_name,
+        Some(_) => {
+            return Err(Error::invalid(format!(
+                "its target `{target}`'s `operations` is not an object of operations by name"
+            )));
+        }
+    };
+    let mut out = Vec::new();
+    for (name, operation) in entries {
+        let text = |key: &str| {
+            operation
+                .get(key)
+                .and_then(Json::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_owned()
+        };
+        let label = text("label");
+        if label.is_empty() {
+            return Err(Error::invalid(format!(
+                "its target `{target}`'s operation `{name}` has no `label` for its button"
+            )));
+        }
+        out.push(TargetOperation {
+            name: name.clone(),
+            label,
+            description: text("description"),
+            show_if: show_if_conditions(operation.get("showIf")),
+        });
+    }
+    Ok(out)
+}
+
+/// Each target's `options`: settings that configure that target alone, in the
+/// same field vocabulary as the framework's `config_fields`.
+///
+/// ```js
+/// targets: { android: { options: [{ name: "app_version", type: "String" }], … } }
+/// ```
+///
+/// They are **appended to the framework's settings** (`spec`), so an
+/// application stores, validates and hands them to the framework's generators
+/// exactly as it does its other settings, and the target's templates may
+/// interpolate them. What is returned is which names belong to which target, so
+/// a form can show them under the target. A name that is already a setting, or
+/// another target's option, is refused: one application config holds them all.
+fn target_options(
+    declared: &Json,
+    spec: &mut Vec<sc_types::FormField>,
+    framework: &str,
+) -> Result<BTreeMap<String, Vec<String>>> {
+    let mut out = BTreeMap::new();
+    let Json::Object(entries) = declared else {
+        return Ok(out);
+    };
+    for (target, declaration) in entries {
+        let fields = match declaration.get("options") {
+            None | Some(Json::Null) => continue,
+            Some(Json::Array(fields)) => fields,
+            Some(_) => {
+                return Err(Error::invalid(format!(
+                    "its target `{target}`'s `options` is not a list of fields"
+                )));
+            }
+        };
+        let (fields, _) = config_fields_to_form_fields(
+            fields,
+            &format!("the framework `{framework}`'s target `{target}`"),
+        );
+        let mut names = Vec::new();
+        for field in fields {
+            if spec.iter().any(|f| f.name() == field.name()) {
+                return Err(Error::invalid(format!(
+                    "its target `{target}`'s option `{}` has the name of a setting it already \
+                     has; every setting and option shares one namespace",
+                    field.name()
+                )));
+            }
+            names.push(field.name().to_owned());
+            spec.push(field);
+        }
+        out.insert(target.clone(), names);
     }
     Ok(out)
 }
 
 /// A target's `env`: `{ ANDROID_HOME: "/opt/sdk" }`, the variables its command is
 /// started with.
+///
+/// Each value is a template over the framework's settings, so an application's
+/// own setting (a keystore password) reaches the build here rather than through
+/// a file in its project.
 ///
 /// No `.env` file is written: the map is kept in memory, rebuilt whenever the
 /// module (re)loads with its settings, and handed to the build process alone
@@ -334,7 +517,11 @@ fn targets(declared: &Json, spec: &[sc_types::FormField]) -> Result<Vec<TargetTe
 /// leave the variable to the server's environment, not blank it for the build.
 /// A name a process environment cannot carry — empty, or with `=` or a NUL — is
 /// refused, as is a value that is not text.
-fn target_env(target: &str, declared: Option<&Json>) -> Result<BTreeMap<String, String>> {
+fn target_env(
+    target: &str,
+    declared: Option<&Json>,
+    spec: &[sc_types::FormField],
+) -> Result<BTreeMap<String, Template>> {
     let mut env = BTreeMap::new();
     let Some(json) = declared.filter(|v| !v.is_null()) else {
         return Ok(env);
@@ -366,7 +553,10 @@ fn target_env(target: &str, declared: Option<&Json>) -> Result<BTreeMap<String, 
             )));
         }
         if !value.is_empty() {
-            env.insert(key.clone(), value.to_owned());
+            env.insert(
+                key.clone(),
+                settings_template(value, spec, &format!("target `{target}`'s `env` `{key}`"))?,
+            );
         }
     }
     Ok(env)
@@ -687,6 +877,76 @@ mod tests {
     }
 
     #[test]
+    fn a_targets_options_become_settings_its_templates_can_use() {
+        let mut with_options = vue();
+        with_options["targets"] = json!({
+            "android": {
+                "command": "npm run build:android:{{ build_type }}",
+                "artifact": "{{ project }}/{{ build_type }}.apk",
+                "options": [
+                    { "name": "app_version", "label": "Version", "type": "String", "default": "1.0.0" },
+                    { "name": "build_type", "type": "String", "default": "release",
+                      "attributes": { "options": ["debug", "release"] } }
+                ]
+            }
+        });
+        let decl = declaration(&manifest(with_options), "@feldspar/vue").unwrap();
+        // Appended to the framework's own settings, so they are stored and
+        // validated like them…
+        let names: Vec<&str> = decl.config_spec.iter().map(|f| f.name()).collect();
+        assert_eq!(names, ["store", "project", "app_version", "build_type"]);
+        // …and recorded as the target's, for the form.
+        assert_eq!(decl.targets[0].options, ["app_version", "build_type"]);
+        let config = [
+            ("store".to_owned(), json!("apps")),
+            ("project".to_owned(), json!("todo")),
+            ("build_type".to_owned(), json!("debug")),
+        ]
+        .into_iter()
+        .collect();
+        let spec = decl.target_spec("android", &config).unwrap();
+        assert_eq!(spec.args, ["run", "build:android:debug"]);
+        assert_eq!(spec.artifact, "todo/debug.apk");
+    }
+
+    #[test]
+    fn a_target_option_that_reuses_a_setting_name_or_is_not_a_list_is_refused() {
+        let mut clash = vue();
+        clash["targets"] = json!({
+            "android": {
+                "command": "npm run apk",
+                "artifact": "x.apk",
+                "options": [{ "name": "project", "type": "String" }]
+            }
+        });
+        let msg = declaration(&manifest(clash), "@feldspar/vue")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("android") && msg.contains("project"), "{msg}");
+
+        let mut not_a_list = vue();
+        not_a_list["targets"] = json!({
+            "android": { "command": "npm run apk", "artifact": "x.apk", "options": {} }
+        });
+        let msg = declaration(&manifest(not_a_list), "@feldspar/vue")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("options"), "{msg}");
+    }
+
+    #[test]
+    fn a_target_command_naming_an_unknown_setting_is_refused_on_load() {
+        let mut typo = vue();
+        typo["targets"] = json!({
+            "android": { "command": "npm run {{ varient }}", "artifact": "x.apk" }
+        });
+        let msg = declaration(&manifest(typo), "@feldspar/vue")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("varient") && msg.contains("command"), "{msg}");
+    }
+
+    #[test]
     fn declared_targets_become_templates_over_the_frameworks_settings() {
         let mut with_targets = vue();
         with_targets["targets"] = json!({
@@ -729,7 +989,8 @@ mod tests {
             }
         });
         let decl = declaration(&manifest(with_env), "@feldspar/vue").unwrap();
-        let env = &decl.targets[0].env;
+        let config = [("store".to_owned(), json!("apps"))].into_iter().collect();
+        let env = decl.target_spec("android", &config).unwrap().env;
         assert_eq!(
             env.get("ANDROID_HOME").map(String::as_str),
             Some("/opt/sdk")
@@ -745,6 +1006,108 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(msg.contains("android") && msg.contains("A=B"), "{msg}");
+    }
+
+    #[test]
+    fn a_targets_env_carries_an_application_setting_and_drops_it_when_blank() {
+        let mut with_secret = vue();
+        with_secret["targets"] = json!({
+            "android": {
+                "command": "npm run apk",
+                "artifact": "a.apk",
+                "env": { "KEYSTORE_PASSWORD": "{{ keystore_password }}" },
+                "options": [{ "name": "keystore_password", "type": "String", "input_type": "password" }]
+            }
+        });
+        let decl = declaration(&manifest(with_secret), "@feldspar/vue").unwrap();
+        let config = |password: &str| -> sc_types::Attrs {
+            [
+                ("store".to_owned(), json!("apps")),
+                ("keystore_password".to_owned(), json!(password)),
+            ]
+            .into_iter()
+            .collect()
+        };
+        let env = decl.target_spec("android", &config("s3cret")).unwrap().env;
+        assert_eq!(env["KEYSTORE_PASSWORD"], "s3cret");
+        let env = decl.target_spec("android", &config("")).unwrap().env;
+        assert!(!env.contains_key("KEYSTORE_PASSWORD"));
+
+        // A setting the framework has not got is refused on load, as in any
+        // other template.
+        let mut typo = vue();
+        typo["targets"] = json!({
+            "android": { "command": "x", "artifact": "a.apk", "env": { "P": "{{ pasword }}" } }
+        });
+        let msg = declaration(&manifest(typo), "@feldspar/vue")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("pasword"), "{msg}");
+    }
+
+    #[test]
+    fn a_targets_operations_are_read_as_data_and_one_without_a_label_refused() {
+        let mut with_ops = vue();
+        with_ops["targets"] = json!({
+            "android": {
+                "command": "npm run apk",
+                "artifact": "a.apk",
+                "operations": {
+                    "generate_keystore": {
+                        "label": "Generate a keystore",
+                        "description": "Makes one.",
+                        "showIf": { "own_keystore": true }
+                    }
+                }
+            }
+        });
+        let decl = declaration(&manifest(with_ops), "@feldspar/vue").unwrap();
+        let op = &decl.targets[0].operations[0];
+        assert_eq!(op.name, "generate_keystore");
+        assert_eq!(op.label, "Generate a keystore");
+        assert_eq!(op.description, "Makes one.");
+        assert_eq!(
+            op.show_if,
+            [sc_types::ShowIfCondition::new(
+                "own_keystore",
+                vec![json!(true)]
+            )]
+        );
+
+        let mut unlabelled = vue();
+        unlabelled["targets"] = json!({
+            "android": { "command": "x", "artifact": "a.apk", "operations": { "go": {} } }
+        });
+        let msg = declaration(&manifest(unlabelled), "@feldspar/vue")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("go") && msg.contains("label"), "{msg}");
+    }
+
+    #[test]
+    fn an_operations_answer_is_read_and_a_malformed_one_refused() {
+        let answer = operation_answer(
+            &json!({
+                "files": [{ "path": "keys/a.p12", "base64": "AAEC" }],
+                "settings": { "keystore_alias": "upload" },
+                "message": "done"
+            }),
+            "generate_keystore",
+            "@feldspar/react-native",
+        )
+        .unwrap();
+        assert_eq!(answer.files, [("keys/a.p12".to_owned(), vec![0u8, 1, 2])]);
+        assert_eq!(answer.settings["keystore_alias"], json!("upload"));
+        assert_eq!(answer.message, "done");
+
+        for bad in [
+            json!({ "files": [{ "path": "a", "base64": "!!" }] }),
+            json!({ "files": [{ "base64": "AAEC" }] }),
+            json!({ "files": "a" }),
+            json!({ "settings": [1] }),
+        ] {
+            assert!(operation_answer(&bad, "op", "m").is_err(), "{bad}");
+        }
     }
 
     #[test]

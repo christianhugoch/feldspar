@@ -36,6 +36,9 @@ deno-host = [
 ]
 
 [dependencies]
+# A target operation's files arrive base64-encoded, since a keystore is bytes
+# and a module's answer crosses from its JavaScript into Rust as JSON text.
+base64.workspace = true
 sc-error.workspace = true
 sc-log.workspace = true
 # `FormField` for a module action's declared configuration, translated from v1's

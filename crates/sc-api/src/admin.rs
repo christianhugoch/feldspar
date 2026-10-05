@@ -1441,6 +1441,28 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // The files of a kind in a store, by path — what a setting that names a file
+    // (`store_files:png,jpg`, an app icon or a keystore) offers as its choices.
+    // Dependency and generated directories are skipped, so a project's
+    // `node_modules` does not bury the one icon the admin is looking for.
+    set.register(
+        Endpoint::new(
+            "listStoreFiles",
+            Method::Get,
+            api()
+                .lit("file-stores")
+                .param("store", ValueType::Text)
+                .lit("files-by-type"),
+        )
+        // Comma-separated, without dots: `png,jpg,jpeg`.
+        .query([QueryParam::new("extensions", ValueType::Text)])
+        .output(TypeSchema::struct_of([
+            StructField::new("paths", TypeSchema::array(TypeSchema::text())),
+            StructField::new("truncated", TypeSchema::bool()),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // Search a store's text files, server-side. This is the endpoint the IDE's
     // find-in-files runs on (§12.1): walking the tree through the filesystem
     // provider is one request per directory, and the same walk done where the
@@ -1745,6 +1767,41 @@ pub fn admin_endpoints() -> EndpointSet {
                 .lit("build"),
         )
         .output(target_build_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Run an operation a target declares — what a button under the target's
+    // settings does, such as generating a signing keystore. The module makes the
+    // files and settings; the server writes the files into the application's
+    // store (never over an existing one) and saves the settings on it. The body
+    // is the form's current framework settings, unsaved edits included, so the
+    // module sees what the admin sees.
+    set.register(
+        Endpoint::new(
+            "runApplicationTargetOperation",
+            Method::Post,
+            api()
+                .lit("applications")
+                .param("id", ValueType::Uuid)
+                .lit("targets")
+                .param("target", ValueType::Text)
+                .lit("operations")
+                .param("operation", ValueType::Text),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "config",
+            TypeSchema::json(),
+        )]))
+        .output(TypeSchema::struct_of([
+            StructField::new("message", TypeSchema::text()),
+            StructField::new("store", TypeSchema::text()),
+            StructField::new("files", TypeSchema::array(TypeSchema::text())),
+            // Whether the store is a git repository, whose next commit would
+            // carry the files.
+            StructField::new("git_repo", TypeSchema::bool()),
+            // The settings it set, as now stored, secrets masked.
+            StructField::new("settings", TypeSchema::json()),
+        ]))
         .auth(AuthRequirement::admin()),
     );
 
@@ -5627,6 +5684,46 @@ fn framework_info_schema() -> TypeSchema {
         // because on those pickers it offers to create a local store rather
         // than making the admin leave the form to define one first.
         StructField::new("file_store_settings", TypeSchema::array(TypeSchema::text())),
+        // The settings whose value is a file in the application's store (an
+        // app icon, a keystore), each with the extensions it accepts: the form
+        // fills their choices from `listStoreFiles` for the store the
+        // application names.
+        StructField::new(
+            "file_settings",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("name", TypeSchema::text()),
+                StructField::new("extensions", TypeSchema::array(TypeSchema::text())),
+            ])),
+        ),
+        // The builds the framework offers beside its web bundle, each with the
+        // settings that configure it alone. Those settings are in `config_spec`
+        // too; the form shows them under their target instead of among the
+        // framework's own.
+        StructField::new(
+            "targets",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("name", TypeSchema::text()),
+                StructField::new("label", TypeSchema::text()),
+                StructField::new("options", TypeSchema::array(TypeSchema::text())),
+                // What the module does for the target on request: a button
+                // each, shown while its `show_if` holds.
+                StructField::new(
+                    "operations",
+                    TypeSchema::array(TypeSchema::struct_of([
+                        StructField::new("name", TypeSchema::text()),
+                        StructField::new("label", TypeSchema::text()),
+                        StructField::new("description", TypeSchema::text()),
+                        StructField::new(
+                            "show_if",
+                            TypeSchema::array(TypeSchema::struct_of([
+                                StructField::new("name", TypeSchema::text()),
+                                StructField::new("values", TypeSchema::array(TypeSchema::json())),
+                            ])),
+                        ),
+                    ])),
+                ),
+            ])),
+        ),
     ])
 }
 
@@ -6083,6 +6180,16 @@ fn form_field_schema() -> TypeSchema {
         // The language this value is source code in (`"javascript"`), or null for
         // a setting that is not code: the form renders a code editor for it.
         StructField::new("code_language", TypeSchema::optional(TypeSchema::text())),
+        // When the setting applies: every named setting holds one of its
+        // values. Empty means always. The form hides a setting that does not
+        // apply, and the server does not require it.
+        StructField::new(
+            "show_if",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("name", TypeSchema::text()),
+                StructField::new("values", TypeSchema::array(TypeSchema::json())),
+            ])),
+        ),
     ])
 }
 

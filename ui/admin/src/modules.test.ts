@@ -416,6 +416,7 @@ describe("how an installed module reads", () => {
               multiline: false,
               secret: false,
               create_only: false,
+              show_if: [],
               code_language: null,
             },
           ],

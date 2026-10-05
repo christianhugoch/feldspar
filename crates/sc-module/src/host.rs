@@ -856,6 +856,33 @@ impl ModuleHost {
         }
     }
 
+    /// Press a target's button: call the plugin's `run` function for
+    /// `operation` (e.g. `generate_keystore` on the `android` target) with
+    /// `context`, and return what it answered as raw JSON.
+    ///
+    /// The call goes to the worker the module is loaded in, since `run` only
+    /// exists there. See `sc_app::TargetOperation`.
+    pub async fn call_target_operation(
+        &self,
+        module: &str,
+        framework: &str,
+        target: &str,
+        operation: &str,
+        context: &Json,
+    ) -> Result<Json> {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool
+                .call_target_operation(module, framework, target, operation, context)
+                .await
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = (module, framework, target, operation, context);
+            Err(no_runtime())
+        }
+    }
+
     /// The files one of a module's frameworks generates for an application —
     /// the whole project (`scaffold`), or the framework's own generated code
     /// (`runtime`).

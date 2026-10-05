@@ -14,20 +14,28 @@ it into an Android APK. The same source becomes both.
   - `src/feldspar/` is generated on every build: the typed client, `hooks.ts` (the React scaffold's
     `useX` / `useCreateX` / `useUpdateX` / `useDeleteX` hooks) and `config.ts`.
   - The web bundle comes from `expo export --platform web`.
-  - The APK comes from `expo prebuild` plus `./gradlew assembleRelease`.
-  - The Android package is `com.feldspar.<subdomain>`.
+  - The APK comes from `expo prebuild` plus Gradle, as a release or a debug build; both carry
+    their JavaScript, and native code for 64-bit devices only (`arm64-v8a`, `x86_64`).
+- **Android app settings** ("Android app" card in the application form): app ID, version, icon,
+  release or debug, and APK or AAB. Release builds can be signed with your own keystore (the
+  password is a secret, never written into the project); **Generate a keystore** creates one in
+  the file store. Bad values fail only the Android build.
 - **CSP**: React's policy plus `style-src 'unsafe-inline'`, because react-native-web's
   `StyleSheet` writes a `<style>` element at run time without a nonce. `script-src` stays strict.
 - **Build targets (generic)**: a declared framework can offer builds that produce a file (rather
   than a bundle to serve) next to its web bundle:
-  `targets: { android: { label, command, artifact, env, requires } }`.
-  - `artifact` is a path template over the framework's settings.
-  - `env` holds extra environment variables for the build; a blank value falls back to the
-    server's own.
-  - `requires` lists what the machine needs: an environment variable (optionally an existing
-    directory), a command on `PATH`, or an operating system, each with a hint on how to fix it.
-    Unmet requirements are shown on the target's button and refuse the build before anything runs.
+  `targets: { android: { label, command, artifact, env, requires, options, operations } }`.
+  - `command`, `artifact` and `env` are templates over the framework's settings; a blank `env`
+    value falls back to the server's own.
+  - `options` are the target's own settings, shown in a card of their own in the form.
+  - `operations` are buttons under those settings that run the module's code; the server
+    writes the files it returns into the store and saves the settings.
+  - `requires` lists what the machine needs (an environment variable or directory, a command, an
+    operating system), checked before a build starts and shown on its button.
   - A malformed declaration is refused when the module loads.
+- **Settings**: a setting can be shown conditionally (v1's `showIf`) or pick a file of given
+  types from the app's store. An application's secret settings are masked in the admin API and
+  kept on save.
 - **Target builds run as background jobs**: `POST /api/applications/{id}/targets/{target}/build`
   starts a build and answers at once; `GET` on the same path reports `running`, `succeeded` (with
   artifact and size) or `failed`.
@@ -37,7 +45,7 @@ it into an Android APK. The same source becomes both.
     lock; Gradle runs outside it.
   - The log is written as the build runs to `<project>/build-logs/<target>-<timestamp>.log`, and
     the last 10 per target are kept.
-  - The admin sidebar has a **Build Android APK** button under Build. It polls until the build is
+  - The admin sidebar has a **Build Android app** button under Build. It polls until the build is
     done, picks up a build still running after a reload, and its toast names the APK and the log.
 - **Android toolchain**: `ANDROID_HOME` and `JAVA_HOME` are the module's own settings
   (Settings → Modules → React Native), passed to the APK build. The shell that started the server
@@ -60,6 +68,11 @@ it into an Android APK. The same source becomes both.
   - A native request that has a session but no valid token is refused rather than treated as
     anonymous.
 - Known gaps are listed in TODO.md (RN.6–RN.12).
+
+## Fix: the file manager downloads large files
+
+Download now links to a new route, `GET /download/{store}/{*path}`, which serves the file as
+is, instead of loading it as base64 inside JSON, which failed for files as large as an APK.
 
 ## Fix: Reinstall picks up an edited local or bundled module
 

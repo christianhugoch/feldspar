@@ -99,6 +99,26 @@ pub enum OptionsSource {
     ServerQuery(String),
 }
 
+/// One condition of a [`show_if`](FormField::show_if): setting `setting` must
+/// hold one of the `allowed` values — `build_type` must be `"release"`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShowIfCondition {
+    /// The setting the condition looks at — `build_type`.
+    pub setting: String,
+    /// The values it may hold for the condition to be met — `["release"]`.
+    pub allowed: Vec<Json>,
+}
+
+impl ShowIfCondition {
+    /// The condition that `setting` holds one of `allowed`.
+    pub fn new(setting: impl Into<String>, allowed: Vec<Json>) -> ShowIfCondition {
+        ShowIfCondition {
+            setting: setting.into(),
+            allowed,
+        }
+    }
+}
+
 /// A field in a form: enough to render an input control for it, and to check
 /// what comes back (design §6.2).
 ///
@@ -179,6 +199,15 @@ pub struct FormField {
     /// alternative is an admin screen that knows `run_js_code`'s `code` setting
     /// by name, which is the coupling this vocabulary exists to remove.
     pub code_language: Option<String>,
+    /// When the field applies at all: every named setting resolves to one of
+    /// the values listed for it — v1's `showIf`, `{ build_type: ["release"] }`.
+    /// Empty means always.
+    ///
+    /// A field that does not apply is hidden by the admin UI and is **not
+    /// required** ([`validate`](FormField::validate)): an own keystore's alias
+    /// is required only when signing with an own keystore is switched on. Its
+    /// value is kept rather than cleared, so switching back restores it.
+    pub show_if: Vec<ShowIfCondition>,
     // Post-MVP (§6.2, §6.3, §12): `fieldview: FieldViewRef` and
     // `visibility: Option<Formula>`. Both name types that do not exist yet —
     // fieldviews and formulas are out of MVP scope — so they are left out rather
@@ -198,7 +227,30 @@ impl FormField {
             secret: false,
             create_only: false,
             code_language: None,
+            show_if: Vec::new(),
         }
+    }
+
+    /// Apply this field only while setting `name` resolves to one of `values`
+    /// (see [`show_if`](FormField::show_if)). Called again for another setting,
+    /// every condition must hold.
+    pub fn show_if(mut self, name: impl Into<String>, values: Vec<Json>) -> FormField {
+        self.show_if.push(ShowIfCondition::new(name, values));
+        self
+    }
+
+    /// Whether the field applies to `attrs` under `spec` (see
+    /// [`show_if`](FormField::show_if)). A condition naming a setting `spec`
+    /// does not have compares against nothing, and so does not hold.
+    pub fn applies(&self, spec: &[FormField], attrs: &Attrs) -> bool {
+        self.show_if.iter().all(|condition| {
+            let current = spec
+                .iter()
+                .find(|f| f.base.name == condition.setting)
+                .and_then(|f| f.resolve(attrs))
+                .or_else(|| attrs.get(&condition.setting));
+            current.is_some_and(|v| condition.allowed.iter().any(|a| same_setting(a, v)))
+        })
     }
 
     /// The field's name — the key it occupies in an [`Attrs`] bag.
@@ -387,7 +439,17 @@ impl FormField {
 /// inventing one here is out of proportion to a settings form.
 pub fn validate_attrs(spec: &[FormField], attrs: &Attrs) -> Result<()> {
     for field in spec {
-        field.validate(attrs)?;
+        if field.applies(spec, attrs) {
+            field.validate(attrs)?;
+        } else {
+            // Not applying, it is not required — but what it holds is still
+            // checked, since it comes back the moment the field applies again.
+            let optional = FormField {
+                required: false,
+                ..field.clone()
+            };
+            optional.validate(attrs)?;
+        }
     }
     for key in attrs.keys() {
         if !spec.iter().any(|f| &f.base.name == key) {
@@ -501,6 +563,17 @@ pub fn preserve_create_only(spec: &[FormField], stored: &Attrs, submitted: &Attr
 }
 
 /// A JSON value's shape, for error messages.
+/// Whether a `show_if` value matches a setting's value. Compared as JSON, and
+/// also as text, because a form posts a checkbox as `"true"` where a
+/// declaration says `true`.
+fn same_setting(allowed: &Json, value: &Json) -> bool {
+    let text = |v: &Json| match v {
+        Json::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    allowed == value || text(allowed) == text(value)
+}
+
 fn json_kind(value: &Json) -> &'static str {
     match value {
         Json::Null => "null",
@@ -855,5 +928,44 @@ mod tests {
             preserve_create_only(&spec, &Attrs::new(), &submitted),
             submitted
         );
+    }
+
+    #[test]
+    fn a_field_that_does_not_apply_is_not_required() {
+        let spec = vec![
+            FormField::new("build_type", BasicType::Text).default_value("release"),
+            FormField::new("own_key", BasicType::Bool)
+                .default_value(false)
+                .show_if("build_type", vec![json!("release")]),
+            FormField::new("alias", BasicType::Text)
+                .required()
+                .show_if("build_type", vec![json!("release")])
+                .show_if("own_key", vec![json!(true)]),
+        ];
+        let attrs = |pairs: &[(&str, Json)]| -> Attrs {
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), v.clone()))
+                .collect()
+        };
+        // Switched off (by default): the alias is not asked for.
+        assert!(!spec[2].applies(&spec, &attrs(&[])));
+        validate_attrs(&spec, &attrs(&[])).unwrap();
+        // Switched on, for a release build: it is.
+        let on = attrs(&[("own_key", json!(true))]);
+        assert!(spec[2].applies(&spec, &on));
+        let msg = validate_attrs(&spec, &on).unwrap_err().to_string();
+        assert!(msg.contains("alias"), "{msg}");
+        // A form posts the checkbox as text; it means the same.
+        assert!(spec[2].applies(&spec, &attrs(&[("own_key", json!("true"))])));
+        // A debug build hides it again, whatever the checkbox says.
+        let debug = attrs(&[("own_key", json!(true)), ("build_type", json!("debug"))]);
+        assert!(!spec[2].applies(&spec, &debug));
+        validate_attrs(&spec, &debug).unwrap();
+        // A hidden value is still checked for what it holds, required or not.
+        let wrong = attrs(&[("build_type", json!("debug")), ("alias", json!(5))]);
+        assert!(validate_attrs(&spec, &wrong).is_err());
+        let wrong = attrs(&[("build_type", json!("debug")), ("own_key", json!("maybe"))]);
+        assert!(validate_attrs(&spec, &wrong).is_err());
     }
 }

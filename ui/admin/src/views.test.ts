@@ -286,6 +286,7 @@ const field = (
   multiline: false,
   secret: false,
   create_only: false,
+  show_if: [],
   code_language: null,
   ...extra,
 });

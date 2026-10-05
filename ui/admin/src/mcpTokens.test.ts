@@ -55,6 +55,7 @@ const traits = [
         multiline: false,
         secret: false,
         create_only: false,
+        show_if: [],
       },
       {
         name: "allow_edit",
@@ -66,6 +67,7 @@ const traits = [
         multiline: false,
         secret: false,
         create_only: false,
+        show_if: [],
       },
       {
         name: "allow_drop",
@@ -77,6 +79,7 @@ const traits = [
         multiline: false,
         secret: false,
         create_only: false,
+        show_if: [],
       },
       {
         name: "allow_access_changes",
@@ -88,6 +91,7 @@ const traits = [
         multiline: false,
         secret: false,
         create_only: false,
+        show_if: [],
       },
       {
         name: "allow_triggers",
@@ -99,6 +103,7 @@ const traits = [
         multiline: false,
         secret: false,
         create_only: false,
+        show_if: [],
       },
       {
         name: "allow_applications",
@@ -110,6 +115,7 @@ const traits = [
         multiline: false,
         secret: false,
         create_only: false,
+        show_if: [],
       },
     ],
   },

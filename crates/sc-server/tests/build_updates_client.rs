@@ -28,7 +28,8 @@ use axum::http::{Request, StatusCode, header};
 use sc_api::admin_endpoints;
 use sc_app::{
     ApiConfig, Application, BuildTemplate, DeclaredFile, FilePhase, FrameworkDecl, FrameworkHost,
-    FrameworkRef, FrameworkSet, InstallSpec, bootstrap, install_frameworks, save_application,
+    FrameworkRef, FrameworkSet, InstallSpec, OperationAnswer, TargetOperation, TargetTemplate,
+    bootstrap, install_frameworks, load_application, save_application,
 };
 use sc_auth::SessionStore;
 use sc_catalog::{Catalog, FileStoreId, TableId};
@@ -40,7 +41,7 @@ use sc_server::{
     AppMounts, CSRF_COOKIE, CSRF_HEADER, ServerConfig, admin_handlers, build_router_with_apps,
 };
 use sc_test_harness::TestDb;
-use sc_types::{BasicType, FormField};
+use sc_types::{BasicType, FormField, SECRET_SENTINEL};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -61,6 +62,11 @@ fn shell_framework() -> FrameworkDecl {
         config_spec: vec![
             FormField::new("store", BasicType::Text).required(),
             FormField::new("project", BasicType::Text).default_value(""),
+            // A secret, as a keystore password is: shown masked, kept on save.
+            FormField::new("token", BasicType::Text).secret(),
+            // The `bundle` target's own settings.
+            FormField::new("key_file", BasicType::Text),
+            FormField::new("key_password", BasicType::Text).secret(),
         ],
         build: BuildTemplate {
             store: template("{{ store }}"),
@@ -75,7 +81,26 @@ fn shell_framework() -> FrameworkDecl {
         builder_prompt: None,
         checks: Vec::new(),
         scaffolds: true,
-        targets: Vec::new(),
+        // A target whose operation makes a key, as the Android one makes a
+        // keystore — and one that misbehaves.
+        targets: vec![TargetTemplate {
+            name: "bundle".to_owned(),
+            label: "Bundle".to_owned(),
+            command: template("sh bundle.sh"),
+            artifact: template("{{ project }}/bundle.zip"),
+            env: Default::default(),
+            requires: Vec::new(),
+            options: vec!["key_file".to_owned(), "key_password".to_owned()],
+            operations: ["make_key", "stray"]
+                .into_iter()
+                .map(|name| TargetOperation {
+                    name: name.to_owned(),
+                    label: name.to_owned(),
+                    description: String::new(),
+                    show_if: Vec::new(),
+                })
+                .collect(),
+        }],
     }
 }
 
@@ -123,6 +148,46 @@ impl FrameworkHost for StubHost {
             });
         }
         Ok(files)
+    }
+
+    async fn call_target_operation(
+        &self,
+        _name: &str,
+        _target: &str,
+        operation: &str,
+        context: Value,
+    ) -> sc_error::Result<OperationAnswer> {
+        let mut answer = OperationAnswer {
+            files: vec![(
+                format!(
+                    "keys/{}.key",
+                    context["app"]["subdomain"].as_str().unwrap_or("")
+                ),
+                b"KEY".to_vec(),
+            )],
+            message: "made".to_owned(),
+            ..OperationAnswer::default()
+        };
+        answer.settings.insert(
+            "key_file".to_owned(),
+            json!(format!(
+                "keys/{}.key",
+                context["app"]["subdomain"].as_str().unwrap_or("")
+            )),
+        );
+        // The password the form holds (typed, or the stored one behind the mask).
+        answer.settings.insert(
+            "key_password".to_owned(),
+            context["settings"]["key_password"].clone(),
+        );
+        if operation == "stray" {
+            // Not one of the target's settings.
+            answer
+                .settings
+                .insert("project".to_owned(), json!("elsewhere"));
+            answer.files[0].0 = "keys/stray.key".to_owned();
+        }
+        Ok(answer)
     }
 }
 
@@ -380,5 +445,132 @@ async fn deep_clean_reinstalls_the_dependencies_and_builds() -> sc_error::Result
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    Ok(())
+}
+
+/// A framework's secret setting (a keystore password) is never sent back to the
+/// admin, and an edit that hands back the mask keeps the stored value.
+#[tokio::test]
+async fn a_framework_secret_is_masked_and_survives_an_edit() -> sc_error::Result<()> {
+    let (mut client, catalog, _dir, _db) = serve("secret").await?;
+    let app = Application::new(
+        "Vault",
+        "vault",
+        FrameworkRef::new("shell")
+            .with("store", "apps")
+            .with("project", "vault")
+            .with("token", "s3cret"),
+    )
+    .with_file_store(FileStoreId("apps".to_owned()))
+    .with_api(ApiConfig::new("rest", "/api"));
+    save_application(&catalog, &app).await?;
+
+    let (status, list) = client.send("GET", "/api/applications", None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let mut row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["subdomain"] == json!("vault"))
+        .unwrap()
+        .clone();
+    assert_eq!(row["framework"]["config"]["token"], json!(SECRET_SENTINEL));
+    assert!(!list.to_string().contains("s3cret"));
+
+    // Save the row as the form would: renamed, the mask handed back.
+    row["name"] = json!("Vault 2");
+    let (status, saved) = client
+        .send("PUT", &format!("/api/applications/{}", app.id), Some(row))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved["framework"]["config"]["token"],
+        json!(SECRET_SENTINEL)
+    );
+    let stored = load_application(&catalog, app.id).await?.unwrap();
+    assert_eq!(stored.name, "Vault 2");
+    assert_eq!(stored.framework.config["token"], json!("s3cret"));
+    Ok(())
+}
+
+/// A target's operation (a keystore generator): the module's file lands in the
+/// store and its settings are saved, a second run does not replace the file,
+/// and an answer reaching beyond the target's settings changes nothing.
+#[tokio::test]
+async fn a_target_operation_writes_its_file_and_saves_its_settings() -> sc_error::Result<()> {
+    let (mut client, catalog, dir, _db) = serve("operation").await?;
+    let app = Application::new(
+        "Keys",
+        "keys",
+        FrameworkRef::new("shell")
+            .with("store", "apps")
+            .with("project", "keys"),
+    )
+    .with_file_store(FileStoreId("apps".to_owned()))
+    .with_api(ApiConfig::new("rest", "/api"));
+    save_application(&catalog, &app).await?;
+    let url = |op: &str| {
+        format!(
+            "/api/applications/{}/targets/bundle/operations/{op}",
+            app.id
+        )
+    };
+
+    // The form's unsaved password is what the module is given.
+    let (status, body) = client
+        .send(
+            "POST",
+            &url("make_key"),
+            Some(json!({ "config": { "store": "apps", "project": "keys", "key_password": "typed" } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["message"], json!("made"));
+    assert_eq!(body["files"], json!(["keys/keys.key"]));
+    assert_eq!(body["git_repo"], json!(false));
+    // Settings come back as the form shows them: the secret masked.
+    assert_eq!(body["settings"]["key_file"], json!("keys/keys.key"));
+    assert_eq!(body["settings"]["key_password"], json!(SECRET_SENTINEL));
+    assert_eq!(std::fs::read(dir.0.join("keys/keys.key"))?, b"KEY");
+    let stored = load_application(&catalog, app.id).await?.unwrap();
+    assert_eq!(stored.framework.config["key_file"], json!("keys/keys.key"));
+    assert_eq!(stored.framework.config["key_password"], json!("typed"));
+
+    // Again: the key is not replaced, and nothing is changed.
+    std::fs::write(dir.0.join("keys/keys.key"), "SIGNED-WITH")?;
+    let (status, body) = client
+        .send(
+            "POST",
+            &url("make_key"),
+            Some(json!({ "config": { "store": "apps", "key_password": SECRET_SENTINEL } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("already exists"), "{body}");
+    assert_eq!(
+        std::fs::read_to_string(dir.0.join("keys/keys.key"))?,
+        "SIGNED-WITH"
+    );
+
+    // An answer naming a setting that is not the target's writes nothing.
+    let (status, body) = client.send("POST", &url("stray"), Some(json!({}))).await;
+    assert!(
+        status.is_server_error() || status.is_client_error(),
+        "{body}"
+    );
+    assert!(body.to_string().contains("project"), "{body}");
+    assert!(!dir.0.join("keys/stray.key").exists());
+    assert_eq!(
+        load_application(&catalog, app.id)
+            .await?
+            .unwrap()
+            .framework
+            .config["project"],
+        json!("keys")
+    );
+
+    // An operation the target does not declare is not run at all.
+    let (status, _) = client.send("POST", &url("nope"), Some(json!({}))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
     Ok(())
 }

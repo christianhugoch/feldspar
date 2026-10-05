@@ -767,6 +767,33 @@ impl DenoModuleHost {
         .map_err(|e| denial(module, e))
     }
 
+    /// Run an operation of one of a module's frameworks' build targets, routed
+    /// to the module's worker as its generators are.
+    pub async fn call_target_operation(
+        &self,
+        module: &str,
+        framework: &str,
+        target: &str,
+        operation: &str,
+        context: &Json,
+    ) -> Result<Json> {
+        let index = self.worker_for(module).await;
+        self.send(
+            index,
+            json!({
+                "op": "call_target_operation",
+                "module": module,
+                "framework": framework,
+                "target": target,
+                "operation": operation,
+                "context": context,
+            }),
+            None,
+        )
+        .await
+        .map_err(|e| denial(module, e))
+    }
+
     /// **Predict** with one, over a frame of any height.
     pub async fn model_predict(
         &self,

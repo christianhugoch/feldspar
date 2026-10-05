@@ -5,7 +5,7 @@
 // Native components through react-native-web into a static SPA, which is served,
 // mounted and reloaded exactly as a React or Vue app is. The **Android APK** is a
 // build *target* (`targets.android` below): `expo prebuild` writes the native
-// project and Gradle builds a release APK from it, left in the file store for the
+// project and Gradle builds a release or debug APK from it, left in the file store for the
 // admin to take away. It needs an Android SDK and a JDK, whose directories are
 // this module's own settings (Settings → Modules → React Native): they are set
 // as `ANDROID_HOME` and `JAVA_HOME` on the APK build, so the server does not
@@ -124,19 +124,119 @@ const configuration_workflow = () => ({
   ],
 });
 
-/** The builds offered beside the web bundle. The artifact is where Gradle
- * leaves a release APK in the project `expo prebuild` writes; the environment
- * is this module's settings. A setting left blank is left out, so the build
- * falls back to the server's own environment. */
+/** The APK's own settings: the target's `options`. Saltcorn stores them with
+ * the application's other settings and shows them in the application's form,
+ * under the target; the sidebar's button only starts a build. `runtime` writes
+ * them into `src/feldspar/native.json`, which `app.config.js` reads when
+ * `expo prebuild` writes the native project. Blank means the default here. */
+const ANDROID_DEFAULTS = { app_version: "1.0.0", build_type: "release" };
+
+const android_options = [
+  {
+    name: "app_id",
+    label: "Application ID (blank: com.feldspar.<subdomain>)",
+    type: "String",
+    default: "",
+  },
+  {
+    name: "app_version",
+    label: "Version (major.minor.patch)",
+    type: "String",
+    default: ANDROID_DEFAULTS.app_version,
+  },
+  {
+    name: "app_icon",
+    label: "Icon (a square PNG, ideally 1024×1024; blank: Expo's)",
+    type: "String",
+    server_query: "store_files:png,jpg,jpeg",
+  },
+  {
+    name: "build_type",
+    label: "Build type",
+    type: "String",
+    required: true,
+    default: ANDROID_DEFAULTS.build_type,
+    attributes: { options: ["release", "debug"] },
+  },
+  // What a release build is packaged as. An APK installs on a phone; an AAB
+  // cannot be installed directly and is what the Play Store takes, which
+  // also wants it signed with your own keystore. A debug build is always an
+  // APK, so the choice is offered for release builds only.
+  {
+    name: "package_format",
+    label: "Package (apk: installs on a phone; aab: for Play Store upload, signed with your own keystore)",
+    type: "String",
+    required: true,
+    default: "apk",
+    attributes: { options: ["apk", "aab"] },
+    showIf: { build_type: "release" },
+  },
+  // Signing. A debug APK is always signed with the debug key, which is what a
+  // debug build is for; a release one is signed with Expo's debug keystore too
+  // unless the admin brings their own — fine for sideloading, refused by the
+  // Play Store. So the choice exists for release builds only, and the keystore
+  // settings only once it is made.
+  {
+    name: "own_keystore",
+    label: "Sign with your own keystore (otherwise the debug key: fine for sideloading, not for the Play Store)",
+    type: "Bool",
+    default: false,
+    showIf: { build_type: "release" },
+  },
+  {
+    name: "keystore_file",
+    label: "Keystore file (.jks, .keystore or .p12, uploaded to the file store)",
+    type: "String",
+    required: true,
+    server_query: "store_files:jks,keystore,p12",
+    showIf: { build_type: "release", own_keystore: true },
+  },
+  {
+    name: "keystore_alias",
+    label: "Key alias",
+    type: "String",
+    required: true,
+    showIf: { build_type: "release", own_keystore: true },
+  },
+  {
+    name: "keystore_password",
+    label: "Keystore password (also the key's password)",
+    type: "String",
+    input_type: "password",
+    required: true,
+    showIf: { build_type: "release", own_keystore: true },
+  },
+];
+
+/** The builds offered beside the web bundle. The build type picks the Gradle
+ * task and so where the APK lands; the environment is this module's settings.
+ * A setting left blank is left out, so the build falls back to the server's own
+ * environment. */
 function targets(configuration) {
   return {
     android: {
-      label: "Android APK",
-      command: "npm run build:android",
-      artifact: "{{ project }}/android/app/build/outputs/apk/release/app-release.apk",
+      label: "Android app",
+      // One script per build type and package; each leaves its result at a
+      // fixed path outside `android/`, which `prebuild --clean` deletes.
+      command: "npm run build:android:{{ build_type }}-{{ package_format }}",
+      artifact: "{{ project }}/android-output/app-{{ build_type }}.{{ package_format }}",
+      options: android_options,
+      operations: {
+        generate_keystore: {
+          label: "Generate a keystore",
+          description:
+            "Creates a new signing key in the file store (keys/<subdomain>-release.p12) and fills " +
+            "in the settings above. A blank password gets a strong one, shown once.",
+          showIf: { build_type: "release", own_keystore: true },
+          run: generateKeystore,
+        },
+      },
       env: {
         ANDROID_HOME: configuration.android_home || "",
         JAVA_HOME: configuration.java_home || "",
+        // The keystore password reaches Gradle here, never through a file in
+        // the project (`app.config.js` reads it from the environment).
+        FELDSPAR_KEYSTORE_PASSWORD: "{{ keystore_password }}",
       },
       // Checked before a build starts and shown on the button: a server without
       // the toolchain says so at once, instead of Gradle saying it minutes into a
@@ -154,6 +254,64 @@ function targets(configuration) {
         },
       ],
     },
+  };
+}
+
+/** Generate a signing keystore for the application: an RSA 2048 key with a
+ * self-signed certificate valid for 10,000 days (Google Play wants validity
+ * past 2033), as PKCS12, which Gradle and Java's `keytool` read. Pure
+ * JavaScript (node-forge), so it needs no JDK and no permission to run one.
+ *
+ * Saltcorn writes the file into the application's store — refusing to replace
+ * an existing one — and saves the settings; this only makes them. The alias
+ * and password are the ones in the form, or `upload` and a random password. */
+function generateKeystore(ctx) {
+  const forge = require("node-forge");
+  const settings = ctx.settings || {};
+  const app = ctx.app || {};
+  const alias = String(settings.keystore_alias || "").trim() || "upload";
+  let password = String(settings.keystore_password || "");
+  const generated = password === "";
+  if (generated) {
+    password = forge.util.encode64(forge.random.getBytesSync(18)).replace(/[+/=]/g, "x");
+  }
+  if (password.length < 6) {
+    throw new Error("A keystore password needs at least 6 characters; Java refuses shorter ones.");
+  }
+
+  const keys = forge.pki.rsa.generateKeyPair({ bits: 2048 });
+  const cert = forge.pki.createCertificate();
+  cert.publicKey = keys.publicKey;
+  // Positive, and random so two keys are never confused for each other.
+  cert.serialNumber = `01${forge.util.bytesToHex(forge.random.getBytesSync(15))}`;
+  cert.validity.notBefore = new Date();
+  cert.validity.notAfter = new Date(Date.now() + 10000 * 24 * 60 * 60 * 1000);
+  const subject = [{ name: "commonName", value: String(app.name || app.subdomain || "App") }];
+  cert.setSubject(subject);
+  cert.setIssuer(subject);
+  cert.sign(keys.privateKey, forge.md.sha256.create());
+  const p12 = forge.pkcs12.toPkcs12Asn1(keys.privateKey, [cert], password, {
+    algorithm: "3des",
+    friendlyName: alias,
+    generateLocalKeyId: true,
+  });
+
+  const name = String(app.subdomain || "app").toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+  const path = `keys/${name}-release.p12`;
+  const keep =
+    "Keep a copy of the keystore and its password somewhere safe: an app signed with it " +
+    "can only be updated with it.";
+  return {
+    files: [{ path, base64: forge.util.encode64(forge.asn1.toDer(p12).getBytes()) }],
+    settings: {
+      own_keystore: true,
+      keystore_file: path,
+      keystore_alias: alias,
+      keystore_password: password,
+    },
+    message: generated
+      ? `Generated ${path} with the key "${alias}". Its password, shown only now: ${password} — ${keep}`
+      : `Generated ${path} with the key "${alias}" and the password you entered. ${keep}`,
   };
 }
 
@@ -416,6 +574,7 @@ matching types and hooks exist at the next build.
 | \`helper.ts\` | how a request is made and how a failure is reported — the same in every application |
 | \`hooks.ts\` | React hooks over that client, one set per table |
 | \`config.ts\` | the application's URL, which a phone sends its requests to |
+| \`native.json\` | the APK's application ID, version, icon and build type, which \`app.config.js\` reads |
 | \`schema.sql\` | a description of this application's tables, for writing SQL against |
 | \`SKILL.md\` | the half of the application that is *not* in this repository |
 
@@ -445,12 +604,17 @@ feldspar api add-query --app ${ctx.app.subdomain} --name recentPosts \\
  * `react-native`, `react-dom` and `react-native-web` it was tested with, and a
  * project that mixes SDKs builds on neither target.
  *
- * `build` is the web bundle Saltcorn serves. `build:android` is the Android
- * target: `expo prebuild` writes the native project into `android/` (generated,
- * ignored by git), and Gradle builds a release APK from it. A release build
- * because it carries its JavaScript inside — a debug one would need a Metro dev
- * server running beside the phone. `--no-daemon` because it is a server that
- * runs it, and a Gradle daemon left behind is a gigabyte nobody asked for. */
+ * `build` is the web bundle Saltcorn serves. The `build:android:<type>-<package>`
+ * scripts are the Android target, one per build type (release, debug) and
+ * package (apk, aab): `expo prebuild --clean` writes the native project into
+ * `android/` afresh (generated, ignored by git, so a changed application id or
+ * icon is never half-applied), Gradle builds it (`assemble…` for an APK,
+ * `bundle…` for an AAB), and the result is copied to
+ * `android-output/app-<type>.<package>`, where the server picks it up. Every
+ * build carries its JavaScript inside (`app.config.js` sees to the debug one),
+ * so none needs a Metro dev server beside the phone. `--no-daemon` because it is
+ * a server that runs it, and a Gradle daemon left behind is a gigabyte nobody
+ * asked for. */
 function packageJson(ctx) {
   const buildProperties = cleartext(ctx)
     ? `,\n    "expo-build-properties": "~57.0.22"`
@@ -464,7 +628,7 @@ function packageJson(ctx) {
     "start": "expo start",
     "build": "tsc --noEmit && expo export --platform web --output-dir dist",
     "typecheck": "tsc --noEmit",
-    "build:android": "expo prebuild --platform android --no-install && cd android && ./gradlew assembleRelease --no-daemon"
+${androidScripts()}
   },
   "dependencies": {
     "@expo/metro-runtime": "~57.0.16",
@@ -482,6 +646,29 @@ function packageJson(ctx) {
 `;
 }
 
+/** The `build:android:<type>-<package>` scripts (see `packageJson`), as
+ * `package.json` lines. A debug AAB is not offered in the form, but its script
+ * exists: a release build switched back to debug keeps "aab" in its (then
+ * hidden) package setting. */
+function androidScripts() {
+  const prebuild = "expo prebuild --platform android --clean --no-install";
+  const lines = [];
+  for (const type of ["release", "debug"]) {
+    const Type = type[0].toUpperCase() + type.slice(1);
+    for (const [pkg, task, dir] of [
+      ["apk", `assemble${Type}`, "apk"],
+      ["aab", `bundle${Type}`, "bundle"],
+    ]) {
+      const output = `app/build/outputs/${dir}/${type}/app-${type}.${pkg}`;
+      lines.push(
+        `    "build:android:${type}-${pkg}": "${prebuild} && cd android && ./gradlew ${task} ` +
+          `--no-daemon && mkdir -p ../android-output && cp ${output} ../android-output/app-${type}.${pkg}"`,
+      );
+    }
+  }
+  return lines.join(",\n");
+}
+
 /** Where the APK sends its requests: the `mobile_url` setting when the admin
  * gave one, the application's own URL otherwise. Without a trailing slash, since
  * the client appends paths that start with one. */
@@ -496,8 +683,8 @@ function mobileUrl(ctx) {
  * carry the permission it does not need. Decided when the project is written. */
 const cleartext = (ctx) => /^http:/i.test(mobileUrl(ctx));
 
-/** The Android application id: `com.feldspar.<subdomain>`, as Java package
- * segments — lowercase letters, digits and `_`, starting with a letter. */
+/** The default Android application id: `com.feldspar.<subdomain>`, as Java
+ * package segments — lowercase letters, digits and `_`, starting with a letter. */
 function androidPackage(ctx) {
   let segment = String(ctx.app.subdomain || ctx.name || "app")
     .toLowerCase()
@@ -506,26 +693,181 @@ function androidPackage(ctx) {
   return `com.feldspar.${segment}`;
 }
 
-/** Expo's app configuration. `web.output: "single"` is an SPA — one
- * `index.html` Saltcorn's fallback serves for every path. */
-function appJson(ctx) {
-  const config = {
-    expo: {
-      name: ctx.app.name,
-      slug: ctx.name,
-      version: "1.0.0",
+/** A store-relative path as a path relative to the project directory, which
+ * is what Expo resolves `icon` against. `null` for a path that climbs. */
+function projectRelative(ctx, storePath) {
+  const parts = String(storePath).split("/").filter((p) => p && p !== ".");
+  if (parts.includes("..")) return null;
+  const project = String(ctx.project || "").split("/").filter((p) => p && p !== ".");
+  let common = 0;
+  while (common < project.length && project[common] === parts[common]) common++;
+  return [...project.slice(common).map(() => ".."), ...parts.slice(common)].join("/");
+}
+
+/** `native.json`: the APK's settings, rewritten on every build so a changed
+ * setting reaches the next APK. Checked by `app.config.js` when the Android
+ * project is written, not here: this is written by every web build too, which
+ * a bad version must not fail. The keystore password is not in it: it reaches
+ * the build through its environment. */
+function nativeJson(ctx) {
+  const settings = ctx.settings || {};
+  const text = (name) => String(settings[name] ?? "").trim();
+  const icon = text("app_icon");
+  const buildType = text("build_type") || ANDROID_DEFAULTS.build_type;
+  // Its own keystore signs a release build only; the password is not here.
+  const keystore = text("keystore_file");
+  const signing =
+    buildType === "release" && text("own_keystore") === "true"
+      ? {
+          keystore: keystore ? projectRelative(ctx, keystore) ?? keystore : null,
+          alias: text("keystore_alias"),
+        }
+      : null;
+  return `${JSON.stringify(
+    {
+      appId: text("app_id") || androidPackage(ctx),
+      version: text("app_version") || ANDROID_DEFAULTS.app_version,
+      icon: icon ? projectRelative(ctx, icon) ?? icon : null,
+      buildType,
+      signing,
+    },
+    null,
+    2,
+  )}\n`;
+}
+
+/** Expo's app configuration, as code so it can read what Saltcorn generates.
+ * The application id, version, icon and signing come from `native.json` (the
+ * application's "Android app" settings) and are checked when `expo prebuild`
+ * writes the Android project — not on the web export, which reads this file
+ * too — so a bad one fails the APK build with a sentence rather than Gradle's.
+ * `web.output: "single"` is an SPA — one `index.html` Saltcorn's fallback
+ * serves for every path. Written once: the project's to change. */
+function appConfigJs(ctx) {
+  const cleartextPlugin = cleartext(ctx)
+    ? `\n        ["expo-build-properties", { android: { usesCleartextTraffic: true } }],`
+    : "";
+  return `// Expo's configuration. The Android settings come from the application's
+// "Android app" settings in Saltcorn, which every build writes into
+// ${ctx.runtime}/native.json.
+const fs = require("fs");
+const path = require("path");
+const { withAppBuildGradle, withGradleProperties } = require("expo/config-plugins");
+
+const native = JSON.parse(fs.readFileSync(path.join(__dirname, ${JSON.stringify(`${ctx.runtime}/native.json`)}), "utf8"));
+
+// Android installs an update only over a lower versionCode, so it follows the
+// version: 1.2.3 is 1002003.
+const version = /^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$/.exec(native.version || "");
+const versionCode = version
+  ? Number(version[1]) * 1000000 + Number(version[2]) * 1000 + Number(version[3])
+  : undefined;
+const iconExists = Boolean(native.icon) && fs.existsSync(path.join(__dirname, native.icon));
+
+/** The Android settings, checked when \`expo prebuild\` writes the Android
+ * project, so a bad one fails the APK build with a sentence rather than
+ * Gradle's — and never the web export, which evaluates this file too. */
+function checkAndroid() {
+  if (!/^[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]*)+$/.test(native.appId)) {
+    throw new Error(
+      \`The application ID "\${native.appId}" is not a Java package name: two or more dot-separated \` +
+        "segments of letters, digits and _, each starting with a letter (com.example.todo).",
+    );
+  }
+  if (!version) {
+    throw new Error(\`The version "\${native.version}" is not major.minor.patch, e.g. 1.2.3.\`);
+  }
+  if (versionCode === 0) {
+    throw new Error("The version 0.0.0 cannot be installed; use 0.0.1 or later.");
+  }
+  if (native.icon) {
+    if (!/\\.(png|jpe?g)$/i.test(native.icon)) {
+      throw new Error(\`The icon "\${native.icon}" is not a PNG or JPEG, which Android needs.\`);
+    }
+    if (!iconExists) {
+      throw new Error(\`The icon "\${native.icon}" does not exist (relative to the project).\`);
+    }
+  }
+  if (native.signing) {
+    const { keystore, alias } = native.signing;
+    if (!keystore || !fs.existsSync(path.join(__dirname, keystore))) {
+      throw new Error(\`The keystore "\${keystore || ""}" does not exist (relative to the project).\`);
+    }
+    if (!alias) throw new Error("Signing with your own keystore needs the key's alias.");
+    if (!process.env.FELDSPAR_KEYSTORE_PASSWORD) {
+      throw new Error(
+        "Signing with your own keystore needs its password; set it in the application's " +
+          "Android app settings and build from Saltcorn.",
+      );
+    }
+  }
+}
+
+/** A Groovy string literal: single-quoted, so a \`$\` in it is not interpolated. */
+const groovy = (text) => \`'\${String(text).replace(/\\\\/g, "\\\\\\\\").replace(/'/g, "\\\\'")}'\`;
+
+/** What \`app/build.gradle\` needs beyond Expo's: a debug build that carries its
+ * JavaScript bundle (as a release one does, so it runs without a Metro dev
+ * server beside the phone), and a release build signed with the application's
+ * own keystore. The password is read from the build's environment, so it is
+ * never written into the project. */
+const withAndroidBuild = (config) =>
+  withAppBuildGradle(config, (mod) => {
+    checkAndroid();
+    let gradle = mod.modResults.contents;
+    if (native.buildType === "debug" && !gradle.includes("debuggableVariants = []")) {
+      gradle = gradle.replace(/react\\s*\\{/, (open) => \`\${open}\\n    debuggableVariants = []\`);
+    }
+    if (native.buildType === "release" && native.signing && !gradle.includes("FELDSPAR_KEYSTORE_PASSWORD")) {
+      const keystore = path.resolve(__dirname, native.signing.keystore);
+      gradle = gradle.replace(
+        /signingConfigs\\s*\\{/,
+        (open) =>
+          \`\${open}\\n        release {\\n\` +
+          \`            storeFile file(\${groovy(keystore)})\\n\` +
+          \`            storePassword System.getenv("FELDSPAR_KEYSTORE_PASSWORD")\\n\` +
+          \`            keyAlias \${groovy(native.signing.alias)}\\n\` +
+          \`            keyPassword System.getenv("FELDSPAR_KEYSTORE_PASSWORD")\\n\` +
+          \`        }\`,
+      );
+      gradle = gradle.replace(
+        /(buildTypes\\s*\\{[\\s\\S]*?release\\s*\\{[\\s\\S]*?)signingConfig signingConfigs\\.debug/,
+        "$1signingConfig signingConfigs.release",
+      );
+    }
+    mod.modResults.contents = gradle;
+    return mod;
+  });
+
+/** Native code for 64-bit devices only: \`arm64-v8a\` (nearly every phone) and
+ * \`x86_64\` (an emulator on a PC). Each architecture adds 20–30 MB to the APK,
+ * and the 32-bit ones (\`armeabi-v7a\`, \`x86\`) are for devices too old to matter. */
+const ARCHITECTURES = "arm64-v8a,x86_64";
+const withArchitectures = (config) =>
+  withGradleProperties(config, (mod) => {
+    mod.modResults = mod.modResults.filter(
+      (item) => !(item.type === "property" && item.key === "reactNativeArchitectures"),
+    );
+    mod.modResults.push({ type: "property", key: "reactNativeArchitectures", value: ARCHITECTURES });
+    return mod;
+  });
+
+module.exports = () =>
+  withArchitectures(
+    withAndroidBuild({
+      name: ${JSON.stringify(ctx.app.name)},
+      slug: ${JSON.stringify(ctx.name)},
+      version: native.version,
       orientation: "portrait",
       userInterfaceStyle: "light",
-      android: { package: androidPackage(ctx) },
+      ...(iconExists ? { icon: native.icon } : {}),
+      android: { package: native.appId, ...(versionCode ? { versionCode } : {}) },
       web: { output: "single", bundler: "metro" },
-    },
-  };
-  if (cleartext(ctx)) {
-    config.expo.plugins = [
-      ["expo-build-properties", { android: { usesCleartextTraffic: true } }],
-    ];
-  }
-  return `${JSON.stringify(config, null, 2)}\n`;
+      plugins: [${cleartextPlugin}
+      ],
+    }),
+  );
+`;
 }
 
 /** Expo's base settings (it knows what Metro and React Native expect), with the
@@ -546,13 +888,15 @@ const TSCONFIG = `{
 `;
 
 /** The generated runtime is part of the source; `android/` and `ios/` are what
- * `expo prebuild` writes, and are rewritten from `app.json` on every target
- * build; `build-logs/` is where the server writes each target build's log. The last lines are the session files `feldspar auth token` writes. */
+ * `expo prebuild` writes, and are rewritten from `app.config.js` on every target
+ * build; `android-output/` is where each build leaves its APK or AAB;
+ * `build-logs/` is where the server writes each target build's log. The last lines are the session files `feldspar auth token` writes. */
 const GITIGNORE = `node_modules
 dist
 .expo
 android
 ios
+android-output
 build-logs
 *.local
 .feldspar-session
@@ -1114,15 +1458,19 @@ function agentsMd(ctx) {
   return `# ${ctx.app.name}
 
 An Expo (React Native) application, served by Saltcorn on the web at
-${ctx.app.url} and built into an Android APK with the admin UI's
-**Build Android APK** button (\`npm run build:android\`).
+${ctx.app.url} and built into an Android APK or AAB with the admin UI's
+**Build Android app** button (\`npm run build:android:<type>-<package>\`, e.g.
+\`build:android:release-aab\`, by the application's "Build type" and "Package"
+settings; the result lands in \`android-output/\`). The application ID, version,
+icon and signing are the application's "Android app" settings in Saltcorn,
+written into \`${ctx.runtime}/native.json\` on every build.
 
 ## Layout
 
 | path | what it is |
 |---|---|
 | \`index.ts\` | the entry point, on every platform |
-| \`app.json\` | Expo's configuration — the app's name and Android package |
+| \`app.config.js\` | Expo's configuration — reads the APK's settings from \`${ctx.runtime}/native.json\` |
 | \`src/Root.tsx\` | the providers around the shell |
 | \`src/App.tsx\` | the shell: header, nav, the current screen |
 | \`src/routes.tsx\` | the routes, as data |
@@ -1171,7 +1519,7 @@ The query becomes a typed method on \`${ctx.client}\` at the next build.
 function scaffold(ctx) {
   const files = [
     { path: "package.json", contents: packageJson(ctx) },
-    { path: "app.json", contents: appJson(ctx) },
+    { path: "app.config.js", contents: appConfigJs(ctx) },
     { path: "tsconfig.json", contents: TSCONFIG },
     { path: ".gitignore", contents: GITIGNORE },
     { path: "AGENTS.md", contents: agentsMd(ctx) },
@@ -1198,6 +1546,7 @@ function runtime(ctx) {
   return [
     { path: at(ctx.runtime, "hooks.ts"), contents: hooksTs(ctx) },
     { path: at(ctx.runtime, "config.ts"), contents: configTs(ctx) },
+    { path: at(ctx.runtime, "native.json"), contents: nativeJson(ctx) },
     { path: at(ctx.runtime, "README.md"), contents: runtimeReadme(ctx) },
   ];
 }
@@ -1213,7 +1562,7 @@ module.exports = {
       label: "React Native",
       description:
         "Saltcorn creates an Expo (React Native) project, generates a typed client and hooks " +
-        "for your tables, and serves it on the web; an Android APK is one more button. " +
+        "for your tables, and serves it on the web; an Android APK or AAB is one more button. " +
         "Pick a file store and a name.",
       config_fields,
       build,

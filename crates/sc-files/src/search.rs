@@ -562,6 +562,55 @@ pub async fn find_files(
     Ok(found)
 }
 
+// --- finding files by type --------------------------------------------------
+
+/// Directories [`find_by_extension`] does not descend into, on top of
+/// [`DEFAULT_EXCLUDED_DIRS`]: the native projects mobile tooling writes (Expo,
+/// Capacitor and Cordova all use these names), which hold dozens of generated
+/// launcher icons and a debug keystore that are copies, not sources.
+const GENERATED_PROJECT_DIRS: [&str; 2] = ["android", "ios"];
+
+/// The files under `dir` the caller may see whose extension is one of
+/// `extensions` (any case, without the dot), in path order — the choices for a
+/// setting that names a file of a kind, such as an app icon or a keystore.
+///
+/// Dependency and generated directories are skipped ([`DEFAULT_EXCLUDED_DIRS`]
+/// and [`GENERATED_PROJECT_DIRS`]): a project's `node_modules` holds thousands
+/// of images and none of them is the app's.
+pub async fn find_by_extension(
+    store: &dyn FileStore,
+    store_min_role: Option<u8>,
+    role: u8,
+    dir: &str,
+    extensions: &[String],
+) -> Result<FoundFiles> {
+    let excluded: Vec<&str> = DEFAULT_EXCLUDED_DIRS
+        .iter()
+        .chain(GENERATED_PROJECT_DIRS.iter())
+        .copied()
+        .collect();
+    let walked = walk_store(store, store_min_role, role, dir, &excluded).await?;
+    let mut entries: Vec<Entry> = walked
+        .entries
+        .into_iter()
+        .filter(|e| !e.is_dir && has_extension(&e.name, extensions))
+        .collect();
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(FoundFiles {
+        entries,
+        truncated: walked.truncated,
+    })
+}
+
+/// Whether a file name ends in one of `extensions`, in any case.
+fn has_extension(name: &str, extensions: &[String]) -> bool {
+    name.rsplit_once('.').is_some_and(|(_, ext)| {
+        extensions
+            .iter()
+            .any(|known| ext.eq_ignore_ascii_case(known.trim_start_matches('.')))
+    })
+}
+
 // --- walking the visible tree ------------------------------------------------
 
 /// Every entry under `dir` the caller may see, files and directories, depth

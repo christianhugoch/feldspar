@@ -21,7 +21,7 @@
 //! actions to a fifth. So the field is rendered as text, the module carries an
 //! issue saying which field and which type, and the admin can see both.
 
-use sc_types::{BasicType, FormField, TypeRef};
+use sc_types::{BasicType, FormField, ShowIfCondition, TypeRef};
 use serde_json::Value as Json;
 
 /// What a translated field set could not express faithfully.
@@ -155,11 +155,37 @@ fn config_field(field: &Json, owner: &str) -> Result<Option<(FormField, Option<S
     if let Some(query) = field.get("server_query").and_then(Json::as_str) {
         form_field = form_field.server_query(query);
     }
+    form_field
+        .show_if
+        .extend(show_if_conditions(field.get("showIf")));
     // `sublabel` — v1's sentence under the control — has nowhere to go:
     // `FormField` carries no help text (a `ConfigDef` does, and that is a
     // settings-screen type). Dropped deliberately rather than folded into the
     // label, where it would read as part of the name.
     Ok(Some((form_field, issue)))
+}
+
+/// Read a v1-style `showIf`: when something (a setting, or an operation's
+/// button) is shown.
+///
+/// `{ build_type: "release", own_keystore: true }` means "only while
+/// `build_type` is `release` **and** `own_keystore` is ticked". A list allows
+/// several values: `{ build_type: ["release", "staging"] }`. Anything that is
+/// not an object means no conditions, so always shown.
+pub(crate) fn show_if_conditions(declared: Option<&Json>) -> Vec<ShowIfCondition> {
+    let Some(Json::Object(conditions)) = declared else {
+        return Vec::new();
+    };
+    conditions
+        .iter()
+        .map(|(setting, declared)| {
+            let allowed = match declared {
+                Json::Array(list) => list.clone(),
+                single => vec![single.clone()],
+            };
+            ShowIfCondition::new(setting.clone(), allowed)
+        })
+        .collect()
 }
 
 /// v1's type names, and what they are here.
@@ -267,6 +293,22 @@ mod tests {
         assert_eq!(fields[0].base.label, "Channel");
         assert_eq!(fields[0].base.type_, TypeRef::Basic(BasicType::Text));
         assert!(fields[0].required);
+    }
+
+    #[test]
+    fn a_v1_show_if_becomes_the_fields_condition() {
+        let (fields, issues) = translate(json!([
+            { "name": "alias", "type": "String",
+              "showIf": { "own_key": true, "build_type": ["release", "staging"] } }
+        ]));
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(
+            fields[0].show_if,
+            [
+                ShowIfCondition::new("own_key", vec![json!(true)]),
+                ShowIfCondition::new("build_type", vec![json!("release"), json!("staging")]),
+            ]
+        );
     }
 
     #[test]
