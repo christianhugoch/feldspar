@@ -2,6 +2,20 @@
 
 Changes in reverse chronological order.
 
+## A restore keeps calculated fields that read through a reference
+
+A calculated field whose expression joins through a `Key` (`(attendeeⱵname).split(' ')[0]`)
+was in the backup but missing after a restore. The restore added columns in two passes — plain,
+then references — and a calculated field counted as plain, so its expression was checked before
+the `Key` it reads through existed and was refused (`attendee` is not a field of the table). The
+refusal only showed up as a warning in the restore report.
+
+`restore_backup` now adds columns in three passes: plain, references, then calculated fields
+(`FieldPass`, `restore_calc_fields`). The calculated fields are retried until a round adds none,
+so one that reads another calculated field — in its own table or, through a join, in a table
+restored later — no longer depends on the backup's order. Test:
+`backup_api::a_calculated_field_reading_through_a_reference_is_restored`.
+
 ## Backups carry everything else an installation is made of
 
 Until now a backup skipped every `_fd_*` table it had no section for. Restoring one lost the

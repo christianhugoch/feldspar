@@ -160,17 +160,20 @@ pub async fn restore_backup(
             Err(e) => report.skipped(format!("table `{name}`: {}", e.causes())),
         }
     }
-    // Columns in two passes over every table: everything that is not a reference,
-    // and then the references. A `Key` takes its storage type from the column it
-    // points at (the schema editor resolves it), and that column may be in a table
-    // further down the list — or in this same table, when a row points at its own
-    // kind. One pass per table would make a backup's column order decide whether
-    // half its references survived.
-    for references in [false, true] {
+    // Columns in three passes over every table: the plain columns, then the
+    // references, then the calculated fields. A `Key` takes its storage type from
+    // the column it points at (the schema editor resolves it), and that column may
+    // be in a table further down the list — or in this same table, when a row
+    // points at its own kind. A calculated field's expression is checked against
+    // the columns it reads, and a join (`authorⱵname`) reads through a `Key` —
+    // so the calculated fields wait for every reference. One pass per table would
+    // make a backup's column order decide whether half of them survived.
+    for pass in [FieldPass::Plain, FieldPass::Reference] {
         for name in &restored_tables {
-            restore_fields(catalog, &entries, name, references, &mut report).await;
+            restore_fields(catalog, &entries, name, pass, &mut report).await;
         }
     }
+    restore_calc_fields(catalog, &entries, &restored_tables, &mut report).await;
 
     // Rows in dependency order, so a row holding a foreign key is inserted after
     // the row it points at.
@@ -438,8 +441,55 @@ async fn restore_table(catalog: &Catalog, entries: &Entries, name: &str) -> Resu
     })
 }
 
-/// Add the columns the backup describes and this table has not got — the
-/// references (`references == true`) or everything else.
+/// Which of the column passes in [`restore_backup`] a field belongs to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FieldPass {
+    Plain,
+    Reference,
+    Calc,
+}
+
+impl FieldPass {
+    fn of(field: &Map<String, Json>) -> FieldPass {
+        match field
+            .get("kind")
+            .and_then(|kind| kind.get("type"))
+            .and_then(Json::as_str)
+        {
+            Some("key") => FieldPass::Reference,
+            Some("calc") => FieldPass::Calc,
+            _ => FieldPass::Plain,
+        }
+    }
+}
+
+/// The fields of one pass that the backup describes for `name` and the live
+/// table has not got, with their names.
+fn missing_fields(
+    catalog: &Catalog,
+    entries: &Entries,
+    name: &str,
+    pass: FieldPass,
+) -> Result<Vec<(String, Map<String, Json>)>> {
+    let Ok(document) = json_entry(entries, &format!("tables/{name}/table.json")) else {
+        return Ok(Vec::new());
+    };
+    let live = catalog.require(name)?;
+    Ok(array_field(&document, "fields")
+        .iter()
+        .filter_map(Json::as_object)
+        .filter(|field| FieldPass::of(field) == pass)
+        .filter_map(|field| {
+            let field_name = field.get("name").and_then(Json::as_str).unwrap_or_default();
+            // Unnamed, or a column an existing table already has: not news.
+            (!field_name.is_empty() && live.field(field_name).is_none())
+                .then(|| (field_name.to_owned(), field.clone()))
+        })
+        .collect())
+}
+
+/// Add the columns of one pass that the backup describes and this table has not
+/// got.
 ///
 /// A column that is already here is left alone rather than altered: its type is
 /// the database's answer, and a restore that rewrote a live column's type would
@@ -448,48 +498,67 @@ async fn restore_fields(
     catalog: &Catalog,
     entries: &Entries,
     name: &str,
-    references: bool,
+    pass: FieldPass,
     report: &mut RestoreReport,
 ) {
-    let Ok(document) = json_entry(entries, &format!("tables/{name}/table.json")) else {
-        return;
+    let missing = match missing_fields(catalog, entries, name, pass) {
+        Ok(missing) => missing,
+        Err(e) => {
+            report.skipped(format!("columns of `{name}`: {}", e.causes()));
+            return;
+        }
     };
-    for value in array_field(&document, "fields") {
-        let Some(field) = value.as_object() else {
-            continue;
-        };
-        let is_reference = field
-            .get("kind")
-            .and_then(|kind| kind.get("type"))
-            .and_then(Json::as_str)
-            == Some("key");
-        if is_reference != references {
-            continue;
-        }
-        let field_name = field
-            .get("name")
-            .and_then(Json::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        if field_name.is_empty() {
-            continue;
-        }
-        let live = match catalog.require(name) {
-            Ok(table) => table,
-            Err(e) => {
-                report.skipped(format!("columns of `{name}`: {}", e.causes()));
-                return;
-            }
-        };
-        if live.field(&field_name).is_some() {
-            // A column an existing table already has: not news.
-            continue;
-        }
+    for (field_name, field) in missing {
         // The primary key travels as what it is — a field that says it is one —
         // so a restored table has the key the backup had, composite or not.
         // Nothing invents a key here or anywhere else (GOALS).
-        let result = add_field(catalog, name, field).await;
+        let result = add_field(catalog, name, &field).await;
         report.outcome(&format!("column `{name}.{field_name}`"), result);
+    }
+}
+
+/// The calculated fields of every restored table, after all the other columns.
+///
+/// One calculated field may read another — in its own table or, through a join,
+/// in a table further down the list — so a field the schema editor refuses is
+/// tried again once others have gone in, until a round adds nothing. Only what
+/// is still refused then is reported, with the reason the last attempt gave.
+async fn restore_calc_fields(
+    catalog: &Catalog,
+    entries: &Entries,
+    tables: &[String],
+    report: &mut RestoreReport,
+) {
+    let mut pending = Vec::new();
+    for name in tables {
+        match missing_fields(catalog, entries, name, FieldPass::Calc) {
+            Ok(missing) => pending.extend(
+                missing
+                    .into_iter()
+                    .map(|(field_name, field)| (name.clone(), field_name, field)),
+            ),
+            Err(e) => report.skipped(format!("columns of `{name}`: {}", e.causes())),
+        }
+    }
+    loop {
+        let mut refused = Vec::new();
+        let before = pending.len();
+        for (name, field_name, field) in pending {
+            match add_field(catalog, &name, &field).await {
+                Ok(line) => report.outcome(&format!("column `{name}.{field_name}`"), Ok(line)),
+                Err(e) => refused.push((name, field_name, field, e)),
+            }
+        }
+        if refused.is_empty() || refused.len() == before {
+            for (name, field_name, _, e) in refused {
+                report.outcome(&format!("column `{name}.{field_name}`"), Err(e));
+            }
+            return;
+        }
+        pending = refused
+            .into_iter()
+            .map(|(name, field_name, field, _)| (name, field_name, field))
+            .collect();
     }
 }
 

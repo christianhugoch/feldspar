@@ -2509,3 +2509,90 @@ async fn analytics_streams_workflows_settings_translations_and_connections_trave
     );
     Ok(())
 }
+
+/// A calculated field that reads through a reference (`writerⱵname`) comes back.
+///
+/// The restore adds the plain columns, then the references, then the calculated
+/// fields: an expression is checked against the columns it reads, and a join
+/// reads through a `Key` that is not there until the references are in. The
+/// `books` field also reads a calculated field of `writers`, a table restored
+/// after it, which only goes in on a second round.
+#[tokio::test]
+async fn a_calculated_field_reading_through_a_reference_is_restored() -> sc_error::Result<()> {
+    let mut source = setup().await?;
+    for (table, field) in [
+        (
+            "writers",
+            json!({ "name": "id", "type": "int", "primary_key": true }),
+        ),
+        ("writers", json!({ "name": "name", "type": "text" })),
+        (
+            "writers",
+            json!({ "name": "surname", "kind": { "type": "calc",
+                    "expression": "name.split(' ')[1]" } }),
+        ),
+        (
+            "books",
+            json!({ "name": "id", "type": "int", "primary_key": true }),
+        ),
+        (
+            "books",
+            json!({ "name": "writer", "kind": { "type": "key", "target_table": "writers",
+                    "target_field": "id", "summary_field": "name" } }),
+        ),
+        (
+            "books",
+            json!({ "name": "first_name", "kind": { "type": "calc",
+                    "expression": "(writerⱵname).split(' ')[0]" } }),
+        ),
+        (
+            "books",
+            json!({ "name": "writer_surname", "kind": { "type": "calc",
+                    "expression": "writerⱵsurname" } }),
+        ),
+    ] {
+        if field["name"] == json!("id") {
+            let (status, body) = source
+                .client
+                .send("POST", "/api/tables", Some(json!({ "name": table })))
+                .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+        }
+        let (status, body) = source
+            .client
+            .send("POST", &format!("/api/tables/{table}/fields"), Some(field))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let archive = backup_everything(&mut source).await;
+
+    let mut target = setup().await?;
+    let report = restore_everything(&mut target, &archive).await;
+    for column in [
+        "books.first_name",
+        "books.writer_surname",
+        "writers.surname",
+    ] {
+        assert!(
+            report_has(&report, "restored", &format!("column `{column}`")),
+            "`{column}` should be restored: {report}"
+        );
+    }
+    let (status, fields) = target
+        .client
+        .send("GET", "/api/tables/books/fields", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{fields}");
+    let first_name = fields
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == json!("first_name"))
+        .unwrap_or_else(|| panic!("the calculated field should be restored: {fields}"));
+    assert_eq!(first_name["kind"]["type"], json!("calc"));
+    assert_eq!(
+        first_name["kind"]["expression"],
+        json!("(writerⱵname).split(' ')[0]")
+    );
+    Ok(())
+}
