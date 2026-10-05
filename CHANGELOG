@@ -2,6 +2,41 @@
 
 Changes in reverse chronological order.
 
+## `view_app` can look signed out; GPT-6 window, budget and apply_patch
+
+**`signed_out`.** Every `view_app` call takes `signed_out: true` to look at the preview as an
+anonymous visitor — e.g. a screenshot of the signed-out homepage, which until now the tool could
+not take: it always signed in as the run's caller. A call without it signs back in. A preview
+used to be reachable only with the run's session cookie, so a signed-out browser got a 404; the
+driver now gives each run's browser context a random `sc_preview` pass cookie the run's previews
+accept (`PREVIEW_COOKIE`, `AppMounts::allow_preview_token`, which replaces
+`allow_preview_session`), and makes the session lazily on the first signed-in call
+(`BrowserRequest::user` is now `Option`). Switching modes deletes or restores the session cookie,
+clears the origin's local/session storage and IndexedDB, and reloads the page. A signed-out call
+needs no user, so a triggered run with no `view_app_user` can look at public pages. Test:
+`view_app::signed_out_looks_as_a_visitor_and_signs_back_in`.
+
+**GPT-6.** The model rules now give `gpt-6` and later a 1M-token context window with a 500k
+working budget (`GPT6_WORKING_BUDGET`, for cost; every other built-in rule stays capped at 250k),
+and the native `apply_patch` tool, which was matched on `gpt-5` literally. Test:
+`capabilities::tests::gpt6_has_a_million_token_window_and_a_half_million_budget`.
+
+## `view_app` offers screenshots to gpt-6 models
+
+The `build-fanacity` agent runs on `gpt-6.1-sol`, and its `view_app` tool had no `screenshot`
+action: the tool offers it only to a model with `vision`, and the built-in OpenAI vision rule
+named `gpt-4o`, `gpt-4.1` and `gpt-5` literally, so every later generation counted as text-only.
+`openai_vision` now reads the generation number (`gpt-5` and up), like the reasoning rule beside
+it. A model row's `vision` setting still overrides it. Test:
+`capabilities::tests::a_later_gpt_generation_takes_images`.
+
+## Migration for `users.disabled` and `users.language`
+
+`TABLES_RENAME.sql` §12 adds the two built-in users columns to a database whose users table
+predates them. The bootstrap never adds columns to an existing users table, so such a server
+generated a `UsersRow` without `disabled`/`language`. An application restored from a server that
+had them then failed `tsc` (`Property 'disabled' does not exist on type 'StoreRow<UsersRow>'`).
+
 ## A restore keeps calculated fields that read through a reference
 
 A calculated field whose expression joins through a `Key` (`(attendeeⱵname).split(' ')[0]`)

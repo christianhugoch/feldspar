@@ -17,11 +17,19 @@
 //! `goto` takes only a path, and a page that leaves the preview host is taken
 //! back, with the attempt reported.
 //!
-//! **The session is the caller's.** The first call of a run creates a session
-//! for the user the request names ([`SessionStore::login`], the
-//! `sc_auth::create_session` row plus this node's cache), lets it reach the
-//! run's previews, and puts its cookie straight into the run's context. Nothing
-//! is written to disk. Closing the context logs the session out.
+//! **The session is the caller's.** The first signed-in call of a run creates a
+//! session for the user the request names ([`SessionStore::login`], the
+//! `sc_auth::create_session` row plus this node's cache) and puts its cookie
+//! straight into the run's context. Nothing is written to disk. Closing the
+//! context logs the session out.
+//!
+//! **The preview is reached with a pass, not the session.** Each context also
+//! carries a random [`PREVIEW_COOKIE`] that the run's previews accept
+//! ([`AppMounts::allow_preview_token`]), so a call with no user — `view_app`'s
+//! `signed_out` — sees the preview as an anonymous visitor would. Switching
+//! between signed in and signed out removes the session cookie or puts it back,
+//! clears the origin's storage (an app may cache who is signed in there), and
+//! reloads the page.
 //!
 //! **What changed since the last call** — console errors, uncaught exceptions,
 //! failed requests and 4xx/5xx responses — is collected by listeners on the
@@ -42,10 +50,11 @@ use chromiumoxide::cdp::browser_protocol::input::{
     DispatchKeyEventParams, DispatchKeyEventType, InsertTextParams,
 };
 use chromiumoxide::cdp::browser_protocol::network::{
-    CookieParam, CookieSameSite, EventLoadingFailed, EventRequestWillBeSent, EventResponseReceived,
-    ResourceType,
+    CookieParam, CookieSameSite, DeleteCookiesParams, EventLoadingFailed, EventRequestWillBeSent,
+    EventResponseReceived, ResourceType,
 };
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
+use chromiumoxide::cdp::browser_protocol::storage::ClearDataForOriginParams;
 use chromiumoxide::cdp::browser_protocol::target::{
     CreateBrowserContextParams, CreateTargetParams,
 };
@@ -65,7 +74,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::snapshot::{AxNode, render};
 use crate::apps::AppMounts;
-use crate::security::SESSION_COOKIE;
+use crate::security::{PREVIEW_COOKIE, SESSION_COOKIE, new_csrf_token};
 
 /// The viewport every page gets.
 const VIEWPORT: (u32, u32) = (1280, 800);
@@ -137,8 +146,13 @@ impl Seen {
 struct RunPage {
     context: BrowserContextId,
     page: Page,
-    session: String,
-    /// The origins the session cookie has been set for.
+    /// The caller's session, made on the first signed-in call.
+    session: Option<String>,
+    /// The token the run's previews accept from this context.
+    pass: String,
+    /// Whether the last call was signed out; `None` before the first.
+    signed_out: Option<bool>,
+    /// The origins the cookies for the current mode have been set for.
     origins: Vec<String>,
     /// The DOM node each ref of the last snapshot names.
     refs: HashMap<String, i64>,
@@ -321,14 +335,16 @@ impl ChromiumDriver {
             (context, page)
         };
 
-        let session = self.sessions.login(request.user.clone()).await?;
-        self.apps.allow_preview_session(request.run, &session);
+        let pass = new_csrf_token();
+        self.apps.allow_preview_token(request.run, &pass);
         let seen = Arc::new(Mutex::new(Seen::default()));
         let listeners = listen(&page, &seen).await?;
         let run_page = Arc::new(tokio::sync::Mutex::new(RunPage {
             context,
             page,
-            session,
+            session: None,
+            pass,
+            signed_out: None,
             origins: Vec::new(),
             refs: HashMap::new(),
             seen,
@@ -347,16 +363,39 @@ impl ChromiumDriver {
         let page = self.run_page(request, deadline).await?;
         let mut page = page.lock().await;
         let origin = self.origin(&request.preview.host);
+        // Again on every call: a preview the idle sweep removed and a later
+        // check mounted afresh has forgotten it.
+        self.apps.allow_preview_token(request.run, &page.pass);
+
+        let signed_out = request.user.is_none();
+        let switched = page.signed_out.is_some_and(|was| was != signed_out);
+        page.signed_out = Some(signed_out);
+        if switched {
+            for visited in std::mem::take(&mut page.origins) {
+                forget_session(&page.page, &visited).await?;
+            }
+        }
+        if let Some(user) = request.user
+            && page.session.is_none()
+        {
+            page.session = Some(self.sessions.login(user.clone()).await?);
+        }
         if !page.origins.contains(&origin) {
-            let cookie = CookieParam::builder()
-                .name(SESSION_COOKIE)
-                .value(page.session.clone())
-                .url(origin.clone())
-                .http_only(true)
-                .same_site(CookieSameSite::Strict)
-                .build()
-                .map_err(Error::msg)?;
-            page.page.set_cookie(cookie).await.map_err(cdp)?;
+            let mut cookies = vec![(PREVIEW_COOKIE, page.pass.clone())];
+            if let (false, Some(session)) = (signed_out, &page.session) {
+                cookies.push((SESSION_COOKIE, session.clone()));
+            }
+            for (name, value) in cookies {
+                let cookie = CookieParam::builder()
+                    .name(name)
+                    .value(value)
+                    .url(origin.clone())
+                    .http_only(true)
+                    .same_site(CookieSameSite::Strict)
+                    .build()
+                    .map_err(Error::msg)?;
+                page.page.set_cookie(cookie).await.map_err(cdp)?;
+            }
             page.origins.push(origin.clone());
         }
 
@@ -370,9 +409,12 @@ impl ChromiumDriver {
             }
             action => {
                 // Everything but `goto` acts on the page as it is; a page that
-                // has not been opened on this preview yet is opened at `/`.
+                // has not been opened on this preview yet is opened at `/`, and
+                // one opened in the other mode is loaded again in this one.
                 if !on_preview {
                     navigate(&page.page, &format!("{origin}/")).await?;
+                } else if switched {
+                    navigate(&page.page, &current).await?;
                 }
                 match action {
                     BrowserAction::Click { reference } => {
@@ -474,7 +516,9 @@ impl BrowserDriver for ChromiumDriver {
         let browser = self.browser.clone();
         runtime.spawn(async move {
             let page = page.lock().await;
-            if let Err(e) = sessions.logout(&page.session).await {
+            if let Some(session) = &page.session
+                && let Err(e) = sessions.logout(session).await
+            {
                 sc_log::log_warn!("run {run}: its view_app session could not be deleted: {e}");
             }
             if let Some(launched) = browser.lock().await.as_ref() {
@@ -514,6 +558,30 @@ fn watchdog(_browser: u32, _profile: &std::path::Path) -> Option<std::process::C
 }
 
 /// A protocol failure, as an error the model can read.
+/// Remove the session cookie from `origin`, and what the application may have
+/// stored there about who is signed in. The preview pass stays.
+async fn forget_session(page: &Page, origin: &str) -> Result<()> {
+    page.execute(
+        DeleteCookiesParams::builder()
+            .name(SESSION_COOKIE)
+            .url(origin)
+            .build()
+            .map_err(Error::msg)?,
+    )
+    .await
+    .map_err(cdp)?;
+    page.execute(
+        ClearDataForOriginParams::builder()
+            .origin(origin)
+            .storage_types("local_storage,session_storage,indexeddb,cache_storage,service_workers")
+            .build()
+            .map_err(Error::msg)?,
+    )
+    .await
+    .map_err(cdp)?;
+    Ok(())
+}
+
 fn cdp(e: chromiumoxide::error::CdpError) -> Error {
     Error::msg(format!("the browser reported: {e}"))
 }

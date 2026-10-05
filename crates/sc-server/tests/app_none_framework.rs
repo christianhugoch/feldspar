@@ -352,7 +352,7 @@ async fn an_application_with_no_framework_serves_its_files_and_has_a_coding_agen
     let preview = AppPreviewer::mount_preview(apps.as_ref(), run, "landing", Path::new("")).await?;
     assert_eq!(preview.subdomain, "landing");
     let token = admin.cookies["sc_session"].clone();
-    apps.allow_preview_session(run, &token);
+    apps.allow_preview_token(run, &token);
     let mut previewer = Client::new(router, &preview.host);
     previewer
         .cookies

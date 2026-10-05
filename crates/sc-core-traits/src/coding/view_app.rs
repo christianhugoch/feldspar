@@ -28,6 +28,11 @@
 //! `snapshot` and `screenshot` — because a plan is written from what is there,
 //! and `click`, `fill` and `press` change it.
 //!
+//! Any call may pass `signed_out`, and looks as a visitor who is not signed
+//! in: the browser context drops its session for that call (and a later call
+//! without it signs back in). It needs no user, so a triggered run with no
+//! [`CFG_VIEW_APP_USER`] can still look at the public pages.
+//!
 //! Every result also carries the URL, the last document's HTTP status, and the
 //! console errors and failed requests since the previous call.
 //!
@@ -139,7 +144,9 @@ pub fn spec(scope: &FileScope, config: &Attrs, vision: bool, mode: RunMode) -> T
              live build before there is one. Each result has the URL, the HTTP status, an \
              accessibility snapshot of the page whose interactive elements carry refs (`@e12`) \
              for the next action, and any console errors and failed requests since the last \
-             call.{}{}",
+             call. Pass signed_out: true to look as a visitor who is not signed in; every \
+             call that should stay signed out needs it, and a call without it signs back in \
+             and reloads the page.{}{}",
             if acts {
                 " The data is live: click and fill on a form write real rows."
             } else {
@@ -164,6 +171,7 @@ fn parameters(actions: Vec<&str>, vision: bool, acts: bool) -> Json {
         "ref": {"type": "string", "description": "For click, fill, wait_for: an @e ref from the last snapshot"},
         "text": {"type": "string", "description": "For fill: the text to type; for wait_for: text to wait for"},
         "timeout": {"type": "integer", "description": "For wait_for: seconds to wait"},
+        "signed_out": {"type": "boolean", "description": "Look as a visitor who is not signed in, for this call"},
     });
     if let Some(map) = properties.as_object_mut() {
         if acts {
@@ -339,8 +347,16 @@ pub async fn call(config: &Attrs, args: &Json, ctx: &mut TraitContext<'_>) -> Re
             ctx.mode
         )));
     }
+    let signed_out = args
+        .get("signed_out")
+        .and_then(Json::as_bool)
+        .unwrap_or(false);
     let (preview, live) = preview(&application, ctx).await?;
-    let user = viewer(config, ctx).await?;
+    let user = if signed_out {
+        None
+    } else {
+        Some(viewer(config, ctx).await?)
+    };
     let name = action.name();
     let target = match &action {
         BrowserAction::Goto { path } => format!(" {path}"),
@@ -355,13 +371,17 @@ pub async fn call(config: &Attrs, args: &Json, ctx: &mut TraitContext<'_>) -> Re
         .act(BrowserRequest {
             run: ctx.run,
             preview: &preview,
-            user: &user,
+            user: user.as_ref(),
             action,
             timeout: limit,
         })
         .await?;
 
-    let mut out = format!("view_app {name}{target}\nurl: {}", report.url);
+    let mut out = format!(
+        "view_app {name}{target}{}\nurl: {}",
+        if signed_out { " (signed out)" } else { "" },
+        report.url
+    );
     if let Some(status) = report.status {
         out.push_str(&format!(" (status {status})"));
     }
@@ -401,7 +421,7 @@ pub async fn call(config: &Attrs, args: &Json, ctx: &mut TraitContext<'_>) -> Re
 /// The action and its target: a repeated look at the same thing is a repeat.
 pub fn fingerprint(args: &Json) -> Json {
     let mut out = serde_json::Map::new();
-    for key in ["action", "path", "ref", "key", "text"] {
+    for key in ["action", "path", "ref", "key", "text", "signed_out"] {
         if let Some(value) = args.get(key) {
             out.insert(key.to_owned(), value.clone());
         }

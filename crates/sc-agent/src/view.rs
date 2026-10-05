@@ -13,8 +13,8 @@
 //! - [`AppPreviewer`] mounts, re-mounts and unmounts a run's preview of one
 //!   application.
 //! - [`BrowserDriver`] performs one [`BrowserAction`] in the run's own browser
-//!   context, as a session for the run's caller, and reports what the page is
-//!   now.
+//!   context, as a session for the run's caller or signed out, and reports what
+//!   the page is now.
 //! - [`AppRequester`] sends one HTTP request to an application through the
 //!   server's own router, as a session for a user or as nobody, and hands back
 //!   the response — `call_api`'s way of seeing what an endpoint answers.
@@ -142,8 +142,10 @@ pub struct BrowserRequest<'a> {
     /// The preview the page belongs to. Navigation anywhere else is refused.
     pub preview: &'a PreviewInfo,
     /// Whom the context's session is for: the run's caller, or the configured
-    /// user of a run nobody is present for.
-    pub user: &'a User,
+    /// user of a run nobody is present for. `None` looks as a visitor who is
+    /// not signed in: the context carries no session for this call, and a
+    /// later call with a user signs it back in.
+    pub user: Option<&'a User>,
     /// What to do.
     pub action: BrowserAction,
     /// How long the whole call may take, including waiting for a context.

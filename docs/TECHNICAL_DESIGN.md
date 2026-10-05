@@ -5025,13 +5025,20 @@ request through it — not "not written to".
   the live application would answer a question nobody asked. A run keeps one label per
   application, so a later green build re-mounts under the same label and the page the agent has
   open keeps working.
-- **A preview is not public.** Every request through it must carry the owning run's session, and
-  anything else — no session, or another user's — is a 404 rather than a 403: the existence of
-  another run's preview is not a fact to hand out. The session is made by the browser driver on
-  the run's first `view_app` call (`SessionStore::login`, which is `sc_auth::create_session` plus
-  this node's cache, so the router honours it at once) for the run's own user, or for the account
-  `view_app_user` names on a run nobody is present for; it is injected as a cookie into the run's
-  browser context, written nowhere on disk, and logged out when the context closes.
+- **A preview is not public.** Every request through it must carry a token the owning run
+  allowed (`AppMounts::allow_preview_token`), as its session cookie or its `sc_preview` cookie,
+  and anything else is a 404 rather than a 403: the existence of another run's preview is not a
+  fact to hand out. The browser driver gives each run's context a random `sc_preview` pass when it
+  creates it, so **the preview is reached whether or not the context is signed in**. The session
+  is separate: made on the run's first signed-in `view_app` call (`SessionStore::login`, which is
+  `sc_auth::create_session` plus this node's cache, so the router honours it at once) for the
+  run's own user, or for the account `view_app_user` names on a run nobody is present for; it is
+  injected as a cookie into the run's browser context, written nowhere on disk, and logged out
+  when the context closes. **`signed_out: true` on a call looks as an anonymous visitor**: the
+  driver removes the session cookie, clears the origin's local/session storage and IndexedDB
+  (where an app may cache who is signed in) and reloads the page; a later call without it puts
+  the cookie back the same way. It needs no user, so a triggered run without `view_app_user` can
+  still look at the public pages.
 - **The browser reaches it over a listener of its own.** Rather than teaching Chromium to trust
   the public listener's certificate, `serve` binds a second loopback-only listener serving the
   same router in plain HTTP with non-`Secure` cookies, and the browser is started with

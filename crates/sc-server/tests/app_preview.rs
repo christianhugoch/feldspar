@@ -205,7 +205,7 @@ async fn a_preview_serves_the_runs_build_to_the_runs_session_only() -> sc_error:
 
     // The run's own session.
     let token = env.login().await;
-    env.apps.allow_preview_session(run, &token);
+    env.apps.allow_preview_token(run, &token);
     let (status, body) = env.get(&preview.host, Some(&token)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "<div id=root>run-v1</div>");
@@ -340,7 +340,7 @@ async fn a_green_check_mounts_the_runs_preview_and_leaves_the_live_mount() -> sc
         "{report}"
     );
     let token = env.login().await;
-    env.apps.allow_preview_session(run, &token);
+    env.apps.allow_preview_token(run, &token);
     let (_, body) = env.get(&preview.host, Some(&token)).await;
     assert_eq!(body, "<div id=root>agent-build</div>");
     let (_, body) = env.get(APP_HOST, None).await;

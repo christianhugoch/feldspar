@@ -653,3 +653,64 @@ async fn a_planned_features_pages_are_looked_at_on_the_planners_preview() -> Res
     env.driver.shutdown();
     Ok(())
 }
+
+/// `signed_out` looks as an anonymous visitor: no session reaches the
+/// application, though the preview is still the run's. A call without it signs
+/// the same page back in, and a triggered run with no `view_app_user` may look
+/// signed out.
+#[tokio::test(flavor = "multi_thread")]
+async fn signed_out_looks_as_a_visitor_and_signs_back_in() -> Result<()> {
+    let Some(executable) = browser("signed_out_looks_as_a_visitor_and_signs_back_in") else {
+        return Ok(());
+    };
+    let env = setup("signed_out", executable).await?;
+
+    let mut run = Run::new(&env, RunCaller::user(env.alice.clone()), config(&[]));
+    run.call("check", json!({})).await.0?;
+    run.view(json!({"action": "goto", "path": "/"})).await;
+    let page = run
+        .view(json!({"action": "wait_for", "text": "loaded", "timeout": 10}))
+        .await;
+    assert!(page.contains("alice note"), "{page}");
+
+    run.view(json!({"action": "goto", "path": "/", "signed_out": true}))
+        .await;
+    // The page loads, and the API shows a visitor none of Alice's notes.
+    let page = run
+        .view(json!({"action": "wait_for", "text": "loaded", "timeout": 10, "signed_out": true}))
+        .await;
+    assert!(page.contains("view_app wait_for (signed out)"), "{page}");
+    assert!(
+        page.contains("heading \"Notes\""),
+        "the preview is reached: {page}"
+    );
+    assert!(!page.contains("alice note"), "{page}");
+    let (shot, images) = run
+        .call(
+            "view_app",
+            json!({"action": "screenshot", "signed_out": true}),
+        )
+        .await;
+    assert!(shot?.contains("screenshot: attached"));
+    assert_eq!(images, 1);
+
+    // Without it, the same page is loaded again as Alice.
+    run.view(json!({"action": "snapshot"})).await;
+    let page = run
+        .view(json!({"action": "wait_for", "text": "loaded", "timeout": 10}))
+        .await;
+    assert!(page.contains("alice note"), "{page}");
+    run.end();
+
+    // Nobody chatting and no `view_app_user`: signed out still looks.
+    let mut run = Run::new(&env, RunCaller::system(), config(&[]));
+    run.call("check", json!({})).await.0?;
+    let page = run
+        .view(json!({"action": "goto", "path": "/", "signed_out": true}))
+        .await;
+    assert!(page.contains("heading \"Notes\""), "{page}");
+    run.end();
+
+    env.driver.shutdown();
+    Ok(())
+}

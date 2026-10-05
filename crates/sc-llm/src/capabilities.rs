@@ -55,6 +55,9 @@ pub const UNKNOWN_WORKING_BUDGET: u64 = UNKNOWN_CONTEXT_WINDOW;
 /// million-token window still compacts at a size a run can afford: the loop
 /// compacts at 80% of this, 200k tokens.
 pub const MAX_BUILT_IN_WORKING_BUDGET: u64 = 250_000;
+/// The working budget of GPT-6 and later: half their million-token window,
+/// for cost, so the loop compacts at 400k tokens.
+pub const GPT6_WORKING_BUDGET: u64 = 500_000;
 
 /// How a model's prompt cache is driven.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,7 +177,7 @@ impl ModelCapabilities {
         let openai_family = is_openai_family(&name);
         let window = context_window(&name);
         let working_budget = match window {
-            Some(window) => window.min(MAX_BUILT_IN_WORKING_BUDGET),
+            Some(window) => window.min(working_budget_cap(&name)),
             None => UNKNOWN_WORKING_BUDGET,
         };
         let context_window = window.unwrap_or(UNKNOWN_CONTEXT_WINDOW);
@@ -197,7 +200,8 @@ impl ModelCapabilities {
             OPENAI_RESPONSES_BACKEND => ModelCapabilities {
                 parallel_tool_calls: true,
                 parallel_tool_calls_default: false,
-                native_apply_patch: name.starts_with("gpt-5") || name.contains("codex"),
+                native_apply_patch: gpt_generation(&name).is_some_and(|n| n >= 5)
+                    || name.contains("codex"),
                 reasoning_replay: is_openai_reasoning(&name),
                 prompt_caching: if openai_family {
                     PromptCaching::Automatic
@@ -331,11 +335,13 @@ fn gpt_generation(name: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// OpenAI models that accept images.
+/// OpenAI models that accept images: every `gpt-` generation from 5 on (by
+/// number, like [`is_openai_reasoning`], so `gpt-6.1-sol` is not taken for a
+/// text-only model and denied `view_app`'s screenshot).
 fn openai_vision(name: &str) -> bool {
     name.starts_with("gpt-4o")
         || name.starts_with("gpt-4.1")
-        || name.starts_with("gpt-5")
+        || gpt_generation(name).is_some_and(|n| n >= 5)
         || name.starts_with("o3")
         || name.starts_with("o4")
 }
@@ -357,6 +363,9 @@ fn context_window(name: &str) -> Option<u64> {
     if name.starts_with("gpt-4.1") {
         return Some(1_000_000);
     }
+    if gpt_generation(name).is_some_and(|n| n >= 6) {
+        return Some(1_000_000);
+    }
     if name.starts_with("gpt-5") || name.contains("codex") {
         return Some(400_000);
     }
@@ -373,6 +382,17 @@ fn context_window(name: &str) -> Option<u64> {
         return Some(128_000);
     }
     None
+}
+
+/// The largest working budget the rules give `name`:
+/// [`MAX_BUILT_IN_WORKING_BUDGET`], except [`GPT6_WORKING_BUDGET`] for GPT-6
+/// and later.
+fn working_budget_cap(name: &str) -> u64 {
+    if gpt_generation(name).is_some_and(|n| n >= 6) {
+        GPT6_WORKING_BUDGET
+    } else {
+        MAX_BUILT_IN_WORKING_BUDGET
+    }
 }
 
 /// A Claude model's window: a million tokens from Opus and Sonnet 4.6 on, and
@@ -494,16 +514,16 @@ mod tests {
             ),
             (
                 // A generation past the one the rule names literally:
-                // reasoning-by-default has to be inferred from the number,
-                // not a `gpt-5`-only match.
+                // reasoning-by-default, vision, apply_patch and the window
+                // are inferred from the number, not a `gpt-5`-only match.
                 OPENAI_RESPONSES_BACKEND,
                 "gpt-6-astra",
-                false,
+                true,
                 true,
                 PromptCaching::Automatic,
                 EditFormat::ApplyPatch,
-                UNKNOWN_CONTEXT_WINDOW,
-                false,
+                1_000_000,
+                true,
                 false,
             ),
             (
@@ -653,6 +673,31 @@ mod tests {
             let caps = ModelCapabilities::built_in(ANTHROPIC_BACKEND, model);
             assert_eq!(caps.context_window, window, "{model}");
         }
+    }
+
+    #[test]
+    fn a_later_gpt_generation_takes_images() {
+        for backend in [OPENAI_RESPONSES_BACKEND, OPENAI_CHAT_BACKEND] {
+            for model in ["gpt-6.1-sol", "gpt-6-luna", "gpt-7"] {
+                assert!(
+                    ModelCapabilities::built_in(backend, model).vision,
+                    "{backend} {model}"
+                );
+            }
+        }
+        assert!(!ModelCapabilities::built_in(OPENAI_RESPONSES_BACKEND, "gpt-3.5-turbo").vision);
+    }
+
+    #[test]
+    fn gpt6_has_a_million_token_window_and_a_half_million_budget() {
+        for model in ["gpt-6.1-sol", "gpt-6-luna"] {
+            let caps = ModelCapabilities::built_in(OPENAI_RESPONSES_BACKEND, model);
+            assert_eq!(caps.context_window, 1_000_000, "{model}");
+            assert_eq!(caps.working_budget, GPT6_WORKING_BUDGET, "{model}");
+            assert!(caps.native_apply_patch, "{model}");
+        }
+        let gpt5 = ModelCapabilities::built_in(OPENAI_RESPONSES_BACKEND, "gpt-5.1");
+        assert_eq!(gpt5.working_budget, MAX_BUILT_IN_WORKING_BUDGET);
     }
 
     #[test]

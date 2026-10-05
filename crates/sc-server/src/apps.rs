@@ -266,11 +266,11 @@ struct Preview {
     last_used: Instant,
 }
 
-/// The previews, and the sessions that may reach each run's.
+/// The previews, and the tokens that may reach each run's.
 #[derive(Default)]
 struct Previews {
     by_label: HashMap<String, Preview>,
-    sessions: HashMap<RunId, HashSet<String>>,
+    tokens: HashMap<RunId, HashSet<String>>,
 }
 
 impl AppMounts {
@@ -365,26 +365,28 @@ impl AppMounts {
             return false;
         };
         if !previews.by_label.values().any(|p| p.run == removed.run) {
-            previews.sessions.remove(&removed.run);
+            previews.tokens.remove(&removed.run);
         }
         true
     }
 
-    /// Unmount every preview `run` owns, and forget its sessions. Returns how
+    /// Unmount every preview `run` owns, and forget its tokens. Returns how
     /// many went.
     pub fn unmount_run_previews(&self, run: RunId) -> usize {
         let mut previews = self.previews_mut();
         let before = previews.by_label.len();
         previews.by_label.retain(|_, p| p.run != run);
-        previews.sessions.remove(&run);
+        previews.tokens.remove(&run);
         before - previews.by_label.len()
     }
 
-    /// Let the session `token` reach `run`'s previews: the session the run's
-    /// browser context carries. No other session does.
-    pub fn allow_preview_session(&self, run: RunId, token: &str) {
+    /// Let `token` reach `run`'s previews, as the value of a request's session
+    /// cookie or its [`PREVIEW_COOKIE`](crate::security::PREVIEW_COOKIE). The
+    /// run's browser context carries a preview cookie of its own, so it reaches
+    /// the preview signed in or signed out; nothing else does.
+    pub fn allow_preview_token(&self, run: RunId, token: &str) {
         self.previews_mut()
-            .sessions
+            .tokens
             .entry(run)
             .or_default()
             .insert(token.to_owned());
@@ -408,9 +410,10 @@ impl AppMounts {
     }
 
     /// The preview a request to `<label>--<subdomain>` reaches, if `label` is a
-    /// preview of `subdomain` and `session` is its run's session.
+    /// preview of `subdomain` and one of `tokens` (the request's session and
+    /// preview cookies) is one its run allowed.
     ///
-    /// `Err(())` is a label that **is** a preview, reached without its session:
+    /// `Err(())` is a label that **is** a preview, reached without its token:
     /// the router answers 404. `Ok(None)` is no such preview, and the host is
     /// resolved as an application subdomain as usual.
     #[allow(clippy::result_unit_err)]
@@ -418,18 +421,19 @@ impl AppMounts {
         &self,
         label: &str,
         subdomain: &str,
-        session: Option<&str>,
+        tokens: &[&str],
     ) -> std::result::Result<Option<Arc<MountedApp>>, ()> {
         let mut previews = self.previews_mut();
-        let Previews { by_label, sessions } = &mut *previews;
+        let Previews {
+            by_label,
+            tokens: allowed_tokens,
+        } = &mut *previews;
         let Some(preview) = by_label.get_mut(label) else {
             return Ok(None);
         };
-        let allowed = session.is_some_and(|token| {
-            sessions
-                .get(&preview.run)
-                .is_some_and(|tokens| tokens.contains(token))
-        });
+        let allowed = allowed_tokens
+            .get(&preview.run)
+            .is_some_and(|allowed| tokens.iter().any(|token| allowed.contains(*token)));
         if preview.mounted.app.subdomain != subdomain || !allowed {
             return Err(());
         }

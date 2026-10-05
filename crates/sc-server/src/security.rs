@@ -35,6 +35,10 @@ use uuid::Uuid;
 
 /// Name of the session cookie (opaque token → [`SessionStore`](sc_auth::SessionStore)).
 pub const SESSION_COOKIE: &str = "sc_session";
+/// Name of the cookie that lets a `view_app` browser context reach its run's
+/// previews whether or not it is signed in (see
+/// [`AppMounts::allow_preview_token`](crate::AppMounts::allow_preview_token)).
+pub const PREVIEW_COOKIE: &str = "sc_preview";
 /// Name of the CSRF double-submit cookie (readable by the SPA), and the header a
 /// mutating request must echo it in.
 ///

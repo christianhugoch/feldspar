@@ -116,7 +116,7 @@ impl AgentTrait for Look {
             .act(BrowserRequest {
                 run: ctx.run,
                 preview: &preview,
-                user: &user,
+                user: Some(&user),
                 action: BrowserAction::Screenshot { full_page: false },
                 timeout: std::time::Duration::from_secs(5),
             })

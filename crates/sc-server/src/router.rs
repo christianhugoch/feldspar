@@ -48,7 +48,7 @@ use crate::mcp::MCP_ROUTE;
 use crate::observe::{STREAM_OBSERVE_ROUTE, stream_observe_by_name, stream_observe_upgrade};
 use crate::security::{
     ANALYTICS_CONTENT_SECURITY_POLICY, AnonymousCaller, CONTENT_SECURITY_POLICY, CSRF_COOKIE,
-    CSRF_HEADER, CsrfPolicy, IDE_CONTENT_SECURITY_POLICY, SESSION_COOKIE,
+    CSRF_HEADER, CsrfPolicy, IDE_CONTENT_SECURITY_POLICY, PREVIEW_COOKIE, SESSION_COOKIE,
     admin_content_security_policy, build_cookie, csrf_middleware, is_native_client,
 };
 
@@ -904,8 +904,11 @@ fn resolve_app(state: &AppState, headers: &axum::http::HeaderMap, jar: &CookieJa
     // with a `--` in it is an ordinary subdomain.
     let preview = label.split_once("--");
     if let Some((preview, subdomain)) = preview {
-        let session = jar.get(SESSION_COOKIE).map(|c| c.value());
-        match state.apps.resolve_preview(preview, subdomain, session) {
+        let tokens: Vec<&str> = [SESSION_COOKIE, PREVIEW_COOKIE]
+            .iter()
+            .filter_map(|name| jar.get(name).map(|c| c.value()))
+            .collect();
+        match state.apps.resolve_preview(preview, subdomain, &tokens) {
             Ok(Some(app)) => return Resolved::App(app),
             Err(()) => return Resolved::HiddenPreview,
             Ok(None) => {}

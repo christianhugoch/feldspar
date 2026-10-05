@@ -598,3 +598,24 @@ UPDATE "_fd_models" SET "view_state" = '{}'::jsonb WHERE "view_state" IS NULL;
 -- Re-running it is a no-op.
 
 DELETE FROM "_fd_config" WHERE "key" = 'https_port';
+
+-- ---------------------------------------------------------------------------
+-- 12. Postgres and SQLite: the built-in `users.disabled` and `users.language`
+--    columns (2026-10-05).
+-- ---------------------------------------------------------------------------
+--
+-- Both are system columns of the users table (`sc_auth::users_fields`), but the
+-- bootstrap only creates the users table when it is absent and never adds
+-- columns to one that is there — so a database whose users table predates them
+-- has neither. Without them the generated client's `UsersRow` loses both
+-- fields, and an application built against a server that had them (a restored
+-- backup, for instance) fails to type-check. Re-running it is a no-op.
+
+ALTER TABLE IF EXISTS "users" ADD COLUMN IF NOT EXISTS "disabled" boolean;
+ALTER TABLE IF EXISTS "users" ADD COLUMN IF NOT EXISTS "language" text;
+
+-- SQLite has no `ADD COLUMN IF NOT EXISTS`: run each only when
+-- `PRAGMA table_info("users")` lacks that column:
+--
+--   ALTER TABLE "users" ADD COLUMN "disabled" boolean;
+--   ALTER TABLE "users" ADD COLUMN "language" text;

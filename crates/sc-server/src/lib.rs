@@ -162,7 +162,9 @@ pub use sc_expr::CodeAdapter;
 pub use sc_module::BUNDLED_IN_CHECKOUT;
 pub use security::{ANALYTICS_CONTENT_SECURITY_POLICY, IDE_CONTENT_SECURITY_POLICY};
 pub use security::{BUILDER_CONTENT_SECURITY_POLICY, builder_content_security_policy};
-pub use security::{CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE};
+pub use security::{
+    CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, PREVIEW_COOKIE, SESSION_COOKIE,
+};
 pub use serve::{serve, serve_browser};
 pub use streams::{StreamServices, TriggerBridge, install_streams, install_streams_with};
 pub use systemd::ServiceManager;
