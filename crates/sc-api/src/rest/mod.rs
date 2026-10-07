@@ -2302,7 +2302,7 @@ mod tests {
             "{ts}"
         );
         assert!(ts.contains("  update(id: number, row: PostsUpdate): Promise<PostsRow>;"));
-        assert!(ts.contains("/api/posts/${id}"));
+        assert!(ts.contains("/api/posts/${encodeURIComponent(id)}"));
         // …and no loose method survives beside it.
         assert!(!ts.contains("listPosts("), "{ts}");
     }

@@ -2,6 +2,21 @@
 
 Changes in reverse chronological order.
 
+## Fix: the admin copilot's chat history was always empty
+
+The chat panel's rail of past conversations was blank for `Admin copilot`, however many
+conversations it had had. The runs were stored; the lookup missed them. `listRuns` received its
+path parameter exactly as it was in the URL — `Admin%20copilot` — and found no run with that
+subject. An agent whose name needs no escaping (`build-fanacity`) was unaffected.
+
+- **The router now percent-decodes every API path parameter** before the handler sees it
+  (`sc-server/src/router.rs`). The fourteen handlers that called `path_decode` themselves no
+  longer do, so nothing is decoded twice, and a handler can no longer forget.
+- **The generated TypeScript client escapes path parameters** with `encodeURIComponent`
+  (`sc-api/src/typescript.rs`), so a name with `#`, `?` or `/` in it is one segment. The admin,
+  builder, IDE and analytics clients are regenerated (analytics was also behind on `show_if`).
+- Test: `an_agent_with_a_space_in_its_name_lists_its_runs` (`sc-server/tests/agent_admin_api.rs`).
+
 ## Build an application from a sentence: create_application, create_file_store, set_application_tables, and the copilot delegating to coding agents
 
 Neither the chat copilot (`admin_copilot`) nor an external agent over MCP could create an

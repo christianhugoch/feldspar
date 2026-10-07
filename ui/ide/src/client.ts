@@ -621,7 +621,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateTableFromCsvResponse;
     },
     async updateTable(table, body) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -630,7 +630,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateTableResponse;
     },
     async dropTable(table) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -672,7 +672,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateProvidedTableResponse;
     },
     async updateProvidedTable(table, body) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/provider`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/provider`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -681,7 +681,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateProvidedTableResponse;
     },
     async deleteTableSettings(table) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/settings`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/settings`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -714,7 +714,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateRoleResponse;
     },
     async deleteRole(role) {
-      const res = await doFetch(`${baseUrl}/api/roles/${role}`, {
+      const res = await doFetch(`${baseUrl}/api/roles/${encodeURIComponent(role)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -722,7 +722,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteRoleResponse;
     },
     async listFields(table) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/fields`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/fields`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -730,7 +730,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListFieldsResponse;
     },
     async listInboundKeys(table) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/inbound-keys`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/inbound-keys`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -738,7 +738,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListInboundKeysResponse;
     },
     async createField(table, body) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/fields`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/fields`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -747,7 +747,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateFieldResponse;
     },
     async updateField(table, field, body) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/fields/${field}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/fields/${encodeURIComponent(field)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -756,7 +756,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateFieldResponse;
     },
     async deleteField(table, field) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/fields/${field}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/fields/${encodeURIComponent(field)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -764,7 +764,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteFieldResponse;
     },
     async listConstraints(table) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/constraints`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/constraints`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -772,7 +772,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListConstraintsResponse;
     },
     async createConstraint(table, body) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/constraints`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/constraints`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -781,7 +781,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateConstraintResponse;
     },
     async deleteConstraint(table, constraint) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/constraints/${constraint}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/constraints/${encodeURIComponent(constraint)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -803,7 +803,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (query?.offset !== undefined && query?.offset !== null) search.append("offset", String(query?.offset));
       for (const [key, value] of Object.entries(query?.filter ?? {})) search.append(key, String(value));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -814,7 +814,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       const search = new URLSearchParams();
       for (const [key, value] of Object.entries(query?.filter ?? {})) search.append(key, String(value));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows/count${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows/count${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -822,7 +822,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CountRowsResponse;
     },
     async createRow(table, body) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -831,7 +831,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateRowResponse;
     },
     async updateRow(table, id, body) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -840,7 +840,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateRowResponse;
     },
     async deleteRow(table, id) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -848,7 +848,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return;
     },
     async deleteAllRows(table) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -856,7 +856,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteAllRowsResponse;
     },
     async exportTableCsv(table) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/csv`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/csv`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -864,7 +864,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ExportTableCsvResponse;
     },
     async importTableCsv(table, body) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/csv`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/csv`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -890,7 +890,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateDatabaseConnectionResponse;
     },
     async updateDatabaseConnection(id, body) {
-      const res = await doFetch(`${baseUrl}/api/db-connections/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/db-connections/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -899,7 +899,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateDatabaseConnectionResponse;
     },
     async deleteDatabaseConnection(id) {
-      const res = await doFetch(`${baseUrl}/api/db-connections/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/db-connections/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -933,7 +933,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateFileStoreResponse;
     },
     async updateFileStore(id, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -942,7 +942,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateFileStoreResponse;
     },
     async deleteFileStore(id) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -958,7 +958,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListFileStoreBackendsResponse;
     },
     async runBackendOperation(backend, operation, body) {
-      const res = await doFetch(`${baseUrl}/api/file-store-backends/${backend}/operations/${operation}`, {
+      const res = await doFetch(`${baseUrl}/api/file-store-backends/${encodeURIComponent(backend)}/operations/${encodeURIComponent(operation)}`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -967,7 +967,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as RunBackendOperationResponse;
     },
     async runFileStoreOperation(id, operation, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${id}/operations/${operation}`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(id)}/operations/${encodeURIComponent(operation)}`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -993,7 +993,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateLlmProviderResponse;
     },
     async updateLlmProvider(id, body) {
-      const res = await doFetch(`${baseUrl}/api/llm-providers/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1002,7 +1002,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateLlmProviderResponse;
     },
     async deleteLlmProvider(id) {
-      const res = await doFetch(`${baseUrl}/api/llm-providers/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1018,7 +1018,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListLlmProviderBackendsResponse;
     },
     async listLlmModels(id) {
-      const res = await doFetch(`${baseUrl}/api/llm-providers/${id}/models`, {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${encodeURIComponent(id)}/models`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1026,7 +1026,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListLlmModelsResponse;
     },
     async createLlmModel(id, body) {
-      const res = await doFetch(`${baseUrl}/api/llm-providers/${id}/models`, {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${encodeURIComponent(id)}/models`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1035,7 +1035,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateLlmModelResponse;
     },
     async updateLlmModel(id, body) {
-      const res = await doFetch(`${baseUrl}/api/llm-models/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/llm-models/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1044,7 +1044,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateLlmModelResponse;
     },
     async deleteLlmModel(id) {
-      const res = await doFetch(`${baseUrl}/api/llm-models/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/llm-models/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1052,7 +1052,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteLlmModelResponse;
     },
     async listLlmModelSettings(backend) {
-      const res = await doFetch(`${baseUrl}/api/llm-provider-backends/${backend}/model-settings`, {
+      const res = await doFetch(`${baseUrl}/api/llm-provider-backends/${encodeURIComponent(backend)}/model-settings`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1060,7 +1060,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListLlmModelSettingsResponse;
     },
     async fetchLlmModels(id) {
-      const res = await doFetch(`${baseUrl}/api/llm-providers/${id}/fetch-models`, {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${encodeURIComponent(id)}/fetch-models`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1094,7 +1094,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as InstallModuleResponse;
     },
     async updateModule(id, body) {
-      const res = await doFetch(`${baseUrl}/api/modules/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/modules/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1103,7 +1103,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateModuleResponse;
     },
     async deleteModule(id) {
-      const res = await doFetch(`${baseUrl}/api/modules/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/modules/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1136,7 +1136,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateAgentResponse;
     },
     async updateAgent(id, body) {
-      const res = await doFetch(`${baseUrl}/api/agents/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/agents/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1145,7 +1145,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateAgentResponse;
     },
     async deleteAgent(id) {
-      const res = await doFetch(`${baseUrl}/api/agents/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/agents/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1161,7 +1161,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListAgentTraitsResponse;
     },
     async listRuns(agent) {
-      const res = await doFetch(`${baseUrl}/api/agent-runs/${agent}`, {
+      const res = await doFetch(`${baseUrl}/api/agent-runs/${encodeURIComponent(agent)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1169,7 +1169,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListRunsResponse;
     },
     async getRun(id) {
-      const res = await doFetch(`${baseUrl}/api/runs/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/runs/${encodeURIComponent(id)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1177,7 +1177,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetRunResponse;
     },
     async getRunDiff(id) {
-      const res = await doFetch(`${baseUrl}/api/runs/${id}/diff`, {
+      const res = await doFetch(`${baseUrl}/api/runs/${encodeURIComponent(id)}/diff`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1185,7 +1185,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetRunDiffResponse;
     },
     async deleteRun(id) {
-      const res = await doFetch(`${baseUrl}/api/runs/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/runs/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1193,7 +1193,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteRunResponse;
     },
     async browseFiles(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/browse`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/browse`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1202,7 +1202,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as BrowseFilesResponse;
     },
     async findFiles(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/find`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/find`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1214,7 +1214,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       const search = new URLSearchParams();
       if (query?.extensions !== undefined && query?.extensions !== null) search.append("extensions", String(query?.extensions));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/files-by-type${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/files-by-type${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1222,7 +1222,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListStoreFilesResponse;
     },
     async searchFiles(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/search`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/search`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1231,7 +1231,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SearchFilesResponse;
     },
     async readFile(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/read`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/read`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1240,7 +1240,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ReadFileResponse;
     },
     async writeFile(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/write`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/write`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1249,7 +1249,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as WriteFileResponse;
     },
     async makeDirectory(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/mkdir`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/mkdir`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1258,7 +1258,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as MakeDirectoryResponse;
     },
     async deleteFile(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/delete`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/delete`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1267,7 +1267,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteFileResponse;
     },
     async renameFile(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/rename`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/rename`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1276,7 +1276,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as RenameFileResponse;
     },
     async getFileMeta(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/meta`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/meta`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1285,7 +1285,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetFileMetaResponse;
     },
     async setFileMeta(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/set-meta`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/set-meta`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1311,7 +1311,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateApplicationResponse;
     },
     async updateApplication(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1320,7 +1320,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateApplicationResponse;
     },
     async deleteApplication(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1328,7 +1328,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteApplicationResponse;
     },
     async buildApplication(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/build`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/build`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1336,7 +1336,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as BuildApplicationResponse;
     },
     async deepCleanApplication(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/deep-clean`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/deep-clean`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1344,7 +1344,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeepCleanApplicationResponse;
     },
     async buildApplicationTarget(id, target) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/targets/${target}/build`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/targets/${encodeURIComponent(target)}/build`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1352,7 +1352,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as BuildApplicationTargetResponse;
     },
     async runApplicationTargetOperation(id, target, operation, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/targets/${target}/operations/${operation}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/targets/${encodeURIComponent(target)}/operations/${encodeURIComponent(operation)}`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1361,7 +1361,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as RunApplicationTargetOperationResponse;
     },
     async getApplicationTargetBuild(id, target) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/targets/${target}/build`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/targets/${encodeURIComponent(target)}/build`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1369,7 +1369,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetApplicationTargetBuildResponse;
     },
     async updateApplicationClient(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/client`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/client`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1377,7 +1377,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateApplicationClientResponse;
     },
     async runApplicationGraphql(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/graphql`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/graphql`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1386,7 +1386,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as RunApplicationGraphqlResponse;
     },
     async listViews(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/views`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/views`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1394,7 +1394,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListViewsResponse;
     },
     async getView(id, name) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/views/${name}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/views/${encodeURIComponent(name)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1402,7 +1402,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetViewResponse;
     },
     async saveView(id, name, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/views/${name}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/views/${encodeURIComponent(name)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1411,7 +1411,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SaveViewResponse;
     },
     async deleteView(id, name) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/views/${name}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/views/${encodeURIComponent(name)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1419,7 +1419,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteViewResponse;
     },
     async createView(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/views`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/views`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1428,7 +1428,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateViewResponse;
     },
     async viewConfigStep(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/view-config-step`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/view-config-step`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1437,7 +1437,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ViewConfigStepResponse;
     },
     async viewReferences(id, name) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/views/${name}/references`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/views/${encodeURIComponent(name)}/references`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1445,7 +1445,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ViewReferencesResponse;
     },
     async listPages(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/pages`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1453,7 +1453,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListPagesResponse;
     },
     async getPage(id, name) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages/${name}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/pages/${encodeURIComponent(name)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1461,7 +1461,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetPageResponse;
     },
     async savePage(id, name, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages/${name}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/pages/${encodeURIComponent(name)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1470,7 +1470,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SavePageResponse;
     },
     async deletePage(id, name) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages/${name}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/pages/${encodeURIComponent(name)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1478,7 +1478,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeletePageResponse;
     },
     async saveViewLayout(id, name, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/views/${name}/layout`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/views/${encodeURIComponent(name)}/layout`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1487,7 +1487,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SaveViewLayoutResponse;
     },
     async savePageLayout(id, name, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages/${name}/layout`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/pages/${encodeURIComponent(name)}/layout`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1496,7 +1496,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SavePageLayoutResponse;
     },
     async pageReferences(id, name) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages/${name}/references`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/pages/${encodeURIComponent(name)}/references`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1504,7 +1504,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as PageReferencesResponse;
     },
     async listLibrary(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/library`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/library`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1512,7 +1512,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListLibraryResponse;
     },
     async getLibraryItem(id, item) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/library/${item}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/library/${encodeURIComponent(item)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1520,7 +1520,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetLibraryItemResponse;
     },
     async createLibraryItem(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/library`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/library`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1529,7 +1529,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateLibraryItemResponse;
     },
     async saveLibraryItem(id, item, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/library/${item}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/library/${encodeURIComponent(item)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1538,7 +1538,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SaveLibraryItemResponse;
     },
     async saveLibraryUpdates(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/library/updates`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/library/updates`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1550,7 +1550,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       const search = new URLSearchParams();
       if (query?.confirm !== undefined && query?.confirm !== null) search.append("confirm", String(query?.confirm));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/library/${item}${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/library/${encodeURIComponent(item)}${qs ? `?${qs}` : ""}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1558,7 +1558,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteLibraryItemResponse;
     },
     async getTranslations(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/translations`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/translations`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1566,7 +1566,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetTranslationsResponse;
     },
     async setApplicationLocales(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/locales`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/locales`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1575,7 +1575,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SetApplicationLocalesResponse;
     },
     async saveTranslations(id, locale, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/translations/${locale}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/translations/${encodeURIComponent(locale)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1584,7 +1584,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SaveTranslationsResponse;
     },
     async translateMissing(id, locale) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/translations/${locale}/fill`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/translations/${encodeURIComponent(locale)}/fill`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1592,7 +1592,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as TranslateMissingResponse;
     },
     async builderFieldPreview(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/field-preview`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/builder/field-preview`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1601,7 +1601,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as BuilderFieldPreviewResponse;
     },
     async builderFieldviewConfigForm(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/fieldview-config`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/builder/fieldview-config`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1610,7 +1610,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as BuilderFieldviewConfigFormResponse;
     },
     async builderViewPreview(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/view-preview`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/builder/view-preview`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1619,7 +1619,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as BuilderViewPreviewResponse;
     },
     async builderPagePreview(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/page-preview`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/builder/page-preview`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1628,7 +1628,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as BuilderPagePreviewResponse;
     },
     async builderDistinctValues(id, table, field) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/distinct/${table}/${field}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/builder/distinct/${encodeURIComponent(table)}/${encodeURIComponent(field)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1694,7 +1694,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateUserResponse;
     },
     async updateUser(id, body) {
-      const res = await doFetch(`${baseUrl}/api/users/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1703,7 +1703,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateUserResponse;
     },
     async deleteUser(id) {
-      const res = await doFetch(`${baseUrl}/api/users/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1711,7 +1711,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteUserResponse;
     },
     async setUserDisabled(id, body) {
-      const res = await doFetch(`${baseUrl}/api/users/${id}/disabled`, {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/disabled`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1720,7 +1720,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SetUserDisabledResponse;
     },
     async forceLogoutUser(id) {
-      const res = await doFetch(`${baseUrl}/api/users/${id}/force-logout`, {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/force-logout`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1728,7 +1728,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ForceLogoutUserResponse;
     },
     async becomeUser(id) {
-      const res = await doFetch(`${baseUrl}/api/users/${id}/become`, {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/become`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1736,7 +1736,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as BecomeUserResponse;
     },
     async setRandomPassword(id) {
-      const res = await doFetch(`${baseUrl}/api/users/${id}/random-password`, {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/random-password`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1761,7 +1761,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateApiTokenResponse;
     },
     async revokeApiToken(id) {
-      const res = await doFetch(`${baseUrl}/api/api-tokens/${id}/revoke`, {
+      const res = await doFetch(`${baseUrl}/api/api-tokens/${encodeURIComponent(id)}/revoke`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1786,7 +1786,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateTriggerResponse;
     },
     async updateTrigger(id, body) {
-      const res = await doFetch(`${baseUrl}/api/triggers/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/triggers/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1795,7 +1795,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateTriggerResponse;
     },
     async deleteTrigger(id) {
-      const res = await doFetch(`${baseUrl}/api/triggers/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/triggers/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1803,7 +1803,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteTriggerResponse;
     },
     async runTrigger(id, body) {
-      const res = await doFetch(`${baseUrl}/api/triggers/${id}/run`, {
+      const res = await doFetch(`${baseUrl}/api/triggers/${encodeURIComponent(id)}/run`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1812,7 +1812,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as RunTriggerResponse;
     },
     async testRunTrigger(id, body) {
-      const res = await doFetch(`${baseUrl}/api/triggers/${id}/test-run`, {
+      const res = await doFetch(`${baseUrl}/api/triggers/${encodeURIComponent(id)}/test-run`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1835,7 +1835,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       const search = new URLSearchParams();
       if (query?.version !== undefined && query?.version !== null) search.append("version", String(query?.version));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/workflows/${id}${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/workflows/${encodeURIComponent(id)}${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1843,7 +1843,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetWorkflowResponse;
     },
     async saveWorkflow(id, body) {
-      const res = await doFetch(`${baseUrl}/api/workflows/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/workflows/${encodeURIComponent(id)}`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1852,7 +1852,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SaveWorkflowResponse;
     },
     async revertWorkflow(id, body) {
-      const res = await doFetch(`${baseUrl}/api/workflows/${id}/revert`, {
+      const res = await doFetch(`${baseUrl}/api/workflows/${encodeURIComponent(id)}/revert`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1866,7 +1866,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (query?.limit !== undefined && query?.limit !== null) search.append("limit", String(query?.limit));
       if (query?.offset !== undefined && query?.offset !== null) search.append("offset", String(query?.offset));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/workflows/${id}/runs${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/workflows/${encodeURIComponent(id)}/runs${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1874,7 +1874,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListWorkflowRunsResponse;
     },
     async resumeRun(id, body) {
-      const res = await doFetch(`${baseUrl}/api/runs/${id}/resume`, {
+      const res = await doFetch(`${baseUrl}/api/runs/${encodeURIComponent(id)}/resume`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1883,7 +1883,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ResumeRunResponse;
     },
     async cancelRun(id, body) {
-      const res = await doFetch(`${baseUrl}/api/runs/${id}/cancel`, {
+      const res = await doFetch(`${baseUrl}/api/runs/${encodeURIComponent(id)}/cancel`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1892,7 +1892,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CancelRunResponse;
     },
     async retryRun(id) {
-      const res = await doFetch(`${baseUrl}/api/runs/${id}/retry`, {
+      const res = await doFetch(`${baseUrl}/api/runs/${encodeURIComponent(id)}/retry`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1932,7 +1932,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListModelsResponse;
     },
     async getModel(id) {
-      const res = await doFetch(`${baseUrl}/api/models/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1949,7 +1949,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SaveModelResponse;
     },
     async cloneModel(id, body) {
-      const res = await doFetch(`${baseUrl}/api/models/${id}/clone`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}/clone`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1958,7 +1958,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CloneModelResponse;
     },
     async modelUsage(id) {
-      const res = await doFetch(`${baseUrl}/api/models/${id}/usage`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}/usage`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1966,7 +1966,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ModelUsageResponse;
     },
     async patchModelViewState(id, body) {
-      const res = await doFetch(`${baseUrl}/api/models/${id}/view-state`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}/view-state`, {
         method: "PATCH",
         headers: requestHeaders("PATCH", true),
         body: JSON.stringify(body),
@@ -1975,7 +1975,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as PatchModelViewStateResponse;
     },
     async deleteModel(id) {
-      const res = await doFetch(`${baseUrl}/api/models/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1983,7 +1983,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteModelResponse;
     },
     async fitModel(id, body) {
-      const res = await doFetch(`${baseUrl}/api/models/${id}/fit`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}/fit`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1992,7 +1992,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as FitModelResponse;
     },
     async listModelInstances(id) {
-      const res = await doFetch(`${baseUrl}/api/models/${id}/instances`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}/instances`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2000,7 +2000,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListModelInstancesResponse;
     },
     async getModelInstance(id) {
-      const res = await doFetch(`${baseUrl}/api/model-instances/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/model-instances/${encodeURIComponent(id)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2008,7 +2008,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetModelInstanceResponse;
     },
     async deleteModelInstance(id) {
-      const res = await doFetch(`${baseUrl}/api/model-instances/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/model-instances/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -2016,7 +2016,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteModelInstanceResponse;
     },
     async activateModelInstance(id) {
-      const res = await doFetch(`${baseUrl}/api/model-instances/${id}/activate`, {
+      const res = await doFetch(`${baseUrl}/api/model-instances/${encodeURIComponent(id)}/activate`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -2063,7 +2063,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SuggestBindingsResponse;
     },
     async compileModel(id) {
-      const res = await doFetch(`${baseUrl}/api/models/${id}/compile`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}/compile`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -2071,7 +2071,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CompileModelResponse;
     },
     async cancelModelFit(id) {
-      const res = await doFetch(`${baseUrl}/api/model-instances/${id}/cancel`, {
+      const res = await doFetch(`${baseUrl}/api/model-instances/${encodeURIComponent(id)}/cancel`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -2086,7 +2086,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (query?.warmup !== undefined && query?.warmup !== null) search.append("warmup", String(query?.warmup));
       if (query?.thin !== undefined && query?.thin !== null) search.append("thin", String(query?.thin));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/model-instances/${id}/draws${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/model-instances/${encodeURIComponent(id)}/draws${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2098,7 +2098,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (query?.variable !== undefined && query?.variable !== null) search.append("variable", String(query?.variable));
       if (query?.elements !== undefined && query?.elements !== null) search.append("elements", String(query?.elements));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/model-instances/${id}/summary${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/model-instances/${encodeURIComponent(id)}/summary${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2106,7 +2106,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetPosteriorSummaryResponse;
     },
     async downloadModelRun(id) {
-      const res = await doFetch(`${baseUrl}/api/model-instances/${id}/run`, {
+      const res = await doFetch(`${baseUrl}/api/model-instances/${encodeURIComponent(id)}/run`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2114,7 +2114,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DownloadModelRunResponse;
     },
     async writePosterior(id, body) {
-      const res = await doFetch(`${baseUrl}/api/model-instances/${id}/posterior-writes`, {
+      const res = await doFetch(`${baseUrl}/api/model-instances/${encodeURIComponent(id)}/posterior-writes`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -2143,7 +2143,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListStreamsResponse;
     },
     async getStream(id) {
-      const res = await doFetch(`${baseUrl}/api/streams/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/streams/${encodeURIComponent(id)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2160,7 +2160,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SaveStreamResponse;
     },
     async deleteStream(id) {
-      const res = await doFetch(`${baseUrl}/api/streams/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/streams/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -2168,7 +2168,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteStreamResponse;
     },
     async streamStatus(id) {
-      const res = await doFetch(`${baseUrl}/api/streams/${id}/status`, {
+      const res = await doFetch(`${baseUrl}/api/streams/${encodeURIComponent(id)}/status`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2252,7 +2252,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListDatasetsResponse;
     },
     async getDataset(id) {
-      const res = await doFetch(`${baseUrl}/api/datasets/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/datasets/${encodeURIComponent(id)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2269,7 +2269,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateDatasetResponse;
     },
     async updateDataset(id, body) {
-      const res = await doFetch(`${baseUrl}/api/datasets/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/datasets/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -2278,7 +2278,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateDatasetResponse;
     },
     async deleteDataset(id) {
-      const res = await doFetch(`${baseUrl}/api/datasets/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/datasets/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -2286,7 +2286,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return;
     },
     async cloneDataset(id, body) {
-      const res = await doFetch(`${baseUrl}/api/datasets/${id}/clone`, {
+      const res = await doFetch(`${baseUrl}/api/datasets/${encodeURIComponent(id)}/clone`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -2295,7 +2295,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CloneDatasetResponse;
     },
     async datasetUsage(id) {
-      const res = await doFetch(`${baseUrl}/api/datasets/${id}/usage`, {
+      const res = await doFetch(`${baseUrl}/api/datasets/${encodeURIComponent(id)}/usage`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2395,7 +2395,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (query?.fit !== undefined && query?.fit !== null) search.append("fit", String(query?.fit));
       if (query?.include !== undefined && query?.include !== null) search.append("include", String(query?.include));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/models/${id}/outputs${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}/outputs${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2419,7 +2419,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListWorkspacesResponse;
     },
     async getWorkspace(id) {
-      const res = await doFetch(`${baseUrl}/api/workspaces/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/workspaces/${encodeURIComponent(id)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2436,7 +2436,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateWorkspaceResponse;
     },
     async updateWorkspace(id, body) {
-      const res = await doFetch(`${baseUrl}/api/workspaces/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/workspaces/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -2445,7 +2445,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateWorkspaceResponse;
     },
     async saveWorkspaceState(id, body) {
-      const res = await doFetch(`${baseUrl}/api/workspaces/${id}/state`, {
+      const res = await doFetch(`${baseUrl}/api/workspaces/${encodeURIComponent(id)}/state`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -2454,7 +2454,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SaveWorkspaceStateResponse;
     },
     async deleteWorkspace(id) {
-      const res = await doFetch(`${baseUrl}/api/workspaces/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/workspaces/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });

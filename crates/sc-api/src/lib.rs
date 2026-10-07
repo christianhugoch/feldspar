@@ -214,7 +214,7 @@ mod tests {
                 "listRows(table: string, query?: ListRowsQuery): Promise<ListRowsResponse>"
             )
         );
-        assert!(ts.contains("/api/tables/${table}/rows"));
+        assert!(ts.contains("/api/tables/${encodeURIComponent(table)}/rows"));
 
         // A void endpoint (logout has no response payload).
         assert!(ts.contains("logout(): Promise<void>"));

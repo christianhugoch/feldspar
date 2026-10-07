@@ -879,10 +879,12 @@ async fn dispatch(
 
     match state.routes.at(uri.path()) {
         Ok(matched) => {
+            // Decoded here, once, for every endpoint: a handler that forgot to
+            // would look up `Admin%20copilot` and quietly find nothing.
             let params: HashMap<String, String> = matched
                 .params
                 .iter()
-                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .map(|(k, v)| (k.to_owned(), path_decode(v)))
                 .collect();
             let endpoints = matched.value;
 
@@ -2305,8 +2307,9 @@ fn form_decode(s: &str) -> String {
 }
 
 /// One path segment, percent-decoded. `matchit` hands a parameter over exactly
-/// as it was in the URL, so a name with a space in it — v1's `List Books` —
-/// arrives as `List%20Books`. A `+` in a path is a plus.
+/// as it was in the URL, so a name with a space in it — v1's `List Books` or an
+/// agent called `Admin copilot` — arrives as `List%20Books`. A `+` in a path is
+/// a plus. Applied to every API path parameter before the handler sees it.
 pub(crate) fn path_decode(s: &str) -> String {
     percent_decode(s, false)
 }

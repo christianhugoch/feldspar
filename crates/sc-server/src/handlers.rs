@@ -4889,7 +4889,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 let app = require_app(&catalog, ctx.path_param("id")?).await?;
-                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                let name = ctx.path_param("name")?;
                 let view = sc_viewpattern::load_view(&catalog, app.id, name)
                     .await?
                     .ok_or_else(|| no_such("view", &app, name))?;
@@ -4906,7 +4906,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let apps = apps.clone();
             async move {
                 let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
-                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                let name = ctx.path_param("name")?;
                 // The stored view's id when the path names one — so a body with
                 // another name renames it rather than adding a second view.
                 let id = sc_viewpattern::load_view(&catalog, app.id, name)
@@ -5027,7 +5027,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let apps = apps.clone();
             async move {
                 let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
-                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                let name = ctx.path_param("name")?;
                 if sc_viewpattern::load_view(&catalog, app.id, name)
                     .await?
                     .is_none()
@@ -5072,7 +5072,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 let app = require_app(&catalog, ctx.path_param("id")?).await?;
-                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                let name = ctx.path_param("name")?;
                 if !sc_viewpattern::view_sets()
                     .delete_view(&catalog, app.id, name)
                     .await?
@@ -5104,7 +5104,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 let app = require_app(&catalog, ctx.path_param("id")?).await?;
-                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                let name = ctx.path_param("name")?;
                 let page = sc_viewpattern::load_page(&catalog, app.id, name)
                     .await?
                     .ok_or_else(|| no_such("page", &app, name))?;
@@ -5119,7 +5119,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
-                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                let name = ctx.path_param("name")?;
                 let id = sc_viewpattern::load_page(&catalog, app.id, name)
                     .await?
                     .map_or_else(sc_viewpattern::PageId::new, |p| p.id);
@@ -5142,7 +5142,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 let app = require_app(&catalog, ctx.path_param("id")?).await?;
-                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                let name = ctx.path_param("name")?;
                 if !sc_viewpattern::view_sets()
                     .delete_page(&catalog, app.id, name)
                     .await?
@@ -5168,7 +5168,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let apps = apps.clone();
             async move {
                 let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
-                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                let name = ctx.path_param("name")?;
                 let mut view = sc_viewpattern::load_view(&catalog, app.id, name)
                     .await?
                     .ok_or_else(|| no_such("view", &app, name))?;
@@ -5219,7 +5219,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
-                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                let name = ctx.path_param("name")?;
                 let mut page = sc_viewpattern::load_page(&catalog, app.id, name)
                     .await?
                     .ok_or_else(|| no_such("page", &app, name))?;
@@ -5240,7 +5240,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
-                let name = &crate::router::path_decode(ctx.path_param("name")?);
+                let name = ctx.path_param("name")?;
                 let set = sc_viewpattern::view_sets().get(&catalog, app.id).await?;
                 let page = set.page(name).ok_or_else(|| no_such("page", &app, name))?;
                 let roles: Vec<(u8, String)> = sc_auth::list_roles(&catalog)
@@ -5470,7 +5470,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             async move {
                 let app = require_app(&catalog, ctx.path_param("id")?).await?;
                 let locale =
-                    sc_i18n::Locale::parse(&crate::router::path_decode(ctx.path_param("locale")?))?;
+                    sc_i18n::Locale::parse(ctx.path_param("locale")?)?;
                 let obj = require_object(&ctx.body)?;
                 let messages = obj
                     .get("messages")
@@ -5492,7 +5492,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             async move {
                 let app = require_app(&catalog, ctx.path_param("id")?).await?;
                 let locale =
-                    sc_i18n::Locale::parse(&crate::router::path_decode(ctx.path_param("locale")?))?;
+                    sc_i18n::Locale::parse(ctx.path_param("locale")?)?;
                 let translator = crate::translations::configured_translator(&catalog, None).await?;
                 Ok(HandlerResponse::ok(
                     crate::translations::fill_missing(&catalog, &apps, &app, &locale, &translator)
@@ -5622,8 +5622,8 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let apps = apps.clone();
             async move {
                 let app = require_views_app(&catalog, ctx.path_param("id")?).await?;
-                let table = &crate::router::path_decode(ctx.path_param("table")?);
-                let field = &crate::router::path_decode(ctx.path_param("field")?);
+                let table = ctx.path_param("table")?;
+                let field = ctx.path_param("field")?;
                 require_subset_table(&app, table)?;
                 let values = view_configurer(&catalog, &app, ctx.user.as_ref(), &apps)
                     .await?

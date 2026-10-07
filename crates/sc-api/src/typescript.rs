@@ -619,8 +619,12 @@ fn query_arg_optional(ep: &Endpoint) -> bool {
 /// The name of the generated methods' query-options argument.
 const QUERY_ARG: &str = "query";
 
-/// The request URL as a JS template-literal body (path params interpolated),
-/// e.g. `/api/tables/${table}/rows/${id}`.
+/// The request URL as a JS template-literal body (path params interpolated and
+/// escaped), e.g. `/api/tables/${encodeURIComponent(table)}/rows/${encodeURIComponent(id)}`.
+///
+/// Escaped because a name is free text: an agent called `Admin copilot`, or a
+/// view with a `#` or `/` in it, must arrive as one segment. The server decodes
+/// every path parameter before a handler sees it.
 fn url_template(ep: &Endpoint) -> String {
     let mut out = String::from("/");
     for (i, seg) in ep.path.segments.iter().enumerate() {
@@ -630,7 +634,7 @@ fn url_template(ep: &Endpoint) -> String {
         match seg {
             PathSegment::Literal(s) => out.push_str(s),
             PathSegment::Param { name, .. } => {
-                let _ = write!(out, "${{{name}}}");
+                let _ = write!(out, "${{encodeURIComponent({name})}}");
             }
         }
     }

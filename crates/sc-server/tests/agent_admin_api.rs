@@ -505,6 +505,29 @@ async fn runs_are_listed_read_and_deleted_and_outlive_their_agent() -> sc_error:
     Ok(())
 }
 
+/// An agent whose name needs escaping in a URL — the seeded `Admin copilot` —
+/// still has a history. The path parameter arrives as `Admin%20copilot`; looked
+/// up undecoded it matched no run, and the chat panel's rail was always empty.
+#[tokio::test]
+async fn an_agent_with_a_space_in_its_name_lists_its_runs() -> sc_error::Result<()> {
+    let (mut client, catalog, _db) = setup().await?;
+
+    let mut chat = AgentLoop::new(20);
+    chat.push_user("build me a CRM")?;
+    let run = Run::new("Admin copilot", &RunCaller::system(), &chat).description("build me a CRM");
+    save_run(&catalog, &run).await?;
+
+    let (status, runs) = client
+        .send("GET", "/api/agent-runs/Admin%20copilot", None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let runs = runs.as_array().unwrap();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0]["id"], json!(run.id.0.to_string()));
+    assert_eq!(runs[0]["subject"], json!("Admin copilot"));
+    Ok(())
+}
+
 /// TODO 10.5: a planned run's plan is served with the run, and its diff is the
 /// changes its sessions made — the planner itself edits nothing — including a
 /// session still running, which only the plan knows about yet.

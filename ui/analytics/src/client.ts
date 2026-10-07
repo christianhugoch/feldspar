@@ -10,22 +10,22 @@ export type CreateFirstUserRequest = { email: string; password: string };
 export type CreateFirstUserResponse = { id: string; email: string; role: number };
 export type LoginRequest = { email: string; password: string };
 export type LoginResponse = { id: string; email: string; role: number };
-export type ListTablesResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null }>;
+export type ListTablesResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null }>;
 export type CreateTableRequest = { name: string; database?: string | null };
-export type CreateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
+export type CreateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
 export type CreateTableFromCsvRequest = { name: string; csv: string; database?: string | null };
-export type CreateTableFromCsvResponse = { table: { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null }; inserted: number };
+export type CreateTableFromCsvResponse = { table: { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null }; inserted: number };
 export type UpdateTableRequest = { label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean };
-export type UpdateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
+export type UpdateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
 export type DropTableResponse = { dropped: string };
 export type ListMetadataTablesResponse = Array<string>;
 export type CreateMetadataTableRequest = { name: string };
-export type CreateMetadataTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
-export type ListTableProvidersResponse = Array<{ module: string; provider: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>;
+export type CreateMetadataTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
+export type ListTableProvidersResponse = Array<{ module: string; provider: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>;
 export type CreateProvidedTableRequest = { name: string; module: string; provider: string; configuration?: unknown | null };
-export type CreateProvidedTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
+export type CreateProvidedTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
 export type UpdateProvidedTableRequest = { configuration: unknown };
-export type UpdateProvidedTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
+export type UpdateProvidedTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
 export type DeleteTableSettingsResponse = { deleted: boolean };
 export type ListOrphanTableSettingsResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean }>;
 export type ListRolesResponse = Array<{ role: number; name: string; description: string; builtin: boolean }>;
@@ -43,7 +43,7 @@ export type ListConstraintsResponse = Array<{ name: string; type: string; fields
 export type CreateConstraintRequest = { type: string; fields?: Array<string> | null; language?: string | null; formula?: string | null; name?: string | null; error_message?: string | null };
 export type CreateConstraintResponse = { name: string; type: string; fields: Array<string>; expression?: string | null; method?: string | null; language?: string | null; formula?: string | null; error_message?: string | null; managed: boolean };
 export type DeleteConstraintResponse = { dropped: string };
-export type ListFieldTypesResponse = Array<{ name: string; label: string; category: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>;
+export type ListFieldTypesResponse = Array<{ name: string; label: string; category: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>;
 export type ListRowsQuery = { order?: string; limit?: number; offset?: number; filter?: Record<string, string> };
 export type ListRowsResponse = Array<unknown>;
 export type CountRowsQuery = { filter?: Record<string, string> };
@@ -70,7 +70,7 @@ export type CreateFileStoreResponse = { id?: string | null; name: string; descri
 export type UpdateFileStoreRequest = { name: string; description: string; backend: string; config: unknown; min_role?: number | null };
 export type UpdateFileStoreResponse = { id?: string | null; name: string; description: string; backend: string; config: unknown; min_role?: number | null; connected: boolean; error?: string | null; is_git_repo?: boolean | null };
 export type DeleteFileStoreResponse = { deleted: boolean };
-export type ListFileStoreBackendsResponse = Array<{ name: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; operations: Array<{ name: string; label: string; description: string; scope: string; input_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; on_create: boolean; automatic: boolean }> }>;
+export type ListFileStoreBackendsResponse = Array<{ name: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; operations: Array<{ name: string; label: string; description: string; scope: string; input_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; on_create: boolean; automatic: boolean }> }>;
 export type RunBackendOperationRequest = { name: string; config: unknown; input: unknown };
 export type RunBackendOperationResponse = { config: unknown; output: string; data?: unknown | null };
 export type RunFileStoreOperationRequest = { input: unknown };
@@ -81,22 +81,22 @@ export type CreateLlmProviderResponse = { id: string; name: string; description:
 export type UpdateLlmProviderRequest = { name: string; description: string; backend: string; config: unknown };
 export type UpdateLlmProviderResponse = { id: string; name: string; description: string; backend: string; config: unknown };
 export type DeleteLlmProviderResponse = { deleted: boolean };
-export type ListLlmProviderBackendsResponse = Array<{ name: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>;
+export type ListLlmProviderBackendsResponse = Array<{ name: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>;
 export type ListLlmModelsResponse = Array<{ id: string; provider_id: string; name: string; description: string; is_default: boolean; config: unknown; capabilities: unknown; prices: unknown }>;
 export type CreateLlmModelRequest = { name: string; description: string; is_default: boolean; config: unknown };
 export type CreateLlmModelResponse = { id: string; provider_id: string; name: string; description: string; is_default: boolean; config: unknown; capabilities: unknown; prices: unknown };
 export type UpdateLlmModelRequest = { name: string; description: string; is_default: boolean; config: unknown };
 export type UpdateLlmModelResponse = { id: string; provider_id: string; name: string; description: string; is_default: boolean; config: unknown; capabilities: unknown; prices: unknown };
 export type DeleteLlmModelResponse = { deleted: boolean };
-export type ListLlmModelSettingsResponse = Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>;
+export type ListLlmModelSettingsResponse = Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>;
 export type FetchLlmModelsResponse = { ok: boolean; message: string; names: Array<string> };
 export type TestLlmModelRequest = { provider_id?: string | null; backend: string; config: unknown; name: string; model_config?: unknown | null };
 export type TestLlmModelResponse = { ok: boolean; message: string; model: string; capabilities: unknown; prices: unknown };
-export type ListModulesResponse = { modules: Array<{ id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null }>; root: string; npm: boolean; npm_too_old?: { version: string; minimum: string } | null; node: boolean; python: boolean; pip: boolean; python_dir?: string | null; bundled: Array<{ id: string; name: string; language: string; title: string; description: string; supplies: Array<string>; installs: Array<string>; permissions: unknown; installed: boolean }> };
+export type ListModulesResponse = { modules: Array<{ id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null }>; root: string; npm: boolean; npm_too_old?: { version: string; minimum: string } | null; node: boolean; python: boolean; pip: boolean; python_dir?: string | null; bundled: Array<{ id: string; name: string; language: string; title: string; description: string; supplies: Array<string>; installs: Array<string>; permissions: unknown; installed: boolean }> };
 export type InstallModuleRequest = { source: string; location: string; language?: string | null };
-export type InstallModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
+export type InstallModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
 export type UpdateModuleRequest = { configuration?: unknown | null; permissions?: unknown | null };
-export type UpdateModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
+export type UpdateModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
 export type DeleteModuleResponse = { deleted: boolean };
 export type ReloadModulesResponse = { modules: number };
 export type ListAgentsResponse = Array<{ id: string; name: string; description: string; provider: string; model?: string | null; system_prompt: string; traits: Array<{ trait: string; config: unknown }>; min_role?: number | null; attributes: unknown; error?: string | null }>;
@@ -105,15 +105,17 @@ export type CreateAgentResponse = { id: string; name: string; description: strin
 export type UpdateAgentRequest = { name: string; description: string; provider: string; model?: string | null; system_prompt: string; traits: Array<{ trait: string; config: unknown }>; min_role?: number | null; attributes: unknown };
 export type UpdateAgentResponse = { id: string; name: string; description: string; provider: string; model?: string | null; system_prompt: string; traits: Array<{ trait: string; config: unknown }>; min_role?: number | null; attributes: unknown; error?: string | null };
 export type DeleteAgentResponse = { deleted: boolean };
-export type ListAgentTraitsResponse = Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }> }>;
+export type ListAgentTraitsResponse = Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>;
 export type ListRunsResponse = Array<{ id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null; conclusion?: unknown | null; parent_run?: string | null }>;
-export type GetRunResponse = { id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null; conclusion?: unknown | null; parent_run?: string | null; context: unknown; attributes: unknown; trace: Array<{ id: string; seq: number; step: string; started_at: string; finished_at: string; attempt: number; outcome: string; error?: string | null; context: unknown }>; pending_form?: { fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; assign_to: string; min_role?: number | null } | null; plan?: { features: Array<{ id: string; title: string; description: string; kind: string; acceptance: Array<string>; files: Array<string>; pages: Array<string>; status: string; attempts: number; runs: Array<string> }>; progress: Array<{ feature: string; run: string; status: string; summary: string; check: string; diffstat: string }> } | null };
+export type GetRunResponse = { id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null; conclusion?: unknown | null; parent_run?: string | null; context: unknown; attributes: unknown; trace: Array<{ id: string; seq: number; step: string; started_at: string; finished_at: string; attempt: number; outcome: string; error?: string | null; context: unknown }>; pending_form?: { fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; assign_to: string; min_role?: number | null } | null; plan?: { features: Array<{ id: string; title: string; description: string; kind: string; acceptance: Array<string>; files: Array<string>; pages: Array<string>; status: string; attempts: number; runs: Array<string> }>; progress: Array<{ feature: string; run: string; status: string; summary: string; check: string; diffstat: string }> } | null };
 export type GetRunDiffResponse = { run: string; runs: Array<string>; scopes: Array<{ store: string; root: string; files: Array<{ path: string; status: string; added?: number | null; removed?: number | null }>; moves: Array<{ from: string; to: string }>; stat: string; unified: string }> };
 export type DeleteRunResponse = { deleted: boolean };
 export type BrowseFilesRequest = { dir: string };
 export type BrowseFilesResponse = Array<{ name: string; path: string; is_dir: boolean; size?: number | null; modified?: string | null; owner?: string | null; min_role?: number | null; effective_min_role?: number | null }>;
 export type FindFilesRequest = { query: string; dir?: string | null; max_results?: number | null };
 export type FindFilesResponse = { entries: Array<{ name: string; path: string; is_dir: boolean; size?: number | null; modified?: string | null; owner?: string | null; min_role?: number | null; effective_min_role?: number | null }>; truncated: boolean };
+export type ListStoreFilesQuery = { extensions?: string };
+export type ListStoreFilesResponse = { paths: Array<string>; truncated: boolean };
 export type SearchFilesRequest = { pattern: string; regex?: boolean | null; case_sensitive?: boolean | null; whole_word?: boolean | null; glob?: string | null; dir?: string | null; max_results?: number | null };
 export type SearchFilesResponse = { matches: Array<{ path: string; line: number; column: number; length: number; text: string }>; files_searched: number; truncated: boolean };
 export type ReadFileRequest = { path: string };
@@ -139,6 +141,8 @@ export type DeleteApplicationResponse = { deleted: boolean; agent?: string | nul
 export type BuildApplicationResponse = { built: boolean; git_repo: boolean; log: string };
 export type DeepCleanApplicationResponse = { built: boolean; git_repo: boolean; log: string };
 export type BuildApplicationTargetResponse = { target: string; label: string; status: string; store: string; log_path: string; started_at: string; finished_at?: string | null; artifact?: string | null; size?: number | null; log?: string | null; error?: string | null };
+export type RunApplicationTargetOperationRequest = { config: unknown };
+export type RunApplicationTargetOperationResponse = { message: string; store: string; files: Array<string>; git_repo: boolean; settings: unknown };
 export type GetApplicationTargetBuildResponse = { target: string; label: string; status: string; store: string; log_path: string; started_at: string; finished_at?: string | null; artifact?: string | null; size?: number | null; log?: string | null; error?: string | null };
 export type UpdateApplicationClientResponse = { scaffolded: boolean; files: Array<string>; log: string };
 export type RunApplicationGraphqlRequest = { query: string; variables?: unknown | null; operationName?: string | null };
@@ -151,7 +155,7 @@ export type DeleteViewResponse = { deleted: boolean };
 export type CreateViewRequest = { name: string; description?: string | null; viewpattern: string; table_name?: string | null; min_role: number };
 export type CreateViewResponse = { id: string; name: string; description: string; viewpattern: string; table_name?: string | null; configuration: unknown; min_role: number; slug?: unknown | null; attributes: unknown };
 export type ViewConfigStepRequest = { viewpattern: string; table_name?: string | null; name?: string | null; step: number; context: unknown };
-export type ViewConfigStepResponse = { index: number; name: string; count: number; builder: boolean; builder_options?: unknown | null; skip: boolean; context_field?: string | null; blurb?: string | null; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; values: unknown; issues: Array<string> };
+export type ViewConfigStepResponse = { index: number; name: string; count: number; builder: boolean; builder_options?: unknown | null; skip: boolean; context_field?: string | null; blurb?: string | null; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; values: unknown; issues: Array<string> };
 export type ViewReferencesResponse = { embedded_in: Array<string>; linked_from: Array<string>; pages: Array<string>; library: Array<string>; places: Array<string> };
 export type ListPagesResponse = Array<{ id: string; name: string; title: string; description: string; layout: unknown; min_role: number; attributes: unknown }>;
 export type GetPageResponse = { id: string; name: string; title: string; description: string; layout: unknown; min_role: number; attributes: unknown };
@@ -190,8 +194,8 @@ export type BuilderPagePreviewResponse = { html: string };
 export type BuilderDistinctValuesResponse = { success: unknown };
 export type ListViewPatternsResponse = Array<{ name: string; label: string; description: string; table_required: boolean; view_quantity?: string | null; routes: Array<string>; steps: Array<string>; module?: string | null }>;
 export type BuilderStatusResponse = { available: boolean };
-export type ListFrameworksResponse = Array<{ name: string; label: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; has_views: boolean; file_store_settings: Array<string> }>;
-export type ListApiProvidersResponse = Array<{ name: string; label: string; description: string; default_mount: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; supports_custom_queries: boolean }>;
+export type ListFrameworksResponse = Array<{ name: string; label: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; has_views: boolean; file_store_settings: Array<string>; file_settings: Array<{ name: string; extensions: Array<string> }>; targets: Array<{ name: string; label: string; options: Array<string>; operations: Array<{ name: string; label: string; description: string; show_if: Array<{ name: string; values: Array<unknown> }> }> }> }>;
+export type ListApiProvidersResponse = Array<{ name: string; label: string; description: string; default_mount: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; supports_custom_queries: boolean }>;
 export type DescribeCustomQueryRequest = { name: string; description?: string | null; method: string; path: string; language?: string | null; code: string; params: Array<{ name: string; type: string; required?: boolean | null }>; min_role?: number | null; tables?: Array<string> | null };
 export type DescribeCustomQueryResponse = { columns: Array<{ name: string; type: string }> };
 export type ListUsersResponse = Array<{ id: string; email: string; role: number; disabled: boolean; language?: string | null; extra: unknown }>;
@@ -220,7 +224,7 @@ export type RunTriggerResponse = { result: unknown };
 export type TestRunTriggerRequest = unknown;
 export type TestRunTriggerResponse = { ok: boolean; result: unknown; error?: string | null; console: Array<{ level: string; text: string }>; row?: unknown | null };
 export type ListActionsQuery = { table?: string };
-export type ListActionsResponse = Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; workflow_step: boolean }>;
+export type ListActionsResponse = Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; workflow_step: boolean }>;
 export type GetWorkflowQuery = { version?: number };
 export type GetWorkflowResponse = { id: string; name: string; channel?: string | null; version: number; workflow: unknown; issues: Array<{ step?: string | null; problem: string }>; versions: Array<{ version: number; description: string; created_at: string; created_by?: string | null }> };
 export type SaveWorkflowRequest = { workflow: unknown; description?: string | null };
@@ -230,12 +234,12 @@ export type RevertWorkflowResponse = { id: string; name: string; channel?: strin
 export type ListWorkflowRunsQuery = { state?: string; limit?: number; offset?: number };
 export type ListWorkflowRunsResponse = Array<{ id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null; conclusion?: unknown | null; parent_run?: string | null }>;
 export type ResumeRunRequest = unknown;
-export type ResumeRunResponse = { id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null; conclusion?: unknown | null; parent_run?: string | null; context: unknown; attributes: unknown; trace: Array<{ id: string; seq: number; step: string; started_at: string; finished_at: string; attempt: number; outcome: string; error?: string | null; context: unknown }>; pending_form?: { fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; assign_to: string; min_role?: number | null } | null; plan?: { features: Array<{ id: string; title: string; description: string; kind: string; acceptance: Array<string>; files: Array<string>; pages: Array<string>; status: string; attempts: number; runs: Array<string> }>; progress: Array<{ feature: string; run: string; status: string; summary: string; check: string; diffstat: string }> } | null };
+export type ResumeRunResponse = { id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null; conclusion?: unknown | null; parent_run?: string | null; context: unknown; attributes: unknown; trace: Array<{ id: string; seq: number; step: string; started_at: string; finished_at: string; attempt: number; outcome: string; error?: string | null; context: unknown }>; pending_form?: { fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; assign_to: string; min_role?: number | null } | null; plan?: { features: Array<{ id: string; title: string; description: string; kind: string; acceptance: Array<string>; files: Array<string>; pages: Array<string>; status: string; attempts: number; runs: Array<string> }>; progress: Array<{ feature: string; run: string; status: string; summary: string; check: string; diffstat: string }> } | null };
 export type CancelRunRequest = { reason?: string | null };
-export type CancelRunResponse = { id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null; conclusion?: unknown | null; parent_run?: string | null; context: unknown; attributes: unknown; trace: Array<{ id: string; seq: number; step: string; started_at: string; finished_at: string; attempt: number; outcome: string; error?: string | null; context: unknown }>; pending_form?: { fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; assign_to: string; min_role?: number | null } | null; plan?: { features: Array<{ id: string; title: string; description: string; kind: string; acceptance: Array<string>; files: Array<string>; pages: Array<string>; status: string; attempts: number; runs: Array<string> }>; progress: Array<{ feature: string; run: string; status: string; summary: string; check: string; diffstat: string }> } | null };
-export type RetryRunResponse = { id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null; conclusion?: unknown | null; parent_run?: string | null; context: unknown; attributes: unknown; trace: Array<{ id: string; seq: number; step: string; started_at: string; finished_at: string; attempt: number; outcome: string; error?: string | null; context: unknown }>; pending_form?: { fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; assign_to: string; min_role?: number | null } | null; plan?: { features: Array<{ id: string; title: string; description: string; kind: string; acceptance: Array<string>; files: Array<string>; pages: Array<string>; status: string; attempts: number; runs: Array<string> }>; progress: Array<{ feature: string; run: string; status: string; summary: string; check: string; diffstat: string }> } | null };
+export type CancelRunResponse = { id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null; conclusion?: unknown | null; parent_run?: string | null; context: unknown; attributes: unknown; trace: Array<{ id: string; seq: number; step: string; started_at: string; finished_at: string; attempt: number; outcome: string; error?: string | null; context: unknown }>; pending_form?: { fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; assign_to: string; min_role?: number | null } | null; plan?: { features: Array<{ id: string; title: string; description: string; kind: string; acceptance: Array<string>; files: Array<string>; pages: Array<string>; status: string; attempts: number; runs: Array<string> }>; progress: Array<{ feature: string; run: string; status: string; summary: string; check: string; diffstat: string }> } | null };
+export type RetryRunResponse = { id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null; conclusion?: unknown | null; parent_run?: string | null; context: unknown; attributes: unknown; trace: Array<{ id: string; seq: number; step: string; started_at: string; finished_at: string; attempt: number; outcome: string; error?: string | null; context: unknown }>; pending_form?: { fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; assign_to: string; min_role?: number | null } | null; plan?: { features: Array<{ id: string; title: string; description: string; kind: string; acceptance: Array<string>; files: Array<string>; pages: Array<string>; status: string; attempts: number; runs: Array<string> }>; progress: Array<{ feature: string; run: string; status: string; summary: string; check: string; diffstat: string }> } | null };
 export type ListModelProvidersQuery = { dataset?: string; configuration?: string };
-export type ListModelProvidersResponse = { providers: Array<{ name: string; description: string; module?: string | null; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; hyperparameters: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; outcome_spec: unknown; outcome?: unknown | null; outcome_error?: string | null; standardise: boolean; binds_data: boolean; cancellable: boolean; unavailable?: string | null }>; builtins_compiled_out: boolean; notice?: string | null };
+export type ListModelProvidersResponse = { providers: Array<{ name: string; description: string; module?: string | null; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; hyperparameters: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; outcome_spec: unknown; outcome?: unknown | null; outcome_error?: string | null; standardise: boolean; binds_data: boolean; cancellable: boolean; unavailable?: string | null }>; builtins_compiled_out: boolean; notice?: string | null };
 export type PreviewDatasetRequest = { dataset: unknown; limit?: number | null };
 export type PreviewDatasetResponse = { columns: Array<{ name: string; type: string }>; rows: Array<unknown>; primary_key?: string | null; split_error?: string | null };
 export type ListModelsQuery = { table?: string };
@@ -273,16 +277,16 @@ export type DownloadModelRunResponse = unknown;
 export type WritePosteriorRequest = { variable: string; mode: string; statistics: unknown; table?: string | null; coordinates?: unknown | null; instance_field?: string | null; elements?: unknown | null };
 export type WritePosteriorResponse = { variable: string; mode: string; table: string; instance: string; written: number };
 export type ListStreamProvidersQuery = { provider?: string; configuration?: string };
-export type ListStreamProvidersResponse = { providers: Array<{ name: string; label: string; description: string; module?: string | null; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null }>; element_type?: unknown | null; element_type_error?: string | null }>; builtins_compiled_out: boolean; notice?: string | null };
+export type ListStreamProvidersResponse = { providers: Array<{ name: string; label: string; description: string; module?: string | null; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; element_type?: unknown | null; element_type_error?: string | null }>; builtins_compiled_out: boolean; notice?: string | null };
 export type ListStreamsResponse = Array<{ id: string; name: string; description: string; provider: string; configuration: unknown; min_role?: number | null; attributes: unknown; enabled: boolean; element_type?: unknown | null; error?: string | null; status?: unknown | null; counters?: unknown | null }>;
 export type GetStreamResponse = { id: string; name: string; description: string; provider: string; configuration: unknown; min_role?: number | null; attributes: unknown; enabled: boolean; element_type?: unknown | null; error?: string | null; status?: unknown | null; counters?: unknown | null };
 export type SaveStreamRequest = { id?: string | null; name: string; description?: string | null; provider: string; configuration?: unknown | null; min_role?: number | null; attributes?: unknown | null; enabled?: boolean | null };
 export type SaveStreamResponse = { id: string; name: string; description: string; provider: string; configuration: unknown; min_role?: number | null; attributes: unknown; enabled: boolean; element_type?: unknown | null; error?: string | null; status?: unknown | null; counters?: unknown | null };
 export type DeleteStreamResponse = { deleted: boolean };
 export type StreamStatusResponse = { id: string; name: string; running: boolean; status?: unknown | null; counters?: unknown | null; element_type?: unknown | null; listeners: number };
-export type GetSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; help: string }> }>; values: unknown };
+export type GetSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }>; help: string }> }>; values: unknown };
 export type UpdateSettingsRequest = { values: unknown };
-export type UpdateSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; help: string }> }>; values: unknown };
+export type UpdateSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }>; help: string }> }>; values: unknown };
 export type SendTestEmailRequest = { to?: string | null };
 export type SendTestEmailResponse = { sent_to: string };
 export type GetPythonStatusResponse = { state: string; version?: string | null; explanation: string; dir?: string | null; site_packages?: string | null; bin?: string | null; packages: Array<{ name: string; version?: string | null }>; max_inflight: number; resident: number; threads: number; stuck: number; max_stuck: number; env_error?: string | null };
@@ -408,6 +412,7 @@ export interface ApiClient {
   deleteRun(id: string): Promise<DeleteRunResponse>;
   browseFiles(store: string, body: BrowseFilesRequest): Promise<BrowseFilesResponse>;
   findFiles(store: string, body: FindFilesRequest): Promise<FindFilesResponse>;
+  listStoreFiles(store: string, query?: ListStoreFilesQuery): Promise<ListStoreFilesResponse>;
   searchFiles(store: string, body: SearchFilesRequest): Promise<SearchFilesResponse>;
   readFile(store: string, body: ReadFileRequest): Promise<ReadFileResponse>;
   writeFile(store: string, body: WriteFileRequest): Promise<WriteFileResponse>;
@@ -423,6 +428,7 @@ export interface ApiClient {
   buildApplication(id: string): Promise<BuildApplicationResponse>;
   deepCleanApplication(id: string): Promise<DeepCleanApplicationResponse>;
   buildApplicationTarget(id: string, target: string): Promise<BuildApplicationTargetResponse>;
+  runApplicationTargetOperation(id: string, target: string, operation: string, body: RunApplicationTargetOperationRequest): Promise<RunApplicationTargetOperationResponse>;
   getApplicationTargetBuild(id: string, target: string): Promise<GetApplicationTargetBuildResponse>;
   updateApplicationClient(id: string): Promise<UpdateApplicationClientResponse>;
   runApplicationGraphql(id: string, body: RunApplicationGraphqlRequest): Promise<RunApplicationGraphqlResponse>;
@@ -615,7 +621,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateTableFromCsvResponse;
     },
     async updateTable(table, body) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -624,7 +630,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateTableResponse;
     },
     async dropTable(table) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -666,7 +672,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateProvidedTableResponse;
     },
     async updateProvidedTable(table, body) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/provider`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/provider`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -675,7 +681,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateProvidedTableResponse;
     },
     async deleteTableSettings(table) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/settings`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/settings`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -708,7 +714,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateRoleResponse;
     },
     async deleteRole(role) {
-      const res = await doFetch(`${baseUrl}/api/roles/${role}`, {
+      const res = await doFetch(`${baseUrl}/api/roles/${encodeURIComponent(role)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -716,7 +722,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteRoleResponse;
     },
     async listFields(table) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/fields`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/fields`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -724,7 +730,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListFieldsResponse;
     },
     async listInboundKeys(table) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/inbound-keys`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/inbound-keys`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -732,7 +738,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListInboundKeysResponse;
     },
     async createField(table, body) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/fields`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/fields`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -741,7 +747,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateFieldResponse;
     },
     async updateField(table, field, body) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/fields/${field}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/fields/${encodeURIComponent(field)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -750,7 +756,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateFieldResponse;
     },
     async deleteField(table, field) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/fields/${field}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/fields/${encodeURIComponent(field)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -758,7 +764,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteFieldResponse;
     },
     async listConstraints(table) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/constraints`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/constraints`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -766,7 +772,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListConstraintsResponse;
     },
     async createConstraint(table, body) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/constraints`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/constraints`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -775,7 +781,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateConstraintResponse;
     },
     async deleteConstraint(table, constraint) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/constraints/${constraint}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/constraints/${encodeURIComponent(constraint)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -797,7 +803,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (query?.offset !== undefined && query?.offset !== null) search.append("offset", String(query?.offset));
       for (const [key, value] of Object.entries(query?.filter ?? {})) search.append(key, String(value));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -808,7 +814,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       const search = new URLSearchParams();
       for (const [key, value] of Object.entries(query?.filter ?? {})) search.append(key, String(value));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows/count${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows/count${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -816,7 +822,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CountRowsResponse;
     },
     async createRow(table, body) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -825,7 +831,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateRowResponse;
     },
     async updateRow(table, id, body) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -834,7 +840,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateRowResponse;
     },
     async deleteRow(table, id) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -842,7 +848,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return;
     },
     async deleteAllRows(table) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/rows`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -850,7 +856,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteAllRowsResponse;
     },
     async exportTableCsv(table) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/csv`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/csv`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -858,7 +864,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ExportTableCsvResponse;
     },
     async importTableCsv(table, body) {
-      const res = await doFetch(`${baseUrl}/api/tables/${table}/csv`, {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/csv`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -884,7 +890,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateDatabaseConnectionResponse;
     },
     async updateDatabaseConnection(id, body) {
-      const res = await doFetch(`${baseUrl}/api/db-connections/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/db-connections/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -893,7 +899,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateDatabaseConnectionResponse;
     },
     async deleteDatabaseConnection(id) {
-      const res = await doFetch(`${baseUrl}/api/db-connections/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/db-connections/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -927,7 +933,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateFileStoreResponse;
     },
     async updateFileStore(id, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -936,7 +942,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateFileStoreResponse;
     },
     async deleteFileStore(id) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -952,7 +958,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListFileStoreBackendsResponse;
     },
     async runBackendOperation(backend, operation, body) {
-      const res = await doFetch(`${baseUrl}/api/file-store-backends/${backend}/operations/${operation}`, {
+      const res = await doFetch(`${baseUrl}/api/file-store-backends/${encodeURIComponent(backend)}/operations/${encodeURIComponent(operation)}`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -961,7 +967,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as RunBackendOperationResponse;
     },
     async runFileStoreOperation(id, operation, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${id}/operations/${operation}`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(id)}/operations/${encodeURIComponent(operation)}`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -987,7 +993,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateLlmProviderResponse;
     },
     async updateLlmProvider(id, body) {
-      const res = await doFetch(`${baseUrl}/api/llm-providers/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -996,7 +1002,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateLlmProviderResponse;
     },
     async deleteLlmProvider(id) {
-      const res = await doFetch(`${baseUrl}/api/llm-providers/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1012,7 +1018,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListLlmProviderBackendsResponse;
     },
     async listLlmModels(id) {
-      const res = await doFetch(`${baseUrl}/api/llm-providers/${id}/models`, {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${encodeURIComponent(id)}/models`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1020,7 +1026,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListLlmModelsResponse;
     },
     async createLlmModel(id, body) {
-      const res = await doFetch(`${baseUrl}/api/llm-providers/${id}/models`, {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${encodeURIComponent(id)}/models`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1029,7 +1035,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateLlmModelResponse;
     },
     async updateLlmModel(id, body) {
-      const res = await doFetch(`${baseUrl}/api/llm-models/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/llm-models/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1038,7 +1044,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateLlmModelResponse;
     },
     async deleteLlmModel(id) {
-      const res = await doFetch(`${baseUrl}/api/llm-models/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/llm-models/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1046,7 +1052,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteLlmModelResponse;
     },
     async listLlmModelSettings(backend) {
-      const res = await doFetch(`${baseUrl}/api/llm-provider-backends/${backend}/model-settings`, {
+      const res = await doFetch(`${baseUrl}/api/llm-provider-backends/${encodeURIComponent(backend)}/model-settings`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1054,7 +1060,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListLlmModelSettingsResponse;
     },
     async fetchLlmModels(id) {
-      const res = await doFetch(`${baseUrl}/api/llm-providers/${id}/fetch-models`, {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${encodeURIComponent(id)}/fetch-models`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1088,7 +1094,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as InstallModuleResponse;
     },
     async updateModule(id, body) {
-      const res = await doFetch(`${baseUrl}/api/modules/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/modules/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1097,7 +1103,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateModuleResponse;
     },
     async deleteModule(id) {
-      const res = await doFetch(`${baseUrl}/api/modules/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/modules/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1130,7 +1136,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateAgentResponse;
     },
     async updateAgent(id, body) {
-      const res = await doFetch(`${baseUrl}/api/agents/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/agents/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1139,7 +1145,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateAgentResponse;
     },
     async deleteAgent(id) {
-      const res = await doFetch(`${baseUrl}/api/agents/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/agents/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1155,7 +1161,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListAgentTraitsResponse;
     },
     async listRuns(agent) {
-      const res = await doFetch(`${baseUrl}/api/agent-runs/${agent}`, {
+      const res = await doFetch(`${baseUrl}/api/agent-runs/${encodeURIComponent(agent)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1163,7 +1169,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListRunsResponse;
     },
     async getRun(id) {
-      const res = await doFetch(`${baseUrl}/api/runs/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/runs/${encodeURIComponent(id)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1171,7 +1177,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetRunResponse;
     },
     async getRunDiff(id) {
-      const res = await doFetch(`${baseUrl}/api/runs/${id}/diff`, {
+      const res = await doFetch(`${baseUrl}/api/runs/${encodeURIComponent(id)}/diff`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1179,7 +1185,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetRunDiffResponse;
     },
     async deleteRun(id) {
-      const res = await doFetch(`${baseUrl}/api/runs/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/runs/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1187,7 +1193,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteRunResponse;
     },
     async browseFiles(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/browse`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/browse`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1196,7 +1202,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as BrowseFilesResponse;
     },
     async findFiles(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/find`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/find`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1204,8 +1210,19 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (!res.ok) throw await clientError("findFiles", res);
       return (await res.json()) as FindFilesResponse;
     },
+    async listStoreFiles(store, query) {
+      const search = new URLSearchParams();
+      if (query?.extensions !== undefined && query?.extensions !== null) search.append("extensions", String(query?.extensions));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/files-by-type${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listStoreFiles", res);
+      return (await res.json()) as ListStoreFilesResponse;
+    },
     async searchFiles(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/search`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/search`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1214,7 +1231,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SearchFilesResponse;
     },
     async readFile(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/read`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/read`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1223,7 +1240,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ReadFileResponse;
     },
     async writeFile(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/write`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/write`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1232,7 +1249,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as WriteFileResponse;
     },
     async makeDirectory(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/mkdir`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/mkdir`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1241,7 +1258,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as MakeDirectoryResponse;
     },
     async deleteFile(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/delete`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/delete`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1250,7 +1267,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteFileResponse;
     },
     async renameFile(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/rename`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/rename`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1259,7 +1276,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as RenameFileResponse;
     },
     async getFileMeta(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/meta`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/meta`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1268,7 +1285,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetFileMetaResponse;
     },
     async setFileMeta(store, body) {
-      const res = await doFetch(`${baseUrl}/api/file-stores/${store}/set-meta`, {
+      const res = await doFetch(`${baseUrl}/api/file-stores/${encodeURIComponent(store)}/set-meta`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1294,7 +1311,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateApplicationResponse;
     },
     async updateApplication(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1303,7 +1320,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateApplicationResponse;
     },
     async deleteApplication(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1311,7 +1328,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteApplicationResponse;
     },
     async buildApplication(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/build`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/build`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1319,7 +1336,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as BuildApplicationResponse;
     },
     async deepCleanApplication(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/deep-clean`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/deep-clean`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1327,15 +1344,24 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeepCleanApplicationResponse;
     },
     async buildApplicationTarget(id, target) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/targets/${target}/build`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/targets/${encodeURIComponent(target)}/build`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
       if (!res.ok) throw await clientError("buildApplicationTarget", res);
       return (await res.json()) as BuildApplicationTargetResponse;
     },
+    async runApplicationTargetOperation(id, target, operation, body) {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/targets/${encodeURIComponent(target)}/operations/${encodeURIComponent(operation)}`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("runApplicationTargetOperation", res);
+      return (await res.json()) as RunApplicationTargetOperationResponse;
+    },
     async getApplicationTargetBuild(id, target) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/targets/${target}/build`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/targets/${encodeURIComponent(target)}/build`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1343,7 +1369,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetApplicationTargetBuildResponse;
     },
     async updateApplicationClient(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/client`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/client`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1351,7 +1377,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateApplicationClientResponse;
     },
     async runApplicationGraphql(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/graphql`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/graphql`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1360,7 +1386,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as RunApplicationGraphqlResponse;
     },
     async listViews(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/views`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/views`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1368,7 +1394,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListViewsResponse;
     },
     async getView(id, name) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/views/${name}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/views/${encodeURIComponent(name)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1376,7 +1402,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetViewResponse;
     },
     async saveView(id, name, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/views/${name}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/views/${encodeURIComponent(name)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1385,7 +1411,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SaveViewResponse;
     },
     async deleteView(id, name) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/views/${name}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/views/${encodeURIComponent(name)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1393,7 +1419,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteViewResponse;
     },
     async createView(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/views`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/views`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1402,7 +1428,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateViewResponse;
     },
     async viewConfigStep(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/view-config-step`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/view-config-step`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1411,7 +1437,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ViewConfigStepResponse;
     },
     async viewReferences(id, name) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/views/${name}/references`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/views/${encodeURIComponent(name)}/references`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1419,7 +1445,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ViewReferencesResponse;
     },
     async listPages(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/pages`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1427,7 +1453,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListPagesResponse;
     },
     async getPage(id, name) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages/${name}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/pages/${encodeURIComponent(name)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1435,7 +1461,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetPageResponse;
     },
     async savePage(id, name, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages/${name}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/pages/${encodeURIComponent(name)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1444,7 +1470,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SavePageResponse;
     },
     async deletePage(id, name) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages/${name}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/pages/${encodeURIComponent(name)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1452,7 +1478,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeletePageResponse;
     },
     async saveViewLayout(id, name, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/views/${name}/layout`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/views/${encodeURIComponent(name)}/layout`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1461,7 +1487,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SaveViewLayoutResponse;
     },
     async savePageLayout(id, name, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages/${name}/layout`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/pages/${encodeURIComponent(name)}/layout`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1470,7 +1496,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SavePageLayoutResponse;
     },
     async pageReferences(id, name) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/pages/${name}/references`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/pages/${encodeURIComponent(name)}/references`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1478,7 +1504,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as PageReferencesResponse;
     },
     async listLibrary(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/library`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/library`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1486,7 +1512,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListLibraryResponse;
     },
     async getLibraryItem(id, item) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/library/${item}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/library/${encodeURIComponent(item)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1494,7 +1520,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetLibraryItemResponse;
     },
     async createLibraryItem(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/library`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/library`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1503,7 +1529,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateLibraryItemResponse;
     },
     async saveLibraryItem(id, item, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/library/${item}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/library/${encodeURIComponent(item)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1512,7 +1538,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SaveLibraryItemResponse;
     },
     async saveLibraryUpdates(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/library/updates`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/library/updates`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1524,7 +1550,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       const search = new URLSearchParams();
       if (query?.confirm !== undefined && query?.confirm !== null) search.append("confirm", String(query?.confirm));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/library/${item}${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/library/${encodeURIComponent(item)}${qs ? `?${qs}` : ""}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1532,7 +1558,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteLibraryItemResponse;
     },
     async getTranslations(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/translations`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/translations`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1540,7 +1566,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetTranslationsResponse;
     },
     async setApplicationLocales(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/locales`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/locales`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1549,7 +1575,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SetApplicationLocalesResponse;
     },
     async saveTranslations(id, locale, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/translations/${locale}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/translations/${encodeURIComponent(locale)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1558,7 +1584,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SaveTranslationsResponse;
     },
     async translateMissing(id, locale) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/translations/${locale}/fill`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/translations/${encodeURIComponent(locale)}/fill`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1566,7 +1592,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as TranslateMissingResponse;
     },
     async builderFieldPreview(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/field-preview`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/builder/field-preview`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1575,7 +1601,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as BuilderFieldPreviewResponse;
     },
     async builderFieldviewConfigForm(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/fieldview-config`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/builder/fieldview-config`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1584,7 +1610,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as BuilderFieldviewConfigFormResponse;
     },
     async builderViewPreview(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/view-preview`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/builder/view-preview`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1593,7 +1619,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as BuilderViewPreviewResponse;
     },
     async builderPagePreview(id, body) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/page-preview`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/builder/page-preview`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1602,7 +1628,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as BuilderPagePreviewResponse;
     },
     async builderDistinctValues(id, table, field) {
-      const res = await doFetch(`${baseUrl}/api/applications/${id}/builder/distinct/${table}/${field}`, {
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/builder/distinct/${encodeURIComponent(table)}/${encodeURIComponent(field)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1668,7 +1694,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateUserResponse;
     },
     async updateUser(id, body) {
-      const res = await doFetch(`${baseUrl}/api/users/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1677,7 +1703,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateUserResponse;
     },
     async deleteUser(id) {
-      const res = await doFetch(`${baseUrl}/api/users/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1685,7 +1711,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteUserResponse;
     },
     async setUserDisabled(id, body) {
-      const res = await doFetch(`${baseUrl}/api/users/${id}/disabled`, {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/disabled`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1694,7 +1720,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SetUserDisabledResponse;
     },
     async forceLogoutUser(id) {
-      const res = await doFetch(`${baseUrl}/api/users/${id}/force-logout`, {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/force-logout`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1702,7 +1728,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ForceLogoutUserResponse;
     },
     async becomeUser(id) {
-      const res = await doFetch(`${baseUrl}/api/users/${id}/become`, {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/become`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1710,7 +1736,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as BecomeUserResponse;
     },
     async setRandomPassword(id) {
-      const res = await doFetch(`${baseUrl}/api/users/${id}/random-password`, {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/random-password`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1735,7 +1761,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateApiTokenResponse;
     },
     async revokeApiToken(id) {
-      const res = await doFetch(`${baseUrl}/api/api-tokens/${id}/revoke`, {
+      const res = await doFetch(`${baseUrl}/api/api-tokens/${encodeURIComponent(id)}/revoke`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1760,7 +1786,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateTriggerResponse;
     },
     async updateTrigger(id, body) {
-      const res = await doFetch(`${baseUrl}/api/triggers/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/triggers/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -1769,7 +1795,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateTriggerResponse;
     },
     async deleteTrigger(id) {
-      const res = await doFetch(`${baseUrl}/api/triggers/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/triggers/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1777,7 +1803,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteTriggerResponse;
     },
     async runTrigger(id, body) {
-      const res = await doFetch(`${baseUrl}/api/triggers/${id}/run`, {
+      const res = await doFetch(`${baseUrl}/api/triggers/${encodeURIComponent(id)}/run`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1786,7 +1812,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as RunTriggerResponse;
     },
     async testRunTrigger(id, body) {
-      const res = await doFetch(`${baseUrl}/api/triggers/${id}/test-run`, {
+      const res = await doFetch(`${baseUrl}/api/triggers/${encodeURIComponent(id)}/test-run`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1809,7 +1835,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       const search = new URLSearchParams();
       if (query?.version !== undefined && query?.version !== null) search.append("version", String(query?.version));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/workflows/${id}${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/workflows/${encodeURIComponent(id)}${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1817,7 +1843,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetWorkflowResponse;
     },
     async saveWorkflow(id, body) {
-      const res = await doFetch(`${baseUrl}/api/workflows/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/workflows/${encodeURIComponent(id)}`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1826,7 +1852,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SaveWorkflowResponse;
     },
     async revertWorkflow(id, body) {
-      const res = await doFetch(`${baseUrl}/api/workflows/${id}/revert`, {
+      const res = await doFetch(`${baseUrl}/api/workflows/${encodeURIComponent(id)}/revert`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1840,7 +1866,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (query?.limit !== undefined && query?.limit !== null) search.append("limit", String(query?.limit));
       if (query?.offset !== undefined && query?.offset !== null) search.append("offset", String(query?.offset));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/workflows/${id}/runs${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/workflows/${encodeURIComponent(id)}/runs${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1848,7 +1874,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListWorkflowRunsResponse;
     },
     async resumeRun(id, body) {
-      const res = await doFetch(`${baseUrl}/api/runs/${id}/resume`, {
+      const res = await doFetch(`${baseUrl}/api/runs/${encodeURIComponent(id)}/resume`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1857,7 +1883,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ResumeRunResponse;
     },
     async cancelRun(id, body) {
-      const res = await doFetch(`${baseUrl}/api/runs/${id}/cancel`, {
+      const res = await doFetch(`${baseUrl}/api/runs/${encodeURIComponent(id)}/cancel`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1866,7 +1892,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CancelRunResponse;
     },
     async retryRun(id) {
-      const res = await doFetch(`${baseUrl}/api/runs/${id}/retry`, {
+      const res = await doFetch(`${baseUrl}/api/runs/${encodeURIComponent(id)}/retry`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1906,7 +1932,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListModelsResponse;
     },
     async getModel(id) {
-      const res = await doFetch(`${baseUrl}/api/models/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1923,7 +1949,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SaveModelResponse;
     },
     async cloneModel(id, body) {
-      const res = await doFetch(`${baseUrl}/api/models/${id}/clone`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}/clone`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1932,7 +1958,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CloneModelResponse;
     },
     async modelUsage(id) {
-      const res = await doFetch(`${baseUrl}/api/models/${id}/usage`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}/usage`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1940,7 +1966,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ModelUsageResponse;
     },
     async patchModelViewState(id, body) {
-      const res = await doFetch(`${baseUrl}/api/models/${id}/view-state`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}/view-state`, {
         method: "PATCH",
         headers: requestHeaders("PATCH", true),
         body: JSON.stringify(body),
@@ -1949,7 +1975,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as PatchModelViewStateResponse;
     },
     async deleteModel(id) {
-      const res = await doFetch(`${baseUrl}/api/models/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1957,7 +1983,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteModelResponse;
     },
     async fitModel(id, body) {
-      const res = await doFetch(`${baseUrl}/api/models/${id}/fit`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}/fit`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -1966,7 +1992,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as FitModelResponse;
     },
     async listModelInstances(id) {
-      const res = await doFetch(`${baseUrl}/api/models/${id}/instances`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}/instances`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1974,7 +2000,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListModelInstancesResponse;
     },
     async getModelInstance(id) {
-      const res = await doFetch(`${baseUrl}/api/model-instances/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/model-instances/${encodeURIComponent(id)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1982,7 +2008,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetModelInstanceResponse;
     },
     async deleteModelInstance(id) {
-      const res = await doFetch(`${baseUrl}/api/model-instances/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/model-instances/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -1990,7 +2016,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteModelInstanceResponse;
     },
     async activateModelInstance(id) {
-      const res = await doFetch(`${baseUrl}/api/model-instances/${id}/activate`, {
+      const res = await doFetch(`${baseUrl}/api/model-instances/${encodeURIComponent(id)}/activate`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -2037,7 +2063,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SuggestBindingsResponse;
     },
     async compileModel(id) {
-      const res = await doFetch(`${baseUrl}/api/models/${id}/compile`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}/compile`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -2045,7 +2071,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CompileModelResponse;
     },
     async cancelModelFit(id) {
-      const res = await doFetch(`${baseUrl}/api/model-instances/${id}/cancel`, {
+      const res = await doFetch(`${baseUrl}/api/model-instances/${encodeURIComponent(id)}/cancel`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -2060,7 +2086,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (query?.warmup !== undefined && query?.warmup !== null) search.append("warmup", String(query?.warmup));
       if (query?.thin !== undefined && query?.thin !== null) search.append("thin", String(query?.thin));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/model-instances/${id}/draws${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/model-instances/${encodeURIComponent(id)}/draws${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2072,7 +2098,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (query?.variable !== undefined && query?.variable !== null) search.append("variable", String(query?.variable));
       if (query?.elements !== undefined && query?.elements !== null) search.append("elements", String(query?.elements));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/model-instances/${id}/summary${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/model-instances/${encodeURIComponent(id)}/summary${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2080,7 +2106,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as GetPosteriorSummaryResponse;
     },
     async downloadModelRun(id) {
-      const res = await doFetch(`${baseUrl}/api/model-instances/${id}/run`, {
+      const res = await doFetch(`${baseUrl}/api/model-instances/${encodeURIComponent(id)}/run`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2088,7 +2114,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DownloadModelRunResponse;
     },
     async writePosterior(id, body) {
-      const res = await doFetch(`${baseUrl}/api/model-instances/${id}/posterior-writes`, {
+      const res = await doFetch(`${baseUrl}/api/model-instances/${encodeURIComponent(id)}/posterior-writes`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -2117,7 +2143,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListStreamsResponse;
     },
     async getStream(id) {
-      const res = await doFetch(`${baseUrl}/api/streams/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/streams/${encodeURIComponent(id)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2134,7 +2160,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SaveStreamResponse;
     },
     async deleteStream(id) {
-      const res = await doFetch(`${baseUrl}/api/streams/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/streams/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -2142,7 +2168,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as DeleteStreamResponse;
     },
     async streamStatus(id) {
-      const res = await doFetch(`${baseUrl}/api/streams/${id}/status`, {
+      const res = await doFetch(`${baseUrl}/api/streams/${encodeURIComponent(id)}/status`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2226,7 +2252,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListDatasetsResponse;
     },
     async getDataset(id) {
-      const res = await doFetch(`${baseUrl}/api/datasets/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/datasets/${encodeURIComponent(id)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2243,7 +2269,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateDatasetResponse;
     },
     async updateDataset(id, body) {
-      const res = await doFetch(`${baseUrl}/api/datasets/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/datasets/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -2252,7 +2278,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateDatasetResponse;
     },
     async deleteDataset(id) {
-      const res = await doFetch(`${baseUrl}/api/datasets/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/datasets/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
@@ -2260,7 +2286,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return;
     },
     async cloneDataset(id, body) {
-      const res = await doFetch(`${baseUrl}/api/datasets/${id}/clone`, {
+      const res = await doFetch(`${baseUrl}/api/datasets/${encodeURIComponent(id)}/clone`, {
         method: "POST",
         headers: requestHeaders("POST", true),
         body: JSON.stringify(body),
@@ -2269,7 +2295,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CloneDatasetResponse;
     },
     async datasetUsage(id) {
-      const res = await doFetch(`${baseUrl}/api/datasets/${id}/usage`, {
+      const res = await doFetch(`${baseUrl}/api/datasets/${encodeURIComponent(id)}/usage`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2369,7 +2395,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (query?.fit !== undefined && query?.fit !== null) search.append("fit", String(query?.fit));
       if (query?.include !== undefined && query?.include !== null) search.append("include", String(query?.include));
       const qs = search.toString();
-      const res = await doFetch(`${baseUrl}/api/models/${id}/outputs${qs ? `?${qs}` : ""}`, {
+      const res = await doFetch(`${baseUrl}/api/models/${encodeURIComponent(id)}/outputs${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2393,7 +2419,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as ListWorkspacesResponse;
     },
     async getWorkspace(id) {
-      const res = await doFetch(`${baseUrl}/api/workspaces/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/workspaces/${encodeURIComponent(id)}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -2410,7 +2436,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as CreateWorkspaceResponse;
     },
     async updateWorkspace(id, body) {
-      const res = await doFetch(`${baseUrl}/api/workspaces/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/workspaces/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -2419,7 +2445,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as UpdateWorkspaceResponse;
     },
     async saveWorkspaceState(id, body) {
-      const res = await doFetch(`${baseUrl}/api/workspaces/${id}/state`, {
+      const res = await doFetch(`${baseUrl}/api/workspaces/${encodeURIComponent(id)}/state`, {
         method: "PUT",
         headers: requestHeaders("PUT", true),
         body: JSON.stringify(body),
@@ -2428,7 +2454,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       return (await res.json()) as SaveWorkspaceStateResponse;
     },
     async deleteWorkspace(id) {
-      const res = await doFetch(`${baseUrl}/api/workspaces/${id}`, {
+      const res = await doFetch(`${baseUrl}/api/workspaces/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: requestHeaders("DELETE", false),
       });
