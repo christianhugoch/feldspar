@@ -72,6 +72,15 @@ export async function uploadFile(
   if (!res.ok) throw await rawError("uploadFile", res);
 }
 
+/** Where a store file downloads from as itself (`GET /download/{store}/{*path}`,
+ * outside the generated client for `uploadFile`'s reason). A link to it lets
+ * the browser fetch and save the bytes directly, at any size, instead of
+ * `readFile`'s base64 in JSON. */
+export function downloadUrl(store: string, path: string): string {
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+  return `/download/${encodeURIComponent(store)}/${encodedPath}`;
+}
+
 /** The error a route outside the typed endpoint set failed with, in the same shape
  * the generated client throws — `<name> failed: <status>[: <server message>]` — so
  * `errorStatus` and `errorMessage` below read it the same way. */

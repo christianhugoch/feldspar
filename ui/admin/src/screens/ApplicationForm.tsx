@@ -23,7 +23,7 @@ import Form from "react-bootstrap/Form";
 import Row from "react-bootstrap/Row";
 import Spinner from "react-bootstrap/Spinner";
 
-import { api, errorMessage } from "../api";
+import { api, downloadUrl, errorMessage } from "../api";
 import type {
   CreateApplicationRequest,
   ListApiProvidersResponse,
@@ -38,7 +38,14 @@ import { navigate } from "../App";
 import { IconArrowLeft } from "../icons";
 import { PageBody, PageHeader } from "../layout";
 import { setNotice } from "../notice";
-import { SettingsFields, asString, buildConfig, readConfig } from "../settings";
+import {
+  SettingsFields,
+  asString,
+  buildConfig,
+  isShown,
+  readConfig,
+  type FieldSpec,
+} from "../settings";
 import {
   apiRowsFromApp,
   apiRowsToRequest,
@@ -49,6 +56,13 @@ import {
 } from "../apiRows";
 import { MultiSelect } from "../multiSelect";
 import { createdStoresText, newStoreOptions } from "../newFileStore";
+import {
+  fileOptions,
+  storeNameOf,
+  splitTargetSettings,
+  type FileSetting,
+  type TargetOperationDecl,
+} from "../targetSettings";
 import {
   blankStaticRow,
   staticDirsToRequest,
@@ -93,6 +107,11 @@ function textToCsp(text: string): Record<string, string[]> {
   }
   return csp;
 }
+
+/** No file pickers: one shared empty list, so a framework without any does
+ * not hand the effect that loads the pickers' files a new array on every
+ * render. */
+const NO_FILE_PICKERS: FileSetting[] = [];
 
 export function ApplicationForm({
   appId,
@@ -223,8 +242,54 @@ export function ApplicationForm({
     };
   }, [appId]);
 
-  const selected = frameworks?.find((f) => f.name === frameworkName);
-  const ownTab = settingsOnOwnTab(selected);
+  // The framework picked in the form (e.g. React Native), as the server
+  // describes it: its label, settings, build targets and file pickers.
+  const selectedFramework = frameworks?.find((f) => f.name === frameworkName);
+  const ownTab = settingsOnOwnTab(selectedFramework);
+  // The framework's settings, and each build target's own (an APK's id,
+  // version and icon), which get a card of their own below the framework's.
+  const settings = splitTargetSettings(
+    selectedFramework?.config_spec ?? [],
+    selectedFramework?.targets ?? [],
+  );
+  // Load the matching files from the app's store for each file picker (icon,
+  // keystore); if listing fails, its choices just stay empty. `filePickers`
+  // comes from state, so it is a stable dependency.
+  const filePickers = selectedFramework?.file_settings ?? NO_FILE_PICKERS;
+  const storeName = storeNameOf(selectedFramework?.file_store_settings ?? [], config);
+  const [found, setFound] = useState<Record<string, string[]>>({});
+  useEffect(() => {
+    if (!storeName || filePickers.length === 0) {
+      setFound({});
+      return;
+    }
+    let cancelled = false;
+    void Promise.all(
+      filePickers.map(({ name, extensions }) =>
+        api
+          .listStoreFiles(storeName, { extensions: extensions.join(",") })
+          .then((r) => [name, r.paths] as const, () => [name, []] as const),
+      ),
+    ).then((pairs) => {
+      if (!cancelled) setFound(Object.fromEntries(pairs));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [storeName, filePickers]);
+  const targetExtraOptions = fileOptions(filePickers, found, config);
+  // A file picker is a drop-down even with nothing in it, saying why.
+  const filePickerHints = Object.fromEntries(
+    filePickers.map(({ name, extensions }) => [
+      name,
+      storeName
+        ? t(
+            "File store “{store}” has no {kinds} files yet. Upload one under Files, then reopen this form.",
+            { store: storeName, kinds: extensions.map((e) => `.${e}`).join(", ") },
+          )
+        : t("Choose the application's file store first; its files are offered here."),
+    ]),
+  );
   const appSettingsHref = stored
     ? appTabs(stored).find((t) => t.id === "app-settings")?.href
     : undefined;
@@ -240,7 +305,7 @@ export function ApplicationForm({
         subdomain: subdomain.trim(),
         framework: {
           name: frameworkName,
-          config: buildConfig(selected?.config_spec ?? [], config),
+          config: buildConfig(selectedFramework?.config_spec ?? [], config),
         },
         extra_frameworks: [],
         tables,
@@ -346,12 +411,12 @@ export function ApplicationForm({
               <Card className="mb-3">
                 <Card.Header>
                   {t("{framework} settings", {
-                    framework: selected?.label || frameworkName,
+                    framework: selectedFramework?.label || frameworkName,
                   })}
                 </Card.Header>
                 <Card.Body>
                   <SettingsFields
-                    spec={selected?.config_spec ?? []}
+                    spec={selectedFramework?.config_spec ?? []}
                     values={config}
                     onChange={(name, v) =>
                       setConfig((c) => ({ ...c, [name]: v }))
@@ -476,7 +541,7 @@ export function ApplicationForm({
                   </Form.Text>
                 ) : (
                   <SettingsFields
-                    spec={selected?.config_spec ?? []}
+                    spec={settings.general}
                     values={config}
                     onChange={(name, v) =>
                       setConfig((c) => ({ ...c, [name]: v }))
@@ -485,7 +550,7 @@ export function ApplicationForm({
                     // the server names it after the subdomain and puts it in
                     // the directory "Suggest a directory" would pick.
                     extraOptions={newStoreOptions(
-                      selected?.file_store_settings ?? [],
+                      selectedFramework?.file_store_settings ?? [],
                       !appId,
                       t("Create a new local file store"),
                     )}
@@ -493,6 +558,41 @@ export function ApplicationForm({
                 )}
               </Card.Body>
             </Card>
+
+            {/* Each build target's own settings, as the framework declared
+              them — no target-specific code here either. They are saved with
+              the application and used by the target's next build; the
+              sidebar's button only starts it. */}
+            {!ownTab &&
+              settings.targets.map((target) => (
+                <Card className="mb-3" key={target.name}>
+                  <Card.Header>{target.label}</Card.Header>
+                  <Card.Body>
+                    <SettingsFields
+                      spec={target.spec}
+                      values={config}
+                      idPrefix={`target-${target.name}`}
+                      onChange={(name, v) =>
+                        setConfig((c) => ({ ...c, [name]: v }))
+                      }
+                      extraOptions={targetExtraOptions}
+                      pickerHints={filePickerHints}
+                      // A target's settings may depend on the framework's.
+                      conditionSpec={selectedFramework?.config_spec ?? []}
+                    />
+                    <TargetOperationButtons
+                      appId={appId}
+                      target={target.name}
+                      operations={target.operations}
+                      spec={selectedFramework?.config_spec ?? []}
+                      values={config}
+                      onSettings={(changed) =>
+                        setConfig((c) => ({ ...c, ...changed }))
+                      }
+                    />
+                  </Card.Body>
+                </Card>
+              ))}
 
             <Row>
               <Col md={6}>
@@ -1024,5 +1124,104 @@ function RepeatableRows<T extends Record<string, string>>({
         ))}
       </Card.Body>
     </Card>
+  );
+}
+
+/** The buttons under a target's settings, e.g. "Generate a keystore", each
+ * shown while its `show_if` holds. Pressing one sends the form's current
+ * settings to the server, which runs the module's code, writes its files into
+ * the store and saves the settings it returns; the form then shows them too.
+ * On a new application the buttons are shown but disabled, with a note that
+ * they work once it is saved: before that there is no store to write into and
+ * nothing to save the settings on. */
+function TargetOperationButtons({
+  appId,
+  target,
+  operations,
+  spec,
+  values,
+  onSettings,
+}: {
+  appId?: string;
+  target: string;
+  operations: TargetOperationDecl[];
+  spec: FieldSpec[];
+  values: Record<string, string>;
+  onSettings: (changed: Record<string, string>) => void;
+}) {
+  const { t } = useT();
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<{
+    message: string;
+    store: string;
+    files: string[];
+    git_repo: boolean;
+  } | null>(null);
+
+  const shown = operations.filter((op) => isShown(op, spec, values));
+  if (shown.length === 0) return null;
+
+  const run = async (operation: string) => {
+    if (!appId) return;
+    setBusy(operation);
+    setError(null);
+    setResult(null);
+    try {
+      const done = await api.runApplicationTargetOperation(appId, target, operation, {
+        config: buildConfig(spec, values),
+      });
+      onSettings(readConfig(done.settings));
+      setResult(done);
+    } catch (err) {
+      setError(errorMessage(err, "The operation failed."));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="border-top pt-3">
+      {shown.map((op) => (
+        <div key={op.name} className="mb-2">
+          <Button
+            variant="outline-primary"
+            disabled={!appId || busy !== null}
+            onClick={() => void run(op.name)}
+          >
+            {busy === op.name ? t("Working…") : op.label}
+          </Button>
+          <Form.Text muted className="d-block">
+            {op.description}
+          </Form.Text>
+          {!appId && (
+            <Form.Text className="d-block text-warning-emphasis">
+              {t("Available once the application is saved: reopen it after saving to use this.")}
+            </Form.Text>
+          )}
+        </div>
+      ))}
+      {error && <Alert variant="danger">{error}</Alert>}
+      {result && (
+        <Alert variant="success" className="mt-2">
+          <div style={{ whiteSpace: "pre-wrap" }}>{result.message}</div>
+          {result.files.map((path) => (
+            <div key={path}>
+              <a href={downloadUrl(result.store, path)} download>
+                {t("Download {file}", { file: path })}
+              </a>
+            </div>
+          ))}
+          {result.git_repo && result.files.length > 0 && (
+            <div className="mt-2 text-warning-emphasis">
+              {t(
+                "File store “{store}” is a git repository: {files} will be part of your next commit, and pushed with it. Keep it out of a repository others can read.",
+                { store: result.store, files: result.files.join(", ") },
+              )}
+            </div>
+          )}
+        </Alert>
+      )}
+    </div>
   );
 }

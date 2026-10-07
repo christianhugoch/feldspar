@@ -53,7 +53,34 @@ export type FieldSpec = {
    * for the same reason `multiline` is one: no screen should know that a
    * particular action's particular setting happens to hold a program. */
   code_language?: string | null;
+  /** When the setting applies: every named setting holds one of its values
+   * (v1's `showIf`). Empty or absent means always. A setting that does not
+   * apply is not shown, and the server does not require it. */
+  show_if?: ShowIfCondition[];
 };
+
+/** One condition of a `show_if`: setting `name` must hold one of `values`. */
+export type ShowIfCondition = { name: string; values: unknown[] };
+
+/** Something the form shows only while its conditions hold (v1's `showIf`):
+ * a setting ({@link FieldSpec}), or a target's operation button. */
+export type Conditional = { show_if?: ShowIfCondition[] };
+
+/** Whether `item` is shown: every condition in its `show_if` holds for the
+ * form's current `values`. A setting the form has no value for yet counts as
+ * its default, looked up in `spec`. Compared as text, which is how a form holds
+ * every value — a checkbox is `"true"`. */
+export function isShown(
+  item: Conditional,
+  spec: readonly FieldSpec[],
+  values: Record<string, string>,
+): boolean {
+  return (item.show_if ?? []).every(({ name, values: allowed }) => {
+    const setting = spec.find((f) => f.name === name);
+    const current = values[name] ?? (setting ? asString(setting.default) : "");
+    return allowed.some((v) => asString(v) === current);
+  });
+}
 
 /** What the server substitutes for a secret setting's value on read, and what it
  * reads back as "unchanged" on write (`sc_types::SECRET_SENTINEL`).
@@ -158,12 +185,18 @@ export function SettingField({
   locked = false,
   codeScope,
   extraOptions = [],
+  pickerHint,
 }: {
   field: FieldSpec;
   value: string;
   onChange: (value: string) => void;
   idPrefix?: string;
   locked?: boolean;
+  /** Makes the field a drop-down even while it has no choices, with this
+   * sentence under it saying why there are none and what to do — an app icon
+   * picked from a store that holds no images yet. A text box there would
+   * invite typing a path the screen could have offered. */
+  pickerHint?: string;
   /** Choices the *screen* adds after the field's own, each with its own label —
    * "Create a new local file store" at the end of a new application's store
    * picker. Passed in because the field only knows the values it may hold; what
@@ -180,7 +213,8 @@ export function SettingField({
   const fixedHint = fixed ? (
     <Form.Text muted><T text="Chosen when this was created; it cannot be changed." /></Form.Text>
   ) : null;
-  if (field.options.length > 0 || extraOptions.length > 0) {
+  const choices = field.options.length + extraOptions.length;
+  if (choices > 0 || pickerHint !== undefined) {
     return (
       <Form.Group className="mb-3" controlId={controlId}>
         <Form.Label>
@@ -207,6 +241,7 @@ export function SettingField({
             </option>
           ))}
         </Form.Select>
+        {choices === 0 && pickerHint && <Form.Text muted>{pickerHint}</Form.Text>}
         {fixedHint}
       </Form.Group>
     );
@@ -331,6 +366,8 @@ export function SettingsFields({
   locked = false,
   codeScope,
   extraOptions = {},
+  pickerHints = {},
+  conditionSpec,
 }: {
   spec: FieldSpec[];
   values: Record<string, string>;
@@ -345,10 +382,18 @@ export function SettingsFields({
   /** Screen-supplied choices appended to a setting's own, by setting name (see
    * [`SettingField`]). */
   extraOptions?: Record<string, ExtraOption[]>;
+  /** Settings that are always drop-downs, by name, each with the sentence shown
+   * while it has no choices (see [`SettingField`]). */
+  pickerHints?: Record<string, string>;
+  /** The settings a field's `show_if` may name, when that is more than `spec`
+   * — a form split into cards, whose conditions reach across them. */
+  conditionSpec?: readonly FieldSpec[];
 }) {
   return (
     <>
-      {spec.map((field) => (
+      {spec
+        .filter((field) => isShown(field, conditionSpec ?? spec, values))
+        .map((field) => (
         <SettingField
           key={field.name}
           field={field}
@@ -358,6 +403,7 @@ export function SettingsFields({
           locked={locked}
           codeScope={codeScope}
           extraOptions={extraOptions[field.name]}
+          pickerHint={pickerHints[field.name]}
         />
       ))}
     </>

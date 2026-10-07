@@ -5305,6 +5305,36 @@ needs `ANDROID_HOME` and `JAVA_HOME`; an iOS target will add `{ os: "macos" }`, 
 with the tools' own message, and still builds and serves the web bundle. The built-in frameworks declare none.
 `plugins/react-native` is the one that does.
 
+**A target's own settings are application settings, shown under the target.** A target may
+declare `options`, fields in the same vocabulary as `config_fields`. They configure that target
+for one application (an APK's application ID, version, icon and build type), so they are not the
+module's settings (which hold the machine's toolchain) and not the build button's (which only
+starts a build). When the module loads they are **appended to the framework's `config_spec`**,
+so they are stored, validated, handed to the generators as `ctx.settings` and interpolated by
+templates exactly as the framework's own settings are. A name already taken by a setting or by
+another target's option is refused. The target's `command` is a template too, as its `artifact`
+is, so an option can pick the task (`npm run build:android:{{ build_type }}`). `listFrameworks`
+names each target's options, and the application form shows them in a card per target instead
+of among the framework's settings. A setting declaring `server_query: "store_files:png,jpg"`
+holds a file of that kind in the application's store (an icon, a keystore). The form offers the
+files `listStoreFiles` finds there, skipping dependency folders and generated native projects.
+The value is a store-relative path, and on save it is unrestricted. A setting may also declare
+v1's `showIf` (`{ build_type: "release", own_keystore: true }`): the form hides it while any
+condition fails, and the server does not require it then, so "sign with your own keystore" shows
+the keystore's settings only when it is ticked. A target's `env` values are templates too, which
+is how a secret setting (the keystore password) reaches the build without being written into
+the project. An application's secret framework settings are masked in what the admin API sends
+and kept when a save hands the mask back, as a provider's are; a backup keeps them.
+A target may also declare `operations`, buttons under its settings shown on a `showIf`: the module
+runs its own code (`plugins/react-native` generates a signing keystore with node-forge, so no JDK
+or permission to run one is needed) and answers files and settings. The server writes the files
+into the application's store, never over an existing file (a replaced keystore is an app that
+can no longer be updated), saves the settings, which must be the target's own, and says when the
+store is a git repository that would commit them.
+`plugins/react-native` writes everything else into `src/feldspar/native.json` on every build,
+and the project's `app.config.js` checks it when `expo prebuild` writes the Android project
+(not on the web export, which reads the same file).
+
 **The context the generator receives carries the derivations, not just the data.** Whether a
 page may offer a delete button, what a table hangs off the client as, which columns a create
 form asks for and which the database issues — each is a question answered *by asking the

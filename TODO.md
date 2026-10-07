@@ -806,6 +806,13 @@ Outside the analytics milestones. See CHANGELOG for what each item covers.
 - [ ] RN.12 A build dropped while the server runs (a future "cancel build", or a server killed
       on its own) kills only `npm`, not the `sh` / `gradlew` / Gradle under it: run the command
       in its own process group and kill the group.
+- [x] RN.13 The APK's own settings (application ID, version, icon from the app's file store,
+      debug or release) as a target's `options`, shown in the application form under the target.
+- [x] RN.14 Release signing with the admin's own keystore (file from the store, alias, password
+      as a secret), shown only for a release build once "Sign with your own keystore" is ticked.
+- [x] RN.15 "Generate a keystore": a target operation that makes one in the file store and fills
+      in the signing settings; warns when the store is a git repository.
+- [ ] RN.16 Keep secrets such as a generated keystore out of a git file store's commits.
 
 # Not in a milestone yet
 

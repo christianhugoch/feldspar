@@ -603,6 +603,48 @@ async fn a_listing_carries_the_columns_a_file_browser_shows() -> sc_error::Resul
     Ok(())
 }
 
+/// A file setting's choices: the store's files of that kind, without the ones
+/// in dependency folders or a generated native project.
+#[tokio::test]
+async fn list_store_files_skips_dependencies_and_native_projects() -> sc_error::Result<()> {
+    let (mut client, store, _db) = setup().await?;
+    for path in [
+        "todo/assets/icon.png",
+        "todo/assets/Splash.JPG",
+        "todo/src/App.tsx",
+        "logo.svg",
+        "todo/node_modules/pkg/img.png",
+        "todo/android/app/src/main/res/mipmap-hdpi/ic_launcher.png",
+        "todo/android/app/debug.keystore",
+        "keys/release.jks",
+    ] {
+        store.write(path, bytes::Bytes::from_static(b"x")).await?;
+    }
+    let (status, body) = client
+        .send(
+            "GET",
+            "/api/file-stores/docs/files-by-type?extensions=png,jpg,svg",
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["paths"],
+        json!(["logo.svg", "todo/assets/Splash.JPG", "todo/assets/icon.png"])
+    );
+    assert_eq!(body["truncated"], json!(false));
+    // A keystore picker, which must not offer the generated debug keystore.
+    let (_, body) = client
+        .send(
+            "GET",
+            "/api/file-stores/docs/files-by-type?extensions=jks,keystore",
+            None,
+        )
+        .await;
+    assert_eq!(body["paths"], json!(["keys/release.jks"]));
+    Ok(())
+}
+
 /// Finding a file by **name**, anywhere under a directory — the file manager's
 /// search box.
 ///

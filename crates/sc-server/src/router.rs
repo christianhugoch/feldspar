@@ -271,6 +271,12 @@ pub fn build_router_with_apps(
         // is repeated here rather than inherited. CSRF is *not* repeated: the
         // middleware wraps every route including this one.
         .route("/upload/{store}/{*path}", axum::routing::post(upload))
+        // …and its mirror: a store file as itself, for the file manager's
+        // Download. `readFile` answers base64 inside JSON, which a browser has
+        // to hold twice and decode by hand — fine for a source file, hopeless
+        // for a 100 MB APK. A plain `GET`, so a link downloads it; it reads
+        // nothing it does not check access to, as `readFile` does.
+        .route("/download/{store}/{*path}", axum::routing::get(download))
         // Backup and restore, **outside** the typed `EndpointSet` for the same
         // reason the upload above is: one route's response is a file and the
         // other's request is one, and a `TypeSchema` has no bytes shape. Both
@@ -462,6 +468,44 @@ async fn upload(
             )
             .await
         }
+    }
+}
+
+/// Serve one store file as a download (`GET /download/{store}/{*path}`), behind
+/// the same session lookup and admin check as the typed endpoints.
+async fn download(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    AxumPath((store_name, path)): AxumPath<(String, String)>,
+) -> Response {
+    let session_token = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
+    let user = match session_user(&state, &jar).await {
+        Ok(user) => user,
+        Err(response) => return *response,
+    };
+    if let Some(rejection) = enforce_auth(&AuthRequirement::admin(), user.as_ref()) {
+        return rejection;
+    }
+    let Some(handler) = state.handlers.get("downloadFile").cloned() else {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "this server has no file-download handler registered",
+        );
+    };
+    let route = format!("/download/{store_name}/{path}");
+    let caller = user.clone();
+    let ctx = HandlerCtx {
+        raw_body: None,
+        path_params: HashMap::from([("store".to_owned(), store_name), ("path".to_owned(), path)]),
+        query: Vec::new(),
+        body: serde_json::Value::Null,
+        user,
+        // As `upload`: bytes, not prose.
+        locale: sc_i18n::active().default_locale().clone(),
+    };
+    match handler(ctx).await {
+        Ok(resp) => apply_response(&state, jar, session_token, false, resp).await,
+        Err(e) => error_out(&state, &e, Audience::Admin, "GET", &route, caller.as_ref()).await,
     }
 }
 

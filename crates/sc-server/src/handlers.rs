@@ -2283,6 +2283,38 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    reg.register("listStoreFiles", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let name = ctx.path_param("store")?.to_owned();
+                let (store, floor) = resolve_store(&catalog, &name).await?;
+                let role = caller_role(&ctx);
+                check_access(store.as_ref(), floor, "", role).await?;
+                let extensions: Vec<String> = ctx
+                    .query_get("extensions")
+                    .unwrap_or("")
+                    .split(',')
+                    .map(|e| e.trim().to_owned())
+                    .filter(|e| !e.is_empty())
+                    .collect();
+                if extensions.is_empty() {
+                    return Err(Error::invalid(
+                        "say which files to list: `extensions`, e.g. png,jpg",
+                    ));
+                }
+                let found =
+                    sc_files::find_by_extension(store.as_ref(), floor, role, "", &extensions)
+                        .await?;
+                Ok(HandlerResponse::ok(json!({
+                    "paths": found.entries.into_iter().map(|e| e.path).collect::<Vec<_>>(),
+                    "truncated": found.truncated,
+                })))
+            }
+        }
+    });
+
     reg.register("searchFiles", {
         let catalog = catalog.clone();
         move |ctx| {
@@ -2464,6 +2496,31 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 store.write(&path, data).await?;
                 record_owner(store.as_ref(), &path, ctx.user.as_ref()).await;
                 Ok(HandlerResponse::ok(file_entry_written_json(&path, size)).with_status(201))
+            }
+        }
+    });
+
+    // The bytes of one file, as a download (the `/download/{store}/{*path}`
+    // route): what the file manager's Download fetches, however large.
+    reg.register("downloadFile", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let name = ctx.path_param("store")?.to_owned();
+                let (store, floor) = resolve_store(&catalog, &name).await?;
+                let path = ctx.path_param("path")?.to_owned();
+                check_access(store.as_ref(), floor, &path, caller_role(&ctx)).await?;
+                let bytes = store.read(&path).await?;
+                let file_name = path.rsplit('/').next().unwrap_or(&path);
+                Ok(HandlerResponse::download(crate::handler::Download {
+                    bytes,
+                    content_type: sc_files::mime_for_path(&path)
+                        .unwrap_or_else(|| "application/octet-stream".to_owned()),
+                    // Quoted in the header: a quote or backslash in the name
+                    // would end it early.
+                    filename: file_name.replace(['"', '\\'], "_"),
+                }))
             }
         }
     });
@@ -4535,7 +4592,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 let apps = list_applications(&catalog).await?;
-                let out: Vec<Json> = apps.iter().map(application_json).collect();
+                let out: Vec<Json> = apps.iter().map(application_api_json).collect();
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
         }
@@ -4694,7 +4751,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // saved and valid, and an unwritable store or an occupied
                 // directory is a thing the admin fixes and re-tries, not a reason
                 // to lose the application they just configured.
-                let mut body = application_json(&app);
+                let mut body = application_api_json(&app);
                 if !new_stores.is_empty()
                     && let Some(obj) = body.as_object_mut()
                 {
@@ -4745,12 +4802,13 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let apps = apps.clone();
             async move {
                 let id = parse_app_id(ctx.path_param("id")?)?;
-                if load_application(&catalog, id).await?.is_none() {
+                let Some(stored) = load_application(&catalog, id).await? else {
                     return Err(Error::not_found(format!("no application with id {id}")));
-                }
+                };
                 // The id is the path's, not the body's — the row's identity is not
                 // something a payload gets to reassign.
                 let mut updated = application_from_body(id, &ctx.body)?;
+                merge_framework_secrets(&stored, &mut updated);
                 framable_by_the_admin(&mut updated, &ctx.body, &apps);
                 let app = save_application(&catalog, &updated).await?;
                 // A save is an API-definition change: a table added to the
@@ -4760,7 +4818,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // application is already saved and an unreachable store is not a
                 // reason to report that it was not.
                 reemit_app_client(&catalog, &app, apps.triggers()).await;
-                let mut body = application_json(&app);
+                let mut body = application_api_json(&app);
                 refresh_mounted_app(&apps, &app, &mut body).await;
                 Ok(HandlerResponse::ok(body))
             }
@@ -5722,6 +5780,54 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    // Run an operation a target declares (a keystore generator): the module's
+    // files written into the application's store, its settings saved on it.
+    reg.register("runApplicationTargetOperation", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_app_id(ctx.path_param("id")?)?;
+                let target = ctx.path_param("target")?.to_owned();
+                let operation = ctx.path_param("operation")?.to_owned();
+                let app = load_application(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no application with id {id}")))?;
+                // The form's current settings, unsaved edits included; the
+                // stored ones when the request sends none.
+                let form_settings = match require_object(&ctx.body)?.get("config") {
+                    Some(Json::Object(config)) => config.clone(),
+                    None | Some(Json::Null) => app.framework.config.clone(),
+                    Some(_) => return Err(Error::invalid("`config` is not an object of settings")),
+                };
+                let outcome = sc_app::run_target_operation(
+                    &catalog,
+                    &app,
+                    &target,
+                    &operation,
+                    &form_settings,
+                )
+                .await?;
+                // The app's settings with secrets masked, as the form shows
+                // them; of those, the ones the operation set go back.
+                let spec = framework_config_spec(&outcome.app.framework.name)?;
+                let masked = sc_types::redact_attrs(&spec, &outcome.app.framework.config);
+                let settings: sc_types::Attrs = outcome
+                    .settings
+                    .iter()
+                    .filter_map(|name| Some((name.clone(), masked.get(name)?.clone())))
+                    .collect();
+                Ok(HandlerResponse::ok(json!({
+                    "message": outcome.message,
+                    "store": outcome.store,
+                    "files": outcome.files,
+                    "git_repo": outcome.git_repo,
+                    "settings": Json::Object(settings),
+                })))
+            }
+        }
+    });
+
     // The latest build of a target: what the UI polls while one runs, and asks
     // after a reload to pick up a build that is still going.
     reg.register("getApplicationTargetBuild", {
@@ -5859,7 +5965,29 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     // Read before resolving: afterwards a store picker is just a
                     // list of names, and the form can no longer tell it is one.
                     let store_settings = file_store_settings(&declared);
+                    let file_settings: Vec<Json> = sc_catalog::store_file_settings(&declared)
+                        .into_iter()
+                        .map(|f| json!({ "name": f.name, "extensions": f.extensions }))
+                        .collect();
                     let spec = resolve_options(&catalog, declared).await?;
+                    let targets: Vec<Json> = sc_app::framework_build_targets(&info.name)
+                        .into_iter()
+                        .map(|t| {
+                            json!({
+                                "name": t.name,
+                                "label": t.label,
+                                "options": t.options,
+                                "operations": t.operations.iter().map(|o| json!({
+                                    "name": o.name,
+                                    "label": say(&o.label, &ctx.locale),
+                                    "description": say(&o.description, &ctx.locale),
+                                    "show_if": o.show_if.iter().map(|c| {
+                                        json!({ "name": c.setting, "values": c.allowed })
+                                    }).collect::<Vec<_>>(),
+                                })).collect::<Vec<_>>(),
+                            })
+                        })
+                        .collect();
                     out.push(json!({
                         "name": info.name,
                         "label": say(&info.label, &ctx.locale),
@@ -5867,6 +5995,8 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                         "config_spec": spec_json(&spec, &ctx.locale),
                         "has_views": info.name == sc_viewpattern::SALTCORN_UI_FRAMEWORK,
                         "file_store_settings": store_settings,
+                        "file_settings": file_settings,
+                        "targets": targets,
                     }));
                 }
                 Ok(HandlerResponse::ok(Json::Array(out)))
@@ -6519,6 +6649,33 @@ fn description_of(metas: &[FieldMeta], field: &str) -> String {
 
 // --- applications: wire shaping ------------------------------------------------
 
+/// [`application_json`] as an admin is shown it: the framework's
+/// [`secret`](sc_types::FormField::secret) settings (a keystore password)
+/// replaced by the sentinel, which a save hands back and
+/// `merge_framework_secrets` restores. The unredacted form is what a backup
+/// keeps.
+pub(crate) fn application_api_json(app: &Application) -> Json {
+    let mut out = application_json(app);
+    if let Ok(spec) = framework_config_spec(&app.framework.name) {
+        out["framework"]["config"] =
+            Json::Object(sc_types::redact_attrs(&spec, &app.framework.config));
+    }
+    out
+}
+
+/// A submitted application's framework settings with every secret the form
+/// handed back unchanged (the sentinel) replaced by what `stored` holds — so
+/// saving an application's name does not save the mask over its password.
+fn merge_framework_secrets(stored: &Application, submitted: &mut Application) {
+    if stored.framework.name != submitted.framework.name {
+        return;
+    }
+    if let Ok(spec) = framework_config_spec(&submitted.framework.name) {
+        submitted.framework.config =
+            sc_types::merge_secrets(&spec, &stored.framework.config, &submitted.framework.config);
+    }
+}
+
 /// An [`Application`] as the API returns it (matching `application_schema`): the
 /// id plus every field, with the nested framework/CSP/attributes as plain JSON.
 pub(crate) fn application_json(app: &Application) -> Json {
@@ -6544,7 +6701,7 @@ pub(crate) fn application_json(app: &Application) -> Json {
         "installs": sc_app::framework_factory(&app.framework.name).is_none()
             && app_source_from_config(&app.framework).is_ok_and(|s| s.build.install.is_some()),
         "has_views": app.framework.name == sc_viewpattern::SALTCORN_UI_FRAMEWORK,
-        "targets": sc_app::app_build_targets(app)
+        "targets": sc_app::framework_build_targets(&app.framework.name)
             .into_iter()
             .map(|t| {
                 // A state of this machine, next to the target's description: what
@@ -10091,6 +10248,11 @@ fn form_field_json(field: &FormField) -> Json {
         "secret": field.secret,
         "create_only": field.create_only,
         "code_language": field.code_language,
+        "show_if": field
+            .show_if
+            .iter()
+            .map(|c| json!({ "name": c.setting, "values": c.allowed }))
+            .collect::<Vec<_>>(),
     })
 }
 

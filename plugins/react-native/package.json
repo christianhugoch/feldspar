@@ -4,5 +4,8 @@
   "description": "The React Native (web) application framework for Saltcorn Feldspar.",
   "main": "index.js",
   "license": "MIT",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "node-forge": "^1.4.0"
+  }
 }

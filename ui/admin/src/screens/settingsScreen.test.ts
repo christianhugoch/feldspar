@@ -52,6 +52,7 @@ const sections = [
         multiline: false,
         secret: false,
         create_only: false,
+        show_if: [],
         help: "off serves plain HTTP.",
       },
       {
@@ -64,6 +65,7 @@ const sections = [
         multiline: true,
         secret: true,
         create_only: false,
+        show_if: [],
         help: "Stored in the database.",
       },
       {
@@ -76,6 +78,7 @@ const sections = [
         multiline: false,
         secret: false,
         create_only: false,
+        show_if: [],
         help: "",
       },
       {
@@ -88,6 +91,7 @@ const sections = [
         multiline: false,
         secret: false,
         create_only: false,
+        show_if: [],
         help: "",
       },
     ],
@@ -182,6 +186,7 @@ const emailSection = {
       multiline: false,
       secret: false,
       create_only: false,
+      show_if: [],
       help: "The mail server's hostname.",
     },
   ],
@@ -204,6 +209,7 @@ const developmentSection = {
       multiline: false,
       secret: false,
       create_only: false,
+      show_if: [],
       help: "Print every statement this server sends to the database.",
     },
     {
@@ -216,6 +222,7 @@ const developmentSection = {
       multiline: false,
       secret: false,
       create_only: false,
+      show_if: [],
       help: "info logs every server request.",
     },
   ],

@@ -76,6 +76,29 @@ impl Client {
         (status, value)
     }
 
+    /// `GET` a route whose answer is a file: the status, the headers and the
+    /// bytes as they are.
+    async fn get_raw(&mut self, path: &str) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let mut builder = Request::builder().method("GET").uri(path);
+        if !self.cookies.is_empty() {
+            let cookie_header = self
+                .cookies
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            builder = builder.header(header::COOKIE, cookie_header);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+        let response = self.router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, headers, body.to_vec())
+    }
+
     async fn send(&mut self, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
         let mut builder = Request::builder().method(method).uri(path);
         if !self.cookies.is_empty() {
@@ -453,6 +476,48 @@ async fn upload_rejects_an_unauthenticated_caller() -> sc_error::Result<()> {
         store.read("sneak.bin").await.is_err(),
         "nothing must have been written"
     );
+
+    Ok(())
+}
+
+/// The download route: a store file as itself, however large, named for the
+/// browser's save dialog, and behind the same auth and access model as upload.
+#[tokio::test]
+async fn download_serves_the_bytes_as_a_named_file() -> sc_error::Result<()> {
+    let (mut client, store, _db) = setup().await?;
+
+    // Large and binary: what base64-in-JSON could not carry.
+    let payload: Vec<u8> = (0u8..=255).cycle().take(3 * 1024 * 1024).collect();
+    store
+        .write(
+            "app/outputs/app-debug.apk",
+            bytes::Bytes::from(payload.clone()),
+        )
+        .await?;
+
+    let (status, headers, body) = client
+        .get_raw("/download/docs/app/outputs/app-debug.apk")
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, payload);
+    assert_eq!(
+        headers[header::CONTENT_DISPOSITION],
+        "attachment; filename=\"app-debug.apk\""
+    );
+    assert_eq!(
+        headers[header::CONTENT_TYPE],
+        "application/vnd.android.package-archive"
+    );
+
+    // A missing file is a 404, and a caller without a session gets nothing.
+    let (status, _, _) = client.get_raw("/download/docs/app/nothing.apk").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    client.cookies.remove(sc_server::SESSION_COOKIE);
+    let (status, _, body) = client
+        .get_raw("/download/docs/app/outputs/app-debug.apk")
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_ne!(body, payload);
 
     Ok(())
 }

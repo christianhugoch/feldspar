@@ -644,19 +644,25 @@ pub async fn build_code_framework(
 
 /// One build target an application's framework offers — what a button says and
 /// what a build request names.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TargetInfo {
     /// The key — `android`.
     pub name: String,
     /// The label — `Android APK`.
     pub label: String,
+    /// The framework settings that configure this target alone (see
+    /// [`crate::TargetTemplate::options`]).
+    pub options: Vec<String>,
+    /// What the module can do for the target on request (see
+    /// [`crate::TargetOperation`]).
+    pub operations: Vec<crate::TargetOperation>,
 }
 
-/// The build targets `app`'s framework declares, in declaration order. Empty for
-/// the built-in frameworks, which only serve.
-pub fn app_build_targets(app: &Application) -> Vec<TargetInfo> {
+/// The build targets framework `name` declares, in declaration order. Empty for
+/// the built-in frameworks and for a name nothing declares.
+pub fn framework_build_targets(name: &str) -> Vec<TargetInfo> {
     installed_frameworks()
-        .find(&app.framework.name)
+        .find(name)
         .map(|decl| {
             decl.targets
                 .iter()
@@ -667,6 +673,8 @@ pub fn app_build_targets(app: &Application) -> Vec<TargetInfo> {
                     } else {
                         t.label.clone()
                     },
+                    options: t.options.clone(),
+                    operations: t.operations.clone(),
                 })
                 .collect()
         })

@@ -21,7 +21,7 @@ use sc_module::{
     BundledModules, Installer, LoadedModule, Module, ModuleFrameworks, ModuleHost,
     ModulePermissions, ModuleSet, ModuleSource,
 };
-use sc_types::Attrs;
+use sc_types::{Attrs, ShowIfCondition};
 use serde_json::{Value as Json, json};
 
 /// The framework's name, as an application row stores it.
@@ -248,7 +248,20 @@ async fn the_bundled_react_native_module_declares_a_web_framework() {
     assert_eq!(rn.checks, ["typecheck"]);
     assert_eq!(
         rn.config_spec.iter().map(|f| f.name()).collect::<Vec<_>>(),
-        ["store", "project", "mobile_url"]
+        [
+            "store",
+            "project",
+            "mobile_url",
+            "app_id",
+            "app_version",
+            "app_icon",
+            "build_type",
+            "package_format",
+            "own_keystore",
+            "keystore_file",
+            "keystore_alias",
+            "keystore_password"
+        ]
     );
 
     let config: Attrs = [
@@ -269,14 +282,76 @@ async fn the_bundled_react_native_module_declares_a_web_framework() {
     // The APK is a build target beside the web bundle, run in the same project.
     assert_eq!(rn.targets.len(), 1);
     let apk = rn.target_spec("android", &config).unwrap();
-    assert_eq!(apk.label, "Android APK");
+    assert_eq!(apk.label, "Android app");
     assert_eq!(apk.command, "npm");
-    assert_eq!(apk.args, ["run", "build:android"]);
+    // A release APK unless the application says otherwise, left where
+    // `prebuild --clean` does not delete it.
+    assert_eq!(apk.args, ["run", "build:android:release-apk"]);
     assert_eq!(apk.source_dir, "todo");
+    assert_eq!(apk.artifact, "todo/android-output/app-release.apk");
+    // An AAB for the Play Store, offered for a release build only.
+    let mut aab = config.clone();
+    aab.insert("package_format".to_owned(), json!("aab"));
+    let spec = rn.target_spec("android", &aab).unwrap();
+    assert_eq!(spec.args, ["run", "build:android:release-aab"]);
+    assert_eq!(spec.artifact, "todo/android-output/app-release.aab");
+    // Its own settings, which the application form shows under the target; the
+    // icon is picked from the application's store.
     assert_eq!(
-        apk.artifact,
-        "todo/android/app/build/outputs/apk/release/app-release.apk"
+        rn.targets[0].options,
+        [
+            "app_id",
+            "app_version",
+            "app_icon",
+            "build_type",
+            "package_format",
+            "own_keystore",
+            "keystore_file",
+            "keystore_alias",
+            "keystore_password"
+        ]
     );
+    let icon = rn
+        .config_spec
+        .iter()
+        .find(|f| f.name() == "app_icon")
+        .unwrap();
+    assert_eq!(icon.query(), Some("store_files:png,jpg,jpeg"));
+    // The keystore settings: a release build's, once its own keystore is
+    // chosen, and the password a secret that reaches the build as its
+    // environment.
+    let field = |name: &str| rn.config_spec.iter().find(|f| f.name() == name).unwrap();
+    assert_eq!(
+        field("package_format").show_if,
+        [ShowIfCondition::new("build_type", vec![json!("release")])]
+    );
+    assert_eq!(
+        field("own_keystore").show_if,
+        [ShowIfCondition::new("build_type", vec![json!("release")])]
+    );
+    assert_eq!(
+        field("keystore_alias").show_if,
+        [
+            ShowIfCondition::new("build_type", vec![json!("release")]),
+            ShowIfCondition::new("own_keystore", vec![json!(true)])
+        ]
+    );
+    assert!(field("keystore_password").secret);
+    assert_eq!(
+        field("keystore_file").query(),
+        Some("store_files:jks,keystore,p12")
+    );
+    let mut signed = config.clone();
+    signed.insert("keystore_password".to_owned(), json!("s3cret"));
+    let apk = rn.target_spec("android", &signed).unwrap();
+    assert_eq!(apk.env["FELDSPAR_KEYSTORE_PASSWORD"], "s3cret");
+    // Unsigned, or switched off with nothing filled in: the build needs nothing.
+    sc_types::validate_attrs(&rn.config_spec, &config).unwrap();
+    let mut debug = config.clone();
+    debug.insert("build_type".to_owned(), json!("debug"));
+    let apk = rn.target_spec("android", &debug).unwrap();
+    assert_eq!(apk.args, ["run", "build:android:debug-apk"]);
+    assert_eq!(apk.artifact, "todo/android-output/app-debug.apk");
 
     // One widening beyond React's policy: react-native-web injects its styles at
     // run time. Scripts stay strict.
@@ -359,7 +434,7 @@ async fn the_scaffold_is_an_expo_project_whose_every_import_resolves() {
     let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
     for expected in [
         "package.json",
-        "app.json",
+        "app.config.js",
         "tsconfig.json",
         "AGENTS.md",
         "index.ts",
@@ -375,6 +450,7 @@ async fn the_scaffold_is_an_expo_project_whose_every_import_resolves() {
         "src/screens/Readings.tsx",
         "src/feldspar/hooks.ts",
         "src/feldspar/config.ts",
+        "src/feldspar/native.json",
         "src/feldspar/README.md",
     ] {
         assert!(paths.contains(&expected), "missing {expected}: {paths:?}");
@@ -399,19 +475,65 @@ async fn the_scaffold_is_an_expo_project_whose_every_import_resolves() {
         package.contains("\"typecheck\": \"tsc --noEmit\""),
         "{package}"
     );
-    assert!(
-        package.contains("\"build:android\": \"expo prebuild --platform android"),
-        "{package}"
-    );
+    // One script per build type and package, each copying its result to
+    // `android-output/`.
+    for (script, task, output) in [
+        (
+            "release-apk",
+            "assembleRelease",
+            "apk/release/app-release.apk",
+        ),
+        (
+            "release-aab",
+            "bundleRelease",
+            "bundle/release/app-release.aab",
+        ),
+        ("debug-apk", "assembleDebug", "apk/debug/app-debug.apk"),
+        ("debug-aab", "bundleDebug", "bundle/debug/app-debug.aab"),
+    ] {
+        let line = package
+            .lines()
+            .find(|l| l.contains(&format!("\"build:android:{script}\"")))
+            .unwrap_or_else(|| panic!("no {script} script: {package}"));
+        assert!(
+            line.contains("expo prebuild --platform android --clean"),
+            "{line}"
+        );
+        assert!(line.contains(&format!("./gradlew {task}")), "{line}");
+        assert!(
+            line.contains(&format!("cp app/build/outputs/{output} ../android-output/")),
+            "{line}"
+        );
+    }
+    assert!(file(&files, ".gitignore").contains("android-output"));
     assert!(file(&files, "index.ts").contains("registerRootComponent(Root)"));
-    let app_json = file(&files, "app.json");
+    let app_config = file(&files, "app.config.js");
     assert!(
-        app_json.contains("\"package\": \"com.feldspar.todo\""),
-        "{app_json}"
+        app_config.contains("src/feldspar/native.json"),
+        "{app_config}"
     );
-    assert!(app_json.contains("\"output\": \"single\""), "{app_json}");
+    assert!(app_config.contains("package: native.appId"), "{app_config}");
+    assert!(app_config.contains("output: \"single\""), "{app_config}");
+    // The checks' regular expressions survive the template they are written
+    // from: an unescaped `.` or `d` would refuse every version.
+    assert!(
+        app_config.contains(r"/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/"),
+        "{app_config}"
+    );
+    assert!(
+        app_config.contains(r"(\.[a-zA-Z][a-zA-Z0-9_]*)+$/"),
+        "{app_config}"
+    );
     // Served over HTTPS, so the APK asks for no cleartext permission.
-    assert!(!app_json.contains("usesCleartextTraffic"), "{app_json}");
+    assert!(!app_config.contains("usesCleartextTraffic"), "{app_config}");
+    // Nothing set: the default application id, version and build type, and
+    // Expo's own icon.
+    let native: Json = serde_json::from_str(&file(&files, "src/feldspar/native.json")).unwrap();
+    assert_eq!(
+        native,
+        json!({ "appId": "com.feldspar.todo", "version": "1.0.0", "icon": null,
+                "buildType": "release", "signing": null })
+    );
     assert!(!package.contains("expo-build-properties"), "{package}");
 
     // A phone has no page to be relative to: its requests go to the app's URL.
@@ -509,10 +631,10 @@ async fn an_app_served_over_http_lets_its_apk_reach_it() {
         .expect("the scaffold runs");
     // A release APK refuses plain HTTP unless it says otherwise, and a
     // development server is plain HTTP.
-    let app_json = file(&files, "app.json");
+    let app_config = file(&files, "app.config.js");
     assert!(
-        app_json.contains("\"usesCleartextTraffic\": true"),
-        "{app_json}"
+        app_config.contains("usesCleartextTraffic: true"),
+        "{app_config}"
     );
     assert!(file(&files, "package.json").contains("\"expo-build-properties\":"));
     assert!(
@@ -538,7 +660,72 @@ async fn the_mobile_url_setting_is_where_the_apk_sends_its_requests() {
     );
     // That URL is plain HTTP, so the APK may speak it — although the
     // application itself is served over HTTPS.
-    assert!(file(&files, "app.json").contains("\"usesCleartextTraffic\": true"));
+    assert!(file(&files, "app.config.js").contains("usesCleartextTraffic: true"));
+}
+
+#[tokio::test]
+async fn the_apk_settings_reach_native_json_on_every_build() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let mut ctx = context(true, vec![tasks_table()]);
+    // The icon is picked from the store; the project is `todo` in that store,
+    // and Expo resolves the icon against the project.
+    ctx["settings"] = json!({
+        "app_id": " com.example.todo ",
+        "app_version": "2.3.4",
+        "app_icon": "todo/assets/icon.png",
+        "build_type": "debug"
+    });
+    let files = frameworks("bundled-rn-native")
+        .await
+        .framework_files(FRAMEWORK, FilePhase::Runtime, ctx.clone())
+        .await
+        .expect("the runtime runs");
+    let native: Json = serde_json::from_str(&file(&files, "src/feldspar/native.json")).unwrap();
+    assert_eq!(
+        native,
+        json!({ "appId": "com.example.todo", "version": "2.3.4",
+                "icon": "assets/icon.png", "buildType": "debug", "signing": null })
+    );
+    // An icon outside the project is reached from it.
+    ctx["settings"]["app_icon"] = json!("branding/logo.png");
+    let files = frameworks("bundled-rn-native-outside")
+        .await
+        .framework_files(FRAMEWORK, FilePhase::Runtime, ctx.clone())
+        .await
+        .expect("the runtime runs");
+    let native: Json = serde_json::from_str(&file(&files, "src/feldspar/native.json")).unwrap();
+    assert_eq!(native["icon"], json!("../branding/logo.png"));
+
+    // A release build signed with the application's own keystore: its path
+    // and alias are in `native.json`, its password is not.
+    ctx["settings"] = json!({
+        "build_type": "release",
+        "own_keystore": true,
+        "keystore_file": "keys/release.jks",
+        "keystore_alias": "upload",
+        "keystore_password": "s3cret"
+    });
+    let files = frameworks("bundled-rn-native-signed")
+        .await
+        .framework_files(FRAMEWORK, FilePhase::Runtime, ctx.clone())
+        .await
+        .expect("the runtime runs");
+    let native_text = file(&files, "src/feldspar/native.json");
+    let native: Json = serde_json::from_str(&native_text).unwrap();
+    assert_eq!(
+        native["signing"],
+        json!({ "keystore": "../keys/release.jks", "alias": "upload" })
+    );
+    assert!(!native_text.contains("s3cret"), "{native_text}");
+    // A debug build is signed with the debug key, whatever the settings say.
+    ctx["settings"]["build_type"] = json!("debug");
+    let files = frameworks("bundled-rn-native-debug")
+        .await
+        .framework_files(FRAMEWORK, FilePhase::Runtime, ctx)
+        .await
+        .expect("the runtime runs");
+    let native: Json = serde_json::from_str(&file(&files, "src/feldspar/native.json")).unwrap();
+    assert_eq!(native["signing"], Json::Null);
 }
 
 #[tokio::test]
@@ -559,6 +746,7 @@ async fn a_rebuild_rewrites_the_generated_directory_and_nothing_else() {
         [
             "src/feldspar/hooks.ts",
             "src/feldspar/config.ts",
+            "src/feldspar/native.json",
             "src/feldspar/README.md"
         ],
         "a build must not rewrite a screen the developer owns"
@@ -651,4 +839,80 @@ async fn the_bundled_react_native_module_scaffolds_an_application_that_builds() 
     assert_eq!(fw.serve(&sc_app::AppRequest::get("/tasks")).status, 200);
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// "Generate a keystore": the module makes a PKCS12 keystore in pure JavaScript
+/// and answers it with the settings that name it. Writing and saving are the
+/// server's (`sc_app::run_target_operation`); this checks what the module makes.
+#[tokio::test]
+async fn the_keystore_operation_makes_a_keystore_and_the_settings_naming_it() {
+    skip_without!(have_npm(), "npm is not on the PATH");
+    let frameworks = frameworks("bundled-rn-keystore").await;
+    let declared = frameworks.frameworks();
+    let op = &declared[0].targets[0].operations[0];
+    assert_eq!(op.name, "generate_keystore");
+    assert_eq!(
+        op.show_if,
+        [
+            ShowIfCondition::new("build_type", vec![json!("release")]),
+            ShowIfCondition::new("own_keystore", vec![json!(true)])
+        ]
+    );
+
+    let context = |settings: Json| {
+        json!({ "app": { "name": "My Todo", "subdomain": "todo" }, "project": "todo",
+                "settings": settings })
+    };
+    // Nothing filled in: the alias `upload` and a generated password, shown once.
+    let answer = frameworks
+        .call_target_operation(
+            FRAMEWORK,
+            "android",
+            "generate_keystore",
+            context(json!({ "build_type": "release", "own_keystore": true })),
+        )
+        .await
+        .expect("the operation runs");
+    assert_eq!(answer.files.len(), 1);
+    let (path, bytes) = &answer.files[0];
+    assert_eq!(path, "keys/todo-release.p12");
+    // A DER SEQUENCE, of a size a 2048-bit key and its certificate make.
+    assert_eq!(bytes[0], 0x30);
+    assert!(bytes.len() > 2000, "{} bytes", bytes.len());
+    assert_eq!(answer.settings["own_keystore"], json!(true));
+    assert_eq!(
+        answer.settings["keystore_file"],
+        json!("keys/todo-release.p12")
+    );
+    assert_eq!(answer.settings["keystore_alias"], json!("upload"));
+    let password = answer.settings["keystore_password"].as_str().unwrap();
+    assert_eq!(password.len(), 24);
+    assert!(answer.message.contains(password), "{}", answer.message);
+
+    // The alias and password the admin typed are used, and not repeated back.
+    let answer = frameworks
+        .call_target_operation(
+            FRAMEWORK,
+            "android",
+            "generate_keystore",
+            context(json!({ "keystore_alias": "release", "keystore_password": "typed-pass" })),
+        )
+        .await
+        .expect("the operation runs");
+    assert_eq!(answer.settings["keystore_alias"], json!("release"));
+    assert_eq!(answer.settings["keystore_password"], json!("typed-pass"));
+    assert!(!answer.message.contains("typed-pass"), "{}", answer.message);
+
+    // Java refuses a password shorter than six characters, so the module does.
+    let err = frameworks
+        .call_target_operation(
+            FRAMEWORK,
+            "android",
+            "generate_keystore",
+            context(json!({ "keystore_password": "short" })),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("6 characters"), "{err}");
 }

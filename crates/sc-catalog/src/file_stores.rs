@@ -336,6 +336,18 @@ pub async fn connect_all_file_stores(catalog: &Catalog) -> Result<FileStoreConne
 /// different languages.
 pub const QUERY_FILE_STORES: &str = "file_stores";
 
+/// The prefix of a [`ServerQuery`](sc_types::OptionsSource::ServerQuery) whose
+/// setting names a **file of a kind** in the application's own file store, as
+/// a path relative to that store: `store_files:png,jpg,jpeg` is an app icon,
+/// `store_files:jks,keystore,p12` a keystore.
+///
+/// Not answered by [`resolve_options`]: the files are a property of whichever
+/// store the application's store setting names, which the form knows and a
+/// framework's spec does not. The spec says which settings ask and for what
+/// ([`store_file_settings`]); the form fills them from `listStoreFiles`. On save
+/// the value is unrestricted, as for any query this server does not resolve.
+pub const QUERY_STORE_FILES: &str = "store_files:";
+
 /// The value a setting answered by [`QUERY_FILE_STORES`] carries to mean "no
 /// store yet — create a local one for me", in place of a store's name.
 ///
@@ -357,6 +369,35 @@ pub fn file_store_settings(spec: &[FormField]) -> Vec<String> {
     spec.iter()
         .filter(|field| field.query() == Some(QUERY_FILE_STORES))
         .map(|field| field.base.name.clone())
+        .collect()
+}
+
+/// A setting that picks a file from the application's store (an app icon, a
+/// keystore), and the file extensions it accepts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreFileSetting {
+    /// The setting's name — `app_icon`.
+    pub name: String,
+    /// The extensions it accepts, lowercase and without the dot — `png`, `jpg`.
+    pub extensions: Vec<String>,
+}
+
+/// The settings in `spec` whose value is a file in the application's store
+/// ([`QUERY_STORE_FILES`]). Read off the unresolved spec, as
+/// [`file_store_settings`] is.
+pub fn store_file_settings(spec: &[FormField]) -> Vec<StoreFileSetting> {
+    spec.iter()
+        .filter_map(|field| {
+            let extensions = field.query()?.strip_prefix(QUERY_STORE_FILES)?;
+            Some(StoreFileSetting {
+                name: field.base.name.clone(),
+                extensions: extensions
+                    .split(',')
+                    .map(|e| e.trim().trim_start_matches('.').to_lowercase())
+                    .filter(|e| !e.is_empty())
+                    .collect(),
+            })
+        })
         .collect()
 }
 
