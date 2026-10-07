@@ -229,6 +229,13 @@ pub fn generate_skill(catalog: &Catalog, app: &Application, client_file: &str) -
          and placeholders are `{{name}}` rather than a template. The project's \
          `AGENTS.md` has the call shapes.\n\
          \n\
+         **Translating** is done with the tools, not by editing files: \
+         `describe_translations` shows the strings and what each locale is \
+         missing, the `locales` section of `update_application` enables a \
+         locale, and `save_translations` writes the translations you produce — only the keys you name change, so \
+         a correction is one key. Keep every `{{placeholder}}` name exactly; a \
+         translation that changes one is refused.\n\
+         \n\
          ## Whether you have the tools\n\
          \n\
          They arrive from an MCP server this project may or may not be connected \
@@ -281,7 +288,7 @@ pub fn generate_skill(catalog: &Catalog, app: &Application, client_file: &str) -
          foreign key may point at a table created earlier in the same list. It is \
          one transaction: a refused operation refuses the batch, naming its index.\n\
          3. A table this application should serve must be **connected** to it: \
-         `set_application_tables` with `add`. An application reaches only its \
+         `update_application` with `tables: {{ add: [...] }}`. An application reaches only its \
          connected tables, and the generated client is typed for them alone.\n\
          4. Read the result. It names the applications it re-projected and which \
          of them **want a build** — a schema change rewrites the generated client \

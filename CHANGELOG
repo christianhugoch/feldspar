@@ -2,6 +2,181 @@
 
 Changes in reverse chronological order.
 
+## MCP: translating an application from a coding agent
+
+A user driving Claude Code over MCP should be able to say "translate this app to German" or
+"the translation of 'Save' is wrong, it should be …". Before this, nothing on the MCP surface
+reached an application's catalogue, and Claude Code never read the `t()`/`<T>` rules because
+they were only in `AGENTS.md`, which Claude Code does not load.
+
+- **Two new tools** (`sc-app/src/mcp/translate.rs`, applications area) and a new section of
+  `update_application`. The agent is the translator, so no tool calls the server's own LLM:
+  - `describe_translations`: every string the source wraps (or a Saltcorn UI app's views show),
+    the locales with their coverage, `problems` (non-literal call sites) and `unwrapped`
+    literals (capped at 200, with `unwrapped_count`). With `locale` it gives one `translation`
+    per message, and `missing_only` keeps just the untranslated ones.
+  - `update_application` gains a **`locales` section** (`add`, `remove`, `default_locale`) rather
+    than a tool of its own, because the locales are part of the application record and the tool
+    list should not grow. It writes the record's `attributes` through the same
+    `updateApplication` save, so it can be combined with the other sections and the mount is
+    refreshed with no build. A default that was just removed is dropped rather than refusing
+    the call. A default that is not enabled is refused. Needs `allow_edit`.
+  - `save_translations`: `messages` maps an English key to a translation, or to `null` to
+    remove it. It **merges** into the locale's current catalogue, because `saveTranslations`
+    replaces the catalogue and a one-word correction must not wipe the rest. Keys the source
+    does not use are saved but reported under `not_in_source`. Needs `allow_edit`.
+  - Both tools run the Translations screen's own handlers (`getTranslations`,
+    `saveTranslations`) through the `AdminHost`. So the placeholder
+    check, orphan keeping and catalogue cache invalidation are the screen's, and the change is
+    live without a build. With no running server, they refuse.
+- **The MCP handshake `instructions`** (`sc-server/src/mcp.rs`) gain a translating paragraph,
+  and step 5 of building an app now says to wrap user-visible strings in `t()`/`<T>`. Claude Code
+  puts these instructions in its system prompt, so this is the part that reaches it whatever
+  the project contains.
+- **Scaffolded projects get a `CLAUDE.md`** containing `@AGENTS.md`, so Claude Code reads the
+  same guide as other agents. It is written once, like `AGENTS.md`. `AGENTS.md` and the
+  regenerated `src/feldspar/SKILL.md` gain a short "Translating this application" section.
+- The built-in `admin_copilot` shares this tool set, so it offers the two tools too (17 tool
+  names, up from 15).
+- Tests: `app_i18n::a_coding_agent_translates_an_application_through_the_mcp_tools` (enable `de`
+  through `update_application`,
+  list what is missing, save, correct one key and check the rest survive, a renamed placeholder
+  refused, served JSON checked) and
+  `scaffold::files::tests::claude_md_imports_agents_md_which_says_how_to_translate` and
+  `mcp::update::tests::locales_are_added_and_removed_and_a_removed_default_goes_with_them`.
+
+## MCP: File fields, static directories, the CSP, and compressed responses
+
+An external coding agent built two applications through the administration MCP server (TODO
+"Feedback from an external MCP build"). It had to work around four gaps and leave two settings
+for a person. Fixed:
+
+- **Responses are compressed** (`sc-server/src/router.rs`). A brotli or gzip
+  `CompressionLayer` sits just inside the request log, so every response is compressed for a
+  client that sends `Accept-Encoding`. tower-http's default predicate already skips SSE, images
+  and tiny bodies, and zip archives are skipped as well. The agent's presentation took about 75 s
+  to load its first JSON snapshot over a 3G-like connection. `tower-http` gains the
+  `compression-br` and `compression-gzip` features. `TECHNICAL_DESIGN.md` §16 has a paragraph
+  on it.
+- **`edit_schema` makes File fields** (`sc-api/src/mcp/schema.rs`). `file_store`, with optional
+  `file_folder` and `file_mime`, on an `add_field`, an `alter_field` or a `create_table` field
+  makes a `DataFieldKind::File`. The schema editor stores it as `text` when no type is given.
+  `type: "file"` is refused with a sentence saying to use `file_store`. A store that does not
+  exist is refused too, and the refusal lists the stores there are. The tool description says
+  not to keep file contents in a `bytes` column, which is what the agent did after
+  `type: "file"` was refused. The new properties are added to the parameter schema after the
+  `json!`, because one more level exceeded the macro's recursion limit.
+- **`update_application`** (new, `sc-app/src/mcp/update.rs`, applications area) replaces
+  `set_application_tables`. It is one tool with a section for each part of the application an
+  agent may change, rather than one tool per part, so the tool list does not grow:
+  - `tables` (`add`, `remove`, `set`): the connected tables, as `set_application_tables` did.
+  - `static_dirs` (`add` of `{ mount, file_store, path }`, `remove` of mounts): it connects any
+    store it names. It needs only `allow_edit` because a mount is not a grant.
+  - `csp` (directive → sources, or `null` to remove it): directives not named are kept. A
+    directive name or source that could break the header is refused.
+- Each section's grant is checked before anything changes: `tables` and `static_dirs` need
+  `allow_edit`, and `csp` needs `allow_access_changes`. A call with several sections is saved as
+  one, and a refused section changes nothing. The description says which sections this token's
+  grants rule out.
+- It saves through the server's own `listApplications` → `updateApplication`, using the
+  `AdminHost`, so validation, the client rewrite and **the mount refresh** are the admin form's.
+  The running app serves the change at once, including newly connected tables, which
+  `set_application_tables` only served after the next build. With no server the record is
+  saved, the client rewritten, and the answer says the change is served from the next start.
+- The build instructions (`BUILD_PLAYBOOK`, the MCP server's `initialize` text, `SKILL.md`,
+  `create_application`'s `next`) say `update_application` with `tables: { add: [...] }`.
+- **`describe_applications`** reports each application's `file_stores`, `static_dirs` and `csp`.
+- `admin_copilot` still names 15 tools. `SKILL.md` lists the new one by itself.
+  `TECHNICAL_DESIGN.md` §13.6 and `OPERATIONS.md` cover `update_application` and File fields.
+- Not changed, by design: `min_role` on queries and tables still needs `allow_access_changes`,
+  and dropping tables and triggers still needs `allow_drop`. The agent's token had neither.
+- Tests: `responses_are_compressed_for_a_client_that_accepts_it` (`sc-server/tests/router.rs`),
+  `a_file_field_is_named_by_its_store_and_file_is_not_a_type` (`sc-api`),
+  `a_file_field_names_its_store_and_needs_no_type` (`sc-core-traits/tests/admin_copilot.rs`),
+  `update_application_checks_each_section_s_grant_before_changing_anything`
+  (`sc-core-traits/tests/admin_copilot_apps.rs`), three unit tests in `update.rs`, and
+  `an_agent_serves_a_store_folder_and_widens_the_csp_of_a_running_app`
+  (`sc-server/tests/build_from_a_sentence.rs`). That last test creates a `none` app over MCP,
+  then checks that the running app serves the mounted file and sends the widened CSP header.
+  A final call with two sections removes the directory and a directive, after which the file
+  is a 404 and the header no longer has the directive. `an_external_agent_builds_an_application_from_a_sentence`
+  connects its table with `update_application`. `locale_negotiation`'s `vary()` helper
+  now ignores the `accept-encoding` that compression adds.
+
+## Fix: Clear all removed the TLS settings, and `feldspar.toml` can now pin them
+
+After Clear all, `_fd_config` had no TLS settings. Nothing changed until the next restart; then
+the server listened only on plain HTTP. Behind a TLS-passthrough proxy that sends traffic to
+8443, every application and the admin UI stopped answering, and the settings can only be put
+back from that admin UI (or `feldspar set-cfg` on the host). The cause was Clear all, which
+deleted every row of `_fd_config`. Restore only adds settings and never removed any.
+
+- **Clear all keeps the TLS settings and the ACME cache** (`sc-server/src/clear_all.rs`). The
+  `_fd_config` delete leaves out every key in the SSL / TLS section (`sc_config::ssl_keys`). The
+  certificate and key are kept too, because `custom` mode without its certificate would stop the
+  boot. `_fd_acme_cache` is not cleared, so a restart does not order new certificates against
+  the CA's rate limits. The report says the TLS settings were kept.
+- **An `[environments.*]` section of `feldspar.toml` may pin `ssl_mode`, `acme_contact_email`,
+  `acme_directory_url`, `redirect_http_to_https` and `ssl_extra_domains`** (a TOML list)
+  (`sc-config-file`). `connect_catalog` passes them to `sc_config::set_host_config`, which checks
+  each against its declaration (a mistyped mode stops the boot by name) and holds them on the
+  `Catalog` (`set_host_config` / `host_config`). A pinned key wins:
+  - `all_config` and `config_value` return it, so the boot serves what the file says.
+  - `set_config` / `set_config_many` write nothing when the value is the pinned one (the form
+    sends back what it was shown), and refuse any other value before writing anything, naming
+    the file.
+  - A restore skips it and reports "`ssl_mode` kept from this host's feldspar.toml".
+  - `getSettings` / `updateSettings` return `host_keys`, and the settings screen shows those
+    fields read-only with a note to change them in the file (`SettingField`'s new `pinned` prop).
+    The generated clients were regenerated.
+  - `feldspar serve --help` lists the new keys.
+- `https_port` was already a host setting and was never stored in `_fd_config`.
+- Tests: `an_environment_may_pin_the_tls_settings` (`sc-config-file`),
+  `the_kept_keys_are_the_whole_section_and_the_pinnable_ones_are_in_it` (`sc-config/src/ssl.rs`),
+  `a_key_the_host_pins_wins_over_the_table_and_cannot_be_saved_over`
+  (`sc-config/tests/config_store.rs`), `the_file_s_tls_keys_become_the_settings_they_pin`
+  (`sc-cli/src/db.rs`), `a_restore_leaves_the_tls_keys_the_host_pins_alone`
+  (`sc-server/tests/backup_api.rs`). `clear_all_empties_the_installation_and_removes_only_ticked_stores`
+  now checks that the TLS settings and the ACME cache survive.
+
+## Fix: restored rows pointing at a kept account, and a restored `node_modules` that would not run
+
+Two more problems from restoring a real backup onto a second server.
+
+- **Rows that refer to an account already on the server now refer to it by its id there**
+  (`sc-server/src/backup/restore.rs`). The restore keeps an existing account, matched by email,
+  but the account has a different id on each server. A row such as `clients.therapist` kept the
+  backup's id and broke its foreign key. Every row that referred to that row failed too
+  (`assignment` → `exercise_run` → `answer`). `restore_users` now returns the backup id → local id
+  of each account kept by email, and `repoint_users` rewrites every `Key` to `users` in the rows
+  before they are inserted.
+- **`node_modules` is neither backed up nor restored** (`sc-server/src/backup/{mod,write,restore}.rs`,
+  `is_installed_dependency`). A store's files were read through the store, which follows symlinks,
+  so `.bin/tsc` came back as a copy of `typescript/bin/tsc`. Its `import "../lib/tsc.js"` then
+  resolved from the wrong directory and the build failed. Because a `node_modules` was present,
+  the build also did not run its install. The writer no longer descends into `node_modules`. The
+  restore leaves it out of older backups and reports how many files it skipped, so the first build
+  installs the dependencies.
+- Tests: `a_row_referring_to_a_kept_account_refers_to_it_by_its_id_here` and
+  `node_modules_is_neither_backed_up_nor_restored` (`sc-server/tests/backup_api.rs`).
+
+## Fix: restoring a backup refused every table with an ownership formula
+
+Restoring a backup onto another server skipped each table that had an ownership formula, even
+one that reads only the table's own column (`clients`, whose formula reads its `therapist`
+column). Then everything that needed those tables failed too: a custom query, an application build, a trigger.
+A restored table is created with no columns, and they are added in later passes. But the formula
+was part of the create, and it is checked against the columns it reads, which were not there yet.
+
+- **The ownership formula and RLS are applied after the columns and rows**
+  (`sc-server/src/backup/restore.rs`). `restore_table` holds both back, and they go on with one
+  `AlterTable` per table once every column, including references and calculated fields, is in
+  place. They are applied after the rows because RLS is `FORCE`d and would otherwise judge each
+  insert. A failure is reported as "the ownership rule of `name`", and the table is kept.
+- Test: `an_ownership_formula_is_restored_after_the_columns_it_reads`
+  (`sc-server/tests/backup_api.rs`). It covers an own-column formula with RLS on and a row to
+  insert, and a formula that reads through a `Key`.
+
 ## Fix: the admin copilot's chat history was always empty
 
 The chat panel's rail of past conversations was blank for `Admin copilot`, however many
