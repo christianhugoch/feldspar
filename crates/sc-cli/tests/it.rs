@@ -37,6 +37,8 @@ mod core_deps;
 mod demo;
 #[path = "i18n.rs"]
 mod i18n;
+#[path = "mcp_token.rs"]
+mod mcp_token;
 #[path = "repo_hygiene.rs"]
 mod repo_hygiene;
 #[path = "serve.rs"]

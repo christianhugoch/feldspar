@@ -2,6 +2,36 @@
 
 Changes in reverse chronological order.
 
+## `feldspar mcp-token create|list|revoke` and `feldspar app list --json`
+
+**`mcp-token`.** The administration MCP server's bearer tokens can now be managed from a
+terminal holding the database, with no running server or admin session. `create` takes
+`--label`, `--email EMAIL` or `--admin` (the token's administrator; a non-admin is refused),
+`--expires-in-days N`, and each of the six grants as `--allow-X` / `--no-allow-X`
+(`create`, `edit`, `drop`, `access-changes`, `triggers`, `applications`); omitted grants take
+the same defaults as the admin screen (via `sc_api::mcp::{validate_flags, grants_from_attrs,
+areas_from_attrs, flags_to_attrs}`). The secret is printed alone on stdout so it can be
+captured; the id, grants, expiry, the `claude mcp add` line (`--url`, `--name`) and a
+reminder when `mcp_enabled` is off go to stderr. `list [--json]` shows id, state, label,
+grants and last use (never the secret); `revoke ID` marks the row revoked. New module
+`sc_cli::mcp_token`.
+
+**`app list [--json]`.** Every application with its framework and the absolute project
+directory its source is in on this machine, resolved as a build resolves it
+(`app_source_from_config` / `none_source_dir`, then the connected store's `local_path`). An
+app whose directory cannot be resolved is still listed with `project_dir: null` and an
+`error`. Stdout carries only the listing (SQL echo off). New module `sc_cli::app`.
+
+**Docs.** `OPERATIONS.md` §7.1 shows turning MCP on and off with `set-cfg`/`get-cfg`; §7.2
+documents `mcp-token` and every create option; §7.3 uses `app list --json` to find the project
+directory; the grant table now names `allow_applications`. `feldspar` usage text updated.
+
+Tests: `sc-cli` `tests/mcp_token.rs` —
+`a_token_minted_from_the_cli_authenticates_until_it_is_revoked` (minted token passes
+`authenticate_api_token` with the requested grants, is listed, fails after `revoke`; a
+non-admin is refused) and `app_list_json_gives_each_applications_project_directory`; unit
+tests in `sc_cli::mcp_token` for flag parsing, defaults and the registration line.
+
 ## `view_app` can look signed out; GPT-6 window, budget and apply_patch
 
 **`signed_out`.** Every `view_app` call takes `signed_out: true` to look at the preview as an

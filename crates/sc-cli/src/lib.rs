@@ -6,11 +6,14 @@
 //! the coding agent's evaluation harness ([`eval`]), the `i18n` commands and the
 //! domains they read ([`i18n`]), the `cmdstan` commands' arguments and status
 //! report ([`cmdstan`]), parsing the `api` commands' flags
-//! ([`api`]), the `get-cfg`/`set-cfg` commands' arguments ([`config`]) and
+//! ([`api`]), the `get-cfg`/`set-cfg` commands' arguments ([`config`]), the
+//! `mcp-token` commands ([`mcp_token`]), resolving an application's project
+//! directory for `app list` ([`app`]) and
 //! standing up a connected [`Catalog`] ([`connect_catalog`]) —
 //! live here so integration tests can drive the same boot path the CLI uses.
 
 pub mod api;
+pub mod app;
 pub mod auth;
 pub mod cmdstan;
 pub mod config;
@@ -18,6 +21,7 @@ pub mod db;
 pub mod demo;
 pub mod eval;
 pub mod i18n;
+pub mod mcp_token;
 
 /// The `feldspar.toml` reader. It lives in its own layer-0 crate because the
 /// integration-test harness reads the same file (for the `test` environment),

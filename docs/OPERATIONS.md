@@ -840,12 +840,20 @@ on is the moment the server is already running.
 | Administration MCP server | `mcp_enabled` | off |
 | MCP from this machine only | `mcp_loopback_only` | **on** |
 
-From the admin UI, or from a terminal that holds the database:
+From the admin UI, or from a terminal that holds the database — `set-cfg` writes
+the same stored setting the checkbox does (§8.2), so it needs no running server and
+no session, and a running server picks it up on its next request:
 
 ```bash
-feldspar set-cfg mcp_enabled true
+feldspar set-cfg mcp_enabled true          # serve POST /mcp
+feldspar get-cfg mcp_enabled               # → true
 feldspar set-cfg mcp_loopback_only false   # only if the agent is not on this host
+feldspar set-cfg mcp_enabled false         # and off again: the route is a 404
 ```
+
+Both take `true`/`false` (or `yes`/`no`, `on`/`off`, `1`/`0`); anything else is
+refused before it is written. Add the usual database flags (`--environment NAME`,
+`--database-url …`) when the shell does not already select the right database.
 
 Leave `mcp_loopback_only` on. The usual arrangement is an agent running beside the
 server or reaching it down an ssh tunnel the developer made:
@@ -868,7 +876,7 @@ The panel below those switches. A label, an expiry in days, and six grants:
 | `allow_drop` | drop tables and fields, delete triggers and queries |
 | `allow_access_changes` | change role floors, ownership formulae and row-level security |
 | `allow_triggers` | work on triggers at all |
-| (applications) | work on applications' custom SQL queries |
+| `allow_applications` | work on applications' custom SQL queries |
 
 `allow_access_changes` is the one to think hardest about: it changes what *every*
 user of the deployment can reach. `allow_drop` at least announces itself.
@@ -884,9 +892,87 @@ boxes, and every call is authorized exactly as that person's own session would b
 *Revoking it is the only way to take it back*: there is no session to expire and
 no browser to close.
 
+#### From a terminal
+
+`feldspar mcp-token` does the same three things as the panel, against the same
+table, with the same defaults — a token minted here is listed and revoked on the
+screen like any other, and the other way round. Like `get-cfg`, it needs the
+database and nothing else.
+
+```bash
+feldspar mcp-token create --label "claude-code on my laptop" --admin \
+    --expires-in-days 90 --no-allow-triggers
+```
+
+| Option | Meaning |
+|---|---|
+| `--label TEXT` | **required.** What the token is called in the list and in every `MCP [label] …` log line |
+| `--email EMAIL` | the administrator the token runs as |
+| `--admin` | …or the first administrator. One of the two is required |
+| `--expires-in-days N` | lapse after N days; leave it out for a token that does not expire |
+| `--allow-create` / `--no-allow-create` | create tables, fields, triggers and queries (default **on**) |
+| `--allow-edit` / `--no-allow-edit` | change existing ones (default **on**) |
+| `--allow-drop` / `--no-allow-drop` | drop and delete (default **off**) |
+| `--allow-access-changes` / `--no-allow-access-changes` | role floors, ownership, row-level security (default **off**) |
+| `--allow-triggers` / `--no-allow-triggers` | the trigger tools at all (default **on**) |
+| `--allow-applications` / `--no-allow-applications` | applications' custom SQL (default **on**) |
+| `--url ORIGIN` | the origin the printed `claude mcp add` line points at (default `http://localhost:<bind port>`) |
+| `--name NAME` | what the server is called in that line (default `feldspar`) |
+
+plus the usual database flags. A grant left out takes its default — the same
+safe configuration an untouched panel has: it can build, it cannot destroy, it
+cannot widen anybody's access. The user must be an administrator; any other user
+is refused, since the server would refuse every call the token made.
+
+The **secret is the only thing on stdout**, so it can be captured:
+
+```bash
+token=$(feldspar mcp-token create --label ci --admin --expires-in-days 1)
+```
+
+Everything else — the token's id, its grants, its expiry, the ready-made
+`claude mcp add` line, and a reminder if `mcp_enabled` is still off — goes to
+stderr. As on the screen, it is shown once.
+
+```bash
+feldspar mcp-token list            # id, state (live/expired/revoked), label, grants, last use
+feldspar mcp-token list --json     # the same, as a JSON array; never the secret
+feldspar mcp-token revoke 3f2c…    # by the id from the list
+```
+
 ### 7.3 Registering it
 
-One line, in the project directory of the application's repository:
+One line, in the project directory of the application's repository. To find
+that directory on this machine, ask the database:
+
+```bash
+feldspar app list                  # subdomain, framework, name, project directory
+feldspar app list --json
+```
+
+```json
+[
+  {
+    "id": "6b0e…",
+    "name": "Todo",
+    "subdomain": "todo",
+    "framework": "react",
+    "file_store": "apps",
+    "source_dir": "todo",
+    "project_dir": "/srv/feldspar/apps/todo"
+  }
+]
+```
+
+`project_dir` is derived exactly as a build derives it — the framework's store and
+directory settings, resolved through the store's location on disk — so it is the
+directory `build-app` runs in. An application with no such directory (a store that
+is not connected or not on this machine's disk, a framework with no source tree) is
+still listed, with `project_dir: null` and the reason in `error`. Only the JSON is
+on stdout, so `jq -r '.[] | select(.subdomain=="todo") | .project_dir'` works
+directly on it.
+
+Then:
 
 ```bash
 claude mcp add --transport http feldspar http://localhost:3032/mcp \
@@ -1063,7 +1149,7 @@ journalctl -u feldspar -f | grep '^MCP'
 Set **Log verbosity** to `verbose` in the same Settings → Development section and
 the call arguments are logged too.
 
-**Revoke** on the token's row ends it: the row stays, marked, because a revocation
+**Revoke** on the token's row — or `feldspar mcp-token revoke ID` — ends it: the row stays, marked, because a revocation
 is a thing that happened and that list is where it is seen to have happened. The
 next call the agent makes fails. The same is true if the token expires, if the
 user who minted it is deleted, or if they stop being an administrator — the

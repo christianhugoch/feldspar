@@ -51,6 +51,8 @@ async fn run(args: &[String]) -> Result<()> {
         Some("get-cfg") => get_cfg_command(&args[1..]).await,
         Some("set-cfg") => set_cfg_command(&args[1..]).await,
         Some("auth") => auth_command(&args[1..]).await,
+        Some("mcp-token") => mcp_token_command(&args[1..]).await,
+        Some("app") => app_command(&args[1..]).await,
         Some("agent") => agent_command(&args[1..]).await,
         Some("i18n") => i18n_command(&args[1..]).await,
         Some("cmdstan") => cmdstan_command(&args[1..]).await,
@@ -1082,6 +1084,214 @@ async fn set_cfg_command(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `feldspar mcp-token create|list|revoke` — the administration MCP server's
+/// bearer tokens, without the admin UI (§13.6). See `sc_cli::mcp_token`.
+async fn mcp_token_command(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("create") => mcp_token_create_command(&args[1..]).await,
+        Some("list") => mcp_token_list_command(&args[1..]).await,
+        Some("revoke") => mcp_token_revoke_command(&args[1..]).await,
+        Some(other) => Err(sc_error::Error::config(format!(
+            "unknown mcp-token subcommand `{other}`; there are create, list and revoke"
+        ))),
+        None => Err(sc_error::Error::config(
+            "mcp-token needs a subcommand: create, list or revoke",
+        )),
+    }
+}
+
+/// `feldspar mcp-token create --label L (--email E | --admin) [--expires-in-days N]
+/// [--allow-…|--no-allow-…]… [--url ORIGIN] [--name NAME]`.
+///
+/// Prints the secret, alone, on stdout — the one time it exists anywhere — and
+/// everything else on stderr.
+async fn mcp_token_create_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let parsed = sc_cli::mcp_token::parse_create(&rest)?;
+    // Before the database: a grant that will not validate is a typo, and the
+    // message should not wait on a connection.
+    let grants = sc_cli::mcp_token::normalised_grants(&parsed.grants)?;
+
+    if let Some(source) = db.source() {
+        eprintln!("feldspar: database configured from {source}");
+    }
+    let catalog = connect_catalog(&db).await?;
+    // stdout is the secret and nothing else.
+    sc_log::set_log_sql(false);
+
+    let user = sc_cli::auth::resolve_user(&catalog, &parsed.user).await?;
+    let email = user
+        .extra
+        .get(sc_auth::COL_EMAIL)
+        .and_then(|e| e.as_text())
+        .unwrap_or("the selected user")
+        .to_owned();
+    // A token for a non-admin would be minted and then refused on every call.
+    if user.role > sc_auth::ROLE_ADMIN {
+        return Err(sc_error::Error::invalid(format!(
+            "{email} is not an administrator, and an MCP token only works for one"
+        )));
+    }
+
+    let minted = sc_auth::mint_api_token(
+        &catalog,
+        sc_auth::NewApiToken {
+            user_id: user.id,
+            label: parsed.label.clone(),
+            grants,
+            expires_at: sc_cli::mcp_token::expiry(parsed.expires_in_days, chrono::Utc::now()),
+        },
+    )
+    .await?;
+
+    println!("{}", minted.secret);
+    let token = &minted.token;
+    eprintln!(
+        "feldspar: minted MCP token `{}` (id {}) running as {email}",
+        token.label, token.id
+    );
+    eprintln!(
+        "feldspar: grants: {}",
+        sc_cli::mcp_token::describe_grants(&token.grants)
+    );
+    match token.expires_at {
+        Some(at) => eprintln!("feldspar: expires {at}"),
+        None => eprintln!("feldspar: it does not expire; revoke it when you are done with it"),
+    }
+    let origin = parsed
+        .url
+        .clone()
+        .unwrap_or_else(|| format!("http://localhost:{}", db.serving().port().unwrap_or(3032)));
+    eprintln!("feldspar: the token is shown once. Register it with:");
+    eprintln!(
+        "  {}",
+        sc_cli::mcp_token::claude_mcp_add_line(&origin, &parsed.name, &minted.secret)
+    );
+    if !sc_config::mcp_settings(&catalog).await?.enabled {
+        eprintln!(
+            "feldspar: the MCP server is off; `feldspar set-cfg mcp_enabled true` turns it on"
+        );
+    }
+    Ok(())
+}
+
+/// `feldspar mcp-token list [--json]` — every token, newest first, revoked and
+/// lapsed ones included. Never the secret, which nothing can read back.
+async fn mcp_token_list_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let as_json = match rest.as_slice() {
+        [] => false,
+        [flag] if flag == "--json" => true,
+        [other, ..] => {
+            return Err(sc_error::Error::config(format!(
+                "unknown mcp-token list argument `{other}`; it takes --json"
+            )));
+        }
+    };
+    let catalog = connect_catalog(&db).await?;
+    sc_log::set_log_sql(false);
+    let now = chrono::Utc::now();
+    let tokens = sc_auth::list_api_tokens(&catalog).await?;
+    if as_json {
+        let out: Vec<serde_json::Value> = tokens
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "id": t.id,
+                    "user_id": t.user_id,
+                    "label": t.label,
+                    "grants": t.grants,
+                    "created_at": t.created_at,
+                    "expires_at": t.expires_at,
+                    "last_used_at": t.last_used_at,
+                    "revoked_at": t.revoked_at,
+                    "state": sc_cli::mcp_token::state(t, now),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+        return Ok(());
+    }
+    for t in &tokens {
+        println!(
+            "{}  {:<7}  {}  [{}]{}",
+            t.id,
+            sc_cli::mcp_token::state(t, now),
+            t.label,
+            sc_cli::mcp_token::describe_grants(&t.grants),
+            t.last_used_at
+                .map(|at| format!("  last used {at}"))
+                .unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+/// `feldspar mcp-token revoke ID` — the row stays, marked revoked; the next call
+/// under it fails.
+async fn mcp_token_revoke_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let id = sc_cli::mcp_token::parse_revoke(&rest)?;
+    let catalog = connect_catalog(&db).await?;
+    let token = sc_auth::load_api_token(&catalog, id)
+        .await?
+        .ok_or_else(|| sc_error::Error::not_found(format!("no MCP token with id {id}")))?;
+    match sc_auth::revoke_api_token(&catalog, id).await? {
+        true => eprintln!("feldspar: revoked MCP token `{}` ({id})", token.label),
+        false => eprintln!(
+            "feldspar: MCP token `{}` ({id}) was already revoked",
+            token.label
+        ),
+    }
+    Ok(())
+}
+
+/// `feldspar app list [--json]` — every application, with the project directory
+/// its source is in on this machine. See `sc_cli::app`.
+async fn app_command(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("list") => app_list_command(&args[1..]).await,
+        Some(other) => Err(sc_error::Error::config(format!(
+            "unknown app subcommand `{other}`; there is `list`"
+        ))),
+        None => Err(sc_error::Error::config("app needs a subcommand: list")),
+    }
+}
+
+async fn app_list_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let as_json = sc_cli::app::parse_list(&rest)?;
+    let catalog = connect_catalog(&db).await?;
+    // stdout is the listing; a JSON consumer must get nothing else there.
+    sc_log::set_log_sql(false);
+    connect_stored_file_stores(&catalog).await?;
+
+    let apps = sc_app::list_applications(&catalog).await?;
+    let out: Vec<serde_json::Value> = apps
+        .iter()
+        .map(|app| sc_cli::app::app_json(&catalog, app))
+        .collect();
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+        return Ok(());
+    }
+    for app in &out {
+        let field = |k: &str| app.get(k).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+        let dir = match app.get("project_dir").and_then(|v| v.as_str()) {
+            Some(dir) => dir.to_owned(),
+            None => format!("(no project directory: {})", field("error")),
+        };
+        println!(
+            "{:<20} {:<10} {:<24} {}",
+            field("subdomain"),
+            field("framework"),
+            field("name"),
+            dir
+        );
+    }
+    Ok(())
+}
+
 /// `feldspar auth SUBCOMMAND …` — sessions for driving an application without a
 /// browser to sign in with.
 async fn auth_command(args: &[String]) -> Result<()> {
@@ -1553,10 +1763,24 @@ fn print_usage() {
     );
     eprintln!("                          [database flags]");
     eprintln!("  feldspar auth token --app SUBDOMAIN (--email EMAIL | --admin | --role NAME)");
+    eprintln!("                      [--format playwright|netscape] [--out PATH] [--url ORIGIN]");
+    eprintln!(
+        "  feldspar mcp-token create --label TEXT (--email EMAIL | --admin) [--expires-in-days N]"
+    );
+    eprintln!(
+        "                      [--allow-create|--no-allow-create] [--allow-edit|--no-allow-edit]"
+    );
+    eprintln!("                      [--allow-drop|--no-allow-drop]");
+    eprintln!("                      [--allow-access-changes|--no-allow-access-changes]");
+    eprintln!("                      [--allow-triggers|--no-allow-triggers]");
+    eprintln!("                      [--allow-applications|--no-allow-applications]");
+    eprintln!("                      [--url ORIGIN] [--name NAME] [database flags]");
+    eprintln!("  feldspar mcp-token list [--json] [database flags]");
+    eprintln!("  feldspar mcp-token revoke ID [database flags]");
+    eprintln!("  feldspar app list [--json] [database flags]");
     eprintln!("  feldspar demo analytics [--replace] [database flags]");
     eprintln!("  feldspar cmdstan status [--cmdstan DIR]");
     eprintln!("  feldspar cmdstan install [--version V] [--dir D] [--jobs J]");
-    eprintln!("                      [--format playwright|netscape] [--out PATH] [--url ORIGIN]");
     eprintln!();
     eprintln!("  database (or the DATABASE_URL / PG* environment variables):");
     eprintln!("    --database-url URL   full connection string (takes precedence)");
@@ -1614,6 +1838,19 @@ fn print_usage() {
        can. The default file is .feldspar-session.json, Playwright's
        storageState; --format netscape writes a cookies.txt for curl instead.
        Both are written 0600 — a session file is a password.
+
+  mcp-token: mints, lists and revokes the bearer tokens the administration MCP
+       server (POST /mcp) accepts — the same tokens Settings → Development
+       mints. A token runs as an administrator: name one with --email, or
+       --admin for the first. Each of the six grants has a flag and its --no-
+       form; one left out takes its default (create, edit, triggers and
+       applications on; drop and access changes off). The secret is printed
+       once, alone on stdout; the id to revoke it by and the `claude mcp add`
+       line go to stderr. Turn the server on with `set-cfg mcp_enabled true`.
+
+  app list: every application with its framework and the project directory
+       its source is in on this machine; --json prints an array of
+       {{id, name, subdomain, framework, file_store, source_dir, project_dir}}.
 
   server:"
     );
