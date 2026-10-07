@@ -696,8 +696,22 @@ async fn the_two_callers_of_one_tool_set_are_offered_identical_tools() -> Result
 
     let mut seen: Vec<String> = Vec::new();
     for (agent_config, areas) in cases {
-        // The copilot's path: an agent's configuration.
-        let from_agent = env.tools(TRAIT, &agent_config);
+        // The copilot's path: an agent's configuration — less the two tools
+        // only an agent has (delegating to a coding agent, publishing), which
+        // come after the shared set and only with the applications area.
+        let mut from_agent = env.tools(TRAIT, &agent_config);
+        let own = ["delegate_to_coding_agent", "publish_application"];
+        let own_offered: Vec<String> = from_agent
+            .iter()
+            .filter(|t| own.contains(&t.name.as_str()))
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(
+            own_offered.len(),
+            if areas.applications { 2 } else { 0 },
+            "{own_offered:?}"
+        );
+        from_agent.retain(|t| !own.contains(&t.name.as_str()));
         // The MCP server's path: a token's grants and areas, with no agent
         // anywhere in it.
         let grants = sc_api::schema_edit::Grants {

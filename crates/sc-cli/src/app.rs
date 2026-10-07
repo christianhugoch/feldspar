@@ -15,9 +15,7 @@
 //! is still listed, with `project_dir: null` and the reason in `error`: a list
 //! that left it out would read as "there is no such application".
 
-use std::path::PathBuf;
-
-use sc_app::{Application, app_source_from_config, none_source_dir};
+use sc_app::Application;
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use serde_json::{Value as Json, json};
@@ -33,26 +31,8 @@ pub fn parse_list(args: &[String]) -> Result<bool> {
     }
 }
 
-/// The file store and the directory inside it an application's source is in.
-pub fn source_location(app: &Application) -> Result<(String, String)> {
-    if let Some(found) = none_source_dir(&app.framework) {
-        return Ok(found);
-    }
-    let source = app_source_from_config(&app.framework)?;
-    Ok((source.store.0, source.build.source_dir))
-}
-
-/// The absolute project directory, through the connected store.
-pub fn project_dir(catalog: &Catalog, store: &str, dir: &str) -> Result<PathBuf> {
-    let connected = catalog
-        .file_store(store)?
-        .ok_or_else(|| Error::not_found(format!("file store `{store}` is not connected")))?;
-    connected.local_path(dir)?.ok_or_else(|| {
-        Error::invalid(format!(
-            "file store `{store}` is not on this machine's disk, so it has no project directory"
-        ))
-    })
-}
+pub use sc_app::app_source_location as source_location;
+pub use sc_app::store_dir as project_dir;
 
 /// One application as `app list --json` reports it.
 pub fn app_json(catalog: &Catalog, app: &Application) -> Json {

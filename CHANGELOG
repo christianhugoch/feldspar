@@ -2,6 +2,70 @@
 
 Changes in reverse chronological order.
 
+## Build an application from a sentence: create_application, create_file_store, set_application_tables, and the copilot delegating to coding agents
+
+Neither the chat copilot (`admin_copilot`) nor an external agent over MCP could create an
+application or a file store, so "build me a to-do list" stopped at the schema. Both can now carry
+it to a working first draft with nobody opening a form.
+
+**Three shared tools** (`sc_app::mcp::create`, in the applications area, offered to both callers):
+
+- `create_application` — a display name is enough. React unless another framework is named, a
+  subdomain made from the name (the next free one when taken), a **new local file store** unless
+  `file_store` names one, REST at `/api`. Answers with the absolute `project_dir` (scaffolded,
+  with the typed client in `src/feldspar/`), the `builder_agent` the framework created, and the
+  handler's own `scaffold_error` / `agent_error` / `building` news. Needs `allow_create`.
+- `create_file_store` — local (in the suggested directory under the data directory) or git
+  (`url`, `branch`, `key_path`); `generate_deploy_key: true` creates nothing and returns the
+  public key to add before calling again. Needs `allow_create`.
+- `set_application_tables` — connect (`add`), disconnect (`remove`) or replace (`tables`) an
+  application's tables; refuses a table that does not exist; saves and regenerates the client.
+  Needs `allow_edit`.
+
+`describe_applications` now also gives each application's `id`, `project_dir` and
+`builder_agent`.
+
+**The creates run the server's own handlers.** New `sc_catalog::AdminHost` / `AdminCall`
+(`Catalog::set_admin_host` / `admin_host`): call an admin endpoint by name. `sc-server` installs
+it (`mcp::AdminHandlers`, holding the handler registry and catalog weakly) in
+`build_router_with_apps`, so `createFileStore`, `runBackendOperation` and `createApplication`
+— store, record, scaffold, builder agent, first build — are exactly what the Create button does.
+Without a router the tools refuse ("needs the running server").
+
+**`admin_copilot`** gains two tools of its own (applications area, `allow_edit`):
+`delegate_to_coding_agent` (any agent with a `coding` trait, by `agent` or by `application`
+subdomain; task/context/output briefing; `max_steps` default 150, at most 400; a non-coding or
+unknown agent is refused listing the coding agents) and `publish_application` (`buildApplication`
+by subdomain; a failed build is a result with `diagnostics`). Its prompt carries `BUILD_PLAYBOOK`
+(look, create the app — React and a local store when the request is vague, git only when asked
+— tables in one `edit_schema` batch, connect them, delegate the code to the builder, publish,
+report), and its session header lists the coding agents. `subagent`'s call body is now
+`subagent::delegate`, shared by both. `tool_names::admin_copilot()` is fifteen names.
+
+**Instructions.** The MCP `initialize` instructions now give an external agent the same order,
+and tell it to work in `project_dir` and read its `AGENTS.md`. The generated `SKILL.md` adds the
+connect step. A `react` builder agent's prompt says that when handed a whole application its
+tables are already connected, it cannot change the schema, and it should report what is missing
+and run `check` until it passes.
+
+**Refactor.** `sc_cli::app::{source_location, project_dir}` moved to `sc_app::{
+app_source_location, store_dir}` (plus `app_project_dir`), used by `app list` and the tools.
+`sc-app/src/mcp.rs` became `sc-app/src/mcp/mod.rs` with `create.rs` beside it.
+
+Docs: `TECHNICAL_DESIGN.md` §13.6 "Building an application from a sentence"; tier lists updated.
+
+Tests: `sc-server` `tests/build_from_a_sentence.rs` (its own binary — it moves the data
+directory) — over MCP, `create_application` with only a name makes `todo-list` with a new local
+store, a scaffolded project under the data directory and the `build-todo-list` coding agent;
+`edit_schema` then `set_application_tables` puts `todos` in the regenerated client; an unknown
+table is refused; `describe_applications` gives the same `project_dir`; a second "Todo list" is
+`todo-list2`; and `create_file_store` + `create_application { file_store }` scaffolds into that
+store. `sc-core-traits` `tests/admin_copilot_build.rs` — the copilot delegates to a coding agent
+with scripted models (the child run is linked, saw the briefing; the copilot saw the playbook and
+the coding agents in its header), refusals name the coding agents, and `create_application`
+without a server creates nothing. Unit tests for the subdomain derivation, the default React
+config, and the playbook's order. Existing tool-list tests updated for the new names.
+
 ## `feldspar mcp-token create|list|revoke` and `feldspar app list --json`
 
 **`mcp-token`.** The administration MCP server's bearer tokens can now be managed from a

@@ -25,7 +25,7 @@
 //! [`McpTag`](sc_api::McpTag)s of [`admin_endpoints`](sc_api::admin_endpoints)
 //! for the generated ones. A tool added, renamed or tagged tomorrow is in the
 //! next SKILL.md with nobody editing prose, which is the property a
-//! hand-written list of twenty-six tool names cannot have.
+//! hand-written list of thirty tool names cannot have.
 //!
 //! What is *not* derived is the one-line summary: it is the **first clause** of
 //! the description the model is given, cut at the first sentence, colon or dash
@@ -280,15 +280,18 @@ pub fn generate_skill(catalog: &Catalog, app: &Application, client_file: &str) -
          2. `edit_schema` with the **whole** change as one ordered batch — a \
          foreign key may point at a table created earlier in the same list. It is \
          one transaction: a refused operation refuses the batch, naming its index.\n\
-         3. Read the result. It names the applications it re-projected and which \
+         3. A table this application should serve must be **connected** to it: \
+         `set_application_tables` with `add`. An application reaches only its \
+         connected tables, and the generated client is typed for them alone.\n\
+         4. Read the result. It names the applications it re-projected and which \
          of them **want a build** — a schema change rewrites the generated client \
          but runs no bundler, so an application with a build is serving one made \
          against the old schema until you rebuild it.\n\
-         4. `buildApplication` with the id from that result. It regenerates \
+         5. `buildApplication` with the id from that result. It regenerates \
          `{client_file}` from the new schema, runs the build, and serves it with \
          no restart. A build that does not compile comes back as a result with \
          the diagnostics in it, not as a refusal.\n\
-         5. Only then is the generated client in this repository in step with the \
+         6. Only then is the generated client in this repository in step with the \
          database, and only then does code written against it compile.\n",
         skill = skill_name(app),
         name = app.name,

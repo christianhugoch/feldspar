@@ -23,6 +23,7 @@
 //! **writable** table providers, and cross-process cache invalidation over a
 //! bus.
 
+mod admin_host;
 mod calc;
 mod caller;
 mod catalog;
@@ -45,6 +46,7 @@ mod table_meta;
 mod tx;
 mod wakeups;
 
+pub use admin_host::{AdminCall, AdminHost};
 pub use caller::CallerContext;
 pub use catalog::{Catalog, ProvidedTableIssue, SchemaStep};
 pub use constraint::{

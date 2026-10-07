@@ -234,6 +234,11 @@ pub fn build_router_with_apps(
     crate::builder::register_status_handler(&mut handlers, config.builder_dir.clone());
     let handlers = Arc::new(handlers);
     let mcp_endpoint_tools = Arc::new(crate::mcp::endpoint_tools(endpoints, &handlers));
+    // The administrative tools create applications and file stores through
+    // these same handlers (§13.6), so the router that serves them installs them.
+    if let Some(catalog) = apps.catalog() {
+        crate::mcp::AdminHandlers::install(catalog, &handlers)?;
+    }
     let state = AppState {
         routes,
         handlers,

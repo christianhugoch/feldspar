@@ -392,7 +392,7 @@ async fn the_areas_decide_which_tools_the_model_is_offered() -> Result<()> {
     let all = offered(&default_grants());
     assert!(all.contains(&TOOL_DESCRIBE_APPS.to_owned()), "{all:?}");
     assert!(all.contains(&TOOL_DESCRIBE_TRIGGERS.to_owned()), "{all:?}");
-    assert_eq!(all.len(), 10, "{all:?}");
+    assert_eq!(all.len(), 15, "{all:?}");
 
     // Switched off, the tools are *gone* rather than present and refusing: a tool
     // the model can see is a tool it will try. The code-body reference stays, as
@@ -427,6 +427,15 @@ async fn the_areas_decide_which_tools_the_model_is_offered() -> Result<()> {
         "{names:?}"
     );
     assert!(!names.contains(&TOOL_SAVE_QUERY.to_owned()), "{names:?}");
+    // The trait's own two are application work too, and go with the area.
+    for own in [
+        "delegate_to_coding_agent",
+        "publish_application",
+        "create_application",
+    ] {
+        assert!(all.contains(&own.to_owned()), "{all:?}");
+        assert!(!names.contains(&own.to_owned()), "{names:?}");
+    }
     Ok(())
 }
 

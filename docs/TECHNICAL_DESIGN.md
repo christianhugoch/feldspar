@@ -6710,7 +6710,8 @@ of those endpoints are the SPA's own plumbing.
 
 - **Tier 1 — composite tools.** The ones §11.3's `admin_copilot` already defines:
   `describe_schema`, `edit_schema`, `describe_triggers`, `describe_action`, `save_trigger`,
-  `delete_trigger`, `describe_apps`, `save_query`, `delete_query`. These exist *because* a
+  `delete_trigger`, `describe_apps`, `create_file_store`, `create_application`,
+  `set_application_tables`, `save_query`, `delete_query`. These exist *because* a
   one-endpoint-one-tool projection is the wrong shape — `edit_schema` takes an ordered operation
   list because a schema is a set of connected tables and a per-operation tool turns a
   twelve-table domain into forty round trips; `describe_action` is progressive disclosure
@@ -6719,7 +6720,8 @@ of those endpoints are the SPA's own plumbing.
   the prose a model reads. Everything else is already in the value: the name, the typed path and
   query parameters, and both `TypeSchema`s. `TypeSchema` → JSON Schema is the one new function,
   and it is the sibling of the TypeScript generator's type mapping (§13.1).
-- **Tier 3 — deliberately absent.** Row CRUD, the file-store IDE routes (§12.1), backup and
+- **Tier 3 — deliberately absent.** Row CRUD, the file-store IDE routes (§12.1) — creating a
+  store is a tier-1 tool, browsing or writing one is not — backup and
   restore, user management, and anything that reads a provider's key. Each is a real capability
   and none of them is *administering the application*, which is what this server is for. An
   agent that can add a column and an agent that can read customer rows are different
@@ -6838,6 +6840,54 @@ and the batch was not applied" is actionable; "Forbidden" is a turn wasted and t
 MCP has the shape for this — a tool result flagged as an error, which the model sees — and tool
 failures go there. JSON-RPC errors are reserved for what is wrong with the *call*: an unknown
 method, an unknown tool, an unsupported revision, a refused credential.
+
+#### Building an application from a sentence
+
+"Build me a to-do list" is a request both callers — the chat copilot and an external agent over
+MCP — carry to a working first draft with nobody opening a form. Three shared tools, in
+`sc_app::mcp::create`, make it possible:
+
+- **`create_application`** takes a display name and little else. The framework is `react`
+  unless named, the subdomain is made from the name (the next free one, `todo-list2`, when it is
+  taken), the code goes in a **new local file store** unless `file_store` names one, and the API
+  is REST at `/api`. It answers with the absolute **`project_dir`** (scaffolded: Vite, the typed
+  client in `src/feldspar/`, sign-in) and the **builder agent** the framework created.
+- **`create_file_store`** makes a local store, or a **git** one cloned from a URL. A private SSH
+  repository is two calls: `generate_deploy_key: true` creates nothing and returns the public key
+  for the person to add, and the second call passes the `key_path` back.
+- **`set_application_tables`** connects tables to an application (`add`, `remove`, or the whole
+  list), saving through `save_application` and regenerating the client — the step between
+  `edit_schema` and code, because the client is typed only for connected tables.
+
+`describe_applications` now carries each application's `id`, `project_dir` and `builder_agent`.
+
+**The creates run the server's own handlers.** Creating an application is a sequence — store,
+record, scaffold, builder agent, first build — two of whose steps need the agent registry and
+the mount registry, which only `sc-server` holds. Rather than a second implementation for the
+tools, `sc-catalog` declares an **`AdminHost`** seam (call an admin endpoint by name, JSON in and
+out, as a user id) and the server installs it over its `HandlerRegistry` when it builds the
+router (held weakly, since the catalog outlives every router). The tools call `createFileStore`,
+`runBackendOperation` and `createApplication` through it, so what an agent creates is what the
+Create button creates; a context with no router (a CLI command) is refused rather than
+half-creating.
+
+**The order is instructions, not code.** Both callers are told to build without asking what can
+be decided — React and a local store when the request is vague about technology — and to do
+tables first: `create_application`, one `edit_schema` batch, `set_application_tables`, then the
+code, then a build. The MCP server says so in its `initialize` instructions, and the external
+agent then works in `project_dir` with its own file tools; `SKILL.md` adds the connect step to
+"the order that works".
+
+**The copilot delegates the code.** `admin_copilot` has two tools of its own, after the shared
+set and only with the applications area: `delegate_to_coding_agent` hands a task to any agent
+carrying a `coding` trait — by name, or an application's builder by subdomain — through the
+`subagent` trait's delegation (the same briefing and failure messages; a default budget of 150
+steps, which suits a first draft, at most 400), and `publish_application` runs `buildApplication`
+by subdomain, returning a failed build's diagnostics as a result to hand back to the coding
+agent. Its prompt carries the playbook and its session header lists the coding agents there are,
+so it can delegate to one it did not create in this conversation. The builder agent's own prompt
+says that, handed a whole application, its tables are already connected, it cannot change the
+schema, and it reports what is missing rather than inventing it.
 
 ---
 

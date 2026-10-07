@@ -1,7 +1,7 @@
 //! The administration MCP server: `POST /mcp` (design §13.6).
 //!
 //! One route, streamable HTTP, no server-initiated stream. It projects the
-//! administrative tool surface — the nine composite tools of `sc_api::mcp` and
+//! administrative tool surface — the thirteen composite tools of `sc_api::mcp` and
 //! `sc_app::mcp`, plus the tools generated from the endpoints tagged
 //! [`Endpoint::mcp`](sc_api::Endpoint::mcp) — to an external coding agent
 //! holding a bearer token an administrator minted.
@@ -364,16 +364,39 @@ fn initialize(id: &Json, params: &Json) -> Response {
 /// arrives here already holding the repository, and the mistake it would
 /// otherwise make is looking for the schema in a file.
 const INSTRUCTIONS: &str = "This is the administrative surface of a Saltcorn Feldspar \
-installation: the half of an application that lives in the database rather than in its git \
-repository — the tables and their fields, the access rules, the triggers, the workflows and \
-the agents. Write the application's source code through the filesystem as usual; use these \
-tools for everything that is configuration. There are deliberately no tools for reading or \
-writing row data, for the file store, or for user management. Code you store here — a \
-`run_js_code` trigger or workflow step, a `javascript` API query — runs against this server's \
-own JavaScript API, which is not one you know from elsewhere: call `describe_code_api` before \
-writing any.";
+installation: the half of an application that lives in the database rather than in its source \
+directory — the applications themselves, the tables and their fields, the access rules, the \
+triggers, the workflows and the agents. Write an application's source code through the \
+filesystem as usual; use these tools for everything that is configuration. There are \
+deliberately no tools for reading or writing row data, for browsing or writing files, or for \
+user management. Code you store here — a `run_js_code` trigger or workflow step, a \
+`javascript` API query — runs against this server's own JavaScript API, which is not one you \
+know from elsewhere: call `describe_code_api` before writing any.
 
-/// Run one tool and render the result the way MCP wants it.
+Building a new application. When the user asks you to build an application, a site or a tool \
+(\"build me a to-do list\"), build the whole first working draft without asking them anything \
+you can decide: \
+(1) `describe_applications` and `describe_schema`, to see what exists. \
+(2) `create_application`. Unless the user named another technology, it is a React \
+application in a new local file store — do not ask. Only if they asked for the code to be in a \
+git repository, first `create_file_store` with `backend: \"git\"` and pass its name as \
+`file_store`. The result's `project_dir` is the application's source directory on this \
+machine, already scaffolded: a React + TypeScript + Vite project with a typed client for the \
+application's API in `src/feldspar/` and sign-in wired up. Work in that directory from now \
+on, and read its `AGENTS.md`. \
+(3) Create every table the application needs in one `edit_schema` batch — tables before \
+code, because the client is generated from them. \
+(4) `set_application_tables` to connect those tables to the application; this regenerates \
+`src/feldspar/` so the client has a typed method for each. \
+(5) Write the pages in the project directory, using only the generated client to reach the \
+data. \
+(6) `buildApplication` (its id is in `describe_applications`) to build it and serve it on its \
+subdomain; fix whatever the diagnostics report and build again until it succeeds. \
+(7) Tell the user the address and what the draft does.
+
+To change an existing application, `describe_applications` gives its `project_dir`: work \
+there, connect any new table with `set_application_tables`, and rebuild.";
+
 async fn call_tool(
     state: &AppState,
     catalog: &Arc<Catalog>,
@@ -473,7 +496,7 @@ fn tool_result(outcome: Result<Json>) -> Json {
     }
 }
 
-/// The tools this token was granted: the nine composite ones and the tagged
+/// The tools this token was granted: the thirteen composite ones and the tagged
 /// endpoints, under the token's six flags.
 ///
 /// Built per request rather than cached, because the flags are the token's and
@@ -622,6 +645,65 @@ fn resolve(handlers: &HandlerRegistry, endpoint: &Endpoint) -> Result<crate::han
 /// The bearer credential this request presents, if it presents one.
 ///
 /// A cookie is not consulted, here or anywhere on this route.
+/// The admin handlers, offered to the administrative tools through the
+/// catalog (see [`sc_catalog::AdminHost`]): how `create_application` — whether
+/// the chat copilot or an MCP client called it — runs the same handler the
+/// admin's Create button does.
+///
+/// Holds the registry **weakly**: the catalog outlives every router, and a
+/// strong handle here would be a cycle through the handlers' own clones of the
+/// catalog.
+pub(crate) struct AdminHandlers {
+    handlers: std::sync::Weak<HandlerRegistry>,
+    catalog: std::sync::Weak<Catalog>,
+}
+
+impl AdminHandlers {
+    /// Install `handlers` on `catalog`.
+    pub(crate) fn install(catalog: &Arc<Catalog>, handlers: &Arc<HandlerRegistry>) -> Result<()> {
+        catalog.set_admin_host(Arc::new(AdminHandlers {
+            handlers: Arc::downgrade(handlers),
+            catalog: Arc::downgrade(catalog),
+        }))
+    }
+}
+
+#[async_trait::async_trait]
+impl sc_catalog::AdminHost for AdminHandlers {
+    async fn call_admin(&self, call: sc_catalog::AdminCall) -> Result<Json> {
+        let handlers = self.handlers.upgrade().ok_or_else(|| {
+            Error::config("the server that installed the admin handlers has stopped")
+        })?;
+        let handler = handlers.get(&call.endpoint).cloned().ok_or_else(|| {
+            Error::config(format!(
+                "this process registers no handler for `{}`",
+                call.endpoint
+            ))
+        })?;
+        drop(handlers);
+        let user = match call.user {
+            Some(id) => {
+                let catalog = self
+                    .catalog
+                    .upgrade()
+                    .ok_or_else(|| Error::config("the server's catalog has been dropped"))?;
+                sc_auth::load_user(&catalog, id).await?
+            }
+            None => None,
+        };
+        let response = handler(HandlerCtx {
+            path_params: call.path_params.into_iter().collect(),
+            query: Vec::new(),
+            body: call.body,
+            user,
+            raw_body: None,
+            locale: sc_i18n::active().default_locale().clone(),
+        })
+        .await?;
+        Ok(response.body)
+    }
+}
+
 pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<String> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let token = value.strip_prefix(BEARER_PREFIX)?.trim();

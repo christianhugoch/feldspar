@@ -253,61 +253,84 @@ impl AgentTrait for Subagent {
         ctx: &mut TraitContext<'_>,
     ) -> Result<Json> {
         let agent = configured_agent(config)?;
-        let briefing = briefing(&agent, ctx.agent, args)?;
-        let delegate = ctx.require_delegate()?;
-
-        let outcome = delegate
-            .delegate(
-                DelegateRequest::new(&agent, &briefing, ctx.run)
-                    .max_steps(config_u32(config, CFG_MAX_STEPS)?)
-                    .max_depth(max_depth(config)?),
-            )
-            .await?;
-
-        // A sub-agent that finished without saying anything is a failure of the
-        // delegation, reported as one — see the module docs. The message is
-        // written for the reader it has: a model deciding what to do next.
-        let Some(answer) = outcome.answer() else {
-            return Err(Error::invalid(match &outcome.conclusion {
-                sc_agent::Conclusion::MaxSteps => format!(
-                    "`{agent}` used its whole budget of {} steps without reaching a \
-                     conclusion. Its transcript is run {}. Ask it again for a \
-                     smaller piece of the task, or do the work here.",
-                    outcome.steps, outcome.run
-                ),
-                sc_agent::Conclusion::OverBudget { budget } => format!(
-                    "`{agent}` ran out of its {budget} budget after {} steps without \
-                     reaching a conclusion. Its transcript is run {}. Ask it for a \
-                     smaller piece of the task, or do the work here.",
-                    outcome.steps, outcome.run
-                ),
-                sc_agent::Conclusion::Stuck { reason } => format!(
-                    "`{agent}` was stopped after {} steps because it was going round in \
-                     circles: {reason}. Its transcript is run {}. Do the work here, or \
-                     ask for it differently.",
-                    outcome.steps, outcome.run
-                ),
-                _ => format!(
-                    "`{agent}` finished without reporting anything (run {}). It may \
-                     have done the work and failed to say so. Ask again, stating in \
-                     `{ARG_OUTPUT}` exactly what it must include in its final \
-                     message.",
-                    outcome.run
-                ),
-            }));
-        };
-
-        Ok(json!({
-            "agent": outcome.agent,
-            // A string, because a JSON number cannot hold a UUID — and the
-            // reader that wants the transcript is going to put this in a URL.
-            "run": outcome.run.to_string(),
-            "steps": outcome.steps,
-            // Verbatim. A summary here would be a second chance to lose the
-            // finding, and the parent is about to read this anyway.
-            "answer": answer,
-        }))
+        delegate(
+            ctx,
+            &agent,
+            args,
+            config_u32(config, CFG_MAX_STEPS)?,
+            max_depth(config)?,
+        )
+        .await
     }
+}
+
+/// Hand `args`' briefing to `agent` and return its report — or, when it ended
+/// with nothing to hand back, the error that says why.
+///
+/// Shared with `admin_copilot`'s `delegate_to_coding_agent`, which names its
+/// sub-agent per call rather than per configuration: one delegation, refused in
+/// the same words whichever tool asked.
+pub(crate) async fn delegate(
+    ctx: &mut TraitContext<'_>,
+    agent: &str,
+    args: &Json,
+    max_steps: Option<u32>,
+    max_depth: u32,
+) -> Result<Json> {
+    let briefing = briefing(agent, ctx.agent, args)?;
+    let delegate = ctx.require_delegate()?;
+
+    let outcome = delegate
+        .delegate(
+            DelegateRequest::new(agent, &briefing, ctx.run)
+                .max_steps(max_steps)
+                .max_depth(max_depth),
+        )
+        .await?;
+
+    // A sub-agent that finished without saying anything is a failure of the
+    // delegation, reported as one — see the module docs. The message is
+    // written for the reader it has: a model deciding what to do next.
+    let Some(answer) = outcome.answer() else {
+        return Err(Error::invalid(match &outcome.conclusion {
+            sc_agent::Conclusion::MaxSteps => format!(
+                "`{agent}` used its whole budget of {} steps without reaching a \
+                 conclusion. Its transcript is run {}. Ask it again for a \
+                 smaller piece of the task, or do the work here.",
+                outcome.steps, outcome.run
+            ),
+            sc_agent::Conclusion::OverBudget { budget } => format!(
+                "`{agent}` ran out of its {budget} budget after {} steps without \
+                 reaching a conclusion. Its transcript is run {}. Ask it for a \
+                 smaller piece of the task, or do the work here.",
+                outcome.steps, outcome.run
+            ),
+            sc_agent::Conclusion::Stuck { reason } => format!(
+                "`{agent}` was stopped after {} steps because it was going round in \
+                 circles: {reason}. Its transcript is run {}. Do the work here, or \
+                 ask for it differently.",
+                outcome.steps, outcome.run
+            ),
+            _ => format!(
+                "`{agent}` finished without reporting anything (run {}). It may \
+                 have done the work and failed to say so. Ask again, stating in \
+                 `{ARG_OUTPUT}` exactly what it must include in its final \
+                 message.",
+                outcome.run
+            ),
+        }));
+    };
+
+    Ok(json!({
+        "agent": outcome.agent,
+        // A string, because a JSON number cannot hold a UUID — and the
+        // reader that wants the transcript is going to put this in a URL.
+        "run": outcome.run.to_string(),
+        "steps": outcome.steps,
+        // Verbatim. A summary here would be a second chance to lose the
+        // finding, and the parent is about to read this anyway.
+        "answer": answer,
+    }))
 }
 
 /// The configured sub-agent's name.

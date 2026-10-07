@@ -93,19 +93,90 @@
 //!   used, so the parameters are decided by the model that can see the
 //!   conversation and a refusal reaches the model that can fix it.
 
-use sc_agent::{AgentTrait, ToolsContext, TraitCheck, TraitContext};
-use sc_api::mcp::{Areas, ToolContext, ToolSet};
+//!
+//! ## Building an application from a sentence
+//!
+//! "Build me a to-do list" is a request this agent can carry to a working first
+//! draft without anybody opening a form, and [`BUILD_PLAYBOOK`] is the order it
+//! is told to do it in. `create_application` and `set_application_tables` are
+//! shared tools ([`sc_app::mcp`]); what is this trait's own is what only an
+//! *agent* can do:
+//!
+//! - [`delegate_to_coding_agent`](TOOL_DELEGATE) hands the code to a **coding
+//!   agent** as a sub-agent — the application's builder, which
+//!   `create_application` just created, or any other agent with a `coding`
+//!   trait. Named per call rather than per configuration (the `subagent`
+//!   trait's shape), because the builder this agent wants usually did not
+//!   exist when this agent was configured. The session header lists the coding
+//!   agents there are.
+//! - [`publish_application`](TOOL_PUBLISH) builds the application and serves
+//!   it on its subdomain — the admin's Build button, by subdomain.
+
+use sc_agent::DEFAULT_MAX_DEPTH;
+use sc_agent::{AgentTrait, SessionContext, ToolsContext, TraitCheck, TraitContext};
+use sc_api::mcp::{
+    Area, Areas, ToolContext, ToolSet, arguments, optional_string, require_admin, require_grant,
+};
 use sc_api::schema_edit::{self, Grants};
-use sc_error::Result;
+use sc_error::{Error, Result};
 use sc_llm::ToolSpec;
 use sc_types::{Attrs, BasicType, FormField};
-use serde_json::Value as Json;
+use serde_json::{Value as Json, json};
 
 pub use sc_api::mcp::{
     TOOL_DELETE_TRIGGER, TOOL_DESCRIBE, TOOL_DESCRIBE_ACTION, TOOL_DESCRIBE_CODE_API,
     TOOL_DESCRIBE_TRIGGERS, TOOL_EDIT, TOOL_SAVE_TRIGGER,
 };
-pub use sc_app::mcp::{TOOL_DELETE_QUERY, TOOL_DESCRIBE_APPS, TOOL_SAVE_QUERY};
+pub use sc_app::mcp::{
+    TOOL_CREATE_APP, TOOL_CREATE_STORE, TOOL_DELETE_QUERY, TOOL_DESCRIBE_APPS, TOOL_SAVE_QUERY,
+    TOOL_SET_TABLES,
+};
+
+/// Hands a task to a coding agent as a sub-agent.
+pub const TOOL_DELEGATE: &str = "delegate_to_coding_agent";
+/// Builds an application and serves it on its subdomain.
+pub const TOOL_PUBLISH: &str = "publish_application";
+
+/// The trait a coding agent carries — what makes an agent one this agent can
+/// delegate code to.
+const CODING_TRAIT: &str = sc_app::TRAIT_CODING;
+
+/// The step budget a delegation gets when the model names none, and the most
+/// it may ask for. A first draft of an application is a long task; the
+/// builder's own budget was chosen for a chat with a person, one feature at a
+/// time.
+const DEFAULT_DELEGATION_STEPS: u32 = 150;
+const MAX_DELEGATION_STEPS: u32 = 400;
+
+/// How this agent is told to build an application from a sentence.
+///
+/// In the prompt rather than in a tool description because it is an *order*
+/// across six tools, and the model reads a tool's description only when it is
+/// already thinking about that tool.
+pub const BUILD_PLAYBOOK: &str = "## Building an application\n\n\
+When the person asks you to build an application, a site or a tool (\"build me a to-do \
+list\", \"make an app for booking rooms\"), build the whole first working draft yourself, \
+without asking them anything you can decide:\n\n\
+1. `describe_applications` and `describe_schema`, to see what already exists.\n\
+2. `create_application`. Unless they named another technology, it is a React \
+application in a new local file store — do not ask. Only if they asked for the code to \
+live in a git repository, first `create_file_store` with `backend: \"git\"` and pass its \
+name as `file_store`.\n\
+3. Create every table the application needs with **one** `edit_schema` batch: fields, \
+types, required flags, keys between tables. Tables come before code, because the \
+application's typed client is generated from them.\n\
+4. `set_application_tables` to connect those tables to the application.\n\
+5. `delegate_to_coding_agent` with the application's builder agent (the \
+`builder_agent` that `create_application` returned): give it the full specification — \
+what the app is for, every page and what it shows, the tables and fields it reads and \
+writes, who signs in — and ask it to implement it in the scaffolded project, using the \
+generated client in `src/feldspar/`, and to check that it builds. Ask it to report what \
+it built and anything it could not do.\n\
+6. `publish_application`, so it is served on its subdomain. If the build fails, \
+delegate the diagnostics back to the builder agent to fix, then publish again.\n\
+7. Tell the person the address and what the draft does.\n\n\
+To change an existing application's code later, delegate to its builder agent the same \
+way; the session header lists the coding agents there are.";
 
 /// May create tables, fields and triggers.
 pub const CFG_ALLOW_CREATE: &str = schema_edit::GRANT_CREATE;
@@ -144,7 +215,7 @@ pub struct AdminCopilot;
 /// subset of these. This is the whole set, which is what the admin UI's "what
 /// will this be called?" and §11.2's collision check want — a name that any
 /// configuration could produce is a name that could collide.
-pub fn tool_names() -> [&'static str; 10] {
+pub fn tool_names() -> [&'static str; 15] {
     [
         TOOL_DESCRIBE,
         TOOL_EDIT,
@@ -154,8 +225,13 @@ pub fn tool_names() -> [&'static str; 10] {
         TOOL_DELETE_TRIGGER,
         TOOL_DESCRIBE_CODE_API,
         TOOL_DESCRIBE_APPS,
+        TOOL_CREATE_STORE,
+        TOOL_CREATE_APP,
+        TOOL_SET_TABLES,
         TOOL_SAVE_QUERY,
         TOOL_DELETE_QUERY,
+        TOOL_DELEGATE,
+        TOOL_PUBLISH,
     ]
 }
 
@@ -166,9 +242,11 @@ impl AgentTrait for AdminCopilot {
     }
 
     fn description(&self) -> &str {
-        "Build the application: create, alter and drop tables and fields, \
-         configure the actions that run when something happens, and write the \
-         custom SQL queries an application serves as API endpoints"
+        "Build the application: create applications and their file stores, \
+         create, alter and drop tables and fields, configure the actions that \
+         run when something happens, write the custom SQL queries an \
+         application serves as API endpoints, and hand the code to coding \
+         agents"
     }
 
     fn config_spec(&self) -> Vec<FormField> {
@@ -193,7 +271,11 @@ impl AgentTrait for AdminCopilot {
                 .label("May work on triggers")
                 .default_value(true),
             FormField::new(CFG_ALLOW_APPLICATIONS, BasicType::Bool)
-                .label("May work on applications' custom SQL queries")
+                .label(
+                    "May work on applications: create them, connect their tables, \
+                     write their custom SQL queries, build them and delegate their \
+                     code to coding agents",
+                )
                 .default_value(true),
         ]
     }
@@ -214,7 +296,49 @@ impl AgentTrait for AdminCopilot {
     /// checkbox is on — which is [`ToolSet::specs`]'s rule, not one this trait
     /// applies on top of it.
     fn tools(&self, cx: &ToolsContext<'_>, config: &Attrs) -> Vec<ToolSpec> {
-        tool_set(config).specs(cx.catalog)
+        let mut specs = tool_set(config).specs(cx.catalog);
+        if areas(config).has(Area::Applications) {
+            specs.push(delegate_spec());
+            specs.push(publish_spec());
+        }
+        specs
+    }
+
+    /// The build playbook, where this agent may work on applications at all.
+    fn prompt(&self, _cx: &ToolsContext<'_>, config: &Attrs) -> Option<String> {
+        areas(config)
+            .has(Area::Applications)
+            .then(|| BUILD_PLAYBOOK.to_owned())
+    }
+
+    /// The coding agents there are, so the model can delegate to one it did not
+    /// create in this conversation.
+    async fn session_header(
+        &self,
+        config: &Attrs,
+        cx: &mut SessionContext<'_>,
+    ) -> Result<Option<String>> {
+        if !areas(config).has(Area::Applications) {
+            return Ok(None);
+        }
+        let agents = coding_agents(cx.catalog).await?;
+        Ok(Some(match agents.is_empty() {
+            true => "There are no coding agents yet. `create_application` creates \
+                     one for each application it creates."
+                .to_owned(),
+            false => format!(
+                "The coding agents you can delegate code to with \
+                 `{TOOL_DELEGATE}`:\n{}",
+                agents
+                    .iter()
+                    .map(|(name, app)| match app {
+                        Some(app) => format!("- `{name}` (builds the application `{app}`)"),
+                        None => format!("- `{name}`"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        }))
     }
 
     async fn call(
@@ -224,9 +348,274 @@ impl AgentTrait for AdminCopilot {
         args: &Json,
         ctx: &mut TraitContext<'_>,
     ) -> Result<Json> {
+        if tool == TOOL_DELEGATE || tool == TOOL_PUBLISH {
+            require_admin(ctx.caller.role, tool)?;
+            if !areas(config).has(Area::Applications) {
+                return Err(Error::invalid(format!(
+                    "`{tool}` is switched off for this agent; turn on `{}` in its \
+                     `admin_copilot` settings to offer it.",
+                    Area::Applications.key()
+                )));
+            }
+            require_grant(
+                grants(config).edit,
+                match tool {
+                    TOOL_DELEGATE => "hand an application's code to a coding agent",
+                    _ => "build an application",
+                },
+                CFG_ALLOW_EDIT,
+            )?;
+            return match tool {
+                TOOL_DELEGATE => delegate_to_coding_agent(args, ctx).await,
+                _ => publish_application(args, ctx).await,
+            };
+        }
         let tools = tool_set(config);
         tools.call(tool, args, &tool_context(ctx)).await
     }
+}
+
+// --- delegate_to_coding_agent -------------------------------------------------
+
+const ARG_AGENT: &str = "agent";
+const ARG_APPLICATION: &str = "application";
+const ARG_MAX_STEPS: &str = "max_steps";
+
+fn delegate_spec() -> ToolSpec {
+    ToolSpec::new(
+        TOOL_DELEGATE,
+        format!(
+            "Hand a coding task to a **coding agent** — an agent that reads, \
+             writes and builds an application's source — and wait for its report. \
+             This is how you write an application's code: name the application \
+             (its builder agent is used) or the agent. It cannot see this \
+             conversation, only what you send, so `{}` must be a complete \
+             specification: the pages, what each shows and does, the tables and \
+             fields it uses through the generated client in `src/feldspar/`, who \
+             signs in. It works on its own, checks its work builds, and returns \
+             one report. Create and connect the tables first: it cannot change \
+             the schema.",
+            crate::ARG_TASK
+        ),
+        json!({
+            "type": "object",
+            "properties": {
+                ARG_APPLICATION: {
+                    "type": "string",
+                    "description":
+                        "The application whose builder agent to use, by subdomain.",
+                },
+                ARG_AGENT: {
+                    "type": "string",
+                    "description":
+                        "A coding agent by name, instead of an application's builder.",
+                },
+                crate::ARG_TASK: {
+                    "type": "string",
+                    "description":
+                        "What to build or change, in full, as an instruction to \
+                         someone who has read nothing above.",
+                },
+                crate::ARG_CONTEXT: {
+                    "type": "string",
+                    "description":
+                        "What it cannot see for itself: the tables and fields you \
+                         created, the application's subdomain, decisions already \
+                         made.",
+                },
+                crate::ARG_OUTPUT: {
+                    "type": "string",
+                    "description": "What its final report must contain.",
+                },
+                ARG_MAX_STEPS: {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_DELEGATION_STEPS,
+                    "description": format!(
+                        "Its step budget for this task; {DEFAULT_DELEGATION_STEPS} \
+                         when omitted, which suits a first draft."
+                    ),
+                },
+            },
+            "required": [crate::ARG_TASK],
+            "additionalProperties": false,
+        }),
+    )
+}
+
+async fn delegate_to_coding_agent(args: &Json, ctx: &mut TraitContext<'_>) -> Result<Json> {
+    let obj = arguments(
+        args,
+        &[
+            ARG_AGENT,
+            ARG_APPLICATION,
+            crate::ARG_TASK,
+            crate::ARG_CONTEXT,
+            crate::ARG_OUTPUT,
+            ARG_MAX_STEPS,
+        ],
+    )?;
+    let named = |key: &str| -> Result<Option<String>> {
+        Ok(optional_string(&obj, key)?
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty()))
+    };
+    let agents = coding_agents(ctx.catalog).await?;
+    let agent = match (named(ARG_AGENT)?, named(ARG_APPLICATION)?) {
+        (Some(agent), _) => agent,
+        (None, Some(app)) => agents
+            .iter()
+            .find(|(_, builds)| builds.as_deref() == Some(app.as_str()))
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "no coding agent builds the application `{app}`. {}",
+                    the_coding_agents(&agents)
+                ))
+            })?,
+        (None, None) => {
+            return Err(Error::invalid(format!(
+                "name the `{ARG_APPLICATION}` whose builder should do this, or the \
+                 `{ARG_AGENT}`. {}",
+                the_coding_agents(&agents)
+            )));
+        }
+    };
+    if !agents.iter().any(|(name, _)| *name == agent) {
+        return Err(Error::invalid(format!(
+            "`{agent}` is not a coding agent. {}",
+            the_coding_agents(&agents)
+        )));
+    }
+    let steps = match obj.get(ARG_MAX_STEPS) {
+        None | Some(Json::Null) => DEFAULT_DELEGATION_STEPS,
+        Some(n) => n
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| (1..=MAX_DELEGATION_STEPS).contains(n))
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "`{ARG_MAX_STEPS}` should be a number from 1 to {MAX_DELEGATION_STEPS}"
+                ))
+            })?,
+    };
+    let briefing = json!({
+        crate::ARG_TASK: obj.get(crate::ARG_TASK),
+        crate::ARG_CONTEXT: obj.get(crate::ARG_CONTEXT),
+        crate::ARG_OUTPUT: obj.get(crate::ARG_OUTPUT),
+    });
+    crate::subagent::delegate(ctx, &agent, &briefing, Some(steps), DEFAULT_MAX_DEPTH).await
+}
+
+/// Every agent with a `coding` trait, by name, with the application it builds
+/// where its trait names one.
+async fn coding_agents(catalog: &sc_catalog::Catalog) -> Result<Vec<(String, Option<String>)>> {
+    if catalog.get(sc_agent::AGENTS_TABLE)?.is_none() {
+        return Ok(Vec::new());
+    }
+    Ok(sc_agent::list_agents(catalog)
+        .await?
+        .into_iter()
+        .filter_map(|agent| {
+            let coding = agent.traits.iter().find(|t| t.trait_ == CODING_TRAIT)?;
+            let app = coding
+                .config
+                .get(sc_app::TRAIT_CFG_APPLICATION)
+                .and_then(Json::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            Some((agent.name, app))
+        })
+        .collect())
+}
+
+fn the_coding_agents(agents: &[(String, Option<String>)]) -> String {
+    match agents.is_empty() {
+        true => format!(
+            "There are no coding agents; `{TOOL_CREATE_APP}` creates one with each \
+             application."
+        ),
+        false => format!(
+            "The coding agents are {}.",
+            agents
+                .iter()
+                .map(|(name, app)| match app {
+                    Some(app) => format!("`{name}` (application `{app}`)"),
+                    None => format!("`{name}`"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+// --- publish_application ------------------------------------------------------
+
+fn publish_spec() -> ToolSpec {
+    ToolSpec::new(
+        TOOL_PUBLISH,
+        "Build an application and serve it on its subdomain — the admin's Build \
+         button. Do this when its code is written, and again after its tables \
+         or queries change. A build that fails is a result, not a refusal: \
+         `built` is false and `diagnostics` lists each error's file, line and \
+         message — hand those to its coding agent to fix. The previous version \
+         keeps serving until a build succeeds.",
+        json!({
+            "type": "object",
+            "properties": {
+                ARG_APPLICATION: {
+                    "type": "string",
+                    "description": "The application, by subdomain.",
+                },
+            },
+            "required": [ARG_APPLICATION],
+            "additionalProperties": false,
+        }),
+    )
+}
+
+async fn publish_application(args: &Json, ctx: &mut TraitContext<'_>) -> Result<Json> {
+    let obj = arguments(args, &[ARG_APPLICATION])?;
+    let subdomain = optional_string(&obj, ARG_APPLICATION)?
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::invalid(format!("`{ARG_APPLICATION}` is required")))?;
+    let app = sc_app::load_application_by_subdomain(ctx.catalog, &subdomain)
+        .await?
+        .ok_or_else(|| Error::not_found(format!("no application is served at `{subdomain}`")))?;
+    let host = ctx.catalog.admin_host().ok_or_else(|| {
+        Error::config(format!(
+            "`{TOOL_PUBLISH}` needs the running server, and agent `{}` is not \
+             connected to one",
+            ctx.agent
+        ))
+    })?;
+    let call = sc_catalog::AdminCall::new("buildApplication", Json::Null)
+        .param("id", app.id.0.to_string())
+        .user(ctx.caller.user.as_ref().map(|u| u.id));
+    // A failed build is news about the application, so it is a result.
+    Ok(match host.call_admin(call).await {
+        Ok(mut body) => {
+            let log = body
+                .get("log")
+                .and_then(Json::as_str)
+                .unwrap_or("")
+                .to_owned();
+            body["application"] = json!(subdomain);
+            body["diagnostics"] = json!(sc_app::build_diagnostics(&log));
+            body
+        }
+        Err(e) => {
+            let log = e.to_string();
+            json!({
+                "application": subdomain,
+                "built": false,
+                "log": log,
+                "diagnostics": sc_app::build_diagnostics(&log),
+            })
+        }
+    })
 }
 
 /// The ten tools under this agent's configuration.
@@ -308,14 +697,27 @@ mod tests {
         assert_eq!(a, Areas::none());
     }
 
-    /// The set this agent builds is the whole surface, in the order this crate
-    /// has always published: the schema's two, the triggers' four, the
-    /// code-body reference, the applications' three.
+    /// The set this agent builds is the whole shared surface, in the order this
+    /// crate has always published — the schema's two, the triggers' four, the
+    /// code-body reference, the applications' six — and this trait's own two
+    /// come after it.
     #[test]
-    fn the_configured_set_is_the_ten_tools_this_trait_names() {
+    fn the_configured_set_and_the_own_tools_are_the_names_this_trait_publishes() {
         let set = tool_set(&Attrs::new());
-        assert_eq!(set.all_names(), tool_names().to_vec());
+        let mut names = set.all_names();
+        names.extend([TOOL_DELEGATE, TOOL_PUBLISH]);
+        assert_eq!(names, tool_names().to_vec());
         assert_eq!(*set.grants(), grants(&Attrs::new()));
+    }
+
+    #[test]
+    fn the_playbook_builds_tables_before_code_and_defaults_to_react() {
+        let tables = BUILD_PLAYBOOK.find("edit_schema").unwrap();
+        let connect = BUILD_PLAYBOOK.find("set_application_tables").unwrap();
+        let code = BUILD_PLAYBOOK.find(TOOL_DELEGATE).unwrap();
+        assert!(tables < connect && connect < code, "{BUILD_PLAYBOOK}");
+        assert!(BUILD_PLAYBOOK.contains("React"), "{BUILD_PLAYBOOK}");
+        assert!(BUILD_PLAYBOOK.contains("do not ask"), "{BUILD_PLAYBOOK}");
     }
 
     /// An area that is off removes its tools rather than leaving them to be

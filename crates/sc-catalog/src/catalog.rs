@@ -119,6 +119,10 @@ pub struct Catalog {
     /// [`prefetch_bindings`](crate::prefetch_bindings), the read path and the
     /// code host, which all hold a `Catalog`.
     model_host: RwLock<Option<Arc<dyn crate::model_host::ModelHost>>>,
+    /// The server's admin handlers, which the administrative tools create an
+    /// application or a file store through (§13.6) — `None` in a process that
+    /// built no router. See [`crate::AdminHost`].
+    admin_host: RwLock<Option<Arc<dyn crate::admin_host::AdminHost>>>,
     /// The formula evaluator the **read path** computes a calculated field
     /// with when it does not translate to SQL (milestone 31 §4) — a
     /// `predict("…")`, a module function call. Installed by whoever built the
@@ -250,6 +254,7 @@ impl Catalog {
             schema_observer: RwLock::new(None),
             module_functions: RwLock::new(None),
             model_host: RwLock::new(None),
+            admin_host: RwLock::new(None),
             formula_evaluator: RwLock::new(None),
             table_providers: RwLock::new(None),
             provided_table_issues: RwLock::new(Vec::new()),
@@ -1519,6 +1524,23 @@ impl Catalog {
     /// [`module_functions`](Catalog::module_functions)' reason.
     pub fn model_host(&self) -> Option<Arc<dyn crate::model_host::ModelHost>> {
         self.model_host.read().ok()?.clone()
+    }
+
+    /// Install the server's admin handlers (§13.6) — `sc-server`, when it
+    /// builds its router. Replaces any previous one.
+    pub fn set_admin_host(&self, host: Arc<dyn crate::admin_host::AdminHost>) -> Result<()> {
+        let mut guard = self
+            .admin_host
+            .write()
+            .map_err(|_| Error::msg("catalog admin-host lock poisoned"))?;
+        *guard = Some(host);
+        Ok(())
+    }
+
+    /// The installed admin handlers, or `None` where no server installed any
+    /// (a CLI command, a test with no router).
+    pub fn admin_host(&self) -> Option<Arc<dyn crate::admin_host::AdminHost>> {
+        self.admin_host.read().ok()?.clone()
     }
 
     /// Install the formula evaluator the read path computes an untranslatable

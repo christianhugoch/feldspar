@@ -18,8 +18,8 @@
 //! them to the administration MCP server as tools (§13.6). It is **opt-in and
 //! deliberately sparse**: a coding agent pays for every tool in its context on
 //! every turn, so projecting all of these would be mechanical and wrong. The
-//! nine composite tools of `sc_api::mcp` plus these seventeen come to
-//! twenty-six, and the number is a design constraint rather than an outcome —
+//! thirteen composite tools of `sc_api::mcp` and `sc_app::mcp` plus these seventeen
+//! come to thirty, and the number is a design constraint rather than an outcome —
 //! `the_tier_two_tags_are_the_ones_that_were_argued_for` is the test that makes
 //! adding one a decision somebody has to write down.
 //!

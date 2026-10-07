@@ -24,6 +24,8 @@ mod common;
 mod admin_copilot;
 #[path = "admin_copilot_apps.rs"]
 mod admin_copilot_apps;
+#[path = "admin_copilot_build.rs"]
+mod admin_copilot_build;
 #[path = "admin_copilot_triggers.rs"]
 mod admin_copilot_triggers;
 #[path = "build_application.rs"]
