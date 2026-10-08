@@ -2,6 +2,63 @@
 
 Changes in reverse chronological order.
 
+## i18n: the backup schedules and source control strings are extractable again
+
+`i18n::every_declared_domain_scans_without_an_unreadable_call_site` failed on eight `t()` calls
+in `BackupTab.tsx` and `SourceControl.tsx`. Each was given a string computed in a model module,
+such as `t(errors.destination)`, `t(row.label)` or `t(primary.blocked)`. The extractor needs
+the English at the call site, so none of those messages could reach a catalogue.
+
+- The model functions that produce text now take the screen's `t` as an optional last argument,
+  defaulting to the untranslated `format`. The English is written there as `t("…")` literals,
+  where the extractor finds it, and the unit tests still get English without passing anything.
+  - `backupSchedules.ts`: `scheduleFormErrors` and `frequencyLabel`. The retention message
+    is now `t("Enter a whole number of days from 1 to {max}.", …)` rather than a template string.
+    `FREQUENCIES` is now just the values, and the labels come from `frequencyLabel`.
+  - `sourceControl.ts`: `changeRows` (the row tooltips), `primaryAction` (why the button is
+    disabled) and `branchNameProblem`. The duplicate-branch message is `t("{name} already
+    exists.", …)`.
+- The two screens pass their `t` and show the result as it is.
+- Tests: the i18n test above passes again, and the admin SPA's vitest suite (655 tests,
+  including `backupSchedules.test.ts` and `sourceControl.test.ts`) passes unchanged.
+
+## CLI: `feldspar backup FILE` and `feldspar restore FILE`
+
+The backup zip that Settings → Backup produces can now be written and restored from a terminal,
+with the database credentials as the authority, like `add-user`.
+
+- `feldspar backup FILE [database flags]` writes everything the Backup dialog offers, with
+  every box ticked **except SSL / TLS**. It uses `Selection::everything` with `ssl: false`. The
+  file stores are connected first so their files are included. The zip is written to
+  `.FILE.partial` and renamed into place, as the automated backups do. The dialog's stored
+  selection (`backup_include`) is not changed.
+- `feldspar restore FILE [database flags] [server flags]` restores everything in the file: a
+  Feldspar backup, or a Saltcorn 1 one. It uses `Selection::everything` over the file's manifest
+  and the same `restore_backup` as the `restoreBackup` endpoint. The file is inspected before
+  the database is connected, so a file that is not a backup is refused without touching
+  anything. Restored lines go to stdout and warnings to stderr. The command succeeds when the
+  only problems are warnings, as the dialog does.
+- Restore needs the services the server has: modules to reinstall packages, the trigger, agent
+  and stream registries, and the mount registry to build applications. So the agents, models,
+  triggers, modules and streams setup in `serve_command` moved into a shared
+  `install_services` in `main.rs`, which both commands call. `serve` behaves the same as
+  before. One side effect: as in the server, stored streams are started while the restore
+  runs, until the process exits.
+- Fix: a backup of a database no server had run on failed with `relation "_fd_triggers" does
+  not exist`. `_fd_triggers` is created when `serve` installs the triggers, not at connect.
+  `backup::available` now counts triggers only when the table exists, as it already did for
+  modules, streams and the analytics tables.
+- `sc-server` now re-exports `backup_available`, `write_backup`, `inspect_backup` and
+  `restore_backup`. `sc-cli` depends on `sc-action` for the dispatcher type, and the design
+  doc's §2 dependency table now lists it.
+- The usage text and `docs/OPERATIONS.md` §8.2 describe the commands.
+- Test: `crates/sc-cli/tests/backup.rs` runs the real binary against two Postgres databases.
+  It backs up a table with rows, an SMTP setting and an ACME contact email, and checks the
+  manifest: the TLS settings are out, the other settings are in, and the table has both rows.
+  It then restores into an empty database and checks the rows and the SMTP setting arrived and
+  the TLS setting did not. It also checks that a junk file is refused and that a missing FILE
+  argument is an error.
+
 ## Automated backups: each schedule chooses what it includes
 
 Each automated backup now has its own choice of what goes in, with the same options as the backup

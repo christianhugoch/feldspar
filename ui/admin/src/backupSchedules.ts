@@ -13,15 +13,13 @@
 
 import { isEmpty, type BackupSelection } from "./backup";
 import type { ListBackupSchedulesResponse } from "./client";
+import { format, type Translator } from "./i18n";
 
 export type BackupSchedule = ListBackupSchedulesResponse[number];
 
 export type Frequency = "daily" | "weekly";
 
-export const FREQUENCIES: { value: Frequency; label: string }[] = [
-  { value: "daily", label: "Daily" },
-  { value: "weekly", label: "Weekly" },
-];
+export const FREQUENCIES: Frequency[] = ["daily", "weekly"];
 
 /** The most days a backup can be kept — the server's `MAX_RETENTION_DAYS`. */
 export const MAX_RETENTION_DAYS = 3650;
@@ -53,22 +51,27 @@ export function editScheduleForm(schedule: BackupSchedule): ScheduleForm {
   };
 }
 
-/** Why the form cannot be sent, by field; empty when it can. */
+/** Why the form cannot be sent, by field; empty when it can. The screen passes
+ * its `t`, so each message is a literal the extractor finds here; without one
+ * the messages are the English. */
 export function scheduleFormErrors(
   form: ScheduleForm,
+  t: Translator["t"] = format,
 ): Partial<Record<"destination" | "retention" | "include", string>> {
   const errors: Partial<Record<"destination" | "retention" | "include", string>> = {};
   const destination = form.destination.trim();
-  if (destination === "") errors.destination = "Enter a directory on the server.";
+  if (destination === "") errors.destination = t("Enter a directory on the server.");
   else if (!destination.startsWith("/"))
-    errors.destination = "Enter an absolute path, starting with /.";
+    errors.destination = t("Enter an absolute path, starting with /.");
   else if (destination.split("/").includes(".."))
-    errors.destination = "Enter the path without '..'.";
+    errors.destination = t("Enter the path without '..'.");
   const retention = form.retention.trim();
   const days = Number(retention);
   if (!/^\d+$/.test(retention) || days < 1 || days > MAX_RETENTION_DAYS)
-    errors.retention = `Enter a whole number of days from 1 to ${MAX_RETENTION_DAYS}.`;
-  if (isEmpty(form.include)) errors.include = "Choose at least one thing to include.";
+    errors.retention = t("Enter a whole number of days from 1 to {max}.", {
+      max: MAX_RETENTION_DAYS,
+    });
+  if (isEmpty(form.include)) errors.include = t("Choose at least one thing to include.");
   return errors;
 }
 
@@ -82,9 +85,16 @@ export function scheduleBody(form: ScheduleForm) {
   };
 }
 
-/** "Daily" or "Weekly". */
-export function frequencyLabel(frequency: string): string {
-  return FREQUENCIES.find((f) => f.value === frequency)?.label ?? frequency;
+/** "Daily" or "Weekly", in the screen's language when it passes its `t`. */
+export function frequencyLabel(frequency: string, t: Translator["t"] = format): string {
+  switch (frequency) {
+    case "daily":
+      return t("Daily");
+    case "weekly":
+      return t("Weekly");
+    default:
+      return frequency;
+  }
 }
 
 /** What a schedule last did, in one line, and whether it is a problem. */

@@ -8422,6 +8422,7 @@ dependencies = [
  "chrono",
  "libc",
  "reqwest",
+ "sc-action",
  "sc-agent",
  "sc-analytics",
  "sc-api",

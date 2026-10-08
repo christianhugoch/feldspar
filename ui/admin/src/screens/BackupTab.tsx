@@ -819,7 +819,7 @@ function AutomatedBackups({
     }
   };
 
-  const errors = editing && submitted ? scheduleFormErrors(editing) : {};
+  const errors = editing && submitted ? scheduleFormErrors(editing, t) : {};
 
   return (
     <div className="card">
@@ -880,7 +880,7 @@ function AutomatedBackups({
                       })}
                     </div>
                   </td>
-                  <td>{t(frequencyLabel(schedule.frequency))}</td>
+                  <td>{frequencyLabel(schedule.frequency, t)}</td>
                   <td>{t("{count} days", { count: schedule.retention_days })}</td>
                   <td className={status.failed ? "text-danger small" : "text-secondary small"}>
                     {status.text}
@@ -938,7 +938,7 @@ function AutomatedBackups({
                   onChange={(e) => setEditing({ ...editing, destination: e.target.value })}
                 />
                 <Form.Control.Feedback type="invalid">
-                  {errors.destination && t(errors.destination)}
+                  {errors.destination}
                 </Form.Control.Feedback>
                 <Form.Text muted>
                   <T text="An absolute path to a directory on the server. It is created if it does not exist, and no other automated backup may use it." />
@@ -953,8 +953,8 @@ function AutomatedBackups({
                   }
                 >
                   {FREQUENCIES.map((f) => (
-                    <option key={f.value} value={f.value}>
-                      {t(f.label)}
+                    <option key={f} value={f}>
+                      {frequencyLabel(f, t)}
                     </option>
                   ))}
                 </Form.Select>
@@ -971,7 +971,7 @@ function AutomatedBackups({
                   onChange={(e) => setEditing({ ...editing, retention: e.target.value })}
                 />
                 <Form.Control.Feedback type="invalid">
-                  {errors.retention && t(errors.retention)}
+                  {errors.retention}
                 </Form.Control.Feedback>
                 <Form.Text muted>
                   <T text="Backups in the directory older than this are deleted after each new backup." />
@@ -984,7 +984,7 @@ function AutomatedBackups({
               </p>
               {errors.include && (
                 <Alert variant="danger">
-                  <AlertBody>{t(errors.include)}</AlertBody>
+                  <AlertBody>{errors.include}</AlertBody>
                 </Alert>
               )}
               <IncludeFields

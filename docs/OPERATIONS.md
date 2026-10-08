@@ -1222,6 +1222,33 @@ Leave the password off the command line when you can, because it ends up in the
 shell history and in `ps`. A password that starts with `--` is written
 `--password=VALUE`. Sessions the user already holds are not ended.
 
+#### Backup and restore from a terminal
+
+The zip **Settings → Backup** downloads can be written and restored from a terminal:
+
+```bash
+sudo -u feldspar feldspar backup /var/backups/feldspar/site.zip --environment production
+sudo -u feldspar feldspar restore /var/backups/feldspar/site.zip --environment staging
+```
+
+`backup` includes everything — tables and their rows, applications with their views
+and pages, file stores and their files, users, modules, database connections,
+streams, analytics, LLM providers, agents, triggers and settings — **except the SSL /
+TLS settings**. The certificate, its key and the names it covers belong to the
+machine, not to the installation. The dialog still offers them if you want to move
+them. The file is written beside its final name and renamed into place, so an
+interrupted backup leaves the previous file whole.
+
+`restore` restores everything the file holds. The file can come from `feldspar
+backup`, from the dialog, or from Saltcorn 1. It behaves like the Restore dialog with
+nothing unticked: it adds to what is there and does not drop, delete or replace.
+Each thing it restored is printed on stdout, and each thing it left alone is printed
+on stderr with the reason. Modules are reinstalled and applications are built, so
+give it the same server flags or `--environment` the server runs with. That matters
+most for `--modules-dir`. **Restart a server that is already running on that
+database** afterwards, because it loaded its tables, applications and triggers when
+it started.
+
 ### 8.3 The bound on a model dataset
 
 A model's dataset is a `SELECT` an administrator wrote, and a fit holds the whole
