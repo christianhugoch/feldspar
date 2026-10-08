@@ -2,6 +2,22 @@
 
 Changes in reverse chronological order.
 
+## Monthly automated backups
+
+An automated backup schedule can now run **monthly** as well as daily or weekly.
+
+- A month is a **calendar month**, not thirty days: a backup taken at 02:00 on the 3rd is next
+  due at 02:00 on the 3rd of the next month. From a day the next month lacks it is that month's
+  last day, so a schedule that ran on 31 January next runs on 28 (or 29) February, and from then
+  on on the 28th/29th (`Frequency::next_after`, which replaces the fixed `period()`).
+- As before, "after" means after the tick that last *succeeded*; a failure is still retried an
+  hour later.
+- The admin dialog's frequency choice and the schedule list offer and show **Monthly**; the API
+  takes `"frequency": "monthly"`. An unknown frequency's error now lists all three.
+- Tests: `a_month_is_a_calendar_month` and the monthly case in
+  `a_success_makes_the_next_run_one_period_later` (`sc-server`), and a monthly case in
+  `backupSchedules.test.ts`.
+
 ## Automated backups to SFTP or S3
 
 An automated backup can now be sent to an SFTP server or an S3-compatible bucket, as well as

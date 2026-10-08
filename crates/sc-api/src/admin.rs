@@ -4000,8 +4000,8 @@ fn api_token_schema() -> TypeSchema {
     ])
 }
 
-/// What an admin sets on an automated backup: where the backups go, `daily`
-/// or `weekly`, the days before a backup there is deleted, and what each
+/// What an admin sets on an automated backup: where the backups go, `daily`,
+/// `weekly` or `monthly`, the days before a backup there is deleted, and what each
 /// backup includes.
 fn backup_schedule_input_schema() -> TypeSchema {
     TypeSchema::struct_of(backup_schedule_input_fields())

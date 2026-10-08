@@ -23,9 +23,9 @@ import { format, type Translator } from "./i18n";
 
 export type BackupSchedule = ListBackupSchedulesResponse[number];
 
-export type Frequency = "daily" | "weekly";
+export type Frequency = "daily" | "weekly" | "monthly";
 
-export const FREQUENCIES: Frequency[] = ["daily", "weekly"];
+export const FREQUENCIES: Frequency[] = ["daily", "weekly", "monthly"];
 
 export type DestinationKind = "local" | "sftp" | "s3";
 
@@ -126,7 +126,9 @@ export function editScheduleForm(schedule: BackupSchedule): ScheduleForm {
     region: d.region ?? "",
     accessKey: d.access_key ?? "",
     secretKey: d.secret_key ?? "",
-    frequency: schedule.frequency === "weekly" ? "weekly" : "daily",
+    frequency: (FREQUENCIES as string[]).includes(schedule.frequency)
+      ? (schedule.frequency as Frequency)
+      : "daily",
     retention: String(schedule.retention_days),
   };
 }
@@ -236,13 +238,15 @@ export function destinationKindLabel(kind: string, t: Translator["t"] = format):
   }
 }
 
-/** "Daily" or "Weekly", in the screen's language when it passes its `t`. */
+/** "Daily", "Weekly" or "Monthly", in the screen's language when it passes its `t`. */
 export function frequencyLabel(frequency: string, t: Translator["t"] = format): string {
   switch (frequency) {
     case "daily":
       return t("Daily");
     case "weekly":
       return t("Weekly");
+    case "monthly":
+      return t("Monthly");
     default:
       return frequency;
   }

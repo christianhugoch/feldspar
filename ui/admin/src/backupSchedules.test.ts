@@ -7,8 +7,10 @@ import { describe, expect, it } from "vitest";
 
 import { NO_CONTENTS, everything, type BackupSelection } from "./backup";
 import {
+  FREQUENCIES,
   destinationKindLabel,
   editScheduleForm,
+  frequencyLabel,
   newScheduleForm,
   scheduleBody,
   scheduleFormErrors,
@@ -114,6 +116,15 @@ describe("the schedule form", () => {
       accessKey: "AK",
       secretKey: SECRET_SENTINEL,
     });
+  });
+
+  it("keeps a monthly schedule monthly, and offers and names the frequency", () => {
+    expect(editScheduleForm({ ...schedule, frequency: "monthly" }).frequency).toBe("monthly");
+    expect(scheduleBody({ ...local, frequency: "monthly", retention: "90" }).frequency).toBe(
+      "monthly",
+    );
+    expect(FREQUENCIES).toContain("monthly");
+    expect(frequencyLabel("monthly")).toBe("Monthly");
   });
 
   it("wants an absolute directory for local files", () => {

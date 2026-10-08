@@ -4,8 +4,8 @@
 //!
 //! A schedule is four things an admin chooses — a **destination** (a
 //! [`Destination`]: a local directory, an SFTP directory or a bucket), a
-//! **frequency** (daily or weekly), a **retention** (days before a backup there
-//! is deleted) and what it **includes** — stored as a list under
+//! **frequency** (daily, weekly or monthly), a **retention** (days before a
+//! backup there is deleted) and what it **includes** — stored as a list under
 //! [`BACKUP_SCHEDULES`](sc_config::BACKUP_SCHEDULES). Each schedule has its own
 //! selection, so a nightly schema-only backup and a weekly full one can sit
 //! side by side.
@@ -28,8 +28,8 @@
 //!
 //! - **Due** ([`is_due`]): a schedule that has never succeeded is due at once —
 //!   the admin learns on the next minute whether the backup arrives, not a
-//!   week later. After a success it is due a day (or a week) after the tick that
-//!   ran it; after a failure it is retried an hour later rather than every
+//!   week later. After a success it is due a day, a week or a calendar month
+//!   after the tick that ran it; after a failure it is retried an hour later rather than every
 //!   minute.
 //! - **Written whole or not at all** ([`Connection::put`]): on a disk or over
 //!   SFTP the zip is written under a dot-prefixed temporary name and renamed
@@ -44,7 +44,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, Duration, NaiveDateTime, Timelike, Utc};
+use chrono::{DateTime, Duration, Months, NaiveDateTime, Timelike, Utc};
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use serde_json::{Map, Value as Json, json};
@@ -72,6 +72,7 @@ pub const MAX_RETENTION_DAYS: i64 = 3650;
 pub enum Frequency {
     Daily,
     Weekly,
+    Monthly,
 }
 
 impl Frequency {
@@ -79,6 +80,7 @@ impl Frequency {
         match self {
             Frequency::Daily => "daily",
             Frequency::Weekly => "weekly",
+            Frequency::Monthly => "monthly",
         }
     }
 
@@ -86,17 +88,24 @@ impl Frequency {
         match raw {
             "daily" => Ok(Frequency::Daily),
             "weekly" => Ok(Frequency::Weekly),
+            "monthly" => Ok(Frequency::Monthly),
             other => Err(Error::invalid(format!(
-                "`{other}` is not a backup frequency; choose `daily` or `weekly`"
+                "`{other}` is not a backup frequency; choose `daily`, `weekly` or `monthly`"
             ))),
         }
     }
 
-    /// The time from one run to the next.
-    pub fn period(self) -> Duration {
+    /// When the run after one at `last` is due. A month is a calendar month,
+    /// not thirty days, so a backup taken on the 3rd is next taken on the 3rd;
+    /// from a day the next month lacks it is that month's last day (31 January
+    /// is followed by 28 or 29 February, and that by the 28th or 29th of March).
+    pub fn next_after(self, last: DateTime<Utc>) -> DateTime<Utc> {
         match self {
-            Frequency::Daily => Duration::days(1),
-            Frequency::Weekly => Duration::weeks(1),
+            Frequency::Daily => last + Duration::days(1),
+            Frequency::Weekly => last + Duration::weeks(1),
+            Frequency::Monthly => last
+                .checked_add_months(Months::new(1))
+                .unwrap_or(DateTime::<Utc>::MAX_UTC),
         }
     }
 }
@@ -358,7 +367,7 @@ pub fn is_due(
     }
     match status.last_success_at {
         None => true,
-        Some(success) => now >= success + schedule.frequency.period(),
+        Some(success) => now >= schedule.frequency.next_after(success),
     }
 }
 
@@ -574,6 +583,27 @@ mod tests {
         };
         assert!(!is_due(&w, Some(&status), at(2026, 1, 7, 2, 0)));
         assert!(is_due(&w, Some(&status), at(2026, 1, 8, 2, 0)));
+
+        let m = BackupSchedule {
+            frequency: Frequency::Monthly,
+            ..w
+        };
+        assert!(!is_due(&m, Some(&status), at(2026, 1, 31, 2, 0)));
+        assert!(!is_due(&m, Some(&status), at(2026, 2, 1, 1, 59)));
+        assert!(is_due(&m, Some(&status), at(2026, 2, 1, 2, 0)));
+    }
+
+    #[test]
+    fn a_month_is_a_calendar_month() {
+        let m = Frequency::Monthly;
+        // February is shorter than thirty days, and March is longer.
+        assert_eq!(m.next_after(at(2026, 2, 3, 2, 0)), at(2026, 3, 3, 2, 0));
+        assert_eq!(m.next_after(at(2026, 3, 3, 2, 0)), at(2026, 4, 3, 2, 0));
+        // A day the next month lacks becomes its last day.
+        assert_eq!(m.next_after(at(2026, 1, 31, 2, 0)), at(2026, 2, 28, 2, 0));
+        assert_eq!(m.next_after(at(2028, 1, 31, 2, 0)), at(2028, 2, 29, 2, 0));
+        // Across the year.
+        assert_eq!(m.next_after(at(2026, 12, 15, 2, 0)), at(2027, 1, 15, 2, 0));
     }
 
     #[test]
