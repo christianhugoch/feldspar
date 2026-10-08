@@ -1,0 +1,664 @@
+//! Automated backups: any number of recurring backups, each written to a
+//! directory on the server and pruned after a number of days.
+//!
+//! A schedule is three things an admin chooses — a **destination** (an absolute
+//! directory on this server), a **frequency** (daily or weekly) and a
+//! **retention** (days before a backup in that directory is deleted) — stored as
+//! a list under [`BACKUP_SCHEDULES`](sc_config::BACKUP_SCHEDULES). What each one
+//! *includes* is not a fourth choice: it is the selection the Backup card shows
+//! as "Currently included" ([`BackupPreferences`]), read afresh on every run, so
+//! a table added next week is in next week's automated backup exactly as it is in
+//! the next manual one.
+//!
+//! [`BackupScheduler`] runs them: one task, waking on the minute like the trigger
+//! scheduler, running the due schedules **one after another** — two full
+//! backups at once would compete for the same database for no benefit, and
+//! serialising them is also what keeps the status record
+//! ([`BACKUP_SCHEDULE_STATUS`](sc_config::BACKUP_SCHEDULE_STATUS)) free of
+//! lost updates, since this task is its only writer.
+//!
+//! The rules, each a pure function tested against instants rather than waited
+//! for:
+//!
+//! - **Due** ([`is_due`]): a schedule that has never succeeded is due at once —
+//!   the admin learns on the next minute whether the directory is writable, not a
+//!   week later. After a success it is due a day (or a week) after the tick that
+//!   ran it; after a failure it is retried an hour later rather than every
+//!   minute.
+//! - **Written whole or not at all**: the zip is written under a dot-prefixed
+//!   temporary name and renamed into place, so neither a reader nor the pruning
+//!   below ever sees half a backup.
+//! - **Pruned by name** ([`prune`]): only files named as a backup is named
+//!   (`feldspar-backup-YYYY-MM-DD-HHMMSS.zip`) are ever deleted, and their age is
+//!   the time in that name, not the file's mtime — a copy or a restore of the
+//!   directory must not make every backup in it look new, or old.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use chrono::{DateTime, Duration, NaiveDateTime, Timelike, Utc};
+use sc_catalog::Catalog;
+use sc_error::{Error, Result};
+use serde_json::{Map, Value as Json, json};
+use uuid::Uuid;
+
+use super::{Available, BackupPreferences};
+
+/// The prefix and suffix of a backup's file name, with the time it was taken
+/// between them (see [`backup_file_name`]).
+const FILE_PREFIX: &str = "feldspar-backup-";
+const FILE_SUFFIX: &str = ".zip";
+/// The time format between them: sorts chronologically as text.
+const FILE_TIME: &str = "%Y-%m-%d-%H%M%S";
+
+/// How long a failed run waits before it is tried again.
+const RETRY_AFTER: Duration = Duration::hours(1);
+
+/// The longest retention accepted: ten years, which is "keep them" in every
+/// sense that matters and stops a typo of extra digits from being stored.
+pub const MAX_RETENTION_DAYS: i64 = 3650;
+
+/// How often a schedule runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Frequency {
+    Daily,
+    Weekly,
+}
+
+impl Frequency {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Frequency::Daily => "daily",
+            Frequency::Weekly => "weekly",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Result<Frequency> {
+        match raw {
+            "daily" => Ok(Frequency::Daily),
+            "weekly" => Ok(Frequency::Weekly),
+            other => Err(Error::invalid(format!(
+                "`{other}` is not a backup frequency; choose `daily` or `weekly`"
+            ))),
+        }
+    }
+
+    /// The time from one run to the next.
+    pub fn period(self) -> Duration {
+        match self {
+            Frequency::Daily => Duration::days(1),
+            Frequency::Weekly => Duration::weeks(1),
+        }
+    }
+}
+
+/// One automated backup.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackupSchedule {
+    pub id: Uuid,
+    /// An absolute directory on this server, without a trailing separator.
+    pub destination: String,
+    pub frequency: Frequency,
+    /// Backups in `destination` older than this many days are deleted after
+    /// each successful run.
+    pub retention_days: i64,
+}
+
+impl BackupSchedule {
+    /// Read a schedule from an admin's request body (`destination`,
+    /// `frequency`, `retention_days`), with the id it is to have.
+    ///
+    /// Checks what can be checked without the disk or the other schedules; see
+    /// [`check_destination`] and [`check_unique`] for those.
+    pub fn from_body(id: Uuid, body: &Map<String, Json>) -> Result<BackupSchedule> {
+        let destination = body
+            .get("destination")
+            .and_then(Json::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        let destination = normalise_destination(destination)?;
+        let frequency = Frequency::parse(
+            body.get("frequency")
+                .and_then(Json::as_str)
+                .unwrap_or_default(),
+        )?;
+        let retention_days = body
+            .get("retention_days")
+            .and_then(Json::as_i64)
+            .ok_or_else(|| Error::invalid("`retention_days` must be a whole number of days"))?;
+        if !(1..=MAX_RETENTION_DAYS).contains(&retention_days) {
+            return Err(Error::invalid(format!(
+                "`retention_days` must be between 1 and {MAX_RETENTION_DAYS}"
+            )));
+        }
+        Ok(BackupSchedule {
+            id,
+            destination,
+            frequency,
+            retention_days,
+        })
+    }
+
+    /// The stored shape (and, with a status merged in, the API's).
+    pub fn to_json(&self) -> Json {
+        json!({
+            "id": self.id.to_string(),
+            "destination": self.destination,
+            "frequency": self.frequency.as_str(),
+            "retention_days": self.retention_days,
+        })
+    }
+
+    /// Read a stored schedule. A record that no longer parses is skipped by
+    /// [`load_schedules`] rather than failing the list, so one bad entry cannot
+    /// stop every other schedule from running.
+    fn from_json(value: &Json) -> Option<BackupSchedule> {
+        let obj = value.as_object()?;
+        let id = Uuid::parse_str(obj.get("id")?.as_str()?).ok()?;
+        BackupSchedule::from_body(id, obj).ok()
+    }
+}
+
+/// What a schedule last did. Written only by [`BackupScheduler`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScheduleStatus {
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    pub last_success_at: Option<DateTime<Utc>>,
+    /// Why the last attempt failed; `None` when it succeeded.
+    pub last_error: Option<String>,
+    /// The full path of the last backup written.
+    pub last_file: Option<String>,
+}
+
+impl ScheduleStatus {
+    pub fn to_json(&self) -> Json {
+        json!({
+            "last_attempt_at": self.last_attempt_at.map(|t| t.to_rfc3339()),
+            "last_success_at": self.last_success_at.map(|t| t.to_rfc3339()),
+            "last_error": self.last_error,
+            "last_file": self.last_file,
+        })
+    }
+
+    fn from_json(value: &Json) -> ScheduleStatus {
+        let time = |key: &str| {
+            value
+                .get(key)
+                .and_then(Json::as_str)
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.with_timezone(&Utc))
+        };
+        let text = |key: &str| value.get(key).and_then(Json::as_str).map(str::to_owned);
+        ScheduleStatus {
+            last_attempt_at: time("last_attempt_at"),
+            last_success_at: time("last_success_at"),
+            last_error: text("last_error"),
+            last_file: text("last_file"),
+        }
+    }
+}
+
+/// A destination as stored: trimmed, absolute, with no `..` and no trailing
+/// separator, so `/srv/backups/` and `/srv/backups` are recognised as the same
+/// directory by [`check_unique`].
+pub fn normalise_destination(raw: &str) -> Result<String> {
+    if raw.is_empty() {
+        return Err(Error::invalid(
+            "`destination` must name a directory on the server",
+        ));
+    }
+    let path = Path::new(raw);
+    if !path.is_absolute() {
+        return Err(Error::invalid(format!(
+            "`{raw}` is not an absolute path; the destination must start from the root of the server's file system"
+        )));
+    }
+    if path.components().any(|c| c == Component::ParentDir) {
+        return Err(Error::invalid(format!(
+            "`{raw}` contains `..`; give the directory's path without it"
+        )));
+    }
+    let normal: PathBuf = path.components().collect();
+    Ok(normal.to_string_lossy().into_owned())
+}
+
+/// Make sure the destination is a directory this server can use, creating it
+/// if it does not exist yet — done when the schedule is saved, so a typo or a
+/// permission problem is reported in the dialog rather than by a backup that
+/// silently never arrives.
+pub async fn check_destination(destination: &str) -> Result<()> {
+    let path = Path::new(destination);
+    match tokio::fs::metadata(path).await {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(Error::invalid(format!(
+                "`{destination}` exists and is not a directory"
+            )));
+        }
+        Err(_) => tokio::fs::create_dir_all(path).await.map_err(|e| {
+            Error::invalid(format!(
+                "could not create the directory `{destination}`: {e}"
+            ))
+        })?,
+    }
+    // Writable, by doing it: permission bits do not tell the whole story (a
+    // read-only mount, an ACL), and the run would find out the same way.
+    let probe = path.join(format!(".feldspar-backup-probe-{}", Uuid::new_v4()));
+    tokio::fs::write(&probe, b"")
+        .await
+        .map_err(|e| Error::invalid(format!("this server cannot write to `{destination}`: {e}")))?;
+    let _ = tokio::fs::remove_file(&probe).await;
+    Ok(())
+}
+
+/// Refuse a second schedule writing to the same directory: each one's pruning
+/// would delete the other's backups, and a weekly schedule would see the daily
+/// one's files and think itself up to date.
+pub fn check_unique(schedule: &BackupSchedule, others: &[BackupSchedule]) -> Result<()> {
+    if others
+        .iter()
+        .any(|o| o.id != schedule.id && o.destination == schedule.destination)
+    {
+        return Err(Error::invalid(format!(
+            "another automated backup already writes to `{}`; each schedule needs a directory of its own",
+            schedule.destination
+        )));
+    }
+    Ok(())
+}
+
+/// The stored schedules, in the order they were created.
+pub async fn load_schedules(catalog: &Catalog) -> Result<Vec<BackupSchedule>> {
+    let stored = sc_config::stored_config(catalog, sc_config::BACKUP_SCHEDULES).await?;
+    Ok(stored
+        .as_ref()
+        .and_then(Json::as_array)
+        .map(|list| list.iter().filter_map(BackupSchedule::from_json).collect())
+        .unwrap_or_default())
+}
+
+/// Replace the stored schedules.
+pub async fn save_schedules(catalog: &Catalog, schedules: &[BackupSchedule]) -> Result<()> {
+    let list: Vec<Json> = schedules.iter().map(BackupSchedule::to_json).collect();
+    sc_config::set_config(catalog, sc_config::BACKUP_SCHEDULES, Json::Array(list)).await
+}
+
+/// What each schedule last did, by id.
+pub async fn load_statuses(catalog: &Catalog) -> Result<HashMap<Uuid, ScheduleStatus>> {
+    let stored = sc_config::stored_config(catalog, sc_config::BACKUP_SCHEDULE_STATUS).await?;
+    Ok(stored
+        .as_ref()
+        .and_then(Json::as_object)
+        .map(|map| {
+            map.iter()
+                .filter_map(|(id, status)| {
+                    Some((Uuid::parse_str(id).ok()?, ScheduleStatus::from_json(status)))
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+async fn save_statuses(catalog: &Catalog, statuses: &HashMap<Uuid, ScheduleStatus>) -> Result<()> {
+    let map: Map<String, Json> = statuses
+        .iter()
+        .map(|(id, status)| (id.to_string(), status.to_json()))
+        .collect();
+    sc_config::set_config(
+        catalog,
+        sc_config::BACKUP_SCHEDULE_STATUS,
+        Json::Object(map),
+    )
+    .await
+}
+
+/// A schedule with what it last did, as `listBackupSchedules` returns it.
+pub fn schedule_json(schedule: &BackupSchedule, status: Option<&ScheduleStatus>) -> Json {
+    let mut out = schedule.to_json();
+    let status = status.cloned().unwrap_or_default().to_json();
+    if let (Some(out), Some(status)) = (out.as_object_mut(), status.as_object()) {
+        out.extend(status.clone());
+    }
+    out
+}
+
+/// Whether `schedule` should run at `now`, given what it last did.
+pub fn is_due(
+    schedule: &BackupSchedule,
+    status: Option<&ScheduleStatus>,
+    now: DateTime<Utc>,
+) -> bool {
+    let Some(status) = status else {
+        return true;
+    };
+    if status.last_error.is_some()
+        && let Some(attempt) = status.last_attempt_at
+        && now < attempt + RETRY_AFTER
+    {
+        return false;
+    }
+    match status.last_success_at {
+        None => true,
+        Some(success) => now >= success + schedule.frequency.period(),
+    }
+}
+
+/// What a backup taken at `at` is called — the name a manual download gets too,
+/// so a directory can hold both and [`prune`] treats them alike.
+pub fn backup_file_name(at: DateTime<Utc>) -> String {
+    format!("{FILE_PREFIX}{}{FILE_SUFFIX}", at.format(FILE_TIME))
+}
+
+/// When the backup called `name` was taken, or `None` for any other file.
+fn taken_at(name: &str) -> Option<DateTime<Utc>> {
+    let stamp = name.strip_prefix(FILE_PREFIX)?.strip_suffix(FILE_SUFFIX)?;
+    NaiveDateTime::parse_from_str(stamp, FILE_TIME)
+        .ok()
+        .map(|t| t.and_utc())
+}
+
+/// Delete the backups in `dir` taken more than `retention_days` before `now`,
+/// returning the paths deleted. Anything not named as a backup is left alone.
+pub async fn prune(dir: &Path, retention_days: i64, now: DateTime<Utc>) -> Result<Vec<PathBuf>> {
+    let cutoff = now - Duration::days(retention_days);
+    let mut entries = tokio::fs::read_dir(dir)
+        .await
+        .map_err(|e| Error::file(format!("reading `{}`: {e}", dir.display())))?;
+    let mut deleted = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| Error::file(format!("reading `{}`: {e}", dir.display())))?
+    {
+        let name = entry.file_name();
+        let Some(taken) = name.to_str().and_then(taken_at) else {
+            continue;
+        };
+        if taken < cutoff && entry.file_type().await.is_ok_and(|t| t.is_file()) {
+            let path = entry.path();
+            tokio::fs::remove_file(&path)
+                .await
+                .map_err(|e| Error::file(format!("deleting `{}`: {e}", path.display())))?;
+            deleted.push(path);
+        }
+    }
+    Ok(deleted)
+}
+
+/// Take one backup for `schedule`, named for `at`, and prune its directory.
+/// Returns the path written.
+pub async fn run_schedule(
+    catalog: &Catalog,
+    schedule: &BackupSchedule,
+    at: DateTime<Utc>,
+) -> Result<PathBuf> {
+    let dir = Path::new(&schedule.destination);
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(|e| Error::file(format!("creating `{}`: {e}", dir.display())))?;
+
+    let available: Available = super::available(catalog).await?;
+    let preferences = match sc_config::stored_config(catalog, sc_config::BACKUP_INCLUDE).await? {
+        Some(value) => BackupPreferences::from_json(&value),
+        None => BackupPreferences::default(),
+    };
+    let bytes = super::write_backup(catalog, &preferences.selection(&available)).await?;
+
+    let name = backup_file_name(at);
+    let target = dir.join(&name);
+    let partial = dir.join(format!(".{name}.partial"));
+    tokio::fs::write(&partial, &bytes)
+        .await
+        .map_err(|e| Error::file(format!("writing `{}`: {e}", partial.display())))?;
+    if let Err(e) = tokio::fs::rename(&partial, &target).await {
+        let _ = tokio::fs::remove_file(&partial).await;
+        return Err(Error::file(format!("writing `{}`: {e}", target.display())));
+    }
+
+    prune(dir, schedule.retention_days, at).await?;
+    Ok(target)
+}
+
+/// The task that runs the automated backups.
+pub struct BackupScheduler {
+    catalog: Arc<Catalog>,
+    /// Set while a tick's backups are running, so a run that takes longer than
+    /// a minute is not joined by a second copy of itself.
+    busy: Mutex<bool>,
+}
+
+impl BackupScheduler {
+    pub fn new(catalog: Arc<Catalog>) -> BackupScheduler {
+        BackupScheduler {
+            catalog,
+            busy: Mutex::new(false),
+        }
+    }
+
+    /// Start the task loop: a tick on every minute boundary.
+    pub fn start(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let scheduler = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let now = Utc::now();
+                let wait = 60 - u64::from(now.second());
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                let scheduler = Arc::clone(&scheduler);
+                // A task of its own, so a backup that takes ten minutes does
+                // not stop the clock; `busy` keeps the next ticks from starting
+                // another until it is done.
+                tokio::spawn(async move { scheduler.tick(Utc::now()).await });
+            }
+        })
+    }
+
+    /// Run every schedule that is due at `now`, one after another, recording
+    /// what each did. Returns the ids that ran (for tests); a tick that finds a
+    /// previous one still running does nothing.
+    pub async fn tick(&self, now: DateTime<Utc>) -> Vec<Uuid> {
+        {
+            let mut busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
+            if *busy {
+                return Vec::new();
+            }
+            *busy = true;
+        }
+        let ran = self.run_due(now).await;
+        *self.busy.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        ran
+    }
+
+    async fn run_due(&self, now: DateTime<Utc>) -> Vec<Uuid> {
+        // On the minute, so a daily backup recorded at 02:00 is due at 02:00
+        // tomorrow and does not creep later by the seconds a tick wakes late.
+        let now = now
+            .with_second(0)
+            .and_then(|t| t.with_nanosecond(0))
+            .unwrap_or(now);
+        let (schedules, mut statuses) = match (
+            load_schedules(&self.catalog).await,
+            load_statuses(&self.catalog).await,
+        ) {
+            (Ok(s), Ok(st)) => (s, st),
+            (Err(e), _) | (_, Err(e)) => {
+                eprintln!("feldspar: the backup scheduler could not read its schedules: {e}");
+                return Vec::new();
+            }
+        };
+        let due: Vec<&BackupSchedule> = schedules
+            .iter()
+            .filter(|s| is_due(s, statuses.get(&s.id), now))
+            .collect();
+        if due.is_empty() {
+            return Vec::new();
+        }
+        let mut ran = Vec::new();
+        for schedule in due {
+            let status = statuses.entry(schedule.id).or_default();
+            status.last_attempt_at = Some(now);
+            match run_schedule(&self.catalog, schedule, now).await {
+                Ok(path) => {
+                    status.last_success_at = Some(now);
+                    status.last_error = None;
+                    status.last_file = Some(path.to_string_lossy().into_owned());
+                }
+                Err(e) => {
+                    eprintln!(
+                        "feldspar: automated backup to `{}` failed: {e}",
+                        schedule.destination
+                    );
+                    status.last_error = Some(e.to_string());
+                }
+            }
+            ran.push(schedule.id);
+        }
+        // Forget the status of schedules that have since been deleted. Done
+        // here, by the status's one writer, rather than by the delete handler.
+        let live: HashSet<Uuid> = schedules.iter().map(|s| s.id).collect();
+        statuses.retain(|id, _| live.contains(id));
+        if let Err(e) = save_statuses(&self.catalog, &statuses).await {
+            eprintln!("feldspar: the backup scheduler could not record what it did: {e}");
+        }
+        ran
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    }
+
+    fn schedule(frequency: Frequency) -> BackupSchedule {
+        BackupSchedule {
+            id: Uuid::new_v4(),
+            destination: "/srv/backups".into(),
+            frequency,
+            retention_days: 7,
+        }
+    }
+
+    #[test]
+    fn a_schedule_that_never_ran_is_due_at_once() {
+        assert!(is_due(
+            &schedule(Frequency::Weekly),
+            None,
+            at(2026, 1, 1, 0, 0)
+        ));
+    }
+
+    #[test]
+    fn a_success_makes_the_next_run_one_period_later() {
+        let s = schedule(Frequency::Daily);
+        let status = ScheduleStatus {
+            last_attempt_at: Some(at(2026, 1, 1, 2, 0)),
+            last_success_at: Some(at(2026, 1, 1, 2, 0)),
+            ..Default::default()
+        };
+        assert!(!is_due(&s, Some(&status), at(2026, 1, 2, 1, 59)));
+        assert!(is_due(&s, Some(&status), at(2026, 1, 2, 2, 0)));
+
+        let w = BackupSchedule {
+            frequency: Frequency::Weekly,
+            ..s
+        };
+        assert!(!is_due(&w, Some(&status), at(2026, 1, 7, 2, 0)));
+        assert!(is_due(&w, Some(&status), at(2026, 1, 8, 2, 0)));
+    }
+
+    #[test]
+    fn a_failure_is_retried_an_hour_later_not_every_minute() {
+        let s = schedule(Frequency::Weekly);
+        let status = ScheduleStatus {
+            last_attempt_at: Some(at(2026, 1, 1, 2, 0)),
+            last_success_at: None,
+            last_error: Some("disk full".into()),
+            last_file: None,
+        };
+        assert!(!is_due(&s, Some(&status), at(2026, 1, 1, 2, 1)));
+        assert!(is_due(&s, Some(&status), at(2026, 1, 1, 3, 0)));
+    }
+
+    #[test]
+    fn a_destination_must_be_absolute_and_is_normalised() {
+        assert_eq!(
+            normalise_destination("/srv/backups/").unwrap(),
+            "/srv/backups"
+        );
+        assert_eq!(
+            normalise_destination("/srv//backups").unwrap(),
+            "/srv/backups"
+        );
+        assert!(normalise_destination("backups").is_err());
+        assert!(normalise_destination("").is_err());
+        assert!(normalise_destination("/srv/../etc").is_err());
+    }
+
+    #[test]
+    fn a_body_is_checked() {
+        let body = |v: Json| v.as_object().unwrap().clone();
+        let ok = BackupSchedule::from_body(
+            Uuid::nil(),
+            &body(json!({ "destination": "/srv/b", "frequency": "weekly", "retention_days": 30 })),
+        )
+        .unwrap();
+        assert_eq!(ok.frequency, Frequency::Weekly);
+        assert_eq!(ok.retention_days, 30);
+        for bad in [
+            json!({ "destination": "/srv/b", "frequency": "hourly", "retention_days": 30 }),
+            json!({ "destination": "/srv/b", "frequency": "daily", "retention_days": 0 }),
+            json!({ "destination": "/srv/b", "frequency": "daily" }),
+            json!({ "destination": "rel", "frequency": "daily", "retention_days": 3 }),
+        ] {
+            assert!(BackupSchedule::from_body(Uuid::nil(), &body(bad)).is_err());
+        }
+    }
+
+    #[test]
+    fn two_schedules_cannot_share_a_directory() {
+        let a = schedule(Frequency::Daily);
+        let b = schedule(Frequency::Weekly);
+        assert!(check_unique(&b, std::slice::from_ref(&a)).is_err());
+        // Editing a schedule is not a clash with itself.
+        assert!(check_unique(&a, std::slice::from_ref(&a)).is_ok());
+    }
+
+    #[test]
+    fn a_file_name_round_trips_to_its_time() {
+        let t = Utc.with_ymd_and_hms(2026, 3, 4, 5, 6, 7).unwrap();
+        assert_eq!(backup_file_name(t), "feldspar-backup-2026-03-04-050607.zip");
+        assert_eq!(taken_at(&backup_file_name(t)), Some(t));
+        assert_eq!(taken_at("notes.txt"), None);
+        assert_eq!(
+            taken_at(".feldspar-backup-2026-03-04-050607.zip.partial"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn pruning_deletes_only_old_backups() {
+        let dir = std::env::temp_dir().join(format!("sc-prune-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let now = at(2026, 1, 31, 2, 0);
+        let old = backup_file_name(at(2026, 1, 20, 2, 0));
+        let recent = backup_file_name(at(2026, 1, 28, 2, 0));
+        for name in [
+            old.as_str(),
+            recent.as_str(),
+            "notes.txt",
+            "feldspar-backup-junk.zip",
+        ] {
+            tokio::fs::write(dir.join(name), b"x").await.unwrap();
+        }
+        let deleted = prune(&dir, 7, now).await.unwrap();
+        assert_eq!(deleted, vec![dir.join(&old)]);
+        for kept in [recent.as_str(), "notes.txt", "feldspar-backup-junk.zip"] {
+            assert!(dir.join(kept).exists(), "{kept} should have been kept");
+        }
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+}

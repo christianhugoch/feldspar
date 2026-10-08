@@ -401,6 +401,10 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // here and nowhere else, for the reason the scheduler is.
     let (_workflows, _workflow_task) = sc_server::start_workflow_engine(&catalog, &triggers);
 
+    // And the automated backups' (Settings → Backup): each schedule writes a
+    // backup to its directory when it is due, and prunes the old ones.
+    let (_backups, _backup_task) = sc_server::start_backup_scheduler(&catalog);
+
     // Sessions are rows, not process memory (§7.2), which is what lets a second
     // application server exist: put two of these behind a load balancer and a
     // session minted by either is a session both honour. Each keeps its own

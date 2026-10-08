@@ -2,6 +2,50 @@
 
 Changes in reverse chronological order.
 
+## Automated backups
+
+Any number of recurring backups, each written to a directory on the server (Settings → Backup).
+
+- **The Backup tab's layout**: the Backup and Restore cards now sit side by side (six columns
+  each, stacked on a narrow screen), with a new **Automated backups** card beneath them. The card
+  lists the schedules, one line each (destination, frequency, retention, and what it last did),
+  with Edit and Delete per line and an Add button. A schedule is edited in a modal with three
+  fields: **destination** (an absolute path on the server), **frequency** (daily or weekly) and
+  **retention** (days before old backups in that directory are deleted). The form's checks are in
+  `ui/admin/src/backupSchedules.ts`, tested in `backupSchedules.test.ts`.
+- **What an automated backup includes** is what the Backup card shows as "Currently included"
+  (the remembered `backup_include` exclusions), read afresh on every run, so a table added later
+  is in the next automated backup without anyone editing the schedule.
+- **Storage**: two new internal `_fd_config` keys, so there is no new table and no migration.
+  `backup_schedules` holds the list and is written by the admin. `backup_schedule_status` holds
+  each schedule's last attempt, last success, last error and last file, and only the backup task
+  writes it. The two keys have different writers so neither can overwrite the other's change
+  (the same arrangement as a trigger's `last_run_at`).
+- **API**: `listBackupSchedules`, `createBackupSchedule`, `updateBackupSchedule` and
+  `deleteBackupSchedule` under `/api/backup/schedules`. They are admin-only and not projected as
+  MCP tools (the write endpoints are added to the tier-3 test). Saving checks the destination: it
+  must be absolute with no `..`, and it is created if missing and probed for writability, so a
+  typo or a permission problem shows up in the dialog. Two schedules may not share a directory,
+  because each one's pruning would delete the other's backups. Deleting a schedule leaves the
+  backups it wrote.
+- **The runner** (`sc-server`'s `backup::schedule::BackupScheduler`, started by `feldspar serve`
+  beside the trigger scheduler) wakes on the minute and runs the due schedules one after another:
+  - A new schedule runs on the next minute, so the admin finds out straight away whether the
+    directory works.
+  - After a success, the next run is due one period after the tick that ran it, so a daily
+    backup does not drift later each day.
+  - A failure is retried an hour later, not every minute.
+  - The zip is written under a dot-prefixed `.partial` name and then renamed into place.
+  - Pruning deletes only files named `feldspar-backup-YYYY-MM-DD-HHMMSS.zip`, judged by the time
+    in the name rather than the mtime. A manual download uses the same name, via the shared
+    `backup_file_name`.
+- **Tests**: eight unit tests in `backup::schedule` (the due rule, the retry, path
+  normalisation, body checks, the shared-directory refusal, file-name parsing, pruning), and
+  `backup_api::an_automated_backup_writes_and_prunes_its_directory`. Through the router, that test
+  creates a schedule, has a scheduler tick write a real backup that honours the remembered
+  selection, checks the old backup was pruned and unrelated files kept, and then edits and
+  deletes the schedule.
+
 ## Analytics A4.6–A4.7: documentation, and the definition of done for reports
 
 The last phase of milestone A4 (Reports, and drag and drop). With it, A4 is done.

@@ -1,4 +1,5 @@
-// The Settings screen's Backup tab: take a backup, or restore one.
+// The Settings screen's Backup tab: take a backup, restore one, or have the
+// server take them on a schedule (the Automated backups card, at the end).
 //
 // Two buttons and one dialog, twice. The dialog is the same component both times
 // (`IncludeDialog`) because the two questions are the same question asked of two
@@ -11,12 +12,13 @@
 // where it is tested without a browser. What is left here is the flow: the
 // buttons, the busy states, and what the admin is told afterwards.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import Alert from "react-bootstrap/Alert";
 import Button from "react-bootstrap/Button";
 import Form from "react-bootstrap/Form";
 import Modal from "react-bootstrap/Modal";
 import Spinner from "react-bootstrap/Spinner";
+import Table from "react-bootstrap/Table";
 
 import { api, createBackup, errorMessage, uploadBackup, type UploadedBackup } from "../api";
 import {
@@ -32,7 +34,20 @@ import {
   type BackupContents,
   type BackupSelection,
 } from "../backup";
-import { IconDownload, IconUpload } from "../icons";
+import {
+  FREQUENCIES,
+  MAX_RETENTION_DAYS,
+  editScheduleForm,
+  frequencyLabel,
+  newScheduleForm,
+  scheduleBody,
+  scheduleFormErrors,
+  scheduleStatus,
+  type BackupSchedule,
+  type Frequency,
+  type ScheduleForm,
+} from "../backupSchedules";
+import { IconDownload, IconPencil, IconPlus, IconTrash, IconUpload } from "../icons";
 import { AlertBody } from "../layout";
 import { MultiSelect } from "../multiSelect";
 import type { RestoreBackupResponse } from "../client";
@@ -136,83 +151,92 @@ export function BackupTab() {
         </Alert>
       )}
 
-      <div className="card mb-4">
-        <div className="card-header">
-          <div>
-            <h3 className="card-title"><T text="Backup" /></h3>            
+      {/* Backup and Restore side by side, the automated backups beneath them:
+          the two things done now, then the one that happens on its own. */}
+      <div className="row row-cards mb-4">
+        <div className="col-md-6">
+          <div className="card h-100">
+            <div className="card-header">
+              <div>
+                <h3 className="card-title"><T text="Backup" /></h3>
+              </div>
+            </div>
+            <div className="card-body">
+              {selection === null ? (
+                <Spinner animation="border" role="status" size="sm" />
+              ) : (
+                <>
+                  <p className="text-secondary mb-3">
+                    {t("Currently included: {summary}", {
+                      summary: summarise(selection, contents),
+                    })}
+                  </p>
+                  <div className="btn-list">
+                    <Button onClick={() => setChoosing(true)} disabled={busy !== null}>
+                      <IconDownload /> <T text="Backup now" />
+                    </Button>
+                  </div>
+                  {/* Said where the choice is made, not in a footnote: a backup carries
+                      password hashes, a file store's credentials and the TLS private
+                      key, so the file is exactly as sensitive as the database. */}
+                  <p className="form-hint mt-3 mb-0 text-secondary">
+                    <T text="A backup contains everything needed to restore this installation, including password hashes, file-store credentials and the SSL private key." />
+                  </p>
+                </>
+              )}
+            </div>
           </div>
         </div>
-        <div className="card-body">
-          {selection === null ? (
-            <Spinner animation="border" role="status" size="sm" />
-          ) : (
-            <>
-              <p className="text-secondary mb-3">
-                {t("Currently included: {summary}", {
-                  summary: summarise(selection, contents),
-                })}
-              </p>
+        <div className="col-md-6">
+          <div className="card h-100">
+            <div className="card-header">
+              <div>
+                <h3 className="card-title"><T text="Restore" /></h3>
+                <p className="card-subtitle text-secondary mb-0">
+                  <T text="Read a backup file and put back the parts of it you choose. A Saltcorn 1 backup works too: its tables, rows, users, files and actions are imported, and the restore says what it could not bring across. Nothing already on this server is deleted or overwritten: tables, users and file stores that are already here are left as they are, and the restore says what it skipped. Restored applications are built and start serving straight away, so a restore that includes one takes as long as its build does." />
+                </p>
+              </div>
+            </div>
+            <div className="card-body">
               <div className="btn-list">
-                <Button onClick={() => setChoosing(true)} disabled={busy !== null}>
-                  <IconDownload /> <T text="Backup now" />
+                <Button
+                  variant="outline-primary"
+                  disabled={busy !== null}
+                  onClick={() => fileInput.current?.click()}
+                >
+                  <IconUpload /> <T text="Restore" />
                 </Button>
               </div>
-              {/* Said where the choice is made, not in a footnote: a backup carries
-                  password hashes, a file store's credentials and the TLS private
-                  key, so the file is exactly as sensitive as the database. */}
-              <p className="form-hint mt-3 mb-0 text-secondary">
-                <T text="A backup contains everything needed to restore this installation, including password hashes, file-store credentials and the SSL private key." />
-              </p>
-            </>
-          )}
-        </div>
-      </div>
+              <input
+                ref={fileInput}
+                type="file"
+                accept=".zip,application/zip"
+                className="d-none"
+                onChange={(e) => {
+                  void readFile(e.target.files?.[0]);
+                  // Cleared so choosing the same file twice fires a change both times.
+                  e.target.value = "";
+                }}
+              />
 
-      <div className="card">
-        <div className="card-header">
-          <div>
-            <h3 className="card-title"><T text="Restore" /></h3>
-            <p className="card-subtitle text-secondary mb-0">
-              <T text="Read a backup file and put back the parts of it you choose. A Saltcorn 1 backup works too: its tables, rows, users, files and actions are imported, and the restore says what it could not bring across. Nothing already on this server is deleted or overwritten: tables, users and file stores that are already here are left as they are, and the restore says what it skipped. Restored applications are built and start serving straight away, so a restore that includes one takes as long as its build does." />
-            </p>
-          </div>
-        </div>
-        <div className="card-body">
-          <div className="btn-list">
-            <Button
-              variant="outline-primary"
-              disabled={busy !== null}
-              onClick={() => fileInput.current?.click()}
-            >
-              <IconUpload /> <T text="Restore" />
-            </Button>
-          </div>
-          <input
-            ref={fileInput}
-            type="file"
-            accept=".zip,application/zip"
-            className="d-none"
-            onChange={(e) => {
-              void readFile(e.target.files?.[0]);
-              // Cleared so choosing the same file twice fires a change both times.
-              e.target.value = "";
-            }}
-          />
-
-          {restore.stage === "done" && (
-            <div className="mt-3">
-              <RestoreReport report={restore.report} />
+              {restore.stage === "done" && (
+                <div className="mt-3">
+                  <RestoreReport report={restore.report} />
+                </div>
+              )}
             </div>
-          )}
+          </div>
         </div>
       </div>
 
       {busy !== null && (
-        <div className="mt-3 text-secondary" role="status">
+        <div className="mb-4 text-secondary" role="status">
           <Spinner animation="border" size="sm" className="me-2" />
           {busy}
         </div>
       )}
+
+      <AutomatedBackups />
 
       {selection !== null && (
         <IncludeDialog
@@ -682,5 +706,244 @@ function RestoreReport({ report }: { report: RestoreBackupResponse }) {
         </details>
       )}
     </>
+  );
+}
+
+/** The Automated backups card: the recurring backups, one line each, with an
+ * Add button and an Edit/Delete pair per line, edited in a modal.
+ *
+ * Its own component with its own state, because nothing in it touches the
+ * backup and restore flows above — except the selection, which the server
+ * reads for itself on every run (what the Backup card says is currently
+ * included is what every automated backup includes). */
+function AutomatedBackups() {
+  const { t } = useT();
+  const [schedules, setSchedules] = useState<BackupSchedule[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<ScheduleForm | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [submitted, setSubmitted] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setSchedules(await api.listBackupSchedules());
+    } catch (e) {
+      setError(errorMessage(e, "Could not read the automated backups."));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const open = (form: ScheduleForm) => {
+    setEditing(form);
+    setFormError(null);
+    setSubmitted(false);
+  };
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!editing) return;
+    setSubmitted(true);
+    if (Object.keys(scheduleFormErrors(editing)).length > 0) return;
+    setSaving(true);
+    setFormError(null);
+    try {
+      const body = scheduleBody(editing);
+      if (editing.id) await api.updateBackupSchedule(editing.id, body);
+      else await api.createBackupSchedule(body);
+      setEditing(null);
+      await load();
+    } catch (err) {
+      // Shown in the dialog, not behind it: the server's refusals — a
+      // directory it cannot write, one another schedule already uses — are
+      // about what was just typed.
+      setFormError(errorMessage(err, "Could not save the automated backup."));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (schedule: BackupSchedule) => {
+    if (
+      !window.confirm(
+        t("Stop the automated backup to {destination}? The backups already there are kept.", {
+          destination: schedule.destination,
+        }),
+      )
+    )
+      return;
+    setError(null);
+    try {
+      await api.deleteBackupSchedule(schedule.id);
+      await load();
+    } catch (e) {
+      setError(errorMessage(e, "Could not delete the automated backup."));
+    }
+  };
+
+  const errors = editing && submitted ? scheduleFormErrors(editing) : {};
+
+  return (
+    <div className="card">
+      <div className="card-header">
+        <div>
+          <h3 className="card-title"><T text="Automated backups" /></h3>
+          <p className="card-subtitle text-secondary mb-0">
+            <T text="Backups written to a directory on the server on a schedule. Each includes what the Backup card says is currently included, and backups in the directory older than the retention period are deleted." />
+          </p>
+        </div>
+        <div className="card-actions">
+          <Button onClick={() => open(newScheduleForm())}>
+            <IconPlus /> <T text="Add" />
+          </Button>
+        </div>
+      </div>
+      {error && (
+        <div className="card-body pb-0">
+          <Alert variant="danger" dismissible onClose={() => setError(null)}>
+            <AlertBody>{error}</AlertBody>
+          </Alert>
+        </div>
+      )}
+      {schedules === null ? (
+        <div className="card-body">
+          <Spinner animation="border" role="status" size="sm" />
+        </div>
+      ) : schedules.length === 0 ? (
+        <div className="card-body">
+          <p className="text-secondary mb-0">
+            <T text="No automated backups. Add one to have this server back itself up every day or every week." />
+          </p>
+        </div>
+      ) : (
+        <Table responsive className="card-table table-vcenter mb-0">
+          <thead>
+            <tr>
+              <th><T text="Destination" /></th>
+              <th><T text="Frequency" /></th>
+              <th><T text="Retention" /></th>
+              <th><T text="Status" /></th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {schedules.map((schedule) => {
+              const status = scheduleStatus(schedule);
+              return (
+                <tr key={schedule.id}>
+                  <td className="font-monospace">{schedule.destination}</td>
+                  <td>{t(frequencyLabel(schedule.frequency))}</td>
+                  <td>{t("{count} days", { count: schedule.retention_days })}</td>
+                  <td className={status.failed ? "text-danger small" : "text-secondary small"}>
+                    {status.text}
+                  </td>
+                  <td className="text-end">
+                    <div className="btn-list flex-nowrap justify-content-end">
+                      <Button
+                        size="sm"
+                        variant="outline-secondary"
+                        aria-label={t("Edit")}
+                        onClick={() => open(editScheduleForm(schedule))}
+                      >
+                        <IconPencil className="icon-2" /> <T text="Edit" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline-danger"
+                        aria-label={t("Delete")}
+                        onClick={() => void remove(schedule)}
+                      >
+                        <IconTrash className="icon-2" /> <T text="Delete" />
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </Table>
+      )}
+
+      <Modal show={editing !== null} onHide={() => setEditing(null)}>
+        {editing && (
+          <Form onSubmit={(e) => void save(e)} noValidate>
+            <Modal.Header closeButton>
+              <Modal.Title className="h4">
+                {editing.id ? t("Edit automated backup") : t("Add automated backup")}
+              </Modal.Title>
+            </Modal.Header>
+            <Modal.Body>
+              {formError && (
+                <Alert variant="danger">
+                  <AlertBody>{formError}</AlertBody>
+                </Alert>
+              )}
+              <Form.Group className="mb-3" controlId="schedule-destination">
+                <Form.Label>
+                  <T text="Destination" /><span className="text-danger"> *</span>
+                </Form.Label>
+                <Form.Control
+                  className="font-monospace"
+                  placeholder="/var/backups/feldspar"
+                  value={editing.destination}
+                  isInvalid={errors.destination !== undefined}
+                  onChange={(e) => setEditing({ ...editing, destination: e.target.value })}
+                />
+                <Form.Control.Feedback type="invalid">
+                  {errors.destination && t(errors.destination)}
+                </Form.Control.Feedback>
+                <Form.Text muted>
+                  <T text="An absolute path to a directory on the server. It is created if it does not exist, and no other automated backup may use it." />
+                </Form.Text>
+              </Form.Group>
+              <Form.Group className="mb-3" controlId="schedule-frequency">
+                <Form.Label><T text="Frequency" /></Form.Label>
+                <Form.Select
+                  value={editing.frequency}
+                  onChange={(e) =>
+                    setEditing({ ...editing, frequency: e.target.value as Frequency })
+                  }
+                >
+                  {FREQUENCIES.map((f) => (
+                    <option key={f.value} value={f.value}>
+                      {t(f.label)}
+                    </option>
+                  ))}
+                </Form.Select>
+              </Form.Group>
+              <Form.Group className="mb-0" controlId="schedule-retention">
+                <Form.Label><T text="Retention (days)" /></Form.Label>
+                <Form.Control
+                  type="number"
+                  min={1}
+                  max={MAX_RETENTION_DAYS}
+                  step={1}
+                  value={editing.retention}
+                  isInvalid={errors.retention !== undefined}
+                  onChange={(e) => setEditing({ ...editing, retention: e.target.value })}
+                />
+                <Form.Control.Feedback type="invalid">
+                  {errors.retention && t(errors.retention)}
+                </Form.Control.Feedback>
+                <Form.Text muted>
+                  <T text="Backups in the directory older than this are deleted after each new backup." />
+                </Form.Text>
+              </Form.Group>
+            </Modal.Body>
+            <Modal.Footer>
+              <Button variant="secondary" type="button" onClick={() => setEditing(null)}>
+                <T text="Cancel" />
+              </Button>
+              <Button type="submit" disabled={saving}>
+                {saving ? t("Saving…") : t("Save")}
+              </Button>
+            </Modal.Footer>
+          </Form>
+        )}
+      </Modal>
+    </div>
   );
 }

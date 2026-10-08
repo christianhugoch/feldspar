@@ -2906,3 +2906,144 @@ async fn node_modules_is_neither_backed_up_nor_restored() -> sc_error::Result<()
     assert!(!target.files.join("web/node_modules").exists());
     Ok(())
 }
+
+/// Automated backups, end to end: a schedule is created through the API the card
+/// uses, the backup task's tick writes a real backup into its directory (with the
+/// remembered selection), prunes what is past its retention, and records what it
+/// did where the list reads it. Editing and deleting go through the same API, and
+/// the checks the dialog relies on refuse what they should.
+#[tokio::test]
+async fn an_automated_backup_writes_and_prunes_its_directory() -> sc_error::Result<()> {
+    let mut server = setup().await?;
+    furnish(&mut server).await?;
+    let dest = temp_dir().join("nightly");
+
+    // Refused: a relative path, an unknown frequency, a zero retention.
+    for bad in [
+        json!({ "destination": "backups", "frequency": "daily", "retention_days": 7 }),
+        json!({ "destination": dest.to_string_lossy(), "frequency": "hourly", "retention_days": 7 }),
+        json!({ "destination": dest.to_string_lossy(), "frequency": "daily", "retention_days": 0 }),
+    ] {
+        let (status, body) = server
+            .client
+            .send("POST", "/api/backup/schedules", Some(bad))
+            .await;
+        assert!(status.is_client_error(), "{status} {body}");
+    }
+
+    // Created; the directory did not exist and is made on save.
+    let created = ok(
+        &mut server,
+        "POST",
+        "/api/backup/schedules",
+        Some(json!({
+            "destination": format!("{}/", dest.to_string_lossy()),
+            "frequency": "daily",
+            "retention_days": 7,
+        })),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap().to_owned();
+    assert_eq!(created["destination"], json!(dest.to_string_lossy()));
+    assert_eq!(created["last_success_at"], Value::Null);
+    assert!(dest.is_dir());
+
+    // A second schedule into the same directory would prune the first's files.
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            "/api/backup/schedules",
+            Some(json!({ "destination": dest.to_string_lossy(), "frequency": "weekly", "retention_days": 30 })),
+        )
+        .await;
+    assert!(status.is_client_error(), "{status} {body}");
+
+    // An old backup past its retention, a recent one, and a file that is not a
+    // backup at all.
+    let old = "feldspar-backup-2000-01-01-020000.zip";
+    let now = chrono::Utc::now();
+    let recent = format!(
+        "feldspar-backup-{}.zip",
+        (now - chrono::Duration::days(2)).format("%Y-%m-%d-%H%M%S")
+    );
+    for name in [old, recent.as_str(), "README.txt"] {
+        std::fs::write(dest.join(name), b"x").unwrap();
+    }
+
+    // Rows are left out of what the Backup card includes; the automated backup
+    // must honour that.
+    sc_config::set_config(
+        &server.catalog,
+        sc_config::BACKUP_INCLUDE,
+        json!({ "exclude_table_data": ["books"] }),
+    )
+    .await?;
+
+    let scheduler = sc_server::BackupScheduler::new(server.catalog.clone());
+    let ran = scheduler.tick(now).await;
+    assert_eq!(ran.len(), 1);
+    // Not due again a minute later.
+    assert!(
+        scheduler
+            .tick(now + chrono::Duration::minutes(1))
+            .await
+            .is_empty()
+    );
+
+    let list = ok(&mut server, "GET", "/api/backup/schedules", None).await;
+    let entry = &list.as_array().unwrap()[0];
+    assert_eq!(entry["last_error"], Value::Null, "{entry}");
+    assert!(entry["last_success_at"].is_string());
+    let written = std::path::PathBuf::from(entry["last_file"].as_str().unwrap());
+    assert_eq!(written.parent(), Some(dest.as_path()));
+    let archive = std::fs::read(&written).unwrap();
+    assert!(has_entry(&archive, "tables/books/table.json"));
+    assert!(!has_entry(&archive, "tables/books/rows.json"));
+
+    assert!(!dest.join(old).exists(), "the old backup should be pruned");
+    assert!(dest.join(&recent).exists());
+    assert!(dest.join("README.txt").exists());
+    // No temporary file left behind.
+    assert!(std::fs::read_dir(&dest).unwrap().all(|e| {
+        !e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".partial")
+    }));
+
+    // Edited: weekly, longer retention. What it last did is kept.
+    let updated = ok(
+        &mut server,
+        "PUT",
+        &format!("/api/backup/schedules/{id}"),
+        Some(json!({ "destination": dest.to_string_lossy(), "frequency": "weekly", "retention_days": 30 })),
+    )
+    .await;
+    assert_eq!(updated["frequency"], json!("weekly"));
+    assert_eq!(updated["retention_days"], json!(30));
+    assert!(updated["last_success_at"].is_string());
+
+    // Deleted: gone from the list, and the backups it wrote stay.
+    let deleted = ok(
+        &mut server,
+        "DELETE",
+        &format!("/api/backup/schedules/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(deleted["deleted"], json!(true));
+    let list = ok(&mut server, "GET", "/api/backup/schedules", None).await;
+    assert_eq!(list, json!([]));
+    assert!(written.exists());
+
+    // Admin-only, like the rest of the Backup tab.
+    let (status, _) = server.client.send("POST", "/api/logout", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = server
+        .client
+        .send("GET", "/api/backup/schedules", None)
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    Ok(())
+}

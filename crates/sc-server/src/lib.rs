@@ -58,7 +58,7 @@ pub use agents::{AgentServices, install_agents, install_agents_on};
 pub use apps::{AppMounts, MountedApp, build_and_mount, mount_all, subdomain_in, subdomain_of};
 pub use backup::{
     Available as BackupContents, BACKUP_CREATE_ROUTE, BACKUP_UPLOAD_ROUTE, BackupPreferences,
-    RestoreReport, Selection as BackupSelection,
+    BackupScheduler, RestoreReport, Selection as BackupSelection, start_backup_scheduler,
 };
 pub use browser::{BROWSER_NAMES, ChromiumDriver, DriverConfig, detect_browser};
 pub use chat::AGENT_CHAT_ROUTE;

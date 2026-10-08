@@ -4537,6 +4537,100 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    // --- automated backups --------------------------------------------------
+    // The schedules are a list in `_fd_config`; what each last did is a second
+    // key only the backup scheduler writes (`crate::backup::schedule`), merged in
+    // here so the card can say when each last ran and whether it failed.
+
+    reg.register("listBackupSchedules", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                use crate::backup::schedule::{load_schedules, load_statuses, schedule_json};
+                let schedules = load_schedules(&catalog).await?;
+                let statuses = load_statuses(&catalog).await?;
+                let list: Vec<Json> = schedules
+                    .iter()
+                    .map(|s| schedule_json(s, statuses.get(&s.id)))
+                    .collect();
+                Ok(HandlerResponse::ok(Json::Array(list)))
+            }
+        }
+    });
+
+    reg.register("createBackupSchedule", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                use crate::backup::schedule::{
+                    BackupSchedule, check_destination, check_unique, load_schedules,
+                    save_schedules, schedule_json,
+                };
+                let schedule =
+                    BackupSchedule::from_body(uuid::Uuid::new_v4(), require_object(&ctx.body)?)?;
+                let mut schedules = load_schedules(&catalog).await?;
+                check_unique(&schedule, &schedules)?;
+                check_destination(&schedule.destination).await?;
+                schedules.push(schedule.clone());
+                save_schedules(&catalog, &schedules).await?;
+                Ok(HandlerResponse::ok(schedule_json(&schedule, None)))
+            }
+        }
+    });
+
+    reg.register("updateBackupSchedule", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                use crate::backup::schedule::{
+                    BackupSchedule, check_destination, check_unique, load_schedules, load_statuses,
+                    save_schedules, schedule_json,
+                };
+                let id = parse_uuid(ctx.path_param("id")?, "backup schedule")?;
+                let schedule = BackupSchedule::from_body(id, require_object(&ctx.body)?)?;
+                let mut schedules = load_schedules(&catalog).await?;
+                let Some(slot) = schedules.iter_mut().find(|s| s.id == id) else {
+                    return Err(Error::not_found(format!(
+                        "no automated backup with id {id}"
+                    )));
+                };
+                *slot = schedule.clone();
+                check_unique(&schedule, &schedules)?;
+                check_destination(&schedule.destination).await?;
+                save_schedules(&catalog, &schedules).await?;
+                let statuses = load_statuses(&catalog).await?;
+                Ok(HandlerResponse::ok(schedule_json(
+                    &schedule,
+                    statuses.get(&id),
+                )))
+            }
+        }
+    });
+
+    reg.register("deleteBackupSchedule", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                use crate::backup::schedule::{load_schedules, save_schedules};
+                let id = parse_uuid(ctx.path_param("id")?, "backup schedule")?;
+                let mut schedules = load_schedules(&catalog).await?;
+                let before = schedules.len();
+                schedules.retain(|s| s.id != id);
+                let deleted = schedules.len() != before;
+                if deleted {
+                    save_schedules(&catalog, &schedules).await?;
+                }
+                // The backups already written stay where they are: deleting a
+                // schedule stops new ones, it does not take the old ones with it.
+                Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
+            }
+        }
+    });
+
     // --- clear all ----------------------------------------------------------
 
     reg.register("getClearAllPreview", {
@@ -9490,11 +9584,11 @@ async fn stored_backup_preferences(catalog: &Catalog) -> Result<crate::backup::B
 /// What a downloaded backup is called: the date and time it was taken, to the
 /// second, so a directory of them sorts chronologically and two taken the same
 /// afternoon do not overwrite each other.
+///
+/// The same name an automated backup is written under, so a directory can hold
+/// both and the automated backups' pruning treats them alike.
 fn backup_filename() -> String {
-    format!(
-        "feldspar-backup-{}.zip",
-        chrono::Utc::now().format("%Y-%m-%d-%H%M%S")
-    )
+    crate::backup::schedule::backup_file_name(chrono::Utc::now())
 }
 
 /// A [`FormField`] as the API returns it (matching `form_field_schema`): enough
