@@ -1,14 +1,19 @@
 //! Automated backups: any number of recurring backups, each written to a
 //! directory on the server and pruned after a number of days.
 //!
-//! A schedule is three things an admin chooses — a **destination** (an absolute
-//! directory on this server), a **frequency** (daily or weekly) and a
-//! **retention** (days before a backup in that directory is deleted) — stored as
-//! a list under [`BACKUP_SCHEDULES`](sc_config::BACKUP_SCHEDULES). What each one
-//! *includes* is not a fourth choice: it is the selection the Backup card shows
-//! as "Currently included" ([`BackupPreferences`]), read afresh on every run, so
-//! a table added next week is in next week's automated backup exactly as it is in
-//! the next manual one.
+//! A schedule is four things an admin chooses — a **destination** (an absolute
+//! directory on this server), a **frequency** (daily or weekly), a
+//! **retention** (days before a backup in that directory is deleted) and what
+//! it **includes** — stored as a list under
+//! [`BACKUP_SCHEDULES`](sc_config::BACKUP_SCHEDULES). Each schedule has its own
+//! selection, so a nightly schema-only backup and a weekly full one can sit
+//! side by side.
+//!
+//! The selection is stored the way the Backup card's is: as
+//! [`BackupPreferences`], what was *left out*. A table added next week is in
+//! next week's automated backup unless somebody unticks it, for the reason the
+//! manual backup works that way — a schedule that quietly stopped covering new
+//! tables is the worst way to find out how it works.
 //!
 //! [`BackupScheduler`] runs them: one task, waking on the minute like the trigger
 //! scheduler, running the due schedules **one after another** — two full
@@ -103,15 +108,23 @@ pub struct BackupSchedule {
     /// Backups in `destination` older than this many days are deleted after
     /// each successful run.
     pub retention_days: i64,
+    /// What each backup includes, as what is left out.
+    pub include: BackupPreferences,
 }
 
 impl BackupSchedule {
     /// Read a schedule from an admin's request body (`destination`,
-    /// `frequency`, `retention_days`), with the id it is to have.
+    /// `frequency`, `retention_days`), with the id it is to have and what it
+    /// includes (which the caller works out from the body's `include`
+    /// selection; see [`include_from_body`]).
     ///
     /// Checks what can be checked without the disk or the other schedules; see
     /// [`check_destination`] and [`check_unique`] for those.
-    pub fn from_body(id: Uuid, body: &Map<String, Json>) -> Result<BackupSchedule> {
+    pub fn from_body(
+        id: Uuid,
+        body: &Map<String, Json>,
+        include: BackupPreferences,
+    ) -> Result<BackupSchedule> {
         let destination = body
             .get("destination")
             .and_then(Json::as_str)
@@ -137,16 +150,18 @@ impl BackupSchedule {
             destination,
             frequency,
             retention_days,
+            include,
         })
     }
 
-    /// The stored shape (and, with a status merged in, the API's).
+    /// The stored shape.
     pub fn to_json(&self) -> Json {
         json!({
             "id": self.id.to_string(),
             "destination": self.destination,
             "frequency": self.frequency.as_str(),
             "retention_days": self.retention_days,
+            "include": self.include.to_json(),
         })
     }
 
@@ -156,7 +171,11 @@ impl BackupSchedule {
     fn from_json(value: &Json) -> Option<BackupSchedule> {
         let obj = value.as_object()?;
         let id = Uuid::parse_str(obj.get("id")?.as_str()?).ok()?;
-        BackupSchedule::from_body(id, obj).ok()
+        let include = obj
+            .get("include")
+            .map(BackupPreferences::from_json)
+            .unwrap_or_default();
+        BackupSchedule::from_body(id, obj, include).ok()
     }
 }
 
@@ -313,9 +332,46 @@ async fn save_statuses(catalog: &Catalog, statuses: &HashMap<Uuid, ScheduleStatu
     .await
 }
 
-/// A schedule with what it last did, as `listBackupSchedules` returns it.
-pub fn schedule_json(schedule: &BackupSchedule, status: Option<&ScheduleStatus>) -> Json {
+/// What a request body's `include` selection means for a schedule, given what
+/// there is to choose from now and what the schedule left out before (`None`
+/// for a new one).
+///
+/// The same arithmetic the manual backup does with the Backup card's
+/// selection ([`BackupPreferences::of`]): a name not on offer keeps whatever it
+/// had, so an exclusion is not erased by editing the schedule on a day the table
+/// happens not to exist.
+pub fn include_from_body(
+    body: &Map<String, Json>,
+    available: &Available,
+    previous: Option<&BackupPreferences>,
+) -> Result<BackupPreferences> {
+    let selection = match body.get("include") {
+        Some(value) => super::Selection::from_json(value)?,
+        None => {
+            return Err(Error::invalid(
+                "`include` must say what each automated backup includes",
+            ));
+        }
+    };
+    let previous = previous.cloned().unwrap_or_default();
+    Ok(BackupPreferences::of(&previous, available, &selection))
+}
+
+/// A schedule with what it last did, as `listBackupSchedules` returns it: its
+/// `include` is the selection it means for what is on offer *now* — the shape
+/// the dialog's pickers take.
+pub fn schedule_json(
+    schedule: &BackupSchedule,
+    status: Option<&ScheduleStatus>,
+    available: &Available,
+) -> Json {
     let mut out = schedule.to_json();
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert(
+            "include".to_owned(),
+            schedule.include.selection(available).to_json(),
+        );
+    }
     let status = status.cloned().unwrap_or_default().to_json();
     if let (Some(out), Some(status)) = (out.as_object_mut(), status.as_object()) {
         out.extend(status.clone());
@@ -399,11 +455,7 @@ pub async fn run_schedule(
         .map_err(|e| Error::file(format!("creating `{}`: {e}", dir.display())))?;
 
     let available: Available = super::available(catalog).await?;
-    let preferences = match sc_config::stored_config(catalog, sc_config::BACKUP_INCLUDE).await? {
-        Some(value) => BackupPreferences::from_json(&value),
-        None => BackupPreferences::default(),
-    };
-    let bytes = super::write_backup(catalog, &preferences.selection(&available)).await?;
+    let bytes = super::write_backup(catalog, &schedule.include.selection(&available)).await?;
 
     let name = backup_file_name(at);
     let target = dir.join(&name);
@@ -539,6 +591,7 @@ mod tests {
             destination: "/srv/backups".into(),
             frequency,
             retention_days: 7,
+            include: BackupPreferences::default(),
         }
     }
 
@@ -604,6 +657,7 @@ mod tests {
         let ok = BackupSchedule::from_body(
             Uuid::nil(),
             &body(json!({ "destination": "/srv/b", "frequency": "weekly", "retention_days": 30 })),
+            BackupPreferences::default(),
         )
         .unwrap();
         assert_eq!(ok.frequency, Frequency::Weekly);
@@ -614,8 +668,24 @@ mod tests {
             json!({ "destination": "/srv/b", "frequency": "daily" }),
             json!({ "destination": "rel", "frequency": "daily", "retention_days": 3 }),
         ] {
-            assert!(BackupSchedule::from_body(Uuid::nil(), &body(bad)).is_err());
+            assert!(
+                BackupSchedule::from_body(Uuid::nil(), &body(bad), BackupPreferences::default())
+                    .is_err()
+            );
         }
+    }
+
+    #[test]
+    fn a_stored_schedule_keeps_what_it_left_out() {
+        let s = BackupSchedule {
+            include: BackupPreferences {
+                exclude_table_data: vec!["books".into()],
+                users: false,
+                ..BackupPreferences::default()
+            },
+            ..schedule(Frequency::Daily)
+        };
+        assert_eq!(BackupSchedule::from_json(&s.to_json()), Some(s));
     }
 
     #[test]

@@ -3861,10 +3861,12 @@ pub fn admin_endpoints() -> EndpointSet {
     );
 
     // **Automated backups**: any number of recurring backups, each written to a
-    // directory on the server (Settings → Backup → Automated backups). What each
-    // includes is the selection `getBackupOptions` returns — the one the Backup
-    // card shows — so there is no selection here. The `last_*` fields are what
-    // the schedule last did, written by the server's backup task and read-only.
+    // directory on the server (Settings → Backup → Automated backups). Each has
+    // its own `include`, the same selection the backup dialog sends, and the
+    // server stores it as what was left out, as it does the Backup card's — so
+    // a table created later is in the next run. Read back, `include` is that
+    // resolved against what there is now. The `last_*` fields are what the
+    // schedule last did, written by the server's backup task and read-only.
     set.register(
         Endpoint::new(
             "listBackupSchedules",
@@ -3998,8 +4000,8 @@ fn api_token_schema() -> TypeSchema {
 }
 
 /// What an admin sets on an automated backup: an absolute directory on the
-/// server, `daily` or `weekly`, and the days before a backup in that directory
-/// is deleted.
+/// server, `daily` or `weekly`, the days before a backup in that directory is
+/// deleted, and what each backup includes.
 fn backup_schedule_input_schema() -> TypeSchema {
     TypeSchema::struct_of(backup_schedule_input_fields())
 }
@@ -4009,6 +4011,7 @@ fn backup_schedule_input_fields() -> Vec<StructField> {
         StructField::new("destination", TypeSchema::text()),
         StructField::new("frequency", TypeSchema::text()),
         StructField::new("retention_days", TypeSchema::int()),
+        StructField::new("include", backup_selection_schema()),
     ]
 }
 

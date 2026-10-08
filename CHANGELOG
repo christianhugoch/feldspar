@@ -2,6 +2,47 @@
 
 Changes in reverse chronological order.
 
+## Automated backups: each schedule chooses what it includes
+
+Each automated backup now has its own choice of what goes in, with the same options as the backup
+dialog: table definitions, table data, applications, file stores, users, modules, database
+connections, streams, analytics, model fits, LLM providers, agents, triggers, views, pages, SSL
+and other settings. Before this, every schedule used the Backup card's "Currently included"
+selection.
+
+- **The modal** has a "What each backup includes" section under destination, frequency and
+  retention. It uses the backup dialog's own pickers and checkboxes, which are now a shared
+  `IncludeFields` component in `BackupTab.tsx`. The backup and restore dialog uses the same
+  component, with control ids prefixed so the two sets cannot clash.
+  - A new schedule starts from the Backup card's current selection.
+  - Saving with nothing ticked is refused beside the fields.
+  - Each line in the list shows an "Includes: …" summary under the destination.
+- **Stored as what was left out**: each schedule keeps a `BackupPreferences` under `include`,
+  as the Backup card's `backup_include` does. A table created later goes into the schedule's
+  next backup, rows and all, unless someone unticks it.
+  - On edit, the previous exclusions are an input (`BackupPreferences::of`). An exclusion
+    naming a table that is missing that day survives the edit.
+  - Read back, `include` is resolved against what there is now, in the shape the dialog's
+    pickers take.
+- **API**: `createBackupSchedule` and `updateBackupSchedule` take a required `include`. It is
+  the same selection schema `restoreBackup` and the backup download take.
+  `listBackupSchedules` returns each schedule's `include`. All four `client.ts` copies are
+  regenerated.
+- **The runner** writes `schedule.include.selection(available)` for each schedule. It no
+  longer reads `backup_include`.
+- **Tests**:
+  - A new unit test checks that a stored schedule round-trips its exclusions.
+  - `backup_api::an_automated_backup_writes_and_prunes_its_directory` now creates the schedule
+    with its own selection: the books table without its rows, no users, triggers included.
+    - It checks that the written zip matches that selection while the Backup card's
+      selection is unchanged.
+    - It checks that a table created afterwards appears in the schedule's `include` with its
+      rows, while the books' rows stay out.
+    - It checks that an edit ticking users keeps the other exclusions, and that a body
+      without `include` is refused.
+  - `backupSchedules.test.ts` covers the form's `include`: opening on it, refusing an empty
+    one, and sending it.
+
 ## Automated backups
 
 Any number of recurring backups, each written to a directory on the server (Settings → Backup).
@@ -13,9 +54,8 @@ Any number of recurring backups, each written to a directory on the server (Sett
   fields: **destination** (an absolute path on the server), **frequency** (daily or weekly) and
   **retention** (days before old backups in that directory are deleted). The form's checks are in
   `ui/admin/src/backupSchedules.ts`, tested in `backupSchedules.test.ts`.
-- **What an automated backup includes** is what the Backup card shows as "Currently included"
-  (the remembered `backup_include` exclusions), read afresh on every run, so a table added later
-  is in the next automated backup without anyone editing the schedule.
+- **What an automated backup includes** was the Backup card's "Currently included" selection.
+  Superseded by the entry above: each schedule now has its own.
 - **Storage**: two new internal `_fd_config` keys, so there is no new table and no migration.
   `backup_schedules` holds the list and is written by the admin. `backup_schedule_status` holds
   each schedule's last attempt, last success, last error and last file, and only the backup task

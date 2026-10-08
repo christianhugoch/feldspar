@@ -2,12 +2,16 @@
  * The Automated backups card's model: the form a schedule is edited in, what
  * it checks before it is sent, and what a schedule's line says about it.
  *
+ * A schedule's `include` is the same selection the backup dialog edits
+ * (`backup.ts` has its arithmetic); the server stores it as what was left out.
+ *
  * The server checks everything again (and checks what only it can — that the
  * directory can be written, that no other schedule writes there); these checks
  * are here so the obvious mistakes are reported beside the field rather than
  * after a round trip.
  */
 
+import { isEmpty, type BackupSelection } from "./backup";
 import type { ListBackupSchedulesResponse } from "./client";
 
 export type BackupSchedule = ListBackupSchedulesResponse[number];
@@ -29,11 +33,13 @@ export type ScheduleForm = {
   destination: string;
   frequency: Frequency;
   retention: string;
+  include: BackupSelection;
 };
 
-/** What the Add button opens on. */
-export function newScheduleForm(): ScheduleForm {
-  return { id: null, destination: "", frequency: "daily", retention: "30" };
+/** What the Add button opens on: what to include starts as the Backup card's
+ * current selection, the one choice the admin has already made. */
+export function newScheduleForm(include: BackupSelection): ScheduleForm {
+  return { id: null, destination: "", frequency: "daily", retention: "30", include };
 }
 
 /** What the Edit button opens on. */
@@ -43,14 +49,15 @@ export function editScheduleForm(schedule: BackupSchedule): ScheduleForm {
     destination: schedule.destination,
     frequency: schedule.frequency === "weekly" ? "weekly" : "daily",
     retention: String(schedule.retention_days),
+    include: schedule.include,
   };
 }
 
 /** Why the form cannot be sent, by field; empty when it can. */
 export function scheduleFormErrors(
   form: ScheduleForm,
-): Partial<Record<"destination" | "retention", string>> {
-  const errors: Partial<Record<"destination" | "retention", string>> = {};
+): Partial<Record<"destination" | "retention" | "include", string>> {
+  const errors: Partial<Record<"destination" | "retention" | "include", string>> = {};
   const destination = form.destination.trim();
   if (destination === "") errors.destination = "Enter a directory on the server.";
   else if (!destination.startsWith("/"))
@@ -61,6 +68,7 @@ export function scheduleFormErrors(
   const days = Number(retention);
   if (!/^\d+$/.test(retention) || days < 1 || days > MAX_RETENTION_DAYS)
     errors.retention = `Enter a whole number of days from 1 to ${MAX_RETENTION_DAYS}.`;
+  if (isEmpty(form.include)) errors.include = "Choose at least one thing to include.";
   return errors;
 }
 
@@ -70,6 +78,7 @@ export function scheduleBody(form: ScheduleForm) {
     destination: form.destination.trim(),
     frequency: form.frequency,
     retention_days: Number(form.retention.trim()),
+    include: form.include,
   };
 }
 

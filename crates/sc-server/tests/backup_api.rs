@@ -2907,22 +2907,51 @@ async fn node_modules_is_neither_backed_up_nor_restored() -> sc_error::Result<()
     Ok(())
 }
 
+/// What the automated backup in the test below includes: the books table's
+/// definition but not its rows, the file store, the triggers — and no users.
+fn schedule_include() -> Value {
+    json!({
+        "tables": ["books"],
+        "table_data": [],
+        "applications": [],
+        "file_stores": ["assets"],
+        "users": false,
+        "triggers": true,
+        "ssl": true,
+    })
+}
+
+/// `body` with [`schedule_include`] as its `include`.
+fn with_include(mut body: Value) -> Value {
+    body["include"] = schedule_include();
+    body
+}
+
 /// Automated backups, end to end: a schedule is created through the API the card
-/// uses, the backup task's tick writes a real backup into its directory (with the
-/// remembered selection), prunes what is past its retention, and records what it
-/// did where the list reads it. Editing and deleting go through the same API, and
-/// the checks the dialog relies on refuse what they should.
+/// uses, with a selection of its own; the backup task's tick writes a real backup
+/// into its directory holding exactly that selection, prunes what is past its
+/// retention, and records what it did where the list reads it. Editing and
+/// deleting go through the same API, and the checks the dialog relies on refuse
+/// what they should.
 #[tokio::test]
 async fn an_automated_backup_writes_and_prunes_its_directory() -> sc_error::Result<()> {
     let mut server = setup().await?;
     furnish(&mut server).await?;
     let dest = temp_dir().join("nightly");
 
-    // Refused: a relative path, an unknown frequency, a zero retention.
+    // Refused: a relative path, an unknown frequency, a zero retention, and no
+    // word on what to include.
     for bad in [
-        json!({ "destination": "backups", "frequency": "daily", "retention_days": 7 }),
-        json!({ "destination": dest.to_string_lossy(), "frequency": "hourly", "retention_days": 7 }),
-        json!({ "destination": dest.to_string_lossy(), "frequency": "daily", "retention_days": 0 }),
+        with_include(
+            json!({ "destination": "backups", "frequency": "daily", "retention_days": 7 }),
+        ),
+        with_include(
+            json!({ "destination": dest.to_string_lossy(), "frequency": "hourly", "retention_days": 7 }),
+        ),
+        with_include(
+            json!({ "destination": dest.to_string_lossy(), "frequency": "daily", "retention_days": 0 }),
+        ),
+        json!({ "destination": dest.to_string_lossy(), "frequency": "daily", "retention_days": 7 }),
     ] {
         let (status, body) = server
             .client
@@ -2936,15 +2965,19 @@ async fn an_automated_backup_writes_and_prunes_its_directory() -> sc_error::Resu
         &mut server,
         "POST",
         "/api/backup/schedules",
-        Some(json!({
+        Some(with_include(json!({
             "destination": format!("{}/", dest.to_string_lossy()),
             "frequency": "daily",
             "retention_days": 7,
-        })),
+        }))),
     )
     .await;
     let id = created["id"].as_str().unwrap().to_owned();
     assert_eq!(created["destination"], json!(dest.to_string_lossy()));
+    // Read back as the selection it means now, the shape the dialog's pickers take.
+    assert_eq!(created["include"]["tables"], json!(["books"]));
+    assert_eq!(created["include"]["table_data"], json!([]));
+    assert_eq!(created["include"]["users"], json!(false));
     assert_eq!(created["last_success_at"], Value::Null);
     assert!(dest.is_dir());
 
@@ -2954,7 +2987,9 @@ async fn an_automated_backup_writes_and_prunes_its_directory() -> sc_error::Resu
         .send(
             "POST",
             "/api/backup/schedules",
-            Some(json!({ "destination": dest.to_string_lossy(), "frequency": "weekly", "retention_days": 30 })),
+            Some(with_include(
+                json!({ "destination": dest.to_string_lossy(), "frequency": "weekly", "retention_days": 30 }),
+            )),
         )
         .await;
     assert!(status.is_client_error(), "{status} {body}");
@@ -2970,15 +3005,6 @@ async fn an_automated_backup_writes_and_prunes_its_directory() -> sc_error::Resu
     for name in [old, recent.as_str(), "README.txt"] {
         std::fs::write(dest.join(name), b"x").unwrap();
     }
-
-    // Rows are left out of what the Backup card includes; the automated backup
-    // must honour that.
-    sc_config::set_config(
-        &server.catalog,
-        sc_config::BACKUP_INCLUDE,
-        json!({ "exclude_table_data": ["books"] }),
-    )
-    .await?;
 
     let scheduler = sc_server::BackupScheduler::new(server.catalog.clone());
     let ran = scheduler.tick(now).await;
@@ -2997,9 +3023,31 @@ async fn an_automated_backup_writes_and_prunes_its_directory() -> sc_error::Resu
     assert!(entry["last_success_at"].is_string());
     let written = std::path::PathBuf::from(entry["last_file"].as_str().unwrap());
     assert_eq!(written.parent(), Some(dest.as_path()));
+    // The schedule's own selection, not the Backup card's (which still has
+    // everything ticked).
     let archive = std::fs::read(&written).unwrap();
     assert!(has_entry(&archive, "tables/books/table.json"));
     assert!(!has_entry(&archive, "tables/books/rows.json"));
+    assert!(!has_entry(&archive, "users.json"));
+    assert!(has_entry(&archive, "triggers.json"));
+    let (_, options) = server.client.send("GET", "/api/backup", None).await;
+    assert_eq!(options["include"]["users"], json!(true));
+    assert_eq!(options["include"]["table_data"], json!(["books"]));
+
+    // Stored as what was left out: a table created later is in the schedule,
+    // rows and all, while the books' rows stay out.
+    server
+        .catalog
+        .create_table(
+            "reviews",
+            &[DataField::plain("id", TypeRef::Basic(BasicType::Int))
+                .required()
+                .primary_key()],
+        )
+        .await?;
+    let list = ok(&mut server, "GET", "/api/backup/schedules", None).await;
+    assert_eq!(list[0]["include"]["tables"], json!(["books", "reviews"]));
+    assert_eq!(list[0]["include"]["table_data"], json!(["reviews"]));
 
     assert!(!dest.join(old).exists(), "the old backup should be pruned");
     assert!(dest.join(&recent).exists());
@@ -3012,16 +3060,26 @@ async fn an_automated_backup_writes_and_prunes_its_directory() -> sc_error::Resu
             .ends_with(".partial")
     }));
 
-    // Edited: weekly, longer retention. What it last did is kept.
+    // Edited: weekly, longer retention, and the users ticked. What it last did
+    // is kept.
+    let mut include = list[0]["include"].clone();
+    include["users"] = json!(true);
     let updated = ok(
         &mut server,
         "PUT",
         &format!("/api/backup/schedules/{id}"),
-        Some(json!({ "destination": dest.to_string_lossy(), "frequency": "weekly", "retention_days": 30 })),
+        Some(json!({
+            "destination": dest.to_string_lossy(),
+            "frequency": "weekly",
+            "retention_days": 30,
+            "include": include,
+        })),
     )
     .await;
     assert_eq!(updated["frequency"], json!("weekly"));
     assert_eq!(updated["retention_days"], json!(30));
+    assert_eq!(updated["include"]["users"], json!(true));
+    assert_eq!(updated["include"]["table_data"], json!(["reviews"]));
     assert!(updated["last_success_at"].is_string());
 
     // Deleted: gone from the list, and the backups it wrote stay.

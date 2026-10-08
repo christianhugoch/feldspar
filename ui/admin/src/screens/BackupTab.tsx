@@ -236,7 +236,7 @@ export function BackupTab() {
         </div>
       )}
 
-      <AutomatedBackups />
+      <AutomatedBackups contents={contents} cardSelection={selection} />
 
       {selection !== null && (
         <IncludeDialog
@@ -285,11 +285,8 @@ function restoreSubtitle(uploaded: UploadedBackup): string | undefined {
   return parts.length > 0 ? parts.join(" ") : undefined;
 }
 
-/** The tick boxes and pickers, over whatever is on offer.
- *
- * Every row is conditional on the offering holding something of that kind, which
- * is what lets one dialog serve both flows: a backup with no applications in it
- * simply has no applications row to untick. */
+/** The backup and restore dialog: a title, the tick boxes and pickers, and a
+ * button. */
 function IncludeDialog({
   show,
   title,
@@ -313,7 +310,6 @@ function IncludeDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const { t } = useT();
   const nothing = isEmpty(selection);
   return (
     <Modal show={show} onHide={onCancel} size="lg" scrollable>
@@ -323,336 +319,12 @@ function IncludeDialog({
       <Modal.Body>
         {subtitle && <p className="text-secondary">{subtitle}</p>}
 
-        {contents.tables.length > 0 && (
-          <>
-            <Form.Group className="mb-3" controlId="backup-tables">
-              <Form.Label><T text="Table definitions" /></Form.Label>
-              <MultiSelect
-                id="backup-tables"
-                options={choices(contents.tables, "row")}
-                selected={selection.tables}
-                onChange={(tables) => onChange(withTables(selection, tables))}
-                placeholder={t("No tables")}
-              />
-              <Form.Text muted>
-                <T text="A table's columns, its access rules and its ownership formula." />
-              </Form.Text>
-            </Form.Group>
-
-            <Form.Group className="mb-3" controlId="backup-table-data">
-              <Form.Label><T text="Table data" /></Form.Label>
-              <MultiSelect
-                id="backup-table-data"
-                options={dataChoices(contents, selection)}
-                selected={selection.table_data}
-                onChange={(data) => onChange(withTableData(selection, data))}
-                placeholder={t("No rows")}
-                emptyText="Choose a table above first."
-              />
-              {/* The rule, where it applies: the picker above is the list this one
-                  offers, so unticking a table takes its rows with it. */}
-              <Form.Text muted>
-                <T text="The rows themselves. Only a table whose definition is included can have its rows included." />
-              </Form.Text>
-            </Form.Group>
-          </>
-        )}
-
-        {contents.applications.length > 0 && (
-          <Form.Group className="mb-3" controlId="backup-applications">
-            <Form.Label><T text="Applications" /></Form.Label>
-            <MultiSelect
-              id="backup-applications"
-              options={choices(contents.applications, "")}
-              selected={selection.applications}
-              onChange={(applications) => onChange({ ...selection, applications })}
-              placeholder={t("No applications")}
-            />
-            <Form.Text muted>
-              <T text="An application's definition — its framework, its API and the tables it exposes. The built bundle is not in the backup: a restored application is rebuilt from the source its file store carries, which is what makes it serve again without anybody pressing Build." />
-            </Form.Text>
-          </Form.Group>
-        )}
-
-        {contents.file_stores.length > 0 && (
-          <Form.Group className="mb-3" controlId="backup-file-stores">
-            <Form.Label><T text="Files" /></Form.Label>
-            <MultiSelect
-              id="backup-file-stores"
-              options={choices(contents.file_stores, "file")}
-              selected={selection.file_stores}
-              onChange={(file_stores) => onChange({ ...selection, file_stores })}
-              placeholder={t("No file stores")}
-            />
-            <Form.Text muted>
-              <T text="Each store's definition, every file in it, and each file's access rules." />
-            </Form.Text>
-          </Form.Group>
-        )}
-
-        <div className="mb-2">
-          {contents.users > 0 && (
-            <Form.Check
-              type="checkbox"
-              id="backup-users"
-              className="mb-2"
-              checked={selection.users}
-              onChange={(e) => onChange({ ...selection, users: e.target.checked })}
-              label={
-                <>
-                  <span className="fw-semibold"><T text="Users and roles" /></span>
-                  <div className="text-muted small">
-                    {/* One message with a plural form, not a ternary over two
-                      English words: which forms a language needs is CLDR's
-                      answer and not this file's. */}
-                    {t(
-                      "{count} accounts, with their password hashes and the roles they hold.",
-                      { count: contents.users },
-                    )}
-                  </div>
-                </>
-              }
-            />
-          )}
-          {contents.modules > 0 && (
-            <Form.Check
-              type="checkbox"
-              id="backup-modules"
-              className="mb-2"
-              checked={selection.modules}
-              onChange={(e) => onChange({ ...selection, modules: e.target.checked })}
-              label={
-                <>
-                  <span className="fw-semibold"><T text="Modules" /></span>
-                  <div className="text-muted small">
-                    {t(
-                      "{count} installed modules, with their settings and permissions. A restore reinstalls each one from where it came, so the server needs npm or pip and whatever the module was installed from.",
-                      { count: contents.modules },
-                    )}
-                  </div>
-                </>
-              }
-            />
-          )}
-          {contents.db_connections > 0 && (
-            <Form.Check
-              type="checkbox"
-              id="backup-db-connections"
-              className="mb-2"
-              checked={selection.db_connections}
-              onChange={(e) => onChange({ ...selection, db_connections: e.target.checked })}
-              label={
-                <>
-                  <span className="fw-semibold"><T text="Database connections" /></span>
-                  <div className="text-muted small">
-                    {t(
-                      "{count} connections to other databases, with their passwords. Their tables stay in those databases and are not copied into the backup.",
-                      { count: contents.db_connections },
-                    )}
-                  </div>
-                </>
-              }
-            />
-          )}
-          {contents.streams > 0 && (
-            <Form.Check
-              type="checkbox"
-              id="backup-streams"
-              className="mb-2"
-              checked={selection.streams}
-              onChange={(e) => onChange({ ...selection, streams: e.target.checked })}
-              label={
-                <>
-                  <span className="fw-semibold"><T text="Streams" /></span>
-                  <div className="text-muted small">
-                    {t(
-                      "{count} streams, with their connection settings and secrets. What they have delivered is not included.",
-                      { count: contents.streams },
-                    )}
-                  </div>
-                </>
-              }
-            />
-          )}
-          {hasAnalytics(contents) && (
-            <Form.Check
-              type="checkbox"
-              id="backup-analytics"
-              className="mb-2"
-              checked={selection.analytics}
-              onChange={(e) => onChange(withAnalytics(selection, e.target.checked))}
-              label={
-                <>
-                  <span className="fw-semibold"><T text="Analytics" /></span>
-                  <div className="text-muted small">
-                    {t("Datasets: {datasets}. Models: {models}. Workspaces: {workspaces}.", {
-                      datasets: contents.datasets,
-                      models: contents.models,
-                      workspaces: contents.workspaces,
-                    })}
-                  </div>
-                </>
-              }
-            />
-          )}
-          {contents.fits > 0 && (
-            <Form.Check
-              type="checkbox"
-              id="backup-fits"
-              className="mb-2"
-              checked={selection.fits}
-              disabled={!selection.analytics}
-              onChange={(e) => onChange({ ...selection, fits: e.target.checked })}
-              label={
-                <>
-                  <span className="fw-semibold"><T text="Model fits" /></span>
-                  <div className="text-muted small">
-                    {t(
-                      "{count} fitted model instances, with their output frames and posterior draws. These can be large; without them a restored model has to be fitted again.",
-                      { count: contents.fits },
-                    )}
-                  </div>
-                </>
-              }
-            />
-          )}
-          {contents.llm_providers > 0 && (
-            <Form.Check
-              type="checkbox"
-              id="backup-llm-providers"
-              className="mb-2"
-              checked={selection.llm_providers}
-              onChange={(e) => onChange({ ...selection, llm_providers: e.target.checked })}
-              label={
-                <>
-                  <span className="fw-semibold"><T text="LLM providers" /></span>
-                  <div className="text-muted small">
-                    {t(
-                      "{count} LLM providers, with their models and API keys. An agent is only restored if the provider it uses is.",
-                      { count: contents.llm_providers },
-                    )}
-                  </div>
-                </>
-              }
-            />
-          )}
-          {contents.agents > 0 && (
-            <Form.Check
-              type="checkbox"
-              id="backup-agents"
-              className="mb-2"
-              checked={selection.agents}
-              onChange={(e) => onChange({ ...selection, agents: e.target.checked })}
-              label={
-                <>
-                  <span className="fw-semibold"><T text="Agents" /></span>
-                  <div className="text-muted small">
-                    {t(
-                      "{count} agents, with their prompts and enabled traits. Their runs are not included.",
-                      { count: contents.agents },
-                    )}
-                  </div>
-                </>
-              }
-            />
-          )}
-          {contents.triggers > 0 && (
-            <Form.Check
-              type="checkbox"
-              id="backup-triggers"
-              className="mb-2"
-              checked={selection.triggers}
-              onChange={(e) => onChange({ ...selection, triggers: e.target.checked })}
-              label={
-                <>
-                  <span className="fw-semibold"><T text="Triggers" /></span>
-                  <div className="text-muted small">
-                    {t(
-                      "{count} triggers. A trigger that fires on a table whose definition is not included is left out with it.",
-                      { count: contents.triggers },
-                    )}
-                  </div>
-                </>
-              }
-            />
-          )}
-          {contents.views > 0 && (
-            <Form.Check
-              type="checkbox"
-              id="backup-views"
-              className="mb-2"
-              checked={selection.views}
-              disabled={selection.applications.length === 0}
-              onChange={(e) => onChange({ ...selection, views: e.target.checked })}
-              label={
-                <>
-                  <span className="fw-semibold"><T text="Views" /></span>
-                  <div className="text-muted small">
-                    {t(
-                      "{count} Saltcorn UI views, in the applications chosen above. Restored, they replace the views the application has.",
-                      { count: contents.views },
-                    )}
-                  </div>
-                </>
-              }
-            />
-          )}
-          {contents.pages > 0 && (
-            <Form.Check
-              type="checkbox"
-              id="backup-pages"
-              className="mb-2"
-              checked={selection.pages}
-              disabled={selection.applications.length === 0}
-              onChange={(e) => onChange({ ...selection, pages: e.target.checked })}
-              label={
-                <>
-                  <span className="fw-semibold"><T text="Pages" /></span>
-                  <div className="text-muted small">
-                    {t(
-                      "{count} Saltcorn UI pages, in the applications chosen above. Restored, they replace the pages the application has.",
-                      { count: contents.pages },
-                    )}
-                  </div>
-                </>
-              }
-            />
-          )}
-          {contents.ssl && (
-            <Form.Check
-              type="checkbox"
-              id="backup-ssl"
-              className="mb-2"
-              checked={selection.ssl}
-              onChange={(e) => onChange({ ...selection, ssl: e.target.checked })}
-              label={
-                <>
-                  <span className="fw-semibold"><T text="SSL settings" /></span>
-                  <div className="text-muted small">
-                    <T text="The certificate source and, in" /> <code>custom</code> <T text="mode, the certificate and its private key." />
-                  </div>
-                </>
-              }
-            />
-          )}
-          {contents.settings && (
-            <Form.Check
-              type="checkbox"
-              id="backup-settings"
-              className="mb-2"
-              checked={selection.settings}
-              onChange={(e) => onChange({ ...selection, settings: e.target.checked })}
-              label={
-                <>
-                  <span className="fw-semibold"><T text="Other settings" /></span>
-                  <div className="text-muted small">
-                    <T text="Email, localisation and development settings, including the SMTP password." />
-                  </div>
-                </>
-              }
-            />
-          )}
-        </div>
+        <IncludeFields
+          idPrefix="backup"
+          contents={contents}
+          selection={selection}
+          onChange={onChange}
+        />
       </Modal.Body>
       <Modal.Footer>
         <Button variant="secondary" type="button" onClick={onCancel}>
@@ -663,6 +335,361 @@ function IncludeDialog({
         </Button>
       </Modal.Footer>
     </Modal>
+  );
+}
+
+/** The tick boxes and pickers, over whatever is on offer.
+ *
+ * Every row is conditional on the offering holding something of that kind, which
+ * is what lets one set of fields serve three places: a backup, a restore (where
+ * a file with no applications in it simply has no applications row to untick),
+ * and an automated backup's dialog. `idPrefix` keeps the controls' ids apart
+ * between them. */
+function IncludeFields({
+  idPrefix,
+  contents,
+  selection,
+  onChange,
+}: {
+  idPrefix: string;
+  contents: BackupContents;
+  selection: BackupSelection;
+  onChange: (selection: BackupSelection) => void;
+}) {
+  const { t } = useT();
+  return (
+    <>
+      {contents.tables.length > 0 && (
+        <>
+          <Form.Group className="mb-3" controlId={`${idPrefix}-tables`}>
+            <Form.Label><T text="Table definitions" /></Form.Label>
+            <MultiSelect
+              id={`${idPrefix}-tables`}
+              options={choices(contents.tables, "row")}
+              selected={selection.tables}
+              onChange={(tables) => onChange(withTables(selection, tables))}
+              placeholder={t("No tables")}
+            />
+            <Form.Text muted>
+              <T text="A table's columns, its access rules and its ownership formula." />
+            </Form.Text>
+          </Form.Group>
+
+          <Form.Group className="mb-3" controlId={`${idPrefix}-table-data`}>
+            <Form.Label><T text="Table data" /></Form.Label>
+            <MultiSelect
+              id={`${idPrefix}-table-data`}
+              options={dataChoices(contents, selection)}
+              selected={selection.table_data}
+              onChange={(data) => onChange(withTableData(selection, data))}
+              placeholder={t("No rows")}
+              emptyText="Choose a table above first."
+            />
+            {/* The rule, where it applies: the picker above is the list this one
+                offers, so unticking a table takes its rows with it. */}
+            <Form.Text muted>
+              <T text="The rows themselves. Only a table whose definition is included can have its rows included." />
+            </Form.Text>
+          </Form.Group>
+        </>
+      )}
+
+      {contents.applications.length > 0 && (
+        <Form.Group className="mb-3" controlId={`${idPrefix}-applications`}>
+          <Form.Label><T text="Applications" /></Form.Label>
+          <MultiSelect
+            id={`${idPrefix}-applications`}
+            options={choices(contents.applications, "")}
+            selected={selection.applications}
+            onChange={(applications) => onChange({ ...selection, applications })}
+            placeholder={t("No applications")}
+          />
+          <Form.Text muted>
+            <T text="An application's definition — its framework, its API and the tables it exposes. The built bundle is not in the backup: a restored application is rebuilt from the source its file store carries, which is what makes it serve again without anybody pressing Build." />
+          </Form.Text>
+        </Form.Group>
+      )}
+
+      {contents.file_stores.length > 0 && (
+        <Form.Group className="mb-3" controlId={`${idPrefix}-file-stores`}>
+          <Form.Label><T text="Files" /></Form.Label>
+          <MultiSelect
+            id={`${idPrefix}-file-stores`}
+            options={choices(contents.file_stores, "file")}
+            selected={selection.file_stores}
+            onChange={(file_stores) => onChange({ ...selection, file_stores })}
+            placeholder={t("No file stores")}
+          />
+          <Form.Text muted>
+            <T text="Each store's definition, every file in it, and each file's access rules." />
+          </Form.Text>
+        </Form.Group>
+      )}
+
+      <div className="mb-2">
+        {contents.users > 0 && (
+          <Form.Check
+            type="checkbox"
+            id={`${idPrefix}-users`}
+            className="mb-2"
+            checked={selection.users}
+            onChange={(e) => onChange({ ...selection, users: e.target.checked })}
+            label={
+              <>
+                <span className="fw-semibold"><T text="Users and roles" /></span>
+                <div className="text-muted small">
+                  {/* One message with a plural form, not a ternary over two
+                    English words: which forms a language needs is CLDR's
+                    answer and not this file's. */}
+                  {t(
+                    "{count} accounts, with their password hashes and the roles they hold.",
+                    { count: contents.users },
+                  )}
+                </div>
+              </>
+            }
+          />
+        )}
+        {contents.modules > 0 && (
+          <Form.Check
+            type="checkbox"
+            id={`${idPrefix}-modules`}
+            className="mb-2"
+            checked={selection.modules}
+            onChange={(e) => onChange({ ...selection, modules: e.target.checked })}
+            label={
+              <>
+                <span className="fw-semibold"><T text="Modules" /></span>
+                <div className="text-muted small">
+                  {t(
+                    "{count} installed modules, with their settings and permissions. A restore reinstalls each one from where it came, so the server needs npm or pip and whatever the module was installed from.",
+                    { count: contents.modules },
+                  )}
+                </div>
+              </>
+            }
+          />
+        )}
+        {contents.db_connections > 0 && (
+          <Form.Check
+            type="checkbox"
+            id={`${idPrefix}-db-connections`}
+            className="mb-2"
+            checked={selection.db_connections}
+            onChange={(e) => onChange({ ...selection, db_connections: e.target.checked })}
+            label={
+              <>
+                <span className="fw-semibold"><T text="Database connections" /></span>
+                <div className="text-muted small">
+                  {t(
+                    "{count} connections to other databases, with their passwords. Their tables stay in those databases and are not copied into the backup.",
+                    { count: contents.db_connections },
+                  )}
+                </div>
+              </>
+            }
+          />
+        )}
+        {contents.streams > 0 && (
+          <Form.Check
+            type="checkbox"
+            id={`${idPrefix}-streams`}
+            className="mb-2"
+            checked={selection.streams}
+            onChange={(e) => onChange({ ...selection, streams: e.target.checked })}
+            label={
+              <>
+                <span className="fw-semibold"><T text="Streams" /></span>
+                <div className="text-muted small">
+                  {t(
+                    "{count} streams, with their connection settings and secrets. What they have delivered is not included.",
+                    { count: contents.streams },
+                  )}
+                </div>
+              </>
+            }
+          />
+        )}
+        {hasAnalytics(contents) && (
+          <Form.Check
+            type="checkbox"
+            id={`${idPrefix}-analytics`}
+            className="mb-2"
+            checked={selection.analytics}
+            onChange={(e) => onChange(withAnalytics(selection, e.target.checked))}
+            label={
+              <>
+                <span className="fw-semibold"><T text="Analytics" /></span>
+                <div className="text-muted small">
+                  {t("Datasets: {datasets}. Models: {models}. Workspaces: {workspaces}.", {
+                    datasets: contents.datasets,
+                    models: contents.models,
+                    workspaces: contents.workspaces,
+                  })}
+                </div>
+              </>
+            }
+          />
+        )}
+        {contents.fits > 0 && (
+          <Form.Check
+            type="checkbox"
+            id={`${idPrefix}-fits`}
+            className="mb-2"
+            checked={selection.fits}
+            disabled={!selection.analytics}
+            onChange={(e) => onChange({ ...selection, fits: e.target.checked })}
+            label={
+              <>
+                <span className="fw-semibold"><T text="Model fits" /></span>
+                <div className="text-muted small">
+                  {t(
+                    "{count} fitted model instances, with their output frames and posterior draws. These can be large; without them a restored model has to be fitted again.",
+                    { count: contents.fits },
+                  )}
+                </div>
+              </>
+            }
+          />
+        )}
+        {contents.llm_providers > 0 && (
+          <Form.Check
+            type="checkbox"
+            id={`${idPrefix}-llm-providers`}
+            className="mb-2"
+            checked={selection.llm_providers}
+            onChange={(e) => onChange({ ...selection, llm_providers: e.target.checked })}
+            label={
+              <>
+                <span className="fw-semibold"><T text="LLM providers" /></span>
+                <div className="text-muted small">
+                  {t(
+                    "{count} LLM providers, with their models and API keys. An agent is only restored if the provider it uses is.",
+                    { count: contents.llm_providers },
+                  )}
+                </div>
+              </>
+            }
+          />
+        )}
+        {contents.agents > 0 && (
+          <Form.Check
+            type="checkbox"
+            id={`${idPrefix}-agents`}
+            className="mb-2"
+            checked={selection.agents}
+            onChange={(e) => onChange({ ...selection, agents: e.target.checked })}
+            label={
+              <>
+                <span className="fw-semibold"><T text="Agents" /></span>
+                <div className="text-muted small">
+                  {t(
+                    "{count} agents, with their prompts and enabled traits. Their runs are not included.",
+                    { count: contents.agents },
+                  )}
+                </div>
+              </>
+            }
+          />
+        )}
+        {contents.triggers > 0 && (
+          <Form.Check
+            type="checkbox"
+            id={`${idPrefix}-triggers`}
+            className="mb-2"
+            checked={selection.triggers}
+            onChange={(e) => onChange({ ...selection, triggers: e.target.checked })}
+            label={
+              <>
+                <span className="fw-semibold"><T text="Triggers" /></span>
+                <div className="text-muted small">
+                  {t(
+                    "{count} triggers. A trigger that fires on a table whose definition is not included is left out with it.",
+                    { count: contents.triggers },
+                  )}
+                </div>
+              </>
+            }
+          />
+        )}
+        {contents.views > 0 && (
+          <Form.Check
+            type="checkbox"
+            id={`${idPrefix}-views`}
+            className="mb-2"
+            checked={selection.views}
+            disabled={selection.applications.length === 0}
+            onChange={(e) => onChange({ ...selection, views: e.target.checked })}
+            label={
+              <>
+                <span className="fw-semibold"><T text="Views" /></span>
+                <div className="text-muted small">
+                  {t(
+                    "{count} Saltcorn UI views, in the applications chosen above. Restored, they replace the views the application has.",
+                    { count: contents.views },
+                  )}
+                </div>
+              </>
+            }
+          />
+        )}
+        {contents.pages > 0 && (
+          <Form.Check
+            type="checkbox"
+            id={`${idPrefix}-pages`}
+            className="mb-2"
+            checked={selection.pages}
+            disabled={selection.applications.length === 0}
+            onChange={(e) => onChange({ ...selection, pages: e.target.checked })}
+            label={
+              <>
+                <span className="fw-semibold"><T text="Pages" /></span>
+                <div className="text-muted small">
+                  {t(
+                    "{count} Saltcorn UI pages, in the applications chosen above. Restored, they replace the pages the application has.",
+                    { count: contents.pages },
+                  )}
+                </div>
+              </>
+            }
+          />
+        )}
+        {contents.ssl && (
+          <Form.Check
+            type="checkbox"
+            id={`${idPrefix}-ssl`}
+            className="mb-2"
+            checked={selection.ssl}
+            onChange={(e) => onChange({ ...selection, ssl: e.target.checked })}
+            label={
+              <>
+                <span className="fw-semibold"><T text="SSL settings" /></span>
+                <div className="text-muted small">
+                  <T text="The certificate source and, in" /> <code>custom</code> <T text="mode, the certificate and its private key." />
+                </div>
+              </>
+            }
+          />
+        )}
+        {contents.settings && (
+          <Form.Check
+            type="checkbox"
+            id={`${idPrefix}-settings`}
+            className="mb-2"
+            checked={selection.settings}
+            onChange={(e) => onChange({ ...selection, settings: e.target.checked })}
+            label={
+              <>
+                <span className="fw-semibold"><T text="Other settings" /></span>
+                <div className="text-muted small">
+                  <T text="Email, localisation and development settings, including the SMTP password." />
+                </div>
+              </>
+            }
+          />
+        )}
+      </div>
+    </>
   );
 }
 
@@ -712,11 +739,17 @@ function RestoreReport({ report }: { report: RestoreBackupResponse }) {
 /** The Automated backups card: the recurring backups, one line each, with an
  * Add button and an Edit/Delete pair per line, edited in a modal.
  *
- * Its own component with its own state, because nothing in it touches the
- * backup and restore flows above — except the selection, which the server
- * reads for itself on every run (what the Backup card says is currently
- * included is what every automated backup includes). */
-function AutomatedBackups() {
+ * Each schedule has its own selection, edited with the same fields as the
+ * backup dialog (`IncludeFields`). What there is to choose from is the Backup
+ * card's `contents`, and a new schedule starts from the card's current
+ * selection (`cardSelection`) — the choice the admin has already made once. */
+function AutomatedBackups({
+  contents,
+  cardSelection,
+}: {
+  contents: BackupContents;
+  cardSelection: BackupSelection | null;
+}) {
   const { t } = useT();
   const [schedules, setSchedules] = useState<BackupSchedule[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -733,9 +766,11 @@ function AutomatedBackups() {
     }
   }, []);
 
+  // Read again when what there is to back up changes (a restore, a backup just
+  // taken): each schedule's selection comes back resolved against it.
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, contents]);
 
   const open = (form: ScheduleForm) => {
     setEditing(form);
@@ -792,11 +827,14 @@ function AutomatedBackups() {
         <div>
           <h3 className="card-title"><T text="Automated backups" /></h3>
           <p className="card-subtitle text-secondary mb-0">
-            <T text="Backups written to a directory on the server on a schedule. Each includes what the Backup card says is currently included, and backups in the directory older than the retention period are deleted." />
+            <T text="Backups written to a directory on the server on a schedule, each with its own choice of what to include. Backups in the directory older than the retention period are deleted." />
           </p>
         </div>
         <div className="card-actions">
-          <Button onClick={() => open(newScheduleForm())}>
+          <Button
+            disabled={cardSelection === null}
+            onClick={() => cardSelection && open(newScheduleForm(cardSelection))}
+          >
             <IconPlus /> <T text="Add" />
           </Button>
         </div>
@@ -834,7 +872,14 @@ function AutomatedBackups() {
               const status = scheduleStatus(schedule);
               return (
                 <tr key={schedule.id}>
-                  <td className="font-monospace">{schedule.destination}</td>
+                  <td>
+                    <div className="font-monospace">{schedule.destination}</div>
+                    <div className="small text-secondary">
+                      {t("Includes: {summary}", {
+                        summary: summarise(schedule.include, contents),
+                      })}
+                    </div>
+                  </td>
                   <td>{t(frequencyLabel(schedule.frequency))}</td>
                   <td>{t("{count} days", { count: schedule.retention_days })}</td>
                   <td className={status.failed ? "text-danger small" : "text-secondary small"}>
@@ -867,7 +912,7 @@ function AutomatedBackups() {
         </Table>
       )}
 
-      <Modal show={editing !== null} onHide={() => setEditing(null)}>
+      <Modal show={editing !== null} onHide={() => setEditing(null)} size="lg" scrollable>
         {editing && (
           <Form onSubmit={(e) => void save(e)} noValidate>
             <Modal.Header closeButton>
@@ -914,7 +959,7 @@ function AutomatedBackups() {
                   ))}
                 </Form.Select>
               </Form.Group>
-              <Form.Group className="mb-0" controlId="schedule-retention">
+              <Form.Group className="mb-4" controlId="schedule-retention">
                 <Form.Label><T text="Retention (days)" /></Form.Label>
                 <Form.Control
                   type="number"
@@ -932,6 +977,22 @@ function AutomatedBackups() {
                   <T text="Backups in the directory older than this are deleted after each new backup." />
                 </Form.Text>
               </Form.Group>
+
+              <h4 className="mb-1"><T text="What each backup includes" /></h4>
+              <p className="text-secondary small mb-3">
+                <T text="Anything created later, such as a new table, is included unless you untick it here." />
+              </p>
+              {errors.include && (
+                <Alert variant="danger">
+                  <AlertBody>{t(errors.include)}</AlertBody>
+                </Alert>
+              )}
+              <IncludeFields
+                idPrefix="schedule-include"
+                contents={contents}
+                selection={editing.include}
+                onChange={(include) => setEditing({ ...editing, include })}
+              />
             </Modal.Body>
             <Modal.Footer>
               <Button variant="secondary" type="button" onClick={() => setEditing(null)}>

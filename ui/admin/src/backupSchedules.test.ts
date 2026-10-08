@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import { NO_CONTENTS, everything, type BackupSelection } from "./backup";
 import {
   editScheduleForm,
   newScheduleForm,
@@ -14,11 +15,19 @@ import {
   type BackupSchedule,
 } from "./backupSchedules";
 
+const all: BackupSelection = everything({
+  ...NO_CONTENTS,
+  tables: [{ name: "books", label: "books", count: 3 }],
+  users: 2,
+});
+const nothing: BackupSelection = { ...all, tables: [], table_data: [], users: false };
+
 const schedule: BackupSchedule = {
   id: "6f9619ff-8b86-d011-b42d-00c04fc964ff",
   destination: "/srv/backups",
   frequency: "weekly",
   retention_days: 30,
+  include: all,
   last_attempt_at: null,
   last_success_at: null,
   last_error: null,
@@ -27,17 +36,23 @@ const schedule: BackupSchedule = {
 
 describe("the schedule form", () => {
   it("opens empty for a new schedule and on the schedule for an edit", () => {
-    expect(newScheduleForm()).toMatchObject({ id: null, destination: "", frequency: "daily" });
+    expect(newScheduleForm(all)).toMatchObject({
+      id: null,
+      destination: "",
+      frequency: "daily",
+      include: all,
+    });
     expect(editScheduleForm(schedule)).toEqual({
       id: schedule.id,
       destination: "/srv/backups",
       frequency: "weekly",
       retention: "30",
+      include: all,
     });
   });
 
   it("wants an absolute destination", () => {
-    const form = { ...newScheduleForm(), retention: "7" };
+    const form = { ...newScheduleForm(all), retention: "7" };
     expect(scheduleFormErrors({ ...form, destination: "" }).destination).toBeDefined();
     expect(scheduleFormErrors({ ...form, destination: "backups" }).destination).toBeDefined();
     expect(scheduleFormErrors({ ...form, destination: "/srv/../etc" }).destination).toBeDefined();
@@ -45,16 +60,28 @@ describe("the schedule form", () => {
   });
 
   it("wants a whole number of days of at least one", () => {
-    const form = { ...newScheduleForm(), destination: "/srv/b" };
+    const form = { ...newScheduleForm(all), destination: "/srv/b" };
     for (const bad of ["", "0", "-3", "1.5", "seven", "99999"])
       expect(scheduleFormErrors({ ...form, retention: bad }).retention).toBeDefined();
     expect(scheduleFormErrors({ ...form, retention: " 14 " })).toEqual({});
   });
 
-  it("sends trimmed values and a number of days", () => {
+  it("wants something to include", () => {
+    const form = { ...newScheduleForm(nothing), destination: "/srv/b" };
+    expect(scheduleFormErrors(form).include).toBeDefined();
+    expect(scheduleFormErrors({ ...form, include: all })).toEqual({});
+  });
+
+  it("sends trimmed values, a number of days and the selection", () => {
     expect(
-      scheduleBody({ id: null, destination: " /srv/b ", frequency: "weekly", retention: "14" }),
-    ).toEqual({ destination: "/srv/b", frequency: "weekly", retention_days: 14 });
+      scheduleBody({
+        id: null,
+        destination: " /srv/b ",
+        frequency: "weekly",
+        retention: "14",
+        include: all,
+      }),
+    ).toEqual({ destination: "/srv/b", frequency: "weekly", retention_days: 14, include: all });
   });
 });
 

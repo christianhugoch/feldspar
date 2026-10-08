@@ -4550,9 +4550,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 use crate::backup::schedule::{load_schedules, load_statuses, schedule_json};
                 let schedules = load_schedules(&catalog).await?;
                 let statuses = load_statuses(&catalog).await?;
+                let available = crate::backup::available(&catalog).await?;
                 let list: Vec<Json> = schedules
                     .iter()
-                    .map(|s| schedule_json(s, statuses.get(&s.id)))
+                    .map(|s| schedule_json(s, statuses.get(&s.id), &available))
                     .collect();
                 Ok(HandlerResponse::ok(Json::Array(list)))
             }
@@ -4565,17 +4566,21 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 use crate::backup::schedule::{
-                    BackupSchedule, check_destination, check_unique, load_schedules,
-                    save_schedules, schedule_json,
+                    BackupSchedule, check_destination, check_unique, include_from_body,
+                    load_schedules, save_schedules, schedule_json,
                 };
-                let schedule =
-                    BackupSchedule::from_body(uuid::Uuid::new_v4(), require_object(&ctx.body)?)?;
+                let body = require_object(&ctx.body)?;
+                let available = crate::backup::available(&catalog).await?;
+                let include = include_from_body(body, &available, None)?;
+                let schedule = BackupSchedule::from_body(uuid::Uuid::new_v4(), body, include)?;
                 let mut schedules = load_schedules(&catalog).await?;
                 check_unique(&schedule, &schedules)?;
                 check_destination(&schedule.destination).await?;
                 schedules.push(schedule.clone());
                 save_schedules(&catalog, &schedules).await?;
-                Ok(HandlerResponse::ok(schedule_json(&schedule, None)))
+                Ok(HandlerResponse::ok(schedule_json(
+                    &schedule, None, &available,
+                )))
             }
         }
     });
@@ -4586,17 +4591,22 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 use crate::backup::schedule::{
-                    BackupSchedule, check_destination, check_unique, load_schedules, load_statuses,
-                    save_schedules, schedule_json,
+                    BackupSchedule, check_destination, check_unique, include_from_body,
+                    load_schedules, load_statuses, save_schedules, schedule_json,
                 };
                 let id = parse_uuid(ctx.path_param("id")?, "backup schedule")?;
-                let schedule = BackupSchedule::from_body(id, require_object(&ctx.body)?)?;
+                let body = require_object(&ctx.body)?;
+                let available = crate::backup::available(&catalog).await?;
                 let mut schedules = load_schedules(&catalog).await?;
                 let Some(slot) = schedules.iter_mut().find(|s| s.id == id) else {
                     return Err(Error::not_found(format!(
                         "no automated backup with id {id}"
                     )));
                 };
+                // The previous exclusions are an input, so one naming a table
+                // that is not here today survives the edit.
+                let include = include_from_body(body, &available, Some(&slot.include))?;
+                let schedule = BackupSchedule::from_body(id, body, include)?;
                 *slot = schedule.clone();
                 check_unique(&schedule, &schedules)?;
                 check_destination(&schedule.destination).await?;
@@ -4605,6 +4615,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 Ok(HandlerResponse::ok(schedule_json(
                     &schedule,
                     statuses.get(&id),
+                    &available,
                 )))
             }
         }
