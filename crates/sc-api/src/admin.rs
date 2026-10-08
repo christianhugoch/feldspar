@@ -3860,8 +3860,9 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
-    // **Automated backups**: any number of recurring backups, each written to a
-    // directory on the server (Settings → Backup → Automated backups). Each has
+    // **Automated backups**: any number of recurring backups, each sent to a
+    // directory on the server, an SFTP server or an S3-compatible bucket
+    // (Settings → Backup → Automated backups). Each has
     // its own `include`, the same selection the backup dialog sends, and the
     // server stores it as what was left out, as it does the Backup card's — so
     // a table created later is in the next run. Read back, `include` is that
@@ -3902,7 +3903,7 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
-    // Stops new backups; the ones already written stay in the directory.
+    // Stops new backups; the ones already written stay where they were sent.
     set.register(
         Endpoint::new(
             "deleteBackupSchedule",
@@ -3999,20 +4000,51 @@ fn api_token_schema() -> TypeSchema {
     ])
 }
 
-/// What an admin sets on an automated backup: an absolute directory on the
-/// server, `daily` or `weekly`, the days before a backup in that directory is
-/// deleted, and what each backup includes.
+/// What an admin sets on an automated backup: where the backups go, `daily`
+/// or `weekly`, the days before a backup there is deleted, and what each
+/// backup includes.
 fn backup_schedule_input_schema() -> TypeSchema {
     TypeSchema::struct_of(backup_schedule_input_fields())
 }
 
 fn backup_schedule_input_fields() -> Vec<StructField> {
     vec![
-        StructField::new("destination", TypeSchema::text()),
+        StructField::new("destination", backup_destination_schema()),
         StructField::new("frequency", TypeSchema::text()),
         StructField::new("retention_days", TypeSchema::int()),
         StructField::new("include", backup_selection_schema()),
     ]
+}
+
+/// Where an automated backup goes. `kind` is `local`, `sftp` or `s3`, and
+/// says which of the other fields apply:
+///
+/// - `local`: `directory`, an absolute path on the server.
+/// - `sftp`: `host`, `port` (22 when null), `username`, `password` and
+///   `directory` (absolute, or relative to the login's directory; empty for
+///   that directory). `host_key` is the server's key fingerprint, recorded when
+///   the schedule is saved and checked on every run; it is read-only.
+/// - `s3`: `endpoint` (any S3-compatible service; empty for AWS), `bucket`,
+///   `region` (empty for `us-east-1`), `access_key` and `secret_key`.
+///
+/// `password` and `secret_key` are sent as a mask; handing the mask back on an
+/// update keeps what is stored.
+fn backup_destination_schema() -> TypeSchema {
+    let text = || TypeSchema::optional(TypeSchema::text());
+    TypeSchema::struct_of([
+        StructField::new("kind", TypeSchema::text()),
+        StructField::new("directory", text()),
+        StructField::new("host", text()),
+        StructField::new("port", TypeSchema::optional(TypeSchema::int())),
+        StructField::new("username", text()),
+        StructField::new("password", text()),
+        StructField::new("host_key", text()),
+        StructField::new("endpoint", text()),
+        StructField::new("bucket", text()),
+        StructField::new("region", text()),
+        StructField::new("access_key", text()),
+        StructField::new("secret_key", text()),
+    ])
 }
 
 /// An automated backup, with what it last did.
@@ -4020,6 +4052,9 @@ fn backup_schedule_schema() -> TypeSchema {
     let mut fields = vec![StructField::new("id", TypeSchema::uuid())];
     fields.extend(backup_schedule_input_fields());
     fields.extend([
+        // Where the backups go, in one line: a path, an `sftp://` address or
+        // the bucket's URL.
+        StructField::new("location", TypeSchema::text()),
         StructField::new(
             "last_attempt_at",
             TypeSchema::optional(TypeSchema::timestamp()),
@@ -4030,7 +4065,8 @@ fn backup_schedule_schema() -> TypeSchema {
         ),
         // Why the last attempt failed; null when it succeeded.
         StructField::new("last_error", TypeSchema::optional(TypeSchema::text())),
-        // The full path of the last backup written.
+        // Where the last backup written is: a path, an `sftp://` address or a
+        // URL.
         StructField::new("last_file", TypeSchema::optional(TypeSchema::text())),
     ]);
     TypeSchema::struct_of(fields)

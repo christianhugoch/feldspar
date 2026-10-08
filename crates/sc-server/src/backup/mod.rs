@@ -60,8 +60,11 @@
 //! restorer sees it, so the upload, the dialog, the selection and the report are
 //! the same ones a Feldspar backup goes through.
 
+pub mod destination;
 mod restore;
+pub(crate) mod s3;
 pub mod schedule;
+mod sftp;
 mod v1;
 mod write;
 

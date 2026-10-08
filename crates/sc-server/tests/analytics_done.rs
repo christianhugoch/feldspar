@@ -1432,15 +1432,17 @@ impl Client {
 
     /// A workspace's stored state.
     async fn state_of(&mut self, id: &str) -> Value {
-        self.ok("GET", &format!("/api/workspaces/{id}"), None)
-            .await["state"]
-            .clone()
+        self.ok("GET", &format!("/api/workspaces/{id}"), None).await["state"].clone()
     }
 
     /// A panel drawn as a report draws it; a sentence instead is a failure.
     async fn render(&mut self, panel: &Value) -> Value {
         let drawn = self
-            .ok("POST", "/api/panels/render", Some(json!({ "panel": panel })))
+            .ok(
+                "POST",
+                "/api/panels/render",
+                Some(json!({ "panel": panel })),
+            )
             .await;
         assert!(drawn.get("error").is_none(), "{drawn}");
         drawn
@@ -1637,7 +1639,10 @@ async fn the_try_it_of_milestone_a4() -> sc_error::Result<()> {
         .iter()
         .map(|r| r[0].as_str().unwrap())
         .collect();
-    assert!(terms.contains(&"area") && terms.contains(&"bedrooms"), "{table}");
+    assert!(
+        terms.contains(&"area") && terms.contains(&"bedrooms"),
+        "{table}"
+    );
     let fitted = client.render(&residuals).await;
     let scored = fitted["plot"]["layers"][0]["rows"]
         .as_array()
@@ -1675,7 +1680,10 @@ async fn the_try_it_of_milestone_a4() -> sc_error::Result<()> {
     assert_eq!(drawn["plot"]["layers"][0]["total"], json!(houses_rows + 1));
     let fitted = client.render(&residuals).await;
     assert_eq!(
-        fitted["plot"]["layers"][0]["rows"].as_array().unwrap().len(),
+        fitted["plot"]["layers"][0]["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
         scored
     );
 

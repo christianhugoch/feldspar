@@ -1,5 +1,6 @@
 // The Settings screen's Backup tab: take a backup, restore one, or have the
-// server take them on a schedule (the Automated backups card, at the end).
+// server take them on a schedule, to a directory, an SFTP server or an S3
+// bucket (the Automated backups card, at the end).
 //
 // Two buttons and one dialog, twice. The dialog is the same component both times
 // (`IncludeDialog`) because the two questions are the same question asked of two
@@ -35,18 +36,25 @@ import {
   type BackupSelection,
 } from "../backup";
 import {
+  DEFAULT_SFTP_PORT,
+  DESTINATION_KINDS,
   FREQUENCIES,
   MAX_RETENTION_DAYS,
+  destinationKindLabel,
   editScheduleForm,
   frequencyLabel,
+  isStoredSecret,
   newScheduleForm,
   scheduleBody,
   scheduleFormErrors,
   scheduleStatus,
   type BackupSchedule,
+  type DestinationKind,
   type Frequency,
+  type ScheduleField,
   type ScheduleForm,
 } from "../backupSchedules";
+import { SECRET_SENTINEL } from "../dbConnection";
 import { IconDownload, IconPencil, IconPlus, IconTrash, IconUpload } from "../icons";
 import { AlertBody } from "../layout";
 import { MultiSelect } from "../multiSelect";
@@ -793,8 +801,8 @@ function AutomatedBackups({
       await load();
     } catch (err) {
       // Shown in the dialog, not behind it: the server's refusals — a
-      // directory it cannot write, one another schedule already uses — are
-      // about what was just typed.
+      // directory it cannot write, a password the SFTP server refused, a
+      // bucket another schedule already uses — are about what was just typed.
       setFormError(errorMessage(err, "Could not save the automated backup."));
     } finally {
       setSaving(false);
@@ -805,7 +813,7 @@ function AutomatedBackups({
     if (
       !window.confirm(
         t("Stop the automated backup to {destination}? The backups already there are kept.", {
-          destination: schedule.destination,
+          destination: schedule.location,
         }),
       )
     )
@@ -827,7 +835,7 @@ function AutomatedBackups({
         <div>
           <h3 className="card-title"><T text="Automated backups" /></h3>
           <p className="card-subtitle text-secondary mb-0">
-            <T text="Backups written to a directory on the server on a schedule, each with its own choice of what to include. Backups in the directory older than the retention period are deleted." />
+            <T text="Backups sent on a schedule to a directory on the server, an SFTP server or an S3-compatible bucket, each with its own choice of what to include. Backups there older than the retention period are deleted." />
           </p>
         </div>
         <div className="card-actions">
@@ -873,7 +881,19 @@ function AutomatedBackups({
               return (
                 <tr key={schedule.id}>
                   <td>
-                    <div className="font-monospace">{schedule.destination}</div>
+                    <div>
+                      <span className="badge bg-secondary-lt me-2">
+                        {destinationKindLabel(schedule.destination.kind, t)}
+                      </span>
+                      <span className="font-monospace">{schedule.location}</span>
+                    </div>
+                    {schedule.destination.host_key && (
+                      <div className="small text-secondary">
+                        {t("Host key {fingerprint}", {
+                          fingerprint: schedule.destination.host_key,
+                        })}
+                      </div>
+                    )}
                     <div className="small text-secondary">
                       {t("Includes: {summary}", {
                         summary: summarise(schedule.include, contents),
@@ -926,24 +946,11 @@ function AutomatedBackups({
                   <AlertBody>{formError}</AlertBody>
                 </Alert>
               )}
-              <Form.Group className="mb-3" controlId="schedule-destination">
-                <Form.Label>
-                  <T text="Destination" /><span className="text-danger"> *</span>
-                </Form.Label>
-                <Form.Control
-                  className="font-monospace"
-                  placeholder="/var/backups/feldspar"
-                  value={editing.destination}
-                  isInvalid={errors.destination !== undefined}
-                  onChange={(e) => setEditing({ ...editing, destination: e.target.value })}
-                />
-                <Form.Control.Feedback type="invalid">
-                  {errors.destination}
-                </Form.Control.Feedback>
-                <Form.Text muted>
-                  <T text="An absolute path to a directory on the server. It is created if it does not exist, and no other automated backup may use it." />
-                </Form.Text>
-              </Form.Group>
+              <DestinationFields
+                form={editing}
+                errors={errors}
+                onChange={(change) => setEditing({ ...editing, ...change })}
+              />
               <Form.Group className="mb-3" controlId="schedule-frequency">
                 <Form.Label><T text="Frequency" /></Form.Label>
                 <Form.Select
@@ -974,7 +981,7 @@ function AutomatedBackups({
                   {errors.retention}
                 </Form.Control.Feedback>
                 <Form.Text muted>
-                  <T text="Backups in the directory older than this are deleted after each new backup." />
+                  <T text="Backups at the destination older than this are deleted after each new backup." />
                 </Form.Text>
               </Form.Group>
 
@@ -1006,5 +1013,172 @@ function AutomatedBackups({
         )}
       </Modal>
     </div>
+  );
+}
+
+/** The top of the schedule dialog: where the backups go — local files, an
+ * SFTP server or an S3-compatible bucket — and that kind's own fields. */
+function DestinationFields({
+  form,
+  errors,
+  onChange,
+}: {
+  form: ScheduleForm;
+  errors: Partial<Record<ScheduleField, string>>;
+  onChange: (change: Partial<ScheduleForm>) => void;
+}) {
+  const { t } = useT();
+  /** A text box for one of the form's fields, with its error. */
+  const field = (
+    name: ScheduleField & keyof ScheduleForm,
+    label: string,
+    options: {
+      placeholder?: string;
+      help?: string;
+      required?: boolean;
+      monospace?: boolean;
+      type?: string;
+    } = {},
+  ) => (
+    <Form.Group className="mb-3" controlId={`schedule-${name}`}>
+      <Form.Label>
+        {label}
+        {options.required && <span className="text-danger"> *</span>}
+      </Form.Label>
+      <Form.Control
+        className={options.monospace ? "font-monospace" : undefined}
+        type={options.type ?? "text"}
+        placeholder={options.placeholder}
+        value={String(form[name] ?? "")}
+        isInvalid={errors[name] !== undefined}
+        onChange={(e) => onChange({ [name]: e.target.value })}
+      />
+      <Form.Control.Feedback type="invalid">{errors[name]}</Form.Control.Feedback>
+      {options.help && <Form.Text muted>{options.help}</Form.Text>}
+    </Form.Group>
+  );
+  /** A password box holding a stored secret as the mask: cleared on focus so
+   * typing replaces it rather than appending to it, and put back on blur if
+   * nothing was typed, so tabbing through the form keeps the stored one. */
+  const secret = (name: "password" | "secretKey", label: string) => (
+    <Form.Group className="mb-3" controlId={`schedule-${name}`}>
+      <Form.Label>
+        {label}
+        <span className="text-danger"> *</span>
+      </Form.Label>
+      <Form.Control
+        type="password"
+        autoComplete="new-password"
+        value={form[name]}
+        isInvalid={errors[name] !== undefined}
+        onChange={(e) => onChange({ [name]: e.target.value })}
+        onFocus={() => form.id && isStoredSecret(form[name]) && onChange({ [name]: "" })}
+        onBlur={() => form.id && form[name] === "" && onChange({ [name]: SECRET_SENTINEL })}
+      />
+      <Form.Control.Feedback type="invalid">{errors[name]}</Form.Control.Feedback>
+      {isStoredSecret(form[name]) && (
+        <Form.Text muted><T text="Stored. Type to replace it." /></Form.Text>
+      )}
+    </Form.Group>
+  );
+
+  return (
+    <>
+      <Form.Group className="mb-3" controlId="schedule-kind">
+        <Form.Label><T text="Destination" /></Form.Label>
+        <Form.Select
+          value={form.kind}
+          onChange={(e) => onChange({ kind: e.target.value as DestinationKind })}
+        >
+          {DESTINATION_KINDS.map((kind) => (
+            <option key={kind} value={kind}>
+              {destinationKindLabel(kind, t)}
+            </option>
+          ))}
+        </Form.Select>
+      </Form.Group>
+
+      {form.kind === "local" &&
+        field("directory", t("Directory"), {
+          required: true,
+          monospace: true,
+          placeholder: "/var/backups/feldspar",
+          help: t(
+            "An absolute path to a directory on the server. It is created if it does not exist, and no other automated backup may use it.",
+          ),
+        })}
+
+      {form.kind === "sftp" && (
+        <>
+          <div className="row">
+            <div className="col-sm-8">
+              {field("host", t("Host"), {
+                required: true,
+                monospace: true,
+                placeholder: "backup.example.com",
+              })}
+            </div>
+            <div className="col-sm-4">
+              {field("port", t("Port"), {
+                type: "number",
+                placeholder: String(DEFAULT_SFTP_PORT),
+              })}
+            </div>
+          </div>
+          <div className="row">
+            <div className="col-sm-6">{field("username", t("User name"), { required: true })}</div>
+            <div className="col-sm-6">{secret("password", t("Password"))}</div>
+          </div>
+          {field("remoteDirectory", t("Directory"), {
+            monospace: true,
+            placeholder: "backups/feldspar",
+            help: t(
+              "Absolute, or relative to where the login starts; empty for that directory itself. It is created if it does not exist.",
+            ),
+          })}
+          {form.hostKey ? (
+            <p className="small text-secondary">
+              {t(
+                "Host key {fingerprint}, recorded when this was last saved. Saving again accepts the key the server presents now.",
+                { fingerprint: form.hostKey },
+              )}
+            </p>
+          ) : (
+            <p className="small text-secondary">
+              <T text="Saving logs in to check the server and records its host key. A later backup is refused if the server presents a different key." />
+            </p>
+          )}
+        </>
+      )}
+
+      {form.kind === "s3" && (
+        <>
+          {field("endpoint", t("Endpoint"), {
+            monospace: true,
+            placeholder: "https://s3.eu-west-1.amazonaws.com",
+            help: t(
+              "The URL of any S3-compatible service, such as MinIO, Cloudflare R2 or Backblaze B2. Leave it empty for Amazon S3.",
+            ),
+          })}
+          <div className="row">
+            <div className="col-sm-6">
+              {field("bucket", t("Bucket"), { required: true, monospace: true })}
+            </div>
+            <div className="col-sm-6">
+              {field("region", t("Region"), { monospace: true, placeholder: "us-east-1" })}
+            </div>
+          </div>
+          <div className="row">
+            <div className="col-sm-6">
+              {field("accessKey", t("Access key"), { required: true, monospace: true })}
+            </div>
+            <div className="col-sm-6">{secret("secretKey", t("Secret key"))}</div>
+          </div>
+          <p className="small text-secondary">
+            <T text="Saving writes and deletes a test object to check the keys. No other automated backup may use the same bucket." />
+          </p>
+        </>
+      )}
+    </>
   );
 }

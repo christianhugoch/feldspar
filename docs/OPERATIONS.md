@@ -1249,6 +1249,46 @@ most for `--modules-dir`. **Restart a server that is already running on that
 database** afterwards, because it loaded its tables, applications and triggers when
 it started.
 
+#### Automated backups off the server
+
+**Settings → Backup → Automated backups** takes a backup every day or every week and
+sends it to one of three destinations:
+
+- **Local files**: a directory on the server. This is only as safe as the disk it
+  is on, so copy it elsewhere or use one of the two below.
+- **SFTP**: a host, a port (22 by default), a user name, a password and a
+  directory. A relative directory is relative to where the login starts.
+- **S3**: any S3-compatible service. Give the endpoint URL (empty for Amazon S3),
+  the bucket, the region (empty for `us-east-1`; Cloudflare R2 uses `auto`), an
+  access key and a secret key. Requests use path-style addresses
+  (`https://endpoint/bucket/key`), and backups are written at the top of the bucket.
+
+Saving a schedule tests the destination by doing what a run does: it logs in,
+creates the directory if it is missing, writes a test file, lists, and deletes the
+test file. A wrong password or a read-only bucket is reported in the dialog. The
+server must be able to reach the destination: outbound TCP to the SFTP port, or
+HTTPS to the endpoint.
+
+- **SFTP host keys are trusted on first use.** Saving records the server's key
+  fingerprint (`SHA256:…`, shown under the destination). Every run refuses a server
+  presenting a different key, so the password is never sent to whatever answers on
+  that address. Compare the fingerprint with `ssh-keygen -lf
+  /etc/ssh/ssh_host_ed25519_key.pub` on the SFTP server. If the server's key was
+  changed on purpose, open the schedule and save it to accept the new one.
+- **Credentials** are stored in the database (`_fd_config`, key
+  `backup_schedules`), like the SMTP password. They are never sent back to the
+  browser, and a backup that includes the settings includes them. Give the
+  schedule credentials that can do only this:
+  - for S3, a key limited to the one bucket, with `s3:PutObject`, `s3:ListBucket`
+    and `s3:DeleteObject`;
+  - for SFTP, a chrooted account.
+- **Retention** deletes only files named `feldspar-backup-YYYY-MM-DD-HHMMSS.zip`,
+  and judges their age by the time in the name. Two schedules may not share a
+  directory or a bucket, because each would prune the other's backups.
+- Each backup is built in memory and sent whole. Over SFTP it is written under a
+  temporary `.partial` name and renamed into place. An S3 upload is a single
+  `PUT`, which limits one backup to 5 GB on Amazon S3.
+
 ### 8.3 The bound on a model dataset
 
 A model's dataset is a `SELECT` an administrator wrote, and a fit holds the whole

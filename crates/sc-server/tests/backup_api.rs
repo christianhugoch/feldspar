@@ -2927,6 +2927,11 @@ fn with_include(mut body: Value) -> Value {
     body
 }
 
+/// A destination in a directory on the server.
+fn local(dir: impl AsRef<std::path::Path>) -> Value {
+    json!({ "kind": "local", "directory": dir.as_ref().to_string_lossy() })
+}
+
 /// Automated backups, end to end: a schedule is created through the API the card
 /// uses, with a selection of its own; the backup task's tick writes a real backup
 /// into its directory holding exactly that selection, prunes what is past its
@@ -2943,15 +2948,15 @@ async fn an_automated_backup_writes_and_prunes_its_directory() -> sc_error::Resu
     // word on what to include.
     for bad in [
         with_include(
-            json!({ "destination": "backups", "frequency": "daily", "retention_days": 7 }),
+            json!({ "destination": local("backups"), "frequency": "daily", "retention_days": 7 }),
         ),
         with_include(
-            json!({ "destination": dest.to_string_lossy(), "frequency": "hourly", "retention_days": 7 }),
+            json!({ "destination": local(&dest), "frequency": "hourly", "retention_days": 7 }),
         ),
         with_include(
-            json!({ "destination": dest.to_string_lossy(), "frequency": "daily", "retention_days": 0 }),
+            json!({ "destination": local(&dest), "frequency": "daily", "retention_days": 0 }),
         ),
-        json!({ "destination": dest.to_string_lossy(), "frequency": "daily", "retention_days": 7 }),
+        json!({ "destination": local(&dest), "frequency": "daily", "retention_days": 7 }),
     ] {
         let (status, body) = server
             .client
@@ -2966,14 +2971,15 @@ async fn an_automated_backup_writes_and_prunes_its_directory() -> sc_error::Resu
         "POST",
         "/api/backup/schedules",
         Some(with_include(json!({
-            "destination": format!("{}/", dest.to_string_lossy()),
+            "destination": local(format!("{}/", dest.to_string_lossy())),
             "frequency": "daily",
             "retention_days": 7,
         }))),
     )
     .await;
     let id = created["id"].as_str().unwrap().to_owned();
-    assert_eq!(created["destination"], json!(dest.to_string_lossy()));
+    assert_eq!(created["destination"], local(&dest));
+    assert_eq!(created["location"], json!(dest.to_string_lossy()));
     // Read back as the selection it means now, the shape the dialog's pickers take.
     assert_eq!(created["include"]["tables"], json!(["books"]));
     assert_eq!(created["include"]["table_data"], json!([]));
@@ -2988,7 +2994,7 @@ async fn an_automated_backup_writes_and_prunes_its_directory() -> sc_error::Resu
             "POST",
             "/api/backup/schedules",
             Some(with_include(
-                json!({ "destination": dest.to_string_lossy(), "frequency": "weekly", "retention_days": 30 }),
+                json!({ "destination": local(&dest), "frequency": "weekly", "retention_days": 30 }),
             )),
         )
         .await;
@@ -3069,7 +3075,7 @@ async fn an_automated_backup_writes_and_prunes_its_directory() -> sc_error::Resu
         "PUT",
         &format!("/api/backup/schedules/{id}"),
         Some(json!({
-            "destination": dest.to_string_lossy(),
+            "destination": local(&dest),
             "frequency": "weekly",
             "retention_days": 30,
             "include": include,
@@ -3105,3 +3111,8 @@ async fn an_automated_backup_writes_and_prunes_its_directory() -> sc_error::Resu
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     Ok(())
 }
+
+/// Automated backups sent to an S3-compatible bucket and to an SFTP server,
+/// each played by a server in this process.
+#[path = "backup_remote.rs"]
+mod remote;

@@ -4541,6 +4541,11 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
     // The schedules are a list in `_fd_config`; what each last did is a second
     // key only the backup scheduler writes (`crate::backup::schedule`), merged in
     // here so the card can say when each last ran and whether it failed.
+    //
+    // A destination's secrets (an SFTP password, an S3 secret key) go out as
+    // the mask and come back as it when unchanged (`keep_secrets`). Saving
+    // reaches the destination (`check`), which for SFTP is also when the
+    // server's host key is learnt and recorded.
 
     reg.register("listBackupSchedules", {
         let catalog = catalog.clone();
@@ -4566,16 +4571,17 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 use crate::backup::schedule::{
-                    BackupSchedule, check_destination, check_unique, include_from_body,
-                    load_schedules, save_schedules, schedule_json,
+                    BackupSchedule, check_unique, include_from_body, load_schedules,
+                    save_schedules, schedule_json,
                 };
                 let body = require_object(&ctx.body)?;
                 let available = crate::backup::available(&catalog).await?;
                 let include = include_from_body(body, &available, None)?;
-                let schedule = BackupSchedule::from_body(uuid::Uuid::new_v4(), body, include)?;
+                let mut schedule = BackupSchedule::from_body(uuid::Uuid::new_v4(), body, include)?;
+                schedule.destination = schedule.destination.keep_secrets(None)?;
                 let mut schedules = load_schedules(&catalog).await?;
                 check_unique(&schedule, &schedules)?;
-                check_destination(&schedule.destination).await?;
+                schedule.destination.check().await?;
                 schedules.push(schedule.clone());
                 save_schedules(&catalog, &schedules).await?;
                 Ok(HandlerResponse::ok(schedule_json(
@@ -4591,25 +4597,29 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 use crate::backup::schedule::{
-                    BackupSchedule, check_destination, check_unique, include_from_body,
-                    load_schedules, load_statuses, save_schedules, schedule_json,
+                    BackupSchedule, check_unique, include_from_body, load_schedules, load_statuses,
+                    save_schedules, schedule_json,
                 };
                 let id = parse_uuid(ctx.path_param("id")?, "backup schedule")?;
                 let body = require_object(&ctx.body)?;
                 let available = crate::backup::available(&catalog).await?;
                 let mut schedules = load_schedules(&catalog).await?;
-                let Some(slot) = schedules.iter_mut().find(|s| s.id == id) else {
+                let Some(index) = schedules.iter().position(|s| s.id == id) else {
                     return Err(Error::not_found(format!(
                         "no automated backup with id {id}"
                     )));
                 };
+                let previous = &schedules[index];
                 // The previous exclusions are an input, so one naming a table
                 // that is not here today survives the edit.
-                let include = include_from_body(body, &available, Some(&slot.include))?;
-                let schedule = BackupSchedule::from_body(id, body, include)?;
-                *slot = schedule.clone();
+                let include = include_from_body(body, &available, Some(&previous.include))?;
+                let mut schedule = BackupSchedule::from_body(id, body, include)?;
+                schedule.destination = schedule
+                    .destination
+                    .keep_secrets(Some(&previous.destination))?;
                 check_unique(&schedule, &schedules)?;
-                check_destination(&schedule.destination).await?;
+                schedule.destination.check().await?;
+                schedules[index] = schedule.clone();
                 save_schedules(&catalog, &schedules).await?;
                 let statuses = load_statuses(&catalog).await?;
                 Ok(HandlerResponse::ok(schedule_json(
@@ -4637,6 +4647,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 }
                 // The backups already written stay where they are: deleting a
                 // schedule stops new ones, it does not take the old ones with it.
+                // (Its stored credentials do go, with the schedule.)
                 Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
             }
         }

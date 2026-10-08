@@ -2,6 +2,100 @@
 
 Changes in reverse chronological order.
 
+## Automated backups to SFTP or S3
+
+An automated backup can now be sent to an SFTP server or an S3-compatible bucket, as well as
+to a directory on the server.
+
+- **The dialog** now opens with a **Destination** choice: Local files, SFTP or S3. Each kind
+  has its own fields:
+  - **Local files**: the directory, as before.
+  - **SFTP**: host, port (22 by default), user name, password and directory. A relative
+    directory is relative to the login's directory.
+  - **S3**: endpoint (any S3-compatible service; empty for Amazon S3), bucket, region (empty
+    for `us-east-1`), access key and secret key.
+
+  Frequency, retention and what each backup includes are unchanged and apply to every kind.
+  Switching the kind keeps what was typed in the other kind's fields, but only the chosen
+  kind's fields are checked and sent. The list shows each schedule's kind, its location (a
+  path, an `sftp://` address or the bucket's URL) and, for SFTP, the recorded host key.
+- **Secrets** (the SFTP password and the S3 secret key) are sent to the browser as the
+  `••••••••` mask. Saving with the mask unchanged keeps the stored secret
+  (`Destination::keep_secrets`); the box clears on focus, as in the other secret fields. A mask
+  with nothing stored behind it is refused.
+- **Saving tests the destination** by doing what a run does: it logs in, creates the directory
+  if needed, writes a probe file, lists, and deletes the probe. A wrong password, a refused
+  signature or an unreachable host is reported in the dialog, in the transport's own words.
+- **SFTP host keys are trusted on first use.** Saving records the server's `SHA256:`
+  fingerprint with the schedule, and every run refuses a server presenting a different key, so
+  the password is not handed to whatever answers on that address. Saving the schedule again
+  accepts the server's current key.
+- **Two schedules may not share a place**: the same local directory, the same SFTP host, port
+  and directory (whoever logs in), or the same endpoint and bucket. Each one's pruning would
+  delete the other's backups.
+- **Code** (`crates/sc-server/src/backup/`):
+  - `destination.rs`: the `Destination` enum (parsing, the stored and masked shapes, location,
+    uniqueness, `check`, `open`). It also holds a `Connection` with `put`, `list` and `delete`
+    for each kind. A local or SFTP put writes `.NAME.partial` and renames it into place, and
+    an SFTP put first removes any file with the target name, because OpenSSH will not rename
+    over one. An S3 put is atomic already.
+  - `s3.rs`: the S3 client. It sends PutObject, ListObjectsV2 (following continuation tokens)
+    and DeleteObject to path-style URLs, signs them with AWS Signature Version 4, and
+    computes HMAC-SHA256 over `sha2` directly. There is no AWS SDK, because it would bring a
+    second HTTP stack for three requests.
+  - `sftp.rs`: the SFTP client, on **russh** (pure Rust, using the aws-lc-rs crypto provider
+    rustls already uses here, with no OpenSSL) and **russh-sftp**. Both are new workspace
+    dependencies. They add part of the RustCrypto suite to `Cargo.lock`.
+  - `schedule.rs`: runs and pruning go through the `Connection`. The pruning rule is now the
+    pure `expired(names, retention, now)`, the same for every kind. `last_file` is the path,
+    `sftp://` address or URL of what was written.
+  - `reqwest` moved from `sc-server`'s dev-dependencies to its dependencies.
+- **API**: `destination` in the four schedule endpoints is now an object: `kind` (`local`,
+  `sftp` or `s3`) and that kind's fields. `host_key` is read-only. Each schedule read back also
+  has `location`. All four `client.ts` copies are regenerated.
+- **Migration**: `TABLES_RENAME.sql` §13 turns a stored string destination into
+  `{"kind": "local", "directory": …}`, for Postgres and (commented) SQLite. Without it, such a
+  schedule no longer parses and is skipped. Both variants were run on scratch data, and a
+  second run is a no-op.
+- **Docs**: `docs/OPERATIONS.md` §8.2 has a new part, "Automated backups off the server".
+- **Tests**:
+  - Unit tests for each kind's parsing and checks, masking and keeping secrets, locations and
+    places, round-tripping a stored destination, and a bucket counting as a place.
+  - The S3 signer reproduces AWS's two published examples ("GET Object" and "GET Bucket
+    (List Objects)"), and the HMAC reproduces RFC 4231 cases 2 and 6.
+  - `backup_api::remote::an_automated_backup_goes_to_an_s3_bucket` runs a fake S3 in the test
+    process. It recomputes every request's signature from what arrived on the wire and pages
+    listings two keys at a time. The test checks that:
+    - a wrong secret is refused at save with `SignatureDoesNotMatch`, and so is a mask with
+      nothing stored;
+    - the probe is cleaned up;
+    - a tick puts a backup holding the schedule's selection and prunes three old backups
+      across pages, keeping a recent backup and an unrelated object;
+    - the secret never appears in the listing, and an edit that hands back the mask keeps the
+      stored secret.
+  - `backup_api::remote::an_automated_backup_goes_to_an_sftp_server` runs russh's own server
+    half over a temporary directory, with OpenSSH's no-rename-over rule. The test checks that:
+    - a wrong password is refused at save, and the host key is recorded;
+    - the nested directory is created and the probe removed;
+    - a tick uploads, prunes and leaves no `.partial` file;
+    - an edit with the mask keeps the password;
+    - a server restarted on the same port with a different key makes the next run fail with
+      the new fingerprint in the error.
+  - The existing local test now sends the object form.
+  - `backupSchedules.test.ts` covers the form for each kind: opening on a stored schedule,
+    checking only the chosen kind, the bodies sent, the mask sent back unchanged, and that
+    `host_key` is never sent.
+  - Checked by hand, not in CI:
+    - An `#[ignore]`d `s3::tests::a_real_service_accepts_put_list_and_delete`
+      (`FELDSPAR_TEST_S3=…`) passed against **versitygw** 1.8.0, a real S3-compatible server;
+      it also checks that a wrong secret gets a 403.
+    - A headless Chromium walk of the dialog against a running `feldspar serve`: the three
+      kinds' fields, the field errors, and editing an S3 schedule and saving with the stored
+      secret.
+    - The server's own scheduler then put a backup into versitygw on its next minute.
+  - No real OpenSSH server was available on this machine, so SFTP has been tested only
+    against russh's server.
+
 ## i18n: the backup schedules and source control strings are extractable again
 
 `i18n::every_declared_domain_scans_without_an_unreadable_call_site` failed on eight `t()` calls
