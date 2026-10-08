@@ -2,6 +2,189 @@
 
 Changes in reverse chronological order.
 
+## Analytics A4.6–A4.7: documentation, and the definition of done for reports
+
+The last phase of milestone A4 (Reports, and drag and drop). With it, A4 is done.
+
+- **`TECHNICAL_DESIGN.md` §14.5** now describes what A4 built, replacing the short paragraph
+  that said "A4.6 describes the finished report":
+  - Split view: the `side=` address, `usePane()`, and changes announced to the other side.
+  - The panel model: the `Panel`/`PanelBody` types, `fit_table` as the sixth kind, live
+    rendering through `renderPanel`, and the sentence a panel shows when what it reads is gone.
+  - The usage index: built from the stored states when asked, with `panels_in_state` as the
+    one place that knows where a kind keeps its panels.
+  - Drag and drop: the payload, always a copy, and the sources and the sink.
+  - The Report workspace: the document's JSON, how blocks are added, moved and copied,
+    `check_state`'s refusals, the Markdown subset, still panels drawn as SVG, the page and
+    `paginate`'s rules, and Export PDF with its named `@page` rules.
+  - The workspace kinds available (now the Data explorer and the Report), `renderPanel` in the
+    API list, and A3's and A4's definitions of done.
+- **`tutorial-analytics.md` part 4 — Reports**, following the Try it: two screens side by side,
+  dragging the explorer's plot in and seeing that the copy does not follow the explorer,
+  headings, Markdown and a page break, the model's coefficient table and residual plot, a new
+  house appearing in the report's plot but not in the fit's, A4 landscape and Export PDF, a
+  panel dragged into a second report, and the delete warning. Part 1 no longer says the Data
+  explorer is the only kind of workspace that can be created.
+- **Definition of done** (`sc-server`'s `analytics_done::the_try_it_of_milestone_a4`). Over the
+  demo's rows, through the API, the test does what the UI does:
+  - Creates an explorer and a report.
+  - Drops the explorer's plot-with-tests into the report as a copy with a new id. It then
+    changes the explorer to a box plot and checks the report's panel is unchanged.
+  - Adds a heading, Markdown and a page break, and a `fit_table` coefficient table and a
+    residual plot as the model editor's cards make them. It reorders them and reads the order
+    back. A block of an unknown kind is refused.
+  - Adds a row to `houses` through the admin API. The report's plot then draws 201 rows. The
+    residual plot still draws the fit's scored rows.
+  - Saves an A4 landscape page and checks that B5 is refused.
+  - Copies the panel into a second report.
+  - Checks the usage index. `Houses`' usage lists the explorer (no panels) and both reports (one
+    panel each). The model's dataset lists its model and no workspaces, because the report reads
+    the fit, not the dataset. The model's usage lists the first report with two panels.
+- **Fix: "Report, 1 panels".** The dataset's and the model's delete warnings now say "1 panel"
+  for a single panel (`DatasetList.tsx`, `ModelList.tsx`).
+- **Walked in headless Chromium** against `feldspar demo analytics`, through the UI, step by
+  step:
+  - The explorer was opened and **Split** pressed. The report was created from the right
+    side's front page, and its address then had both sides.
+  - The explorer's **Drag** handle was dropped onto the report, giving a `test_result` panel
+    titled "price by area — Houses". `bedrooms` was then dropped on Y, and the report's panel
+    stayed byte-for-byte the same.
+  - A heading, text and a page break were added from **Add**. With the model editor on the left,
+    its Coefficients and Residuals cards were dragged in. The heading and text were dragged by
+    their grips above the plot.
+  - After a new house was added, the report's plot drew 200 → 201 rows. Its two plots were
+    SVG, with no canvas.
+  - With A4 landscape, the toolbar said 2 pages, with a Page 2 marker. **Export PDF** marked
+    the page `an-print-root an-page-a4-landscape` and titled it after the report, and the
+    marks came off afterwards. `page.pdf({ preferCSSPageSize: true })` gave 2 pages of
+    842 × 595 pt with no raster images.
+  - A block dragged from one report into the other was copied with a new id, and the first
+    report kept its six blocks.
+  - **Delete** on `Houses` listed the explorer and both reports. No page errors.
+
+## Analytics A4.4–A4.5: the Report workspace, and PDF output
+
+The second phase of milestone A4 (Reports, and drag and drop).
+
+- **A report is a document** (A4.4; `ui/analytics/src/report`). Its state is `{ blocks, page }`;
+  a block is a panel, a heading (`text`, `level` 1–3), Markdown text, or a page break. The
+  toolbar's **Add** menu adds a heading, text or a page break at the end, and each block's own
+  menu (⋯, shown on hover) inserts one above it, moves it up or down, edits it, or sets a
+  heading's level; × removes it. A new heading or text block opens for writing; clicking one
+  edits it again, and Enter (a heading), Ctrl+Enter (text), Escape or a click outside finishes.
+  Panels still arrive by dropping.
+- **Blocks are dragged too.** A block's grip (⠿) drags it: dropped back into its own report it
+  moves (the reordering), dropped into another report it is copied with new ids. The drag
+  carries the block and the open report it came from (`application/x-feldspar-report-block`),
+  and a panel or a text block also travels as a panel, so any panel sink (a dashboard in A6)
+  takes it. `dropInto` decides move, copy or add.
+- **Markdown** (`panels/markdown.ts`, `Markdown.tsx`): headings, paragraphs, lists, quotes,
+  code, rules, strong, emphasis, inline code and links, parsed into a tree and drawn as React
+  elements, never as HTML. Links go only to `http(s):`, `mailto:` or relative addresses. `_`
+  emphasises only at a word's edge, so `price_per_m2` reads as written. Text panels (A4.2) use
+  it too. No dependency was added.
+- **Panels in a report are still** (`PanelView`'s new `look`): `stillOption` turns off
+  tooltips, hover highlighting, legend toggles, the colour scale's handles and animation, and the
+  plots are drawn by ECharts' **SVG renderer** in the light scheme. The page is white paper in
+  the dark theme too.
+- **The page** (A4.5; `report/pages.ts`): A4, A3, US Letter or US Legal, portrait or landscape,
+  with 15 mm margins. The paper is drawn on the screen at its printed width in millimetres, so
+  line breaks and plot sizes are the same on screen and on paper. An SVG plot is drawn at a
+  fixed size, so a different printed width would cut it off or stretch it. The desk scrolls
+  sideways when the paper is wider than the pane.
+- **Pagination** (`paginate`): the blocks' measured heights laid out by the print
+  stylesheet's rules. A block that does not fit starts the next page. One taller than a page
+  stays where it is and runs over, because moving it would not keep it whole. A heading goes
+  with a following block that moves. A page break ends its page, and one at the very end
+  makes no blank page. The screen shows dashed **Page n** markers where pages will start, and
+  the toolbar shows the page count.
+- **Export PDF** (`report/print.ts`) opens the browser's print dialog once every panel has
+  drawn (or after 15 s). The dialog's "Save as PDF" makes the PDF. While the dialog is open,
+  `<html>` has `an-printing` and the paper has `an-print-root`. The print stylesheet hides
+  everything else, using `:has()` to keep the paper's ancestors and to stop them scrolling or
+  clipping. It also removes the controls, markers and placeholders, keeps blocks whole
+  (`break-inside: avoid`), keeps headings with what follows, and breaks at page breaks.
+  - **Deviation:** the page size is not injected as a `<style>` at print time. Instead,
+    `analytics.css` has one **named `@page`** for each size and orientation (`a4-landscape`, …),
+    and the paper gets the matching `an-page-…` class.
+  - The document title is set to the report's name while the dialog is open, so the browser
+    offers it as the PDF's file name.
+- **The server checks the document** (`sc_analytics::panel::check_state`). Saving a report
+  whose block has no id, is of an unknown kind, is a heading without text or with a level
+  other than 1–3, or is text without its Markdown or over 100 kB is refused with a sentence
+  naming the block. So is a page whose size or orientation is not one of these.
+- **Tests.** `sc-analytics`:
+  `a_report_is_a_document_of_panels_headings_text_and_page_breaks_on_a_page` (and the
+  existing report-state test gained block ids). Vitest:
+  - `report/state.test.ts`: reading every block kind and the page; adding, editing and moving
+    blocks; a dragged block moved within its report and copied into another; a text block as
+    a panel.
+  - `report/pages.test.ts`: paper sizes, the print marks, and pagination (fitting, breaks,
+    blocks taller than a page, headings kept with what follows).
+  - `panels/markdown.test.ts`, and `echarts.test.ts` for still plots.
+- **Walked in headless Chromium** against the demo data:
+  - A report with headings, Markdown, a scatter plot, a box plot with its tests, a page break
+    and a summary table drew 3 pages with Page 2 and 3 markers. Its plots were SVG with no
+    tooltip on hover.
+  - Add → Heading opened the editor (a fix: the menu gave its toggle the focus back and ended
+    the editing at once). Dragging the new heading by its grip to the top moved it.
+  - Landscape widened the paper to 297 mm. Export PDF marked the page and titled it
+    "Quarterly report", and took the marks off after the dialog.
+  - `page.pdf({ preferCSSPageSize: true })` produced 3 pages in both orientations, the number
+    the screen showed, with vector plots and nothing of the app around the report.
+  - In the dark theme the paper stayed white. The server refused a B5 page.
+
+## Analytics A4.1–A4.3: split view, panels, and drag and drop
+
+The first phase of milestone A4 (Reports, and drag and drop).
+
+- **Split view** (A4.1; `ui/analytics/src/panes.tsx`, `router.ts`). The header's **Split** opens
+  a second screen beside the first; each side is a workspace, the Dataset editor, the model
+  editor or the front page, with its own bar (front page, ×) and a divider moved by pointer or
+  arrow keys (its position is a per-viewer `localStorage` convenience). The address records both:
+  the main route with `side=<the other side's whole hash>` added, so a reload or bookmark reopens
+  both and each side keeps its own `?fit=`/`?back=`. Screens move their own side through
+  `usePane()` (`href`, `go`, `replace`, `beside`, `close`) instead of `navigate`/`routeHash`;
+  every call site in the bundle was converted. The main side is mounted in the same place split
+  or not, so splitting does not rebuild it.
+- **Changes reach the other side** (`changes.ts`). Saving, cloning or deleting a dataset, and
+  saving or fitting a model, is announced with the side it came from; the other side's Dataset
+  editor, explorer (columns and every drawing), model editor (dataset picker, fits' "dataset
+  changed", the model itself), fit view, front-page lists and report panels read it again.
+  In-page only.
+- **The panel model** (A4.2; `sc_analytics::panel`). `Panel { id, title?, kind, content }`, kinds
+  `plot`, `summary_table`, `test_result` (the explorer's tests and the plot beside them, one
+  panel), `text`, `custom`, and — a deviation from the plan's five — **`fit_table`** (`{ fit,
+  output }`): a coefficient table is a table a fit recorded, not a summary of a dataset, so it
+  names the fit and output rather than a spec. Panels are stored as what makes them and render
+  live: `POST /api/panels/render` (`renderPanel`) answers each kind's data, the foreign-key
+  columns a plot should draw as categories, or — when its dataset or fit has been deleted — a
+  sentence in `error` instead of failing. `render_one_output` in `model_outputs` draws one output
+  of a fit.
+- **The usage index** (`UsageIndex`, built from the stored workspace states when asked).
+  `panels_in_state` is the one place that knows where a kind keeps its panels (a report's
+  `blocks[].panel`); the explorer's chosen dataset counts too. `datasetUsage` gains `workspaces`
+  (each with how many panels read it) and `modelUsage` gains `workspaces` whose panels show one of
+  the model's fits; both delete warnings list them with links. `saveWorkspaceState` refuses a
+  report whose panels do not read, naming the panel.
+- **Drag and drop** (A4.3; `ui/analytics/src/panels`). The drag payload is the panel's JSON
+  (`application/x-feldspar-panel`) taken when the drag starts, and the drop is always a copy with
+  a new id (`readPanelDrag`). Sources: the explorer's **Drag** handle in its toolbar (the plot, the
+  plot with its tests, or the summary table) and each model output card's header (a plot by its
+  spec over the fit's output data, a table as `fit_table`). The sink is the **Report** workspace,
+  which is therefore available from A4.3 (`WorkspaceKind::Report.arrives_in()` is `None`): for now
+  a page of dropped panels, inserted before the block dropped on or at the end, each removable and
+  drawn live (`PanelView`). A4.4 makes it a document.
+- **Tests.** `sc-analytics`: panel round trip of every kind, what a panel reads, the usage index,
+  refusing a broken report state. `sc-server`
+  (`analytics_api::panels_render_live_and_the_usage_index_finds_what_they_read`): every kind
+  rendered through the API, a row added to `houses` appearing in a panel, both usage endpoints,
+  and the deleted-dataset and deleted-fit sentences; existing tests updated for the Report kind
+  and the new `workspaces` fields. Vitest: split-view addresses and panes, change routing, the
+  panel codec and copy-on-drop, the explorer's and the model editor's panels, the report's
+  blocks. Walked in headless Chromium against the demo data: explorer → report and model outputs
+  → report across a split, the divider, and both delete warnings; no console errors.
+
 ## CLI: `feldspar add-user` and `feldspar modify-user`
 
 An admin who had forgotten their password on an instance with no SMTP configured had no way
