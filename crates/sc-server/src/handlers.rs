@@ -5469,8 +5469,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let apps = apps.clone();
             async move {
                 let app = require_app(&catalog, ctx.path_param("id")?).await?;
-                let locale =
-                    sc_i18n::Locale::parse(ctx.path_param("locale")?)?;
+                let locale = sc_i18n::Locale::parse(ctx.path_param("locale")?)?;
                 let obj = require_object(&ctx.body)?;
                 let messages = obj
                     .get("messages")
@@ -5491,8 +5490,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let apps = apps.clone();
             async move {
                 let app = require_app(&catalog, ctx.path_param("id")?).await?;
-                let locale =
-                    sc_i18n::Locale::parse(ctx.path_param("locale")?)?;
+                let locale = sc_i18n::Locale::parse(ctx.path_param("locale")?)?;
                 let translator = crate::translations::configured_translator(&catalog, None).await?;
                 Ok(HandlerResponse::ok(
                     crate::translations::fill_missing(&catalog, &apps, &app, &locale, &translator)
@@ -10248,6 +10246,8 @@ fn form_field_json(field: &FormField) -> Json {
         "secret": field.secret,
         "create_only": field.create_only,
         "code_language": field.code_language,
+        "section": field.section,
+        "sublabel": field.sublabel,
         "show_if": field
             .show_if
             .iter()

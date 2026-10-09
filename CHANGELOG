@@ -2,6 +2,173 @@
 
 Changes in reverse chronological order.
 
+## Fix: iOS builds failed for any project whose path has a space
+
+Local file stores on macOS live under `~/Library/Application Support/…`, and two build phases
+Expo writes break on the space (`bash: /Users/…/Library/Application: No such file or directory`):
+
+- **EXConstants** (Pods project): the script path is unquoted, and so is the script's own
+  `basename $PROJECT_DIR` check. Fixing only the first would build an app with an empty
+  `Constants.manifest`.
+- **Bundle React Native code and images** (app project): runs a backtick path unquoted.
+
+After `pod install`, `ios/build.cjs` swaps both for quoted versions, matched exactly, so a later
+Expo fix is left alone. A space in the path with a phase not found gets a warning in the log.
+React Native's own `find` for `RCTNewArchEnabled` still splits the path during `pod install`;
+it only skips adding that key, which React Native 0.86 does not need.
+
+- **Test:** `an_ios_build_quotes_the_project_path_in_the_phases_that_split_it`.
+- **Checked:** a simulator build of the failed project, cloned to a path with a space,
+  succeeded; the app has its JS bundle and app config, and starts on an iPhone simulator.
+  A signed archive with the fix has not been run yet.
+
+## Settings can be grouped under headings and explained (v1's `section_header`, `sublabel`)
+
+A module's settings can now be split into groups with headings, using Saltcorn 1's own
+`{ input_type: "section_header", label: "…" }` entry, and each setting can carry a
+description under its input, v1's `sublabel`. Until now both were silently dropped.
+
+- **Descriptions:** `FormField` gains `sublabel`, translated like labels and sent by the API
+  (clients regenerated). `SettingField` shows it under every kind of control.
+
+- **The declaration:** `FormField` gains `section`, the heading of a group that starts at
+  that setting. A `section_header` entry is still not a setting. Its label (or `sublabel`)
+  becomes the `section` of the next real setting, so a spec stays a list of settings only.
+  When two headings are adjacent, the later one wins. A heading with nothing after it is
+  dropped.
+- **The API:** every `config_spec` field carries `section` (a string or null). The four
+  generated clients are regenerated. Headings are translated like labels.
+- **The admin UI:** `SettingsFields` draws a group's heading above the first setting of the
+  group that is shown, as a band with an accent bar. A group whose opening setting is
+  hidden by `show_if` keeps its heading; a group with nothing shown has none. The Modules
+  tab now renders a module's settings through it too, so module settings get headings,
+  descriptions and `show_if` as well. The grouping logic is in
+  `ui/admin/src/settingSections.ts`.
+- **React Native:** the module settings are grouped under "Android" and "iOS", each with a
+  description. The framework card now has a "Native apps (Android and iOS)" heading
+  starting at "Server URL for the mobile app". The file store and project directory above
+  it apply to the web app too; the server URL, App ID, version and icon below it apply only
+  to the native apps.
+- **Tests:**
+  - `spec::tests::a_section_header_heads_the_setting_after_it` covers adjacent headings, a
+    `sublabel`, and a trailing heading.
+  - The view-pattern translation test checks that its heading reaches the first setting.
+  - The React Native declaration test checks where the heading falls.
+  - `settingSections.test.ts` checks that headings are drawn, kept, and dropped as
+    described above.
+
+## React Native: iOS builds, signed from a provisioning profile
+
+`plugins/react-native` builds iOS apps from the same Expo project, on a server running on
+macOS with Xcode and CocoaPods. Two new build targets sit beside the Android one:
+
+- **iOS simulator app** (`ios_simulator`): an unsigned Release build for the simulator,
+  left as `ios-output/app-simulator.zip` (the `.app`, zipped). It needs no Apple account
+  and no profile.
+- **iOS app** (`ios`): an `.ipa` for App Store Connect (TestFlight and the App Store) in
+  `ios-output/app.ipa`, signed the way Saltcorn 1 signs.
+  - **The profile is the whole of signing**, and has two sources, chosen per application
+    ("Provisioning profile": `own` or `generate`):
+    - **own:** an App Store `.mobileprovision` picked from the application's file store.
+    - **generate:** made through the App Store Connect API at build time. It registers the
+      App ID as a bundle ID if Apple does not know it, and reuses the profile an earlier
+      build made (`Feldspar <bundle ID> App Store`) until it is days from expiring or
+      issued for another certificate; then it is replaced. The profile is left in
+      `ios-output/app-store.mobileprovision`.
+  - **"Generate a provisioning profile"** (a target operation, shown for `own`): the same
+    App Store Connect steps without a build, from any server, Linux included. The profile
+    is stored in the file store as `keys/<subdomain>-app-store-<date>-<time>.mobileprovision`
+    (dated, because a store file is never replaced and profiles are renewed yearly) and
+    selected as the app's profile. The worker cannot see the build Mac's keychain, so the
+    certificate is chosen from App Store Connect alone; a build on a Mac without its
+    private key still stops with a message. The module now asks for network access to
+    `api.appstoreconnect.apple.com`.
+  - **App Store only, for now:** an ad hoc, development or enterprise profile is refused
+    with a sentence saying so.
+  - **Read from the profile at build time:** the team, the bundle ID, the expiry, the
+    export method and the certificates it was issued for.
+    - The bundle ID is the application's App ID (with `_` as `-`) only for a wildcard
+      profile, which has to cover it.
+  - **Signing identity:** whichever of the profile's certificates this Mac's keychain holds
+    with its private key, matched by SHA-1. A profile carries no key, so as in v1 the
+    certificate's `.p12` must be in the keychain of the user the server runs as.
+  - **Improvements on v1:**
+    - The profile is read by key, not by position.
+    - It is decoded in memory rather than through a shared `/tmp` file.
+    - An expired profile, a wildcard that does not cover the bundle ID, or a certificate
+      missing from the keychain stops the build with a message before Xcode starts.
+    - Signing is set on the app target only, so CocoaPods' targets are untouched.
+- **Readiness:** both targets require macOS, `xcodebuild` and `pod`. What signing needs
+  depends on the profile's source, so `ios/build.cjs` checks it before Xcode starts. A Linux
+  server shows the targets as not ready and still builds the web bundle and the APK.
+- **Module settings** ("Native toolchains"), shared by every application, like the SDK
+  directories. The builds use the Xcode `xcode-select` points to; there is no setting for it.
+  - a CocoaPods directory, for a `pod` that is not on the PATH the server was started with
+    (e.g. `/opt/homebrew/bin`). The iOS builds get it as `FELDSPAR_POD_DIR`, and `ios/build.cjs`
+    puts it in front of the PATH of every step. The readiness check looks there too: a
+    `command` requirement may name a `dir_env`, a variable naming one more directory to
+    look in first.
+  - "Use the App Store Connect API", a checkbox. Only when ticked are the API settings below
+    shown, passed to the build, and the "Generate a provisioning profile" button offered.
+  - the App Store Connect API key for generated profiles: issuer ID, key ID, and the
+    contents of its `.p8` as a secret setting (masked in the admin UI, never in a file
+    store; a key pasted into the one-line field still works);
+  - which distribution certificate generated profiles use, by SHA-1 or name. Blank means
+    the only one that both App Store Connect and the keychain hold (for the operation: the
+    only unexpired one App Store Connect has). A certificate is never created per app:
+    Apple allows only a few per team.
+- **The project:**
+  - Four new files in `src/feldspar/`, regenerated on every build. Their sources are real
+    JavaScript files in the module (`plugins/react-native/ios*.cjs`), copied into the project
+    as text. Two are entry points, two are what they use:
+    - `ios/build.cjs`: the `build:ios:*` scripts;
+    - `ios/prebuild.cjs`: what `app.config.js` needs during `expo prebuild`;
+    - `ios/signing.cjs`: reading the profile, shared by both;
+    - `ios/profile-generator.cjs`: generating a profile through the App Store Connect API.
+      The module itself requires it too, for the operation; its token is signed with Node's
+      `crypto.sign`, which also works in the module's worker.
+
+    Together they decode the profile (`security cms -D`, then `@expo/plist`, Expo's own
+    parser, added to the project's dev dependencies), sets manual signing on the app
+    target during `expo prebuild`, and runs the builds: `npm run build:ios:simulator` and
+    `npm run build:ios:device` run prebuild, then `pod install`, then `xcodebuild`
+    (archive and export for a device), and copy the result to `ios-output/`.
+  - `native.json` gains an `ios` section (profile path, fallback bundle ID).
+  - `app.config.js` sets `ios.bundleIdentifier` and the build number. The build number
+    follows the version as Android's `versionCode` does.
+  - For an `http://` server URL, `app.config.js` also allows plain HTTP through App
+    Transport Security.
+  - **The App ID, version and icon are now the application's own settings**, shown with
+    the framework's settings rather than in the "Android app" card, because both platforms
+    use them. The "Android app" card keeps the build type, package and signing; the
+    "iOS app" card has the provisioning profile and its source. The App ID is the Android package
+    and, with `_` as `-`, the iOS bundle ID.
+    - The icon picker offers PNG files only, since iOS refuses any other kind.
+    - The application form now fills a file picker among the framework's settings with
+      the store's files, as it already did for a target's.
+    - Settings are stored flat, so existing applications keep their values.
+  - Existing projects keep their `package.json` and `app.config.js`, which are written once,
+    so they gain the iOS targets only when re-scaffolded.
+- **Tests** (`crates/sc-module/tests/bundled_react_native.rs`):
+  - the targets, their options, environment and requirements;
+  - `native.json`'s `ios` section;
+  - the generated scripts and `.gitignore`;
+  - a new test that runs the generated `ios/build.cjs` under Node over an ad hoc profile's
+    payload: the values read from it, the signing applied to the app target only, the
+    export options, the three other export methods, wildcard profiles, and each refusal,
+    including the ad hoc profile itself;
+  - a new test that runs the profile generation under Node against a fake App Store
+    Connect API: the signed token, the choice of certificate, a first build registering
+    the bundle ID, a later one reusing the profile, a stale one replaced, and each
+    refusal.
+- **Verified by hand on macOS 26 with Xcode 26.6:**
+  - A generated project built with `npm run build:ios:simulator`, and the app installed
+    and ran on an iPhone 17 Pro simulator.
+  - The device build decoded a CMS-signed profile and stopped at the keychain check as
+    designed.
+  - A complete device build was not run: it needs a real profile and its certificate.
+    Neither was a generated profile against Apple's real API.
+
 ## Fix: the admin copilot's chat history was always empty
 
 The chat panel's rail of past conversations was blank for `Admin copilot`, however many

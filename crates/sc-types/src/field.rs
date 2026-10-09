@@ -208,6 +208,21 @@ pub struct FormField {
     /// is required only when signing with an own keystore is switched on. Its
     /// value is kept rather than cleared, so switching back restores it.
     pub show_if: Vec<ShowIfCondition>,
+    /// The heading of a **group of settings that starts with this one**, or
+    /// `None` for a field that continues the group before it — v1's
+    /// `section_header`, which a v1 form writes as a field of its own.
+    ///
+    /// Presentation only, like [`multiline`](FormField::multiline): it changes
+    /// nothing about the value. It is on the field that opens the group, rather
+    /// than a heading entry in the spec, so that a spec stays a list of
+    /// settings — something every consumer can validate, store and look up by
+    /// name without stepping over entries that are not settings.
+    pub section: Option<String>,
+    /// A sentence or two shown **under the control**, explaining the setting
+    /// beyond its label: what to enter, where to find it. v1's `sublabel`.
+    ///
+    /// Presentation only, like [`section`](FormField::section).
+    pub sublabel: Option<String>,
     // Post-MVP (§6.2, §6.3, §12): `fieldview: FieldViewRef` and
     // `visibility: Option<Formula>`. Both name types that do not exist yet —
     // fieldviews and formulas are out of MVP scope — so they are left out rather
@@ -228,7 +243,23 @@ impl FormField {
             create_only: false,
             code_language: None,
             show_if: Vec::new(),
+            section: None,
+            sublabel: None,
         }
+    }
+
+    /// Explain this field under its control (see
+    /// [`sublabel`](FormField::sublabel)).
+    pub fn sublabel(mut self, text: impl Into<String>) -> FormField {
+        self.sublabel = Some(text.into());
+        self
+    }
+
+    /// Open a group of settings headed `heading` with this field (see
+    /// [`section`](FormField::section)).
+    pub fn section(mut self, heading: impl Into<String>) -> FormField {
+        self.section = Some(heading.into());
+        self
     }
 
     /// Apply this field only while setting `name` resolves to one of `values`

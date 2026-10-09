@@ -5295,19 +5295,79 @@ Modules tab, and its `frameworks` export is a function of them. Saving the setti
 module and so the declaration. A blank value is left out rather than set empty, so an unconfigured
 module falls back to the server's environment. A target also declares `requires`: what the machine must have before it can
 build. Each entry is one of `{ env, directory }` (a variable the build sees is set, and is a
-directory), `{ command }` (a program is on the build's `PATH`) and `{ os }` (the host's operating
-system), with an optional `hint`. They are data, so the server checks them synchronously:
+directory), `{ command, dir_env }` (a program is on the build's `PATH`, or in the directory the
+optional `dir_env` variable names, which the build is expected to put on its own `PATH`) and
+`{ os }` (the host's operating system), with an optional `hint`. They are data, so the server checks them synchronously:
 `listApplications` reports each target's `readiness` (`ready`, and the `missing` sentences), a
 state of this machine rather than part of the target, so the button warns before it is
 pressed, and `buildApplicationTarget` refuses with all of them before a job starts. An Android APK
-needs `ANDROID_HOME` and `JAVA_HOME`; an iOS target will add `{ os: "macos" }`, `xcodebuild` and
-`pod` without a change to the mechanism. A server without the toolchain fails that target
+needs `ANDROID_HOME` and `JAVA_HOME`; the iOS targets need `{ os: "macos" }`, `xcodebuild` and
+`pod`, with no change to the mechanism. A server without the toolchain fails that target
 with the tools' own message, and still builds and serves the web bundle. The built-in frameworks declare none.
 `plugins/react-native` is the one that does.
 
+**iOS: two targets, an App Store `.ipa` signed from a provisioning profile.** `plugins/react-native`
+declares `ios_simulator` (an unsigned Release build for the simulator, its `.app` zipped, since an
+artifact is one file) and `ios` (an `.ipa` for App Store Connect). They are two targets rather than
+one with a build type because a template interpolates names only and cannot choose the artifact's
+extension. For now the `.ipa` is for App Store Connect only (TestFlight and the App Store): a
+profile of another kind (ad hoc, development, enterprise) is refused.
+
+Signing follows Saltcorn 1: an App Store provisioning profile is the whole of it, and everything
+else is read out of it at build time: the team, the bundle ID (the application's own only for a
+wildcard profile), the expiry, the export method, and the certificates it was issued for. The
+identity is whichever of those certificates the build user's keychain holds with its private
+key, matched by SHA-1, because a profile carries no key. Unlike v1, the profile is read by key
+rather than by position, and a profile that has expired, is not an App Store profile, does not
+cover the bundle ID, or has no certificate in the keychain is refused with a sentence before
+Xcode starts.
+
+The profile has two sources, chosen per application by the `ios_profile_source` option:
+
+- **`own`:** a `.mobileprovision` the admin uploaded to the store (`ios_profile`).
+- **`generate`:** made through the App Store Connect API at build time. The API key (issuer
+  ID, key ID and the contents of its `.p8`, a secret setting) and, when there are several, which
+  distribution certificate to use, are the **module's** settings, like the SDK directories:
+  one Apple team and one certificate serve every application, and Apple allows only a few
+  distribution certificates per team. The build signs a 15-minute ES256 token with the key,
+  picks the one unexpired distribution certificate that both App Store Connect and the
+  keychain hold, registers the App ID as a bundle ID if Apple does not know it, and reuses
+  the `IOS_APP_STORE` profile named `Feldspar <bundle ID> App Store` while it is active,
+  issued for that certificate and more than a week from expiring. Otherwise it deletes the
+  stale ones of that name and creates a new one. The profile is left in
+  `ios-output/app-store.mobileprovision` and signed with as an own one would be. No
+  certificate is ever created: that happens once per team, by hand (Xcode, or a `.p12`
+  imported into the keychain).
+
+The same steps are also a target operation, **"Generate a provisioning profile"**, offered for
+`own`: it stores the profile in the file store under a dated name (a store file is never
+replaced, and profiles are renewed yearly) and selects it, without a build and on any server.
+It runs in the module's worker, which requires `ios/profile-generator.cjs` from the module
+directory and needs the manifest's `net` grant for `api.appstoreconnect.apple.com`. The token is signed with
+Node's `crypto.sign`, which the worker has too. The worker cannot run `security`, so the
+certificate is chosen from App Store Connect alone; the keychain check then happens at build
+time.
+
+Decoding needs `security cms -D` and the keychain, so the signing code runs in the build, not in
+the module: the module's code runs on the sandboxed worker, which cannot start programs, and an
+operation is not handed the store's files. The code is four generated files in
+`src/feldspar/ios/`, rewritten on every build so a fix reaches existing projects. There are two
+entry points, `ios/build.cjs` (the build script) and `ios/prebuild.cjs` (what `app.config.js` needs), and two libraries they use:
+`ios/signing.cjs` (reading the profile, shared by both) and `ios/profile-generator.cjs` (the
+App Store Connect API). `app.config.js` requires `ios/prebuild.cjs` so that `expo prebuild`
+sets manual signing on the app target only (on the `xcodebuild` command line the settings would
+reach the Pods, which refuse a profile). `npm run build:ios:*` runs it: a generated profile
+first, then prebuild, `pod install`, `xcodebuild` (`archive` and `-exportArchive` for a
+device), and a copy into `ios-output/`. A generated profile reaches prebuild as
+`FELDSPAR_IOS_PROFILE_FILE`. What signing needs depends on the source, which a `requires`
+entry cannot see, so `ios/build.cjs` checks it before Xcode starts instead. Both targets use the
+Xcode `xcode-select` points to. The module's App Store Connect settings reach the `ios`
+target as `FELDSPAR_ASC_ISSUER_ID`, `FELDSPAR_ASC_KEY_ID`, `FELDSPAR_ASC_KEY` and
+`FELDSPAR_IOS_IDENTITY`.
+
 **A target's own settings are application settings, shown under the target.** A target may
 declare `options`, fields in the same vocabulary as `config_fields`. They configure that target
-for one application (an APK's application ID, version, icon and build type), so they are not the
+for one application (an APK's build type and signing, an iOS app's provisioning profile), so they are not the
 module's settings (which hold the machine's toolchain) and not the build button's (which only
 starts a build). When the module loads they are **appended to the framework's `config_spec`**,
 so they are stored, validated, handed to the generators as `ctx.settings` and interpolated by
@@ -5318,10 +5378,17 @@ names each target's options, and the application form shows them in a card per t
 of among the framework's settings. A setting declaring `server_query: "store_files:png,jpg"`
 holds a file of that kind in the application's store (an icon, a keystore). The form offers the
 files `listStoreFiles` finds there, skipping dependency folders and generated native projects.
-The value is a store-relative path, and on save it is unrestricted. A setting may also declare
+The value is a store-relative path, and on save it is unrestricted. What all of a framework's targets
+share is not a target's option but one of the framework's own settings: `plugins/react-native`'s
+App ID, version and icon are in its `config_fields`, because Android and iOS both use them. The
+form fills a file picker among those settings with the store's files the same way. A setting may also declare
 v1's `showIf` (`{ build_type: "release", own_keystore: true }`): the form hides it while any
 condition fails, and the server does not require it then, so "sign with your own keystore" shows
-the keystore's settings only when it is ticked. A target's `env` values are templates too, which
+the keystore's settings only when it is ticked. A module may also group its settings under
+headings with v1's `{ input_type: "section_header", label }`. That entry is not a setting, so it
+is not kept as one: its label becomes the `section` of the next setting, and the form draws it
+above the first shown setting of the group. `plugins/react-native` heads its native apps'
+settings this way, from the server URL on. A target's `env` values are templates too, which
 is how a secret setting (the keystore password) reaches the build without being written into
 the project. An application's secret framework settings are masked in what the admin API sends
 and kept when a save hands the mask back, as a provider's are; a backup keeps them.
