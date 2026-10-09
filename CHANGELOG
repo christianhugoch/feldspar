@@ -2,6 +2,19 @@
 
 Changes in reverse chronological order.
 
+## Admin: long dialogs scroll again
+
+The automated backup dialog (Settings → Backup) was taller than the window and could not be
+scrolled, so its last fields and the Save button were out of reach. The modal already asked for
+`scrollable`, but Bootstrap's scrolling works only when `.modal-body` is a flex child of
+`.modal-content`; the dialog wraps header, body and footer in a `<form>`, which sat in between as
+a plain block, grew to its content and was clipped. A rule in `ui/admin/src/admin.css` makes
+such a form the flex column instead (`display: flex; flex-direction: column; min-height: 0;
+overflow: hidden`), so the body scrolls and the footer stays on screen. It applies to every
+scrollable admin modal built that way, not only this one. Checked in headless Chromium at a
+600px-high window: before, the body was 2568px and the footer ended at 2730px; after, the body is
+395px high and scrolls, and the footer ends at 557px. `modalScroll.test.ts` pins the rule.
+
 ## Analytics A5.14–A5.15: map demo data, documentation, definition of done
 
 The last phase of milestone A5 (Maps). The milestone is done: the Try it can be walked through
