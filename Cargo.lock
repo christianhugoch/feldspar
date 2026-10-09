@@ -8957,6 +8957,7 @@ dependencies = [
  "bytes",
  "chrono",
  "csv",
+ "reqwest",
  "rusqlite",
  "rust_decimal",
  "sc-action",
@@ -8979,6 +8980,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-postgres",
+ "toml",
  "uuid",
  "zip",
 ]

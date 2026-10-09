@@ -1,6 +1,7 @@
 //! The Analytics UI's endpoints (analytics TODO A1.13, A2.6, A2.8, A3.3, A4.2, A5.5–A5.12):
-//! datasets, plots, panels, map layers, the Map workspace's attribute table, selection and
-//! toolbox, a model's outputs and workspaces.
+//! datasets, the public datasets "Get datasets" offers, plots, panels, map
+//! layers, the Map workspace's attribute table, selection and toolbox, a
+//! model's outputs and workspaces.
 //!
 //! Admin-only in this milestone, like everything else under `/api`: A9 is
 //! where a restricted application's users reach a subset of them under their
@@ -90,6 +91,54 @@ pub(crate) fn register(set: &mut EndpointSet) {
             TypeSchema::optional(TypeSchema::text()),
         )]))
         .output(dataset_detail_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // --- public datasets ----------------------------------------------------
+
+    // The catalogue of well-known open datasets "Get datasets" offers
+    // (`sc_api::public_datasets`): what each is, its licence and credit, how
+    // big it is, whether it is here already (and its dataset), why it cannot be
+    // got here if it cannot, and the latest install of it this process ran.
+    set.register(
+        Endpoint::new(
+            "listPublicDatasets",
+            Method::Get,
+            api().lit("public-datasets"),
+        )
+        .output(TypeSchema::array(public_dataset_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Get one: download its files, create its tables and a dataset on the main
+    // one. Minutes for the largest, so this **starts** it and answers at once
+    // with the job, `running`; the UI asks `getPublicDatasetInstall` until it is
+    // done. A second start while one runs answers that one.
+    set.register(
+        Endpoint::new(
+            "installPublicDataset",
+            Method::Post,
+            api()
+                .lit("public-datasets")
+                .param("key", ValueType::Text)
+                .lit("install"),
+        )
+        .output(public_dataset_job_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // The latest install of one, running or finished: what the UI polls. A
+    // 404 when this process has not installed it since it started.
+    set.register(
+        Endpoint::new(
+            "getPublicDatasetInstall",
+            Method::Get,
+            api()
+                .lit("public-datasets")
+                .param("key", ValueType::Text)
+                .lit("install"),
+        )
+        .output(public_dataset_job_schema())
         .auth(AuthRequirement::admin()),
     );
 
@@ -855,6 +904,55 @@ fn dataset_report_schema() -> TypeSchema {
         StructField::new("tables", TypeSchema::json()),
         // For each table, the child tables whose keys point at it.
         StructField::new("children", TypeSchema::json()),
+    ])
+}
+
+/// A public dataset as the picker shows it.
+fn public_dataset_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("key", TypeSchema::text()),
+        StructField::new("title", TypeSchema::text()),
+        // `tabular`, `hierarchical`, `time_series` or `spatial`.
+        StructField::new("category", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("homepage", TypeSchema::text()),
+        StructField::new("licence", TypeSchema::text()),
+        StructField::new("licence_url", TypeSchema::text()),
+        StructField::new("attribution", TypeSchema::text()),
+        StructField::new("tables", TypeSchema::array(TypeSchema::text())),
+        // About how many rows, over all its tables.
+        StructField::new("rows", TypeSchema::int()),
+        // About how many bytes are downloaded.
+        StructField::new("download_bytes", TypeSchema::int()),
+        // Whether all its tables are here already.
+        StructField::new("installed", TypeSchema::bool()),
+        // Why it cannot be got here, as a sentence, if it cannot.
+        StructField::new("unavailable", TypeSchema::optional(TypeSchema::text())),
+        // A dataset on its main table, when there is one.
+        StructField::new("dataset_id", TypeSchema::optional(TypeSchema::uuid())),
+        StructField::new("job", TypeSchema::optional(public_dataset_job_schema())),
+    ])
+}
+
+/// An install of a public dataset, running or finished.
+fn public_dataset_job_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("key", TypeSchema::text()),
+        // `running`, `succeeded` or `failed`.
+        StructField::new("status", TypeSchema::text()),
+        // While running: `downloading`, `creating`, `importing` or `finishing`,
+        // the file or table it is on, and how far through it.
+        StructField::new("stage", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("subject", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("done", TypeSchema::int()),
+        StructField::new("total", TypeSchema::int()),
+        StructField::new("started_at", TypeSchema::timestamp()),
+        StructField::new("finished_at", TypeSchema::optional(TypeSchema::timestamp())),
+        // Once it succeeded: the dataset it made (or found) and the rows written.
+        StructField::new("dataset_id", TypeSchema::optional(TypeSchema::uuid())),
+        StructField::new("dataset_name", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("rows", TypeSchema::optional(TypeSchema::int())),
+        StructField::new("error", TypeSchema::optional(TypeSchema::text())),
     ])
 }
 

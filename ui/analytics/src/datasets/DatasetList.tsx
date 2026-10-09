@@ -1,6 +1,7 @@
 // The list of datasets, on the Analytics UI's front page (analytics TODO A1.16,
 // A1.21): every dataset, each edited, cloned or deleted from its row, and a new
-// one made on a base — a table, or another dataset. The list is global, because
+// one made on a base — a table, or another dataset — or got from the public
+// datasets ("Get datasets", `PublicDatasets.tsx`). The list is global, because
 // models and panels share the datasets; one opens in the Dataset editor.
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
@@ -18,6 +19,7 @@ import { T, useT } from "../i18n";
 import { useAnnounce, useChanges, usePane } from "../panes";
 import { workspaceKindName } from "../labels";
 import { describeGrain, type Base, type Grain } from "./ops";
+import { PublicDatasetsModal } from "./PublicDatasets";
 
 export type DatasetItem = ListDatasetsResponse[number];
 type TableItem = ListDatasetTablesResponse[number];
@@ -247,6 +249,7 @@ export function NewDatasetForm({
   const [name, setName] = useState("");
   const [base, setBase] = useState(initialTable ? `table:${initialTable}` : "");
   const [error, setError] = useState<string | null>(null);
+  const [getting, setGetting] = useState(false);
 
   useEffect(() => {
     api
@@ -313,10 +316,21 @@ export function NewDatasetForm({
           <Button type="submit" disabled={name.trim() === "" || base === ""}>
             <T text="Create" />
           </Button>
+          <Button variant="outline-primary" onClick={() => setGetting(true)}>
+            <T text="Get datasets" />
+          </Button>
         </Form>
         <Form.Text muted>
           <T text="The base cannot be changed later: every operation is written against the columns it provides." />
         </Form.Text>
+        <PublicDatasetsModal
+          show={getting}
+          onHide={() => setGetting(false)}
+          onOpen={(id) => {
+            setGetting(false);
+            onCreated(id);
+          }}
+        />
       </Card.Body>
     </Card>
   );

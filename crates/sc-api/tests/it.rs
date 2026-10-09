@@ -45,6 +45,8 @@ mod graphql_mutations;
 mod graphql_rows;
 #[path = "graphql_schema.rs"]
 mod graphql_schema;
+#[path = "public_datasets.rs"]
+mod public_datasets;
 #[path = "query_params.rs"]
 mod query_params;
 #[path = "rest_auth.rs"]

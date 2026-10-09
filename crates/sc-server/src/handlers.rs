@@ -112,6 +112,20 @@ const TEST_EMAIL_HTML: &str = "<p>This is a test message from Saltcorn.</p><p>If
 /// CRUD handlers still work, and a build simply mounts an app no subdomain routes
 /// to until a `--base-domain` is configured.
 pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerRegistry {
+    admin_handlers_with(
+        catalog,
+        apps,
+        Arc::new(crate::public_datasets::HttpFetch::new()),
+    )
+}
+
+/// [`admin_handlers`], with the public datasets' files downloaded by `fetch`
+/// rather than over HTTPS — what a test serves fixture files through.
+pub fn admin_handlers_with(
+    catalog: Arc<Catalog>,
+    apps: Arc<AppMounts>,
+    fetch: Arc<dyn sc_api::public_datasets::Fetch>,
+) -> HandlerRegistry {
     // A schema change re-projects the API providers of every mounted app
     // exposing that table, live (Phase 7's seam). This used to be a
     // `refresh_table` call inside each handler that changed a schema, which
@@ -6655,6 +6669,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     // --- the Analytics UI (analytics TODO A1.13) -----------------------------
     crate::analytics::register(&mut reg, catalog.clone());
+    crate::public_datasets::register(&mut reg, catalog.clone(), fetch);
 
     reg
 }

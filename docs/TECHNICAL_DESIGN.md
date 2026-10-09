@@ -8263,6 +8263,72 @@ the enabled operations.
 sections 7 (Postgres) and 8 (SQLite): one named dataset per old dataset, built as
 `DatasetDef::from_columns` builds it.
 
+#### Public datasets ("Get datasets")
+
+`sc_api::public_datasets` offers well-known open datasets, which the front page's *Get datasets*
+lists. Getting one downloads it, creates its tables and creates a dataset on its main table.
+There are 34, across four categories:
+
+- **Tabular**: penguins, iris, Titanic, tips, diamonds, Auto MPG, mtcars, wine quality, adult
+  income, abalone, California housing.
+- **Hierarchical**: Gapminder, Minnesota radon, sleep study, the Flare class tree, Australian
+  tourism, Northwind.
+- **Time series**: Mauna Loa CO₂, air passengers, the Nile, Seattle weather, global temperature,
+  S&P 500, US unemployment, OWID emissions, NYC flights 2013.
+- **Spatial**: world countries, US states, world cities, rivers, USGS earthquakes, Fiji
+  earthquakes, world airports, EU NUTS regions.
+
+- **Only metadata is in the codebase.** `public_datasets/catalogue.toml` is compiled in. It
+  holds each table's fields, types, keys and references, its source URLs, how to read each file,
+  and the licence and credit. The data is fetched from its publisher on request, so Feldspar
+  (MIT) redistributes nobody's data. The licence and credit go onto the picker and into the
+  descriptions of the tables and the dataset. Descriptions are our own words.
+- **Pinned sources.** GitHub sources are pinned to a commit (a test checks this), so a column
+  cannot be renamed under the field list. Live feeds (NOAA, USGS, OurAirports, Eurostat) are
+  read by column name.
+- **Licences were checked when the list was chosen.** Sets whose terms were not open enough
+  were left out: SILSO sunspots (non-commercial), and the Melbourne temperatures and stock
+  prices mirrors (no licence stated). The ISO 3166 region table (share-alike) was left out
+  because Natural Earth carries the same regions.
+- **Declared, not deduced** (unlike a CSV import, §13.1). The schema says how a value is read:
+  - a file with no header, columns lined up with spaces, `?`/`NA`/`NULL`/`-99` meaning none;
+  - a quarter (`1998 Q1`), a decimal year, milliseconds since 1970;
+  - a point from two columns, a date from year, month and day;
+  - a GeoJSON feature's id or depth.
+
+  A lookup table can be cut from a flat file (`distinct`): Gapminder's countries, radon's
+  counties, tourism's regions. A reference may be written as none when its row is missing
+  (`if_missing = "null"`): nycflights13's flights name planes and airports its other tables do
+  not have.
+- **`install(catalog, key, fetch, progress, context)`** does the whole job:
+  1. It downloads every file first (a failure creates nothing).
+  2. It creates the tables in one schema batch. A reference to a table created earlier in the
+     batch resolves; a reference to the table itself is added afterwards.
+  3. It writes the rows through the row layer (`rows::create_row_in`) in one transaction,
+     reading one record at a time. A table that references itself (Flare, the Northwind
+     employees, NUTS) is written parents first.
+  4. It moves supplied integer keys' identity sequences past the largest key, and creates the
+     dataset.
+
+  A row that will not go in drops the tables, and the error names the table, the row and the
+  field. If the tables are already there, it answers (or remakes) the dataset and downloads
+  nothing.
+- **Geometry.** A spatial entry needs PostGIS; the listing says why one cannot be got. A point
+  built from coordinates in a non-spatial entry (housing blocks, flights' airports) is left out
+  without PostGIS.
+- **API** (§14.5): `listPublicDatasets`, `installPublicDataset` and `getPublicDatasetInstall`.
+  An install is a background job in the server process (`sc-server`'s `public_datasets.rs`, the
+  shape `target_builds` gives a target build). The UI polls it for the file being downloaded or
+  the table being written and its row count. The download is `reqwest` with a 10-minute timeout
+  and a 256 MB cap.
+- **Speed.** At about 2,500 rows a second through the row layer (debug build), the largest
+  entry, nycflights13 (368,000 rows over five tables), takes about two and a half minutes.
+  Everything else takes under 40 seconds.
+- **Tests.** `sc-api`'s `tests/public_datasets.rs` installs real entries from synthetic stand-ins
+  in each source's format. The `#[ignore]`d `every_public_dataset_installs_from_its_source`
+  downloads and installs all of them; `FELDSPAR_PUBLIC_DATA_CACHE` and
+  `FELDSPAR_PUBLIC_DATASETS` let it reuse downloaded files and run only some entries.
+
 ### 14.5 The Analytics UI (`sc-analytics`, `ui/analytics`)
 
 The Analytics UI (`docs/analytics-ui-goals.md`) is where datasets are built and, milestone by

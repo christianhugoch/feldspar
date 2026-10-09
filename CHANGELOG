@@ -2,6 +2,61 @@
 
 Changes in reverse chronological order.
 
+## Public datasets: "Get datasets" in the Analytics UI
+
+The Datasets card on the Analytics front page has a **Get datasets** button beside *Create*. It
+lists 34 well-known open datasets: 11 tabular, 6 hierarchical, 9 time series and 8 spatial.
+Picking one downloads it from its publisher, creates its tables (with keys and references) and
+opens a dataset on the main table. Only metadata is hardcoded: fields, types, sources, licence
+and credit. The data is downloaded on request, and each entry's licence and credit go onto the
+picker and into the descriptions of its tables and dataset.
+
+- **Catalogue** (`sc-api/src/public_datasets/catalogue.toml`, new; parsed with the workspace
+  `toml`):
+  - Licences were checked when the list was chosen. SILSO sunspots (non-commercial), two
+    unlicensed mirrors and the share-alike ISO region table were left out.
+  - Seaborn's mirror was replaced by the original sources: UCI, ggplot2, reshape2, and Vanderbilt
+    for Titanic.
+  - GitHub URLs are pinned to commits.
+  - Several sets are normalised: Gapminder → countries, radon → counties, tourism → regions.
+    Northwind is 11 tables with the employees' manager tree, and nycflights13 is 5 tables.
+- **Reading** (`public_datasets/read.rs`): CSV (comma, semicolon, tab, space-aligned, headerless,
+  comment lines), JSON arrays and GeoJSON.
+  - Values are read per field: missing-value markers; quarters, months and decimal years as
+    dates; epoch milliseconds; a point from two columns; a date from year, month and day.
+  - From a GeoJSON feature: its id and depth, a 2D geometry made multi where the column is,
+    a parent code, longitudes wrapped to ±180°.
+  - One record at a time, so the 33 MB flights file is never held as JSON.
+- **`install`** (`public_datasets/install.rs`):
+  - It downloads everything first, then creates the tables in one schema batch (a reference to
+    the table itself is added afterwards).
+  - It writes the rows through `rows::create_row_in` in one transaction, parents first for a
+    self-referencing table. It moves supplied keys' sequences on and creates the dataset.
+  - A failure drops the tables, and the error names the table, row and field. Getting a dataset
+    again reuses its tables.
+  - Spatial entries need PostGIS. A point made from coordinates in a non-spatial entry is left
+    out without it.
+- **Admin API**: `listPublicDatasets`, `installPublicDataset` (starts a background job, 202) and
+  `getPublicDatasetInstall` (polled). The jobs live in the server process
+  (`sc-server/src/public_datasets.rs`, like `target_builds`).
+  - The downloader is `reqwest` with a timeout and a 256 MB cap, injectable through the new
+    `admin_handlers_with`.
+  - The client was regenerated in all four UIs.
+- **Analytics UI** (`datasets/PublicDatasets.tsx`, `publicDatasets.ts`): a picker with
+  category filters and search; rows, tables, download size, licence link and credit per
+  entry; a progress bar with the file or table and its row count; and *Open* for one already
+  here. The dataset asked for opens when its install finishes.
+- **Docs**: TECHNICAL_DESIGN §14.4 "Public datasets".
+- **Tests**:
+  - Reader and catalogue unit tests (`sc-api`).
+  - `sc-api/tests/public_datasets.rs`: Northwind, nycflights13 and NUTS from synthetic stand-ins
+    covering references, the tree, missing references, rollback, a failed download, a table in
+    the way and PostGIS.
+  - `sc-server/tests/public_datasets_api.rs`: the endpoints and the job.
+  - vitest for the picker's helpers.
+  - The `#[ignore]`d `every_public_dataset_installs_from_its_source` downloaded and installed
+    all 34 into PostGIS: about 2,500 rows/s in a debug build, nycflights13 in 147 s.
+
 ## An LLM provider from `feldspar.toml`, and a default provider
 
 An environment in `feldspar.toml` can supply an LLM provider (`[environments.NAME.llm_provider]`,

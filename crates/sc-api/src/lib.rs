@@ -48,6 +48,7 @@ pub mod metadata_tables;
 // code body's model handle share this one function.
 pub mod models;
 pub mod provided_tables;
+pub mod public_datasets;
 pub mod query_string;
 pub mod rows;
 pub mod schema_edit;

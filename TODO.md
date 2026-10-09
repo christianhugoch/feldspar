@@ -892,3 +892,24 @@ it, and can still add other providers and make one of them the default.
   Backups leave the file's provider out. Tests.
 - [x] L.5 Admin UI: badges, *Make default*, and the file's provider and its models read-only.
   OPERATIONS.md §4.4, README and TECHNICAL_DESIGN §11.1.
+
+# Public datasets ("Get datasets")
+
+The Analytics UI's Datasets card gets a *Get datasets* button beside *Create*. It lists well-known
+open datasets: tabular, hierarchical, time series and spatial. Picking one downloads it from its
+publisher, creates its tables and opens a dataset on them. Only the metadata (fields, types,
+references, sources, licence and credit) is in the codebase; the data is downloaded on request.
+
+- [x] PD.1 The catalogue (`sc-api/src/public_datasets/catalogue.toml`): 34 datasets with
+  licences checked, GitHub sources pinned to a commit, our own descriptions. Validated at
+  compile-test time.
+- [x] PD.2 Reading the files (CSV in its variants, JSON, GeoJSON) into typed rows, and
+  `install`: download everything first, create the tables with their references, write the rows
+  through the row layer in one transaction, create the dataset; drop the tables on failure.
+- [x] PD.3 Admin API: `listPublicDatasets`, `installPublicDataset` (a background job) and
+  `getPublicDatasetInstall`. The client regenerated in all four UIs.
+- [x] PD.4 The picker in the Analytics UI: categories, search, size and licence, progress while
+  it runs, open the dataset when done.
+- [x] PD.5 Tests: the reader's quirks, installs from synthetic fixtures (references, a tree,
+  missing references, rollback, PostGIS), the endpoints, and an `#[ignore]`d test that installs
+  every dataset from its real source.

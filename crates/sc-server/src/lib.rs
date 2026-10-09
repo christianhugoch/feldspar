@@ -50,6 +50,7 @@ mod serve;
 mod streams;
 mod systemd;
 // Build targets as background jobs the admin UI polls (§13.3).
+pub mod public_datasets;
 pub mod target_builds;
 mod tls;
 pub mod translations;
@@ -142,7 +143,7 @@ pub use config::{DEFAULT_BIND, DEFAULT_HTTPS_PORT, PythonMode, ServerConfig};
 pub use handler::{
     BoxFuture, HandlerCtx, HandlerFn, HandlerRegistry, HandlerResponse, SessionAction,
 };
-pub use handlers::admin_handlers;
+pub use handlers::{admin_handlers, admin_handlers_with};
 pub use i18n::{LANG_COOKIE, LANG_QUERY};
 pub use logging::log_requests;
 pub use lsp::{LSP_ROUTE, MAX_LANGUAGE_SERVERS};

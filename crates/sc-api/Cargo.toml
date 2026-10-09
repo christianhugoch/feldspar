@@ -55,6 +55,9 @@ bytes.workspace = true
 # already has a tool for. See the workspace pin for why the format is not
 # hand-rolled.
 csv.workspace = true
+# The public dataset catalogue (`public_datasets/catalogue.toml`) is TOML,
+# compiled in and parsed once.
+toml.workspace = true
 # The GraphQL provider's schema, parser, validator and executor (§13.4). Built
 # through `async_graphql::dynamic`, because an application's schema is its
 # tables and those change at runtime; see the workspace pin for the decision.
@@ -89,6 +92,10 @@ sc-test-harness.workspace = true
 # `tests/code_host_as_user.rs`.
 sc-expr = { workspace = true, features = ["eval"] }
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
+# `tests/public_datasets.rs`: rows read back with SQL, and the `#[ignore]`d
+# test that downloads every public dataset from its publisher.
+tokio-postgres.workspace = true
+reqwest.workspace = true
 
 [lints]
 workspace = true

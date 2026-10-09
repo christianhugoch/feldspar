@@ -315,6 +315,9 @@ export type UpdateDatasetRequest = { name: string; description?: string | null; 
 export type UpdateDatasetResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown } };
 export type CloneDatasetRequest = { name?: string | null };
 export type CloneDatasetResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown } };
+export type ListPublicDatasetsResponse = Array<{ key: string; title: string; category: string; description: string; homepage: string; licence: string; licence_url: string; attribution: string; tables: Array<string>; rows: number; download_bytes: number; installed: boolean; unavailable?: string | null; dataset_id?: string | null; job?: { key: string; status: string; stage?: string | null; subject?: string | null; done: number; total: number; started_at: string; finished_at?: string | null; dataset_id?: string | null; dataset_name?: string | null; rows?: number | null; error?: string | null } | null }>;
+export type InstallPublicDatasetResponse = { key: string; status: string; stage?: string | null; subject?: string | null; done: number; total: number; started_at: string; finished_at?: string | null; dataset_id?: string | null; dataset_name?: string | null; rows?: number | null; error?: string | null };
+export type GetPublicDatasetInstallResponse = { key: string; status: string; stage?: string | null; subject?: string | null; done: number; total: number; started_at: string; finished_at?: string | null; dataset_id?: string | null; dataset_name?: string | null; rows?: number | null; error?: string | null };
 export type DatasetUsageResponse = { datasets: Array<{ id: string; name: string }>; models: Array<{ id: string; name: string }>; workspaces: Array<{ id: string; name: string; kind: string; panels: number }> };
 export type DatasetShapesRequest = { dataset: unknown };
 export type DatasetShapesResponse = { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown };
@@ -575,6 +578,9 @@ export interface ApiClient {
   updateDataset(id: string, body: UpdateDatasetRequest): Promise<UpdateDatasetResponse>;
   deleteDataset(id: string): Promise<void>;
   cloneDataset(id: string, body: CloneDatasetRequest): Promise<CloneDatasetResponse>;
+  listPublicDatasets(): Promise<ListPublicDatasetsResponse>;
+  installPublicDataset(key: string): Promise<InstallPublicDatasetResponse>;
+  getPublicDatasetInstall(key: string): Promise<GetPublicDatasetInstallResponse>;
   datasetUsage(id: string): Promise<DatasetUsageResponse>;
   datasetShapes(body: DatasetShapesRequest): Promise<DatasetShapesResponse>;
   validateDatasetOperation(body: ValidateDatasetOperationRequest): Promise<ValidateDatasetOperationResponse>;
@@ -2412,6 +2418,30 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("cloneDataset", res);
       return (await res.json()) as CloneDatasetResponse;
+    },
+    async listPublicDatasets() {
+      const res = await doFetch(`${baseUrl}/api/public-datasets`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listPublicDatasets", res);
+      return (await res.json()) as ListPublicDatasetsResponse;
+    },
+    async installPublicDataset(key) {
+      const res = await doFetch(`${baseUrl}/api/public-datasets/${encodeURIComponent(key)}/install`, {
+        method: "POST",
+        headers: requestHeaders("POST", false),
+      });
+      if (!res.ok) throw await clientError("installPublicDataset", res);
+      return (await res.json()) as InstallPublicDatasetResponse;
+    },
+    async getPublicDatasetInstall(key) {
+      const res = await doFetch(`${baseUrl}/api/public-datasets/${encodeURIComponent(key)}/install`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getPublicDatasetInstall", res);
+      return (await res.json()) as GetPublicDatasetInstallResponse;
     },
     async datasetUsage(id) {
       const res = await doFetch(`${baseUrl}/api/datasets/${encodeURIComponent(id)}/usage`, {
