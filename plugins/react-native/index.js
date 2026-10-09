@@ -335,6 +335,19 @@ const ios_options = [
   },
 ];
 
+/** The simulator build's own setting. Debug gives the dev menu and warnings;
+ * its JavaScript is still bundled into the app, so it runs on its own. */
+const ios_simulator_options = [
+  {
+    name: "simulator_configuration",
+    label: "Configuration",
+    type: "String",
+    required: true,
+    default: "release",
+    attributes: { options: ["release", "debug"] },
+  },
+];
+
 /** What an iOS build needs of the machine, either target: a Mac with Xcode and
  * CocoaPods. A server on Linux shows the iOS buttons as not ready. */
 const IOS_REQUIRES = [
@@ -451,6 +464,7 @@ function targets({
       label: "iOS simulator app",
       command: "npm run build:ios:simulator",
       artifact: "{{ project }}/ios-output/app-simulator.zip",
+      options: ios_simulator_options,
       env: podDir,
       requires: IOS_REQUIRES,
     },
@@ -986,6 +1000,7 @@ function nativeJson(ctx) {
         profileSource,
         profile: profile ? projectRelative(ctx, profile) ?? profile : null,
         bundleId: iosBundleId(appId),
+        simulatorConfiguration: text("simulator_configuration") || "release",
       },
     },
     null,

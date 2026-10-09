@@ -62,9 +62,10 @@ description under its input, v1's `sublabel`. Until now both were silently dropp
 `plugins/react-native` builds iOS apps from the same Expo project, on a server running on
 macOS with Xcode and CocoaPods. Two new build targets sit beside the Android one:
 
-- **iOS simulator app** (`ios_simulator`): an unsigned Release build for the simulator,
-  left as `ios-output/app-simulator.zip` (the `.app`, zipped). It needs no Apple account
-  and no profile.
+- **iOS simulator app** (`ios_simulator`): an unsigned build for the simulator, left as
+  `ios-output/app-simulator.zip` (the `.app`, zipped). It needs no Apple account and no
+  profile. Its "Configuration" setting picks Release (default) or Debug (dev menu, warnings).
+  A Debug build carries its JavaScript too (`FORCE_BUNDLING=1`), so it runs on its own.
 - **iOS app** (`ios`): an `.ipa` for App Store Connect (TestFlight and the App Store) in
   `ios-output/app.ipa`, signed the way Saltcorn 1 signs.
   - **The profile is the whole of signing**, and has two sources, chosen per application

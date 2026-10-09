@@ -262,7 +262,8 @@ async fn the_bundled_react_native_module_declares_a_web_framework() {
             "keystore_alias",
             "keystore_password",
             "ios_profile_source",
-            "ios_profile"
+            "ios_profile",
+            "simulator_configuration"
         ]
     );
 
@@ -421,7 +422,14 @@ async fn the_bundled_react_native_module_declares_a_web_framework() {
     assert_eq!(sim.label, "iOS simulator app");
     assert_eq!(sim.args, ["run", "build:ios:simulator"]);
     assert_eq!(sim.artifact, "todo/ios-output/app-simulator.zip");
-    assert!(rn.targets[2].options.is_empty());
+    // Release unless asked: Debug is for the dev menu and warnings.
+    assert_eq!(rn.targets[2].options, ["simulator_configuration"]);
+    assert_eq!(field("simulator_configuration").default, Some(json!("release")));
+    let mut debug_sim = config.clone();
+    debug_sim.insert("simulator_configuration".to_owned(), json!("debug"));
+    sc_types::validate_attrs(&rn.config_spec, &debug_sim).unwrap();
+    debug_sim.insert("simulator_configuration".to_owned(), json!("profile"));
+    assert!(sc_types::validate_attrs(&rn.config_spec, &debug_sim).is_err());
 
     // One widening beyond React's policy: react-native-web injects its styles at
     // run time. Scripts stay strict.
@@ -782,7 +790,8 @@ async fn the_scaffold_is_an_expo_project_whose_every_import_resolves() {
         native,
         json!({ "appId": "com.feldspar.todo", "version": "1.0.0", "icon": null,
                 "buildType": "release", "signing": null,
-                "ios": { "profileSource": "own", "profile": null, "bundleId": "com.feldspar.todo" } })
+                "ios": { "profileSource": "own", "profile": null, "bundleId": "com.feldspar.todo",
+                         "simulatorConfiguration": "release" } })
     );
     assert!(!package.contains("expo-build-properties"), "{package}");
 
@@ -940,7 +949,8 @@ async fn the_apk_settings_reach_native_json_on_every_build() {
         native,
         json!({ "appId": "com.example.todo", "version": "2.3.4",
                 "icon": "assets/icon.png", "buildType": "debug", "signing": null,
-                "ios": { "profileSource": "own", "profile": null, "bundleId": "com.example.todo" } })
+                "ios": { "profileSource": "own", "profile": null, "bundleId": "com.example.todo",
+                         "simulatorConfiguration": "release" } })
     );
     // An icon outside the project is reached from it.
     ctx["settings"]["app_icon"] = json!("branding/logo.png");
@@ -1000,7 +1010,8 @@ async fn the_apk_settings_reach_native_json_on_every_build() {
         json!({
             "profileSource": "own",
             "profile": "signing/adhoc.mobileprovision",
-            "bundleId": "com.example.my-todo"
+            "bundleId": "com.example.my-todo",
+            "simulatorConfiguration": "release"
         })
     );
     // And it is the same App ID Android packages the app under.
@@ -1009,6 +1020,7 @@ async fn the_apk_settings_reach_native_json_on_every_build() {
     // A generated profile is made at build time: an uploaded one still
     // chosen (but hidden) is not passed on.
     ctx["settings"]["ios_profile_source"] = json!("generate");
+    ctx["settings"]["simulator_configuration"] = json!("debug");
     let files = frameworks("bundled-rn-native-ios-generate")
         .await
         .framework_files(FRAMEWORK, FilePhase::Runtime, ctx)
@@ -1017,7 +1029,8 @@ async fn the_apk_settings_reach_native_json_on_every_build() {
     let native: Json = serde_json::from_str(&file(&files, "src/feldspar/native.json")).unwrap();
     assert_eq!(
         native["ios"],
-        json!({ "profileSource": "generate", "profile": null, "bundleId": "com.example.my-todo" })
+        json!({ "profileSource": "generate", "profile": null, "bundleId": "com.example.my-todo",
+                "simulatorConfiguration": "debug" })
     );
 }
 
@@ -1524,7 +1537,10 @@ const ios = require("./ios/build.cjs");
 const dir = require("path").join(process.cwd(), "Application Support/app/ios");
 const first = ios.quoteScriptPaths(dir);
 const again = ios.quoteScriptPaths(dir);
-console.log(JSON.stringify({ first, again }));
+// A Debug simulator build bundles its JavaScript too.
+const sim = [ios.simulatorConfiguration({ ios: { simulatorConfiguration: "debug" } }),
+             ios.simulatorConfiguration({})];
+console.log(JSON.stringify({ first, again, sim }));
 "#;
     let out = std::process::Command::new("node")
         .arg("-e")
@@ -1543,7 +1559,15 @@ console.log(JSON.stringify({ first, again }));
     std::fs::remove_dir_all(&dir).ok();
 
     // Both fixed once; a second build finds nothing left to fix.
-    assert_eq!(got, json!({ "first": 2, "again": 0 }));
+    assert_eq!(got["first"], 2);
+    assert_eq!(got["again"], 0);
+    assert_eq!(
+        got["sim"],
+        json!([
+            { "configuration": "Debug", "buildSettings": ["FORCE_BUNDLING=1"] },
+            { "configuration": "Release", "buildSettings": [] }
+        ])
+    );
     assert!(!pods.contains(constants), "{pods}");
     assert!(
         pods.contains(

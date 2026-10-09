@@ -59,7 +59,8 @@ const SPACE_FIXES = [
   },
 ];
 
-/** The Pods project and the app's own project in `iosDir`. */
+/** Paths of the two project.pbxproj files to patch: CocoaPods' (Pods/) and
+ * the app's (<name>.xcodeproj, null if not there yet). */
 function xcodeProjects(iosDir) {
   const app = fs.existsSync(iosDir)
     ? fs.readdirSync(iosDir).find((f) => f.endsWith(".xcodeproj"))
@@ -105,6 +106,14 @@ async function generateProfile(native, env, outDir) {
 function run(command, args, options) {
   console.log("$ " + [command].concat(args).join(" "));
   execFileSync(command, args, Object.assign({ stdio: "inherit" }, options));
+}
+
+/** The simulator build's Xcode configuration. Debug leaves the JavaScript
+ * out of the app by default; FORCE_BUNDLING puts it in. */
+function simulatorConfiguration(native) {
+  return (native.ios || {}).simulatorConfiguration === "debug"
+    ? { configuration: "Debug", buildSettings: ["FORCE_BUNDLING=1"] }
+    : { configuration: "Release", buildSettings: [] };
 }
 
 /** The one entry in `dir` ending in `suffix`; throws if there are none or several. */
@@ -187,13 +196,16 @@ async function main(kind) {
   const workspace = findSingle(iosDir, ".xcworkspace", "Xcode workspace");
   const scheme = workspace.slice(0, -".xcworkspace".length);
   const build = path.join(iosDir, "build");
+  // A device build is always Release (App Store); the simulator's is chosen.
+  const sim = simulatorConfiguration(native);
+  const configuration = signing ? "Release" : sim.configuration;
   const common = [
     "-workspace",
     workspace,
     "-scheme",
     scheme,
     "-configuration",
-    "Release",
+    configuration,
     "-derivedDataPath",
     path.join(build, "derived"),
   ];
@@ -208,6 +220,7 @@ async function main(kind) {
         "-destination",
         "generic/platform=iOS Simulator",
         "CODE_SIGNING_ALLOWED=NO",
+        ...sim.buildSettings,
         "build",
       ]),
       { cwd: iosDir, env }
@@ -217,7 +230,7 @@ async function main(kind) {
       "derived",
       "Build",
       "Products",
-      "Release-iphonesimulator"
+      configuration + "-iphonesimulator"
     );
     const app = findSingle(products, ".app", "app");
     run("ditto", [
@@ -265,7 +278,7 @@ async function main(kind) {
   console.log("Wrote " + path.relative(projectDir, artifact));
 }
 
-module.exports = { quoteScriptPaths, SPACE_FIXES };
+module.exports = { quoteScriptPaths, SPACE_FIXES, simulatorConfiguration };
 
 // Run as the build script; required (by a test), only export.
 if (require.main === module) {

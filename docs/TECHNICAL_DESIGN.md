@@ -5307,8 +5307,9 @@ with the tools' own message, and still builds and serves the web bundle. The bui
 `plugins/react-native` is the one that does.
 
 **iOS: two targets, an App Store `.ipa` signed from a provisioning profile.** `plugins/react-native`
-declares `ios_simulator` (an unsigned Release build for the simulator, its `.app` zipped, since an
-artifact is one file) and `ios` (an `.ipa` for App Store Connect). They are two targets rather than
+declares `ios_simulator` (an unsigned build for the simulator, its `.app` zipped, since an
+artifact is one file; Release or Debug by its `simulator_configuration`, Debug with
+`FORCE_BUNDLING=1` so the JavaScript is bundled into the app) and `ios` (an `.ipa` for App Store Connect). They are two targets rather than
 one with a build type because a template interpolates names only and cannot choose the artifact's
 extension. For now the `.ipa` is for App Store Connect only (TestFlight and the App Store): a
 profile of another kind (ad hoc, development, enterprise) is refused.
