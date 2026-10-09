@@ -122,7 +122,9 @@ export function AgentForm({ agentId }: { agentId?: string }) {
           setNumbers(readNumbers(existing.attributes));
           setModelRoles(readRoles(existing.attributes));
         } else {
-          setProvider(providerList[0]?.name ?? "");
+          // A new agent starts on the installation's default provider.
+          const preferred = providerList.find((p) => p.is_default) ?? providerList[0];
+          setProvider(preferred?.name ?? "");
         }
       } catch {
         if (!cancelled) setLoadError("Could not load the traits and providers.");

@@ -24,6 +24,9 @@ sc-types.workspace = true
 # does (§9's storage pattern). Needing a `Catalog` is what fixes this crate
 # above layer 4.
 sc-catalog.workspace = true
+# The installation's default provider is a `_fd_config` value
+# (`default_llm_provider`), set from the LLM providers screen.
+sc-config.workspace = true
 sc-query.workspace = true
 sc-db.workspace = true
 async-trait.workspace = true

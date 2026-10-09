@@ -1008,3 +1008,118 @@ async fn every_provider_endpoint_requires_a_session() -> sc_error::Result<()> {
     }
     Ok(())
 }
+
+/// The provider the server's configuration file supplies: listed beside the
+/// admin's, read-only, the default until the admin picks another — and its key
+/// never leaves the server, not even through *Test*.
+#[tokio::test]
+async fn the_configuration_files_provider_is_usable_but_not_editable() -> sc_error::Result<()> {
+    let (mut client, catalog, _db) = setup().await?;
+    sc_config::bootstrap(&catalog).await?;
+    let host_endpoint = stub_provider(200, "text/event-stream", anthropic_answer("ok")).await;
+    // Where an admin would like the key sent. It answers differently, so a
+    // test that reached it would say so.
+    let elsewhere = stub_provider(200, "text/event-stream", anthropic_answer("leaked")).await;
+
+    let def = sc_llm::LlmProviderDef::new("hosted", sc_llm::ANTHROPIC_BACKEND)
+        .with(CFG_API_KEY, "sk-operator")
+        .with(CFG_BASE_URL, host_endpoint.clone());
+    let host = sc_llm::HostLlmProvider::new(def, vec![], "claude-sonnet-5")?;
+    sc_llm::set_host_llm_provider(&catalog, Some(host)).await?;
+
+    // Listed, marked, the default, and redacted like any other.
+    let (status, listed) = client.send("GET", "/api/llm-providers", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let hosted = listed[0].clone();
+    assert_eq!(hosted["name"], "hosted");
+    assert_eq!(hosted["from_config_file"], json!(true));
+    assert_eq!(hosted["is_default"], json!(true));
+    assert_eq!(hosted["config"]["api_key"], json!(SECRET_SENTINEL));
+    let id = hosted["id"].as_str().unwrap().to_owned();
+
+    // Neither it nor its models can be changed.
+    let (status, body) = client
+        .send(
+            "PUT",
+            &format!("/api/llm-providers/{id}"),
+            Some(json!({
+                "name": "hosted",
+                "description": "",
+                "backend": "anthropic",
+                "config": { "api_key": SECRET_SENTINEL, "base_url": elsewhere },
+            })),
+        )
+        .await;
+    assert!(status.is_client_error(), "{status} {body}");
+    let (status, body) = client
+        .send("DELETE", &format!("/api/llm-providers/{id}"), None)
+        .await;
+    assert!(status.is_client_error(), "{status} {body}");
+    let (status, body) = client
+        .send(
+            "POST",
+            &format!("/api/llm-providers/{id}/models"),
+            Some(json!({ "name": "claude-opus-5-5", "description": "", "is_default": false, "config": {} })),
+        )
+        .await;
+    assert!(status.is_client_error(), "{status} {body}");
+
+    // *Test* uses the file's endpoint, whatever the form sends…
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/llm-model-test",
+            Some(json!({
+                "provider_id": id,
+                "backend": "anthropic",
+                "config": { "api_key": SECRET_SENTINEL, "base_url": elsewhere },
+                "name": "claude-sonnet-5",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["message"], json!("ok"), "{body}");
+    // …and only the models the file lists.
+    let (status, body) = client
+        .send(
+            "POST",
+            "/api/llm-model-test",
+            Some(json!({
+                "provider_id": id,
+                "backend": "anthropic",
+                "config": hosted["config"],
+                "name": "claude-opus-5-5",
+            })),
+        )
+        .await;
+    assert!(status.is_client_error(), "{status} {body}");
+
+    // The admin adds their own and makes it the default.
+    let mine = create_provider(
+        &mut client,
+        "mine",
+        json!({ "api_key": "sk-admin", "base_url": host_endpoint }),
+    )
+    .await;
+    let (status, body) = client
+        .send("PUT", &format!("/api/llm-providers/{mine}/default"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["is_default"], json!(true));
+    let (_, listed) = client.send("GET", "/api/llm-providers", None).await;
+    let defaults: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["is_default"] == json!(true))
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(defaults, ["mine"]);
+    assert_eq!(
+        sc_llm::default_llm_provider(&catalog)
+            .await?
+            .map(|d| d.name),
+        Some("mine".to_owned())
+    );
+    Ok(())
+}

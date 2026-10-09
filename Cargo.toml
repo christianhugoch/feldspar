@@ -216,7 +216,9 @@ toml = { version = "1.1", default-features = false, features = [
     "parse",
     "serde",
 ] }
-uuid = { version = "1", features = ["v4", "serde"] }
+# `v5` for ids derived from a name: the LLM provider `feldspar.toml` supplies has
+# no row to hold an id, and its id must survive a restart (`sc_llm::host`).
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 # The two ICU4X primitives `sc-i18n` is built on, and deliberately only those
 # two. `icu_locale_core` is the BCP-47 parser and the canonical `Locale` value —
 # a language tag is a grammar, not a string to split on hyphens — and

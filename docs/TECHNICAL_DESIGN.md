@@ -225,6 +225,7 @@ graph TD
   email --> config["sc-config"]
   config --> catalog["sc-catalog"]
   auth --> catalog
+  llm --> config
   llm --> catalog
   catalog --> db["sc-db"]
   catalog --> pg
@@ -267,7 +268,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-config` | `sc-catalog` `sc-db` `sc-error` `sc-i18n` `sc-log` `sc-query` `sc-types` |
 | `sc-email` | `sc-catalog` `sc-config` `sc-error` |
 | `sc-auth` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
-| `sc-llm` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
+| `sc-llm` | `sc-catalog` `sc-config` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
 | `sc-action` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-dataset` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-model` | `sc-catalog` `sc-dataset` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
@@ -3170,6 +3171,36 @@ Phase 1):
   Responses output parser knows no `apply_patch_call` item, so a model whose capabilities say
   `native_apply_patch` is still offered `coding`'s `apply_patch_…` as a **function tool** taking the
   V4A patch text. The capability is resolved and stored, and nothing reads it yet.
+
+**A provider from `feldspar.toml`, and the default provider** (as built). An environment may
+supply one provider (`[environments.NAME.llm_provider]`: `name`, `backend`, `api_key`,
+`base_url`, `description`, `default_model`, and `[[…models]]` entries carrying a model's settings
+by their declared names). This follows the TLS keys of §13.5: the file wins, and the admin can
+use the provider but not change it.
+
+- **It is never a row.** `sc_llm::set_host_llm_provider` holds a checked `HostLlmProvider` on
+  the `Catalog`, in an opaque slot like the other hosts. `storage`'s readers merge it in: listed,
+  found by id and by name, with its models. Its writers refuse it: saving or deleting it, and
+  adding, changing or deleting its models. So its key is in no backup, Clear all leaves it, and
+  a restore cannot overwrite it. The ids are UUID v5 of the name, so they are the same on every
+  boot.
+- **Checked at boot.** It is checked the way a save is checked: the backend, the key, each
+  model's settings against the backend's spec, one default. A stored provider with the same
+  name stops the boot rather than being shadowed, because shadowing it would quietly change
+  which key the admin's agents are billed to.
+- ***Test* sends the file's settings as they are.** It never merges the form's settings over
+  them, and it only tests the models the file lists. Merging would let an admin who cannot see
+  the key send it to a `base_url` of their own.
+- **The default provider** is what a caller uses when nothing names a provider: a new
+  application's builder agent, `i18n translate`, `eval`, and the first choice in the agent
+  form. Callers use `sc_llm::default_llm_provider`, which checks, in order:
+  1. the admin's pick (`default_llm_provider` in `_fd_config`, an internal key set by
+     `PUT /api/llm-providers/{id}/default`);
+  2. the file's provider;
+  3. the first provider by name.
+
+  A pick whose provider has been deleted falls through to the next. The admin API reports
+  `from_config_file` and `is_default` on each provider.
 
 ### 11.2 Agents, traits and the loop (`sc-agent`)
 

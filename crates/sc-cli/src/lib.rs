@@ -138,6 +138,21 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
     }
     sc_config::set_host_config(&catalog, pinned)
         .context("reading the TLS settings in the configuration file")?;
+    // The LLM provider the selected environment supplies, on the same footing:
+    // usable by every agent, listed read-only, never stored.
+    let provider = db
+        .serving()
+        .llm_provider()
+        .context("reading the LLM provider in the configuration file")?;
+    if let Some(provider) = &provider {
+        eprintln!(
+            "feldspar: LLM provider `{}` set by the configuration file",
+            provider.def().name
+        );
+    }
+    sc_llm::set_host_llm_provider(&catalog, provider)
+        .await
+        .context("reading the LLM provider in the configuration file")?;
     // The stored Localisation settings, on the same footing and here for the
     // same reason: what a `feldspar` command prints to an admin — and what a
     // server negotiates a request into — is a stored setting, so it has to be

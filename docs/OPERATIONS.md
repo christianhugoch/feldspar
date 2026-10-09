@@ -564,6 +564,7 @@ Every key an environment may hold:
 | `stan_max_draws_response` | integer | `--stan-max-draws-response` (§9.4) |
 | `stan_summary_max_elements` | integer | `--stan-summary-max-elements` (§9.4) |
 | `test_template` | string | the template per-test databases are cloned from. Read by the integration-test harness, **not** by the server |
+| `llm_provider` | table | an LLM provider this host supplies, read-only in the admin UI (§4.4) |
 
 `environments` is an ordinary TOML table: define as many as you have databases,
 named whatever you like. `--environment NAME` (or `--env NAME`, or `FELDSPAR_ENV`)
@@ -612,6 +613,108 @@ though it is the file's default.
 on every start. If the database is unreachable or misconfigured it exits
 immediately with an error naming the target — the password is never printed — and
 will not boot in a half-working state.
+
+### 4.4 An LLM provider from the file
+
+An environment can supply an **LLM provider**: an API key and the models it may be used
+with. Use this when the operator of the host pays for the model and the admin of the
+instance should be able to use it, but not see the key or change it. Managed hosting is
+the usual case.
+
+```toml
+[environments.production.llm_provider]
+name          = "hosted"             # what agents call it
+backend       = "anthropic"          # anthropic, openai_responses or openai_chat
+api_key       = "sk-ant-…"
+# base_url    = "https://gateway.internal/v1"   # when it is not the backend's own endpoint
+# description = "Paid for by the hosting provider"
+default_model = "claude-sonnet-5"
+
+[[environments.production.llm_provider.models]]
+name         = "claude-sonnet-5"
+price_input  = 3.0                   # per million tokens, as on the admin form
+price_output = 15.0
+
+[[environments.production.llm_provider.models]]
+name = "claude-haiku-4-5"
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `name` | string | the provider's name, which agents use to refer to it. No provider the admin adds may use the same name |
+| `backend` | string | `anthropic`, `openai_responses` or `openai_chat` |
+| `api_key` | string | required, except for `openai_chat` against a local host that takes none |
+| `base_url` | string | the endpoint. Defaults to the backend's own; required for `openai_chat` |
+| `description` | string | shown under the name in the admin UI |
+| `default_model` | string | the model used by an agent that names this provider but no model. Can be left out when exactly one model is listed; when any models are listed, it must be one of them |
+| `models` | array of tables | the models agents may use. Each has a `name` plus any of the backend's model settings, the same ones the admin form's model dialog shows. With no list, `default_model` is the only model, with built-in settings |
+
+A model's settings, and the values they take:
+
+| Setting | Value |
+|---|---|
+| `price_input`, `price_cached_input`, `price_cache_write`, `price_output` | number, per million tokens |
+| `context_window`, `working_budget` | integer, in tokens |
+| `edit_format` | `"str_replace"`, `"apply_patch"` or `"whole_file"` |
+| `parallel_tool_calls`, `vision`, `supports_temperature`, `reasoning_replay`, `native_apply_patch` | `"yes"` or `"no"` |
+| `parallel_tool_calls_default` | `"on"` or `"off"` |
+| `prompt_caching` | one of the choices the model dialog offers for that backend |
+
+Not every backend has every setting. For example, `native_apply_patch` exists only
+for `openai_responses`. A setting the backend does not have is refused at startup,
+and the message lists the ones it does have.
+
+A setting left out means the built-in default, as a blank does on the form. A missing
+price means the price is unknown, not zero. The yes/no and on/off values are strings,
+not TOML booleans, because blank is a third value meaning "built-in".
+
+What the admin sees and can do:
+
+- **Agents → LLM providers** lists it with a *configuration file* badge. It opens as
+  *View*: the form is disabled, the key shows as `••••••••`, and there is no Save or
+  Remove. Its models can be **tested** but not added, edited, deleted or fetched from
+  the host.
+- **It is the default provider until the admin picks another.** The default is used
+  wherever nothing names a provider: a new application's builder agent, the first
+  choice in a new agent's form, translation, and `feldspar eval`. The admin can add
+  providers of their own and press **Make default** on any of them, including this
+  one. Without a pick, the default is this provider, and with no file provider it is
+  the first provider by name.
+- **Test sends the file's settings exactly as they are.** It ignores any base URL or
+  key typed into the form, and it only tests the models the file lists. So the admin
+  cannot send the key anywhere else.
+
+What the server does with it:
+
+- **It never writes it to the database.** The provider and its models are held in
+  memory and added to every provider lookup. As a result:
+  - the key is not in `_fd_llm_providers`, a database dump, or a backup;
+  - Clear all does not remove it;
+  - a restore cannot overwrite it.
+
+  The file is the only copy, so keep it `0640`/`0600` as §4.1 says.
+- **Its ids are derived from its name.** Agents, runs and the admin UI's links keep
+  working across restarts. Renaming the provider in the file changes its id, so
+  agents that name the old name stop working until they are pointed at the new one.
+- **It is checked at startup, like a save in the admin UI.** Each of these stops the
+  server with a message naming the problem:
+  - an unknown backend;
+  - a missing key;
+  - a model setting the backend does not have (a typo such as `price_inptu` is listed
+    against the valid names);
+  - a model listed twice;
+  - no clear default model;
+  - a provider the admin already added under the same `name`.
+
+  The server does not replace the admin's provider with the file's, because that
+  would silently change which key the admin's agents are billed to. Rename one of
+  them.
+- **Changes need a restart.** The section is read at boot, like the TLS settings.
+  `SIGHUP` does not re-read it (§6.2). The startup log has the line
+  ``feldspar: LLM provider `hosted` set by the configuration file``.
+
+To stop supplying it, delete the section and restart. Agents that named it then
+report the provider as missing until the admin points them at another one.
 
 ---
 
@@ -746,7 +849,8 @@ admin API that updates the live set in place, so the restart is rarely what you
 want:
 
 - the **trigger set** and the **agents**,
-- the **LLM providers**,
+- the **LLM providers** — and the one in `feldspar.toml` (§4.4) is not re-read at
+  all: change it with a restart,
 - **file-store connections** — a store's *contents* are read live, but a store
   definition added since boot is not connected here,
 - **database connections** — a connected database is re-introspected with the
@@ -1236,8 +1340,10 @@ sudo -u feldspar feldspar restore /var/backups/feldspar/site.zip --environment s
 `backup` includes everything — tables and their rows, applications with their views
 and pages, file stores and their files, users, modules, database connections,
 streams, analytics, LLM providers, agents, triggers and settings — **except the SSL /
-TLS settings**. The certificate, its key and the names it covers belong to the
-machine, not to the installation. The dialog still offers them if you want to move
+TLS settings** and **the LLM provider `feldspar.toml` supplies** (§4.4). The
+certificate, its key and the names it covers belong to the machine, not to the
+installation, and so does the operator's API key. An agent that names the file's
+provider is restored only where the target's file supplies a provider of that name. The dialog still offers them if you want to move
 them. The file is written beside its final name and renamed into place, so an
 interrupted backup leaves the previous file whole.
 
@@ -1338,6 +1444,9 @@ looking hung. Ctrl-C does the same interactively.
 | after setting **Admin subdomain** (Settings → Development) the dialog stays on "Obtaining a certificate" | the CA cannot reach the new name: point a DNS record for `<subdomain>.<base domain>` (or a wildcard) at this server. The CA's last error is shown under the step. The old address keeps serving the admin UI meanwhile |
 | the dialog's certificate step says "No certificate covers …" | the certificate pasted in Settings → SSL / TLS does not name the admin host. Paste one that does — a wildcard for the base domain covers it — or move the admin UI back by emptying the box |
 | the admin UI is unreachable after moving it, and the old address redirects | the redirect is sent only once the new host's certificate is ready, but the browser may still not resolve the name. Reach the server on any other host that names no application (an IP address works) and empty **Admin subdomain**, or delete the `admin_subdomain` row from `_fd_config` and restart |
+| startup stops with "reading the LLM provider in the configuration file" | the `llm_provider` section (§4.4) is not accepted. The next line says why: an unknown backend, a missing `api_key`, an unknown model setting (the valid names are listed), a model listed twice, or a `default_model` that is not one of the listed models |
+| startup stops with "the admin has already added one by that name" | a provider stored in the database has the `name` the file gives its provider. Rename the one in the file, or have the admin rename or remove theirs |
+| an admin cannot edit or remove an LLM provider ("set by the server's configuration file") | it comes from `feldspar.toml` (§4.4). Change it there and restart. The admin can add another provider and make that the default |
 | `POST /mcp` answers 404 with a valid token | `mcp_enabled` is off, and off means absent (§7.1) |
 | MCP calls refused from another machine | `mcp_loopback_only` is on, which is its default |
 | a model fit says "the server restarted while this fit was running" | it did. A fit is a spawned job whose only record is its instance row, so boot marks a `fitting` row failed rather than leaving it running for ever (§3.5). Press **Fit** again |

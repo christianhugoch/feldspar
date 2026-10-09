@@ -676,8 +676,7 @@ pub fn parse_answer(text: &str) -> Result<BTreeMap<String, Json>> {
 }
 
 /// The translator this installation is configured with: a named LLM provider,
-/// or the only sensible default — the first one configured, with its default
-/// model.
+/// or the installation's default provider, with its default model.
 ///
 /// The error says what to configure rather than what failed, because "no LLM
 /// provider" is not a fault, it is a step the admin has not taken yet.
@@ -689,16 +688,12 @@ pub async fn configured_translator(
         Some(name) => sc_llm::load_llm_provider_by_name(cat, name)
             .await?
             .ok_or_else(|| Error::not_found(format!("no LLM provider named `{name}`")))?,
-        None => sc_llm::list_llm_providers(cat)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                Error::config(
-                    "no LLM provider is configured — add one in Settings → LLM providers \
+        None => sc_llm::default_llm_provider(cat).await?.ok_or_else(|| {
+            Error::config(
+                "no LLM provider is configured — add one in Settings → LLM providers \
                      before translating",
-                )
-            })?,
+            )
+        })?,
     };
     let model = sc_llm::require_llm_model(cat, &provider, None).await?;
     Ok(LlmTranslator::new(sc_llm::connect_model(

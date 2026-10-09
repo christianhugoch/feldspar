@@ -142,7 +142,7 @@ pub async fn available(catalog: &Catalog) -> Result<Available> {
         workspaces,
         fits,
         llm_providers: if has_table(catalog, sc_llm::LLM_PROVIDERS_TABLE)? {
-            count(sc_llm::list_llm_providers(catalog).await?.len())
+            count(stored_llm_providers(catalog).await?.len())
         } else {
             0
         },
@@ -446,7 +446,7 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
     // validates, and a provider without its key does not.
     if selection.llm_providers && has_table(catalog, sc_llm::LLM_PROVIDERS_TABLE)? {
         let mut providers = Vec::new();
-        for def in sc_llm::list_llm_providers(catalog).await? {
+        for def in stored_llm_providers(catalog).await? {
             let models = sc_llm::list_llm_models(catalog, &def).await?;
             providers.push(backup_llm_provider_json(&def, &models));
         }
@@ -844,4 +844,17 @@ impl ZipBuilder {
 
 fn zip_error(path: &str, message: &str) -> Error {
     Error::msg(format!("could not write {path} into the backup: {message}"))
+}
+
+/// The LLM providers the admin added — not the one the configuration file
+/// supplies, whose key is the operator's and stays in that file. An agent
+/// naming it is restored onto an installation whose file supplies the same
+/// name, and is reported unrestorable elsewhere, like any agent whose provider
+/// is missing.
+async fn stored_llm_providers(catalog: &Catalog) -> Result<Vec<sc_llm::LlmProviderDef>> {
+    Ok(sc_llm::list_llm_providers(catalog)
+        .await?
+        .into_iter()
+        .filter(|def| !sc_llm::is_host_llm_provider(catalog, def.id))
+        .collect())
 }

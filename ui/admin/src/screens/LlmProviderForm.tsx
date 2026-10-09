@@ -22,6 +22,11 @@
 //     is knowable without a request. What is tested is one model through one
 //     key, so the *Test* button is on each model row, and it sends the
 //     provider settings as the form holds them.
+//
+// A provider the server's configuration file supplies (`from_config_file`) is
+// shown, not edited: the fields are disabled, there is no Save, and its models
+// can be tested but not changed. The server refuses every write to it anyway;
+// this is so the admin is not invited to try.
 
 import { useEffect, useState, type FormEvent } from "react";
 import Alert from "react-bootstrap/Alert";
@@ -56,6 +61,7 @@ export function LlmProviderForm({ providerId }: { providerId?: string }) {
   const [description, setDescription] = useState("");
   const [backendName, setBackendName] = useState("");
   const [config, setConfig] = useState<Record<string, string>>({});
+  const [fromConfigFile, setFromConfigFile] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,6 +82,7 @@ export function LlmProviderForm({ providerId }: { providerId?: string }) {
           setName(existing.name);
           setDescription(existing.description);
           setBackendName(existing.backend);
+          setFromConfigFile(existing.from_config_file);
           // Whatever the server sent, sentinel included: the form's job is to
           // hand it back unchanged unless the admin types over it.
           setConfig(readConfig(existing.config));
@@ -139,7 +146,13 @@ export function LlmProviderForm({ providerId }: { providerId?: string }) {
     <>
       <PageHeader
         pretitle="Agents"
-        title={providerId ? "Edit LLM provider" : "New LLM provider"}
+        title={
+          fromConfigFile
+            ? "LLM provider"
+            : providerId
+              ? "Edit LLM provider"
+              : "New LLM provider"
+        }
         actions={
           <Button variant="outline-secondary" onClick={() => navigate("/llm-providers")}>
             <IconArrowLeft className="icon-2" />
@@ -149,57 +162,67 @@ export function LlmProviderForm({ providerId }: { providerId?: string }) {
       />
       <PageBody>
         {error && <Alert variant="danger">{error}</Alert>}
+        {fromConfigFile && (
+          <Alert variant="info">
+            <T text="This provider is set in the server's configuration file (feldspar.toml), so it cannot be changed here. Agents can use it, and you can make it — or a provider you add — the default." />
+          </Alert>
+        )}
         <Form onSubmit={submit}>
-          <Form.Group className="mb-3" controlId="providerName">
-            <Form.Label><T text="Name" /></Form.Label>
-            <Form.Control value={name} required onChange={(e) => setName(e.target.value)} />
-            <Form.Text muted><T text="How an agent refers to this provider." /></Form.Text>
-          </Form.Group>
+          <fieldset disabled={fromConfigFile}>
+            <Form.Group className="mb-3" controlId="providerName">
+              <Form.Label><T text="Name" /></Form.Label>
+              <Form.Control value={name} required onChange={(e) => setName(e.target.value)} />
+              <Form.Text muted><T text="How an agent refers to this provider." /></Form.Text>
+            </Form.Group>
 
-          <Form.Group className="mb-3" controlId="providerDescription">
-            <Form.Label><T text="Description" /></Form.Label>
-            <Form.Control
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-            />
-          </Form.Group>
-
-          <Card className="mb-3">
-            <Card.Header><T text="Backend" /></Card.Header>
-            <Card.Body>
-              <Form.Group className="mb-3" controlId="providerBackend">
-                <Form.Label><T text="Backend" /></Form.Label>
-                <Form.Select
-                  value={backendName}
-                  onChange={(e) => setBackendName(e.target.value)}
-                >
-                  {backends.map((b) => (
-                    <option key={b.name} value={b.name}>
-                      {b.name}
-                    </option>
-                  ))}
-                </Form.Select>
-                <Form.Text muted>
-                  <T text="Any endpoint speaking the same API is reached by changing the base URL — a gateway, a local server, another vendor." />
-                </Form.Text>
-              </Form.Group>
-
-              {/* The backend's own settings, rendered from its config_spec. The
-                  API key is a password field because the spec says `secret`. */}
-              <SettingsFields
-                spec={spec}
-                values={config}
-                onChange={(key, v) => setConfig((c) => ({ ...c, [key]: v }))}
-                idPrefix="provider-cfg"
+            <Form.Group className="mb-3" controlId="providerDescription">
+              <Form.Label><T text="Description" /></Form.Label>
+              <Form.Control
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
               />
-            </Card.Body>
-          </Card>
+            </Form.Group>
 
-          <div className="btn-list">
-            <Button type="submit" disabled={busy}>
-              {busy ? "Saving…" : providerId ? "Save changes" : "Create provider"}
-            </Button>
-          </div>
+            <Card className="mb-3">
+              <Card.Header><T text="Backend" /></Card.Header>
+              <Card.Body>
+                <Form.Group className="mb-3" controlId="providerBackend">
+                  <Form.Label><T text="Backend" /></Form.Label>
+                  <Form.Select
+                    value={backendName}
+                    onChange={(e) => setBackendName(e.target.value)}
+                  >
+                    {backends.map((b) => (
+                      <option key={b.name} value={b.name}>
+                        {b.name}
+                      </option>
+                    ))}
+                  </Form.Select>
+                  <Form.Text muted>
+                    <T text="Any endpoint speaking the same API is reached by changing the base URL — a gateway, a local server, another vendor." />
+                  </Form.Text>
+                </Form.Group>
+
+                {/* The backend's own settings, rendered from its config_spec. The
+                    API key is a password field because the spec says `secret`. */}
+                <SettingsFields
+                  spec={spec}
+                  values={config}
+                  onChange={(key, v) => setConfig((c) => ({ ...c, [key]: v }))}
+                  idPrefix="provider-cfg"
+                />
+              </Card.Body>
+            </Card>
+
+          </fieldset>
+
+          {!fromConfigFile && (
+            <div className="btn-list">
+              <Button type="submit" disabled={busy}>
+                {busy ? "Saving…" : providerId ? "Save changes" : "Create provider"}
+              </Button>
+            </div>
+          )}
         </Form>
 
         <div className="mt-4">
@@ -211,6 +234,7 @@ export function LlmProviderForm({ providerId }: { providerId?: string }) {
               providerId={providerId}
               backend={backendName}
               providerConfig={buildConfig(spec, config)}
+              readOnly={fromConfigFile}
             />
           ) : (
             <p className="text-muted small">

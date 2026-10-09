@@ -83,6 +83,16 @@ pub const BACKUP_SCHEDULES: &str = "backup_schedules";
 /// stale copy (the arrangement a trigger's `last_run_at` has).
 pub const BACKUP_SCHEDULE_STATUS: &str = "backup_schedule_status";
 
+/// Which LLM provider is the installation's default, by id: the one a new
+/// application's builder agent, a translation and an eval call when nothing
+/// names a provider.
+///
+/// Internal, because the LLM providers screen is what sets it — a pick-list of
+/// providers is not a text box on the settings form. Unset, or naming a provider
+/// that is gone, the default is the provider the configuration file supplies,
+/// else the first by name (`sc_llm::default_llm_provider`).
+pub const DEFAULT_LLM_PROVIDER: &str = "default_llm_provider";
+
 /// Every section, in screen order.
 pub fn config_sections() -> &'static [ConfigSection] {
     static SECTIONS: OnceLock<Vec<ConfigSection>> = OnceLock::new();
@@ -124,6 +134,10 @@ pub fn internal_defs() -> &'static [ConfigDef] {
             ConfigDef::new(
                 FormField::new(BACKUP_SCHEDULE_STATUS, sc_types::BasicType::Json)
                     .label("What each automated backup last did"),
+            ),
+            ConfigDef::new(
+                FormField::new(DEFAULT_LLM_PROVIDER, sc_types::BasicType::Text)
+                    .label("Default LLM provider"),
             ),
         ]
     })
@@ -189,7 +203,11 @@ mod tests {
         assert!(definition(BACKUP_INCLUDE).is_some());
         assert!(known_keys().contains(&BACKUP_INCLUDE));
         assert!(!config_spec().iter().any(|f| f.name() == BACKUP_INCLUDE));
-        for key in [BACKUP_SCHEDULES, BACKUP_SCHEDULE_STATUS] {
+        for key in [
+            BACKUP_SCHEDULES,
+            BACKUP_SCHEDULE_STATUS,
+            DEFAULT_LLM_PROVIDER,
+        ] {
             assert!(known_keys().contains(&key));
             assert!(!config_spec().iter().any(|f| f.name() == key));
         }

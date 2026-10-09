@@ -1951,17 +1951,15 @@ async fn i18n_translate(
     }
     let catalog_db = connect_catalog(&db).await?;
 
-    // Which model. A named provider, or the only sensible default: the first
-    // one configured, with its default model. The error says what to configure
-    // rather than what failed.
+    // Which model. A named provider, or the installation's default provider,
+    // with its default model. The error says what to configure rather than what
+    // failed.
     let provider = match &parsed.provider {
         Some(name) => sc_llm::load_llm_provider_by_name(&catalog_db, name)
             .await?
             .ok_or_else(|| sc_error::Error::not_found(format!("no LLM provider named `{name}`")))?,
-        None => sc_llm::list_llm_providers(&catalog_db)
+        None => sc_llm::default_llm_provider(&catalog_db)
             .await?
-            .into_iter()
-            .next()
             .ok_or_else(|| {
                 sc_error::Error::config(
                     "no LLM provider is configured — add one in Settings → LLM providers, \

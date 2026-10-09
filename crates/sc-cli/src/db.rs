@@ -127,6 +127,39 @@ impl Serving<'_> {
         out
     }
 
+    /// The LLM provider the file supplies, checked and ready for
+    /// [`sc_llm::set_host_llm_provider`] — `None` where it supplies none.
+    ///
+    /// An error is a section `sc-llm` does not accept: an unknown backend, a
+    /// missing key, a model setting the backend does not declare, no way to tell
+    /// the default model. The server refuses to start on it, as on any other
+    /// misconfiguration in this file.
+    pub fn llm_provider(&self) -> Result<Option<sc_llm::HostLlmProvider>> {
+        let Some(section) = self.section.and_then(|s| s.llm_provider.as_ref()) else {
+            return Ok(None);
+        };
+        let mut def = sc_llm::LlmProviderDef::new(&section.name, &section.backend)
+            .description(section.description.clone().unwrap_or_default());
+        if let Some(key) = &section.api_key {
+            def = def.with(sc_llm::CFG_API_KEY, key.clone());
+        }
+        if let Some(url) = &section.base_url {
+            def = def.with(sc_llm::CFG_BASE_URL, url.clone());
+        }
+        let models = section
+            .models
+            .iter()
+            .map(|model| {
+                let mut def = sc_llm::LlmModelDef::new(def.id, &model.name);
+                for (key, value) in &model.settings {
+                    def.config.insert(key.clone(), toml_to_json(value));
+                }
+                def
+            })
+            .collect();
+        sc_llm::HostLlmProvider::new(def, models, section.default_model_name()?).map(Some)
+    }
+
     /// The configured headless browser, if the file named one.
     pub fn browser(&self) -> Option<&str> {
         self.section.and_then(|s| s.browser.as_deref())
@@ -170,6 +203,27 @@ impl Serving<'_> {
             sc_catalog::PublicOrigin::new(domain, self.port().unwrap_or(DEFAULT_HTTP_PORT))
                 .secure(self.secure_cookies().unwrap_or(false)),
         )
+    }
+}
+
+/// A TOML value as the JSON a model setting is stored as. A date has no JSON
+/// form and no model setting is one, so it becomes its text and the setting's
+/// type check refuses it.
+fn toml_to_json(value: &toml::Value) -> serde_json::Value {
+    use serde_json::Value as Json;
+    match value {
+        toml::Value::String(s) => Json::from(s.clone()),
+        toml::Value::Integer(i) => Json::from(*i),
+        toml::Value::Float(f) => Json::from(*f),
+        toml::Value::Boolean(b) => Json::Bool(*b),
+        toml::Value::Datetime(d) => Json::from(d.to_string()),
+        toml::Value::Array(items) => Json::Array(items.iter().map(toml_to_json).collect()),
+        toml::Value::Table(table) => Json::Object(
+            table
+                .iter()
+                .map(|(k, v)| (k.clone(), toml_to_json(v)))
+                .collect(),
+        ),
     }
 }
 
@@ -514,6 +568,71 @@ mod tests {
                 .all(|key| sc_config::HOST_KEYS.contains(&key.as_str()))
         );
         assert!(Serving { section: None }.host_config().is_empty());
+    }
+
+    /// The file's `llm_provider` becomes a checked host provider: its key and
+    /// endpoint as the backend's settings, a model's TOML settings as the JSON
+    /// a stored model holds, and a typo refused rather than dropped.
+    #[test]
+    fn the_file_s_llm_provider_becomes_a_checked_host_provider() {
+        let file = config_file::ConfigFile::parse(
+            r#"
+[environments.production.llm_provider]
+name = "hosted"
+backend = "openai_chat"
+base_url = "http://localhost:8080/v1"
+default_model = "qwen"
+
+[[environments.production.llm_provider.models]]
+name = "qwen"
+price_input = 0.5
+context_window = 32768
+vision = "no"
+"#,
+            std::path::Path::new("feldspar.toml"),
+        )
+        .expect("parses");
+        let section = &file.environments["production"];
+        let host = Serving {
+            section: Some(section),
+        }
+        .llm_provider()
+        .expect("accepted")
+        .expect("supplied");
+        assert_eq!(host.def().name, "hosted");
+        assert_eq!(host.def().id, sc_llm::host_provider_id("hosted"));
+        assert_eq!(
+            host.def().setting(sc_llm::CFG_BASE_URL),
+            Some("http://localhost:8080/v1")
+        );
+        let [model] = host.models() else {
+            panic!("one model: {:?}", host.models());
+        };
+        assert!(model.is_default);
+        assert_eq!(
+            serde_json::Value::Object(model.config.clone()),
+            serde_json::json!({ "price_input": 0.5, "context_window": 32768, "vision": "no" })
+        );
+        assert!(
+            Serving { section: None }
+                .llm_provider()
+                .expect("none")
+                .is_none()
+        );
+
+        // A model setting the backend does not declare stops the server.
+        let mut typo = section.clone();
+        if let Some(provider) = &mut typo.llm_provider {
+            provider.models[0]
+                .settings
+                .insert("price_inptu".to_owned(), toml::Value::Float(1.0));
+        }
+        let err = Serving {
+            section: Some(&typo),
+        }
+        .llm_provider()
+        .expect_err("a typo");
+        assert!(err.to_string().contains("price_inptu"), "{err}");
     }
 
     #[test]

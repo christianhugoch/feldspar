@@ -1056,6 +1056,40 @@ can read it — including a group that is not its own.
 > staging. Explicit `--db-*` flags still win over everything. `feldspar serve`
 > prints which environment it connected with, from which file.
 
+#### An LLM provider from the file
+
+An environment can also give the instance an **LLM provider**. Use it when the operator of
+the machine pays for the model and the admin of the instance should be able to use it
+without seeing or changing the key:
+
+```toml
+[environments.production.llm_provider]
+name = "hosted"                    # what agents call it
+backend = "anthropic"              # anthropic, openai_responses or openai_chat
+api_key = "sk-ant-…"
+# base_url = "https://…"           # when it is not the backend's own endpoint
+default_model = "claude-sonnet-5"  # may be left out when exactly one model is listed
+
+[[environments.production.llm_provider.models]]
+name = "claude-sonnet-5"
+price_input = 3.0                  # any model setting, by the names the admin form uses
+price_output = 15.0
+
+[[environments.production.llm_provider.models]]
+name = "claude-haiku-4-5"
+```
+
+- **Read-only in the admin UI.** **Agents → LLM providers** lists it with a *configuration
+  file* badge. The provider and its models can be viewed and tested, but not edited or
+  removed.
+- **Never written to the database.** The key stays in the file, so it is not in any backup,
+  and Clear all does not remove it.
+- **Only the listed models.** Agents can use only the models listed here.
+- **The default until the admin picks another.** It is the default provider out of the box.
+  The admin can add providers of their own and **Make default** any of them.
+- **Checked at startup.** An unknown backend, a missing key, a model setting the backend does
+  not have, or a provider the admin already added under the same name stops the server.
+
 ### Server options
 
 | Flag | Meaning | Default |

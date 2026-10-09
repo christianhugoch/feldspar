@@ -2,6 +2,68 @@
 
 Changes in reverse chronological order.
 
+## An LLM provider from `feldspar.toml`, and a default provider
+
+An environment in `feldspar.toml` can supply an LLM provider (`[environments.NAME.llm_provider]`,
+with `[[…models]]`). The admin can use it but not change it. The admin can still add other
+providers and make one of them the **default**.
+
+- **Config file** (`sc-config-file`): `LlmProviderSection` has `name`, `backend`, `api_key`,
+  `base_url`, `description`, `default_model` and `models`. A model entry is a `name` plus its
+  settings, and the backend's spec checks those settings. `default_model` may be left out when
+  exactly one model is listed. When models are listed, it must be one of them.
+  `Environment`/`ConfigFile` are now `PartialEq` without `Eq`, because a price is a float.
+- **Held in memory, never stored** (`sc_llm::host`, new):
+  - `HostLlmProvider::new` checks the provider the way a save does. Ids are UUID v5 of the
+    names (the workspace `uuid` now enables `v5`).
+  - `set_host_llm_provider` puts it in a new opaque slot on the `Catalog`. It refuses a name
+    that a stored provider already has.
+  - `sc-cli`'s `connect_catalog` sets it after the TLS keys (`Serving::llm_provider`). A bad
+    section stops startup.
+- **Storage merges it in.** `list_llm_providers`, `load_llm_provider(_by_name)`,
+  `list_llm_models` and `load_llm_model` return it like a row. Saving or deleting the provider
+  or any of its models is refused with "set by the server's configuration file". An admin's
+  provider cannot take its name.
+- **Default provider** (`sc_llm::default_llm_provider`): the admin's pick (new internal
+  `_fd_config` key `default_llm_provider`), else the file's provider, else the first by name.
+  A pick whose provider was deleted falls back. This replaces "the first provider by name" in
+  four places:
+  - the app builder agent;
+  - `feldspar i18n translate`;
+  - the server's translator;
+  - `feldspar eval`.
+
+  `sc-llm` now depends on `sc-config`.
+- **Admin API:**
+  - Providers carry `from_config_file` and `is_default`.
+  - New `setDefaultLlmProvider` (`PUT /api/llm-providers/{id}/default`). The client was
+    regenerated in all four UIs.
+  - `testLlmModel` uses the file's settings verbatim for its provider, and only its listed
+    models. Merging the form's `base_url` over them would have sent the operator's key wherever
+    an admin pointed it.
+- **Backups** leave out the file's provider and its key (`stored_llm_providers`).
+- **Admin UI:**
+  - LLM providers shows *default* and *configuration file* badges and a *Make default* button.
+    The file's provider opens as *View*, with no *Remove*.
+  - The provider form is disabled for the file's provider, with an explanation and no Save.
+  - `LlmModels` takes `readOnly`, which hides add, fetch, edit, delete and make-default but keeps
+    *Test*.
+  - A new agent starts on the default provider.
+- **Tests:**
+  - `sc-config-file`: parsing and choosing the default model.
+  - `sc-llm/tests/host_provider.rs`: merging, every refused write, the name clash, the checks,
+    and the order the default falls back in.
+  - `sc-cli`: TOML to provider.
+  - `llm_provider_admin_api`: listing, read-only behaviour, *Test* not leaking the key, and
+    setting the default.
+  - `backup_api`: the file's provider is not backed up.
+- **Docs:**
+  - OPERATIONS.md §4.4 "An LLM provider from the file": every key, the value types of the
+    model settings, what the admin can and cannot do, and what the server does with it. It
+    also adds an `llm_provider` row to §4.2's key table, notes in §6.2 (not re-read on
+    `SIGHUP`) and in backup/restore (left out), and three rows in §8.5 Common failures.
+  - README ("An LLM provider from the file") and TECHNICAL_DESIGN §11.1.
+
 ## Admin UI on its own subdomain; an application on the base domain
 
 The admin UI can be moved off the base domain to a subdomain of its own: **Settings →

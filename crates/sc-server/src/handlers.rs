@@ -1462,10 +1462,11 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         move |_ctx| {
             let catalog = catalog.clone();
             async move {
+                let default = default_provider_id(&catalog).await?;
                 let out: Vec<Json> = list_llm_providers(&catalog)
                     .await?
                     .iter()
-                    .map(llm_provider_json)
+                    .map(|def| llm_provider_json(&catalog, def, default))
                     .collect();
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
@@ -1484,7 +1485,11 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // for a form that was never given one.
                 let def = llm_provider_from_body(LlmProviderDefId::new(), &ctx.body)?;
                 save_llm_provider(&catalog, &def).await?;
-                Ok(HandlerResponse::ok(llm_provider_json(&def)).with_status(201))
+                let default = default_provider_id(&catalog).await?;
+                Ok(
+                    HandlerResponse::ok(llm_provider_json(&catalog, &def, default))
+                        .with_status(201),
+                )
             }
         }
     });
@@ -1509,7 +1514,29 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 def.config =
                     unredacted_provider_config(&def.backend, &existing.config, &def.config);
                 save_llm_provider(&catalog, &def).await?;
-                Ok(HandlerResponse::ok(llm_provider_json(&def)))
+                let default = default_provider_id(&catalog).await?;
+                Ok(HandlerResponse::ok(llm_provider_json(
+                    &catalog, &def, default,
+                )))
+            }
+        }
+    });
+
+    reg.register("setDefaultLlmProvider", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_llm_provider_id(ctx.path_param("id")?)?;
+                sc_llm::set_default_llm_provider(&catalog, Some(id)).await?;
+                let def = load_llm_provider(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no LLM provider with id {id:?}")))?;
+                Ok(HandlerResponse::ok(llm_provider_json(
+                    &catalog,
+                    &def,
+                    Some(id),
+                )))
             }
         }
     });
@@ -1737,6 +1764,23 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     None => None,
                 };
                 let provider = match &stored {
+                    // The configuration file's provider is tested exactly as it
+                    // is, and only with its own models. Merging the form's
+                    // settings over it would let an admin who cannot see its key
+                    // send it to a `base_url` of their choosing.
+                    Some(stored) if sc_llm::is_host_llm_provider(&catalog, stored.id) => {
+                        if sc_llm::load_llm_model_by_name(&catalog, stored, &name)
+                            .await?
+                            .is_none()
+                        {
+                            return Err(Error::invalid(format!(
+                                "LLM provider `{}` is set by the server's configuration \
+                                 file, which does not list a model `{name}`",
+                                stored.name
+                            )));
+                        }
+                        stored.clone()
+                    }
                     Some(stored) => LlmProviderDef {
                         config: unredacted_provider_config(&backend, &stored.config, &submitted),
                         ..LlmProviderDef::new(&stored.name, &backend).id(stored.id)
@@ -7203,14 +7247,12 @@ async fn create_builder_agent(
     }
 
     // An agent needs a provider that is connected, and a framework cannot know
-    // which one a deployment has. The first by name is a choice, not a
-    // preference — the admin can change it on the agent — but a deployment with
-    // none is a thing to say out loud rather than a silently agent-less
-    // application.
-    let provider = list_llm_providers(catalog)
+    // which one a deployment has: it gets the installation's default (the
+    // admin's pick, else the configuration file's, else the first by name), and
+    // the admin can change it on the agent. A deployment with none is a thing to
+    // say out loud rather than a silently agent-less application.
+    let provider = sc_llm::default_llm_provider(catalog)
         .await?
-        .into_iter()
-        .next()
         .ok_or_else(|| {
             Error::config(format!(
                 "no LLM provider is connected, so the `{}` agent that builds this \
@@ -8270,14 +8312,30 @@ fn parse_file_store_id(raw: &str) -> Result<FileStoreDefId> {
 /// **The redaction is here and nowhere else.** Every response that carries a
 /// provider goes through this function, so an endpoint added later cannot
 /// accidentally return a key: it would have to build the JSON by hand to do so.
-fn llm_provider_json(def: &LlmProviderDef) -> Json {
+///
+/// `default` is the installation's default provider's id
+/// ([`default_provider_id`]), passed in so a listing asks once.
+fn llm_provider_json(
+    catalog: &Catalog,
+    def: &LlmProviderDef,
+    default: Option<LlmProviderDefId>,
+) -> Json {
     json!({
         "id": def.id.0,
         "name": def.name,
         "description": def.description,
         "backend": def.backend,
         "config": Json::Object(redacted_provider_config(&def.backend, &def.config)),
+        "from_config_file": sc_llm::is_host_llm_provider(catalog, def.id),
+        "is_default": default == Some(def.id),
     })
+}
+
+/// The id of the installation's default LLM provider, if there is a provider.
+async fn default_provider_id(catalog: &Catalog) -> Result<Option<LlmProviderDefId>> {
+    Ok(sc_llm::default_llm_provider(catalog)
+        .await?
+        .map(|def| def.id))
 }
 
 /// An LLM provider for a **backup**: the `createLlmProvider` shape with the

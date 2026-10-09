@@ -978,6 +978,23 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // Make a provider the installation's default: the one used where nothing
+    // names a provider (a new application's builder agent, a translation). The
+    // provider the configuration file supplies may be made the default like any
+    // other — choosing it is using it, not changing it.
+    set.register(
+        Endpoint::new(
+            "setDefaultLlmProvider",
+            Method::Put,
+            api()
+                .lit("llm-providers")
+                .param("id", ValueType::Uuid)
+                .lit("default"),
+        )
+        .output(llm_provider_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
     // The registered backends with their settings spec, so the create/edit form
     // renders controls for a backend it knows nothing about — the same move
     // `listFileStoreBackends` and `listFrameworks` make.
@@ -4723,9 +4740,11 @@ fn llm_provider_fields() -> Vec<StructField> {
 
 /// An LLM provider as reported to the admin UI.
 ///
-/// `id` is not optional here, unlike a file store's: there is no `--llm-provider`
-/// flag and no such thing as a provider without a row, so every provider in a
-/// listing is one that can be edited and deleted.
+/// `id` is not optional here, unlike a file store's: even the provider the
+/// configuration file supplies, which has no row, has an id derived from its
+/// name. That one is `from_config_file`, and neither it nor its models can be
+/// edited or deleted. `is_default` marks the installation's default provider —
+/// exactly one in a non-empty listing.
 ///
 /// There is no `connected` either, and its absence is the design: connecting a
 /// provider builds an HTTP client and sends nothing, so "connected" would be a
@@ -4735,6 +4754,10 @@ fn llm_provider_fields() -> Vec<StructField> {
 fn llm_provider_schema() -> TypeSchema {
     let mut fields = vec![StructField::new("id", TypeSchema::uuid())];
     fields.extend(llm_provider_fields());
+    fields.extend([
+        StructField::new("from_config_file", TypeSchema::bool()),
+        StructField::new("is_default", TypeSchema::bool()),
+    ]);
     TypeSchema::Struct(fields)
 }
 

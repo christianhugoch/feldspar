@@ -873,3 +873,22 @@ could not do, and what we agree is missing:
 
 Not changed, by design: `save_api_query`'s `min_role` and `edit_schema`'s `min_role_*` stay
 behind `allow_access_changes`, and deleting tables and triggers stays behind `allow_drop`.
+
+# An LLM provider from the configuration file
+
+An operator can supply an LLM provider in `feldspar.toml`. The admin can use it but cannot edit
+it, and can still add other providers and make one of them the default.
+
+- [x] L.1 `[environments.NAME.llm_provider]` in `sc-config-file`: name, backend, key, base URL,
+  default model, and `[[…models]]` entries with each model's settings. Shape tests.
+- [x] L.2 `sc_llm::host`: a checked `HostLlmProvider` held on the `Catalog`, never stored.
+  Storage readers merge it in, and writers refuse it and its models. A clash with a stored
+  name stops the boot. Ids are derived from the name. Tests against Postgres.
+- [x] L.3 The default provider: `default_llm_provider` in `_fd_config` (internal), falling
+  back to the file's provider, then the first by name. Used by the app builder agent, `i18n
+  translate`, `eval` and the agent form. Tests.
+- [x] L.4 Admin API: `from_config_file` and `is_default` on a provider, and
+  `setDefaultLlmProvider`. *Test* uses the file's settings verbatim and only its models.
+  Backups leave the file's provider out. Tests.
+- [x] L.5 Admin UI: badges, *Make default*, and the file's provider and its models read-only.
+  OPERATIONS.md §4.4, README and TECHNICAL_DESIGN §11.1.

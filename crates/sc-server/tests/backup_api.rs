@@ -2010,6 +2010,33 @@ async fn furnish_llm(server: &mut Server) -> sc_error::Result<()> {
     Ok(())
 }
 
+/// The provider the configuration file supplies is the operator's, and so is
+/// its key: a backup leaves it out, beside the admin's provider it carries.
+#[tokio::test]
+async fn the_configuration_files_llm_provider_is_not_backed_up() -> sc_error::Result<()> {
+    let mut source = setup().await?;
+    furnish_llm(&mut source).await?;
+    let def = sc_llm::LlmProviderDef::new("hosted", sc_llm::ANTHROPIC_BACKEND)
+        .with(sc_llm::CFG_API_KEY, "sk-operator");
+    let host = sc_llm::HostLlmProvider::new(def, vec![], "claude-sonnet-5")?;
+    sc_llm::set_host_llm_provider(&source.catalog, Some(host)).await?;
+
+    let (_, options) = source.client.send("GET", "/api/backup", None).await;
+    assert_eq!(options["available"]["llm_providers"], json!(1), "{options}");
+    let archive = backup_everything(&mut source).await;
+    let text = entry(&archive, "llm-providers.json");
+    let providers: Value = serde_json::from_str(&text).unwrap();
+    let names: Vec<&str> = providers
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["house"]);
+    assert!(!text.contains("sk-operator"), "{text}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn llm_providers_travel_with_their_key_and_their_agents_come_back() -> sc_error::Result<()> {
     let mut source = setup().await?;

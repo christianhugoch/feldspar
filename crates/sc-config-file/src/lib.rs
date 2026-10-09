@@ -51,6 +51,25 @@
 //! acme_contact_email = "ops@example.com" # them read-only
 //! ```
 //!
+//! A section may also supply an **LLM provider** — the key and the models an
+//! operator pays for, given to the instance rather than typed into it:
+//!
+//! ```toml
+//! [environments.production.llm_provider]
+//! name = "hosted"                  # what an agent names it by
+//! backend = "anthropic"            # anthropic, openai_responses or openai_chat
+//! api_key = "sk-ant-…"
+//! default_model = "claude-sonnet-5"
+//!
+//! [[environments.production.llm_provider.models]]
+//! name = "claude-sonnet-5"
+//! price_input = 3.0                # any of the model's settings
+//! price_output = 15.0
+//! ```
+//!
+//! The admin UI lists it beside the providers an admin added, read-only; it is
+//! never written to the database, so its key is in no backup.
+//!
 //! Those mirror `serve`'s flags of the same names, so `feldspar serve
 //! --environment production` needs none of them on the command line — and, less
 //! obviously but more usefully, a `feldspar build-app` run against the same
@@ -114,7 +133,11 @@ pub const DEFAULT_ENVIRONMENT: &str = "production";
 /// `deny_unknown_fields`: a key we do not recognise is a typo in a file whose
 /// whole job is to say which database to write to, and stepping over it would
 /// mean connecting somewhere the operator did not intend.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+///
+/// `PartialEq` but not `Eq`: a model's settings in an
+/// [`llm_provider`](Environment::llm_provider) section hold prices, which are
+/// floats.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigFile {
     /// Which environment to use when the command line selects none. Defaults to
@@ -144,7 +167,7 @@ pub struct ConfigFile {
 /// otherwise repeat on every `serve` line: its browser, and its CmdStan with
 /// the Stan ceilings. Each mirrors a `serve` flag too, and a flag given on
 /// the command line wins.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Environment {
     /// A full connection string. Takes precedence over the parts below.
@@ -264,6 +287,93 @@ pub struct Environment {
     /// Unset means the server default (`template1`), which is what a clean CI
     /// Postgres wants.
     pub test_template: Option<String>,
+    /// An LLM provider this host supplies — `[environments.NAME.llm_provider]`.
+    ///
+    /// Like the TLS keys, it **wins over the database** and the admin cannot
+    /// change it: the admin UI lists it read-only, beside the providers the
+    /// admin added, and the admin may still add others and make one of those
+    /// the default. It is held in memory and never written to
+    /// `_fd_llm_providers`, so its key is in no backup and Clear all does not
+    /// remove it — the reason an operator puts a key here rather than handing
+    /// it to the admin of the instance.
+    pub llm_provider: Option<LlmProviderSection>,
+}
+
+/// The `llm_provider` table of an environment: one provider, and the models it
+/// may be used with.
+///
+/// Only the shape is checked here. Whether `backend` is one this build has, and
+/// whether a model's settings fit it, is `sc-llm`'s to say, and the server
+/// refuses to start on a section it does not accept.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LlmProviderSection {
+    /// The provider's name: what an agent names it by. No provider the admin
+    /// adds may take it.
+    pub name: String,
+    /// `openai_responses`, `anthropic` or `openai_chat`.
+    pub backend: String,
+    /// A human description, shown under the name.
+    pub description: Option<String>,
+    /// The API key — optional only for an `openai_chat` local host.
+    pub api_key: Option<String>,
+    /// The endpoint, when it is not the backend's own default.
+    pub base_url: Option<String>,
+    /// The model an agent naming this provider and no model calls. May be left
+    /// out when exactly one model is listed; must be one of them when any are.
+    pub default_model: Option<String>,
+    /// The models agents may name. When none are listed, `default_model` is the
+    /// only one, with the built-in settings.
+    #[serde(default)]
+    pub models: Vec<LlmModelSection>,
+}
+
+/// One `[[…llm_provider.models]]` entry: a model name and its settings.
+///
+/// The settings are open-ended here — they are each backend's model settings
+/// (prices, `context_window`, capability overrides) — and a key the backend
+/// does not declare is refused when the server reads the section, so a typo is
+/// still an error rather than a shrug.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct LlmModelSection {
+    /// The vendor's model id, as sent on the wire.
+    pub name: String,
+    /// The model's settings, by the names its backend declares.
+    #[serde(flatten)]
+    pub settings: BTreeMap<String, toml::Value>,
+}
+
+impl LlmProviderSection {
+    /// The default model's name: `default_model`, or the only listed model.
+    ///
+    /// An error when it cannot be told — no `default_model` and not exactly one
+    /// model — or when `default_model` names a model the list leaves out, which
+    /// is more likely a typo than a wish for a model with no settings.
+    pub fn default_model_name(&self) -> Result<&str> {
+        let named = self
+            .default_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty());
+        match (named, self.models.as_slice()) {
+            (Some(name), []) => Ok(name),
+            (Some(name), models) if models.iter().any(|m| m.name.trim() == name) => Ok(name),
+            (Some(name), models) => Err(Error::config(format!(
+                "the `{}` LLM provider's default_model `{name}` is not one of its models ({})",
+                self.name,
+                models
+                    .iter()
+                    .map(|m| m.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+            (None, [only]) => Ok(only.name.trim()),
+            (None, _) => Err(Error::config(format!(
+                "the `{}` LLM provider needs a default_model",
+                self.name
+            ))),
+        }
+    }
 }
 
 impl Environment {
@@ -389,7 +499,7 @@ impl ConfigFile {
 
 /// The environment that was selected, the section it resolved to, and where it
 /// came from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SelectedEnvironment {
     /// The file the section was read from.
     pub path: PathBuf,
@@ -795,6 +905,94 @@ stan_summary_max_elements = 0
         assert!(parse("[environments.production]\nstan_max_proceses = 2\n").is_err());
         // A count is a number, not a string.
         assert!(parse("[environments.production]\nstan_max_processes = \"2\"\n").is_err());
+    }
+
+    /// An operator-supplied LLM provider, with models whose settings are left
+    /// open here and checked by `sc-llm` when the server reads them.
+    #[test]
+    fn an_environment_may_supply_an_llm_provider() {
+        let file = parse(
+            r#"
+[environments.production]
+database = "a"
+
+[environments.production.llm_provider]
+name = "hosted"
+backend = "anthropic"
+api_key = "sk-ant-x"
+default_model = "claude-sonnet-5"
+
+[[environments.production.llm_provider.models]]
+name = "claude-sonnet-5"
+price_input = 3.0
+context_window = 200000
+
+[[environments.production.llm_provider.models]]
+name = "claude-haiku-4-5"
+"#,
+        )
+        .expect("parse");
+        let provider = file.environments["production"]
+            .llm_provider
+            .as_ref()
+            .expect("the section is read");
+        assert_eq!(provider.name, "hosted");
+        assert_eq!(provider.backend, "anthropic");
+        assert_eq!(provider.api_key.as_deref(), Some("sk-ant-x"));
+        assert!(provider.base_url.is_none());
+        assert_eq!(provider.models.len(), 2);
+        assert_eq!(
+            provider.models[0].settings.get("price_input"),
+            Some(&toml::Value::Float(3.0))
+        );
+        assert_eq!(
+            provider.models[0].settings.get("context_window"),
+            Some(&toml::Value::Integer(200_000))
+        );
+        assert!(provider.models[1].settings.is_empty());
+        assert_eq!(
+            provider.default_model_name().expect("named"),
+            "claude-sonnet-5"
+        );
+        // A provider-level typo is refused like any other key.
+        assert!(
+            parse("[environments.p.llm_provider]\nname = \"x\"\nbackend = \"anthropic\"\napi_kye = \"k\"\n")
+                .is_err()
+        );
+    }
+
+    /// Which model is the default, and when that cannot be told.
+    #[test]
+    fn an_llm_providers_default_model_must_be_clear() {
+        let provider = |extra: &str| {
+            let file = parse(&format!(
+                "[environments.p.llm_provider]\nname = \"x\"\nbackend = \"openai_chat\"\n{extra}"
+            ))
+            .expect("parse");
+            file.environments["p"]
+                .llm_provider
+                .clone()
+                .expect("section")
+        };
+        // Named, with no list: the one model.
+        let p = provider("default_model = \"m\"\n");
+        assert_eq!(p.default_model_name().expect("named"), "m");
+        // Not named, one listed: that one.
+        let p = provider("[[environments.p.llm_provider.models]]\nname = \"only\"\n");
+        assert_eq!(p.default_model_name().expect("the only one"), "only");
+        // Not named, none listed or two listed: an error.
+        assert!(provider("").default_model_name().is_err());
+        let p = provider(
+            "[[environments.p.llm_provider.models]]\nname = \"a\"\n\
+             [[environments.p.llm_provider.models]]\nname = \"b\"\n",
+        );
+        assert!(p.default_model_name().is_err());
+        // Named, but not among the listed: a typo, not a wish.
+        let p = provider(
+            "default_model = \"c\"\n[[environments.p.llm_provider.models]]\nname = \"a\"\n",
+        );
+        let err = p.default_model_name().expect_err("not listed");
+        assert!(err.to_string().contains("`c`"), "{err}");
     }
 
     #[test]

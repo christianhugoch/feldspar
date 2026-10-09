@@ -29,6 +29,10 @@
 //!   `_fd_llm_providers` and `_fd_llm_models`, and [`connect_model`] — a
 //!   provider and its models are named records an admin fills in, exactly as a
 //!   file store is.
+//! - The **host's provider** and the **default provider** ([`host`]): one
+//!   provider may come from `feldspar.toml` instead of a row — usable, listed,
+//!   never editable here — and the admin picks which provider is used when
+//!   nothing names one.
 //!
 //! ## What is deliberately not here
 //!
@@ -48,6 +52,7 @@ pub mod anthropic;
 pub mod capabilities;
 pub mod def;
 pub mod estimate;
+pub mod host;
 pub mod listing;
 pub mod logging;
 pub mod message;
@@ -72,6 +77,10 @@ pub use def::{
     validate_provider_config,
 };
 pub use estimate::{TokenEstimator, estimate_tokens, image_tokens};
+pub use host::{
+    HostLlmProvider, default_llm_provider, host_llm_provider, host_provider_id,
+    is_host_llm_provider, set_default_llm_provider, set_host_llm_provider,
+};
 pub use listing::{fetch_host_models, parse_model_listing};
 pub use logging::{LoggedProvider, request_summary, response_summary};
 pub use message::{

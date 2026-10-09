@@ -871,18 +871,16 @@ async fn remove_named(host: &EvalHost<'_>, slug: &str) -> Result<()> {
     Ok(())
 }
 
-/// The executor's model: the one `--model` names, or the first provider in the
-/// database and its default model — which is what creating a builder agent from
-/// the admin UI does, and therefore the right thing to measure when nobody said
+/// The executor's model: the one `--model` names, or the default LLM provider
+/// and its default model — which is what creating a builder agent from the
+/// admin UI does, and therefore the right thing to measure when nobody said
 /// otherwise.
 async fn executor_model(catalog: &Catalog, args: &EvalArgs) -> Result<ModelRef> {
     if let Some(named) = &args.model {
         return Ok(named.clone());
     }
-    let provider = sc_llm::list_llm_providers(catalog)
+    let provider = sc_llm::default_llm_provider(catalog)
         .await?
-        .into_iter()
-        .next()
         .ok_or_else(|| {
             Error::config(
                 "no LLM provider is configured in this database, and `--model` named none"

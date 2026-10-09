@@ -9354,6 +9354,7 @@ dependencies = [
  "reqwest",
  "rig-core",
  "sc-catalog",
+ "sc-config",
  "sc-db",
  "sc-db-postgres",
  "sc-error",
@@ -9989,6 +9990,12 @@ dependencies = [
  "cpufeatures 0.3.0",
  "digest 0.11.3",
 ]
+
+[[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
 
 [[package]]
 name = "sha2"
@@ -11979,6 +11986,7 @@ dependencies = [
  "getrandom 0.4.3",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

@@ -1,11 +1,17 @@
-// LLM providers list: every model endpoint an admin has connected.
+// LLM providers list: every model endpoint an admin has connected, and the
+// one the server's configuration file supplies, if it supplies one.
 //
-// The file-stores list with a different noun, minus the two states that made
-// that screen interesting. There is no `--llm-provider` flag, so every provider
-// has a row and every row is editable; and there is no "connected" state to
-// show, because connecting a provider builds an HTTP client and sends nothing —
-// whether it *works* is a request, which is what the form's Test connection
+// The file-stores list with a different noun. The file's provider is the
+// counterpart of a `--file-store` store: listed, usable, and read-only — it
+// opens as View rather than Edit and has no Remove. There is no "connected"
+// state to show, because connecting a provider builds an HTTP client and sends
+// nothing — whether it *works* is a request, which is what a model's Test
 // button makes.
+//
+// One provider is the **default**: what is used where nothing names a provider
+// (a new application's builder agent, a translation, the agent form's first
+// choice). The admin picks it here; until they do, it is the file's provider,
+// else the first by name.
 //
 // The summary column deliberately renders whatever settings a backend declares
 // rather than reaching for a `model` only some might have. That is the same
@@ -16,6 +22,7 @@
 
 import { useEffect, useState } from "react";
 import Alert from "react-bootstrap/Alert";
+import Badge from "react-bootstrap/Badge";
 import Button from "react-bootstrap/Button";
 import Table from "react-bootstrap/Table";
 
@@ -84,6 +91,16 @@ export function LlmProviders() {
     }
   };
 
+  const makeDefault = async (provider: ProviderItem) => {
+    setError(null);
+    try {
+      await api.setDefaultLlmProvider(provider.id);
+      await load();
+    } catch (err) {
+      setError(errorMessage(err, "Could not make the LLM provider the default."));
+    }
+  };
+
   return (
     <>
       <PageHeader
@@ -121,6 +138,16 @@ export function LlmProviders() {
                 <tr key={provider.id}>
                   <td>
                     {provider.name}
+                    {provider.is_default && (
+                      <Badge bg="primary-lt" className="ms-2">
+                        <T text="default" />
+                      </Badge>
+                    )}
+                    {provider.from_config_file && (
+                      <Badge bg="secondary-lt" className="ms-2">
+                        <T text="configuration file" />
+                      </Badge>
+                    )}
                     {provider.description && (
                       <div className="text-muted small">{provider.description}</div>
                     )}
@@ -129,20 +156,31 @@ export function LlmProviders() {
                   <td className="text-break small">{configSummary(provider)}</td>
                   <td className="text-end">
                     <div className="btn-list justify-content-end flex-nowrap align-items-center">
+                      {!provider.is_default && (
+                        <Button
+                          size="sm"
+                          variant="outline-secondary"
+                          onClick={() => void makeDefault(provider)}
+                        >
+                          <T text="Make default" />
+                        </Button>
+                      )}
                       <Button
                         size="sm"
                         variant="outline-secondary"
                         href={`#/llm-providers/${encodeURIComponent(provider.id)}/edit`}
                       >
-                        <T text="Edit" />
+                        {provider.from_config_file ? <T text="View" /> : <T text="Edit" />}
                       </Button>
-                      <Button
-                        size="sm"
-                        variant="outline-danger"
-                        onClick={() => void remove(provider)}
-                      >
-                        <T text="Remove" />
-                      </Button>
+                      {!provider.from_config_file && (
+                        <Button
+                          size="sm"
+                          variant="outline-danger"
+                          onClick={() => void remove(provider)}
+                        >
+                          <T text="Remove" />
+                        </Button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -154,6 +192,11 @@ export function LlmProviders() {
         <p className="text-muted small mt-3">
           <T text="API keys are stored in the Saltcorn database and are never sent back to this screen — an existing key shows as ••••••••. They are not encrypted at rest, so treat database access as key access." />
         </p>
+        {providers?.some((p) => p.from_config_file) && (
+          <p className="text-muted small">
+            <T text="A provider marked configuration file is set in the server's feldspar.toml. Its key stays in that file — it is not stored in the database or included in backups — and it can only be changed there." />
+          </p>
+        )}
       </PageBody>
     </>
   );

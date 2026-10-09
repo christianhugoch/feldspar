@@ -77,12 +77,13 @@ export type RunBackendOperationRequest = { name: string; config: unknown; input:
 export type RunBackendOperationResponse = { config: unknown; output: string; data?: unknown | null };
 export type RunFileStoreOperationRequest = { input: unknown };
 export type RunFileStoreOperationResponse = { config: unknown; output: string; data?: unknown | null; connected: boolean };
-export type ListLlmProvidersResponse = Array<{ id: string; name: string; description: string; backend: string; config: unknown }>;
+export type ListLlmProvidersResponse = Array<{ id: string; name: string; description: string; backend: string; config: unknown; from_config_file: boolean; is_default: boolean }>;
 export type CreateLlmProviderRequest = { name: string; description: string; backend: string; config: unknown };
-export type CreateLlmProviderResponse = { id: string; name: string; description: string; backend: string; config: unknown };
+export type CreateLlmProviderResponse = { id: string; name: string; description: string; backend: string; config: unknown; from_config_file: boolean; is_default: boolean };
 export type UpdateLlmProviderRequest = { name: string; description: string; backend: string; config: unknown };
-export type UpdateLlmProviderResponse = { id: string; name: string; description: string; backend: string; config: unknown };
+export type UpdateLlmProviderResponse = { id: string; name: string; description: string; backend: string; config: unknown; from_config_file: boolean; is_default: boolean };
 export type DeleteLlmProviderResponse = { deleted: boolean };
+export type SetDefaultLlmProviderResponse = { id: string; name: string; description: string; backend: string; config: unknown; from_config_file: boolean; is_default: boolean };
 export type ListLlmProviderBackendsResponse = Array<{ name: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>;
 export type ListLlmModelsResponse = Array<{ id: string; provider_id: string; name: string; description: string; is_default: boolean; config: unknown; capabilities: unknown; prices: unknown }>;
 export type CreateLlmModelRequest = { name: string; description: string; is_default: boolean; config: unknown };
@@ -420,6 +421,7 @@ export interface ApiClient {
   createLlmProvider(body: CreateLlmProviderRequest): Promise<CreateLlmProviderResponse>;
   updateLlmProvider(id: string, body: UpdateLlmProviderRequest): Promise<UpdateLlmProviderResponse>;
   deleteLlmProvider(id: string): Promise<DeleteLlmProviderResponse>;
+  setDefaultLlmProvider(id: string): Promise<SetDefaultLlmProviderResponse>;
   listLlmProviderBackends(): Promise<ListLlmProviderBackendsResponse>;
   listLlmModels(id: string): Promise<ListLlmModelsResponse>;
   createLlmModel(id: string, body: CreateLlmModelRequest): Promise<CreateLlmModelResponse>;
@@ -1067,6 +1069,14 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("deleteLlmProvider", res);
       return (await res.json()) as DeleteLlmProviderResponse;
+    },
+    async setDefaultLlmProvider(id) {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${encodeURIComponent(id)}/default`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", false),
+      });
+      if (!res.ok) throw await clientError("setDefaultLlmProvider", res);
+      return (await res.json()) as SetDefaultLlmProviderResponse;
     },
     async listLlmProviderBackends() {
       const res = await doFetch(`${baseUrl}/api/llm-provider-backends`, {
