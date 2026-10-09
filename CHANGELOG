@@ -104,8 +104,8 @@ macOS with Xcode and CocoaPods. Two new build targets sit beside the Android one
   server shows the targets as not ready and still builds the web bundle and the APK.
 - **Module settings** ("Native toolchains"), shared by every application, like the SDK
   directories. The builds use the Xcode `xcode-select` points to; there is no setting for it.
-  - a CocoaPods directory, for a `pod` that is not on the PATH the server was started with
-    (e.g. `/opt/homebrew/bin`). The iOS builds get it as `FELDSPAR_POD_DIR`, and `ios/build.cjs`
+  - "Use a custom CocoaPods directory", a checkbox that shows the CocoaPods directory, for a
+    `pod` that is not on the PATH the server was started with (e.g. `/opt/homebrew/bin`). The iOS builds get it as `FELDSPAR_POD_DIR`, and `ios/build.cjs`
     puts it in front of the PATH of every step. The readiness check looks there too: a
     `command` requirement may name a `dir_env`, a variable naming one more directory to
     look in first.

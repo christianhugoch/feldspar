@@ -176,14 +176,20 @@ const configuration_workflow = () => ({
           },
           { input_type: "section_header", label: "iOS" },
           {
+            name: "use_pod_dir",
+            label: "Use a custom CocoaPods directory",
+            type: "Bool",
+            sublabel: "For a pod command that is not on the PATH the server was started with.",
+          },
+          {
             name: "pod_dir",
             label: "CocoaPods directory",
             type: "String",
             sublabel:
-              "The directory that holds the pod command, if it is not on the PATH the server was " +
-              "started with. Run `which pod` in a terminal on the Mac and enter the directory part, " +
-              "e.g. /opt/homebrew/bin (Homebrew on Apple silicon) or /usr/local/bin. Blank: the " +
-              "server's PATH.",
+              "The directory that holds the pod command. Run `which pod` in a terminal on the Mac " +
+              "and enter the directory part, e.g. /opt/homebrew/bin (Homebrew on Apple silicon) or " +
+              "/usr/local/bin.",
+            showIf: { use_pod_dir: true },
           },
           // One App Store Connect API key and one distribution certificate
           // serve every application, as one Apple team does. The key is a
@@ -379,6 +385,7 @@ const IOS_REQUIRES = [
 function targets({
   android_home = "",
   java_home = "",
+  use_pod_dir,
   pod_dir = "",
   use_asc,
   asc_issuer_id = "",
@@ -386,8 +393,9 @@ function targets({
   asc_key = "",
   ios_distribution_identity = "",
 }) {
-  const useAsc = use_asc === true || use_asc === "true";
-  const podDir = { FELDSPAR_POD_DIR: pod_dir };
+  const on = (checkbox) => checkbox === true || checkbox === "true";
+  const useAsc = on(use_asc);
+  const podDir = on(use_pod_dir) ? { FELDSPAR_POD_DIR: pod_dir } : {};
   // The App Store Connect API key, for the build and the operation alike.
   const ascEnv = useAsc
     ? {

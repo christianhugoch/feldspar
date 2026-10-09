@@ -452,6 +452,7 @@ async fn the_modules_toolchain_settings_are_the_apk_builds_environment() {
         json!({
             "android_home": "/opt/android-sdk",
             "java_home": "",
+            "use_pod_dir": true,
             "pod_dir": "/opt/homebrew/bin",
             "use_asc": true,
             "asc_issuer_id": "69a6de70-0000-47e3-e053-5b8c7c11a4d1",
@@ -472,6 +473,7 @@ async fn the_modules_toolchain_settings_are_the_apk_builds_environment() {
         [
             "android_home",
             "java_home",
+            "use_pod_dir",
             "pod_dir",
             "use_asc",
             "asc_issuer_id",
@@ -573,7 +575,13 @@ async fn the_modules_toolchain_settings_are_the_apk_builds_environment() {
     // build, and there is no operation to call the API with.
     let (off, _) = frameworks_configured(
         "bundled-rn-toolchain-asc-off",
-        json!({ "use_asc": false, "asc_key_id": "2X9R4HXF34", "asc_key": "secret" }),
+        json!({
+            "use_pod_dir": false,
+            "pod_dir": "/opt/homebrew/bin",
+            "use_asc": false,
+            "asc_key_id": "2X9R4HXF34",
+            "asc_key": "secret"
+        }),
     )
     .await;
     let rn_off = &off.frameworks()[0];
@@ -585,6 +593,8 @@ async fn the_modules_toolchain_settings_are_the_apk_builds_environment() {
     );
     let ios = rn_off.targets.iter().find(|t| t.name == "ios").unwrap();
     assert!(ios.operations.is_empty());
+    // Likewise the CocoaPods directory, with its checkbox off.
+    assert!(!ipa.env.contains_key("FELDSPAR_POD_DIR"), "{:?}", ipa.env);
 
     // Grouped under a heading per platform on the Modules tab, the API's
     // settings shown only while it is switched on, and each explained under
@@ -595,7 +605,12 @@ async fn the_modules_toolchain_settings_are_the_apk_builds_environment() {
         .iter()
         .filter_map(|f| f.section.as_deref().map(|s| (f.name(), s)))
         .collect();
-    assert_eq!(headed, [("android_home", "Android"), ("pod_dir", "iOS")]);
+    assert_eq!(headed, [("android_home", "Android"), ("use_pod_dir", "iOS")]);
+    let pod = spec.iter().find(|f| f.name() == "pod_dir").unwrap();
+    assert_eq!(
+        pod.show_if,
+        [ShowIfCondition::new("use_pod_dir", vec![json!(true)])]
+    );
     for name in [
         "asc_issuer_id",
         "asc_key_id",
@@ -613,7 +628,6 @@ async fn the_modules_toolchain_settings_are_the_apk_builds_environment() {
         spec.iter().all(|f| f.sublabel.is_some()),
         "every setting explained"
     );
-    let pod = spec.iter().find(|f| f.name() == "pod_dir").unwrap();
     assert!(
         pod.sublabel.as_deref().unwrap().contains("which pod"),
         "{:?}",
