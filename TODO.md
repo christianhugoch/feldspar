@@ -570,28 +570,28 @@ drill-down.
 
 ## Phase 1 — Layout and cards
 
-- [ ] A6.1 The Dashboard workspace: a grid of tiles, dragged and resized, responsive to width;
+- [x] A6.1 The Dashboard workspace: a grid of tiles, dragged and resized, responsive to width;
       panels dropped in from any source. Tests.
-- [ ] A6.2 The stat card panel kind: an aggregate of a column, number formatting, a comparison
+- [x] A6.2 The stat card panel kind: an aggregate of a column, number formatting, a comparison
       (with the previous period, or unfiltered) and an optional sparkline. Tests.
 
 ## Phase 2 — Cross-filtering and drill-down
 
-- [ ] A6.3 Selections: clicks and brushes on ECharts and MapLibre panels become the spec's
+- [x] A6.3 Selections: clicks and brushes on ECharts and MapLibre panels become the spec's
       declared selections, and those become filter conditions on the encoded columns. Tests.
-- [ ] A6.4 Propagation: a condition applies to panels on the same dataset through the column,
+- [x] A6.4 Propagation: a condition applies to panels on the same dataset through the column,
       and to panels on other datasets through a column with a foreign key to the same table
       (from the stage shapes). On the server, it is an extra Filter at the end of the
       dataset's operations. Tests: selecting a district filters a panel on a dataset that
       only has a `district` foreign key.
-- [ ] A6.5 Drill paths on a panel, with a breadcrumb. Tests.
-- [ ] A6.6 The filter bar: the active filters, removing one or all, and dashboard-wide filters
+- [x] A6.5 Drill paths on a panel, with a breadcrumb. Tests.
+- [x] A6.6 The filter bar: the active filters, removing one or all, and dashboard-wide filters
       on a column; an optional refresh interval. Tests.
 
 ## Phase 3 — Documentation, definition of done
 
-- [ ] A6.7 `TECHNICAL_DESIGN.md` (selections and propagation); `tutorial-analytics.md` part 6.
-- [ ] A6.8 Definition of done: an `sc-server` test rendering a dashboard's panels with a
+- [x] A6.7 `TECHNICAL_DESIGN.md` (selections and propagation); `tutorial-analytics.md` part 6.
+- [x] A6.8 Definition of done: an `sc-server` test rendering a dashboard's panels with a
       selection applied and checking the filtered results across two datasets. Walk the
       Try it by hand.
 

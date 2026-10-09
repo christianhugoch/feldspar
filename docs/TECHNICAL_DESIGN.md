@@ -8346,7 +8346,7 @@ reads. Split view (A4) holds either editor or a workspace on each side.
 Dashboard, Simulation, Notebook). The store keeps any kind; `createWorkspace`
 refuses one whose milestone has not arrived, naming it ("arrives with milestone A2"), and
 `listWorkspaceKinds` says which are here so the create dialog lists the rest disabled — since
-A4, all but the Data explorer and the Report. `state` is JSON owned by the kind — an explorer's is its dataset and
+A6.1, the Simulation and the Notebook. `state` is JSON owned by the kind — an explorer's is its dataset and
 drop zones — saved as it changes (`saveWorkspaceState`) and restored when the workspace is
 opened.
 
@@ -8362,7 +8362,7 @@ at the fit's output data, each drawn by `render_plot` unless it is optional and 
 `dataset_changed` — beside the model endpoints of §14.2 (`cloneModel`, `patchModelViewState`,
 `cancelModelFit`, `listModelInstances`) and the fit's progress socket; and workspaces
 (`listWorkspaceKinds`, `listWorkspaces`, `getWorkspace`, `createWorkspace`, `updateWorkspace`,
-`saveWorkspaceState`, `deleteWorkspace`); panels (A4.2): `renderPanel`; map layers (A5.5,
+`saveWorkspaceState`, `deleteWorkspace`); panels (A4.2): `renderPanel`, with a dashboard's conditions as `filters` (A6.4, §14.8); map layers (A5.5,
 §14.6): `layerData`, `layerTile`; maps (A5.6–A5.7, §14.6): `mapSettings`, `suggestMap`,
 `renderMap`; and the Map workspace (A5.8–A5.13, §14.7): `layerRows`, `selectFeatures`,
 `saveSelection`, `allowMapHost`, `listMapTools`, `runMapTool`. `saveWorkspaceState` checks a
@@ -8463,8 +8463,8 @@ quantiles, box plot (`coef` 1.5), summary (a mean with its confidence interval),
 (Gaussian, `bw.nrd0` unless a bandwidth is given), smooth (linear or loess, with a band) or
 correlation. Scales are linear, log or square root, from zero or fitted (or a fixed domain), reversed, with a
 colour scheme; coordinates are Cartesian, flipped or polar; facets are rows, columns or wrap (fixed or
-free scales); references are lines at a value of X or Y; selections are declared and validated
-now, and dashboards (A6) turn them into filters.
+free scales); references are lines at a value of X or Y; selections declare what a click and a brush
+pick, and a dashboard turns them into filters (§14.8).
 
 `validate` checks a spec against the dataset's shape and answers **every** refusal at once, each
 a sentence naming the channel and the column ("X: `colour` is not a column of the dataset"): the
@@ -8628,7 +8628,7 @@ data reference in its specs.
 the delete warnings. It is built from the stored workspace states when asked, so it is never out
 of date. There are a handful of workspaces, not millions, and an index kept on every save would be
 a second copy to keep right. `panels_in_state(kind, state)` is the one place that knows where a
-kind keeps its panels (a report's `blocks[].panel`; A6's dashboards will add theirs), and an
+kind keeps its panels (a report's `blocks[].panel`, a dashboard's `tiles[].panel`), and an
 explorer's chosen dataset counts as a use with no panels. `datasetUsage` and `modelUsage` answer
 `workspaces: [{ id, name, kind, panels }]` beside the datasets, models, fields and triggers they
 already listed, and the front page's delete dialogs list them with links. Deleting is not refused:
@@ -9148,6 +9148,165 @@ it through the API:
 The pages were walked in headless Chromium with SwiftShader's WebGL
 (`--use-angle=swiftshader --enable-unsafe-swiftshader`). Without it MapLibre has no context and
 the map says so.
+
+### 14.8 Dashboards (analytics milestone A6)
+
+A dashboard is a tiled workspace of panels from any source, interactive where a report is still
+(goals document, "Workspaces"). It has no dataset of its own: each tile's panel names its own.
+
+**The state is tiles on a grid** (A6.1). `{ tiles: [{ id, panel, x, y, w, h }] }`, on a grid
+`DASHBOARD_COLUMNS` (12) wide: `x` and `w` count columns, `y` and `h` rows of 64 px.
+`panel::check_state` refuses a tile with no id or panel, one that does not fit the twelve columns,
+one more than `MAX_TILE_ROWS` (40) high, more than `MAX_TILES` (100) tiles, and two tiles that
+share a cell. `panels_in_state` reads `tiles[].panel`, so the usage index and the delete warnings
+find dashboards as they find reports.
+
+**The layout settles** (`ui/analytics/src/dashboard/layout.ts`). A tile moved or resized keeps
+where it was put; the tiles it lands on are pushed down below it, in reading order, and then every
+tile rises as far as it can (vertical compaction), so the grid never has holes or overlaps. A new
+tile goes where it is dropped, or from the Add menu into the first place it fits; its size is its
+kind's (a stat card 3×2, a plot 6×5, a map 6×6). Below 640 px the same tiles are shown stacked
+in reading order, full width, and moving and resizing wait for a wider screen: what is stored is
+always the wide layout. No grid library: the grid is CSS grid, and the layout is pure functions
+tested on their own.
+
+**Moving, resizing, dropping.** A tile's grip is an HTML5 drag carrying the tile and the open
+dashboard it came from (`application/x-feldspar-dashboard-tile`) and its panel
+(`application/x-feldspar-panel`). Over the grid, the cell under the dragged tile's corner is
+outlined; dropped into its own dashboard the tile moves there, into another it is copied (new ids,
+same size), and anything else that carries a panel — the explorer's output, a map, a model
+output, a report's block — is added there as a copy. Because the tile also travels as a panel, a
+report takes it. The corner handle resizes with pointer events, snapping to the cells and showing
+the settled layout as it goes. Each tile's menu moves and resizes by one cell at a time, for the
+keyboard.
+
+**Stat cards** (A6.2; `sc_analytics::card`). A `stat_card` panel's content is a `StatCard`:
+
+| field | what it is |
+|---|---|
+| `dataset` | the dataset the number comes from |
+| `value` | `{ function, column? }`: `count` (rows, or a column's values), `count_distinct`, `sum`, `mean`, `median`, `min`, `max` |
+| `filter` | a formula over the dataset's columns |
+| `time` | `{ column, period: day \| week \| month \| quarter \| year, anchor: latest \| today }`: the date or timestamp column periods come from |
+| `comparison` | `none`, `previous_period` (needs `time`), or `unfiltered` |
+| `sparkline`, `periods` | the value in each of the last `periods` (2–120, default 12) periods (needs `time`) |
+| `format` | `{ style: number \| percent \| currency, decimals?, currency?, compact?, suffix? }`, written by the browser with `Intl.NumberFormat` |
+| `higher_is_better` | `false` when a rise is bad news, so the arrow is red |
+
+`render_card` answers `{ value, label, period?, comparison?: { kind, value, period?, change,
+ratio }, sparkline? }`, or a refusal with a sentence, in `renderPanel`'s `card`. With `time`,
+the value is the **current period's**: the period holding the latest date in the filtered rows
+(`anchor: latest`, so last year's data still has a "this month"), or today's. The previous
+period is the one before it; `unfiltered` is the same aggregate, over the same period, without
+the card's filter.
+
+The card's filter is a Filter operation appended to the dataset's operations and compiled with
+them, so it is checked and translated as any Filter is (A6.4 appends the dashboard's selections
+the same way, and `unfiltered` leaves those out too). Periods are bucketed without date
+functions, which Postgres and SQLite do not share: the bounds are worked out in Rust (ISO weeks,
+calendar months, quarters and years), one `CASE` numbers each row's period, and one grouped
+query answers every period at once; a median goes through the plot renderer's percentiles, which
+work on both databases. A count of an empty period is 0; any other function's is missing.
+
+**Cross-filtering** (A6.3–A6.6) is three things that make **conditions**, and one place that
+applies them. A condition is `{ id, dataset, column?, values? | range? }`
+(`sc_analytics::crossfilter::Condition`): some values of one column of one dataset (a click), or
+a range of them (a brush or a histogram's bin, either end open, `max_exclusive` for a bin's end).
+No `column` means the rows themselves, by their key: a feature clicked on a map of a table's
+rows. The browser makes conditions, because only it knows what was under the pointer; the server
+decides where they reach and what they do, because only it knows the stage shapes.
+
+| what makes it | where it lives | whom it filters |
+|---|---|---|
+| a **selection**: a click or a brush on a tile | the screen, not saved | every tile but its own |
+| a **drill-down**: a value picked on the way down a tile's drill path | the screen, not saved | its own tile only |
+| a **dashboard filter**, made in the filter bar | the state's `filters` (at most 20) | every tile |
+
+`conditionsFor(tile, …)` (`dashboard/filters.ts`) gathers a tile's conditions, and the tile is
+drawn by `renderPanel` with them as `filters`. Nothing about a condition is per panel kind: the
+browser does not know or care whether the tile is a plot, a card or a map.
+
+**Selections** (A6.3; `ui/analytics/src/plot/select.ts`). A plot spec's `selections` (§14.5)
+declare what a click (`point`) and a brush (`interval`) pick, and on which channels; a plot that
+declares none gets the defaults — a click picks the category or bin under the pointer on X or Y
+and its colour group, a brush picks a range along a continuous X. A selection picks only a
+**column of the dataset**: a value a stat computed (a count on Y) or a column a fold makes picks
+nothing, and a mosaic, a polar or parallel plot, or a fit's output data offer no selection at
+all. What was clicked is read back from what ECharts says about the item and from
+`selectionInfo`, which the option compiler returns beside the option: what each axis's
+categories stand for (a value, or a bin's range), and the colour groups. So a category's label
+maps back to its value (a foreign key's `"2"` to `2`, "(missing)" to `null`), a histogram's bar
+to its edges, a flipped plot the right way round. A brush on a time axis gives milliseconds,
+which the server writes as the column's type. On a map, a feature picks the key its geometry is
+found by (a layer drawn through `districtⱵoutline` picks the district) or, on a layer of a
+table's rows, the row by its key — `featurePicks`, from the layer data's `keyed`.
+
+A tile holds one selection at a time: a new click replaces it, Shift or Ctrl-click adds or
+removes a value, clicking the one selected value again or clearing the brush lets it go
+(`select`). The tile it was made on keeps showing everything, so that something else can be
+picked there.
+
+**Propagation** (A6.4; `crossfilter::scope`). For each dataset a panel reads
+(`Panel::datasets`), each condition is worked out against the last stage shapes of its own
+dataset and of the panel's:
+
+1. **The same dataset**: the condition's column, which must still be there.
+2. **Another dataset**: only through a table both refer to. The condition's column identifies
+   rows of a table — it is a foreign key, or it is the key of a dataset whose grain is that
+   table's rows (`identifies`) — and the other dataset either *is* that table's rows (filtered by
+   its key) or has a foreign key to it. A foreign key column stays one through every operation
+   (§14.4, the stage shapes), and a Spatial join brings the joined table's key across as one,
+   so "the incidents with their district" is reached by a district clicked anywhere.
+3. Two columns of the other dataset that refer to the table are a choice not made for the
+   person, unless one has the condition's column's name.
+
+Anything else is skipped with a sentence ("`Incidents` has no column that refers to
+`districts`"). Columns with the same *name* in two datasets are deliberately not matched: a
+`category` in a dataset derived from the incidents is not known to mean the same thing, and a
+filter that silently applied to the wrong column would be worse than one that says it did not
+apply. `renderPanel` answers, beside what it drew, `filters`: for each condition and each of the
+panel's datasets, the column it filtered or why not, which the tile's badge shows ("by
+category"; "not filtered", with each reason in its tooltip).
+
+**Execution.** The conditions that reach a dataset are one formula — values `||`-ed, the two ends
+of a range `&&`-ed, the conditions `&&`-ed — appended as one Filter operation with the id
+`_fd_dashboard_filter` after the dataset's own operations (`Scope::extend`). It is compiled,
+validated and translated like any Filter (§14.4), so the cross-filtered panel is the dataset
+with one more operation, not a second code path: `render_plot_in`, `render_table_in`,
+`run_tests_in`, `render_card_in` and `render_map_in` are the renderers with a `Scope`, and
+`render_plot` and the rest are those with `Scope::none()`. Values are written as formula
+literals of the column's type (`literal`): a number for an integer or float, a date as
+`"2025-03-01"` from a date, an instant or milliseconds, an instant as RFC 3339 in UTC, a time,
+a UUID, `true` or `false`. A value that is not one of the column's type is skipped with a
+sentence rather than compared and matching nothing; a geometry, JSON or bytes column is not
+compared at all. For the string literals to compare with dates, times, timestamps and UUIDs
+on Postgres as they do on SQLite, a formula's string literal compared with such a column binds
+as that type (`sc-db-postgres`'s `value.rs`). When the Filter is the operation that fails, the
+panel says "the dashboard's filters do not work on `…`" (`filter_failure`), not that its dataset
+is broken. A map layer takes the conditions into its own `filter`
+(`Scope::and_filter`), so its vector tiles, fetched by URL, carry them too; a stat card's
+`unfiltered` comparison leaves them out with its own filter, so "34 % of all" is of every row.
+
+**Drill paths** (A6.5; `dashboard/drill.ts`). A plot tile may have `drill: { channel, path }`:
+X, Y or Color, and 2 to 8 different columns, outermost first, the first being the plot's own.
+At the top the plot is as it was made. A click that picks one value of the level's column goes
+down a level: `drilledPanel` puts the next column on the channel (unbinned, without the first
+column's fixed domain), and `drillConditions` filters the tile to the values picked so far, as
+conditions with ids `drill:<tile>:<level>`. These are ordinary conditions on the tile's own
+dataset, so a drill-down is a Filter on the server like everything else; they are only kept out
+of the other tiles. A breadcrumb goes back up; at the last level a click selects. The path is
+saved on the tile and travels with it into another dashboard; where someone is on it is not
+saved.
+
+**The filter bar** (A6.6; `FilterBar.tsx`) shows a chip per condition — the dashboard's filters
+filled, selections outlined — each removable, and *Clear all*. **+ Filter** makes a dashboard
+filter on a column of any dataset (the dashboard's own first): ticked values for a text,
+true-or-false or key column (offered most frequent first, by `datasetColumnValues`), a from–to
+range for a number, date or timestamp. **Refresh** redraws every tile every 30 s to an hour
+(the state's `refresh`, in seconds; 10 to 86,400 accepted), so a dashboard left on a screen
+follows its data. `check_state` checks a dashboard's `drill`s, `filters` (each a condition,
+different ids) and `refresh` before they are stored.
+
 
 ## 15. Code adapters and polyglot plugins (`sc-module`, `sc-python`)
 
