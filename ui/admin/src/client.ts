@@ -289,6 +289,8 @@ export type StreamStatusResponse = { id: string; name: string; running: boolean;
 export type GetSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }>; help: string }> }>; values: unknown; host_keys: Array<string> };
 export type UpdateSettingsRequest = { values: unknown };
 export type UpdateSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; show_if: Array<{ name: string; values: Array<unknown> }>; help: string }> }>; values: unknown; host_keys: Array<string> };
+export type GetAdminAddressResponse = { base_domain?: string | null; admin_subdomain?: string | null; admin_host?: string | null; ready: boolean; certificate?: { state: string; message?: string | null } | null };
+export type CreateAdminHandoffResponse = { host: string; path: string };
 export type SendTestEmailRequest = { to?: string | null };
 export type SendTestEmailResponse = { sent_to: string };
 export type GetPythonStatusResponse = { state: string; version?: string | null; explanation: string; dir?: string | null; site_packages?: string | null; bin?: string | null; packages: Array<{ name: string; version?: string | null }>; max_inflight: number; resident: number; threads: number; stuck: number; max_stuck: number; env_error?: string | null };
@@ -553,6 +555,8 @@ export interface ApiClient {
   streamStatus(id: string): Promise<StreamStatusResponse>;
   getSettings(): Promise<GetSettingsResponse>;
   updateSettings(body: UpdateSettingsRequest): Promise<UpdateSettingsResponse>;
+  getAdminAddress(): Promise<GetAdminAddressResponse>;
+  createAdminHandoff(): Promise<CreateAdminHandoffResponse>;
   sendTestEmail(body: SendTestEmailRequest): Promise<SendTestEmailResponse>;
   getPythonStatus(): Promise<GetPythonStatusResponse>;
   getBackupOptions(): Promise<GetBackupOptionsResponse>;
@@ -2246,6 +2250,22 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("updateSettings", res);
       return (await res.json()) as UpdateSettingsResponse;
+    },
+    async getAdminAddress() {
+      const res = await doFetch(`${baseUrl}/api/settings/admin-address`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getAdminAddress", res);
+      return (await res.json()) as GetAdminAddressResponse;
+    },
+    async createAdminHandoff() {
+      const res = await doFetch(`${baseUrl}/api/settings/admin-address/handoff`, {
+        method: "POST",
+        headers: requestHeaders("POST", false),
+      });
+      if (!res.ok) throw await clientError("createAdminHandoff", res);
+      return (await res.json()) as CreateAdminHandoffResponse;
     },
     async sendTestEmail(body) {
       const res = await doFetch(`${baseUrl}/api/settings/email/test`, {

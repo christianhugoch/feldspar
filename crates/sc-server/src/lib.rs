@@ -19,6 +19,7 @@
 //! [`admin_handlers`]; they are resolved by name against the [`sc_api`] admin
 //! endpoint set at dispatch time.
 
+mod admin_host;
 mod agents;
 mod analytics;
 mod apps;
@@ -54,6 +55,7 @@ mod tls;
 pub mod translations;
 mod triggers;
 
+pub use admin_host::{AdminHost, HANDOFF_ROUTE, HANDOFF_TTL};
 pub use agents::{AgentServices, install_agents, install_agents_on};
 pub use apps::{AppMounts, MountedApp, build_and_mount, mount_all, subdomain_in, subdomain_of};
 pub use backup::{
@@ -165,7 +167,8 @@ pub use sc_expr::CodeAdapter;
 /// name the fallback and `sc-module` is not otherwise its dependency.
 pub use sc_module::BUNDLED_IN_CHECKOUT;
 pub use security::{
-    ANALYTICS_CONTENT_SECURITY_POLICY, IDE_CONTENT_SECURITY_POLICY, analytics_content_security_policy,
+    ANALYTICS_CONTENT_SECURITY_POLICY, IDE_CONTENT_SECURITY_POLICY,
+    analytics_content_security_policy,
 };
 pub use security::{BUILDER_CONTENT_SECURITY_POLICY, builder_content_security_policy};
 pub use security::{
@@ -175,8 +178,9 @@ pub use serve::{serve, serve_browser};
 pub use streams::{StreamServices, TriggerBridge, install_streams, install_streams_with};
 pub use systemd::ServiceManager;
 pub use tls::{
-    AcmeCertificate, Certificate, TlsHandle, TlsNames, TlsSettings, check_certificate, https_addr,
-    install_crypto_provider, redirect_router, serve_https, tls_domains,
+    AcmeCertificate, Certificate, CertificateStatus, PastedCertificate, TlsHandle, TlsNames,
+    TlsSettings, check_certificate, https_addr, install_crypto_provider, redirect_router,
+    serve_https, tls_domains,
 };
 pub use translations::{LlmTranslator, parse_answer};
 pub use triggers::{

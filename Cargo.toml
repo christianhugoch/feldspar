@@ -434,6 +434,10 @@ rustls = { version = "0.23", default-features = false, features = [
 # hand-rolled base64 splitter: "which of PKCS#8, PKCS#1 and SEC1 is this key?"
 # is not a question to answer with `starts_with`.
 rustls-pemfile = "2"
+# Whether a pasted certificate names a host — what the admin UI's move to a new
+# subdomain asks before it lets the admin follow it. The verifier rustls itself
+# uses, so already in the tree; no crypto feature, as nothing is signed here.
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std"] }
 # The ACME client (§13.5): pure Rust, no `certbot` process, and it answers the
 # **TLS-ALPN-01** challenge inside the TLS handshake it is already terminating —
 # so there is no HTTP-01 route to open on port 80 and nothing to keep in step

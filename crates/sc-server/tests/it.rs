@@ -19,6 +19,8 @@ mod admin_applications_api;
 mod admin_graphql_explorer;
 #[path = "admin_spa_typecheck.rs"]
 mod admin_spa_typecheck;
+#[path = "admin_subdomain.rs"]
+mod admin_subdomain;
 #[path = "admin_theme.rs"]
 mod admin_theme;
 #[path = "admin_users_api.rs"]

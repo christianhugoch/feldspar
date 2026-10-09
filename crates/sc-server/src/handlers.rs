@@ -4278,8 +4278,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("updateSettings", {
         let catalog = catalog.clone();
+        let apps = apps.clone();
         move |ctx| {
             let catalog = catalog.clone();
+            let apps = apps.clone();
             async move {
                 let submitted = match ctx.body.get("values") {
                     Some(Json::Object(values)) => values.clone(),
@@ -4294,7 +4296,17 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let spec = sc_config::config_spec();
                 // The secret the form sent back untouched is the sentinel it was
                 // shown, not the key: restore what is stored.
-                let values = sc_types::merge_secrets(&spec, &stored, &submitted);
+                let mut values = sc_types::merge_secrets(&spec, &stored, &submitted);
+                // The admin subdomain is stored as the router reads it — one
+                // lower-cased label, or nothing — so what the screen shows after
+                // the save is the host the admin UI is now on.
+                if let Some(Json::String(raw)) = values.get(sc_config::ADMIN_SUBDOMAIN) {
+                    let normalised = sc_config::check_admin_subdomain(raw)?;
+                    values.insert(
+                        sc_config::ADMIN_SUBDOMAIN.to_owned(),
+                        normalised.map_or(Json::Null, Json::String),
+                    );
+                }
 
                 // What the settings *mean together* is checked before anything
                 // is written: `custom` with no certificate, or a certificate its
@@ -4330,8 +4342,23 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // host the Analytics UI's policy will name, so one that is not
                 // an http or https origin is refused here (analytics A5.6).
                 sc_config::map_settings_from(&merged)?;
+                // Where the admin UI is served: a move is checked against what
+                // is served there before anything is written, because the
+                // router would otherwise have to choose between the admin UI
+                // and an application on one host.
+                let admin_subdomain = sc_config::admin_subdomain_from(&merged)?;
+                let moving = admin_subdomain != apps.admin().subdomain();
+                if moving {
+                    check_admin_move(&catalog, &apps, admin_subdomain.as_deref()).await?;
+                }
 
                 sc_config::set_config_many(&catalog, &values).await?;
+                // The admin UI moves now, and the new name's certificate is
+                // ordered now: the screen that saved this is about to wait for
+                // it (`getAdminAddress`) and then follow it there.
+                if moving {
+                    apps.set_admin_subdomain(admin_subdomain);
+                }
                 // The two switches this process runs under move **now**, not at
                 // the next restart: an admin ticks "Log SQL" precisely because
                 // something is happening in the server they are looking at, and
@@ -4344,6 +4371,45 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 Ok(HandlerResponse::ok(
                     settings_json(&catalog, &ctx.locale).await?,
                 ))
+            }
+        }
+    });
+
+    // Where the admin UI is served, and whether a browser can follow it there
+    // yet (Settings → Development → Admin subdomain). Polled by the dialog a
+    // move opens: the certificate for a new name is a minute of ACME traffic
+    // away, and the admin is not let go to an address that would refuse them.
+    reg.register("getAdminAddress", {
+        let apps = apps.clone();
+        move |_ctx| {
+            let apps = apps.clone();
+            async move { Ok(HandlerResponse::ok(admin_address_json(&apps))) }
+        }
+    });
+
+    // A single-use token that gives the signed-in admin a session on the admin
+    // UI's current host. The session cookie is host-only, so without this
+    // following a move would mean logging in again (`crate::admin_host`).
+    reg.register("createAdminHandoff", {
+        let apps = apps.clone();
+        move |ctx| {
+            let apps = apps.clone();
+            async move {
+                let user = ctx
+                    .user
+                    .clone()
+                    .ok_or_else(|| Error::invalid("there is no session to hand off"))?;
+                let host = apps.admin_host().ok_or_else(|| {
+                    Error::invalid(
+                        "this server has no base domain, so the admin UI has no address to \
+                         move to",
+                    )
+                })?;
+                let token = apps.admin().mint_handoff(user, host.clone());
+                Ok(HandlerResponse::ok(json!({
+                    "host": host,
+                    "path": format!("{}?token={token}", crate::admin_host::HANDOFF_ROUTE),
+                })))
             }
         }
     });
@@ -4881,6 +4947,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // the result columns the database reported rather than the empty
                 // list the caller sent.
                 let mut created = application_from_body(AppId::new(), &ctx.body)?;
+                check_app_subdomain(&apps, &created.subdomain)?;
                 framable_by_the_admin(&mut created, &ctx.body, &apps);
                 // A store setting that asked for a new local store gets one
                 // before the application is validated, since validation checks
@@ -4960,6 +5027,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // The id is the path's, not the body's — the row's identity is not
                 // something a payload gets to reassign.
                 let mut updated = application_from_body(id, &ctx.body)?;
+                check_app_subdomain(&apps, &updated.subdomain)?;
                 merge_framework_secrets(&stored, &mut updated);
                 framable_by_the_admin(&mut updated, &ctx.body, &apps);
                 let app = save_application(&catalog, &updated).await?;
@@ -7256,6 +7324,76 @@ async fn delete_builder_agent(catalog: &Catalog, app: &Application) -> Result<Op
 /// **Only when the caller stated no `csp` of its own.** A policy someone wrote
 /// out is theirs: an admin who writes `frame-ancestors 'none'` has said what
 /// they mean, and a restore is replaying a policy that was already decided.
+/// Refuse a subdomain the router would give to the admin UI rather than to the
+/// application: the admin UI's own, and `@` (the base domain) while the admin
+/// UI is still there.
+fn check_app_subdomain(apps: &AppMounts, subdomain: &str) -> Result<()> {
+    let subdomain = subdomain.trim();
+    let admin = apps.admin().subdomain();
+    if subdomain == sc_config::ROOT_SUBDOMAIN && admin.is_none() {
+        return Err(Error::invalid(
+            "`@` serves the application on the base domain, which is where the admin UI is: \
+             move the admin UI to a subdomain of its own first (Settings → Development → \
+             Admin subdomain)",
+        ));
+    }
+    if admin.as_deref() == Some(subdomain) {
+        return Err(Error::invalid(format!(
+            "`{subdomain}` is where the admin UI is served (Settings → Development → Admin \
+             subdomain); choose another subdomain"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse moving the admin UI to `to` (`None`: back to the base domain) when
+/// an application is served there, or when there is no base domain to be a
+/// subdomain of.
+async fn check_admin_move(catalog: &Catalog, apps: &AppMounts, to: Option<&str>) -> Result<()> {
+    if to.is_some() && apps.base_domain().is_none() {
+        return Err(Error::invalid(
+            "this server has no base domain (`--base-domain`), so the admin UI has nothing to \
+             be a subdomain of",
+        ));
+    }
+    let wanted = to.unwrap_or(sc_config::ROOT_SUBDOMAIN);
+    if let Some(app) = list_applications(catalog)
+        .await?
+        .into_iter()
+        .find(|app| app.subdomain.trim() == wanted)
+    {
+        return Err(Error::invalid(match to {
+            Some(subdomain) => format!(
+                "the application `{}` is served on `{subdomain}`; choose another admin subdomain",
+                app.name
+            ),
+            None => format!(
+                "the application `{}` is served on the base domain (`@`); give it a subdomain \
+                 before moving the admin UI back there",
+                app.name
+            ),
+        }));
+    }
+    Ok(())
+}
+
+/// Where the admin UI is served and whether its certificate is ready: the body
+/// of `getAdminAddress`.
+fn admin_address_json(apps: &AppMounts) -> Json {
+    let host = apps.admin_host();
+    let certificate = host.as_deref().map(|host| apps.certificate_status(host));
+    json!({
+        "base_domain": apps.base_domain(),
+        "admin_subdomain": apps.admin().subdomain(),
+        "admin_host": host,
+        "ready": certificate.as_ref().is_none_or(|status| status.is_ready()),
+        "certificate": certificate.map(|status| json!({
+            "state": status.state,
+            "message": status.message,
+        })),
+    })
+}
+
 fn framable_by_the_admin(app: &mut Application, body: &Json, apps: &AppMounts) {
     let stated = body
         .get("csp")

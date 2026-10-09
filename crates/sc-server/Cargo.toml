@@ -117,6 +117,7 @@ axum.workspace = true
 axum-server.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
+webpki.workspace = true
 rustls-acme.workspace = true
 # The chat socket's client protocol, parsed rather than hand-matched (§11.4).
 serde = { workspace = true }

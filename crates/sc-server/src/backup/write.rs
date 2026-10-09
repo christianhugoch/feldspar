@@ -519,7 +519,14 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
             .filter(|section| section.name != SSL_SECTION)
         {
             let mut values = Map::new();
-            for field in &section.fields {
+            // Where the admin UI is served is this host's, as its TLS settings
+            // are: restored onto another host it would move that host's admin
+            // UI to a name nobody pointed at it.
+            for field in section
+                .fields
+                .iter()
+                .filter(|field| field.key() != sc_config::ADMIN_SUBDOMAIN)
+            {
                 if let Some(value) = stored.get(field.key()) {
                     values.insert(field.key().to_owned(), value.clone());
                 }

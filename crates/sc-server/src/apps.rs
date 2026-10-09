@@ -257,6 +257,9 @@ pub struct AppMounts {
     /// (`crate::target_builds`): a native build is minutes long, so it runs as a
     /// job the admin UI polls rather than inside one request.
     target_builds: crate::target_builds::TargetBuilds,
+    /// Where the admin UI is served (Settings → Development): live, because
+    /// moving it is a save rather than a restart.
+    admin: crate::admin_host::AdminHost,
 }
 
 /// One run's preview of one application.
@@ -304,12 +307,54 @@ impl AppMounts {
             base_domain: None,
             preview_idle: Duration::from_secs(crate::config::DEFAULT_PREVIEW_IDLE_MINUTES * 60),
             target_builds: crate::target_builds::TargetBuilds::default(),
+            admin: crate::admin_host::AdminHost::default(),
         }
     }
 
     /// The build-target jobs of every application this registry serves.
     pub fn target_builds(&self) -> &crate::target_builds::TargetBuilds {
         &self.target_builds
+    }
+
+    /// Where the admin UI is served, and the handoffs that follow it there.
+    pub fn admin(&self) -> &crate::admin_host::AdminHost {
+        &self.admin
+    }
+
+    /// Serve the admin UI on `subdomain` of the base domain (`None`: the base
+    /// domain itself) from the next request on, and tell the certificate — the
+    /// new host is a name it has to cover before a browser will follow.
+    pub fn set_admin_subdomain(&self, subdomain: Option<String>) {
+        self.admin.set_subdomain(subdomain);
+        self.certificate_changed();
+    }
+
+    /// The host the admin UI is served on, if this deployment has a base domain.
+    pub fn admin_host(&self) -> Option<String> {
+        self.admin.host(self.base_domain())
+    }
+
+    /// Whether a handshake for `host` is answered with a certificate naming it:
+    /// what the admin UI's move waits on. A server whose certificate is not its
+    /// own business — TLS off — has nothing to wait for.
+    pub fn certificate_status(&self, host: &str) -> crate::tls::CertificateStatus {
+        match self.certificate.get() {
+            Some(certificate) => certificate.status_for(host),
+            None => crate::tls::CertificateStatus::plain_http(),
+        }
+    }
+
+    /// The `Content-Security-Policy` an application's responses carry, with the
+    /// admin UI's framing following it to its own subdomain
+    /// ([`follow_admin_host`](sc_app::follow_admin_host)).
+    pub fn app_csp(&self, app: &Application) -> String {
+        match (self.base_domain(), self.admin.subdomain()) {
+            (Some(base), Some(subdomain)) => {
+                sc_app::follow_admin_host(&app.csp, base, &format!("{subdomain}.{base}"))
+                    .header_value()
+            }
+            _ => app.csp.header_value(),
+        }
     }
 
     /// Say which domain applications are served under, so a preview has a host
@@ -448,10 +493,17 @@ impl AppMounts {
 
     fn preview_info(&self, label: &str, subdomain: &str) -> PreviewInfo {
         let base = self.base_domain.as_deref().unwrap_or("localhost");
+        // The application on the base domain has no subdomain to put after the
+        // `--`, so its preview is the label alone (`k3j9x2m4pq.example.com`).
+        let host = if subdomain == sc_config::ROOT_SUBDOMAIN {
+            format!("{label}.{base}")
+        } else {
+            format!("{label}--{subdomain}.{base}")
+        };
         PreviewInfo {
             subdomain: subdomain.to_owned(),
             label: label.to_owned(),
-            host: format!("{label}--{subdomain}.{base}"),
+            host,
         }
     }
 
@@ -590,8 +642,21 @@ impl AppMounts {
     /// the registry may call it.
     fn certificate_changed(&self) {
         if let Some(certificate) = self.certificate.get() {
-            certificate.subdomains_changed(&self.subdomains());
+            certificate.subdomains_changed(&self.certificate_subdomains());
         }
+    }
+
+    /// The subdomains the certificate has to cover: every mounted
+    /// application's, and the admin UI's when it has one of its own.
+    pub fn certificate_subdomains(&self) -> Vec<String> {
+        let mut names = self.subdomains();
+        if let Some(admin) = self.admin.subdomain()
+            && !names.contains(&admin)
+        {
+            names.push(admin);
+            names.sort_unstable();
+        }
+        names
     }
 
     /// Mount an app on its declared subdomain, refusing a collision.

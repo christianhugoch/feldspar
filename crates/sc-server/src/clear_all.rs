@@ -341,9 +341,12 @@ async fn clear_system_rows(catalog: &Catalog, report: &mut ClearReport) {
     }
 }
 
-/// Empty one table — all but the host's TLS settings.
+/// Empty one table — all but the host's TLS settings and the admin UI's
+/// subdomain.
 ///
-/// `_fd_config` keeps the TLS section's rows and the ACME cache is left alone:
+/// `_fd_config` keeps the TLS section's rows (and where the admin UI is, which
+/// the running process would otherwise disagree with until the next restart)
+/// and the ACME cache is left alone:
 /// how this host serves is the host's, as a backup already treats it (its
 /// `ssl` part is off by default). Clearing them would change nothing until the
 /// next restart and then take every application *and* the admin UI off the
@@ -356,7 +359,7 @@ async fn delete_rows(catalog: &Catalog, table: &str) -> Result<()> {
     }
     let mut delete = Delete::from(table);
     if table == sc_config::CONFIG_TABLE {
-        let kept = sc_config::ssl_keys()
+        let kept = sc_config::host_serving_keys()
             .into_iter()
             .map(|key| Expr::binary(BinOp::Ne, Expr::col("key"), Expr::lit(key)))
             .reduce(Expr::and);

@@ -528,9 +528,10 @@ fn application_origin(
         .and_then(|host| host.rsplit_once(':'))
         .map(|(_, port)| port)
         .filter(|port| port.parse::<u16>().is_ok());
+    let host = sc_catalog::PublicOrigin::new(base, 0).host_for(&app.subdomain);
     Some(match port {
-        Some(port) => format!("{scheme}://{}.{base}:{port}", app.subdomain),
-        None => format!("{scheme}://{}.{base}", app.subdomain),
+        Some(port) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{host}"),
     })
 }
 

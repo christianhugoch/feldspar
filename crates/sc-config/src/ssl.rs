@@ -88,6 +88,17 @@ pub fn ssl_keys() -> Vec<&'static str> {
     ]
 }
 
+/// Every key that says how *this host* serves: the TLS section, and where the
+/// admin UI is ([`ADMIN_SUBDOMAIN`](crate::ADMIN_SUBDOMAIN)). What Clear all
+/// keeps, for [`ssl_keys`]'s reason — losing the admin subdomain would move the
+/// admin UI back to the base domain at the next restart, under an application
+/// that may be serving there.
+pub fn host_serving_keys() -> Vec<&'static str> {
+    let mut keys = ssl_keys();
+    keys.push(crate::ADMIN_SUBDOMAIN);
+    keys
+}
+
 /// The TLS settings, as one section of the settings screen.
 pub fn ssl_section() -> ConfigSection {
     ConfigSection {

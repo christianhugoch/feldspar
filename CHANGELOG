@@ -2,6 +2,81 @@
 
 Changes in reverse chronological order.
 
+## Admin UI on its own subdomain; an application on the base domain
+
+The admin UI can be moved off the base domain to a subdomain of its own: **Settings →
+Development → Admin subdomain** (`admin_subdomain`; `admin` serves it at `admin.example.com`).
+Once it has moved, an application can be served on the base domain itself by giving `@` as its
+subdomain. No restart is involved, and the admin stays signed in.
+
+- **The move is a save.** `updateSettings` checks the subdomain (one DNS label, lower-cased, not
+  `@`, no `--`), refuses arrangements where the admin UI and an application would share a host,
+  stores it, and calls `AppMounts::set_admin_subdomain`. The router (`resolve_app`) reads it
+  per request:
+  - the admin subdomain is the admin's;
+  - the bare base domain (and each extra base domain) is the `@` application's when one is
+    mounted;
+  - with no `@` application, a page navigation to the base domain gets a 307 to the admin
+    host. This happens only once that host's certificate is ready, and never for an API
+    request, so the screen waiting at the old address keeps working.
+- **The certificate follows.** The admin subdomain is reported through the `tls::Certificate`
+  seam like an application's, so in ACME mode saving it orders a certificate for the new name.
+  `Certificate::status_for(host)` is new:
+  - `AcmeCertificate` reports `ordering` (with the CA's last error, now kept per order) until
+    the order deploys, then `ready`;
+  - a pasted certificate (`tls::PastedCertificate`, now installed in `custom` mode) is checked
+    with `webpki` for the name (`rustls-webpki` is now a direct dependency; it was already in
+    the tree under rustls);
+  - TLS off is `plain_http`.
+
+  `GET /api/settings/admin-address` (`getAdminAddress`) reports it. `tls_domains` treats `@`
+  as the base domain.
+- **The session follows, without a new login.** The session cookie stays host-only: a `Domain`
+  attribute would hand the admin's session to every application. Instead,
+  `POST /api/settings/admin-address/handoff` (`createAdminHandoff`) mints a single-use token.
+  It lasts two minutes, is bound to the admin host and is held in memory (`sc-server::admin_host`).
+  `GET /_feldspar/admin-handoff?token=…` on the new host exchanges it for a session of the
+  same user and lands on `#/settings`. A spent, expired or foreign token is a redirect to the
+  login screen.
+- **The dialog** (`ui/admin/src/screens/AdminMove.tsx`, logic in `adminAddress.ts`) opens when
+  a save changes the stored subdomain. It says where the admin UI is going and polls three
+  steps:
+  1. moved;
+  2. a certificate (or none needed);
+  3. the new origin's `/health` answering this browser.
+
+  The third step is a `no-cors` fetch, so DNS and the browser's trust store are what is
+  tested. *Go to …* stays disabled until all three are done. *Stay here for now* closes it,
+  and the old address keeps serving until the new one is ready. The admin CSP's
+  `connect-src` and `frame-src` now name the base domain as well as its subdomains.
+- **Links to applications** in the admin SPA (`appUrl`, `views.ts`'s `appOrigin`, the
+  GraphQL explorer's endpoint) are built on the base domain the server reports rather than on
+  the admin's own host, which stops being the base domain after a move. `@` links to the base
+  domain itself. The same holds server-side: `PublicOrigin::host_for`, `RequestLinks` and
+  the builder's application origin.
+- **Refused:**
+  - an application on the admin subdomain;
+  - `@` while the admin UI is on the base domain;
+  - moving the admin UI onto an application's subdomain, or back under an `@` application;
+  - any move without a base domain.
+
+  At boot, a stored admin subdomain with no `--base-domain` is reported and ignored.
+- **Kept where it belongs.**
+  - Clear all keeps `admin_subdomain` (`sc_config::host_serving_keys`).
+  - A backup neither writes nor restores it, as with the TLS section.
+  - An application's stored `frame-ancestors`, widened for the base domain, is widened for
+    the admin host as it is served (`sc_app::follow_admin_host`), so the builder's preview
+    pane survives a move.
+  - A preview of the `@` application is `<label>.<base domain>`.
+- **Tests.**
+  - `sc-server/tests/admin_subdomain.rs` drives two browsers through the router: the move, the
+    handoff (including single use and the wrong host), the `@` application on the base domain,
+    the redirect, and every refusal.
+  - Unit tests cover the setting's parsing, `follow_admin_host`, `@` in `PublicOrigin` and
+    `tls_domains`, `PastedCertificate`'s name check and the handoff store.
+  - `ui/admin/src/adminAddress.test.ts` pins the dialog's steps and the application links.
+- **Docs.** `TECHNICAL_DESIGN.md` §13.5 and three rows in `OPERATIONS.md` §8.5.
+
 ## Admin: long dialogs scroll again
 
 The automated backup dialog (Settings → Backup) was taller than the window and could not be

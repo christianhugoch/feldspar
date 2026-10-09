@@ -49,9 +49,10 @@ pub use defs::{
     config_sections, config_spec, definition, internal_defs, known_keys,
 };
 pub use development::{
-    DevelopmentSettings, LOG_SQL, LOG_VERBOSITY, MCP_ENABLED, MCP_LOOPBACK_ONLY, McpSettings,
-    apply_development_settings, development_section, development_settings,
-    development_settings_from, mcp_settings, mcp_settings_from,
+    ADMIN_SUBDOMAIN, DevelopmentSettings, LOG_SQL, LOG_VERBOSITY, MCP_ENABLED, MCP_LOOPBACK_ONLY,
+    McpSettings, ROOT_SUBDOMAIN, admin_subdomain, admin_subdomain_from, apply_development_settings,
+    check_admin_subdomain, development_section, development_settings, development_settings_from,
+    mcp_settings, mcp_settings_from,
 };
 pub use email::{
     DEFAULT_SMTP_PORT, EMAIL_FROM, EmailSettings, Mailbox, SECURITY_NONE, SECURITY_STARTTLS,
@@ -69,8 +70,8 @@ pub use maps::{
 pub use ssl::{
     ACME_CONTACT_EMAIL, ACME_DIRECTORY_URL, HOST_KEYS, LETSENCRYPT_PRODUCTION, LETSENCRYPT_STAGING,
     MODE_CUSTOM, MODE_LETSENCRYPT, MODE_OFF, REDIRECT_HTTP_TO_HTTPS, SSL_CERTIFICATE,
-    SSL_EXTRA_DOMAINS, SSL_MODE, SSL_PRIVATE_KEY, SslMode, SslSettings, parse_domains, ssl_keys,
-    ssl_settings, ssl_settings_from,
+    SSL_EXTRA_DOMAINS, SSL_MODE, SSL_PRIVATE_KEY, SslMode, SslSettings, host_serving_keys,
+    parse_domains, ssl_keys, ssl_settings, ssl_settings_from,
 };
 pub use store::{
     CONFIG_TABLE, all_config, bootstrap_config, config_value, delete_config, host_config_keys,

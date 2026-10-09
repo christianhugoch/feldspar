@@ -218,6 +218,22 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // one would make the router refuse to build. With one, every stored app is
     // built and mounted now — a build that fails is logged and skipped, never
     // fatal (§13.2), and can be fixed and rebuilt without a restart.
+    // Where the admin UI is served (Settings → Development). Before the mounts
+    // and the certificate's names, which both read it. Without a base domain
+    // there is no subdomain to move to, so a stored one is reported and left
+    // unused rather than stopping the boot.
+    match sc_config::admin_subdomain(&catalog).await {
+        Ok(Some(subdomain)) if config.base_domain.is_some() => {
+            apps.set_admin_subdomain(Some(subdomain));
+        }
+        Ok(Some(subdomain)) => eprintln!(
+            "feldspar: the admin subdomain `{subdomain}` is ignored: there is no --base-domain \
+             for it to be a subdomain of"
+        ),
+        Ok(None) => {}
+        Err(e) => eprintln!("feldspar: the admin subdomain is ignored: {e}"),
+    }
+
     service.notify_status("mounting applications");
     if config.base_domain.is_some() {
         mount_all(&apps).await;
@@ -227,7 +243,8 @@ async fn serve_command(args: &[String]) -> Result<()> {
     }
 
     // The certificate's names, now that the mounts are known: the base domain,
-    // every mounted application's subdomain, and whatever else the admin listed
+    // every mounted application's subdomain (and the admin UI's, if it has
+    // moved to one), and whatever else the admin listed
     // (§13.5). The three are kept apart rather than flattened because the middle
     // one is live — an application created while the server runs adds a name, and
     // `serve` hands the mount registry the certificate so that becomes a new
@@ -239,7 +256,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
         config.https_port,
         sc_server::TlsNames::new(
             config.base_domain.clone(),
-            apps.subdomains(),
+            apps.certificate_subdomains(),
             ssl.extra_domains.clone(),
         ),
         Some(sc_config::AcmeCache::new(catalog.clone())),

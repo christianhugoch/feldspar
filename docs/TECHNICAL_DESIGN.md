@@ -6548,6 +6548,43 @@ With TLS on there are two listeners — the bind address (plain HTTP, redirectin
 so a redirected `POST` stays a `POST`, unless the admin turns the redirect off) and the TLS
 port beside it — and one shutdown signal stops both.
 
+**Where the admin UI is served** (`admin_subdomain`, Settings → Development;
+`sc-server::admin_host`). By default the admin UI is the base domain and every host that names
+no application. An admin can move it to `<subdomain>.<base domain>`, which frees the base domain
+for an application whose subdomain is **`@`**. The move is a save, not a restart:
+
+- **Routing is live.** `AppMounts` holds the subdomain beside the mounts; the router gives that
+  host to the admin, and the bare base domain (and each extra base domain) to the `@`
+  application when one is mounted. With no `@` application, a page *navigation* to the base
+  domain gets a **307** to the admin host — only once that host's certificate is ready, and
+  never an API request, so the admin UI still open at the old address keeps working while it
+  waits.
+- **The certificate follows.** The admin subdomain is one more name `AppMounts` reports through
+  the `tls::Certificate` seam, so in ACME mode saving it orders a certificate exactly as mounting
+  an application does. `Certificate::status_for(host)` answers whether a handshake for the host
+  gets a certificate naming it: `ordering` (with the CA's last error) until the order deploys,
+  then `ready`. A pasted certificate (`tls::PastedCertificate`) is checked with `webpki` for the
+  name; TLS off is `plain_http`. `GET /api/settings/admin-address` reports it.
+- **The session follows.** The session cookie is host-only — a `Domain` attribute would give the
+  admin's credential to every application under the base domain — so the new host has no
+  session. `POST /api/settings/admin-address/handoff` mints a single-use token (two minutes,
+  bound to the admin host, held in memory) which `GET /_feldspar/admin-handoff?token=…` on the
+  new host exchanges for a fresh session of the same user, landing on Settings.
+- **The dialog** the save opens (`ui/admin` `AdminMove`) polls the address until the
+  certificate is ready, then fetches the new origin's `/health` from the browser (the admin
+  CSP's `connect-src` names the base domain and its subdomains for this), because only the
+  browser can say whether its DNS and trust store accept the name. Only then is *Go* enabled.
+
+Saves that would put the admin UI and an application on one host are refused (an application
+on the admin subdomain, `@` while the admin UI is on the base domain, moving the admin UI onto
+an application's subdomain or back under an `@` application), as is a move with no base domain.
+The admin subdomain is this host's, like its TLS settings: Clear all keeps it and a backup
+neither writes nor restores it. An application's stored `frame-ancestors`, widened for the base
+domain when it was created, is widened for the admin host as it is served
+(`sc_app::follow_admin_host`), so the builder's preview pane keeps working after a move. A
+preview of the `@` application is `<label>.<base domain>`, having no subdomain to put after
+the `--`.
+
 **Name resolution is this process's own** (`sc-dns`, layer 0), and turning TLS on is what
 first made that necessary. glibc's `getaddrinfo` `dlopen`s a shared object per module named on
 the `hosts:` line of `/etc/nsswitch.conf` — `myhostname`, `mdns4_minimal`, `systemd` — each of

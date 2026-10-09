@@ -3765,6 +3765,54 @@ pub fn admin_endpoints() -> EndpointSet {
             .auth(AuthRequirement::admin()),
     );
 
+    // Where the admin UI is served, and whether a browser can follow it there
+    // yet (Settings → Development → Admin subdomain). The dialog a move opens
+    // polls this until `ready`, and the screens that link to applications read
+    // `base_domain` from it, since the admin UI's own host stops being the base
+    // domain once it moves.
+    //
+    // `certificate` is `null` without a base domain; otherwise `state` is
+    // `plain_http`, `ready`, `ordering` or `not_covered`, and `message` is what
+    // the CA last said (or why the pasted certificate does not do).
+    set.register(
+        Endpoint::new(
+            "getAdminAddress",
+            Method::Get,
+            api().lit("settings").lit("admin-address"),
+        )
+        .output(TypeSchema::struct_of([
+            StructField::new("base_domain", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("admin_subdomain", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("admin_host", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("ready", TypeSchema::bool()),
+            StructField::new(
+                "certificate",
+                TypeSchema::optional(TypeSchema::struct_of([
+                    StructField::new("state", TypeSchema::text()),
+                    StructField::new("message", TypeSchema::optional(TypeSchema::text())),
+                ])),
+            ),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // A single-use token that signs the admin in on the admin UI's current host
+    // — the session cookie is host-only, so following a move would otherwise
+    // mean logging in again. `path` is opened on `host`, with the scheme and
+    // port the browser already uses.
+    set.register(
+        Endpoint::new(
+            "createAdminHandoff",
+            Method::Post,
+            api().lit("settings").lit("admin-address").lit("handoff"),
+        )
+        .output(TypeSchema::struct_of([
+            StructField::new("host", TypeSchema::text()),
+            StructField::new("path", TypeSchema::text()),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // Send one message through the **stored** email settings (§18.2).
     //
     // A section may have an *act* as well as fields, and this is the first one:

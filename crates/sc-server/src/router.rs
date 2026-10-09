@@ -39,6 +39,7 @@ use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Pr
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
+use crate::admin_host::HANDOFF_ROUTE;
 use crate::apps::{AppMounts, MountedApp, subdomain_in};
 use crate::backup::{BACKUP_CREATE_ROUTE, BACKUP_UPLOAD_ROUTE};
 use crate::chat::{AGENT_CHAT_ROUTE, agent_chat_upgrade};
@@ -328,6 +329,11 @@ pub fn build_router_with_apps(
         // what makes it safe to exempt from the CSRF middleware below, and is
         // the whole of the confused-deputy story rather than belt-and-braces.
         .route(MCP_ROUTE, axum::routing::post(crate::mcp::mcp))
+        // The far end of moving the admin UI to its own subdomain (Settings →
+        // Development): a single-use token from the old host becomes a session
+        // here, so following the move does not mean logging in again. A real
+        // route because its answer is a cookie and a redirect, not JSON.
+        .route(HANDOFF_ROUTE, axum::routing::get(admin_handoff))
         .fallback(dispatch)
         .with_state(state.clone())
         // CSRF runs outside dispatch so it guards every route and can mint the
@@ -755,7 +761,7 @@ async fn stream_observe(
     // one. So the host is asked first, as `dispatch` asks it, and an
     // application's socket is served as the application's (TODO "Streams" §10).
     if let Resolved::App(app) = resolve_app(&state, &headers, &jar) {
-        let csp = app.app.csp.header_value();
+        let csp = state.apps.app_csp(&app.app);
         return with_csp(app_stream_observe(&state, &app, &id, &jar, ws).await, &csp);
     }
     let user = match session_user(&state, &jar).await {
@@ -896,6 +902,9 @@ async fn dispatch(
         Resolved::HiddenPreview => return json_error(StatusCode::NOT_FOUND, "not found"),
         Resolved::Admin => {}
     }
+    if let Some(moved) = moved_admin_redirect(&state, &method, &uri, &headers) {
+        return moved;
+    }
 
     match state.routes.at(uri.path()) {
         Ok(matched) => {
@@ -965,21 +974,41 @@ fn open_to_public(state: &AppState, request: &axum::extract::Request) -> bool {
 /// request, and a request in flight against a since-replaced app keeps serving the
 /// version it resolved.
 fn resolve_app(state: &AppState, headers: &axum::http::HeaderMap, jar: &CookieJar) -> Resolved {
-    let Some(label) = state.base_domain.as_ref().and_then(|base| {
+    let Some((base, host)) = state.base_domain.as_ref().and_then(|base| {
         let host = headers.get(header::HOST)?.to_str().ok()?;
-        subdomain_in(host, Some(base.as_str()), &state.extra_base_domains)
+        Some((base.as_str(), host))
     }) else {
         return Resolved::Admin;
+    };
+    let admin = state.apps.admin().subdomain();
+    let Some(label) = subdomain_in(host, Some(base), &state.extra_base_domains) else {
+        // The base domain itself. Once the admin UI has moved to a subdomain of
+        // its own, this is the `@` application's when there is one; otherwise
+        // (and always before the move) it is the admin's, as any host that
+        // names no application is.
+        if admin.is_some()
+            && is_base_host(host, base, &state.extra_base_domains)
+            && let Some(app) = state.apps.get(sc_config::ROOT_SUBDOMAIN)
+        {
+            return Resolved::App(app);
+        }
+        return Resolved::Admin;
+    };
+    // The admin UI's own subdomain is the admin's, whatever is mounted.
+    if admin.as_deref() == Some(label) {
+        return Resolved::Admin;
+    }
+    let tokens = || -> Vec<&str> {
+        [SESSION_COOKIE, PREVIEW_COOKIE]
+            .iter()
+            .filter_map(|name| jar.get(name).map(|c| c.value()))
+            .collect()
     };
     // `<label>--<subdomain>` is a preview when the label is one. Anything else
     // with a `--` in it is an ordinary subdomain.
     let preview = label.split_once("--");
     if let Some((preview, subdomain)) = preview {
-        let tokens: Vec<&str> = [SESSION_COOKIE, PREVIEW_COOKIE]
-            .iter()
-            .filter_map(|name| jar.get(name).map(|c| c.value()))
-            .collect();
-        match state.apps.resolve_preview(preview, subdomain, &tokens) {
+        match state.apps.resolve_preview(preview, subdomain, &tokens()) {
             Ok(Some(app)) => return Resolved::App(app),
             Err(()) => return Resolved::HiddenPreview,
             Ok(None) => {}
@@ -993,7 +1022,113 @@ fn resolve_app(state: &AppState, headers: &axum::http::HeaderMap, jar: &CookieJa
         None if preview.is_some_and(|(_, subdomain)| state.apps.get(subdomain).is_some()) => {
             Resolved::HiddenPreview
         }
+        // A preview of the application on the base domain is the label alone,
+        // having no subdomain to put after the `--`.
+        None if preview.is_none() => {
+            match state
+                .apps
+                .resolve_preview(label, sc_config::ROOT_SUBDOMAIN, &tokens())
+            {
+                Ok(Some(app)) => Resolved::App(app),
+                Err(()) => Resolved::HiddenPreview,
+                Ok(None) => Resolved::Admin,
+            }
+        }
         None => Resolved::Admin,
+    }
+}
+
+/// Whether `host` is the base domain itself, or one of the extra ones — the
+/// hosts the `@` application answers on.
+fn is_base_host(host: &str, base: &str, extra_base_domains: &[String]) -> bool {
+    let name = crate::admin_host::hostname(host);
+    name.eq_ignore_ascii_case(base)
+        || extra_base_domains
+            .iter()
+            .any(|extra| name.eq_ignore_ascii_case(extra))
+}
+
+/// The redirect a browser gets for the admin UI's **old** address, once it has
+/// moved to a subdomain of its own and nothing else is served on the base
+/// domain: a bookmark of `example.com` lands on `admin.example.com`.
+///
+/// Only a page navigation is redirected, so the admin UI still open at the old
+/// address — waiting for the move to be ready — keeps its API. And only once
+/// the new host has a certificate: until then the old address is where the
+/// admin UI is reachable, and a redirect would be to a page a browser refuses.
+/// Temporary (307), because the admin may move it again.
+fn moved_admin_redirect(
+    state: &AppState,
+    method: &axum::http::Method,
+    uri: &Uri,
+    headers: &axum::http::HeaderMap,
+) -> Option<Response> {
+    if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
+        return None;
+    }
+    state.apps.admin().subdomain()?;
+    let base = state.base_domain.as_deref()?;
+    let host = headers.get(header::HOST)?.to_str().ok()?;
+    if !crate::admin_host::hostname(host).eq_ignore_ascii_case(base) || !accepts_html(headers) {
+        return None;
+    }
+    let admin_host = state.apps.admin_host()?;
+    if !state.apps.certificate_status(&admin_host).is_ready() {
+        return None;
+    }
+    // The port the browser used, kept; the scheme it used, kept by leaving it
+    // out (a scheme-relative `Location`).
+    let port = host
+        .rsplit_once(':')
+        .map(|(_, port)| port)
+        .filter(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()));
+    let path = uri.path_and_query().map_or("/", |pq| pq.as_str());
+    let location = match port {
+        Some(port) => format!("//{admin_host}:{port}{path}"),
+        None => format!("//{admin_host}{path}"),
+    };
+    let location = HeaderValue::from_str(&location).ok()?;
+    Some(
+        (
+            StatusCode::TEMPORARY_REDIRECT,
+            [(header::LOCATION, location)],
+        )
+            .into_response(),
+    )
+}
+
+/// Redeem a handoff token minted on the admin UI's old host: a session for the
+/// same user, here, and on to the Settings screen the move started from.
+///
+/// A token that is spent, expired or for another host is not an error page — it
+/// is the login screen, which is where the admin would have been without one.
+async fn admin_handoff(
+    State(state): State<AppState>,
+    uri: Uri,
+    headers: axum::http::HeaderMap,
+    jar: CookieJar,
+) -> Response {
+    let token = parse_query(&uri)
+        .into_iter()
+        .find_map(|(key, value)| (key == "token").then_some(value));
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(crate::admin_host::hostname)
+        .unwrap_or_default();
+    let Some(user) = token.and_then(|token| state.apps.admin().redeem_handoff(&token, &host))
+    else {
+        return Redirect::to("/").into_response();
+    };
+    match state.sessions.login(user).await {
+        Ok(token) => {
+            let cookie = build_cookie(SESSION_COOKIE, token, true, state.secure_cookies);
+            (jar.add(cookie), Redirect::to("/#/settings")).into_response()
+        }
+        Err(e) => {
+            log_failure("could not start the handed-off session", &e);
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "could not start session")
+        }
     }
 }
 
@@ -1026,7 +1161,7 @@ async fn dispatch_app(
     ws: Option<axum::extract::ws::WebSocketUpgrade>,
     body: &Bytes,
 ) -> Response {
-    let csp = app.app.csp.header_value();
+    let csp = state.apps.app_csp(&app.app);
     let Some(api_method) = map_method(method.as_str()) else {
         return with_csp(
             json_error(StatusCode::METHOD_NOT_ALLOWED, "unsupported method"),
@@ -1753,9 +1888,14 @@ impl sc_api::AppDirectory for RequestLinks {
             .rsplit_once(':')
             .map(|(_, port)| port)
             .filter(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()));
+        let host = if subdomain == sc_config::ROOT_SUBDOMAIN {
+            base.to_owned()
+        } else {
+            format!("{subdomain}.{base}")
+        };
         Some(match port {
-            Some(port) => format!("{}://{subdomain}.{base}:{port}", self.scheme),
-            None => format!("{}://{subdomain}.{base}", self.scheme),
+            Some(port) => format!("{}://{host}:{port}", self.scheme),
+            None => format!("{}://{host}", self.scheme),
         })
     }
 }
@@ -2142,14 +2282,10 @@ async fn serve_analytics(
 /// uses the default base map's.
 async fn map_hosts(state: &AppState) -> Vec<String> {
     let settings = match state.apps.catalog() {
-        Some(catalog) => sc_config::map_settings(catalog)
-            .await
-            .unwrap_or_else(|e| {
-                sc_log::log_warn!(
-                    "the map settings do not read, so the default base map is used: {e}"
-                );
-                sc_config::MapSettings::default()
-            }),
+        Some(catalog) => sc_config::map_settings(catalog).await.unwrap_or_else(|e| {
+            sc_log::log_warn!("the map settings do not read, so the default base map is used: {e}");
+            sc_config::MapSettings::default()
+        }),
         None => sc_config::MapSettings::default(),
     };
     settings.hosts()

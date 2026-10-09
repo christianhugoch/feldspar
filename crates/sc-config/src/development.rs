@@ -36,13 +36,19 @@ pub const LOG_VERBOSITY: &str = "log_verbosity";
 pub const MCP_ENABLED: &str = "mcp_enabled";
 /// Whether that route refuses a peer that is not on this machine.
 pub const MCP_LOOPBACK_ONLY: &str = "mcp_loopback_only";
+/// The subdomain of the base domain the admin UI is served on. Empty serves it
+/// on the base domain itself.
+pub const ADMIN_SUBDOMAIN: &str = "admin_subdomain";
+/// The subdomain an application gives to be served on the base domain itself,
+/// which it may do only once the admin UI has moved to [`ADMIN_SUBDOMAIN`].
+pub const ROOT_SUBDOMAIN: &str = "@";
 
 /// The development settings, as one section of the settings screen.
 pub fn development_section() -> ConfigSection {
     ConfigSection {
         name: "development",
         label: "Development",
-        description: "Settings for logging and MCP server availability",
+        description: "Settings for logging, MCP server availability and where the admin UI is served",
         fields: vec![
             ConfigDef::help(
                 FormField::new(LOG_SQL, BasicType::Bool)
@@ -75,6 +81,15 @@ pub fn development_section() -> ConfigSection {
                     .label("MCP from this machine only")
                     .default_value(true),
                 "Refuse an MCP request whose peer is not on this machine.",
+            ),
+            // Live, like the rest of this section: saving it moves the admin UI
+            // (and orders the new name's certificate) without a restart.
+            ConfigDef::help(
+                FormField::new(ADMIN_SUBDOMAIN, BasicType::Text).label("Admin subdomain"),
+                "Serve the admin UI on this subdomain of the base domain (admin gives \
+                 admin.example.com) instead of on the base domain itself. Once it has moved, an \
+                 application can be served on the base domain by giving @ as its subdomain. \
+                 Leave empty to serve the admin UI on the base domain.",
             ),
         ],
     }
@@ -195,6 +210,67 @@ pub async fn mcp_settings(catalog: &Catalog) -> Result<McpSettings> {
     Ok(mcp_settings_from(&crate::store::all_config(catalog).await?))
 }
 
+/// Read the admin subdomain out of a settings bag: `None` when the admin UI is
+/// served on the base domain itself.
+///
+/// A value that is not one DNS label is refused rather than ignored, because
+/// this is a host name the server is about to answer on and order a
+/// certificate for. Lower-cased, since a host name is.
+pub fn admin_subdomain_from(config: &Attrs) -> Result<Option<String>> {
+    match config.get(ADMIN_SUBDOMAIN) {
+        Some(Json::String(raw)) => check_admin_subdomain(raw),
+        _ => Ok(None),
+    }
+}
+
+/// Read the admin subdomain out of `_fd_config`.
+pub async fn admin_subdomain(catalog: &Catalog) -> Result<Option<String>> {
+    admin_subdomain_from(&crate::store::all_config(catalog).await?)
+}
+
+/// Check a typed admin subdomain: empty is `None`, anything else must be one
+/// DNS label — letters, digits and inner hyphens.
+///
+/// Two spellings that *are* labels are refused as well, for what the router
+/// reads into them: `@` is the base domain itself, which is where the admin UI
+/// is when this is empty, and a label holding `--` is a coding run's preview
+/// (`<label>--<subdomain>`).
+pub fn check_admin_subdomain(raw: &str) -> Result<Option<String>> {
+    let name = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    let invalid = |why: &str| {
+        Err(sc_error::Error::invalid(format!(
+            "`{ADMIN_SUBDOMAIN}` `{name}` {why}"
+        )))
+    };
+    if name == ROOT_SUBDOMAIN {
+        return invalid(
+            "is the base domain itself; leave the box empty to serve the admin UI there",
+        );
+    }
+    if name.contains('.') {
+        return invalid("must be a single label such as `admin`, not a domain name");
+    }
+    if name.len() > 63
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        || name.starts_with('-')
+        || name.ends_with('-')
+    {
+        return invalid(
+            "is not a subdomain: use letters, digits and hyphens, not starting or ending with \
+             a hyphen",
+        );
+    }
+    if name.contains("--") {
+        return invalid("contains `--`, which is how a coding run's preview is addressed");
+    }
+    Ok(Some(name))
+}
+
 /// Read the stored development settings and make them this process's own — the
 /// one call the boot path makes.
 pub async fn apply_development_settings(catalog: &Catalog) -> Result<DevelopmentSettings> {
@@ -289,7 +365,13 @@ mod tests {
         let keys: Vec<&str> = section.fields.iter().map(|def| def.key()).collect();
         assert_eq!(
             keys,
-            [LOG_SQL, LOG_VERBOSITY, MCP_ENABLED, MCP_LOOPBACK_ONLY]
+            [
+                LOG_SQL,
+                LOG_VERBOSITY,
+                MCP_ENABLED,
+                MCP_LOOPBACK_ONLY,
+                ADMIN_SUBDOMAIN
+            ]
         );
 
         for (key, default) in [(MCP_ENABLED, false), (MCP_LOOPBACK_ONLY, true)] {
@@ -337,6 +419,40 @@ mod tests {
         ]));
         assert!(!settings.enabled);
         assert!(settings.loopback_only);
+    }
+
+    /// Empty is the base domain; a label is lower-cased and kept.
+    #[test]
+    fn the_admin_subdomain_is_one_label_or_nothing() {
+        assert_eq!(admin_subdomain_from(&Attrs::new()).unwrap(), None);
+        assert_eq!(
+            admin_subdomain_from(&attrs(&[(ADMIN_SUBDOMAIN, json!("  "))])).unwrap(),
+            None
+        );
+        assert_eq!(
+            admin_subdomain_from(&attrs(&[(ADMIN_SUBDOMAIN, json!(" Admin "))])).unwrap(),
+            Some("admin".to_owned())
+        );
+        assert_eq!(
+            check_admin_subdomain("ops-1").unwrap(),
+            Some("ops-1".to_owned())
+        );
+    }
+
+    /// What the router would read as something else — the base domain, a
+    /// preview, a deeper name — is refused with a sentence saying which.
+    #[test]
+    fn an_admin_subdomain_the_router_would_misread_is_refused() {
+        for (raw, says) in [
+            ("@", "base domain"),
+            ("admin.example.com", "single label"),
+            ("ad min", "letters, digits"),
+            ("-admin", "hyphen"),
+            ("a--b", "preview"),
+        ] {
+            let err = check_admin_subdomain(raw).unwrap_err().to_string();
+            assert!(err.contains(says), "{raw}: {err}");
+        }
     }
 
     /// Applying is what a save does, and the process is what changes.

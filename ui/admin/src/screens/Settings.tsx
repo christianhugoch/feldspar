@@ -37,6 +37,7 @@ import Button from "react-bootstrap/Button";
 import Spinner from "react-bootstrap/Spinner";
 
 import { api } from "../api";
+import { adminMoved } from "../adminAddress";
 import type { GetSettingsResponse } from "../client";
 import { AlertBody, PageBody, PageHeader } from "../layout";
 import { mcpEnabled } from "../mcpTokens";
@@ -47,6 +48,7 @@ import {
   readConfig,
   type FieldSpec,
 } from "../settings";
+import { AdminMove } from "./AdminMove";
 import { BackupTab } from "./BackupTab";
 import { ClearAllPanel } from "./ClearAll";
 import { McpTokensPanel } from "./McpTokens";
@@ -139,6 +141,9 @@ export function Settings() {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Whether the last save moved the admin UI to another host, which opens the
+  // dialog that waits for the new address and then goes there.
+  const [moving, setMoving] = useState(false);
 
   /** Take a settings response as the screen's state. */
   const adopt = (response: GetSettingsResponse, opening: boolean) => {
@@ -169,10 +174,13 @@ export function Settings() {
     try {
       // The response is what was *stored*, not what was sent: a cleared box
       // comes back as the declared default, and a secret as the sentinel.
-      adopt(
-        await api.updateSettings({ values: settingsPayload(allFields(sections), values) }),
-        false,
-      );
+      const response = await api.updateSettings({
+        values: settingsPayload(allFields(sections), values),
+      });
+      // Compared as stored, before and after: the server has already moved the
+      // admin UI by the time this answer arrives.
+      if (adminMoved(stored, readConfig(response.values))) setMoving(true);
+      adopt(response, false);
       setSaved(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save the settings.");
@@ -262,6 +270,7 @@ export function Settings() {
         <TabPanel id={BACKUP_TAB} showing={tab}>
           <BackupTab />
         </TabPanel>
+        {moving && <AdminMove onClose={() => setMoving(false)} />}
       </PageBody>
     </>
   );

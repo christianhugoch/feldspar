@@ -284,7 +284,11 @@ pub fn tls_domains(
     if let Some(base) = base_domain.map(str::trim).filter(|b| !b.is_empty()) {
         push(base.to_owned());
         for subdomain in subdomains {
-            push(format!("{subdomain}.{base}"));
+            // `@` is the application on the base domain itself, which is
+            // already the first name.
+            if subdomain != sc_config::ROOT_SUBDOMAIN {
+                push(format!("{subdomain}.{base}"));
+            }
         }
     }
     for name in extra {
@@ -420,6 +424,98 @@ pub trait Certificate: Send + Sync {
     /// **Called from a mount**, so it must not block: the implementation decides
     /// and spawns, it does not wait for a CA.
     fn subdomains_changed(&self, subdomains: &[String]);
+
+    /// Whether a handshake for `host` is answered with a certificate for it
+    /// yet — what the admin UI's move to a new subdomain waits on before it
+    /// lets the admin follow it (Settings → Development).
+    ///
+    /// The default is for a certificate that does not track names: it covers
+    /// what it covers, and there is nothing to wait for.
+    fn status_for(&self, _host: &str) -> CertificateStatus {
+        CertificateStatus::ready()
+    }
+}
+
+/// Where the certificate for one host name has got to.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CertificateStatus {
+    /// `plain_http` (TLS is off: nothing to obtain), `ready`, `ordering`, or
+    /// `not_covered` (no certificate this server holds names the host, and
+    /// none is being ordered).
+    pub state: &'static str,
+    /// What the CA last said, while ordering; why not, when not covered.
+    pub message: Option<String>,
+}
+
+impl CertificateStatus {
+    /// TLS is off: the host is served over plain HTTP and needs nothing.
+    pub fn plain_http() -> CertificateStatus {
+        CertificateStatus {
+            state: "plain_http",
+            message: None,
+        }
+    }
+
+    /// A handshake for the host is answered with a certificate naming it.
+    pub fn ready() -> CertificateStatus {
+        CertificateStatus {
+            state: "ready",
+            message: None,
+        }
+    }
+
+    /// Whether the host can be served now, with or without TLS.
+    pub fn is_ready(&self) -> bool {
+        matches!(self.state, "ready" | "plain_http")
+    }
+}
+
+/// An admin-supplied certificate, as the mount registry sees it: it orders
+/// nothing, and it covers the names written into it.
+///
+/// What it adds over having no [`Certificate`] at all is the answer to "does it
+/// cover this host?", which is the difference between the admin UI moving to a
+/// name a browser accepts and moving to one it refuses.
+pub struct PastedCertificate {
+    /// The leaf certificate, DER.
+    leaf: Option<CertificateDer<'static>>,
+}
+
+impl PastedCertificate {
+    /// The certificate whose chain is `pem` (the leaf first, as pasted).
+    pub fn new(pem: &str) -> PastedCertificate {
+        let leaf = rustls_pemfile::certs(&mut pem.trim().as_bytes())
+            .next()
+            .and_then(|cert| cert.ok());
+        PastedCertificate { leaf }
+    }
+}
+
+impl Certificate for PastedCertificate {
+    fn subdomains_changed(&self, _subdomains: &[String]) {}
+
+    fn status_for(&self, host: &str) -> CertificateStatus {
+        let covered = self.leaf.as_ref().is_some_and(|leaf| {
+            let (Ok(cert), Ok(name)) = (
+                webpki::EndEntityCert::try_from(leaf),
+                rustls::pki_types::ServerName::try_from(host),
+            ) else {
+                return false;
+            };
+            cert.verify_is_valid_for_subject_name(&name).is_ok()
+        });
+        if covered {
+            CertificateStatus::ready()
+        } else {
+            CertificateStatus {
+                state: "not_covered",
+                message: Some(format!(
+                    "the certificate pasted in Settings → SSL / TLS does not name {host}: paste \
+                     one that does (a wildcard for the base domain covers every subdomain)"
+                )),
+            }
+        }
+    }
 }
 
 /// An ACME certificate whose **name set is live** (design §13.5).
@@ -482,6 +578,18 @@ struct Order {
     /// The task polling the ACME state — dropping it would stop the renewal, so
     /// it is held here and aborted only when it is replaced.
     task: tokio::task::JoinHandle<()>,
+    /// Whether it has a certificate yet, and what the CA last said.
+    progress: Arc<OrderProgress>,
+}
+
+/// What one order's driving task has seen, for whoever is waiting on it.
+#[derive(Debug, Default)]
+struct OrderProgress {
+    /// Set on the first deployed certificate. The same flag the resolver's
+    /// generation reads.
+    ready: Arc<AtomicBool>,
+    /// The last error the ACME client reported, cleared by the next success.
+    last_error: Mutex<Option<String>>,
 }
 
 impl AcmeCertificate {
@@ -573,14 +681,21 @@ impl AcmeCertificate {
         );
         // Installed *before* the task is spawned, so no event can land on a
         // generation the resolver has not heard of.
-        let ready = self.resolver.install(state.resolver());
-        let task = runtime.spawn(drive_acme(state, ready));
+        let progress = Arc::new(OrderProgress {
+            ready: self.resolver.install(state.resolver()),
+            last_error: Mutex::new(None),
+        });
+        let task = runtime.spawn(drive_acme(state, progress.clone()));
         eprintln!(
             "feldspar: acme: ordering a certificate for {}",
             domains.join(", ")
         );
         let mut orders = self.lock();
-        if let Some(replaced) = orders.current.replace(Order { domains, task }) {
+        if let Some(replaced) = orders.current.replace(Order {
+            domains,
+            task,
+            progress,
+        }) {
             // Its resolver is still the fallback and its client still renews what
             // that resolver is serving, so its task is kept — see [`Orders`]. The
             // generation *before* it is not consulted any more, so that one's is
@@ -624,6 +739,33 @@ impl Certificate for AcmeCertificate {
             }
         }
         self.order(names);
+    }
+
+    fn status_for(&self, host: &str) -> CertificateStatus {
+        let host = host.to_ascii_lowercase();
+        let orders = self.lock();
+        let Some(order) = orders
+            .current
+            .as_ref()
+            .filter(|o| o.domains.contains(&host))
+        else {
+            return CertificateStatus {
+                state: "not_covered",
+                message: Some(format!("no certificate has been ordered for {host}")),
+            };
+        };
+        if order.progress.ready.load(Ordering::Relaxed) {
+            return CertificateStatus::ready();
+        }
+        CertificateStatus {
+            state: "ordering",
+            message: order
+                .progress
+                .last_error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        }
     }
 }
 
@@ -769,7 +911,7 @@ fn acme_state(
 /// Every line here is an operator's answer to "is my certificate coming?", which
 /// is otherwise unanswerable from outside: the handshake either works or does
 /// not, and the reason lives in the CA's response.
-async fn drive_acme(mut state: AcmeState<Error, Error>, ready: Arc<AtomicBool>) {
+async fn drive_acme(mut state: AcmeState<Error, Error>, progress: Arc<OrderProgress>) {
     use futures::StreamExt;
     while let Some(event) = state.next().await {
         match event {
@@ -781,11 +923,24 @@ async fn drive_acme(mut state: AcmeState<Error, Error>, ready: Arc<AtomicBool>) 
                 ) {
                     // From here this generation answers ordinary handshakes, and
                     // the one it replaced stops being asked.
-                    ready.store(true, Ordering::Relaxed);
+                    progress.ready.store(true, Ordering::Relaxed);
                 }
+                *progress
+                    .last_error
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
                 eprintln!("feldspar: acme: {ok:?}");
             }
-            Err(err) => eprintln!("feldspar: acme error: {err}"),
+            Err(err) => {
+                // Kept for the admin UI's move to a new subdomain, which shows
+                // it while it waits: "the CA could not reach admin.example.com"
+                // is the sentence that says the DNS record is missing.
+                *progress
+                    .last_error
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(err.to_string());
+                eprintln!("feldspar: acme error: {err}");
+            }
         }
     }
 }
@@ -966,6 +1121,41 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("cache"), "{err}");
+    }
+
+    #[test]
+    fn the_root_application_adds_no_name_of_its_own() {
+        let subdomains = ["@".to_owned(), "admin".to_owned()];
+        assert_eq!(
+            tls_domains(Some("example.com"), &subdomains, &[]),
+            ["example.com", "admin.example.com"]
+        );
+    }
+
+    /// A pasted certificate covers exactly the names written into it, and says
+    /// so for a host the admin UI might move to.
+    #[test]
+    fn a_pasted_certificate_covers_the_names_it_carries() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec![
+            "example.com".to_owned(),
+            "*.example.com".to_owned(),
+        ])
+        .unwrap()
+        .self_signed(&key)
+        .unwrap();
+        let pasted = PastedCertificate::new(&cert.pem());
+        assert!(pasted.status_for("admin.example.com").is_ready());
+        assert!(pasted.status_for("example.com").is_ready());
+        let other = pasted.status_for("admin.example.net");
+        assert_eq!(other.state, "not_covered");
+        assert!(other.message.unwrap().contains("admin.example.net"));
+        assert_eq!(
+            PastedCertificate::new("junk")
+                .status_for("example.com")
+                .state,
+            "not_covered"
+        );
     }
 
     #[test]

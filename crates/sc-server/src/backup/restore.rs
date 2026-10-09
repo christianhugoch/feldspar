@@ -1990,7 +1990,10 @@ async fn restore_settings_section(
     let mut attrs = sc_types::Attrs::new();
     let mut kept = Vec::new();
     for (key, value) in values {
-        if !keys.contains(&key.as_str()) {
+        // Never written by a backup (it is this host's, like its TLS settings),
+        // so one in the zip was put there by hand — and restoring it would
+        // move the running admin UI without telling the router.
+        if !keys.contains(&key.as_str()) || key == sc_config::ADMIN_SUBDOMAIN {
             continue;
         }
         if pinned.contains(key) {
