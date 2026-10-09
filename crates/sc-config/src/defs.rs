@@ -92,6 +92,7 @@ pub fn config_sections() -> &'static [ConfigSection] {
             crate::email::email_section(),
             crate::development::development_section(),
             crate::localisation::localisation_section(),
+            crate::maps::maps_section(),
         ]
     })
 }

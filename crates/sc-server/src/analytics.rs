@@ -1,10 +1,15 @@
-//! The Analytics UI's handlers (analytics TODO A1.13, A2.6, A2.8, A2.14, A4.2): datasets,
-//! plots, hypothesis tests, panels and workspaces, over `sc-dataset` and `sc-analytics`. The endpoints are
-//! declared in `sc-api`'s `analytics.rs`, which says what each one is for.
+//! The Analytics UI's handlers (analytics TODO A1.13, A2.6, A2.8, A2.14, A4.2, A5.5–A5.13):
+//! datasets, plots, hypothesis tests, panels, map layers, the Map workspace's attribute table,
+//! selection and toolbox, and workspaces, over `sc-dataset` and `sc-analytics`. The endpoints
+//! are declared in `sc-api`'s `analytics.rs`, which says what each one is for.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use sc_analytics::layer;
+use sc_analytics::map;
+use sc_analytics::selection;
+use sc_analytics::tools;
 use sc_analytics::panel::Panel;
 use sc_analytics::plot::{self, PlotSpec};
 use sc_analytics::stats;
@@ -453,6 +458,250 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
 
     // --- panels ---------------------------------------------------------------
 
+    // --- map layers (A5.5) -----------------------------------------------------
+
+    reg.register("layerData", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let raw = ctx
+                    .body
+                    .get("layer")
+                    .cloned()
+                    .ok_or_else(|| Error::invalid("`layer` is required"))?;
+                let layer = parse_layer(raw)?;
+                let data = layer::layer_data(&catalog, &layer, layer::Limits::default()).await?;
+                let mut out = serde_json::to_value(&data)
+                    .map_err(|e| Error::serde(format!("a layer's data does not serialise: {e}")))?;
+                if matches!(data, layer::LayerData::Tiles { .. })
+                    && let Some(fields) = out.as_object_mut()
+                {
+                    fields.insert("tiles".into(), Json::String(tile_template(&layer)?));
+                }
+                Ok(HandlerResponse::ok(out))
+            }
+        }
+    });
+
+    reg.register("layerTile", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let coordinate = |name: &str| -> Result<u32> {
+                    let raw = ctx.path_param(name)?;
+                    raw.parse::<u32>().map_err(|_| {
+                        Error::invalid(format!("the tile's `{name}` is {raw}, not a tile number"))
+                    })
+                };
+                let (z, x, y) = (coordinate("z")?, coordinate("x")?, coordinate("y")?);
+                let raw = ctx
+                    .query_get("layer")
+                    .ok_or_else(|| Error::invalid("`layer` is required"))?;
+                let layer = parse_layer(
+                    serde_json::from_str(raw)
+                        .map_err(|e| Error::invalid(format!("`layer` is not JSON: {e}")))?,
+                )?;
+                let bytes = layer::layer_tile(&catalog, &layer, z, x, y).await?;
+                Ok(HandlerResponse::download(crate::handler::Download {
+                    bytes: bytes.into(),
+                    content_type: "application/vnd.mapbox-vector-tile".to_owned(),
+                    // Fetched by the map, not saved by a person.
+                    filename: String::new(),
+                }))
+            }
+        }
+    });
+
+    // --- the Map workspace's table and selection (A5.10) ------------------------
+
+    reg.register("layerRows", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let layer = parse_layer(required(&ctx.body, "layer")?)?;
+                let sort: Option<sc_dataset::SortKey> = ctx
+                    .body
+                    .get("sort")
+                    .filter(|v| !v.is_null())
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|e| Error::invalid(format!("`sort` is not an order: {e}")))?;
+                let limit = optional_usize(&ctx.body, "limit")
+                    .map_or(selection::TABLE_ROWS, |l| l as u64);
+                let answer =
+                    match selection::layer_rows(&catalog, &layer, sort.as_ref(), limit).await? {
+                        Ok(rows) => serde_json::to_value(rows).map_err(|e| {
+                            Error::serde(format!("a layer's rows do not serialise: {e}"))
+                        })?,
+                        Err(error) => json!({ "error": error }),
+                    };
+                Ok(HandlerResponse::ok(answer))
+            }
+        }
+    });
+
+    reg.register("selectFeatures", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let layer = parse_layer(required(&ctx.body, "layer")?)?;
+                let by: selection::SelectBy = serde_json::from_value(required(&ctx.body, "by")?)
+                    .map_err(|e| {
+                        Error::invalid(format!("`by` is not a way to select features: {e}"))
+                    })?;
+                let answer = match selection::select_features(&catalog, &layer, &by).await? {
+                    Ok(found) => serde_json::to_value(found).map_err(|e| {
+                        Error::serde(format!("a selection does not serialise: {e}"))
+                    })?,
+                    Err(error) => json!({ "error": error }),
+                };
+                Ok(HandlerResponse::ok(answer))
+            }
+        }
+    });
+
+    reg.register("saveSelection", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let layer = parse_layer(required(&ctx.body, "layer")?)?;
+                let name = text(&ctx.body, "name")?;
+                let ids: Vec<Json> = match ctx.body.get("ids") {
+                    Some(Json::Array(ids)) => ids.clone(),
+                    _ => Vec::new(),
+                };
+                let condition = ctx.body.get("condition").and_then(Json::as_str);
+                let def =
+                    selection::save_selection(&catalog, &layer, &name, &ids, condition).await?;
+                Ok(HandlerResponse::ok(detail(&catalog, &def).await?).with_status(201))
+            }
+        }
+    });
+
+    // --- maps (A5.6, A5.7, A5.11, A5.12) ------------------------------------------
+
+    reg.register("mapSettings", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let settings = sc_config::map_settings(&catalog).await?;
+                Ok(HandlerResponse::ok(map_settings_json(&settings)))
+            }
+        }
+    });
+
+    reg.register("allowMapHost", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let url = text(&ctx.body, "url")?;
+                let settings = sc_config::allow_map_host(&catalog, &url).await?;
+                Ok(HandlerResponse::ok(map_settings_json(&settings)))
+            }
+        }
+    });
+
+    reg.register("listMapTools", move |_ctx| async move {
+        Ok(HandlerResponse::ok(json!(tools::tool_descriptors())))
+    });
+
+    reg.register("runMapTool", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let tool = text(&ctx.body, "tool")?;
+                let params = match ctx.body.get("params") {
+                    Some(Json::Object(params)) => params.clone(),
+                    None | Some(Json::Null) => Map::new(),
+                    Some(other) => {
+                        return Err(Error::invalid(format!(
+                            "`params` is the tool's answers, an object; got {other}"
+                        )));
+                    }
+                };
+                let name = ctx.body.get("name").and_then(Json::as_str);
+                let run =
+                    tools::run_tool(&catalog, &tool, &tools::ToolArgs(params), name).await?;
+                let mut answer = detail(&catalog, &run.dataset).await?;
+                if let Some(fields) = answer.as_object_mut() {
+                    fields.insert(
+                        "layer".into(),
+                        serde_json::to_value(&run.layer).map_err(|e| {
+                            Error::serde(format!("a layer does not serialise: {e}"))
+                        })?,
+                    );
+                }
+                Ok(HandlerResponse::ok(answer).with_status(201))
+            }
+        }
+    });
+
+    reg.register("suggestMap", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id: DatasetId = ctx
+                    .body
+                    .get("dataset")
+                    .and_then(Json::as_str)
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| Error::invalid("`dataset` is required, as a dataset's id"))?;
+                let assignment: plot::Assignment = match ctx.body.get("assignment") {
+                    None | Some(Json::Null) => plot::Assignment::default(),
+                    Some(a) => serde_json::from_value(a.clone()).map_err(|e| {
+                        Error::invalid(format!("`assignment` is not a set of drop zones: {e}"))
+                    })?,
+                };
+                let geometry: Option<layer::GeometrySource> = ctx
+                    .body
+                    .get("geometry")
+                    .filter(|v| !v.is_null())
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|e| {
+                        Error::invalid(format!("`geometry` is not a geometry source: {e}"))
+                    })?;
+                let answer =
+                    map::suggest_map(&catalog, id, &assignment, geometry.as_ref()).await?;
+                Ok(HandlerResponse::ok(serde_json::to_value(answer).map_err(
+                    |e| Error::serde(format!("a suggested map does not serialise: {e}")),
+                )?))
+            }
+        }
+    });
+
+    reg.register("renderMap", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let spec: map::MapSpec = serde_json::from_value(
+                    ctx.body
+                        .get("spec")
+                        .cloned()
+                        .ok_or_else(|| Error::invalid("`spec` is required"))?,
+                )
+                .map_err(|e| Error::invalid(format!("`spec` is not a map: {e}")))?;
+                if spec.layers.is_empty() {
+                    return Err(Error::invalid("a map needs at least one layer"));
+                }
+                let rendered = map::render_map(&catalog, &spec).await?;
+                Ok(HandlerResponse::ok(rendered_map_json(&rendered)?))
+            }
+        }
+    });
+
     reg.register("renderPanel", {
         let catalog = catalog.clone();
         move |ctx| {
@@ -464,11 +713,15 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                         .ok_or_else(|| Error::invalid("`panel` is required"))?,
                 )?;
                 let rendered = sc_analytics::panel::render_panel(&catalog, &panel).await?;
-                Ok(HandlerResponse::ok(
-                    serde_json::to_value(rendered).map_err(|e| {
-                        Error::serde(format!("a panel's data does not serialise: {e}"))
-                    })?,
-                ))
+                let mut answer = serde_json::to_value(&rendered).map_err(|e| {
+                    Error::serde(format!("a panel's data does not serialise: {e}"))
+                })?;
+                // A map panel's tiled layers are fetched by URL, as
+                // `renderMap`'s are.
+                if let (Some(map), Some(fields)) = (&rendered.map, answer.as_object_mut()) {
+                    fields.insert("map".into(), rendered_map_json(map)?);
+                }
+                Ok(HandlerResponse::ok(answer))
             }
         }
     });
@@ -775,4 +1028,63 @@ pub(crate) fn workspace_json(ws: &Workspace) -> Json {
         "created_by": ws.created_by,
         "updated_at": ws.updated_at,
     })
+}
+
+/// A body's `key`, which must be there.
+fn required(body: &Json, key: &str) -> Result<Json> {
+    body.get(key)
+        .filter(|v| !v.is_null())
+        .cloned()
+        .ok_or_else(|| Error::invalid(format!("`{key}` is required")))
+}
+
+/// `mapSettings`' answer.
+fn map_settings_json(settings: &sc_config::MapSettings) -> Json {
+    json!({
+        "style": settings.style,
+        "style_dark": settings.dark_style(),
+        "hosts": settings.hosts(),
+    })
+}
+
+/// A drawn map as `renderMap` answers it: each layer's request, data,
+/// domains and classes, a tiled layer with the URL template of its tiles.
+fn rendered_map_json(rendered: &map::RenderedMap) -> Result<Json> {
+    let mut layers = Vec::with_capacity(rendered.layers.len());
+    for one in &rendered.layers {
+        let mut data = serde_json::to_value(&one.data)
+            .map_err(|e| Error::serde(format!("a layer's data does not serialise: {e}")))?;
+        if matches!(one.data, layer::LayerData::Tiles { .. })
+            && let Some(fields) = data.as_object_mut()
+        {
+            fields.insert("tiles".into(), Json::String(tile_template(&one.layer)?));
+        }
+        let mut entry = json!({
+            "layer": one.layer,
+            "data": data,
+            "domains": one.domains,
+        });
+        if let (Some(classes), Some(fields)) = (&one.classes, entry.as_object_mut()) {
+            fields.insert("classes".into(), json!(classes));
+        }
+        layers.push(entry);
+    }
+    Ok(json!({ "layers": layers }))
+}
+
+/// A layer as `layerData` and `layerTile` are given it.
+fn parse_layer(raw: Json) -> Result<layer::LayerRequest> {
+    serde_json::from_value(raw).map_err(|e| Error::invalid(format!("`layer` is not a layer: {e}")))
+}
+
+/// The URL template of a layer's vector tiles: `layerTile`'s path with
+/// MapLibre's `{z}`, `{x}` and `{y}` in it, and the layer in the query string.
+fn tile_template(layer: &layer::LayerRequest) -> Result<String> {
+    let json = serde_json::to_string(layer)
+        .map_err(|e| Error::serde(format!("a layer does not serialise: {e}")))?;
+    Ok(format!(
+        "/{}/layers/tiles/{{z}}/{{x}}/{{y}}?layer={}",
+        sc_api::ADMIN_API_PREFIX,
+        crate::builder::encode_component(&json)
+    ))
 }

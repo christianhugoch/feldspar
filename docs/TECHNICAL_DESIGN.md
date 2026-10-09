@@ -271,7 +271,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-action` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-dataset` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-model` | `sc-catalog` `sc-dataset` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
-| `sc-analytics` | `sc-catalog` `sc-dataset` `sc-db` `sc-db-sqlite` `sc-error` `sc-model` `sc-query` `sc-types` |
+| `sc-analytics` | `sc-catalog` `sc-config` `sc-dataset` `sc-db` `sc-db-sqlite` `sc-error` `sc-model` `sc-query` `sc-types` |
 | `sc-stream` | `sc-catalog` `sc-db` `sc-error` `sc-query` `sc-types` |
 | `sc-stan` | `sc-catalog` `sc-error` `sc-files` `sc-model` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
@@ -761,6 +761,15 @@ model keeps them apart. And **introspection never resolves a column back to a ri
 `TypeRef::from_sql_type` always yields a basic type, and a column is rich only because the
 `_fd_fields` overlay says so (§9) — guessing "this `text` column is an Email" from the database
 is exactly the magic that makes a legacy database behave surprisingly.
+
+**Geometry is a basic type** (analytics TODO A5.1, §14.6): `BasicType::Geometry(GeometryKind)`,
+where the kind is any geometry, a point, a line, a polygon or one of the multi variants. Its
+column is PostGIS's `geometry(<Kind>,4326)`, and its value is a **GeoJSON geometry object in a
+`Value::Json`** — there is no geometry `Value` variant, because everything above the driver
+already moves JSON, and the Postgres driver converts at the wire. It is basic rather than rich
+because the kind is part of the column's SQL type, not an attribute of a field over one; the
+field types are named `geometry`, `geometry_point`, `geometry_polygon`, … (never `point` or
+`polygon`, which are Postgres's own non-geographic types and keep meaning those).
 
 ### 6.2 Fields — the `BaseField` / `DataField` / `FormField` split
 
@@ -8120,15 +8129,16 @@ store; models (`sc-model`), the Analytics UI's workspaces and, from A2, panels r
 pub struct DatasetDef { id, name, description, base: Base, operations: Vec<Operation> }
 pub enum Base { Table { table }, Dataset { dataset: DatasetId } }
 pub struct Operation { id: String, enabled: bool, #[serde(flatten)] op: Op }  // { id, enabled, kind, params }
-pub enum Op { Calculated, Filter, Select, Sort, Window, Aggregate, Limit, Stack, Split, Complete, Join, Union }
+pub enum Op { Calculated, Filter, Select, Sort, Window, Aggregate, Limit, Stack, Split, Complete, Join, Union, SpatialJoin }
 ```
 
-The operations of milestone A1 are the goals document's, less the three that need later
-machinery (Neighbourhood column in A8, Model predictions in A7, Spatial join in A5):
+The operations are the goals document's, less the two that need later machinery
+(Neighbourhood column in A8, Model predictions in A7). Milestone A1 built the first twelve; the
+Spatial join and the geometry union came with A5 (§14.6):
 
 | keep the grain | change the grain | combine |
 |---|---|---|
-| Calculated column, Filter, Select columns, Sort, Window column (lag, lead, difference, running total and mean, rank, row number, group summaries, share, last value that was not missing) | Aggregate (count, distinct count, sum, mean, median, min, max, standard deviation, first, last; `distinct` with no summaries), Limit (first N, seeded sample, top N per group), Stack, Split (columns fixed when defined, pre-filled from the data), Complete (from the data, a number or date range, or every row of a key's table) | Join (inner, left, full; equality keys; "nearest earlier" on a date), Union (by column name, an optional source column) |
+| Calculated column, Filter, Select columns, Sort, Window column (lag, lead, difference, running total and mean, rank, row number, group summaries, share, last value that was not missing) | Aggregate (count, distinct count, sum, mean, median, min, max, standard deviation, first, last, union of geometries; `distinct` with no summaries), Limit (first N, seeded sample, top N per group), Stack, Split (columns fixed when defined, pre-filled from the data), Complete (from the data, a number or date range, or every row of a key's table) | Join (inner, left, full; equality keys; "nearest earlier" on a date), Union (by column name, an optional source column), Spatial join (intersects, contains, within, within a distance, nearest) |
 
 **Compiling: stages, merged or nested.** `compile(schema, library, def, options)` turns the
 definition into one `Compilation`: a report for the base and every operation (its status —
@@ -8218,15 +8228,19 @@ at the fit's output data, each drawn by `render_plot` unless it is optional and 
 `dataset_changed` — beside the model endpoints of §14.2 (`cloneModel`, `patchModelViewState`,
 `cancelModelFit`, `listModelInstances`) and the fit's progress socket; and workspaces
 (`listWorkspaceKinds`, `listWorkspaces`, `getWorkspace`, `createWorkspace`, `updateWorkspace`,
-`saveWorkspaceState`, `deleteWorkspace`); and panels (A4.2): `renderPanel`. `saveWorkspaceState`
-checks a report's document (`check_state`) before it stores it.
+`saveWorkspaceState`, `deleteWorkspace`); panels (A4.2): `renderPanel`; map layers (A5.5,
+§14.6): `layerData`, `layerTile`; maps (A5.6–A5.7, §14.6): `mapSettings`, `suggestMap`,
+`renderMap`; and the Map workspace (A5.8–A5.13, §14.7): `layerRows`, `selectFeatures`,
+`saveSelection`, `allowMapHost`, `listMapTools`, `runMapTool`. `saveWorkspaceState` checks a
+report's document and a map's spec (`check_state`) before it stores it.
 
 **The bundle** (`ui/analytics`): React, TypeScript and react-bootstrap over the generated client,
 like the admin SPA, but a bundle of its own — so that A9 can mount it in an application without
 the admin shell. It is served under `/analytics/` in the way the IDE is (§12.1): admin-only (a
 visitor is sent to sign in, a non-admin refused), under its own CSP
-(`ANALYTICS_CONTENT_SECURITY_POLICY`, strict for now, widened by later milestones' renderers
-without touching the admin UI's), built into the binary by `sc-cli`'s build script, and sharing
+(`analytics_content_security_policy`: the strict `ANALYTICS_CONTENT_SECURITY_POLICY` with the
+base map's hosts added since A5.6, §14.6 — widened for the renderers without touching the admin
+UI's), built into the binary by `sc-cli`'s build script, and sharing
 the admin UI's session cookie. It routes on the hash (`#/` the front page, `#/w/<id>`,
 `#/datasets/<id>` with `?back=` naming where its Back returns, `#/datasets/new`, and from A3
 `#/models/<id>` with `?fit=`, `#/models/new?dataset=`, `#/models/compare?ids=` and
@@ -8274,8 +8288,8 @@ regression of Y — a logistic one when Y is not a number — opened in the edit
 **The Data explorer** (A2.7–A2.14; `ui/analytics/src/explorer`, `src/plot`). Its state is what
 the person chose — the dataset, the columns on the nine drop zones (X, Y, Color, Size, Shape,
 Label, Facet rows, Facet columns, Wrap; several on Y compared as one variable), the mark
-palette's choice, a gallery preset that reshapes, plot or summary table, the layers panel's
-changes and the tests' settings — never the spec. The spec is the server's answer to the drop zones (`suggestPlot`: the
+palette's choice, a gallery preset that reshapes, plot, summary table or map (with the map's
+geometry source, A5.7), the layers panel's changes and the tests' settings — never the spec. The spec is the server's answer to the drop zones (`suggestPlot`: the
 "show me" rules, a gallery preset or the chosen mark), with the layers panel's `Extras` laid over
 it in the browser (`composeSpec`: the first layer's stat, added layers that take X, Y and Color
 from the first unless the stat makes its own, scales, reference lines, coordinates); `renderPlot`
@@ -8566,6 +8580,9 @@ an expression that doubles at every step (18 s rather than 3 on Postgres). Both 
 same rows. The demo also makes the datasets `Houses`, `Measurements` (with `treatment =
 patientⱵtreatment` and `change = after - before`) and `Events`, since the explorer reads datasets;
 one of those names that is there already is kept, and `--replace` never drops a dataset.
+Where the database has PostGIS the demo also makes `districts` and `incidents` with the datasets
+`Districts` and `Incidents` (A5, §14.7); where it has none they are left out and
+`DemoReport::skipped` says why, which the command prints.
 
 **Definitions of done** (`sc-server`'s `tests/analytics_done.rs`): each milestone's Try it through
 the API over the demo's rows. A2's checks the bins and box statistics against the rows read
@@ -8578,7 +8595,425 @@ A4 landscape page — and checks that the report's plot follows a new row of `ho
 fit's residual plot does not, that a copy into a second report is its own, and that the usage
 index lists both reports for the delete warnings. The print dialog cannot be driven from a test;
 it was walked in headless Chromium, whose `page.pdf({ preferCSSPageSize: true })` gives the
-pages the screen counted.
+pages the screen counted. A5's is described in §14.7.
+
+### 14.6 Geometry and maps (analytics milestone A5, phases 1 to 3)
+
+The milestone as a whole, briefly: geometry is a field type stored by PostGIS and carried as
+GeoJSON (below); a **Spatial join** operation and the `Geo` formula functions do the spatial
+work, in SQL; a dataset is drawn as a **layer**, delivered as GeoJSON or as vector tiles; the
+explorer draws a map of one layer, and the **Map workspace** (§14.7) stacks layers, styles them,
+selects features and runs tools that make datasets.
+
+Maps begin with geometry in core: a field type, files that make tables of it, and formula
+functions over it. All of it needs PostgreSQL with PostGIS (`OPERATIONS.md` §10); SQLite, and a
+Postgres database without the extension, refuse it with a sentence saying which.
+
+**Whether a database has PostGIS** is a fact about one database, not about a backend, so it is
+not a `DbCapabilities` flag but a driver answer: `DatabaseDriver::spatial()` returns
+`SpatialSupport::Available { version }` or `Unavailable { reason }`, remembered from the last
+`detect_spatial()` (a query of `pg_extension`) or `enable_spatial()` (which also tries
+`CREATE EXTENSION postgis`, where the role may). `Catalog::init` detects; `feldspar serve`'s boot
+calls `sc_catalog::bootstrap_spatial`, which enables, and logs the answer. A connected database
+is only ever asked. When PostGIS is there the driver (re)creates three SQL functions beside it:
+`_fd_utm_srid`, `_fd_square_cell` and `_fd_hex_cell` (`sc-db-postgres`'s `spatial.rs`).
+
+**The type** (§6.1) is `BasicType::Geometry(kind)`, a GeoJSON object in a `Value::Json`.
+`sc_types::geometry::check_geojson` is the validation, sentence by sentence: the right `type`
+for the column (a polygon is refused from a point field, saying both), positions of two or three
+numbers, longitude and latitude in range (a British National Grid easting typed into a point is
+refused naming WGS84, and pointing at importing instead), lines of two positions or more, rings
+closed. A height is accepted and not stored. Introspection reads a geometry column's type with
+`format_type`, because `information_schema` says only `geometry`; tables an extension owns
+(`spatial_ref_sys`) are not listed. A geometry field on a table whose database has no PostGIS is
+refused by `schema_edit` before any DDL (`field `location` cannot be a geometry: …`).
+
+**At the wire.** The Postgres driver reads `geometry` and `geography` columns as EWKB and writes
+GeoJSON parameters as 2D little-endian EWKB with SRID 4326 (`sc-db-postgres`'s `geometry.rs`;
+ISO WKB's thousands for Z and M are read too). So a geometry column needs no `ST_AsGeoJSON` in
+any query, and every reader — a REST list, a GraphQL query, a dataset stage, the admin grid —
+gets GeoJSON. REST carries it as the object; GraphQL as a `GeoJSON` scalar with an unordered
+comparison input (`eq`, `ne`, `in`, `nin`, `is_null`); a generated TypeScript client as
+`{ type: string; coordinates?: unknown; geometries?: unknown[] }`; an MCP tool's JSON Schema as
+an object with a `type`. A dataset's column type is `ColType::Geometry`: not sortable, not
+plottable (it is drawn on a map), but a group key (`Geo.hexCell(location, 500)`).
+
+**Importing** (`sc_api::geo_import`, `createTableFromGeoFile`, the admin's *New table → Create
+from a map file*): a GeoJSON file, a zipped Shapefile or a GeoPackage, told apart by their first
+bytes, becomes a new table as a CSV does — fields deduced, the table made through `schema_edit`,
+every feature written through the row layer in one transaction, and no table left behind when a
+feature will not go in. The readers are pure (bytes → `GeoFile { crs, features, warnings }`):
+
+| | geometry | attributes | coordinate system |
+|---|---|---|---|
+| GeoJSON | the Feature's `geometry` | `properties`, plus the Feature's `id` | WGS84, or a pre-RFC 7946 `crs` naming an EPSG code |
+| Shapefile | the `.shp`'s records (holes assigned to the outer ring that contains them) | the `.dbf` (text, numbers, logicals, dates; `.cpg` for the encoding) | the `.prj`'s WKT; WGS84 with a warning when there is none |
+| GeoPackage | the WKB inside each GeoPackage geometry blob | the table's other columns | the EPSG code `gpkg_spatial_ref_sys` names, else its WKT |
+
+A zip with several Shapefiles, or a package with several feature tables, is refused naming them
+until a `layer` is chosen. **PostGIS reprojects**: each chunk of geometries is one query,
+`ST_Force2D(ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(…) | ST_GeomFromWKB(…), srid), 4326))`
+(or `ST_Transform(g, '<wkt>', 4326)` for a definition, which PROJ reads), and the result comes
+back through the driver as GeoJSON; a chunk that fails is retried feature by feature so the
+refusal names the feature. The geometry column's kind is the one every feature fits, with single
+geometries made multi (`ST_Multi`) when a file mixes polygons and multipolygons. Attribute types
+come from the JSON values (whole numbers, numbers, flags, ISO dates and timestamps, objects,
+else text). The file's `id` is the key when every feature has a different whole number for it;
+otherwise the table numbers its rows and keeps the file's as `source_id`. How exactly a datum
+shift is made depends on PROJ's grids (`OPERATIONS.md` §10.2).
+
+**The `Geo` functions** (`sc-expr`'s `geo.rs`) are methods of one global, as JavaScript's own are
+of `Math`, so they claim one identifier rather than eleven a table might have columns called — and
+a field called `Geo` wins, as one called `Math` does:
+
+| function | PostGIS | returns |
+|---|---|---|
+| `Geo.point(lon, lat)` | `ST_SetSRID(ST_MakePoint(…), 4326)` | geometry |
+| `Geo.buffer(g, metres)` | `ST_Buffer(g::geography, m)::geometry` | geometry |
+| `Geo.centroid(g)` | `ST_Centroid(g::geography)::geometry` | geometry |
+| `Geo.area(g)`, `Geo.length(g)` | `ST_Area` / `ST_Length` of `g::geography` | square metres, metres |
+| `Geo.distance(a, b)` | `ST_Distance(a::geography, b::geography)` | metres |
+| `Geo.intersects`, `Geo.contains`, `Geo.within` | `ST_Intersects` / `ST_Contains` / `ST_Within` | a condition |
+| `Geo.squareCell(g, metres)`, `Geo.hexCell(g, metres)` | `_fd_square_cell`, `_fd_hex_cell` | geometry |
+
+Distances and areas are on the WGS84 spheroid through `geography`, so nobody chooses a
+projection. A grid cell is laid out in the UTM zone of the geometry's point on surface — sides
+(a square) or edges (a hexagon) of the given metres on the ground, tiling within a zone — drawn
+by PostGIS's `ST_Square`/`ST_Hexagon` and returned in WGS84; a dataset that straddles two zones
+has two lattices that do not meet at the boundary. Validation checks each call's name and
+argument count and records `Analysis::geo_calls`; the symbolic translation turns each into SQL,
+a boolean one also in condition position. Only the database computes them: the JavaScript
+evaluator has no `Geo`, and says so by name if a formula that needs one reaches it, and a
+dataset whose database has no PostGIS refuses the operation with `Schema::spatial`'s sentence.
+The dataset compiler infers their types (geometry, number, boolean), and the Analytics UI's
+formula input offers them over a stage with a geometry column.
+
+Two compiler fixes came with them, both general: a negative number literal is one literal
+(`-0.12`, not `-$1`, which Postgres cannot type), and an Aggregate key holding a literal
+(`price > 100000`, `Geo.squareCell(location, 500)`) is computed a level down and grouped by
+name, since `f($1)` in the select list and `f($7)` in the `GROUP BY` are not one expression to
+Postgres.
+
+**The Spatial join** (A5.4; `Op::SpatialJoin`, kind `spatial_join`) is the one operation
+geometry needs: what involves another dataset's rows. Its parameters are what is joined (a table
+or a dataset, as a Join's), `inner` or `left` (never `full`: a spatial join keeps these rows, and
+the other's that match nothing mean nothing here), the **relation**, a geometry column on each
+side, a `distance` in metres, an optional `distance_column`, the other's `columns` to bring and a
+`suffix` for a name already taken:
+
+| relation | matches when | SQL |
+|---|---|---|
+| `intersects` | the two share a point | `ST_Intersects(l, r)` in the `ON` |
+| `contains` | this row's geometry contains the other's (a region and its points) | `ST_Contains(l, r)` |
+| `within` | this row's geometry is inside the other's (a point and its region) | `ST_Within(l, r)` |
+| `within_distance` | they are at most `distance` metres apart | `ST_DWithin(l::geography, r::geography, d)` |
+| `nearest` | the other's one row nearest to this one, within `distance` if given | `LEFT`/`INNER JOIN LATERAL (… ORDER BY ST_Distance(l::geography, r::geography) LIMIT 1) ON true` |
+
+Both sides are sealed and the other's columns brought across, as a Join does. The distance
+column is `ST_Distance` over `geography`, in metres, like `Geo.distance`. `nearest` is the one
+relation that matches each row at most once, so it **keeps the grain** (and the row key, so a
+model can still `predict` over it); the others may match a point to two overlapping regions,
+so their grain is `Derived`. **The other's primary key comes across as a foreign key to its
+table**, whatever it is called (`id_right` by default): so `id_rightⱵname` follows it, an
+Aggregate grouped by it is one row per region (`Grain::Group` on a key, whose `Ↄ` and Complete
+from the table then work), and a map finds the region's polygon by it. "Count per region" is
+therefore a Spatial join `within` and an Aggregate by the region's key, and the toolbox (A5.12)
+will write exactly that. The lateral subquery is `sc-query`'s new `Source::Lateral` (Postgres
+only; nothing reaches it without PostGIS). The nearest match is exact on the spheroid and
+ordered by `ST_Distance`, not by the planar `<->`, so it does not use a GiST index; that is the
+place to start if nearest-neighbour joins over large tables are slow. A geometry union is the
+Aggregate summary `union` (`ST_Union`): a column of geometry dissolved into one per group, so
+regions merge and the shared edges go. Without PostGIS both are refused with the sentence.
+
+**Layer data for the browser** (A5.5; `sc-analytics`' `layer.rs`, the endpoints `layerData` and
+`layerTile`). A layer is a stored dataset, a **geometry source** and the columns each feature
+carries (`LayerRequest { dataset, geometry, properties?, filter? }`). The source is a geometry
+column, longitude and latitude columns, or a foreign key to a table with a geometry column. The
+last two become one more Calculated column (`Geo.point(lon, lat)`, `districtⱵoutline`) added to
+the dataset for the read, under a name it does not use, as does the optional filter. So the
+compiler and the formula rules do the work, and an error in either is reported as "the layer's
+geometry/filter does not work: …". A feature carries every column that is not geometry, JSON or
+bytes, unless `properties` names them.
+
+`layerData` first counts the features and their vertices (`count`, `sum(ST_NPoints)`) and takes
+the extent in one aggregate query. Within both limits (5,000 features, 250,000 vertices) it
+answers `delivery: "geojson"` with the whole FeatureCollection. Over either, it answers
+`delivery: "tiles"`, the `source_layer` (`features`) and the URL template
+`/api/layers/tiles/{z}/{x}/{y}?layer=<the request, JSON, encoded>`. The map fills in the tile
+numbers; it needs the page's origin in front, since MapLibre wants absolute tile URLs. A tile is
+one `ST_AsMVT` query over the dataset's rows that meet the tile's envelope (with a 64-unit margin,
+by `ST_Intersects`, which an index answers). Each geometry is transformed to Web Mercator,
+**simplified by zoom** (`ST_Simplify` at one unit of the tile's 4096 grid, keeping tiny polygons
+from vanishing), then clipped and quantised by `ST_AsMVTGeom`. Numbers, flags and text are kept
+as they are and anything else is sent as text. A feature's **id is its row's key** while rows
+are a table's and keyed by an integer, in GeoJSON and in tiles alike, which is what the attribute
+table and the map will be linked by (A5.10). Otherwise a GeoJSON feature is numbered by its place
+in the dataset's order. A layer that cannot be drawn answers `delivery: "none"` and the sentence;
+a tile is refused with a 400 instead (outside the grid, deeper than zoom 24, or a layer that does
+not draw). The tile response is `application/vnd.mapbox-vector-tile`, a `Download` with no
+filename, which the router does not mark as an attachment.
+
+**Maps in the browser** (A5.6–A5.7; `sc-analytics`' `map.rs`, `ui/analytics/src/map`). A map
+is not a plot spec. A plot has one dataset and positions on axes; a map has layers, each a
+dataset of its own with a geometry source, over a base map. So it has a spec of its own, `MapSpec
+{ layers: [MapLayer { dataset, geometry, encoding?, filter? }] }`, whose `MapEncoding` holds a
+plot layer's channels without the positions: Color, Size, Shape and Label. The Map workspace
+(A5.8) will hold several layers; the explorer's map panel holds one. A map is drawn in two
+steps. `renderMap` answers each layer's `LayerData` (§ *Layer data* above, now with the kinds of
+geometry among its features) and the **domains** of its encoded columns. These are computed in
+SQL over every feature with a geometry (`layer_domains`): the smallest and largest value of a
+number on Color or Size, and the values, in order, of a category on Color or Shape. A tiled
+layer is then coloured by the same scale at every zoom, which a scale computed from the
+features in view would not be. The browser compiles spec and data to MapLibre sources and
+layers (`maplibre.ts`, pure and unit-tested like `echarts.ts`). A layer that cannot be drawn
+(its dataset gone, a column renamed, Size on text) answers `delivery: "none"` and its sentence,
+and the others are drawn.
+
+| geometry | MapLibre layers |
+|---|---|
+| polygons | `fill` coloured by Color at 0.6 opacity, and a `line` of outlines in the surface colour |
+| lines | `line` coloured by Color, as wide as Size (1–8 px) |
+| points | `circle` coloured by Color, as large as Size; with a column on Shape, a `symbol` of SDF shape images |
+| any | `symbol` with the Label column's text, in the base map's own font |
+
+The scales are MapLibre expressions over each feature's properties, in the plots' palette
+(`palette.ts`), so a category has the same colour on a map as in a bar chart. A category
+(`match` on `to-string` of the property) takes the slot of its place in the domain, and the
+ninth value onwards share the muted ink, with a note saying so. A number is interpolated across
+the sequential ramp. A missing value is grey. A point's Size is its **area** from zero
+(`r = 18·√(v / max)`, never under 2 px) when no value is negative, as a proportional symbol is,
+and linear across the range when some are. Size does not apply to polygons, and Shape applies
+to points only; each is noted. Shapes are signed-distance-field images made pixel by pixel in
+`shapes.ts` (circle, square, triangle, diamond, cross, star) and added with `sdf: true`, so
+`icon-color` and `icon-size` colour and size them as a circle would be. A tiled layer's source is
+`layerTile`'s template made absolute on the page's origin, with the layer's bounds. One that
+reported no geometry kinds is drawn as all three, which costs nothing where a kind is absent.
+
+**The geometry source** a dataset is mapped by is chosen on the server (`geometry_sources`),
+best first: its geometry columns; number columns paired as longitude and latitude by name
+(`lon`/`lng`/`long`/`longitude` with `lat`/`latitude`, alone or as a prefix or suffix with `_`:
+`pickup_longitude` with `pickup_latitude`, `lng_dropoff` with `lat_dropoff`); and each foreign
+key to a table with a geometry column, once for each such column (`district` → `districts.outline`).
+`suggestMap` answers them all and a spec drawn from the one the explorer's state names, else
+from the first. A dataset with none is told so in a sentence.
+
+**The explorer's map** (A5.7) is a third view beside Plot and Summary table, reached by it or by
+the gallery's Map, which is no longer disabled. The drop zones stay as they are, so going back
+to the plot loses nothing. Color, Size, Shape and Label draw the map. X, Y and the facets are
+dimmed, and a drop on them does not ask the server again (`mapAssignment`). Bins are dropped:
+a map classifies by its style (§14.7), not by binning. A **Geometry** picker lists the sources,
+"Automatic" first. The tests and the layers panel are a plot's and are hidden on a map. The map
+is dragged into a report as a `map` panel, and **Open in map** makes a Map workspace of it
+(§14.7).
+
+**The base map** is a setting: Settings → Maps (`sc_config::maps`) holds a MapLibre style URL
+for a light page, one for a dark page, and further hosts. The default is OpenFreeMap's Positron
+and Dark, which need no key and serve style, tiles, glyphs and sprites from one host. An empty
+style means no base map: the layers are drawn on the page's background. `MapView` fetches the
+style itself rather than handing MapLibre the URL, for two reasons. A label layer needs the
+fonts the style's glyphs have (the first plain `text-font` among its layers). And a style that
+cannot be reached should leave the data on a plain background with a sentence, not a grey box.
+
+**The policy.** MapLibre fetches a style, its tiles, glyphs and sprites, so the Analytics UI's
+`connect-src` and `img-src` name the hosts of Settings → Maps (`MapSettings::hosts`). They are
+read per response, as the MCP switches are, so a changed base map is allowed on the next page
+load. Because a host goes into a header, it is parsed, not trusted. `origin_of` accepts an
+`http` or `https` origin of letters, digits, dots and hyphens (or a bracketed IPv6 address)
+with a numeric port. `updateSettings` refuses anything else by name, and
+`analytics_content_security_policy` leaves out any entry that is not exactly such an origin.
+The one other relaxation is `blob:` in `img-src`, where MapLibre decodes images through object
+URLs. **The worker** is not a `blob:`. MapLibre 6 builds one from its own module file unless
+told otherwise, so `runtime.ts` imports `maplibre-gl-worker.mjs?url` (Vite emits it beside the
+bundle) and calls `setWorkerUrl`, and the policy says `worker-src 'self'`. MapLibre and the map
+view are one lazily loaded chunk, so a page with no map does not fetch them.
+
+**deck.gl is not used** (a deviation from the plan's "MapLibre GL JS and deck.gl"). The goals
+document has deck.gl draw "layers with too many features for MapLibre alone". A5.5 sends such a
+layer as vector tiles made by PostGIS, which MapLibre draws natively at any size, so deck.gl
+would add about a megabyte with nothing to draw. It remains the option for what tiles do not
+cover, such as animating many points over time (A8.5).
+
+### 14.7 The Map workspace (analytics milestone A5, phases 4 and 5)
+
+The Map workspace is where multi-layer GIS work is done (goals document, "Map workspace"). It
+keeps the rule that "a layer is a dataset, a geometry source and a style, and the map never
+computes anything itself": every analysis it offers makes a dataset, and every selection is a
+condition the database evaluates.
+
+**The state is a map spec.** `MapSpec` (`sc_analytics::map`) gained what a workspace needs, and
+a Map workspace's state is that spec with the screen's own keys beside it:
+
+| part | what it is |
+|---|---|
+| `layers[]` | bottom first; each `MapLayer` has `id`, `name`, `dataset`, `geometry`, `filter`, `encoding`, `style`, `popup` (the columns its popup shows), `visible`, `opacity` (0–1) and `legend` — the last three left out at their defaults |
+| `reference[]` | `ReferenceLayer`s: `{ id, name, kind: tiles \| wms \| arcgis, url, layers?, opacity, visible, attribution? }` |
+| `view` | `{ center: [lon, lat], zoom }`, where the map was last looked at |
+| `selection`, `active`, `table` | the screen's: the selected features (`{ layer, ids, condition? }`), the layer whose settings and attribute table are open, and that table's order, kept per layer |
+
+`save_workspace_state` checks a map's state (`panel::check_state` → `MapSpec::check(true)`):
+every layer has an id of its own, an opacity in range, a style's classes from 2 to 7, a single
+symbol's colour as `#rrggbb`, a reference layer's URL an `http(s)` URL whose origin parses, a
+tile template with `{z}`, `{x}` and `{y}` (or `{quadkey}`, `{bbox-epsg-3857}`), a WMS with layer
+names. Each refusal names the layer. The usage index reads a map's layers, one use per layer, so
+deleting a dataset a map shows warns with the map. The `map` kind is no longer refused by
+`createWorkspace`.
+
+**Reading layers.** The workspace asks `renderMap` once per layer, with that layer alone, keyed
+by what changes its features or scales (`dataKey`: dataset, geometry, filter, encoding, style).
+A layer's name, visibility, opacity, legend and popup are drawn in the browser, so changing one
+reads nothing. `MapView` keeps a source while its data is the same object, so a selection or an
+opacity change re-adds the MapLibre layers but never re-sends a GeoJSON source to the worker;
+sources are named by the layer's id, so moving a layer keeps its source too. The view is passed
+once (`initialView`) and saved on every `moveend`, so panning does not recompile the map.
+
+**Styles** (A5.9) are a classification over the plot encodings:
+
+| style | server | browser |
+|---|---|---|
+| automatic | as the explorer (§14.6) | a ramp for a number on Color, slots for a category |
+| single symbol | Color is not read | one colour |
+| categories | Color's values, a number too | `match` per value, the plots' slots |
+| graduated colours | Color must be a number; its **breaks** (`classes`) | `step` over the breaks, `k` colours spread along the sequential ramp, a legend item per class |
+| proportional symbols | Size must be a number; features read at their centres (`points`) | circles by area, the small ones on top (`circle-sort-key`) |
+| heatmap | features at their centres; Size, if any, the weight's range | a `heatmap` layer, weight from 0 to 1 over Size's range, the sequential ramp from transparent |
+
+`LayerRequest.points` makes the geometry `Geo.centroid(…)` (a Calculated column the layer adds),
+so a polygon layer can be drawn as proportional circles or a heatmap. A style without the
+channel it needs is refused for that layer with a sentence; the others are drawn.
+
+**Classification** (`sc_analytics::classify`): quantiles (type 7, as R), equal intervals, and
+Jenks' natural breaks found exactly by Fisher's dynamic programme over sorted values. The values
+come from `layer_sketch`: one query numbers the column's values in order (`row_number()`) and
+keeps every value of a small layer, and of a large one every `n / 1000`th by rank, the first and
+the last — a sorted sample of at most about 2,000 values that is the same at every read, so the
+classes do not move between renders. The breaks are `k + 1` numbers: the smallest value, each
+class's lower bound, the largest. A class of the largest value alone is kept; a column with
+fewer distinct values than classes gets fewer classes, never an empty one.
+
+**The attribute table and selection** (A5.10, `sc_analytics::selection`). A feature's id is its
+row's key while rows are a table's, otherwise its place in the dataset's order (as `layer_data`
+numbers GeoJSON features). `layerRows` answers the first 5,000 rows of a layer — after its
+filter, geometry left out — with each row's id, so the table and the map share one selection.
+The server sorts a keyed layer (a Sort the read adds); any other is read in its order, since its
+ids are places in it, and the table sorts what it has. A click selects, Ctrl adds or removes,
+Shift takes a range; selected rows highlight their features, which are ringed in the text colour
+over every layer by a filter on `["id"]`.
+
+Every other selection is a formula, built on the server and evaluated by the database
+(`selectFeatures`):
+
+| selection | condition (`g` the layer's geometry formula) |
+|---|---|
+| by attribute | the formula typed |
+| lasso | `Geo.intersects(g, Geo.fromGeoJSON('…'))`, the lasso thinned to 200 vertices at most |
+| within a distance of a point | `Geo.distance(g, Geo.point(lon, lat)) <= d` |
+| within a distance of another layer's selection | `Geo.distance(g, Geo.fromGeoJSON('…')) <= d`, one per selected feature (200 at most), `\|\|`-ed |
+
+A keyed layer reads its ids through a Filter; another layer reads the condition as a column
+beside every row and keeps the places where it holds, since a Filter would renumber them.
+**Save selection as dataset** (`saveSelection`) makes a dataset whose base is the layer's
+dataset, followed by the layer's filter and a Filter. That Filter is the condition when the
+selection was made by one, so the saved dataset keeps its meaning as rows change, and for
+clicked features their identities: `id == 4 || id == 9` by the table's key, or the group keys of
+an aggregated dataset (`zone == 2`), as a balanced tree of `||` so a thousand ids nest ten deep.
+Rows that nothing tells apart (a join that repeats rows) are refused for a clicked selection,
+with a sentence pointing at a condition. Two `Geo` functions arrived for this:
+`Geo.fromGeoJSON(text)` (`ST_SetSRID(ST_GeomFromGeoJSON(…), 4326)`) and
+`Geo.intersection(a, b)`, which the toolbox's Intersection uses.
+
+**Reference layers** (A5.11) are raster sources under every data layer: a tile template as
+given, a WMS as a `GetMap` in EPSG:3857 with `{bbox-epsg-3857}`, an ArcGIS map service as
+`…/tile/{z}/{y}/{x}`. The browser may load images only from the hosts the policy names
+(§14.6), so a service on another host is shown with a warning and **Allow it**, which calls
+`allowMapHost`: the URL's origin, parsed by `origin_of`, is added to Settings → Maps' further
+hosts (`sc_config::allow_map_host`), and the page is reloaded for the new policy. The admin is
+the only one who can call it; A9 decides what a restricted user may do. `mapSettings` answers
+`hosts`, the origins allowed now.
+
+**The toolbox** (A5.12, `sc_analytics::tools`) is a list of `MapTool`s. Each declares a form
+(`ToolDescriptor`: fields asking for a layer of the map, a column of a picked layer, a number in
+a unit, a choice, text) and builds a dataset and the layer that shows it. `runMapTool` compiles
+the dataset first and refuses with the first invalid operation's sentence, so nothing is stored
+that would show an error; it names the dataset after what it is made of (made unique) unless the
+person names it, stores it, and answers it with its layer, which the workspace adds on top. A
+new dataset starts from the input layer's dataset with the layer's filter as a Filter and its
+geometry as a Calculated column when it is not a column. The other side of a spatial join must
+be a layer whose geometry is a column and that shows all its rows, or the tool says so.
+
+| group | tool | operations |
+|---|---|---|
+| Proximity | Buffer | Calculated `Geo.buffer(g, d)`; drawn by the buffer |
+| Proximity | Distance to nearest | Spatial join `nearest`, left, bringing only the distance; graduated by it |
+| Proximity | Within a distance | Spatial join `nearest` within `d`, inner (keeps the grain) |
+| Overlay | Spatial join | Spatial join intersects / within / contains, left or inner |
+| Overlay | Intersection | Spatial join intersects, inner, and Calculated `Geo.intersection(g, h)` |
+| Aggregate | Count per region, Sum per region | Spatial join to the regions bringing their key, Aggregate by it (named after the table: `districts` → `district`), Complete over every row of the table with 0; drawn along the key, graduated |
+| Aggregate | Dissolve | Aggregate by a column with the union of the geometries and a count |
+
+Count per region keeps its rows told apart: a Complete over exactly the group keys of a Group
+grain keeps the grain, so a region can be clicked and saved by its key. **Plugins** add tools in
+two ways. A Rust plugin implements `MapTool` and calls `register_map_tool`. A JavaScript module
+declares tools as data under a `maptools` export (an object of templates, or a function of the
+module's configuration returning one): a form, the base layer field, the operations with the
+answers written in as `{{name}}` (`{{geometry}}` the base layer's geometry column, `{{p.name}}`,
+`{{p.dataset}}` and `{{p.geometry}}` for a layer field `p`; a text that is only `{{x}}` becomes
+the answer itself, so numbers stay numbers), and the result layer. The module host passes them
+through the manifest (`ModuleManifest.map_tools`) as JSON, and the server installs them whole on
+every module change (`install_plugin_tools`), each id prefixed with its module; one that does not
+read is logged and the rest installed.
+
+**The map as a panel** (A5.13). A `map` panel is `{ spec }`, a `MapSpec`: the explorer's map, or
+a workspace's shown layers and reference layers with its view (`specOf(state, "visible")`), made
+when the drag starts (`DragHandle`, `mapPanel`). `renderPanel` answers its layers as `renderMap`
+does, tile templates included. In a report `MapView` is `still`: drawn with
+`preserveDrawingBuffer`, and once MapLibre is idle replaced by an `<img>` of its canvas, which a
+browser prints where it would not print WebGL; until then it carries `an-panel-loading`, which
+the report waits for before printing. **Open in map** in the explorer's map view creates a Map
+workspace whose first layer is the explorer's (`stateFromLayer`), beside the explorer when the
+view is split.
+
+**Demo data** (A5.14, `sc_analytics::demo`). On a database with PostGIS, `feldspar demo
+analytics` makes `districts` (twelve polygons with a name and a population) and `incidents`
+(2,400 points with a category and a date in 2025) over an invented city of about 11 km square
+(`DEMO_EXTENT`, laid over Lyon so that a base map has streets under it). The districts are the
+Voronoi cells of a jittered 4 × 3 grid of seeded points. They are computed in Rust, not by
+`ST_VoronoiPolygons`, so that they do not depend on the GEOS version: each cell is the extent's
+rectangle clipped, Sutherland–Hodgman fashion, by the half-plane nearer its seed than each other
+seed, in a local kilometre plane (longitude scaled by the cosine of the middle latitude), and
+its vertices are rounded to six decimals. The cells therefore tile the extent, with no gaps or
+overlaps, and every incident is within exactly one district. Of the incidents, 55% are drawn
+around four hot spots (normal, σ 400–900 m) and the rest evenly. Burglary is twice as likely at
+a hot spot, so a category's map differs from the whole's. A point outside the extent is drawn
+again. The busiest district then has about eight times the quietest's count, which gives
+graduated colours, and A8's hot-spot statistics, something to find. Geometry is written as
+GeoJSON values through the ordinary `Insert`, like any other value (§14.6, *At the wire*).
+Without PostGIS (SQLite, or Postgres without the extension) the two tables and their datasets
+are left out, with the sentence `bootstrap_spatial` gives, and the rest of the demo is made.
+The demo calls `bootstrap_spatial` itself, as `feldspar serve`'s boot does, so a role that may
+install the extension gets it.
+
+**The definition of done** (A5.15, `analytics_done.rs`'s `the_try_it_of_milestone_a5`, on a
+database cloned from the PostGIS template, skipped with a message without it). It walks the Try
+it through the API:
+
+- imports the tutorial's GeoJSON file (`docs/tutorial-data/police-stations.geojson`) and draws it;
+- maps the demo's incidents, checking the explorer's automatic geometry and the category domain;
+- runs Count per region against the districts, and checks every district's count against a
+  point-in-polygon count made in the test from the features `renderMap` sent;
+- styles the result in natural breaks and checks the classes are Jenks's over those counts;
+- sorts the attribute table and selects the top three;
+- selects the incidents within 1 km of a point, checks each against a haversine distance (within
+  half a per cent of the spheroid's), and saves the selection as a dataset of that many rows;
+- keeps a reference layer and opacities in the workspace, and refuses a tile URL without
+  `{z}/{x}/{y}`;
+- renders the whole map as a report panel, and checks that the usage index finds the explorer,
+  the map and the report;
+- fetches the city's vector tile at zoom 12, which holds the incidents, and one over the ocean,
+  which does not.
+
+The pages were walked in headless Chromium with SwiftShader's WebGL
+(`--use-angle=swiftshader --enable-unsafe-swiftshader`). Without it MapLibre has no context and
+the map says so.
 
 ## 15. Code adapters and polyglot plugins (`sc-module`, `sc-python`)
 

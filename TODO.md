@@ -493,58 +493,58 @@ selection, reference layers and the tools that dataset operations can express (g
 
 ## Phase 1 — Geometry in core
 
-- [ ] A5.1 A geometry field type in `sc-types` (point, line, polygon and the multi variants, in
+- [x] A5.1 A geometry field type in `sc-types` (point, line, polygon and the multi variants, in
       WGS84), stored as PostGIS `geometry(…, 4326)`. Bootstrap enables the `postgis`
       extension where the role may; otherwise, and on SQLite, a geometry field is refused
       with a sentence. REST and GraphQL represent geometry as GeoJSON. Tests.
-- [ ] A5.2 Importing GeoJSON, zipped Shapefiles and GeoPackage files into a new table: the
+- [x] A5.2 Importing GeoJSON, zipped Shapefiles and GeoPackage files into a new table: the
       geometry is loaded with its source coordinate system and transformed to WGS84 by
       PostGIS, so no projection library is needed. The admin's table import offers it.
       Tests with small fixture files.
-- [ ] A5.3 Geometry formula functions in `sc-expr`, translated to PostGIS: a point from
+- [x] A5.3 Geometry formula functions in `sc-expr`, translated to PostGIS: a point from
       longitude and latitude, buffer, centroid, area, length, distance, intersects, contains,
       within, and the square and hexagonal cell of a point. Distances and areas are in
       metres (geography casts). Tests.
 
 ## Phase 2 — Spatial operations and delivery
 
-- [ ] A5.4 The Spatial join operation (intersects, contains, within, within a distance,
+- [x] A5.4 The Spatial join operation (intersects, contains, within, within a distance,
       nearest by a lateral join), and geometry union as an Aggregate summary. Tests.
-- [ ] A5.5 Layer data for the browser: GeoJSON for small layers, and Mapbox vector tiles
+- [x] A5.5 Layer data for the browser: GeoJSON for small layers, and Mapbox vector tiles
       (`ST_AsMVT`) for large ones, with simplification by zoom level. Tests.
 
 ## Phase 3 — Map rendering and the map panel
 
-- [ ] A5.6 MapLibre GL JS and deck.gl in `ui/analytics`; the base map style URL as a setting
+- [x] A5.6 MapLibre GL JS and deck.gl in `ui/analytics`; the base map style URL as a setting
       (with a default), and the CSP entries its hosts need. The compiler from a map layer
       spec to MapLibre layers. Tests.
-- [ ] A5.7 The map panel in the Data explorer: the geometry source chosen automatically
+- [x] A5.7 The map panel in the Data explorer: the geometry source chosen automatically
       (geometry column, latitude and longitude columns, or a foreign key to a table with
       geometry), encodings colour, size, shape and label. Tests.
 
 ## Phase 4 — The Map workspace
 
-- [ ] A5.8 The Map workspace's state and layer list: dataset, geometry source, filter, popup
+- [x] A5.8 The Map workspace's state and layer list: dataset, geometry source, filter, popup
       fields, labels, visibility, opacity, order, legend. Tests.
-- [ ] A5.9 Symbology: single symbol, categories, graduated colours (quantile, equal interval,
+- [x] A5.9 Symbology: single symbol, categories, graduated colours (quantile, equal interval,
       natural breaks computed on the server), proportional symbols, heatmap style. Tests.
-- [ ] A5.10 The attribute table below the map with selection linked both ways; selection by
+- [x] A5.10 The attribute table below the map with selection linked both ways; selection by
       click, lasso, attribute condition and location; **Save selection as dataset**. Tests.
-- [ ] A5.11 Reference layers from tile or map service URLs. Tests.
-- [ ] A5.12 The toolbox, for what dataset operations can do: Proximity (buffer, distance to
+- [x] A5.11 Reference layers from tile or map service URLs. Tests.
+- [x] A5.12 The toolbox, for what dataset operations can do: Proximity (buffer, distance to
       nearest, within a distance), Overlay (spatial join, intersection), Aggregate (count and
       sum per region, dissolve). Each creates a global dataset and adds it as a layer, and
       the dataset opens in the Dataset editor. Plugins can register tools. Tests.
-- [ ] A5.13 **Open in map** from the explorer's map panel; a whole map as a draggable panel,
+- [x] A5.13 **Open in map** from the explorer's map panel; a whole map as a draggable panel,
       rendered as an image for reports. Tests.
 
 ## Phase 5 — Demo data, documentation, definition of done
 
-- [ ] A5.14 Demo data: synthetic `districts` (polygons generated from seeded points) and
+- [x] A5.14 Demo data: synthetic `districts` (polygons generated from seeded points) and
       `incidents`. `OPERATIONS.md`: installing PostGIS. `TECHNICAL_DESIGN.md` (geometry type,
       spatial functions and operations, layer delivery, the Map workspace);
       `tutorial-analytics.md` part 5.
-- [ ] A5.15 Definition of done: an `sc-server` test (skipped with a message without PostGIS)
+- [x] A5.15 Definition of done: an `sc-server` test (skipped with a message without PostGIS)
       that imports a GeoJSON fixture, runs the count-per-region tool through the API and
       checks the counts, and fetches a vector tile. Walk the Try it by hand.
 

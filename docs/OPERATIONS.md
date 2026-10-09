@@ -23,6 +23,7 @@ Contents:
 7. [Claude Code over the MCP server](#7-claude-code-over-the-mcp-server)
 8. [Day-to-day operations](#8-day-to-day-operations)
 9. [Bayesian models with Stan](#9-bayesian-models-with-stan)
+10. [Geometry with PostGIS](#10-geometry-with-postgis)
 
 ---
 
@@ -691,6 +692,7 @@ Only relevant on a development machine (README §11).
 |---|---|
 | `DATABASE_URL` | the maintenance connection per-test databases are created and dropped from. Overrides the `test` environment in `feldspar.toml` |
 | `SC_TEST_TEMPLATE` | the template each per-test database is cloned from; it must be **empty**, since every test inherits whatever is in it. Overrides `test_template` in the file. Leave it unset to use Postgres's `template1`; set it on a machine whose `template1` has a stale collation version |
+| `SC_TEST_POSTGIS_TEMPLATE` | the database a **PostGIS** test database is cloned from (default `feldspar_postgis_template`, §10.3). A test that needs PostGIS skips with a message when it does not exist |
 | `SC_TSC` | path to a TypeScript compiler for the generated-client type-check tests |
 | `SC_TEST_NPM`, `SC_TEST_MQTT_BROKER` | opt in to the tests that need a real npm registry and a real MQTT broker |
 | `SC_PRINT_SKILL` | print the generated `SKILL.md` during its test, for reading it |
@@ -1363,6 +1365,19 @@ rows, on Postgres or SQLite. It also makes three datasets for the Data explorer 
 `Measurements` and `Events` — unless a dataset of that name is already there. It takes the same
 database flags as `feldspar serve` and writes where the server would read.
 
+Where the database has PostGIS (§10), it also makes the map demo's `districts` (12 polygons of an
+invented city laid over Lyon) and `incidents` (2,400 points with a category and a date), with the
+datasets `Districts` and `Incidents`. Like `feldspar serve`, it first tries to install the
+extension where its role may. Where PostGIS is not there it makes everything else and says
+why:
+
+```
+the map demo's tables (`districts`, `incidents`) were not made: geometry needs the PostGIS
+extension, … (docs/OPERATIONS.md §10 says how to install PostGIS)
+```
+
+Install PostGIS as §10.1 says, then run the demo again with `--replace`.
+
 It refuses to touch a table that is already there, naming it. `--replace` drops and remakes
 the demo's six tables — and only those, so anything else in the database, including datasets
 and models that read them, is left alone (a dataset over a dropped table reports its error until
@@ -1563,3 +1578,96 @@ program cannot do is reach past Stan:
 Fits, compiles, draws, write-back and **Download run** are admin-only, as every model
 endpoint is.
 
+---
+
+## 10. Geometry with PostGIS
+
+Geometry fields (a point, a line, a polygon or their multi variants, in WGS84 longitude and
+latitude), importing GeoJSON, Shapefiles and GeoPackages, and the `Geo.…` formula functions all
+need **PostgreSQL with the PostGIS extension** in Feldspar's database. Everything else works
+without it: a geometry field is then refused with a sentence saying why, and so is a dataset
+formula that calls a `Geo` function. SQLite has no geometry (SpatiaLite is out of scope).
+
+### 10.1 Installing it
+
+PostGIS is a package for the PostgreSQL server, matching its major version:
+
+```sh
+sudo apt install postgresql-17-postgis-3      # Debian 13; postgresql-16-postgis-3 on Ubuntu 24.04
+```
+
+Installing an extension **into a database** needs a superuser, which Feldspar's role should not
+be. So add it once, as `postgres`:
+
+```sh
+sudo -u postgres psql -d feldspar -c 'CREATE EXTENSION IF NOT EXISTS postgis'
+```
+
+On every start the server looks for it, and tries `CREATE EXTENSION postgis` itself when its role
+may (a superuser, or an installation that marked the extension trusted). It says which it found:
+
+```
+feldspar: PostGIS 3.5.2; geometry fields are available
+feldspar: geometry fields are unavailable: geometry needs the PostGIS extension, which this
+          PostgreSQL server has but this database does not; a superuser can add it with
+          CREATE EXTENSION postgis
+```
+
+Beside the extension the server creates three SQL functions of its own, `_fd_utm_srid`,
+`_fd_square_cell` and `_fd_hex_cell`, which `Geo.squareCell` and `Geo.hexCell` call. PostGIS's
+own table `spatial_ref_sys` is not listed among the tables.
+
+A database **connection** (§5.0 of the design) can hold geometry too when its database has
+PostGIS; the server only looks, and never installs anything in a database that is not its own.
+
+### 10.2 Coordinate systems and datum grids
+
+Geometry is stored in WGS84. An imported file in another coordinate system — a Shapefile's
+`.prj`, a GeoPackage's EPSG code, an old GeoJSON `crs` member — is reprojected by PostGIS, so no
+projection library is needed beside it. How accurately depends on the transformation data PROJ
+has: without a datum grid, British National Grid is converted with no datum shift and lands
+about 100 m from where it should. For metre accuracy install the grids (`apt install proj-data`
+has some; `projsync --all` downloads the rest) or let PROJ fetch them (`PROJ_NETWORK=ON` in the
+PostgreSQL server's environment).
+
+### 10.3 For the test suite
+
+The tests that need PostGIS clone their database from a template that already has it, since the
+test role is not a superuser either. Make it once:
+
+```sh
+sudo -u postgres createdb -O <test role> feldspar_postgis_template
+sudo -u postgres psql -d feldspar_postgis_template -c 'CREATE EXTENSION postgis'
+```
+
+Without it those tests print `skipped: this test needs PostGIS…` and pass. Among them are
+the map demo's test in `sc-cli` and milestone A5's definition of done in `sc-server`.
+`SC_TEST_POSTGIS_TEMPLATE` names another template (§5.4).
+
+### 10.4 The base map
+
+The Analytics UI draws map layers over a base map: a [MapLibre style](https://maplibre.org/maplibre-style-spec/)
+fetched by the browser. **Settings → Maps** names it:
+
+| setting | default | |
+|---|---|---|
+| Base map style | `https://tiles.openfreemap.org/styles/positron` | for a light page |
+| Base map style (dark) | `https://tiles.openfreemap.org/styles/dark` | for a dark page; empty uses the light one |
+| Other map hosts | empty | comma-separated origins the style's tiles, fonts or icons come from, when not the style's own host |
+
+[OpenFreeMap](https://openfreemap.org) needs no account or key. The browser fetches the style,
+tiles, fonts and icons straight from the host, never through Feldspar. The Analytics UI's
+Content-Security-Policy allows the hosts these settings name and no others. So a style whose
+tiles are on a second host draws an empty base map until that host is added under *Other map
+hosts*. A value that is not an `http` or `https` URL is refused when it is saved.
+
+**Reference layers.** A Map workspace can draw a tile or map service (satellite imagery, a
+cadastral map) under its layers. Its host must be allowed in the same way: the workspace says
+when it is not, and **Allow it** adds the host to *Other map hosts* — what an admin would type
+there — after which the page is reloaded so the browser applies the new policy. Remove the host
+from *Other map hosts* to stop it again.
+
+**Without internet access**, or to keep map views off a third party, leave both styles empty.
+The layers are then drawn on a plain background, and labels are left off, because the fonts
+come from the base map. Or serve a style and its tiles yourself (for example with
+[Martin](https://martin.maplibre.org) or a PMTiles file behind a web server) and name its URL.

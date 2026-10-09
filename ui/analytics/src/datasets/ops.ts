@@ -10,7 +10,7 @@
 /** Where a dataset's rows start. */
 export type Base = { kind: "table"; table: string } | { kind: "dataset"; dataset: string };
 
-/** The operation kinds A1 implements. */
+/** The operation kinds: A1's, and A5's Spatial join. */
 export type OpKind =
   | "calculated"
   | "filter"
@@ -23,7 +23,8 @@ export type OpKind =
   | "split"
   | "complete"
   | "join"
-  | "union";
+  | "union"
+  | "spatial_join";
 
 /** One operation of a dataset. */
 export type Operation = {
@@ -90,7 +91,7 @@ export type OpGroup = "keep" | "change" | "combine";
 /** One kind, as the Add menu offers it. */
 export type KindInfo = { kind: OpKind; label: string; group: OpGroup; about: string };
 
-/** The operations A1 implements, in the Add menu's order. */
+/** The operations, in the Add menu's order. */
 export const OP_KINDS: KindInfo[] = [
   { kind: "calculated", label: "Calculated column", group: "keep", about: "Add or replace a column computed by a formula." },
   { kind: "filter", label: "Filter", group: "keep", about: "Keep the rows a condition holds for." },
@@ -104,6 +105,22 @@ export const OP_KINDS: KindInfo[] = [
   { kind: "complete", label: "Complete", group: "change", about: "Add rows for missing combinations of values." },
   { kind: "join", label: "Join", group: "combine", about: "Join another table or dataset on key columns." },
   { kind: "union", label: "Union", group: "combine", about: "Append the rows of another table or dataset." },
+  {
+    kind: "spatial_join",
+    label: "Spatial join",
+    group: "combine",
+    about: "Join another table or dataset where the geometries meet, or to the nearest.",
+  },
+];
+
+/** How two geometries must be placed for a Spatial join to match them, and
+ * whether the relation takes a distance (required, or an optional limit). */
+export const SPATIAL_RELATIONS: { value: string; label: string; distance: "none" | "required" | "optional" }[] = [
+  { value: "within", label: "is within", distance: "none" },
+  { value: "contains", label: "contains", distance: "none" },
+  { value: "intersects", label: "intersects", distance: "none" },
+  { value: "within_distance", label: "is within a distance of", distance: "required" },
+  { value: "nearest", label: "is nearest to", distance: "optional" },
 ];
 
 /** The kind's label. */
@@ -141,6 +158,7 @@ export const SUMMARY_FUNCTIONS: { value: string; label: string }[] = [
   { value: "sd", label: "Standard deviation" },
   { value: "first", label: "First" },
   { value: "last", label: "Last" },
+  { value: "union", label: "Union of geometries" },
 ];
 
 /** A cell's text: a fractional number to at most four decimals (the value
@@ -200,6 +218,15 @@ export function defaultParams(kind: OpKind, columns: StageColumn[]): Record<stri
       };
     case "union":
       return { with: { kind: "table", table: "" } };
+    case "spatial_join":
+      return {
+        with: { kind: "table", table: "" },
+        kind: "left",
+        relation: "within",
+        left: columns.find((c) => c.type === "geometry")?.name ?? "",
+        right: "",
+        suffix: "_right",
+      };
   }
 }
 
@@ -395,6 +422,26 @@ export function describeOperation(
     }
     case "union":
       return t("with {other}", { other: otherName(p.with, datasetName) });
+    case "spatial_join": {
+      const other = otherName(p.with, datasetName);
+      const left = str(p.left);
+      const right = str(p.right);
+      const distance = typeof p.distance === "number" ? p.distance : null;
+      switch (p.relation) {
+        case "contains":
+          return t("{left} contains {other}.{right}", { left, other, right });
+        case "intersects":
+          return t("{left} intersects {other}.{right}", { left, other, right });
+        case "within_distance":
+          return t("{left} within {metres} m of {other}.{right}", { left, other, right, metres: distance ?? 0 });
+        case "nearest":
+          return distance === null
+            ? t("nearest {other}.{right} to {left}", { left, other, right })
+            : t("nearest {other}.{right} to {left}, within {metres} m", { left, other, right, metres: distance });
+        default:
+          return t("{left} within {other}.{right}", { left, other, right });
+      }
+    }
   }
 }
 
@@ -404,8 +451,8 @@ export function describeOperation(
 export type Completion = {
   /** What is inserted. */
   text: string;
-  /** Why it is offered: a column, a join path, an aggregation. */
-  kind: "column" | "join" | "aggregation";
+  /** Why it is offered: a column, a join path, an aggregation, a function. */
+  kind: "column" | "join" | "aggregation" | "function";
   /** A column's type, where it has one. */
   detail?: string;
 };
@@ -424,8 +471,30 @@ export function rowsOf(shape: StageShape): string | null {
   return null;
 }
 
+/**
+ * The geometry functions (analytics TODO A5.3), as `sc-expr`'s `GEO_FUNCTIONS`
+ * lists them: the call's opening, and what it returns. Computed by PostGIS, so
+ * offered only over a stage that has a geometry column.
+ */
+export const GEO_FUNCTIONS: Array<{ name: string; params: string; returns: string }> = [
+  { name: "point", params: "longitude, latitude", returns: "geometry" },
+  { name: "buffer", params: "geometry, metres", returns: "geometry" },
+  { name: "centroid", params: "geometry", returns: "geometry" },
+  { name: "area", params: "geometry", returns: "float" },
+  { name: "length", params: "geometry", returns: "float" },
+  { name: "distance", params: "a, b", returns: "float" },
+  { name: "intersects", params: "a, b", returns: "bool" },
+  { name: "contains", params: "a, b", returns: "bool" },
+  { name: "within", params: "a, b", returns: "bool" },
+  { name: "squareCell", params: "geometry, metres", returns: "geometry" },
+  { name: "hexCell", params: "geometry, metres", returns: "geometry" },
+  { name: "intersection", params: "a, b", returns: "geometry" },
+  { name: "fromGeoJSON", params: "text", returns: "geometry" },
+];
+
 /** Everything a formula over `shape` may name: its columns, one step along each
- * foreign key, and the counts and totals of the child tables its rows have. */
+ * foreign key, the counts and totals of the child tables its rows have, and the
+ * geometry functions where there is geometry. */
 export function formulaCompletions(shape: StageShape | null, report: Report | null): Completion[] {
   if (!shape) return [];
   const out: Completion[] = shape.columns.map((c) => ({
@@ -447,6 +516,11 @@ export function formulaCompletions(shape: StageShape | null, report: Report | nu
       if (!isNumeric(field.type) || field.name === child.key) continue;
       out.push({ text: `${relation}.sum("${field.name}")`, kind: "aggregation", detail: field.type });
       out.push({ text: `${relation}.avg("${field.name}")`, kind: "aggregation", detail: "float" });
+    }
+  }
+  if (shape.columns.some((c) => c.type === "geometry")) {
+    for (const f of GEO_FUNCTIONS) {
+      out.push({ text: `Geo.${f.name}(`, kind: "function", detail: `(${f.params}) → ${f.returns}` });
     }
   }
   return out;
@@ -483,6 +557,11 @@ export function applyCompletion(
   cursor: number,
   insert: string,
 ): { text: string; cursor: number } {
-  const { start, end } = tokenAt(text, cursor);
+  let { start } = tokenAt(text, cursor);
+  const { end } = tokenAt(text, cursor);
+  // `Geo.dis` is completed as a whole: the `Geo.` already typed is part of
+  // what `Geo.distance(` replaces.
+  const dot = insert.lastIndexOf(".");
+  if (dot > 0 && text.slice(0, start).endsWith(insert.slice(0, dot + 1))) start -= dot + 1;
   return { text: text.slice(0, start) + insert + text.slice(end), cursor: start + insert.length };
 }

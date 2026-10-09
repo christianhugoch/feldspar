@@ -286,6 +286,40 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    reg.register("createTableFromGeoFile", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                use base64::Engine as _;
+                let obj = require_object(&ctx.body)?;
+                let name = non_empty_str_field(obj, "name")?.trim().to_owned();
+                let file_name = non_empty_str_field(obj, "file_name")?.to_owned();
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(str_field(obj, "content_base64")?.trim())
+                    .map_err(|e| Error::invalid(format!("`content_base64` is not base64 ({e})")))?;
+                let layer = optional_str(obj, "layer");
+                let (table, outcome) = sc_api::geo_import::create_table_from_geo_file(
+                    &catalog,
+                    &name,
+                    &optional_str(obj, "database"),
+                    &file_name,
+                    &bytes,
+                    Some(layer.trim()).filter(|l| !l.is_empty()),
+                    Some(&admin_caller(ctx.user.as_ref())),
+                )
+                .await?;
+                let rls = catalog.primary().capabilities().row_level_security;
+                Ok(HandlerResponse::ok(json!({
+                    "table": table_json(&catalog, &table, rls, &ctx.locale),
+                    "inserted": outcome.inserted,
+                    "warnings": outcome.warnings,
+                }))
+                .with_status(201))
+            }
+        }
+    });
+
     reg.register("dropTable", {
         let catalog = catalog.clone();
         move |ctx| {
@@ -4292,6 +4326,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // tag that is not a language tag is refused here, where the
                 // admin can see which box they typed it into (§16.1).
                 let localisation = sc_config::localisation_settings_from(&merged)?;
+                // The Maps section's, on the same footing: a base map URL is a
+                // host the Analytics UI's policy will name, so one that is not
+                // an http or https origin is refused here (analytics A5.6).
+                sc_config::map_settings_from(&merged)?;
 
                 sc_config::set_config_many(&catalog, &values).await?;
                 // The two switches this process runs under move **now**, not at
