@@ -2,6 +2,31 @@
 
 Changes in reverse chronological order.
 
+## A development server serves its applications under `localhost` by default
+
+A server with no `base_domain` served no applications at all, only the admin UI, and wrote a
+placeholder (`http://<subdomain>.<the server's base domain>`) as a native app's server URL.
+Now a server that listens on this machine only and serves no TLS (the default
+`127.0.0.1:3032`) uses `localhost`: an app is at `http://<subdomain>.localhost:3032`, and
+that is the URL a React Native app's generated `config.ts` gets. Browsers and macOS's resolver
+(which the iOS simulator uses) send `*.localhost` to this machine; an Android emulator or a
+phone still needs the app's "Server URL for the mobile app" and `extra_base_domains`.
+
+- **The rule** is `sc_server::implied_base_domain(addr, tls)`: `localhost` for a loopback
+  address without TLS, otherwise none, since a server reachable from elsewhere has to be
+  told its domain, and no certificate is issued for `localhost`.
+- **`feldspar serve`** applies it once the TLS settings are read, before the public origin,
+  the mounts and the certificate's names, and says so at startup.
+- **`build-app`, `auth token`** and the other commands that only need an app's URL apply the
+  same rule to the configured bind (or the default) through `Serving::public_origin`.
+- **Tests:** `config::tests::a_loopback_server_without_a_base_domain_serves_its_apps_under_localhost`
+  (sc-server); `config_file::a_loopback_server_without_a_base_domain_is_served_under_localhost`
+  (loopback, its own port, `0.0.0.0`, TLS); and
+  `config_file::without_a_base_domain_the_default_bind_is_served_under_localhost`, which
+  replaces the test that asserted there was no origin.
+- **Checked on macOS:** `nscurl` (Apple's URL loading, as the iOS app uses it) reached the
+  server at `http://withmetro.localhost:3032` while it listened on `127.0.0.1` only.
+
 ## Fix: iOS builds failed for any project whose path has a space
 
 Local file stores on macOS live under `~/Library/Application Support/…`, and two build phases

@@ -823,6 +823,8 @@ Outside the analytics milestones. See CHANGELOG for what each item covers.
       profile in the file store without a build; the API key is a secret module setting.
 - [ ] RN.20 Create the distribution certificate from Saltcorn (a module-level operation, which
       the framework does not have yet), and ad hoc profiles with device registration.
+- [x] RN.21 A loopback-only server with no `base_domain` serves its applications under
+      `localhost`, so a fresh development setup serves apps and a native app's URL is real.
 
 # Not in a milestone yet
 
