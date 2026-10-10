@@ -17,11 +17,13 @@
 //!   grain ([`StageShape`]), its errors as sentences, and the query each stage
 //!   is. Formulas are `sc-expr` formulas, checked against the stage the way a
 //!   calculated field is checked against its table.
-//! - [`read_stage`] — a page of a stage's rows, with the total.
+//! - [`read_stage`] — a page of a stage's rows, with the total, read as a
+//!   [`Caller`] through a [`Reader`] (A9.1).
 //! - [`save_dataset`] and its neighbours — the store.
 //! - [`Snapshot`] — what a model fit records: the resolved definitions and a
 //!   hash of what they mean.
 
+mod access;
 mod compile;
 mod def;
 mod infer;
@@ -31,6 +33,7 @@ mod snapshot;
 mod store;
 mod walk;
 
+pub use access::{Caller, Reader, Sharing, tables_read};
 pub use compile::{
     BaseReport, Compilation, Library, MAX_RANGE_VALUES, OpStatus, OperationReport, Options,
     ROW_KEY, Restriction, Stage, compile, scramble,
@@ -43,12 +46,13 @@ pub use def::{
     WindowFunction, WindowOp,
 };
 pub use read::{
-    MAX_PAGE, Page, Rows, StagePage, column_values, count, last_stage, read_page, read_rows,
-    read_stage, value_json,
+    MAX_PAGE, Page, Rows, StagePage, column_values, count, count_with, last_stage, read_page,
+    read_rows, read_rows_with, read_stage, value_json,
 };
 pub use shape::{ColType, ForeignKey, Grain, Schema, StageColumn, StageShape, TableInfo};
 pub use snapshot::Snapshot;
 pub use store::{
-    DATASETS_TABLE, bootstrap_datasets, clone_dataset, datasets_using, delete_dataset,
-    list_datasets, load_dataset, load_dataset_by_name, load_library, require_dataset, save_dataset,
+    DATASETS_TABLE, bootstrap_datasets, clone_dataset, dataset_sharing, datasets_using,
+    delete_dataset, list_dataset_sharing, list_datasets, load_dataset, load_dataset_by_name,
+    load_library, require_dataset, save_dataset, set_dataset_sharing,
 };

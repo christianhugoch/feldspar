@@ -3,7 +3,10 @@
 //
 // Every workspace, most recently used first, each opened, renamed or deleted
 // from its row; and a new one made by name and kind, the kinds not here yet
-// listed and disabled with the milestone that brings them.
+// listed and disabled with the milestone that brings them. In a self-serve
+// application (A9.3) the server lists its own and the kinds it opens; a
+// workspace is renamed, shared and deleted by its owner, and new ones are made
+// only where the application allows it.
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Alert from "react-bootstrap/Alert";
@@ -18,6 +21,8 @@ import type { ListWorkspacesResponse } from "../client";
 import { T, useT } from "../i18n";
 import { usePane } from "../panes";
 import { workspaceKindName } from "../labels";
+import { ShareSelect } from "../share";
+import { useShell } from "../shell";
 import { firstAvailable, kindOptions, type KindItem } from "./kinds";
 
 type WorkspaceItem = ListWorkspacesResponse[number];
@@ -25,6 +30,8 @@ type WorkspaceItem = ListWorkspacesResponse[number];
 export function WorkspaceList() {
   const { t } = useT();
   const pane = usePane();
+  const { application } = useShell();
+  const mayCreate = !application || application.createWorkspaces;
   const [kinds, setKinds] = useState<KindItem[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -72,42 +79,44 @@ export function WorkspaceList() {
         </Alert>
       )}
 
-      <Card className="mb-4">
-        <Card.Body>
-          <Form onSubmit={create} className="d-flex gap-2 flex-wrap align-items-end">
-            <Form.Group controlId="workspace-name">
-              <Form.Label>
-                <T text="New workspace" />
-              </Form.Label>
-              <Form.Control
-                value={name}
-                placeholder={t("Houses data")}
-                onChange={(e) => setName(e.target.value)}
-              />
-            </Form.Group>
-            <Form.Group controlId="workspace-kind">
-              <Form.Label>
-                <T text="Kind" />
-              </Form.Label>
-              <Form.Select value={kind} onChange={(e) => setKind(e.target.value)}>
-                {kindOptions(kinds, t).map((option) => (
-                  <option key={option.value} value={option.value} disabled={option.disabled}>
-                    {option.label}
-                  </option>
-                ))}
-              </Form.Select>
-            </Form.Group>
-            <Button type="submit" disabled={name.trim() === "" || kind === ""}>
-              <T text="Create" />
-            </Button>
-          </Form>
-          {noneHere && (
-            <Form.Text muted>
-              <T text="No kind of workspace can be created yet: each arrives with the milestone it names." />
-            </Form.Text>
-          )}
-        </Card.Body>
-      </Card>
+      {mayCreate && (
+        <Card className="mb-4">
+          <Card.Body>
+            <Form onSubmit={create} className="d-flex gap-2 flex-wrap align-items-end">
+              <Form.Group controlId="workspace-name">
+                <Form.Label>
+                  <T text="New workspace" />
+                </Form.Label>
+                <Form.Control
+                  value={name}
+                  placeholder={t("Houses data")}
+                  onChange={(e) => setName(e.target.value)}
+                />
+              </Form.Group>
+              <Form.Group controlId="workspace-kind">
+                <Form.Label>
+                  <T text="Kind" />
+                </Form.Label>
+                <Form.Select value={kind} onChange={(e) => setKind(e.target.value)}>
+                  {kindOptions(kinds, t).map((option) => (
+                    <option key={option.value} value={option.value} disabled={option.disabled}>
+                      {option.label}
+                    </option>
+                  ))}
+                </Form.Select>
+              </Form.Group>
+              <Button type="submit" disabled={name.trim() === "" || kind === ""}>
+                <T text="Create" />
+              </Button>
+            </Form>
+            {noneHere && (
+              <Form.Text muted>
+                <T text="No kind of workspace can be created yet: each arrives with the milestone it names." />
+              </Form.Text>
+            )}
+          </Card.Body>
+        </Card>
+      )}
 
       {workspaces && workspaces.length === 0 && (
         <p className="text-secondary">
@@ -139,12 +148,32 @@ export function WorkspaceList() {
                 <td>{workspaceKindName(w.kind, t)}</td>
                 <td className="text-secondary">{new Date(w.updated_at).toLocaleString()}</td>
                 <td className="text-end text-nowrap">
-                  <Button size="sm" variant="outline-secondary" onClick={() => setRenaming(w)}>
-                    <T text="Rename" />
-                  </Button>{" "}
-                  <Button size="sm" variant="outline-danger" onClick={() => setDeleting(w)}>
-                    <T text="Delete" />
-                  </Button>
+                  {application && w.may_change && (
+                    <>
+                      <ShareSelect
+                        value={w.share_role}
+                        label={w.name}
+                        onShare={async (role) => {
+                          try {
+                            await api.shareWorkspace(w.id, { share_role: role });
+                            await load();
+                          } catch (err) {
+                            setError(errorMessage(err, t("Could not share the workspace.")));
+                          }
+                        }}
+                      />{" "}
+                    </>
+                  )}
+                  {w.may_change && (
+                    <>
+                      <Button size="sm" variant="outline-secondary" onClick={() => setRenaming(w)}>
+                        <T text="Rename" />
+                      </Button>{" "}
+                      <Button size="sm" variant="outline-danger" onClick={() => setDeleting(w)}>
+                        <T text="Delete" />
+                      </Button>
+                    </>
+                  )}
                 </td>
               </tr>
             ))}

@@ -195,7 +195,15 @@ pub fn admin_handlers_with(
             let catalog = catalog.clone();
             async move {
                 let (email, password) = credentials(&ctx.body)?;
-                match authenticate_admin(&catalog, &email, &password).await? {
+                // The admin host signs in admins. An Analytics application
+                // (analytics TODO A9.3) signs in anybody whose password is
+                // right, on its own host: its role floor is what decides what
+                // they reach, and it is applied to every call after this one.
+                let user = match ctx.analytics_app {
+                    Some(_) => sc_auth::authenticate(&catalog, &email, &password).await?,
+                    None => authenticate_admin(&catalog, &email, &password).await?,
+                };
+                match user {
                     Some(user) => {
                         let body = user_summary_json(&user);
                         Ok(HandlerResponse::start_session(user, body))

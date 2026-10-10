@@ -24,6 +24,7 @@ sc-types.workspace = true
 # `_fd_datasets` is stored metadata, bootstrapped through the catalog, and the
 # catalog is what a stage's base table and its fields come from.
 sc-catalog.workspace = true
+sc-auth.workspace = true
 sc-db.workspace = true
 uuid.workspace = true
 serde.workspace = true

@@ -736,6 +736,10 @@ years:
 The Analytics UI as an application framework: an admin publishes a restricted subset of it to
 end users (goals document, the introduction's "application").
 
+Taken ahead of A7 and A8 (2026-10-09), which are skipped for now: nothing here needs them. The
+tables a self-serve application may read are the application's own `tables` subset rather than a
+second list in the framework's settings (see the CHANGELOG).
+
 **Try it.**
 1. As the admin, create an application with the framework *Analytics*, in *fixed* mode,
    showing only the dashboard from A6, for the role `staff`.
@@ -750,7 +754,7 @@ end users (goals document, the introduction's "application").
 
 ## Phase 1 — Authority
 
-- [ ] A9.1 Every analytics endpoint takes the caller's authority. Datasets, stat queries,
+- [x] A9.1 Every analytics endpoint takes the caller's authority. Datasets, stat queries,
       tests and layer data read as the caller, through table permissions and ownership
       formulas; the admin keeps full access. Datasets and workspaces gain an owner and
       sharing with roles. Tests: a user without read access is refused; an ownership formula
@@ -758,13 +762,13 @@ end users (goals document, the introduction's "application").
 
 ## Phase 2 — The framework
 
-- [ ] A9.2 The *Analytics* `FrameworkFactory`: its configuration (mode fixed or self-serve,
+- [x] A9.2 The *Analytics* `FrameworkFactory`: its configuration (mode fixed or self-serve,
       the workspaces shown in fixed mode, the tables and workspace types allowed in
       self-serve mode, whether users may create workspaces) and validation. Tests.
-- [ ] A9.3 Mounting: the Analytics UI bundle served in an application with the application's
+- [x] A9.3 Mounting: the Analytics UI bundle served in an application with the application's
       CSP and session, in a restricted shell without admin links. Workspaces belong to an
       application or to the unrestricted UI. Tests.
-- [ ] A9.4 Enforcing the configuration on the server: base pickers, dataset reads and
+- [x] A9.4 Enforcing the configuration on the server: base pickers, dataset reads and
       workspace types limited to what the application allows, whatever the client asks.
       Tests.
 

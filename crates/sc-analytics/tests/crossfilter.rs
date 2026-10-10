@@ -229,7 +229,7 @@ fn count(dataset: DatasetId) -> Panel {
 
 /// The panel drawn with `conditions`, as the API answers it.
 async fn drawn(fx: &Fixture, panel: &Panel, conditions: &[Condition]) -> Json {
-    let rendered = render_panel_in(&fx.cat, panel, conditions)
+    let rendered = render_panel_in(&fx.cat, &sc_dataset::Caller::admin(), panel, conditions)
         .await
         .unwrap_or_else(|e| panic!("on {}: {e}", fx.backend));
     serde_json::to_value(&rendered).expect("serialises")
@@ -484,7 +484,7 @@ async fn a_map_layer_carries_the_conditions_in_its_filter() -> Result<()> {
         .await?;
         // The request — what the tiles' URL carries — has both filters,
         // whether or not this database can draw it.
-        let drawn = render_map_in(&fx.cat, &spec, &scope).await?;
+        let drawn = render_map_in(&fx.cat, &sc_dataset::Caller::admin(), &spec, &scope).await?;
         assert_eq!(
             drawn.layers[0].layer.filter.as_deref(),
             Some("(id > 1) && (category == \"burglary\")"),

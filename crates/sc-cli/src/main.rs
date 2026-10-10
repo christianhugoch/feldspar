@@ -469,7 +469,8 @@ async fn install_services(
             .with_streams(streams)
             .with_modules(modules)
             .with_python(python)
-            .with_saltcorn_ui_dir(config.saltcorn_ui_dir.clone()),
+            .with_saltcorn_ui_dir(config.saltcorn_ui_dir.clone())
+            .with_analytics_dir(config.analytics_dir.clone()),
     );
     Ok(Services {
         apps,

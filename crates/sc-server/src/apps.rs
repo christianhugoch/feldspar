@@ -231,6 +231,10 @@ pub struct AppMounts {
     /// `None` is a binary built without it, where an application whose framework
     /// is `saltcorn-ui` fails to mount — once, naming the bundle.
     saltcorn_ui_dir: Option<PathBuf>,
+    /// Where the Analytics UI's built bundle is, which an application whose
+    /// framework is `analytics` serves (A9.3). `None` serves its API and a page
+    /// saying the bundle is not built.
+    analytics_dir: Option<PathBuf>,
     /// The TLS certificate to keep in step with what is mounted (§13.5).
     ///
     /// An application is served on a subdomain, and a subdomain a certificate
@@ -291,6 +295,11 @@ impl AppMounts {
         if let Err(e) = sc_viewpattern::install_saltcorn_ui() {
             eprintln!("feldspar: the Saltcorn UI framework could not be registered: {e}");
         }
+        // The Analytics UI as a framework (analytics TODO A9.2), constructed for
+        // the same reason: it serves a bundle this binary already has.
+        if let Err(e) = crate::analytics_app::install_analytics_framework() {
+            eprintln!("feldspar: the Analytics framework could not be registered: {e}");
+        }
         AppMounts {
             catalog: Some(catalog),
             evaluator: None,
@@ -301,6 +310,7 @@ impl AppMounts {
             streams: None,
             python: None,
             saltcorn_ui_dir: None,
+            analytics_dir: None,
             certificate: std::sync::OnceLock::new(),
             by_subdomain: RwLock::new(HashMap::new()),
             previews: RwLock::new(Previews::default()),
@@ -610,9 +620,18 @@ impl AppMounts {
     /// The bundle this binary was built with for the framework `name`, which is
     /// what a factory mounting it is handed.
     pub fn framework_bundle(&self, name: &str) -> Option<&Path> {
-        (name == sc_viewpattern::SALTCORN_UI_FRAMEWORK)
-            .then(|| self.saltcorn_ui_dir())
-            .flatten()
+        match name {
+            sc_viewpattern::SALTCORN_UI_FRAMEWORK => self.saltcorn_ui_dir(),
+            sc_analytics::app::ANALYTICS_FRAMEWORK => self.analytics_dir.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Say where the Analytics UI's built bundle is (`ServerConfig::analytics_dir`),
+    /// which an Analytics application serves (analytics TODO A9.3).
+    pub fn with_analytics_dir(mut self, dir: Option<PathBuf>) -> AppMounts {
+        self.analytics_dir = dir;
+        self
     }
 
     /// The Python runtime, if this server built one.

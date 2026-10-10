@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use sc_catalog::Catalog;
+use sc_dataset::Caller;
 use sc_dataset::{ColType, StageShape, scramble, value_json};
 use sc_error::Result;
 use sc_query::{BinOp, Expr, Nulls, OrderBy, OrderDir, Projection, Select, Source, UnOp, Value};
@@ -250,18 +251,19 @@ impl Section {
 
 /// Run the tests the roles of `spec` make, over its dataset: every Wrap
 /// group's results, or the sentence saying why there is no test. Reads as
-/// the admin, as `render_plot` does.
-pub async fn run_tests(catalog: &Catalog, spec: &TestSpec) -> Result<TestsAnswer> {
-    run_tests_in(catalog, spec, &Scope::none()).await
+/// `caller`, as `render_plot` does.
+pub async fn run_tests(catalog: &Catalog, caller: &Caller, spec: &TestSpec) -> Result<TestsAnswer> {
+    run_tests_in(catalog, caller, spec, &Scope::none()).await
 }
 
 /// [`run_tests`] over the rows a dashboard's conditions keep (A6.4).
 pub async fn run_tests_in(
     catalog: &Catalog,
+    caller: &Caller,
     spec: &TestSpec,
     scope: &Scope,
 ) -> Result<TestsAnswer> {
-    let rows = match plot_rows_in(catalog, &spec.data, scope).await? {
+    let rows = match plot_rows_in(catalog, caller, &spec.data, scope).await? {
         Ok(rows) => rows,
         Err(sentence) => return Ok(TestsAnswer::refuse(sentence)),
     };

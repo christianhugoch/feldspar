@@ -475,6 +475,7 @@ async fn upload(
     let caller = user.clone();
     let ctx = HandlerCtx {
         raw_body: Some(bytes),
+        analytics_app: None,
         path_params: HashMap::from([("store".to_owned(), store_name), ("path".to_owned(), path)]),
         query: Vec::new(),
         body: serde_json::Value::Null,
@@ -527,6 +528,7 @@ async fn download(
     let caller = user.clone();
     let ctx = HandlerCtx {
         raw_body: None,
+        analytics_app: None,
         path_params: HashMap::from([("store".to_owned(), store_name), ("path".to_owned(), path)]),
         query: Vec::new(),
         body: serde_json::Value::Null,
@@ -570,6 +572,7 @@ async fn create_backup(State(state): State<AppState>, jar: CookieJar, body: Byte
     let caller = user.clone();
     let ctx = HandlerCtx {
         raw_body: None,
+        analytics_app: None,
         path_params: HashMap::new(),
         query: Vec::new(),
         body: selection,
@@ -625,6 +628,7 @@ async fn upload_backup(State(state): State<AppState>, jar: CookieJar, body: Body
     let caller = user.clone();
     let ctx = HandlerCtx {
         raw_body: Some(bytes),
+        analytics_app: None,
         path_params: HashMap::new(),
         query: Vec::new(),
         body: Value::Null,
@@ -1337,6 +1341,21 @@ async fn dispatch_app(
         );
     }
 
+    // An Analytics application's API (analytics TODO A9.3): the Analytics UI's
+    // own endpoints the bundle calls, on the application's host, under the
+    // application's role floor and with what it allows handed to the handler.
+    // After the providers and the static directories, which the admin stated
+    // and so win; before the framework, whose document would otherwise answer.
+    if app.app.framework.name == sc_analytics::app::ANALYTICS_FRAMEWORK
+        && (path == "/api" || path.starts_with("/api/"))
+    {
+        return with_csp(
+            dispatch_analytics_api(state, app, api_method, uri, headers, jar, anonymous, body)
+                .await,
+            &csp,
+        );
+    }
+
     // The app's UI: its framework serves the built bundle. No catalog access
     // happens here for a code framework — the app reaches data only through the
     // API above.
@@ -1420,6 +1439,146 @@ async fn dispatch_app(
             &csp,
         ),
     }
+}
+
+/// An Analytics application's call to one of the Analytics UI's endpoints
+/// (analytics TODO A9.3): the admin dispatcher's work, with three differences.
+///
+/// - **Only [`APP_ENDPOINTS`](crate::analytics_app::APP_ENDPOINTS).** Anything
+///   else under `/api/` is a 404, as an endpoint an application does not
+///   expose is anywhere.
+/// - **The application's role floor**, not the admin's: the endpoints are
+///   declared admin-only for the admin host, and here the floor is the
+///   application's `min_role`. Signing in and out keep their own requirement.
+/// - **The handler is told the application** ([`HandlerCtx::analytics_app`]),
+///   loaded here from the stored record and the workspaces as they are now, so
+///   what it allows is the server's answer and never the client's.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_analytics_api(
+    state: &AppState,
+    app: &MountedApp,
+    api_method: ApiMethod,
+    uri: &Uri,
+    headers: &axum::http::HeaderMap,
+    jar: CookieJar,
+    anonymous: bool,
+    body: &Bytes,
+) -> Response {
+    use crate::analytics_app::{APP_AUTH_ENDPOINTS, APP_ENDPOINTS};
+    let path = uri.path();
+    let Ok(matched) = state.routes.at(path) else {
+        return json_error(StatusCode::NOT_FOUND, "not found");
+    };
+    let Some(ep) = matched
+        .value
+        .iter()
+        .find(|e| e.method == api_method && APP_ENDPOINTS.contains(&e.name.as_str()))
+    else {
+        return json_error(StatusCode::NOT_FOUND, "not found");
+    };
+    let path_params: HashMap<String, String> = matched
+        .params
+        .iter()
+        .map(|(k, v)| (k.to_owned(), path_decode(v)))
+        .collect();
+    let Some(catalog) = state.apps.catalog() else {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "no catalog");
+    };
+    // A request the CSRF middleware let through as anonymous is nobody's.
+    let session_token = jar
+        .get(SESSION_COOKIE)
+        .filter(|_| !anonymous)
+        .map(|c| c.value().to_owned());
+    let user = match &session_token {
+        Some(token) => match state.sessions.user_for(token).await {
+            Ok(u) => u,
+            Err(e) => {
+                log_failure("session lookup failed", &e);
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "session lookup failed");
+            }
+        },
+        None => None,
+    };
+    let scope = match sc_analytics::app::AppScope::load(
+        catalog,
+        app.app.id.0,
+        &app.app.name,
+        &app.app.framework.config,
+        app.app.tables.iter().map(|t| t.0.clone()),
+    )
+    .await
+    {
+        Ok(scope) => scope,
+        Err(e) => {
+            return error_out(
+                state,
+                &e,
+                Audience::App,
+                api_method.as_str(),
+                path,
+                user.as_ref(),
+            )
+            .await;
+        }
+    };
+    let requirement = if APP_AUTH_ENDPOINTS.contains(&ep.name.as_str()) {
+        ep.auth.clone()
+    } else {
+        AuthRequirement::MinRole(scope.config.min_role)
+    };
+    if let Some(rejection) = enforce_auth(&requirement, user.as_ref()) {
+        return rejection;
+    }
+    let parsed_body = if body.is_empty() {
+        Value::Null
+    } else {
+        match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return json_error(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}"));
+            }
+        }
+    };
+    let handler = match &ep.handler {
+        HandlerRef::Named(name) => match state.handlers.get(name) {
+            Some(h) => h.clone(),
+            None => return json_error(StatusCode::NOT_IMPLEMENTED, "handler not implemented"),
+        },
+        HandlerRef::GuestCode { .. } | HandlerRef::Custom(_) => {
+            return json_error(StatusCode::NOT_IMPLEMENTED, "custom handlers not yet supported");
+        }
+    };
+    // In the application's languages, as its pages are (§16.1).
+    let settings = crate::i18n::app_settings(&app.app, &sc_i18n::active());
+    let negotiated = crate::i18n::negotiate(&settings, uri, headers, &jar, user.as_ref());
+    let locale = crate::i18n::locale_or_default(&settings, negotiated.as_ref());
+    let caller = user.clone();
+    let ctx = HandlerCtx {
+        path_params,
+        query: parse_query(uri),
+        body: parsed_body,
+        user,
+        locale,
+        raw_body: None,
+        analytics_app: Some(Arc::new(scope)),
+    };
+    let out = match handler(ctx).await {
+        Ok(resp) => {
+            apply_response(state, jar, session_token, is_native_client(headers), resp).await
+        }
+        Err(e) => {
+            error_out(
+                state,
+                &e,
+                Audience::App,
+                ep.method.as_str(),
+                path,
+                caller.as_ref(),
+            )
+            .await
+        }
+    };
+    crate::i18n::with_language(out, negotiated.as_ref())
 }
 
 /// One of an application's static directories: the bytes of a file under
@@ -1976,6 +2135,7 @@ async fn handle_api(
     let caller = user.clone();
     let ctx = HandlerCtx {
         raw_body: None,
+        analytics_app: None,
         path_params,
         query: parse_query(uri),
         body: parsed_body,

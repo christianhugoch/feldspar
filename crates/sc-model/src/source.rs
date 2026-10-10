@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use sc_catalog::Catalog;
-use sc_dataset::{Grain, Options, Restriction, Schema, compile, count, read_rows};
+use sc_dataset::{Caller, Grain, Options, Restriction, Schema, compile, count, read_rows};
 use sc_error::{Context, Error, Result};
 use sc_query::{Expr, Value};
 
@@ -204,11 +204,16 @@ impl DatasetSource for CompiledSource {
             }
             None => None,
         };
+        // A model reads its dataset on the server's authority: fitting is the
+        // admin's to start, and a prediction answers for the model, not for
+        // whoever's row it is (analytics TODO A9.1 narrows the Analytics UI's
+        // reads, not a model's).
+        let caller = Caller::admin();
         // The count first, and on purpose: a dataset is held in memory, so
         // the refusal costs one `COUNT(*)` rather than a partial read. A
         // limited read is bounded by construction and skips it.
         if how.limit.is_none() {
-            let n = count(&self.catalog, stage, restriction.as_ref())
+            let n = count(&self.catalog, &caller, stage, restriction.as_ref())
                 .await
                 .with_context(|| format!("counting the rows of the dataset `{}`", ds.name))?;
             if how.cap < n {
@@ -220,7 +225,7 @@ impl DatasetSource for CompiledSource {
             }
         }
         let limit = how.limit.map(|_| how.ceiling());
-        let rows = read_rows(&self.catalog, stage, restriction.as_ref(), limit)
+        let rows = read_rows(&self.catalog, &caller, stage, restriction.as_ref(), limit)
             .await
             .with_context(|| format!("reading the dataset `{}`", ds.name))?;
         let n = rows.rows.len();

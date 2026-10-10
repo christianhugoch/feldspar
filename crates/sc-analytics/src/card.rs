@@ -25,19 +25,18 @@
 //! `CASE` gives each row its period's number, and one grouped query (or, for
 //! a median, the plot renderer's percentiles) answers every period at once.
 
-use std::sync::Arc;
-
 use chrono::{Datelike, Duration, Months, NaiveDate, Utc};
 use sc_catalog::Catalog;
 use sc_dataset::{
-    ColType, DatasetDef, DatasetId, Op, Operation, Options, Schema, StageShape, compile,
+    Caller, ColType, DatasetDef, DatasetId, Op, Operation, Options, Reader, Schema, StageShape,
+    compile,
 };
 use sc_error::{Error, Result};
 use sc_query::{BinOp, CaseArm, Expr, Projection, Select, Source, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::crossfilter::{Scope, filter_failure};
-use crate::plot::render::{DATA, POINTS, PlotRows, Renderer, agg, cast, f64_of, g, v};
+use crate::plot::render::{DATA, POINTS, PlotRows, Renderer, RowsDb, agg, cast, f64_of, g, v};
 use crate::plot::{DataRef, Layer, Mark, PlotSpec, Stat};
 
 /// The most periods a sparkline may span.
@@ -464,10 +463,14 @@ pub struct SparkPoint {
     pub value: Option<f64>,
 }
 
-/// Work out `card` from its dataset as it is now. Reads as the admin, as
+/// Work out `card` from its dataset as it is now. Reads as `caller`, as
 /// `render_plot` does.
-pub async fn render_card(catalog: &Catalog, card: &StatCard) -> Result<RenderedCard> {
-    render_card_in(catalog, card, &Scope::none()).await
+pub async fn render_card(
+    catalog: &Catalog,
+    caller: &Caller,
+    card: &StatCard,
+) -> Result<RenderedCard> {
+    render_card_in(catalog, caller, card, &Scope::none()).await
 }
 
 /// [`render_card`] on a dashboard whose conditions apply (A6.4): they narrow
@@ -475,6 +478,7 @@ pub async fn render_card(catalog: &Catalog, card: &StatCard) -> Result<RenderedC
 /// **unfiltered** leaves both out — "34% of all" is a share of every row.
 pub async fn render_card_in(
     catalog: &Catalog,
+    caller: &Caller,
     card: &StatCard,
     scope: &Scope,
 ) -> Result<RenderedCard> {
@@ -491,7 +495,7 @@ pub async fn render_card_in(
         .map(|f| Operation::new("_fd_card_filter", Op::filter(f.clone())))
         .collect();
     filters.extend(scope.operations(card.dataset));
-    let all = match card_rows(catalog, &def, &[]).await? {
+    let all = match card_rows(catalog, caller, &def, &[]).await? {
         Ok(rows) => rows,
         Err(sentence) => return Ok(RenderedCard::refuse(sentence)),
     };
@@ -505,7 +509,7 @@ pub async fn render_card_in(
     let filtered = if filters.is_empty() {
         None
     } else {
-        match card_rows(catalog, &def, &filters).await? {
+        match card_rows(catalog, caller, &def, &filters).await? {
             Ok(rows) => Some(rows),
             Err(sentence) => {
                 let mut def = def.clone();
@@ -532,6 +536,7 @@ pub async fn render_card_in(
 /// saying why they do not read.
 async fn card_rows(
     catalog: &Catalog,
+    caller: &Caller,
     def: &DatasetDef,
     extra: &[Operation],
 ) -> Result<std::result::Result<PlotRows, String>> {
@@ -544,10 +549,11 @@ async fn card_rows(
         Ok(stage) => stage,
         Err(e) => return Ok(Err(e)),
     };
+    let reader = Reader::new(catalog, caller)?;
     Ok(stage.unordered_query().map(|query| PlotRows {
         query,
         shape: stage.shape(),
-        db: Arc::clone(catalog.primary()),
+        db: RowsDb::Primary(reader),
     }))
 }
 
@@ -779,11 +785,7 @@ impl Card<'_> {
     }
 
     async fn run(&self, rows: &PlotRows, select: Select) -> Result<Vec<sc_db::Row>> {
-        rows.db
-            .query(&sc_query::Statement::from(select))
-            .await?
-            .try_collect()
-            .await
+        rows.db.query(select).await
     }
 }
 

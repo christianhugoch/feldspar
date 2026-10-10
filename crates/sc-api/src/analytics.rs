@@ -3,9 +3,13 @@
 //! layers, the Map workspace's attribute table, selection and toolbox, a
 //! model's outputs and workspaces.
 //!
-//! Admin-only in this milestone, like everything else under `/api`: A9 is
-//! where a restricted application's users reach a subset of them under their
-//! own authority.
+//! Admin-only on the admin host, like everything else under `/api`. An
+//! **Analytics application** (A9.3) reaches a subset of them on its own
+//! subdomain, under its users' own authority: the router dispatches those it
+//! lists (`sc_server`'s `analytics_app::APP_ENDPOINTS`) with the application's
+//! role floor in place of the admin's, and every handler narrows what it
+//! answers to what the application allows (A9.4) and reads as the caller
+//! (A9.1).
 //!
 //! **A dataset is sent whole to be read.** The editor previews an operation
 //! before it is saved — the spreadsheet shows the stage after the operation
@@ -74,6 +78,22 @@ pub(crate) fn register(set: &mut EndpointSet) {
             Method::Delete,
             api().lit("datasets").param("id", ValueType::Uuid),
         )
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Share a dataset with a role, or with nobody but its owner (`null`)
+    // (A9.1). Its owner's and the admin's to say.
+    set.register(
+        Endpoint::new(
+            "shareDataset",
+            Method::Put,
+            api()
+                .lit("datasets")
+                .param("id", ValueType::Uuid)
+                .lit("share"),
+        )
+        .input(share_input_schema())
+        .output(dataset_detail_schema())
         .auth(AuthRequirement::admin()),
     );
 
@@ -787,6 +807,27 @@ pub(crate) fn register(set: &mut EndpointSet) {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- the shell -------------------------------------------------------------
+
+    // What the Analytics UI's shell is: on the admin host the unrestricted UI
+    // (`application` is null); on an Analytics application's subdomain that
+    // application — its name, its mode, what it allows and, in fixed mode, the
+    // workspaces it shows (A9.3). And the roles, for sharing.
+    set.register(
+        Endpoint::new("analyticsShell", Method::Get, api().lit("analytics/shell"))
+            .output(TypeSchema::struct_of([
+                StructField::new("application", TypeSchema::optional(TypeSchema::json())),
+                StructField::new(
+                    "roles",
+                    TypeSchema::array(TypeSchema::struct_of([
+                        StructField::new("role", TypeSchema::int()),
+                        StructField::new("name", TypeSchema::text()),
+                    ])),
+                ),
+            ]))
+            .auth(AuthRequirement::admin()),
+    );
+
     // --- workspaces ----------------------------------------------------------
 
     // Every kind, with whether it is here yet and, when not, the milestone
@@ -848,6 +889,21 @@ pub(crate) fn register(set: &mut EndpointSet) {
         .auth(AuthRequirement::admin()),
     );
 
+    // Share a workspace with a role, or with nobody but its owner (A9.1).
+    set.register(
+        Endpoint::new(
+            "shareWorkspace",
+            Method::Put,
+            api()
+                .lit("workspaces")
+                .param("id", ValueType::Uuid)
+                .lit("share"),
+        )
+        .input(share_input_schema())
+        .output(workspace_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
     set.register(
         Endpoint::new(
             "saveWorkspaceState",
@@ -890,7 +946,20 @@ fn dataset_summary_schema() -> TypeSchema {
         // The first thing that stops it reading, as a sentence.
         StructField::new("error", TypeSchema::optional(TypeSchema::text())),
         StructField::new("grain", TypeSchema::optional(TypeSchema::json())),
+        // The least privileged role it is shared with; null for nobody but its
+        // owner (A9.1).
+        StructField::new("share_role", TypeSchema::optional(TypeSchema::int())),
+        // Whether the caller may edit, share and delete it.
+        StructField::new("may_change", TypeSchema::bool()),
     ])
+}
+
+/// What sharing sends: a role, or null for nobody but the owner.
+fn share_input_schema() -> TypeSchema {
+    TypeSchema::struct_of([StructField::new(
+        "share_role",
+        TypeSchema::optional(TypeSchema::int()),
+    )])
 }
 
 /// A dataset's definition and its compile report.
@@ -999,5 +1068,11 @@ fn workspace_schema() -> TypeSchema {
         StructField::new("state", TypeSchema::json()),
         StructField::new("created_by", TypeSchema::optional(TypeSchema::uuid())),
         StructField::new("updated_at", TypeSchema::timestamp()),
+        // The least privileged role it is shared with (A9.1).
+        StructField::new("share_role", TypeSchema::optional(TypeSchema::int())),
+        // The application it belongs to; null for the unrestricted UI's (A9.3).
+        StructField::new("application", TypeSchema::optional(TypeSchema::uuid())),
+        // Whether the caller may rename, share, save and delete it.
+        StructField::new("may_change", TypeSchema::bool()),
     ])
 }

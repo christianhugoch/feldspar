@@ -36,7 +36,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use sc_catalog::Catalog;
-use sc_dataset::DatasetId;
+use sc_dataset::{Caller, DatasetId};
 use sc_error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
@@ -530,6 +530,17 @@ fn state_datasets(kind: WorkspaceKind, state: &Json) -> BTreeMap<DatasetId, usiz
     }
 }
 
+/// The datasets a workspace's state reads: its panels', and those it keeps
+/// outside a panel (an explorer's chosen dataset, a map's layers). What an
+/// Analytics application in fixed mode lets its users read (A9.4).
+pub fn workspace_datasets(ws: &Workspace) -> BTreeSet<DatasetId> {
+    let mut out: BTreeSet<DatasetId> = state_datasets(ws.kind, &ws.state).into_keys().collect();
+    for panel in panels_in_state(ws.kind, &ws.state) {
+        out.extend(panel.datasets());
+    }
+    out
+}
+
 // --- the usage index -------------------------------------------------------------
 
 /// A workspace that uses a dataset or a fit.
@@ -663,8 +674,8 @@ pub struct RenderedPanel {
 }
 
 /// The foreign key columns of the rows `data` names.
-async fn categorical(catalog: &Catalog, data: &DataRef) -> Result<Vec<String>> {
-    Ok(match plot_rows(catalog, data).await? {
+async fn categorical(catalog: &Catalog, caller: &Caller, data: &DataRef) -> Result<Vec<String>> {
+    Ok(match plot_rows(catalog, caller, data).await? {
         Ok(rows) => rows
             .shape
             .columns
@@ -698,10 +709,15 @@ pub async fn missing_reference(catalog: &Catalog, panel: &Panel) -> Result<Optio
     Ok(None)
 }
 
-/// Draw `panel` from its datasets and fits as they are now. A panel whose
-/// dataset or fit is gone answers the sentence saying so in `error`.
-pub async fn render_panel(catalog: &Catalog, panel: &Panel) -> Result<RenderedPanel> {
-    render_panel_in(catalog, panel, &[]).await
+/// Draw `panel` from its datasets and fits as they are now, read as `caller`
+/// (A9.1). A panel whose dataset or fit is gone answers the sentence saying
+/// so in `error`.
+pub async fn render_panel(
+    catalog: &Catalog,
+    caller: &Caller,
+    panel: &Panel,
+) -> Result<RenderedPanel> {
+    render_panel_in(catalog, caller, panel, &[]).await
 }
 
 /// [`render_panel`] on a dashboard (A6.3–A6.4): over the rows `conditions`
@@ -710,6 +726,7 @@ pub async fn render_panel(catalog: &Catalog, panel: &Panel) -> Result<RenderedPa
 /// `filters`.
 pub async fn render_panel_in(
     catalog: &Catalog,
+    caller: &Caller,
     panel: &Panel,
     conditions: &[Condition],
 ) -> Result<RenderedPanel> {
@@ -726,21 +743,27 @@ pub async fn render_panel_in(
     out.filters = scope.applied.clone();
     match &panel.body {
         PanelBody::Plot { spec } => {
-            out.plot = Some(render_plot_in(catalog, spec, &scope).await?);
-            out.categorical = categorical(catalog, &spec.data).await?;
+            out.plot = Some(render_plot_in(catalog, caller, spec, &scope).await?);
+            out.categorical = categorical(catalog, caller, &spec.data).await?;
         }
         PanelBody::SummaryTable { spec } => {
-            out.table = Some(render_table_in(catalog, spec, &scope).await?);
+            out.table = Some(render_table_in(catalog, caller, spec, &scope).await?);
         }
         PanelBody::TestResult { tests, plot } => {
-            out.tests = Some(run_tests_in(catalog, tests, &scope).await?);
+            out.tests = Some(run_tests_in(catalog, caller, tests, &scope).await?);
             if let Some(spec) = plot {
-                out.plot = Some(render_plot_in(catalog, spec, &scope).await?);
-                out.categorical = categorical(catalog, &spec.data).await?;
+                out.plot = Some(render_plot_in(catalog, caller, spec, &scope).await?);
+                out.categorical = categorical(catalog, caller, &spec.data).await?;
             }
         }
         // The browser renders the Markdown.
         PanelBody::Text { .. } => {}
+        // A model's outputs are the admin's, as a fit's output data is.
+        PanelBody::FitTable { .. } if !caller.is_admin() => {
+            out.error = Some(
+                "A model fit's outputs are shown only in the unrestricted Analytics UI.".to_owned(),
+            );
+        }
         PanelBody::FitTable { fit, output } => {
             let instance =
                 sc_model::require_model_instance(catalog, sc_model::InstanceId(*fit)).await?;
@@ -756,9 +779,9 @@ pub async fn render_panel_in(
                 }
             }
         }
-        PanelBody::Map { spec } => out.map = Some(render_map_in(catalog, spec, &scope).await?),
+        PanelBody::Map { spec } => out.map = Some(render_map_in(catalog, caller, spec, &scope).await?),
         PanelBody::StatCard(card) => {
-            out.card = Some(render_card_in(catalog, card, &scope).await?);
+            out.card = Some(render_card_in(catalog, caller, card, &scope).await?);
         }
         PanelBody::Custom { renderer, .. } => {
             out.error = Some(format!(

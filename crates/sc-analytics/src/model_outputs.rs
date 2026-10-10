@@ -160,7 +160,10 @@ async fn render_output(
             match output_spec(instance.id, data, spec) {
                 Ok(spec) => {
                     if !decl.optional || include.contains(&decl.name) {
-                        view.plot = Some(render_plot(catalog, &spec).await?);
+                        // A model's outputs are the admin's (A9.1): the model
+                        // editor is only in the unrestricted Analytics UI.
+                        let admin = sc_dataset::Caller::admin();
+                        view.plot = Some(render_plot(catalog, &admin, &spec).await?);
                     }
                     view.spec = Some(spec);
                 }

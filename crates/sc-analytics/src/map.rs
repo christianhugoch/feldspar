@@ -44,7 +44,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use sc_catalog::Catalog;
-use sc_dataset::{ColType, DatasetId, Options, Schema, StageColumn, StageShape, compile};
+use sc_dataset::{Caller, ColType, DatasetId, Options, Schema, StageColumn, StageShape, compile};
 use sc_error::{Error, Result};
 
 use crate::classify::{Classification, MAX_CLASSES, MIN_CLASSES, breaks};
@@ -812,9 +812,10 @@ pub struct RenderedMap {
     pub layers: Vec<RenderedLayer>,
 }
 
-/// Each layer's features and the domains of its encoded columns.
-pub async fn render_map(catalog: &Catalog, spec: &MapSpec) -> Result<RenderedMap> {
-    render_map_in(catalog, spec, &Scope::none()).await
+/// Each layer's features and the domains of its encoded columns, read as
+/// `caller` (A9.1).
+pub async fn render_map(catalog: &Catalog, caller: &Caller, spec: &MapSpec) -> Result<RenderedMap> {
+    render_map_in(catalog, caller, spec, &Scope::none()).await
 }
 
 /// [`render_map`] on a dashboard (A6.4): each layer shows the rows its own
@@ -822,6 +823,7 @@ pub async fn render_map(catalog: &Catalog, spec: &MapSpec) -> Result<RenderedMap
 /// filter, so its tiles, fetched by URL, are filtered too.
 pub async fn render_map_in(
     catalog: &Catalog,
+    caller: &Caller,
     spec: &MapSpec,
     scope: &Scope,
 ) -> Result<RenderedMap> {
@@ -883,7 +885,7 @@ pub async fn render_map_in(
                 spreads.push((channel, f.field.clone(), spread));
             }
         }
-        let data = layer_data(catalog, &request, Limits::default()).await?;
+        let data = layer_data(catalog, caller, &request, Limits::default()).await?;
         if matches!(data, LayerData::Refused { .. }) {
             layers.push(RenderedLayer {
                 layer: request,
@@ -895,7 +897,7 @@ pub async fn render_map_in(
         }
         let classes = match (&layer.style, &layer.encoding.color) {
             (Style::Graduated { method, classes }, Some(f)) => {
-                match layer_sketch(catalog, &request, &f.field).await? {
+                match layer_sketch(catalog, caller, &request, &f.field).await? {
                     Ok(values) => Some(breaks(&values, *classes, *method)),
                     Err(error) => {
                         layers.push(refuse(error));
@@ -909,7 +911,7 @@ pub async fn render_map_in(
             .iter()
             .map(|(_, field, spread)| (field.clone(), *spread))
             .collect();
-        let by_column = match layer_domains(catalog, &request, &columns).await? {
+        let by_column = match layer_domains(catalog, caller, &request, &columns).await? {
             Ok(d) => d,
             Err(error) => {
                 layers.push(refuse(error));

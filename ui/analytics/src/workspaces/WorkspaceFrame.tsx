@@ -6,6 +6,10 @@
 // (`StateSaver`), and leaving the workspace — another route, a closed tab —
 // saves what is pending. So "reopen the workspace and it is as it was" is the
 // frame's promise, and no kind has to remember to keep it.
+//
+// A workspace the person may not change (A9.4) — a fixed application's
+// dashboard, one shared with their role — is used the same way, and nothing
+// is saved: what they do on it is theirs until they leave.
 
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Alert from "react-bootstrap/Alert";
@@ -15,6 +19,7 @@ import { api, errorMessage } from "../api";
 import type { GetWorkspaceResponse } from "../client";
 import { T, useT } from "../i18n";
 import { usePane } from "../panes";
+import { useShell } from "../shell";
 import { StateSaver, type SaveStatus } from "./saver";
 
 /** The Data explorer, loaded when a workspace of its kind opens: it brings
@@ -42,11 +47,15 @@ export type WorkspaceProps = {
   setState: (update: (state: WorkspaceState) => WorkspaceState) => void;
   /** The workspace's name: a printed report's title. */
   name?: string;
+  /** Whether the person may not change it (A9.4): a kind that can, hides
+   * what would change it. Nothing is saved either way. */
+  readOnly?: boolean;
 };
 
 export function WorkspaceFrame({ id }: { id: string }) {
   const { t } = useT();
   const pane = usePane();
+  const { application } = useShell();
   const [workspace, setWorkspace] = useState<GetWorkspaceResponse | null>(null);
   const [state, setLocal] = useState<WorkspaceState>({});
   const [error, setError] = useState<string | null>(null);
@@ -91,15 +100,18 @@ export function WorkspaceFrame({ id }: { id: string }) {
 
   const latest = useRef(state);
   latest.current = state;
+  const readOnly = workspace?.may_change === false;
   const setState = useCallback(
     (update: (s: WorkspaceState) => WorkspaceState) => {
       const next = update(latest.current);
       latest.current = next;
       setLocal(next);
-      saver.update(next);
+      if (!readOnly) saver.update(next);
     },
-    [saver],
+    [saver, readOnly],
   );
+  // A fixed application showing one workspace has no list to go back to.
+  const alone = application?.mode === "fixed" && application.workspaces.length === 1;
 
   if (error) {
     return (
@@ -123,18 +135,27 @@ export function WorkspaceFrame({ id }: { id: string }) {
   return (
     <div className="d-flex flex-column h-100">
       <div className="d-flex align-items-center gap-3 px-3 py-2 border-bottom">
-        <a href={pane.href({ name: "home" })} className="text-secondary">
-          ← <T text="Workspaces" />
-        </a>
+        {!alone && (
+          <a href={pane.href({ name: "home" })} className="text-secondary">
+            ← <T text="Workspaces" />
+          </a>
+        )}
         <strong>{workspace.name}</strong>
         <span className="text-secondary small ms-auto" aria-live="polite">
-          {status === "saved" && t("Saved")}
-          {(status === "pending" || status === "saving") && t("Saving…")}
-          {status === "failed" && t("Not saved — will retry on the next change")}
+          {readOnly && !alone && t("Shared with you: your changes are not saved")}
+          {!readOnly && status === "saved" && t("Saved")}
+          {!readOnly && (status === "pending" || status === "saving") && t("Saving…")}
+          {!readOnly && status === "failed" && t("Not saved — will retry on the next change")}
         </span>
       </div>
       <div className="flex-grow-1" style={{ minHeight: 0 }}>
-        <KindScreen kind={workspace.kind} name={workspace.name} state={state} setState={setState} />
+        <KindScreen
+          kind={workspace.kind}
+          name={workspace.name}
+          state={state}
+          setState={setState}
+          readOnly={readOnly}
+        />
       </div>
     </div>
   );

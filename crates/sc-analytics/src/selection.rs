@@ -32,8 +32,9 @@ use serde_json::{Value as Json, json};
 
 use sc_catalog::Catalog;
 use sc_dataset::{
+    Caller,
     Base, ColType, DatasetDef, Grain, Op, OpStatus, Operation, Options, Schema, SortKey, SortOp,
-    StageColumn, compile, read_rows, value_json,
+    StageColumn, compile, read_rows_with, value_json,
 };
 use sc_error::{Error, Result};
 use sc_query::Value;
@@ -75,11 +76,12 @@ pub struct LayerRows {
 /// its feature id.
 pub async fn layer_rows(
     catalog: &Catalog,
+    caller: &Caller,
     req: &LayerRequest,
     sort: Option<&SortKey>,
     limit: u64,
 ) -> Result<std::result::Result<LayerRows, String>> {
-    let layer = match prepare_with(catalog, req, Vec::new()).await? {
+    let layer = match prepare_with(catalog, caller, req, Vec::new()).await? {
         Ok(layer) => layer,
         Err(e) => return Ok(Err(e)),
     };
@@ -97,7 +99,7 @@ pub async fn layer_rows(
                     keys: vec![key.clone()],
                 }),
             );
-            match prepare_with(catalog, req, vec![(op, "the table's order")]).await? {
+            match prepare_with(catalog, caller, req, vec![(op, "the table's order")]).await? {
                 Ok(layer) => layer,
                 Err(e) => return Ok(Err(e)),
             }
@@ -105,14 +107,14 @@ pub async fn layer_rows(
         _ => layer,
     };
     let sorted = sort.is_none() || layer.keyed;
-    let read = read_rows(
-        catalog,
+    let read = read_rows_with(
+        &layer.reader,
         &layer.stage,
         None,
         Some(limit.clamp(1, TABLE_ROWS)),
     )
     .await?;
-    let total = sc_dataset::count(catalog, &layer.stage, None).await?;
+    let total = sc_dataset::count_with(&layer.reader, &layer.stage, None).await?;
     let shown: Vec<usize> = read
         .columns
         .iter()
@@ -234,6 +236,7 @@ pub(crate) fn any_of(terms: &[String]) -> String {
 /// The condition a selection is made by.
 async fn condition_of(
     catalog: &Catalog,
+    caller: &Caller,
     req: &LayerRequest,
     by: &SelectBy,
 ) -> Result<std::result::Result<String, String>> {
@@ -300,7 +303,7 @@ async fn condition_of(
                     ids.len()
                 )));
             }
-            let shapes = match geometries_of(catalog, layer, ids).await? {
+            let shapes = match geometries_of(catalog, caller, layer, ids).await? {
                 Ok(shapes) => shapes,
                 Err(e) => return Ok(Err(format!("the other layer: {e}"))),
             };
@@ -326,14 +329,15 @@ async fn condition_of(
 /// The geometries, as GeoJSON, of the features of `req` with these ids.
 async fn geometries_of(
     catalog: &Catalog,
+    caller: &Caller,
     req: &LayerRequest,
     ids: &[Json],
 ) -> Result<std::result::Result<Vec<Json>, String>> {
-    let layer = match prepare_with(catalog, req, Vec::new()).await? {
+    let layer = match prepare_with(catalog, caller, req, Vec::new()).await? {
         Ok(layer) => layer,
         Err(e) => return Ok(Err(e)),
     };
-    let read = read_rows(catalog, &layer.stage, None, Some(SELECT_ROWS)).await?;
+    let read = read_rows_with(&layer.reader, &layer.stage, None, Some(SELECT_ROWS)).await?;
     let at = read.columns.iter().position(|c| c.name == layer.geometry);
     let mut out = Vec::new();
     for i in 0..read.rows.len() {
@@ -355,14 +359,15 @@ async fn geometries_of(
 /// by; or the sentence saying why it cannot.
 pub async fn select_features(
     catalog: &Catalog,
+    caller: &Caller,
     req: &LayerRequest,
     by: &SelectBy,
 ) -> Result<std::result::Result<Selected, String>> {
-    let condition = match condition_of(catalog, req, by).await? {
+    let condition = match condition_of(catalog, caller, req, by).await? {
         Ok(c) => c,
         Err(e) => return Ok(Err(e)),
     };
-    let found = ids_where(catalog, req, &condition).await?;
+    let found = ids_where(catalog, caller, req, &condition).await?;
     Ok(found.map(|(ids, count)| Selected {
         truncated: count > ids.len() as u64,
         ids,
@@ -374,10 +379,11 @@ pub async fn select_features(
 /// The ids of the features `condition` holds for, and how many there are.
 async fn ids_where(
     catalog: &Catalog,
+    caller: &Caller,
     req: &LayerRequest,
     condition: &str,
 ) -> Result<std::result::Result<(Vec<Json>, u64), String>> {
-    let probe = match prepare_with(catalog, req, Vec::new()).await? {
+    let probe = match prepare_with(catalog, caller, req, Vec::new()).await? {
         Ok(layer) => layer,
         Err(e) => return Ok(Err(e)),
     };
@@ -385,12 +391,12 @@ async fn ids_where(
     if probe.keyed {
         // Keys survive a Filter: read the rows it keeps.
         let op = Operation::new(format!("{EXTRA_OP}-select"), Op::filter(condition));
-        let layer = match prepare_with(catalog, req, vec![(op, what)]).await? {
+        let layer = match prepare_with(catalog, caller, req, vec![(op, what)]).await? {
             Ok(layer) => layer,
             Err(e) => return Ok(Err(e)),
         };
-        let read = read_rows(catalog, &layer.stage, None, Some(SELECT_ROWS)).await?;
-        let count = sc_dataset::count(catalog, &layer.stage, None).await?;
+        let read = read_rows_with(&layer.reader, &layer.stage, None, Some(SELECT_ROWS)).await?;
+        let count = sc_dataset::count_with(&layer.reader, &layer.stage, None).await?;
         let ids = (0..read.rows.len())
             .map(|i| feature_id(&layer, &read.keys, i))
             .collect();
@@ -411,11 +417,11 @@ async fn ids_where(
         format!("{EXTRA_OP}-select"),
         Op::calculated(flag.clone(), condition),
     );
-    let layer = match prepare_with(catalog, req, vec![(op, what)]).await? {
+    let layer = match prepare_with(catalog, caller, req, vec![(op, what)]).await? {
         Ok(layer) => layer,
         Err(e) => return Ok(Err(e)),
     };
-    let read = read_rows(catalog, &layer.stage, None, Some(SELECT_ROWS)).await?;
+    let read = read_rows_with(&layer.reader, &layer.stage, None, Some(SELECT_ROWS)).await?;
     let at = read.columns.iter().position(|c| c.name == flag);
     let ids: Vec<Json> = (0..read.rows.len())
         .filter(|i| {
@@ -447,6 +453,7 @@ fn literal(v: &Value) -> Option<String> {
 /// aggregated dataset. A sentence when the rows cannot be told apart.
 async fn identity_condition(
     catalog: &Catalog,
+    caller: &Caller,
     req: &LayerRequest,
     ids: &[Json],
 ) -> Result<std::result::Result<String, String>> {
@@ -460,7 +467,7 @@ async fn identity_condition(
             ids.len()
         )));
     }
-    let layer = match prepare_with(catalog, req, Vec::new()).await? {
+    let layer = match prepare_with(catalog, caller, req, Vec::new()).await? {
         Ok(layer) => layer,
         Err(e) => return Ok(Err(e)),
     };
@@ -494,7 +501,7 @@ async fn identity_condition(
             )));
         }
     };
-    let read = read_rows(catalog, &layer.stage, None, Some(SELECT_ROWS)).await?;
+    let read = read_rows_with(&layer.reader, &layer.stage, None, Some(SELECT_ROWS)).await?;
     let index: Vec<Option<usize>> = keys
         .iter()
         .map(|k| read.columns.iter().position(|c| &c.name == k))
@@ -533,6 +540,7 @@ async fn identity_condition(
 /// by their rows' identity. Stored, and answered.
 pub async fn save_selection(
     catalog: &Catalog,
+    caller: &Caller,
     req: &LayerRequest,
     name: &str,
     ids: &[Json],
@@ -540,7 +548,7 @@ pub async fn save_selection(
 ) -> Result<DatasetDef> {
     let formula = match condition.filter(|c| !c.trim().is_empty()) {
         Some(c) => c.trim().to_owned(),
-        None => identity_condition(catalog, req, ids)
+        None => identity_condition(catalog, caller, req, ids)
             .await?
             .map_err(Error::invalid)?,
     };

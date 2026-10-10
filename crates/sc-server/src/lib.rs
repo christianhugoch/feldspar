@@ -22,6 +22,7 @@
 mod admin_host;
 mod agents;
 mod analytics;
+mod analytics_app;
 mod apps;
 mod backup;
 mod browser;

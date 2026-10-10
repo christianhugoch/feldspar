@@ -3,6 +3,11 @@
 // one made on a base — a table, or another dataset — or got from the public
 // datasets ("Get datasets", `PublicDatasets.tsx`). The list is global, because
 // models and panels share the datasets; one opens in the Dataset editor.
+//
+// In a self-serve application (A9.3) the server lists the datasets its user
+// owns or that are shared with them, on the application's tables. Its owner
+// shares, edits and deletes one; making one needs the application's Dataset
+// editor; models and the public datasets are the unrestricted UI's.
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Alert from "react-bootstrap/Alert";
@@ -18,6 +23,8 @@ import type { DatasetUsageResponse, ListDatasetsResponse, ListDatasetTablesRespo
 import { T, useT } from "../i18n";
 import { useAnnounce, useChanges, usePane } from "../panes";
 import { workspaceKindName } from "../labels";
+import { ShareSelect } from "../share";
+import { useShell } from "../shell";
 import { describeGrain, type Base, type Grain } from "./ops";
 import { PublicDatasetsModal } from "./PublicDatasets";
 
@@ -36,6 +43,8 @@ export function describeBase(base: unknown, datasets: DatasetItem[]): string {
 export function DatasetList({ onOpen }: { onOpen: (id: string) => void }) {
   const { t } = useT();
   const pane = usePane();
+  const { application } = useShell();
+  const mayMake = !application || application.datasetEditor;
   const changed = useAnnounce();
   const [datasets, setDatasets] = useState<DatasetItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -87,7 +96,7 @@ export function DatasetList({ onOpen }: { onOpen: (id: string) => void }) {
           {error}
         </Alert>
       )}
-      <NewDatasetForm datasets={datasets ?? []} onCreated={onOpen} />
+      {mayMake && <NewDatasetForm datasets={datasets ?? []} onCreated={onOpen} />}
       {datasets && datasets.length === 0 && (
         <p className="text-secondary">
           <T text="No datasets yet. Make one above, on a table." />
@@ -133,23 +142,49 @@ export function DatasetList({ onOpen }: { onOpen: (id: string) => void }) {
                   )}
                 </td>
                 <td className="text-end text-nowrap">
+                  {d.may_change && (
+                    <>
+                      <ShareSelect
+                        value={d.share_role}
+                        label={d.name}
+                        onShare={async (role) => {
+                          try {
+                            await api.shareDataset(d.id, { share_role: role });
+                            await load();
+                          } catch (err) {
+                            setError(errorMessage(err, t("Could not share the dataset.")));
+                          }
+                        }}
+                      />{" "}
+                    </>
+                  )}
                   <Button size="sm" variant="outline-primary" onClick={() => onOpen(d.id)}>
-                    <T text="Edit" />
+                    {d.may_change ? <T text="Edit" /> : <T text="Open" />}
                   </Button>{" "}
-                  <Button size="sm" variant="outline-secondary" onClick={() => void clone(d)}>
-                    <T text="Clone" />
-                  </Button>{" "}
-                  <Button
-                    size="sm"
-                    variant="outline-secondary"
-                    title={t("A new model on this dataset")}
-                    onClick={() => pane.go({ name: "newModel", dataset: d.id })}
-                  >
-                    <T text="New model" />
-                  </Button>{" "}
-                  <Button size="sm" variant="outline-danger" onClick={() => void askDelete(d)}>
-                    <T text="Delete" />
-                  </Button>
+                  {mayMake && (
+                    <>
+                      <Button size="sm" variant="outline-secondary" onClick={() => void clone(d)}>
+                        <T text="Clone" />
+                      </Button>{" "}
+                    </>
+                  )}
+                  {!application && (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="outline-secondary"
+                        title={t("A new model on this dataset")}
+                        onClick={() => pane.go({ name: "newModel", dataset: d.id })}
+                      >
+                        <T text="New model" />
+                      </Button>{" "}
+                    </>
+                  )}
+                  {d.may_change && (
+                    <Button size="sm" variant="outline-danger" onClick={() => void askDelete(d)}>
+                      <T text="Delete" />
+                    </Button>
+                  )}
                 </td>
               </tr>
             ))}
@@ -245,6 +280,7 @@ export function NewDatasetForm({
   onCreated: (id: string) => void;
 }) {
   const { t } = useT();
+  const { application } = useShell();
   const [tables, setTables] = useState<TableItem[]>([]);
   const [name, setName] = useState("");
   const [base, setBase] = useState(initialTable ? `table:${initialTable}` : "");
@@ -316,9 +352,11 @@ export function NewDatasetForm({
           <Button type="submit" disabled={name.trim() === "" || base === ""}>
             <T text="Create" />
           </Button>
-          <Button variant="outline-primary" onClick={() => setGetting(true)}>
-            <T text="Get datasets" />
-          </Button>
+          {!application && (
+            <Button variant="outline-primary" onClick={() => setGetting(true)}>
+              <T text="Get datasets" />
+            </Button>
+          )}
         </Form>
         <Form.Text muted>
           <T text="The base cannot be changed later: every operation is written against the columns it provides." />

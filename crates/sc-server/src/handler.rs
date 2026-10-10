@@ -72,6 +72,13 @@ pub struct HandlerCtx {
     /// than giving that route its own catalog handle is what keeps one code path
     /// for "write a file", however the bytes arrived.
     pub raw_body: Option<bytes::Bytes>,
+    /// The Analytics application this request came through (analytics TODO
+    /// A9.3), with what it allows; `None` on the admin host, which is the
+    /// unrestricted Analytics UI.
+    ///
+    /// Set by the router alone, from the application the request's host
+    /// names, so a handler asks it rather than anything the client sent.
+    pub analytics_app: Option<Arc<sc_analytics::app::AppScope>>,
 }
 
 impl HandlerCtx {

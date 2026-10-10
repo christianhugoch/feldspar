@@ -33,6 +33,8 @@ mod agent_admin_api;
 mod agent_chat;
 #[path = "analytics_api.rs"]
 mod analytics_api;
+#[path = "analytics_apps.rs"]
+mod analytics_apps;
 #[path = "analytics_done.rs"]
 mod analytics_done;
 #[path = "analytics_plots.rs"]

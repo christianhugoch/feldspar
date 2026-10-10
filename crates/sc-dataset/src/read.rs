@@ -1,10 +1,10 @@
 //! Reading a stage (analytics TODO A1.7): a page of rows, the column types and
 //! the total, in the stage's order.
 //!
-//! **As the caller**, which in this milestone means as the admin: the query is
-//! the compiled dataset run on the primary database, with no ownership formula
-//! or row-level policy in it. A9 is where a restricted user's reads go through
-//! their table permissions.
+//! **As the caller** (A9.1): every statement is run through a [`Reader`], which
+//! narrows each table it reads to the rows the caller may read — their table
+//! permissions and ownership formulas, or the database's own row-level
+//! security. The admin reads everything.
 //!
 //! Paging is stable because the order is total (see
 //! [`compile`](crate::compile)): the sort keys, then the row key, the group keys
@@ -13,9 +13,10 @@
 use sc_catalog::Catalog;
 use sc_db::Row;
 use sc_error::{Error, Result};
-use sc_query::{Statement, Value};
+use sc_query::Value;
 use serde_json::Value as Json;
 
+use crate::access::{Caller, Reader};
 use crate::compile::{Library, Options, Restriction, Stage, compile};
 use crate::def::DatasetDef;
 use crate::shape::{ColType, Grain, Schema, StageColumn};
@@ -58,6 +59,7 @@ pub struct StagePage {
 /// (all of them when `None`), compiling it against the catalog as it is now.
 pub async fn read_stage(
     catalog: &Catalog,
+    caller: &Caller,
     def: &DatasetDef,
     upto: Option<usize>,
     page: Page,
@@ -70,17 +72,23 @@ pub async fn read_stage(
     let stage = compiled
         .stage(upto)
         .map_err(|e| Error::invalid(format!("`{}` does not read here: {e}", def.name)))?;
-    read_page(catalog, stage, page).await
+    read_page(catalog, caller, stage, page).await
 }
 
 /// Read one page of `stage`, and count all of it.
-pub async fn read_page(catalog: &Catalog, stage: &Stage, page: Page) -> Result<StagePage> {
+pub async fn read_page(
+    catalog: &Catalog,
+    caller: &Caller,
+    stage: &Stage,
+    page: Page,
+) -> Result<StagePage> {
+    let reader = Reader::new(catalog, caller)?;
     let limit = page.limit.clamp(1, MAX_PAGE);
     let select = stage
         .rows_query(None, Some((page.offset, limit)), false)
         .map_err(Error::invalid)?;
-    let rows = run(catalog, select.into()).await?;
-    let total = count(catalog, stage, None).await?;
+    let rows = reader.query(select).await?;
+    let total = count_with(&reader, stage, None).await?;
     let shape = stage.shape();
     let mut rows: Vec<Vec<Value>> = rows.into_iter().map(Row::into_values).collect();
     let columns = typed(shape.columns, &mut rows);
@@ -95,11 +103,21 @@ pub async fn read_page(catalog: &Catalog, stage: &Stage, page: Page) -> Result<S
 /// How many rows `stage` has, restricted.
 pub async fn count(
     catalog: &Catalog,
+    caller: &Caller,
+    stage: &Stage,
+    restrict: Option<&Restriction>,
+) -> Result<u64> {
+    count_with(&Reader::new(catalog, caller)?, stage, restrict).await
+}
+
+/// [`count`], through a [`Reader`] the caller already has.
+pub async fn count_with(
+    reader: &Reader,
     stage: &Stage,
     restrict: Option<&Restriction>,
 ) -> Result<u64> {
     let select = stage.count_query(restrict).map_err(Error::invalid)?;
-    let rows = run(catalog, select.into()).await?;
+    let rows = reader.query(select).await?;
     match rows.first().and_then(|r| r.get_index(0)) {
         Some(Value::Int(n)) => Ok(u64::try_from(*n).unwrap_or(0)),
         Some(Value::Decimal(d)) => Ok(d.to_string().parse().unwrap_or(0)),
@@ -114,6 +132,17 @@ pub async fn count(
 /// one. The caller bounds an unlimited read by counting first.
 pub async fn read_rows(
     catalog: &Catalog,
+    caller: &Caller,
+    stage: &Stage,
+    restrict: Option<&Restriction>,
+    limit: Option<u64>,
+) -> Result<Rows> {
+    read_rows_with(&Reader::new(catalog, caller)?, stage, restrict, limit).await
+}
+
+/// [`read_rows`], through a [`Reader`] the caller already has.
+pub async fn read_rows_with(
+    reader: &Reader,
     stage: &Stage,
     restrict: Option<&Restriction>,
     limit: Option<u64>,
@@ -121,7 +150,7 @@ pub async fn read_rows(
     let select = stage
         .rows_query(restrict, limit.map(|l| (0, l)), true)
         .map_err(Error::invalid)?;
-    let rows = run(catalog, select.into()).await?;
+    let rows = reader.query(select).await?;
     let shape = stage.shape();
     let with_key = stage.has_row_key();
     let mut values: Vec<Vec<Value>> = rows.into_iter().map(Row::into_values).collect();
@@ -158,6 +187,7 @@ pub struct Rows {
 /// The distinct values of `column` at `stage`, most frequent first.
 pub async fn column_values(
     catalog: &Catalog,
+    caller: &Caller,
     stage: &Stage,
     column: &str,
     limit: u64,
@@ -165,7 +195,8 @@ pub async fn column_values(
     let select = stage
         .values_query(column, limit.clamp(1, MAX_PAGE))
         .map_err(Error::invalid)?;
-    Ok(run(catalog, select.into())
+    Ok(Reader::new(catalog, caller)?
+        .query(select)
         .await?
         .into_iter()
         .filter_map(|r| r.get_index(0).cloned())
@@ -253,13 +284,4 @@ fn fill_types(mut columns: Vec<StageColumn>, rows: &[Vec<Value>]) -> Vec<StageCo
         }
     }
     columns
-}
-
-async fn run(catalog: &Catalog, statement: Statement) -> Result<Vec<Row>> {
-    catalog
-        .primary()
-        .query(&statement)
-        .await?
-        .try_collect()
-        .await
 }

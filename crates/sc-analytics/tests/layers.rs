@@ -159,7 +159,7 @@ fn at() -> GeometrySource {
 
 /// The GeoJSON a small layer answers, or a panic saying what came instead.
 async fn geojson(cat: &Catalog, req: &LayerRequest) -> (u64, Option<[f64; 4]>, Vec<String>, Json) {
-    match layer_data(cat, req, Limits::default())
+    match layer_data(cat, &sc_dataset::Caller::admin(), req, Limits::default())
         .await
         .expect("reads")
     {
@@ -275,7 +275,7 @@ async fn a_large_layer_is_tiles_simplified_by_zoom() -> Result<()> {
         features: 2,
         vertices: 1_000_000,
     };
-    match layer_data(&cat, &request(sites_id, at()), small).await? {
+    match layer_data(&cat, &sc_dataset::Caller::admin(), &request(sites_id, at()), small).await? {
         LayerData::Tiles {
             count,
             source_layer,
@@ -306,13 +306,13 @@ async fn a_large_layer_is_tiles_simplified_by_zoom() -> Result<()> {
         },
     );
     assert!(matches!(
-        layer_data(&cat, &regions, few_vertices).await?,
+        layer_data(&cat, &sc_dataset::Caller::admin(), &regions, few_vertices).await?,
         LayerData::Tiles { vertices: 802, .. }
     ));
 
     // The whole world at zoom 0: one layer of three point features, each with
     // its row's key and the properties as keys.
-    let tile = Tile::read(&layer_tile(&cat, &request(sites_id, at()), 0, 0, 0).await?);
+    let tile = Tile::read(&layer_tile(&cat, &sc_dataset::Caller::admin(), &request(sites_id, at()), 0, 0, 0).await?);
     assert_eq!(tile.layers.len(), 1);
     let layer = &tile.layers[0];
     assert_eq!(layer.name, SOURCE_LAYER);
@@ -332,9 +332,9 @@ async fn a_large_layer_is_tiles_simplified_by_zoom() -> Result<()> {
     // The tile at zoom 14 that holds the sites (longitude 0.01–0.03 at
     // 51.5° N is column 8192, row 5450), and one far from them.
     let (x, y) = tile_of(0.02, 51.51, 14);
-    let near = Tile::read(&layer_tile(&cat, &request(sites_id, at()), 14, x, y).await?);
+    let near = Tile::read(&layer_tile(&cat, &sc_dataset::Caller::admin(), &request(sites_id, at()), 14, x, y).await?);
     assert!(!near.layers.is_empty() && !near.layers[0].features.is_empty());
-    let far = Tile::read(&layer_tile(&cat, &request(sites_id, at()), 14, 0, 0).await?);
+    let far = Tile::read(&layer_tile(&cat, &sc_dataset::Caller::admin(), &request(sites_id, at()), 14, 0, 0).await?);
     assert!(far.layers.iter().all(|l| l.features.is_empty()));
 
     // A 400-vertex outline keeps its vertices close in and loses most of them
@@ -348,9 +348,9 @@ async fn a_large_layer_is_tiles_simplified_by_zoom() -> Result<()> {
             .unwrap_or(0)
     };
     let (x, y) = tile_of(0.015, 51.505, 12);
-    let close = Tile::read(&layer_tile(&cat, &regions, 12, x, y).await?);
+    let close = Tile::read(&layer_tile(&cat, &sc_dataset::Caller::admin(), &regions, 12, x, y).await?);
     let (x, y) = tile_of(0.015, 51.505, 5);
-    let wide = Tile::read(&layer_tile(&cat, &regions, 5, x, y).await?);
+    let wide = Tile::read(&layer_tile(&cat, &sc_dataset::Caller::admin(), &regions, 5, x, y).await?);
     assert!(
         commands(&close) > 4 * commands(&wide),
         "zoom 12: {} commands, zoom 5: {}",
@@ -365,7 +365,7 @@ async fn a_layer_says_why_it_cannot_be_drawn() -> Result<()> {
     if let Some((cat, _db, sites_id, _)) = sites().await? {
         let data = |req: LayerRequest| {
             let cat = &cat;
-            async move { layer_data(cat, &req, Limits::default()).await }
+            async move { layer_data(cat, &sc_dataset::Caller::admin(), &req, Limits::default()).await }
         };
         let e = refusal(
             data(request(
@@ -417,11 +417,11 @@ async fn a_layer_says_why_it_cannot_be_drawn() -> Result<()> {
         let e = refusal(data(request(DatasetId::new(), at())).await?);
         assert!(e.contains("is gone"), "{e}");
         // A tile outside the grid.
-        let e = layer_tile(&cat, &request(sites_id, at()), 2, 4, 0)
+        let e = layer_tile(&cat, &sc_dataset::Caller::admin(), &request(sites_id, at()), 2, 4, 0)
             .await
             .expect_err("no such tile");
         assert!(e.to_string().contains("no tile 4/0 at zoom 2"), "{e}");
-        let e = layer_tile(&cat, &request(sites_id, at()), 30, 0, 0)
+        let e = layer_tile(&cat, &sc_dataset::Caller::admin(), &request(sites_id, at()), 30, 0, 0)
             .await
             .expect_err("too deep");
         assert!(e.to_string().contains("deeper than tiles go"), "{e}");
@@ -434,7 +434,7 @@ async fn a_layer_says_why_it_cannot_be_drawn() -> Result<()> {
     if !cat.primary().spatial().is_available() {
         sc_dataset::bootstrap_datasets(&cat).await?;
         let e =
-            refusal(layer_data(&cat, &request(DatasetId::new(), at()), Limits::default()).await?);
+            refusal(layer_data(&cat, &sc_dataset::Caller::admin(), &request(DatasetId::new(), at()), Limits::default()).await?);
         assert!(e.contains("PostGIS"), "{e}");
     }
     Ok(())

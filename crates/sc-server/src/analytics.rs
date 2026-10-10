@@ -2,10 +2,19 @@
 //! datasets, plots, hypothesis tests, panels, map layers, the Map workspace's attribute table,
 //! selection and toolbox, and workspaces, over `sc-dataset` and `sc-analytics`. The endpoints
 //! are declared in `sc-api`'s `analytics.rs`, which says what each one is for.
+//!
+//! **Who asks** (A9.1, A9.4). Every handler starts from an [`Access`]: the
+//! caller — whose reads are guarded to the rows their table permissions and
+//! ownership formulas allow — and, on an Analytics application's host, what
+//! that application allows. On the admin host the caller is the admin and
+//! nothing is narrowed. In an application, a dataset or workspace it does not
+//! show is answered as one that does not exist, and a change it does not allow
+//! is refused with a sentence.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use sc_analytics::app::AppScope;
 use sc_analytics::layer;
 use sc_analytics::map;
 use sc_analytics::selection;
@@ -16,8 +25,8 @@ use sc_analytics::stats;
 use sc_analytics::{Workspace, WorkspaceId, WorkspaceKind};
 use sc_catalog::Catalog;
 use sc_dataset::{
-    Base, Compilation, DatasetDef, DatasetId, Library, OpStatus, Operation, Options, Page, Schema,
-    compile,
+    Base, Caller, Compilation, DatasetDef, DatasetId, Library, OpStatus, Operation, Options, Page,
+    Schema, Sharing, compile,
 };
 use sc_error::{Error, Result};
 use serde_json::{Map, Value as Json, json};
@@ -45,20 +54,202 @@ async fn shown_fit(
         .find(|i| i.status == sc_model::FitStatus::Fitted))
 }
 
+/// Who is asking, and through which Analytics application (A9.1, A9.4).
+struct Access {
+    /// The caller every read is guarded as: in a self-serve application, only
+    /// its tables.
+    caller: Caller,
+    /// The application, on its host; `None` on the admin host.
+    app: Option<Arc<AppScope>>,
+}
+
+impl Access {
+    fn of(ctx: &HandlerCtx) -> Access {
+        let caller = Caller::of_user(ctx.user.as_ref());
+        match &ctx.analytics_app {
+            Some(app) => Access {
+                caller: app.narrow(caller),
+                app: Some(app.clone()),
+            },
+            None => Access { caller, app: None },
+        }
+    }
+
+    /// Whether the caller sees `def`, shared as `sharing`.
+    fn sees(&self, def: &DatasetDef, sharing: &Sharing, library: &Library) -> bool {
+        match &self.app {
+            Some(app) => app.sees_dataset(&self.caller, def, sharing, library),
+            None => sharing.admits(&self.caller),
+        }
+    }
+
+    /// The stored dataset `id`, if the caller sees it; one they do not is
+    /// answered as one that is not there.
+    async fn dataset(&self, catalog: &Catalog, id: DatasetId) -> Result<(DatasetDef, Sharing)> {
+        let missing = || Error::not_found(format!("there is no dataset with id {id}"));
+        let def = sc_dataset::load_dataset(catalog, id).await?.ok_or_else(missing)?;
+        let sharing = sc_dataset::dataset_sharing(catalog, id)
+            .await?
+            .unwrap_or_default();
+        if self.app.is_some() || !self.caller.is_admin() {
+            let library = sc_dataset::load_library(catalog).await?;
+            if !self.sees(&def, &sharing, &library) {
+                return Err(missing());
+            }
+        }
+        Ok((def, sharing))
+    }
+
+    /// Refuse unless the caller sees every one of `ids`.
+    async fn check_datasets(
+        &self,
+        catalog: &Catalog,
+        ids: impl IntoIterator<Item = DatasetId>,
+    ) -> Result<()> {
+        if self.app.is_none() && self.caller.is_admin() {
+            return Ok(());
+        }
+        for id in ids {
+            self.dataset(catalog, id).await?;
+        }
+        Ok(())
+    }
+
+    /// Refuse unless datasets may be created and changed here.
+    fn check_editor(&self) -> Result<()> {
+        match &self.app {
+            Some(app) => app.check_dataset_editor(),
+            None => Ok(()),
+        }
+    }
+
+    /// Refuse unless the caller may change a dataset shared as `sharing`.
+    fn check_change_dataset(&self, def: &DatasetDef, sharing: &Sharing) -> Result<()> {
+        self.check_editor()?;
+        if sharing.may_change(&self.caller) {
+            Ok(())
+        } else {
+            Err(Error::auth(format!(
+                "`{}` is not yours to change; clone it to make one of your own",
+                def.name
+            )))
+        }
+    }
+
+    /// Refuse a new dataset's base unless it may be built on here: one of the
+    /// application's tables, or a dataset the caller sees.
+    async fn check_base(&self, catalog: &Catalog, base: &Base) -> Result<()> {
+        match (base, &self.app) {
+            (_, None) => Ok(()),
+            (Base::Table { table }, Some(app)) => {
+                if app.offers_table(table) {
+                    Ok(())
+                } else {
+                    Err(Error::auth(format!(
+                        "`{table}` is not one of the tables this application reads"
+                    )))
+                }
+            }
+            (Base::Dataset { dataset }, Some(_)) => self.check_datasets(catalog, [*dataset]).await,
+        }
+    }
+
+    /// The definition a read endpoint's body names, as this caller may read
+    /// it. In an application: a stored dataset must be one they see, and
+    /// where they may not edit datasets it is read as stored, whatever
+    /// operations were sent; one not stored needs the Dataset editor and a base
+    /// they may build on.
+    async fn body_def(&self, catalog: &Catalog, def: DatasetDef) -> Result<DatasetDef> {
+        let Some(app) = &self.app else {
+            return Ok(def);
+        };
+        if sc_dataset::load_dataset(catalog, def.id).await?.is_some() {
+            let (stored, _) = self.dataset(catalog, def.id).await?;
+            return Ok(if app.check_dataset_editor().is_ok() {
+                def
+            } else {
+                stored
+            });
+        }
+        self.check_editor()?;
+        self.check_base(catalog, &def.base).await?;
+        Ok(def)
+    }
+
+    /// Whether `table` is one a formula may name here, for the editor's
+    /// completions: every table on the admin host, the application's own in a
+    /// self-serve application, none in a fixed one.
+    fn names_table(&self, table: &str) -> bool {
+        match &self.app {
+            None => true,
+            Some(app) => app.offers_table(table),
+        }
+    }
+
+    /// Whether the caller sees the workspace `ws`: in an application, as it
+    /// says; on the admin host, the unrestricted UI's own.
+    fn sees_workspace(&self, ws: &Workspace) -> bool {
+        match &self.app {
+            Some(app) => app.sees_workspace(&self.caller, ws),
+            None => ws.application.is_none(),
+        }
+    }
+
+    /// The workspace `id`, if the caller sees it.
+    async fn workspace(&self, catalog: &Catalog, id: WorkspaceId) -> Result<Workspace> {
+        let ws = sc_analytics::require_workspace(catalog, id).await?;
+        // The admin opens any workspace by its id, an application's included.
+        if self.app.is_none() || self.sees_workspace(&ws) {
+            Ok(ws)
+        } else {
+            Err(Error::not_found(format!("there is no workspace with id {id}")))
+        }
+    }
+
+    /// Refuse unless the caller may change `ws`.
+    fn check_change_workspace(&self, ws: &Workspace) -> Result<()> {
+        match &self.app {
+            Some(app) => app.check_change_workspace(&self.caller, ws),
+            None => Ok(()),
+        }
+    }
+
+    /// A workspace as the endpoints answer it, with whether the caller may
+    /// change it.
+    fn workspace_json(&self, ws: &Workspace) -> Json {
+        let mut out = workspace_json(ws);
+        if let Some(fields) = out.as_object_mut() {
+            fields.insert(
+                "may_change".into(),
+                Json::Bool(self.check_change_workspace(ws).is_ok()),
+            );
+        }
+        out
+    }
+}
+
 /// Register the Analytics UI's handlers on `reg`.
 pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
     // --- datasets ------------------------------------------------------------
 
     reg.register("listDatasets", {
         let catalog = catalog.clone();
-        move |_ctx| {
+        move |ctx| {
             let catalog = catalog.clone();
             async move {
+                let access = Access::of(&ctx);
                 let schema = Schema::of_catalog(&catalog)?;
                 let library = sc_dataset::load_library(&catalog).await?;
+                let sharing = sc_dataset::list_dataset_sharing(&catalog).await?;
                 let out: Vec<Json> = library
                     .defs()
-                    .map(|def| {
+                    .filter_map(|def| {
+                        let shared = sharing.get(&def.id).copied().unwrap_or_default();
+                        access
+                            .sees(def, &shared, &library)
+                            .then_some((def, shared))
+                    })
+                    .map(|(def, shared)| {
                         let resolved = sc_model::Dataset::of_def(&schema, &library, def);
                         json!({
                             "id": def.id,
@@ -74,6 +265,9 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                                 .collect::<Vec<_>>(),
                             "error": resolved.error,
                             "grain": resolved.grain,
+                            "share_role": shared.share_role,
+                            "may_change": access.check_editor().is_ok()
+                                && shared.may_change(&access.caller),
                         })
                     })
                     .collect();
@@ -94,8 +288,9 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
         move |ctx| {
             let catalog = catalog.clone();
             async move {
-                let def = sc_dataset::require_dataset(&catalog, dataset_id(&ctx)?).await?;
-                Ok(HandlerResponse::ok(detail(&catalog, &def).await?))
+                let access = Access::of(&ctx);
+                let (def, _) = access.dataset(&catalog, dataset_id(&ctx)?).await?;
+                Ok(HandlerResponse::ok(detail(&catalog, &access, &def).await?))
             }
         }
     });
@@ -105,9 +300,13 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
         move |ctx| {
             let catalog = catalog.clone();
             async move {
+                let access = Access::of(&ctx);
+                access.check_editor()?;
                 let def = def_from_input(&ctx.body, DatasetId::new())?;
+                access.check_base(&catalog, &def.base).await?;
                 sc_dataset::save_dataset(&catalog, &def).await?;
-                Ok(HandlerResponse::ok(detail(&catalog, &def).await?).with_status(201))
+                owned_by_caller(&catalog, &access, def.id).await?;
+                Ok(HandlerResponse::ok(detail(&catalog, &access, &def).await?).with_status(201))
             }
         }
     });
@@ -117,11 +316,13 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
         move |ctx| {
             let catalog = catalog.clone();
             async move {
+                let access = Access::of(&ctx);
                 let id = dataset_id(&ctx)?;
-                sc_dataset::require_dataset(&catalog, id).await?;
+                let (stored, sharing) = access.dataset(&catalog, id).await?;
+                access.check_change_dataset(&stored, &sharing)?;
                 let def = def_from_input(&ctx.body, id)?;
                 sc_dataset::save_dataset(&catalog, &def).await?;
-                Ok(HandlerResponse::ok(detail(&catalog, &def).await?))
+                Ok(HandlerResponse::ok(detail(&catalog, &access, &def).await?))
             }
         }
     });
@@ -131,7 +332,10 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
         move |ctx| {
             let catalog = catalog.clone();
             async move {
+                let access = Access::of(&ctx);
                 let id = dataset_id(&ctx)?;
+                let (stored, sharing) = access.dataset(&catalog, id).await?;
+                access.check_change_dataset(&stored, &sharing)?;
                 if !sc_dataset::delete_dataset(&catalog, id).await? {
                     return Err(Error::not_found(format!(
                         "there is no dataset with id {id}"
@@ -142,14 +346,41 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
         }
     });
 
+    reg.register("shareDataset", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let access = Access::of(&ctx);
+                let (def, sharing) = access.dataset(&catalog, dataset_id(&ctx)?).await?;
+                access.check_change_dataset(&def, &sharing)?;
+                let share_role = share_role(&ctx.body)?;
+                sc_dataset::set_dataset_sharing(
+                    &catalog,
+                    def.id,
+                    Sharing {
+                        share_role,
+                        ..sharing
+                    },
+                )
+                .await?;
+                Ok(HandlerResponse::ok(detail(&catalog, &access, &def).await?))
+            }
+        }
+    });
+
     reg.register("cloneDataset", {
         let catalog = catalog.clone();
         move |ctx| {
             let catalog = catalog.clone();
             async move {
+                let access = Access::of(&ctx);
+                access.check_editor()?;
+                let (source, _) = access.dataset(&catalog, dataset_id(&ctx)?).await?;
                 let name = ctx.body.get("name").and_then(Json::as_str);
-                let copy = sc_dataset::clone_dataset(&catalog, dataset_id(&ctx)?, name).await?;
-                Ok(HandlerResponse::ok(detail(&catalog, &copy).await?).with_status(201))
+                let copy = sc_dataset::clone_dataset(&catalog, source.id, name).await?;
+                owned_by_caller(&catalog, &access, copy.id).await?;
+                Ok(HandlerResponse::ok(detail(&catalog, &access, &copy).await?).with_status(201))
             }
         }
     });
@@ -159,23 +390,41 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
         move |ctx| {
             let catalog = catalog.clone();
             async move {
+                let access = Access::of(&ctx);
                 let id = dataset_id(&ctx)?;
+                access.dataset(&catalog, id).await?;
+                let library = sc_dataset::load_library(&catalog).await?;
+                let sharing = sc_dataset::list_dataset_sharing(&catalog).await?;
                 let datasets: Vec<Json> = sc_dataset::datasets_using(&catalog, id)
                     .await?
                     .iter()
+                    .filter(|d| {
+                        access.sees(d, &sharing.get(&d.id).copied().unwrap_or_default(), &library)
+                    })
                     .map(|d| json!({ "id": d.id, "name": d.name }))
                     .collect();
-                let models: Vec<Json> = sc_model::list_models(&catalog)
-                    .await?
-                    .iter()
-                    .filter(|m| m.dataset.id == id || m.related.iter().any(|r| r.dataset.id == id))
-                    .map(|m| json!({ "id": m.id.0, "name": m.name }))
+                // Models are the unrestricted UI's: an application lists none.
+                let models: Vec<Json> = match access.app {
+                    Some(_) => Vec::new(),
+                    None => sc_model::list_models(&catalog)
+                        .await?
+                        .iter()
+                        .filter(|m| {
+                            m.dataset.id == id || m.related.iter().any(|r| r.dataset.id == id)
+                        })
+                        .map(|m| json!({ "id": m.id.0, "name": m.name }))
+                        .collect(),
+                };
+                let workspaces = sc_analytics::list_workspaces(&catalog).await?;
+                let visible: Vec<Workspace> = workspaces
+                    .into_iter()
+                    .filter(|w| access.sees_workspace(w))
                     .collect();
-                let workspaces = sc_analytics::panel::UsageIndex::build(&catalog).await?;
+                let index = sc_analytics::panel::UsageIndex::of_workspaces(&visible);
                 Ok(HandlerResponse::ok(json!({
                     "datasets": datasets,
                     "models": models,
-                    "workspaces": workspaces.dataset(id),
+                    "workspaces": index.dataset(id),
                 })))
             }
         }
@@ -186,10 +435,11 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
         move |ctx| {
             let catalog = catalog.clone();
             async move {
-                let def = def_from_body(&ctx.body)?;
+                let access = Access::of(&ctx);
+                let def = access.body_def(&catalog, def_from_body(&ctx.body)?).await?;
                 let (schema, library) = world(&catalog, &def).await?;
                 let compiled = compile(&schema, &library, &def, Options::default());
-                Ok(HandlerResponse::ok(report(&schema, &compiled)))
+                Ok(HandlerResponse::ok(report(&schema, &access, &compiled)))
             }
         }
     });
@@ -199,7 +449,9 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
         move |ctx| {
             let catalog = catalog.clone();
             async move {
-                let mut def = def_from_body(&ctx.body)?;
+                let access = Access::of(&ctx);
+                access.check_editor()?;
+                let mut def = access.body_def(&catalog, def_from_body(&ctx.body)?).await?;
                 let position = ctx
                     .body
                     .get("position")
@@ -259,7 +511,8 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
         move |ctx| {
             let catalog = catalog.clone();
             async move {
-                let def = def_from_body(&ctx.body)?;
+                let access = Access::of(&ctx);
+                let def = access.body_def(&catalog, def_from_body(&ctx.body)?).await?;
                 let upto = optional_usize(&ctx.body, "upto");
                 let offset = optional_usize(&ctx.body, "offset").unwrap_or(0) as u64;
                 let limit = optional_usize(&ctx.body, "limit").map_or(DEFAULT_PAGE, |l| l as u64);
@@ -268,7 +521,9 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                 let stage = compiled
                     .stage(upto.unwrap_or(def.operations.len()))
                     .map_err(Error::invalid)?;
-                let page = sc_dataset::read_page(&catalog, stage, Page { offset, limit }).await?;
+                let page =
+                    sc_dataset::read_page(&catalog, &access.caller, stage, Page { offset, limit })
+                        .await?;
                 Ok(HandlerResponse::ok(json!({
                     "columns": page.columns,
                     "grain": page.grain,
@@ -288,7 +543,8 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
         move |ctx| {
             let catalog = catalog.clone();
             async move {
-                let def = def_from_body(&ctx.body)?;
+                let access = Access::of(&ctx);
+                let def = access.body_def(&catalog, def_from_body(&ctx.body)?).await?;
                 let upto = optional_usize(&ctx.body, "upto");
                 let column = ctx
                     .body
@@ -303,7 +559,9 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                 let stage = compiled
                     .stage(upto.unwrap_or(def.operations.len()))
                     .map_err(Error::invalid)?;
-                let values = sc_dataset::column_values(&catalog, stage, &column, limit).await?;
+                let values =
+                    sc_dataset::column_values(&catalog, &access.caller, stage, &column, limit)
+                        .await?;
                 Ok(HandlerResponse::ok(Json::Array(
                     values.iter().map(sc_dataset::value_json).collect(),
                 )))
@@ -313,14 +571,17 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
 
     reg.register("listDatasetTables", {
         let catalog = catalog.clone();
-        move |_ctx| {
+        move |ctx| {
             let catalog = catalog.clone();
             async move {
+                let access = Access::of(&ctx);
                 let schema = Schema::of_catalog(&catalog)?;
                 Ok(HandlerResponse::ok(Json::Array(
                     schema
                         .tables
                         .values()
+                        // The base picker offers what may be built on here.
+                        .filter(|t| access.names_table(&t.name))
                         .map(|t| {
                             json!({
                                 "name": t.name,
@@ -348,7 +609,9 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                         .ok_or_else(|| Error::invalid("`spec` is required"))?,
                 )
                 .map_err(|e| Error::invalid(format!("`spec` is not a plot spec: {e}")))?;
-                let rendered = plot::render_plot(&catalog, &spec).await?;
+                let access = Access::of(&ctx);
+                access.check_datasets(&catalog, data_datasets(&spec.data)).await?;
+                let rendered = plot::render_plot(&catalog, &access.caller, &spec).await?;
                 Ok(HandlerResponse::ok(
                     serde_json::to_value(rendered).map_err(|e| {
                         Error::serde(format!("a plot's data does not serialise: {e}"))
@@ -370,7 +633,9 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                         .ok_or_else(|| Error::invalid("`spec` is required"))?,
                 )
                 .map_err(|e| Error::invalid(format!("`spec` is not a summary table: {e}")))?;
-                let rendered = plot::render_table(&catalog, &spec).await?;
+                let access = Access::of(&ctx);
+                access.check_datasets(&catalog, data_datasets(&spec.data)).await?;
+                let rendered = plot::render_table(&catalog, &access.caller, &spec).await?;
                 Ok(HandlerResponse::ok(
                     serde_json::to_value(rendered).map_err(|e| {
                         Error::serde(format!("a table's data does not serialise: {e}"))
@@ -392,7 +657,9 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                         .ok_or_else(|| Error::invalid("`spec` is required"))?,
                 )
                 .map_err(|e| Error::invalid(format!("`spec` is not a set of test roles: {e}")))?;
-                let answer = stats::run_tests(&catalog, &spec).await?;
+                let access = Access::of(&ctx);
+                access.check_datasets(&catalog, data_datasets(&spec.data)).await?;
+                let answer = stats::run_tests(&catalog, &access.caller, &spec).await?;
                 Ok(HandlerResponse::ok(serde_json::to_value(answer).map_err(
                     |e| Error::serde(format!("a test's results do not serialise: {e}")),
                 )?))
@@ -430,7 +697,7 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                     .map(serde_json::from_value)
                     .transpose()
                     .map_err(|e| Error::invalid(format!("`mark` is not a mark: {e}")))?;
-                let def = sc_dataset::require_dataset(&catalog, id).await?;
+                let (def, _) = Access::of(&ctx).dataset(&catalog, id).await?;
                 let (schema, library) = world(&catalog, &def).await?;
                 let compiled = compile(&schema, &library, &def, Options::default());
                 let shape = match compiled.last() {
@@ -471,7 +738,11 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                     .cloned()
                     .ok_or_else(|| Error::invalid("`layer` is required"))?;
                 let layer = parse_layer(raw)?;
-                let data = layer::layer_data(&catalog, &layer, layer::Limits::default()).await?;
+                let access = Access::of(&ctx);
+                access.check_datasets(&catalog, [layer.dataset]).await?;
+                let data =
+                    layer::layer_data(&catalog, &access.caller, &layer, layer::Limits::default())
+                        .await?;
                 let mut out = serde_json::to_value(&data)
                     .map_err(|e| Error::serde(format!("a layer's data does not serialise: {e}")))?;
                 if matches!(data, layer::LayerData::Tiles { .. })
@@ -503,7 +774,9 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                     serde_json::from_str(raw)
                         .map_err(|e| Error::invalid(format!("`layer` is not JSON: {e}")))?,
                 )?;
-                let bytes = layer::layer_tile(&catalog, &layer, z, x, y).await?;
+                let access = Access::of(&ctx);
+                access.check_datasets(&catalog, [layer.dataset]).await?;
+                let bytes = layer::layer_tile(&catalog, &access.caller, &layer, z, x, y).await?;
                 Ok(HandlerResponse::download(crate::handler::Download {
                     bytes: bytes.into(),
                     content_type: "application/vnd.mapbox-vector-tile".to_owned(),
@@ -522,6 +795,8 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
             let catalog = catalog.clone();
             async move {
                 let layer = parse_layer(required(&ctx.body, "layer")?)?;
+                let access = Access::of(&ctx);
+                access.check_datasets(&catalog, [layer.dataset]).await?;
                 let sort: Option<sc_dataset::SortKey> = ctx
                     .body
                     .get("sort")
@@ -533,7 +808,9 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                 let limit = optional_usize(&ctx.body, "limit")
                     .map_or(selection::TABLE_ROWS, |l| l as u64);
                 let answer =
-                    match selection::layer_rows(&catalog, &layer, sort.as_ref(), limit).await? {
+                    match selection::layer_rows(&catalog, &access.caller, &layer, sort.as_ref(), limit)
+                        .await?
+                    {
                         Ok(rows) => serde_json::to_value(rows).map_err(|e| {
                             Error::serde(format!("a layer's rows do not serialise: {e}"))
                         })?,
@@ -550,11 +827,15 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
             let catalog = catalog.clone();
             async move {
                 let layer = parse_layer(required(&ctx.body, "layer")?)?;
+                let access = Access::of(&ctx);
+                access.check_datasets(&catalog, [layer.dataset]).await?;
                 let by: selection::SelectBy = serde_json::from_value(required(&ctx.body, "by")?)
                     .map_err(|e| {
                         Error::invalid(format!("`by` is not a way to select features: {e}"))
                     })?;
-                let answer = match selection::select_features(&catalog, &layer, &by).await? {
+                let answer = match selection::select_features(&catalog, &access.caller, &layer, &by)
+                    .await?
+                {
                     Ok(found) => serde_json::to_value(found).map_err(|e| {
                         Error::serde(format!("a selection does not serialise: {e}"))
                     })?,
@@ -571,15 +852,26 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
             let catalog = catalog.clone();
             async move {
                 let layer = parse_layer(required(&ctx.body, "layer")?)?;
+                let access = Access::of(&ctx);
+                access.check_editor()?;
+                access.check_datasets(&catalog, [layer.dataset]).await?;
                 let name = text(&ctx.body, "name")?;
                 let ids: Vec<Json> = match ctx.body.get("ids") {
                     Some(Json::Array(ids)) => ids.clone(),
                     _ => Vec::new(),
                 };
                 let condition = ctx.body.get("condition").and_then(Json::as_str);
-                let def =
-                    selection::save_selection(&catalog, &layer, &name, &ids, condition).await?;
-                Ok(HandlerResponse::ok(detail(&catalog, &def).await?).with_status(201))
+                let def = selection::save_selection(
+                    &catalog,
+                    &access.caller,
+                    &layer,
+                    &name,
+                    &ids,
+                    condition,
+                )
+                .await?;
+                owned_by_caller(&catalog, &access, def.id).await?;
+                Ok(HandlerResponse::ok(detail(&catalog, &access, &def).await?).with_status(201))
             }
         }
     });
@@ -629,9 +921,23 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                     }
                 };
                 let name = ctx.body.get("name").and_then(Json::as_str);
+                let access = Access::of(&ctx);
+                if access.app.is_some() {
+                    // A tool makes a dataset from the datasets its answers name.
+                    access.check_editor()?;
+                    let library = sc_dataset::load_library(&catalog).await?;
+                    let named: Vec<DatasetId> = params
+                        .values()
+                        .filter_map(Json::as_str)
+                        .filter_map(|v| v.parse().ok())
+                        .filter(|id| library.get(*id).is_some())
+                        .collect();
+                    access.check_datasets(&catalog, named).await?;
+                }
                 let run =
                     tools::run_tool(&catalog, &tool, &tools::ToolArgs(params), name).await?;
-                let mut answer = detail(&catalog, &run.dataset).await?;
+                owned_by_caller(&catalog, &access, run.dataset.id).await?;
+                let mut answer = detail(&catalog, &access, &run.dataset).await?;
                 if let Some(fields) = answer.as_object_mut() {
                     fields.insert(
                         "layer".into(),
@@ -672,6 +978,7 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                     .map_err(|e| {
                         Error::invalid(format!("`geometry` is not a geometry source: {e}"))
                     })?;
+                Access::of(&ctx).check_datasets(&catalog, [id]).await?;
                 let answer =
                     map::suggest_map(&catalog, id, &assignment, geometry.as_ref()).await?;
                 Ok(HandlerResponse::ok(serde_json::to_value(answer).map_err(
@@ -696,7 +1003,11 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                 if spec.layers.is_empty() {
                     return Err(Error::invalid("a map needs at least one layer"));
                 }
-                let rendered = map::render_map(&catalog, &spec).await?;
+                let access = Access::of(&ctx);
+                access
+                    .check_datasets(&catalog, spec.datasets().into_keys())
+                    .await?;
+                let rendered = map::render_map(&catalog, &access.caller, &spec).await?;
                 Ok(HandlerResponse::ok(rendered_map_json(&rendered)?))
             }
         }
@@ -716,8 +1027,20 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                     None | Some(Json::Null) => Vec::new(),
                     Some(raw) => sc_analytics::crossfilter::Condition::read_list(raw)?,
                 };
-                let rendered =
-                    sc_analytics::panel::render_panel_in(&catalog, &panel, &filters).await?;
+                let access = Access::of(&ctx);
+                let read: Vec<DatasetId> = panel
+                    .datasets()
+                    .into_iter()
+                    .chain(filters.iter().map(|c| c.dataset))
+                    .collect();
+                access.check_datasets(&catalog, read).await?;
+                let rendered = sc_analytics::panel::render_panel_in(
+                    &catalog,
+                    &access.caller,
+                    &panel,
+                    &filters,
+                )
+                .await?;
                 let mut answer = serde_json::to_value(&rendered).map_err(|e| {
                     Error::serde(format!("a panel's data does not serialise: {e}"))
                 })?;
@@ -797,12 +1120,36 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
         }
     });
 
+    // --- the shell -----------------------------------------------------------
+
+    reg.register("analyticsShell", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let access = Access::of(&ctx);
+                let roles: Vec<Json> = sc_auth::list_roles(&catalog)
+                    .await?
+                    .into_iter()
+                    .map(|r| json!({ "role": r.role, "name": r.name }))
+                    .collect();
+                Ok(HandlerResponse::ok(json!({
+                    "application": access.app.as_ref().map(|app| app.shell_json()),
+                    "roles": roles,
+                })))
+            }
+        }
+    });
+
     // --- workspaces ----------------------------------------------------------
 
-    reg.register("listWorkspaceKinds", move |_ctx| async move {
+    reg.register("listWorkspaceKinds", move |ctx| async move {
+        let access = Access::of(&ctx);
         Ok(HandlerResponse::ok(Json::Array(
             WorkspaceKind::ALL
                 .iter()
+                // An application lists the kinds it opens, as available.
+                .filter(|k| access.app.as_ref().is_none_or(|app| app.allows_kind(**k)))
                 .map(|k| {
                     json!({
                         "kind": k.as_str(),
@@ -817,12 +1164,16 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
 
     reg.register("listWorkspaces", {
         let catalog = catalog.clone();
-        move |_ctx| {
+        move |ctx| {
             let catalog = catalog.clone();
             async move {
+                let access = Access::of(&ctx);
                 let all = sc_analytics::list_workspaces(&catalog).await?;
                 Ok(HandlerResponse::ok(Json::Array(
-                    all.iter().map(workspace_json).collect(),
+                    all.iter()
+                        .filter(|w| access.sees_workspace(w))
+                        .map(|w| access.workspace_json(w))
+                        .collect(),
                 )))
             }
         }
@@ -833,8 +1184,9 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
         move |ctx| {
             let catalog = catalog.clone();
             async move {
-                let ws = sc_analytics::require_workspace(&catalog, workspace_id(&ctx)?).await?;
-                Ok(HandlerResponse::ok(workspace_json(&ws)))
+                let access = Access::of(&ctx);
+                let ws = access.workspace(&catalog, workspace_id(&ctx)?).await?;
+                Ok(HandlerResponse::ok(access.workspace_json(&ws)))
             }
         }
     });
@@ -847,10 +1199,15 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                 let name = text(&ctx.body, "name")?;
                 let kind = WorkspaceKind::parse(&text(&ctx.body, "kind")?)?;
                 kind.check_available()?;
-                let ws = Workspace::new(name, kind, ctx.user.as_ref().map(|u| u.id));
+                let access = Access::of(&ctx);
+                let mut ws = Workspace::new(name, kind, ctx.user.as_ref().map(|u| u.id));
+                if let Some(app) = &access.app {
+                    app.check_create_workspace(kind)?;
+                    ws = ws.in_application(app.app);
+                }
                 sc_analytics::create_workspace(&catalog, &ws).await?;
                 let ws = sc_analytics::require_workspace(&catalog, ws.id).await?;
-                Ok(HandlerResponse::ok(workspace_json(&ws)).with_status(201))
+                Ok(HandlerResponse::ok(access.workspace_json(&ws)).with_status(201))
             }
         }
     });
@@ -861,9 +1218,32 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
             let catalog = catalog.clone();
             async move {
                 let name = text(&ctx.body, "name")?;
+                let access = Access::of(&ctx);
+                let ws = access.workspace(&catalog, workspace_id(&ctx)?).await?;
+                access.check_change_workspace(&ws)?;
+                let ws = sc_analytics::rename_workspace(&catalog, ws.id, &name).await?;
+                Ok(HandlerResponse::ok(access.workspace_json(&ws)))
+            }
+        }
+    });
+
+    reg.register("shareWorkspace", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let access = Access::of(&ctx);
+                let ws = access.workspace(&catalog, workspace_id(&ctx)?).await?;
+                access.check_change_workspace(&ws)?;
+                if access.app.is_none() && ws.application.is_none() {
+                    return Err(Error::invalid(
+                        "the Analytics UI's own workspaces are the admins'; share a workspace \
+                         of an application, or show this one in a fixed application",
+                    ));
+                }
                 let ws =
-                    sc_analytics::rename_workspace(&catalog, workspace_id(&ctx)?, &name).await?;
-                Ok(HandlerResponse::ok(workspace_json(&ws)))
+                    sc_analytics::share_workspace(&catalog, ws.id, share_role(&ctx.body)?).await?;
+                Ok(HandlerResponse::ok(access.workspace_json(&ws)))
             }
         }
     });
@@ -878,9 +1258,11 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                     .get("state")
                     .cloned()
                     .ok_or_else(|| Error::invalid("`state` is required"))?;
-                let ws = sc_analytics::save_workspace_state(&catalog, workspace_id(&ctx)?, state)
-                    .await?;
-                Ok(HandlerResponse::ok(workspace_json(&ws)))
+                let access = Access::of(&ctx);
+                let ws = access.workspace(&catalog, workspace_id(&ctx)?).await?;
+                access.check_change_workspace(&ws)?;
+                let ws = sc_analytics::save_workspace_state(&catalog, ws.id, state).await?;
+                Ok(HandlerResponse::ok(access.workspace_json(&ws)))
             }
         }
     });
@@ -890,7 +1272,10 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
         move |ctx| {
             let catalog = catalog.clone();
             async move {
+                let access = Access::of(&ctx);
                 let id = workspace_id(&ctx)?;
+                let ws = access.workspace(&catalog, id).await?;
+                access.check_change_workspace(&ws)?;
                 if !sc_analytics::delete_workspace(&catalog, id).await? {
                     return Err(Error::not_found(format!(
                         "there is no workspace with id {id}"
@@ -979,26 +1364,28 @@ async fn world(catalog: &Catalog, def: &DatasetDef) -> Result<(Schema, Library)>
 }
 
 /// A definition and its report.
-async fn detail(catalog: &Catalog, def: &DatasetDef) -> Result<Json> {
+async fn detail(catalog: &Catalog, access: &Access, def: &DatasetDef) -> Result<Json> {
     let (schema, library) = world(catalog, def).await?;
     let compiled = compile(&schema, &library, def, Options::default());
-    Ok(json!({ "dataset": def, "report": report(&schema, &compiled) }))
+    Ok(json!({ "dataset": def, "report": report(&schema, access, &compiled) }))
 }
 
-/// A compiled definition as JSON, with what its formulas may name.
-fn report(schema: &Schema, compiled: &Compilation) -> Json {
+/// A compiled definition as JSON, with what its formulas may name — in an
+/// application, only the tables it reads.
+fn report(schema: &Schema, access: &Access, compiled: &Compilation) -> Json {
     let tables: Map<String, Json> = schema
         .tables
         .values()
+        .filter(|t| access.names_table(&t.name))
         .map(|t| (t.name.clone(), json!(t.columns)))
         .collect();
     let mut children: BTreeMap<String, Vec<Json>> = BTreeMap::new();
-    for name in schema.tables.keys() {
+    for name in schema.tables.keys().filter(|t| access.names_table(t)) {
         let incoming: Vec<Json> = schema
             .shape
             .incoming(name)
             .into_iter()
-            .filter(|(child, _)| schema.tables.contains_key(*child))
+            .filter(|(child, _)| schema.tables.contains_key(*child) && access.names_table(child))
             .map(|(child, key)| json!({ "table": child, "key": key }))
             .collect();
         if !incoming.is_empty() {
@@ -1032,7 +1419,36 @@ pub(crate) fn workspace_json(ws: &Workspace) -> Json {
         "state": ws.state,
         "created_by": ws.created_by,
         "updated_at": ws.updated_at,
+        "share_role": ws.share_role,
+        "application": ws.application,
     })
+}
+
+/// Make the caller the owner of the dataset `id` they just made (A9.1).
+async fn owned_by_caller(catalog: &Catalog, access: &Access, id: DatasetId) -> Result<()> {
+    sc_dataset::set_dataset_sharing(catalog, id, Sharing::owned_by(access.caller.user_id())).await
+}
+
+/// A sharing body's `share_role`: a role, or null for nobody but the owner.
+fn share_role(body: &Json) -> Result<Option<u8>> {
+    match body.get("share_role") {
+        None | Some(Json::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|r| u8::try_from(r).ok())
+            .map(Some)
+            .ok_or_else(|| {
+                Error::invalid(format!("`share_role` is a role from 1 to 100, not {value}"))
+            }),
+    }
+}
+
+/// The dataset a plot's, a table's or a test's data reads, if it reads one.
+fn data_datasets(data: &plot::DataRef) -> Option<DatasetId> {
+    match data {
+        plot::DataRef::Dataset { dataset } => Some(*dataset),
+        plot::DataRef::FitOutput { .. } => None,
+    }
 }
 
 /// A body's `key`, which must be there.

@@ -9,9 +9,11 @@
 //! workspace's classification ([`classify`], A5.9), attribute table and
 //! selection ([`selection`], A5.10) and toolbox ([`tools`], A5.12); a
 //! dashboard's stat cards ([`card`], A6.2) and cross-filtering
-//! ([`crossfilter`], A6.3–A6.6); and the demo data ([`demo`]). Datasets are not here: they are `sc-dataset`'s, because models
+//! ([`crossfilter`], A6.3–A6.6); the Analytics UI as an application framework
+//! ([`app`], A9); and the demo data ([`demo`]). Datasets are not here: they are `sc-dataset`'s, because models
 //! read them too.
 
+pub mod app;
 pub mod card;
 pub mod classify;
 pub mod crossfilter;
@@ -29,5 +31,5 @@ mod workspace;
 pub use workspace::{
     WORKSPACES_TABLE, Workspace, WorkspaceId, WorkspaceKind, bootstrap_workspaces,
     create_workspace, delete_workspace, list_workspaces, load_workspace, rename_workspace,
-    require_workspace, save_workspace_state,
+    require_workspace, save_workspace_state, share_workspace,
 };

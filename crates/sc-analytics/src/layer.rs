@@ -36,11 +36,12 @@ use serde_json::{Map, Value as Json, json};
 
 use sc_catalog::Catalog;
 use sc_dataset::{
+    Caller, Reader,
     ColType, DatasetDef, DatasetId, Op, OpStatus, Operation, Options, ROW_KEY, Schema, Stage,
-    StageColumn, compile, read_rows, value_json,
+    StageColumn, compile, read_rows_with, value_json,
 };
 use sc_error::{Error, Result};
-use sc_query::{Expr, OrderBy, Projection, Select, Source, Statement, UnOp, Value};
+use sc_query::{Expr, OrderBy, Projection, Select, Source, UnOp, Value};
 
 use crate::plot::{DOMAIN_VALUES, Domain};
 
@@ -238,6 +239,8 @@ pub(crate) struct Prepared {
     pub(crate) name: String,
     /// The dataset's columns before the layer added any.
     pub(crate) shape: sc_dataset::StageShape,
+    /// Who reads it (A9.1).
+    pub(crate) reader: Reader,
 }
 
 /// The id of the operations a layer adds to its dataset.
@@ -247,9 +250,10 @@ const GEOMETRY_OP: &str = "layer-geometry";
 /// The layer's stage, or the sentence saying why it cannot be drawn.
 async fn prepare(
     catalog: &Catalog,
+    caller: &Caller,
     req: &LayerRequest,
 ) -> Result<std::result::Result<Prepared, String>> {
-    prepare_with(catalog, req, Vec::new()).await
+    prepare_with(catalog, caller, req, Vec::new()).await
 }
 
 /// The id of the operations a read of a layer adds after its geometry: a
@@ -261,6 +265,7 @@ pub(crate) const EXTRA_OP: &str = "layer-extra";
 /// does not work.
 pub(crate) async fn prepare_with(
     catalog: &Catalog,
+    caller: &Caller,
     req: &LayerRequest,
     extra: Vec<(Operation, &str)>,
 ) -> Result<std::result::Result<Prepared, String>> {
@@ -388,6 +393,7 @@ pub(crate) async fn prepare_with(
         keyed,
         name: def.name.clone(),
         shape: plain_shape,
+        reader: Reader::new(catalog, caller)?,
     }))
 }
 
@@ -428,13 +434,8 @@ fn lit_as(value: Value, type_name: &str) -> Expr {
 /// The alias a layer's features are read from.
 const FEATURES: &str = "_fd_l";
 
-pub(crate) async fn run(catalog: &Catalog, select: Select) -> Result<Vec<sc_db::Row>> {
-    catalog
-        .primary()
-        .query(&Statement::from(select))
-        .await?
-        .try_collect()
-        .await
+pub(crate) async fn run(layer: &Prepared, select: Select) -> Result<Vec<sc_db::Row>> {
+    layer.reader.query(select).await
 }
 
 pub(crate) fn number(v: Option<&Value>) -> Option<f64> {
@@ -450,10 +451,11 @@ pub(crate) fn number(v: Option<&Value>) -> Option<f64> {
 /// map needs to fetch it as tiles.
 pub async fn layer_data(
     catalog: &Catalog,
+    caller: &Caller,
     req: &LayerRequest,
     limits: Limits,
 ) -> Result<LayerData> {
-    let layer = match prepare(catalog, req).await? {
+    let layer = match prepare(catalog, caller, req).await? {
         Ok(layer) => layer,
         Err(error) => return Ok(LayerData::Refused { error }),
     };
@@ -472,7 +474,7 @@ pub async fn layer_data(
             Projection::expr_as(agg("max", vec![func("ST_Dimension", vec![g.clone()])]), "dh"),
         ])
         .filter(Expr::unary(UnOp::IsNotNull, g));
-    let rows = run(catalog, summary).await?;
+    let rows = run(&layer, summary).await?;
     let row = rows.first();
     let at = |i: usize| row.and_then(|r| r.get_index(i));
     let count = number(at(0)).unwrap_or(0.0) as u64;
@@ -493,7 +495,7 @@ pub async fn layer_data(
             keyed: layer.keyed,
         });
     }
-    let rows = read_rows(catalog, &layer.stage, None, None).await?;
+    let rows = read_rows_with(&layer.reader, &layer.stage, None, None).await?;
     let index = |name: &str| rows.columns.iter().position(|c| c.name == name);
     let geometry = index(&layer.geometry);
     let carried: Vec<(String, Option<usize>)> = layer
@@ -552,10 +554,11 @@ pub enum Spread {
 /// One query per column; a column with no values has no domain.
 pub async fn layer_domains(
     catalog: &Catalog,
+    caller: &Caller,
     req: &LayerRequest,
     columns: &[(String, Spread)],
 ) -> Result<std::result::Result<BTreeMap<String, Domain>, String>> {
-    let layer = match prepare(catalog, req).await? {
+    let layer = match prepare(catalog, caller, req).await? {
         Ok(layer) => layer,
         Err(error) => return Ok(Err(error)),
     };
@@ -577,7 +580,7 @@ pub async fn layer_domains(
                         Projection::expr_as(agg("max", vec![c]), "hi"),
                     ])
                     .filter(present);
-                let rows = run(catalog, select).await?;
+                let rows = run(&layer, select).await?;
                 let row = rows.first();
                 let at = |i: usize| number(row.and_then(|r| r.get_index(i)));
                 match (at(0), at(1)) {
@@ -597,7 +600,7 @@ pub async fn layer_domains(
                     .limit(DOMAIN_VALUES as u64);
                 select.group = vec![c.clone()];
                 select.order = vec![OrderBy::asc(c)];
-                let rows = run(catalog, select).await?;
+                let rows = run(&layer, select).await?;
                 let values: Vec<Json> = rows
                     .iter()
                     .filter_map(|r| r.get_index(0).map(value_json))
@@ -628,10 +631,11 @@ pub const SKETCH_VALUES: i64 = 1_000;
 /// breaks are computed over (A5.9).
 pub async fn layer_sketch(
     catalog: &Catalog,
+    caller: &Caller,
     req: &LayerRequest,
     column: &str,
 ) -> Result<std::result::Result<Vec<f64>, String>> {
-    let layer = match prepare(catalog, req).await? {
+    let layer = match prepare(catalog, caller, req).await? {
         Ok(layer) => layer,
         Err(error) => return Ok(Err(error)),
     };
@@ -692,7 +696,7 @@ pub async fn layer_sketch(
             .or(q("rn").eq(q("n"))),
         );
     outer.order = vec![OrderBy::asc(q("rn"))];
-    let rows = run(catalog, outer).await?;
+    let rows = run(&layer, outer).await?;
     Ok(Ok(rows
         .iter()
         .filter_map(|r| number(r.get_index(0)))
@@ -704,6 +708,7 @@ pub async fn layer_sketch(
 /// cannot be drawn, or a tile outside the grid, is refused with the sentence.
 pub async fn layer_tile(
     catalog: &Catalog,
+    caller: &Caller,
     req: &LayerRequest,
     z: u32,
     x: u32,
@@ -720,7 +725,7 @@ pub async fn layer_tile(
             "there is no tile {x}/{y} at zoom {z}: each of them is below {side}"
         )));
     }
-    let layer = prepare(catalog, req).await?.map_err(Error::invalid)?;
+    let layer = prepare(catalog, caller, req).await?.map_err(Error::invalid)?;
     let features = layer.stage.features_query().map_err(Error::invalid)?;
     let int = |n: u32| lit_as(Value::Int(i64::from(n)), "integer");
     let float = |f: f64| lit_as(Value::Float(f), "double precision");
@@ -817,7 +822,7 @@ pub async fn layer_tile(
     let tile = Select::from(Source::subquery(inner, TILE))
         .columns(vec![Projection::expr_as(agg("ST_AsMVT", args), "mvt")])
         .filter(Expr::unary(UnOp::IsNotNull, Expr::qcol(TILE, GEOM)));
-    let rows = run(catalog, tile).await?;
+    let rows = run(&layer, tile).await?;
     Ok(match rows.first().and_then(|r| r.get_index(0)) {
         Some(Value::Bytes(bytes)) => bytes.clone(),
         _ => Vec::new(),

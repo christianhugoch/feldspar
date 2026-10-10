@@ -307,12 +307,14 @@ export type DeleteBackupScheduleResponse = { deleted: boolean };
 export type GetClearAllPreviewResponse = { file_stores: Array<{ name: string; backend: string; directory?: string | null }> };
 export type ClearAllRequest = { delete_from_disk: Array<string> };
 export type ClearAllResponse = { cleared: Array<string>; warnings: Array<string> };
-export type ListDatasetsResponse = Array<{ id: string; name: string; description: string; base: unknown; table: string; operations: number; columns: Array<unknown>; error?: string | null; grain?: unknown | null }>;
+export type ListDatasetsResponse = Array<{ id: string; name: string; description: string; base: unknown; table: string; operations: number; columns: Array<unknown>; error?: string | null; grain?: unknown | null; share_role?: number | null; may_change: boolean }>;
 export type GetDatasetResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown } };
 export type CreateDatasetRequest = { name: string; description?: string | null; base: unknown; operations?: unknown | null };
 export type CreateDatasetResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown } };
 export type UpdateDatasetRequest = { name: string; description?: string | null; base: unknown; operations?: unknown | null };
 export type UpdateDatasetResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown } };
+export type ShareDatasetRequest = { share_role?: number | null };
+export type ShareDatasetResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown } };
 export type CloneDatasetRequest = { name?: string | null };
 export type CloneDatasetResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown } };
 export type ListPublicDatasetsResponse = Array<{ key: string; title: string; category: string; description: string; homepage: string; licence: string; licence_url: string; attribution: string; tables: Array<string>; rows: number; download_bytes: number; installed: boolean; unavailable?: string | null; dataset_id?: string | null; job?: { key: string; status: string; stage?: string | null; subject?: string | null; done: number; total: number; started_at: string; finished_at?: string | null; dataset_id?: string | null; dataset_name?: string | null; rows?: number | null; error?: string | null } | null }>;
@@ -360,15 +362,18 @@ export type RenderPanelRequest = { panel: unknown; filters?: Array<unknown> | nu
 export type RenderPanelResponse = { kind: string; error?: string | null; plot?: unknown | null; table?: unknown | null; tests?: unknown | null; output?: unknown | null; map?: unknown | null; card?: unknown | null; categorical?: Array<string> | null; filters?: Array<unknown> | null };
 export type GetModelOutputsQuery = { fit?: string; include?: string };
 export type GetModelOutputsResponse = { model: string; fit?: unknown | null; outputs: Array<unknown> };
+export type AnalyticsShellResponse = { application?: unknown | null; roles: Array<{ role: number; name: string }> };
 export type ListWorkspaceKindsResponse = Array<{ kind: string; label: string; available: boolean; arrives_in?: string | null }>;
-export type ListWorkspacesResponse = Array<{ id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string }>;
-export type GetWorkspaceResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string };
+export type ListWorkspacesResponse = Array<{ id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string; share_role?: number | null; application?: string | null; may_change: boolean }>;
+export type GetWorkspaceResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string; share_role?: number | null; application?: string | null; may_change: boolean };
 export type CreateWorkspaceRequest = { name: string; kind: string };
-export type CreateWorkspaceResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string };
+export type CreateWorkspaceResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string; share_role?: number | null; application?: string | null; may_change: boolean };
 export type UpdateWorkspaceRequest = { name: string };
-export type UpdateWorkspaceResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string };
+export type UpdateWorkspaceResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string; share_role?: number | null; application?: string | null; may_change: boolean };
+export type ShareWorkspaceRequest = { share_role?: number | null };
+export type ShareWorkspaceResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string; share_role?: number | null; application?: string | null; may_change: boolean };
 export type SaveWorkspaceStateRequest = { state: unknown };
-export type SaveWorkspaceStateResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string };
+export type SaveWorkspaceStateResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string; share_role?: number | null; application?: string | null; may_change: boolean };
 
 export interface ApiClient {
   authStatus(): Promise<AuthStatusResponse>;
@@ -577,6 +582,7 @@ export interface ApiClient {
   createDataset(body: CreateDatasetRequest): Promise<CreateDatasetResponse>;
   updateDataset(id: string, body: UpdateDatasetRequest): Promise<UpdateDatasetResponse>;
   deleteDataset(id: string): Promise<void>;
+  shareDataset(id: string, body: ShareDatasetRequest): Promise<ShareDatasetResponse>;
   cloneDataset(id: string, body: CloneDatasetRequest): Promise<CloneDatasetResponse>;
   listPublicDatasets(): Promise<ListPublicDatasetsResponse>;
   installPublicDataset(key: string): Promise<InstallPublicDatasetResponse>;
@@ -605,11 +611,13 @@ export interface ApiClient {
   renderMap(body: RenderMapRequest): Promise<RenderMapResponse>;
   renderPanel(body: RenderPanelRequest): Promise<RenderPanelResponse>;
   getModelOutputs(id: string, query?: GetModelOutputsQuery): Promise<GetModelOutputsResponse>;
+  analyticsShell(): Promise<AnalyticsShellResponse>;
   listWorkspaceKinds(): Promise<ListWorkspaceKindsResponse>;
   listWorkspaces(): Promise<ListWorkspacesResponse>;
   getWorkspace(id: string): Promise<GetWorkspaceResponse>;
   createWorkspace(body: CreateWorkspaceRequest): Promise<CreateWorkspaceResponse>;
   updateWorkspace(id: string, body: UpdateWorkspaceRequest): Promise<UpdateWorkspaceResponse>;
+  shareWorkspace(id: string, body: ShareWorkspaceRequest): Promise<ShareWorkspaceResponse>;
   saveWorkspaceState(id: string, body: SaveWorkspaceStateRequest): Promise<SaveWorkspaceStateResponse>;
   deleteWorkspace(id: string): Promise<void>;
 }
@@ -2410,6 +2418,15 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (!res.ok) throw await clientError("deleteDataset", res);
       return;
     },
+    async shareDataset(id, body) {
+      const res = await doFetch(`${baseUrl}/api/datasets/${encodeURIComponent(id)}/share`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("shareDataset", res);
+      return (await res.json()) as ShareDatasetResponse;
+    },
     async cloneDataset(id, body) {
       const res = await doFetch(`${baseUrl}/api/datasets/${encodeURIComponent(id)}/clone`, {
         method: "POST",
@@ -2659,6 +2676,14 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (!res.ok) throw await clientError("getModelOutputs", res);
       return (await res.json()) as GetModelOutputsResponse;
     },
+    async analyticsShell() {
+      const res = await doFetch(`${baseUrl}/api/analytics/shell`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("analyticsShell", res);
+      return (await res.json()) as AnalyticsShellResponse;
+    },
     async listWorkspaceKinds() {
       const res = await doFetch(`${baseUrl}/api/workspace-kinds`, {
         method: "GET",
@@ -2700,6 +2725,15 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("updateWorkspace", res);
       return (await res.json()) as UpdateWorkspaceResponse;
+    },
+    async shareWorkspace(id, body) {
+      const res = await doFetch(`${baseUrl}/api/workspaces/${encodeURIComponent(id)}/share`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("shareWorkspace", res);
+      return (await res.json()) as ShareWorkspaceResponse;
     },
     async saveWorkspaceState(id, body) {
       const res = await doFetch(`${baseUrl}/api/workspaces/${encodeURIComponent(id)}/state`, {

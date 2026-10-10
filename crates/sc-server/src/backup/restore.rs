@@ -2657,6 +2657,15 @@ async fn restore_workspaces(catalog: &Catalog, entries: &Entries, report: &mut R
                 }
                 workspace.id = sc_analytics::WorkspaceId(id);
             }
+            // Whom it is shared with and the application it belongs to (A9).
+            workspace.share_role = value
+                .get("share_role")
+                .and_then(Json::as_u64)
+                .and_then(|r| u8::try_from(r).ok());
+            workspace.application = value
+                .get("application")
+                .and_then(Json::as_str)
+                .and_then(|raw| uuid::Uuid::parse_str(raw).ok());
             workspace.state = value.get("state").cloned().unwrap_or(Json::Null);
             if workspace.state.is_null() {
                 workspace.state = Json::Object(Map::new());

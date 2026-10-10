@@ -22,6 +22,10 @@
 // goes down a level instead, with a breadcrumb back. The filter bar shows
 // what is filtering, removes it, and adds filters of the dashboard's own; the
 // dashboard can refresh itself every few minutes.
+//
+// **Read only** (A9.4): shown to somebody who may not change it — a fixed
+// Analytics application's users — it keeps the filtering and the drilling, and
+// offers nothing that would add, move, resize, rename or remove a tile.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent } from "react";
 import Button from "react-bootstrap/Button";
@@ -104,7 +108,7 @@ function every(seconds: number, t: Translate): string {
  * took hold, so the drop puts its corner where the corner was shown. */
 type Held = { id: string; w: number; h: number; dx: number; dy: number };
 
-export function DashboardWorkspace({ state: raw, setState }: WorkspaceProps) {
+export function DashboardWorkspace({ state: raw, setState, readOnly = false }: WorkspaceProps) {
   const { t } = useT();
   const dashboard = useMemo(() => readDashboard(raw), [raw]);
   const update = useCallback(
@@ -285,17 +289,19 @@ export function DashboardWorkspace({ state: raw, setState }: WorkspaceProps) {
   return (
     <div className="an-dashboard">
       <div className="an-dashboard-toolbar">
-        <Dropdown>
-          <Dropdown.Toggle size="sm" variant="outline-secondary">
-            + {t("Add")}
-          </Dropdown.Toggle>
-          <Dropdown.Menu>
-            <Dropdown.Item onClick={() => setTimeout(() => setEditing({ kind: "stat_card", id: null }), 0)}>
-              {t("Stat card")}
-            </Dropdown.Item>
-            <Dropdown.Item onClick={addText}>{t("Text")}</Dropdown.Item>
-          </Dropdown.Menu>
-        </Dropdown>
+        {!readOnly && (
+          <Dropdown>
+            <Dropdown.Toggle size="sm" variant="outline-secondary">
+              + {t("Add")}
+            </Dropdown.Toggle>
+            <Dropdown.Menu>
+              <Dropdown.Item onClick={() => setTimeout(() => setEditing({ kind: "stat_card", id: null }), 0)}>
+                {t("Stat card")}
+              </Dropdown.Item>
+              <Dropdown.Item onClick={addText}>{t("Text")}</Dropdown.Item>
+            </Dropdown.Menu>
+          </Dropdown>
+        )}
         <span className="text-secondary small">
           {dashboard.tiles.length === 1 ? t("1 tile") : t("{count} tiles", { count: dashboard.tiles.length })}
         </span>
@@ -360,20 +366,21 @@ export function DashboardWorkspace({ state: raw, setState }: WorkspaceProps) {
             gap: `${GAP_PX}px`,
             minHeight: dashboard.tiles.length === 0 ? `${6 * (ROW_PX + GAP_PX)}px` : undefined,
           }}
-          onDragOver={over}
+          onDragOver={readOnly ? undefined : over}
           onDragLeave={(e) => {
             if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
               setTarget(null);
               setDragging(false);
             }
           }}
-          onDrop={drop}
+          onDrop={readOnly ? undefined : drop}
         >
           {shown.map((tile) => (
             <TileView
               key={tile.id}
               tile={tile}
               narrow={narrow}
+              readOnly={readOnly}
               resizing={resizing?.id === tile.id}
               renaming={renaming === tile.id}
               setRenaming={(on) => setRenaming(on ? tile.id : null)}
@@ -478,6 +485,7 @@ export function kindName(kind: PanelKind, t: Translate): string {
 function TileView({
   tile,
   narrow,
+  readOnly,
   resizing,
   renaming,
   setRenaming,
@@ -495,6 +503,9 @@ function TileView({
 }: {
   tile: Tile;
   narrow: boolean;
+  /** Shown to somebody who may not change the dashboard: nothing to move,
+   * resize, rename, edit or remove. */
+  readOnly: boolean;
   resizing: boolean;
   renaming: boolean;
   setRenaming: (on: boolean) => void;
@@ -536,19 +547,21 @@ function TileView({
       aria-label={name}
     >
       <header className="an-tile-head">
-        <span
-          className="an-block-grip"
-          draggable
-          role="button"
-          tabIndex={-1}
-          title={t("Drag to move, or into a report or another dashboard")}
-          aria-label={t("Drag {name}", { name })}
-          onDragStart={(e) => box.current && onDragStart(e, box.current)}
-          onDragEnd={onDragEnd}
-        >
-          ⠿
-        </span>
-        {renaming ? (
+        {!readOnly && (
+          <span
+            className="an-block-grip"
+            draggable
+            role="button"
+            tabIndex={-1}
+            title={t("Drag to move, or into a report or another dashboard")}
+            aria-label={t("Drag {name}", { name })}
+            onDragStart={(e) => box.current && onDragStart(e, box.current)}
+            onDragEnd={onDragEnd}
+          >
+            ⠿
+          </span>
+        )}
+        {renaming && !readOnly ? (
           <Form.Control
             size="sm"
             autoFocus
@@ -565,68 +578,72 @@ function TileView({
             }}
           />
         ) : (
-          <span className="an-tile-title" title={name} onDoubleClick={() => setRenaming(true)}>
+          <span className="an-tile-title" title={name} onDoubleClick={readOnly ? undefined : () => setRenaming(true)}>
             {name}
           </span>
         )}
         {drawn.conditions.length > 0 && <FilteredBadge applied={applied} />}
-        <Dropdown align="end" className="ms-auto">
-          <Dropdown.Toggle size="sm" variant="link" className="an-block-menu p-0 px-1" aria-label={t("Options for {name}", { name })}>
-            ⋯
-          </Dropdown.Toggle>
-          <Dropdown.Menu>
-            {editable && <Dropdown.Item onClick={() => setTimeout(edit, 0)}>{t("Edit")}</Dropdown.Item>}
-            <Dropdown.Item onClick={() => setTimeout(() => setRenaming(true), 0)}>{t("Rename")}</Dropdown.Item>
-            {drillSpec(tile.panel) && (
-              <Dropdown.Item onClick={() => setTimeout(editDrill, 0)}>{tile.drill ? t("Drill path…") : t("Add a drill path…")}</Dropdown.Item>
-            )}
-            {!narrow && (
-              <>
-                <Dropdown.Divider />
-                <Dropdown.Item disabled={tile.y === 0} onClick={by(0, -1)}>
-                  {t("Move up")}
-                </Dropdown.Item>
-                <Dropdown.Item onClick={by(0, 1)}>{t("Move down")}</Dropdown.Item>
-                <Dropdown.Item disabled={tile.x === 0} onClick={by(-1, 0)}>
-                  {t("Move left")}
-                </Dropdown.Item>
-                <Dropdown.Item disabled={tile.x + tile.w >= COLUMNS} onClick={by(1, 0)}>
-                  {t("Move right")}
-                </Dropdown.Item>
-                <Dropdown.Divider />
-                <Dropdown.Item disabled={tile.x + tile.w >= COLUMNS} onClick={grow(1, 0)}>
-                  {t("Wider")}
-                </Dropdown.Item>
-                <Dropdown.Item disabled={tile.w <= 2} onClick={grow(-1, 0)}>
-                  {t("Narrower")}
-                </Dropdown.Item>
-                <Dropdown.Item onClick={grow(0, 1)}>{t("Taller")}</Dropdown.Item>
-                <Dropdown.Item disabled={tile.h <= 2} onClick={grow(0, -1)}>
-                  {t("Shorter")}
-                </Dropdown.Item>
-              </>
-            )}
-          </Dropdown.Menu>
-        </Dropdown>
-        <Button
-          size="sm"
-          variant="link"
-          className="p-0 px-1 text-secondary"
-          aria-label={t("Remove {name} from the dashboard", { name })}
-          onClick={() => update((d) => removeTile(d, tile.id))}
-        >
-          ×
-        </Button>
+        {!readOnly && (
+          <Dropdown align="end" className="ms-auto">
+            <Dropdown.Toggle size="sm" variant="link" className="an-block-menu p-0 px-1" aria-label={t("Options for {name}", { name })}>
+              ⋯
+            </Dropdown.Toggle>
+            <Dropdown.Menu>
+              {editable && <Dropdown.Item onClick={() => setTimeout(edit, 0)}>{t("Edit")}</Dropdown.Item>}
+              <Dropdown.Item onClick={() => setTimeout(() => setRenaming(true), 0)}>{t("Rename")}</Dropdown.Item>
+              {drillSpec(tile.panel) && (
+                <Dropdown.Item onClick={() => setTimeout(editDrill, 0)}>{tile.drill ? t("Drill path…") : t("Add a drill path…")}</Dropdown.Item>
+              )}
+              {!narrow && (
+                <>
+                  <Dropdown.Divider />
+                  <Dropdown.Item disabled={tile.y === 0} onClick={by(0, -1)}>
+                    {t("Move up")}
+                  </Dropdown.Item>
+                  <Dropdown.Item onClick={by(0, 1)}>{t("Move down")}</Dropdown.Item>
+                  <Dropdown.Item disabled={tile.x === 0} onClick={by(-1, 0)}>
+                    {t("Move left")}
+                  </Dropdown.Item>
+                  <Dropdown.Item disabled={tile.x + tile.w >= COLUMNS} onClick={by(1, 0)}>
+                    {t("Move right")}
+                  </Dropdown.Item>
+                  <Dropdown.Divider />
+                  <Dropdown.Item disabled={tile.x + tile.w >= COLUMNS} onClick={grow(1, 0)}>
+                    {t("Wider")}
+                  </Dropdown.Item>
+                  <Dropdown.Item disabled={tile.w <= 2} onClick={grow(-1, 0)}>
+                    {t("Narrower")}
+                  </Dropdown.Item>
+                  <Dropdown.Item onClick={grow(0, 1)}>{t("Taller")}</Dropdown.Item>
+                  <Dropdown.Item disabled={tile.h <= 2} onClick={grow(0, -1)}>
+                    {t("Shorter")}
+                  </Dropdown.Item>
+                </>
+              )}
+            </Dropdown.Menu>
+          </Dropdown>
+        )}
+        {!readOnly && (
+          <Button
+            size="sm"
+            variant="link"
+            className="p-0 px-1 text-secondary"
+            aria-label={t("Remove {name} from the dashboard", { name })}
+            onClick={() => update((d) => removeTile(d, tile.id))}
+          >
+            ×
+          </Button>
+        )}
       </header>
       {tile.drill && <Breadcrumb path={tile.drill.path} down={down} goUp={goUp} />}
-      <div className="an-tile-body" onDoubleClick={editable ? edit : undefined}>
+      <div className="an-tile-body" onDoubleClick={editable && !readOnly ? edit : undefined}>
         {tile.panel.kind === "text" && tile.panel.content.markdown.trim() === "" ? (
           <span className="an-placeholder">{t("Double-click to write text, in Markdown.")}</span>
         ) : (
           <PanelView panel={drawn.panel} filters={drawn.conditions} tick={tick} onSelect={onSelect} onFiltered={setApplied} />
         )}
       </div>
-      {!narrow && (
+      {!narrow && !readOnly && (
         <span
           className="an-tile-resize"
           role="separator"

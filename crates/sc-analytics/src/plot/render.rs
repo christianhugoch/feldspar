@@ -38,7 +38,8 @@ use std::sync::Arc;
 
 use sc_catalog::Catalog;
 use sc_dataset::{
-    ColType, Grain, Options, Schema, StageColumn, StageShape, compile, scramble, value_json,
+    Caller, ColType, Grain, Options, Reader, Schema, StageColumn, StageShape, compile, scramble,
+    value_json,
 };
 use sc_db::{ColumnDef, DatabaseDriver, Row, SchemaChange};
 use sc_error::{Error, Result};
@@ -199,15 +200,20 @@ impl From<Error> for Halt {
 pub(crate) type Step<T> = std::result::Result<T, Halt>;
 
 /// Draw `spec`: every layer's data and the domains, or the sentence saying
-/// why it cannot be drawn. Reads as the admin (A9 is where a restricted
-/// user's reads go through their permissions).
-pub async fn render_plot(catalog: &Catalog, spec: &PlotSpec) -> Result<Rendered> {
-    render_plot_in(catalog, spec, &Scope::none()).await
+/// why it cannot be drawn. Reads as `caller` (A9.1): the rows of each table
+/// they may read.
+pub async fn render_plot(catalog: &Catalog, caller: &Caller, spec: &PlotSpec) -> Result<Rendered> {
+    render_plot_in(catalog, caller, spec, &Scope::none()).await
 }
 
 /// [`render_plot`] over the rows a dashboard's conditions keep (A6.4).
-pub async fn render_plot_in(catalog: &Catalog, spec: &PlotSpec, scope: &Scope) -> Result<Rendered> {
-    let rows = match plot_rows_in(catalog, &spec.data, scope).await? {
+pub async fn render_plot_in(
+    catalog: &Catalog,
+    caller: &Caller,
+    spec: &PlotSpec,
+    scope: &Scope,
+) -> Result<Rendered> {
+    let rows = match plot_rows_in(catalog, caller, &spec.data, scope).await? {
         Ok(rows) => rows,
         Err(sentence) => return Ok(Rendered::refuse(sentence)),
     };
@@ -231,32 +237,53 @@ pub async fn render_plot_in(catalog: &Catalog, spec: &PlotSpec, scope: &Scope) -
 /// The rows a plot reads: a query, the columns it answers, and the database
 /// it runs on.
 ///
-/// A dataset's rows are its last stage's query on the primary database. A
-/// fit's output data (analytics TODO A3.1) is read from the instance and put
-/// in a private in-memory SQLite database for the length of one render, so
-/// every stat this module compiles to SQL runs on it unchanged — "computed in
-/// memory" without a second implementation of each stat.
+/// A dataset's rows are its last stage's query on the primary database, read
+/// as the caller (A9.1). A fit's output data (analytics TODO A3.1) is read
+/// from the instance and put in a private in-memory SQLite database for the
+/// length of one render, so every stat this module compiles to SQL runs on it
+/// unchanged — "computed in memory" without a second implementation of each
+/// stat.
 pub(crate) struct PlotRows {
     /// The rows, in no particular order.
     pub(crate) query: Select,
     /// Their columns.
     pub(crate) shape: StageShape,
     /// Where `query` runs.
-    pub(crate) db: Arc<dyn DatabaseDriver>,
+    pub(crate) db: RowsDb,
+}
+
+/// Where a plot's rows are read.
+pub(crate) enum RowsDb {
+    /// The primary database, as the caller: every statement is guarded.
+    Primary(Reader),
+    /// A private database of a fit's output data.
+    Memory(Arc<dyn DatabaseDriver>),
+}
+
+impl RowsDb {
+    /// Run `select`.
+    pub(crate) async fn query(&self, select: Select) -> Result<Vec<Row>> {
+        match self {
+            RowsDb::Primary(reader) => reader.query(select).await,
+            RowsDb::Memory(db) => db.query(&Statement::from(select)).await?.try_collect().await,
+        }
+    }
 }
 
 /// The rows `data` names, or the sentence saying why there are none.
 pub(crate) async fn plot_rows(
     catalog: &Catalog,
+    caller: &Caller,
     data: &DataRef,
 ) -> Result<std::result::Result<PlotRows, String>> {
-    plot_rows_in(catalog, data, &Scope::none()).await
+    plot_rows_in(catalog, caller, data, &Scope::none()).await
 }
 
 /// [`plot_rows`], a dataset's with the conditions on it appended as a Filter
 /// (A6.4). A fit's output data is not a dataset, and no condition reaches it.
 pub(crate) async fn plot_rows_in(
     catalog: &Catalog,
+    caller: &Caller,
     data: &DataRef,
     scope: &Scope,
 ) -> Result<std::result::Result<PlotRows, String>> {
@@ -283,11 +310,16 @@ pub(crate) async fn plot_rows_in(
                 Ok(query) => Ok(PlotRows {
                     query,
                     shape: stage.shape(),
-                    db: Arc::clone(catalog.primary()),
+                    db: RowsDb::Primary(Reader::new(catalog, caller)?),
                 }),
                 Err(e) => Err(format!("the dataset `{}` does not read: {e}", def.name)),
             })
         }
+        // A fit's outputs are its model's, and models are the admin's: rows a
+        // fit read on the server's authority are not narrowed to a caller's.
+        DataRef::FitOutput { .. } if !caller.is_admin() => Ok(Err(
+            "a model fit's output data is shown only in the unrestricted Analytics UI".to_owned(),
+        )),
         DataRef::FitOutput { instance, name } => {
             let id = sc_model::InstanceId(*instance);
             let Some(data) = sc_model::load_output_data(catalog, id, name).await? else {
@@ -394,7 +426,7 @@ async fn fit_output_rows(data: &sc_model::OutputData) -> Result<PlotRows> {
                 .collect(),
             grain: Grain::Derived,
         },
-        db,
+        db: RowsDb::Memory(db),
     })
 }
 
@@ -450,14 +482,19 @@ pub struct TableData {
 }
 
 /// Make the summary table `spec` describes: its body and totals, or the
-/// sentence saying why it cannot. Reads as the admin, as `render_plot` does.
-pub async fn render_table(catalog: &Catalog, spec: &TableSpec) -> Result<RenderedTable> {
-    render_table_in(catalog, spec, &Scope::none()).await
+/// sentence saying why it cannot. Reads as `caller`, as `render_plot` does.
+pub async fn render_table(
+    catalog: &Catalog,
+    caller: &Caller,
+    spec: &TableSpec,
+) -> Result<RenderedTable> {
+    render_table_in(catalog, caller, spec, &Scope::none()).await
 }
 
 /// [`render_table`] over the rows a dashboard's conditions keep (A6.4).
 pub async fn render_table_in(
     catalog: &Catalog,
+    caller: &Caller,
     spec: &TableSpec,
     scope: &Scope,
 ) -> Result<RenderedTable> {
@@ -465,7 +502,7 @@ pub async fn render_table_in(
         problems: vec![error.clone()],
         error,
     };
-    let rows = match plot_rows_in(catalog, &spec.data, scope).await? {
+    let rows = match plot_rows_in(catalog, caller, &spec.data, scope).await? {
         Ok(rows) => rows,
         Err(sentence) => return Ok(refuse(sentence)),
     };
@@ -1899,13 +1936,7 @@ impl<'a> Renderer<'a> {
     }
 
     pub(crate) async fn run(&self, select: Select) -> Step<Vec<Row>> {
-        Ok(self
-            .rows
-            .db
-            .query(&Statement::from(select))
-            .await?
-            .try_collect()
-            .await?)
+        Ok(self.rows.db.query(select).await?)
     }
 
     // --- facets and domains --------------------------------------------------

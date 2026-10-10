@@ -9199,6 +9199,7 @@ name = "sc-dataset"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "sc-auth",
  "sc-catalog",
  "sc-db",
  "sc-db-postgres",

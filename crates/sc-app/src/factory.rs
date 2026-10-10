@@ -62,6 +62,15 @@ pub trait FrameworkFactory: Send + Sync {
         Ok(())
     }
 
+    /// A check that needs the database as it is now — that a setting names
+    /// something that exists — run on save only
+    /// ([`validate_framework_config`](crate::validate_framework_config)), the
+    /// way a server-query setting's options are: whether it exists is settled
+    /// where the admin can fix it, and a build or a mount does not re-ask.
+    async fn check_config_against(&self, _catalog: &Catalog, _config: &Attrs) -> Result<()> {
+        Ok(())
+    }
+
     /// Mount `app`: construct the framework that serves it.
     async fn mount(&self, app: &Application, ctx: MountContext<'_>) -> Result<Arc<dyn Framework>>;
 }
