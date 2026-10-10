@@ -108,12 +108,12 @@ function run(command, args, options) {
   execFileSync(command, args, Object.assign({ stdio: "inherit" }, options));
 }
 
-/** The simulator build's Xcode configuration. Debug leaves the JavaScript
- * out of the app by default; FORCE_BUNDLING puts it in. */
+/** The simulator build's Xcode configuration. A Debug app has no JavaScript
+ * inside: it loads it from Metro (`npx expo start`), as Expo's dev runtime
+ * requires. Embedding it does not help: that runtime refuses to run from an
+ * embedded bundle. */
 function simulatorConfiguration(native) {
-  return (native.ios || {}).simulatorConfiguration === "debug"
-    ? { configuration: "Debug", buildSettings: ["FORCE_BUNDLING=1"] }
-    : { configuration: "Release", buildSettings: [] };
+  return { configuration: (native.ios || {}).simulatorConfiguration === "debug" ? "Debug" : "Release" };
 }
 
 /** The one entry in `dir` ending in `suffix`; throws if there are none or several. */
@@ -220,7 +220,6 @@ async function main(kind) {
         "-destination",
         "generic/platform=iOS Simulator",
         "CODE_SIGNING_ALLOWED=NO",
-        ...sim.buildSettings,
         "build",
       ]),
       { cwd: iosDir, env }

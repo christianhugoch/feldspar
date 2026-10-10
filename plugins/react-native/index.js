@@ -341,12 +341,17 @@ const ios_options = [
   },
 ];
 
-/** The simulator build's own setting. Debug gives the dev menu and warnings;
- * its JavaScript is still bundled into the app, so it runs on its own. */
+/** The simulator build's own setting. Release runs on its own. Debug gives the
+ * dev menu, warnings and Fast Refresh, but loads its JavaScript from Metro, so
+ * it needs `npx expo start` running in the project (README, "Debug simulator
+ * builds"). */
 const ios_simulator_options = [
   {
     name: "simulator_configuration",
     label: "Configuration",
+    sublabel:
+      "release: runs on its own. debug: dev menu and warnings, but needs Metro " +
+      "(npx expo start in the project folder) running before the app starts.",
     type: "String",
     required: true,
     default: "release",

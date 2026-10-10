@@ -1551,7 +1551,7 @@ const ios = require("./ios/build.cjs");
 const dir = require("path").join(process.cwd(), "Application Support/app/ios");
 const first = ios.quoteScriptPaths(dir);
 const again = ios.quoteScriptPaths(dir);
-// A Debug simulator build bundles its JavaScript too.
+// A Debug simulator build is plain Debug: its JavaScript comes from Metro.
 const sim = [ios.simulatorConfiguration({ ios: { simulatorConfiguration: "debug" } }),
              ios.simulatorConfiguration({})];
 console.log(JSON.stringify({ first, again, sim }));
@@ -1578,8 +1578,8 @@ console.log(JSON.stringify({ first, again, sim }));
     assert_eq!(
         got["sim"],
         json!([
-            { "configuration": "Debug", "buildSettings": ["FORCE_BUNDLING=1"] },
-            { "configuration": "Release", "buildSettings": [] }
+            { "configuration": "Debug" },
+            { "configuration": "Release" }
         ])
     );
     assert!(!pods.contains(constants), "{pods}");

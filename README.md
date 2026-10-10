@@ -801,6 +801,27 @@ After a change, `cargo build -p sc-cli` and restart the server. Differences from
   module tests' read permissions do not resolve yet. Give them its real path:
   `TMPDIR=$(cd "$TMPDIR" && pwd -P) cargo test --workspace`.
 
+**Debug simulator builds.** The "iOS simulator app" target's Configuration is `release` (the
+app runs on its own) or `debug` (dev menu, warnings, Fast Refresh). A Debug app has no
+JavaScript inside: it loads it from Metro, Expo's development server, which must be running
+in the project folder before the app starts. With the app's file store `apps` and project
+`todo`:
+
+```bash
+# 1. Metro, in the project folder; leave it running (r reloads, Ctrl-C stops)
+cd ~/Library/Application\ Support/feldspar/local-stores/apps/todo && npx expo start
+
+# 2. In another terminal: install the Debug build and start it
+cd ~/Library/Application\ Support/feldspar/local-stores/apps/todo && open -a Simulator
+rm -rf /tmp/simapp && ditto -x -k ios-output/app-simulator.zip /tmp/simapp
+APP=$(echo /tmp/simapp/*.app) && xcrun simctl install booted "$APP"
+xcrun simctl launch booted "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Info.plist")"
+```
+
+Without Metro the app stops with "No script URL provided". Building the JavaScript into a
+Debug app does not help: Expo's development runtime refuses to run from an embedded bundle.
+For an app that runs on its own, build `release`.
+
 ---
 
 ## 5. Database setup
