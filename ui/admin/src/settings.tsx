@@ -18,6 +18,7 @@ import { CodeEditor } from "./CodeEditor";
 import type { CodeScope } from "./codeTypes";
 import { T } from "./i18n";
 import type { ExtraOption } from "./newFileStore";
+import { withSections } from "./settingSections";
 
 /** One settings field, structurally matching the API's `form_field_schema`.
  *
@@ -57,6 +58,14 @@ export type FieldSpec = {
    * (v1's `showIf`). Empty or absent means always. A setting that does not
    * apply is not shown, and the server does not require it. */
   show_if?: ShowIfCondition[];
+  /** The heading of a group of settings that starts with this one (v1's
+   * `section_header`), drawn above it; absent for a setting that continues the
+   * group before it. Presentation only, so it is declared on the field rather
+   * than as an entry of the spec that is not a setting. */
+  section?: string | null;
+  /** A sentence or two under the control (v1's `sublabel`): what to enter and
+   * where to find it. */
+  sublabel?: string | null;
 };
 
 /** One condition of a `show_if`: setting `name` must hold one of `values`. */
@@ -213,6 +222,10 @@ export function SettingField({
   const fixedHint = fixed ? (
     <Form.Text muted><T text="Chosen when this was created; it cannot be changed." /></Form.Text>
   ) : null;
+  // The field's own description, under the control in every kind below.
+  const description = field.sublabel ? (
+    <Form.Text muted className="d-block">{field.sublabel}</Form.Text>
+  ) : null;
   const choices = field.options.length + extraOptions.length;
   if (choices > 0 || pickerHint !== undefined) {
     return (
@@ -241,6 +254,7 @@ export function SettingField({
             </option>
           ))}
         </Form.Select>
+        {description}
         {choices === 0 && pickerHint && <Form.Text muted>{pickerHint}</Form.Text>}
         {fixedHint}
       </Form.Group>
@@ -256,6 +270,7 @@ export function SettingField({
           disabled={fixed}
           onChange={(e) => onChange(e.target.checked ? "true" : "false")}
         />
+        {description}
         {fixedHint}
       </Form.Group>
     );
@@ -279,6 +294,7 @@ export function SettingField({
           readOnly={fixed}
           onChange={onChange}
         />
+        {description}
         {fixedHint}
       </Form.Group>
     );
@@ -301,6 +317,7 @@ export function SettingField({
           readOnly={fixed}
           onChange={(e) => onChange(e.target.value)}
         />
+        {description}
         {fixedHint ?? <Form.Text muted>JSON.</Form.Text>}
       </Form.Group>
     );
@@ -349,6 +366,7 @@ export function SettingField({
           onBlur={field.secret ? () => value === "" && onChange(SECRET_SENTINEL) : undefined}
         />
       )}
+      {description}
       {fixedHint}
       {field.secret && value === SECRET_SENTINEL && (
         <Form.Text muted><T text="Stored. Type to replace it." /></Form.Text>
@@ -391,21 +409,31 @@ export function SettingsFields({
 }) {
   return (
     <>
-      {spec
-        .filter((field) => isShown(field, conditionSpec ?? spec, values))
-        .map((field) => (
-        <SettingField
-          key={field.name}
-          field={field}
-          value={values[field.name] ?? asString(field.default)}
-          onChange={(v) => onChange(field.name, v)}
-          idPrefix={idPrefix}
-          locked={locked}
-          codeScope={codeScope}
-          extraOptions={extraOptions[field.name]}
-          pickerHint={pickerHints[field.name]}
-        />
-      ))}
+      {withSections(spec, (field) => isShown(field, conditionSpec ?? spec, values)).map((item) =>
+        item.kind === "heading" ? (
+          // A band with an accent bar, so a new group stands out from the
+          // settings above it. Bootstrap's theme colours keep it readable in
+          // dark mode.
+          <h5
+            key={item.key}
+            className="mt-4 mb-3 px-3 py-2 fs-6 fw-semibold text-body-emphasis bg-body-tertiary border-start border-4 border-primary rounded-end"
+          >
+            {item.label}
+          </h5>
+        ) : (
+          <SettingField
+            key={item.field.name}
+            field={item.field}
+            value={values[item.field.name] ?? asString(item.field.default)}
+            onChange={(v) => onChange(item.field.name, v)}
+            idPrefix={idPrefix}
+            locked={locked}
+            codeScope={codeScope}
+            extraOptions={extraOptions[item.field.name]}
+            pickerHint={pickerHints[item.field.name]}
+          />
+        ),
+      )}
     </>
   );
 }

@@ -2,6 +2,47 @@
 
 Changes in reverse chronological order.
 
+## Development servers serve their applications under `localhost`
+
+A server with no `base_domain` that listens on loopback without TLS (the default
+`127.0.0.1:3032`) now serves each application at `http://<subdomain>.localhost:3032`.
+Before, it served no applications. Native apps get that URL as their server URL. A server
+reachable from other machines still needs `base_domain`, and an Android emulator or a phone
+still needs the app's "Server URL for the mobile app".
+
+- Tests: `sc-server` config tests and `crates/sc-cli/tests/config_file.rs`.
+
+## Module settings can have section headings and descriptions
+
+Saltcorn 1's `section_header` entries and `sublabel` descriptions in a settings spec are no
+longer dropped. A heading groups the settings that follow it, and a description appears under
+its input. The admin UI shows both on application forms and on the Modules tab, which now also
+honours `show_if`. The React Native settings are grouped under "Android" and "iOS".
+
+- Tests: `spec::tests::a_section_header_heads_the_setting_after_it`, `settingSections.test.ts`.
+
+## React Native: iOS builds
+
+On a macOS server with Xcode and CocoaPods, `plugins/react-native` builds iOS apps from the
+same Expo project. On Linux, the iOS targets show as not ready.
+
+- **iOS simulator app** (`ios_simulator`): an unsigned Release or Debug build in
+  `ios-output/app-simulator.zip`. A Debug build loads its JavaScript from Metro.
+- **iOS app** (`ios`): an `.ipa` for App Store Connect in `ios-output/app.ipa`. As in
+  Saltcorn 1, the team, bundle ID, export method and signing identity all come from the
+  provisioning profile. The profile is either picked from the file store or generated through
+  the App Store Connect API. The certificate's private key must be in the keychain of the
+  user the server runs as. A bad profile or a missing certificate stops the build before
+  Xcode starts. Only App Store profiles are supported.
+- **"Generate a provisioning profile"**: a target operation that stores an App Store profile
+  in the file store without building. It works from any OS.
+- **Module settings:** a custom CocoaPods directory, the App Store Connect API key (the `.p8`
+  is a secret) and the distribution certificate to use.
+- **Application settings:** the App ID, version and icon (PNG only) now apply to both
+  platforms. The iOS bundle ID is the App ID with `_` replaced by `-`.
+- Project paths that contain spaces now build.
+- Tests: `crates/sc-module/tests/bundled_react_native.rs`.
+
 ## Fix: the admin copilot's chat history was always empty
 
 The chat panel's rail of past conversations was blank for `Admin copilot`, however many

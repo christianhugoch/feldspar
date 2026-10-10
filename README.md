@@ -298,8 +298,10 @@ Notes on that file, all of which §7 covers in full:
 - `base_domain` and `bind` mirror the flags of the same names, so `feldspar serve`
   needs neither on the command line — and a `feldspar build-app` run against the same
   environment writes the application's real URL into the documentation it generates.
-- **Without `base_domain` no application is served at all**, only the admin UI: the
-  server has no way to address an app.
+- **Without `base_domain`**, a server that listens on this machine only (the default
+  `127.0.0.1:3032`, no TLS) serves its applications under `localhost`:
+  `http://<subdomain>.localhost:3032`. Any other server serves no application at all,
+  only the admin UI: it has no way to address an app.
 - `extra_base_domains = ["10.0.2.2.nip.io", "192.168.1.50.nip.io"]` (or
   `--extra-base-domain`, repeatable) makes every application answer under those domains
   too — `todo.10.0.2.2.nip.io` is the app `todo`. That is how an Android emulator
@@ -801,6 +803,31 @@ After a change, `cargo build -p sc-cli` and restart the server. Differences from
   module tests' read permissions do not resolve yet. Give them its real path:
   `TMPDIR=$(cd "$TMPDIR" && pwd -P) cargo test --workspace`.
 
+**Debug simulator builds.** The "iOS simulator app" target has a Configuration setting:
+
+- `release`: the app runs on its own.
+- `debug`: dev menu, warnings and Fast Refresh, but the app loads its JavaScript from
+  Metro, Expo's development server. Start Metro in the project folder before the app.
+
+For example, for an app whose file store `simubuild` is in its suggested directory (with
+the app's Project setting filled in, add that folder to the path):
+
+```bash
+# Terminal 1: Metro; leave it running (r reloads, Ctrl-C stops)
+cd "$HOME/Library/Application Support/Feldspar/local-stores/simubuild"
+npx expo start
+
+# Terminal 2: install the Debug build in the simulator and start it
+cd "$HOME/Library/Application Support/Feldspar/local-stores/simubuild"
+open -a Simulator
+rm -rf /tmp/simapp && ditto -x -k ios-output/app-simulator.zip /tmp/simapp
+APP=$(echo /tmp/simapp/*.app)
+xcrun simctl install booted "$APP"
+xcrun simctl launch booted "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Info.plist")"
+```
+
+Without Metro the Debug app stops with "No script URL provided".
+
 ---
 
 ## 5. Database setup
@@ -1120,7 +1147,7 @@ can read it — including a group that is not its own.
 | `--static-dir <dir>` | directory holding the built admin bundle | (the embedded bundle, unless built with `SC_BUILD_ADMIN=0`) |
 | `--session-ttl-hours <n>` | session lifetime | `24` |
 | `--secure-cookies` | set the `Secure` attribute on session/CSRF cookies (use behind HTTPS) | off |
-| `--base-domain <domain>` | domain that applications are served under: an app with subdomain `blog` is served at `blog.<domain>` | none (app routing off) |
+| `--base-domain <domain>` | domain that applications are served under: an app with subdomain `blog` is served at `blog.<domain>` | `localhost` if bound to loopback without TLS, else none (app routing off) |
 | `--extra-base-domain <domain>` | a further domain the same applications answer under (repeatable): `blog.<domain>` is the app `blog` too | none |
 | `--code-workers <n>` | V8 isolates serving `run_js_code` trigger bodies | `2` |
 | `--code-max-inflight <n>` | runs each of those isolates keeps resident at once | `256` |
@@ -1156,8 +1183,9 @@ Unknown flags in either group are rejected with a clear error rather than ignore
 > **`--base-domain` mounts your applications.** With it set, `feldspar serve` loads
 > every `_fd_applications` row at boot, builds each, and serves it at
 > `<subdomain>.<base-domain>`; an app that fails to build is logged and skipped, not
-> fatal, and can be fixed and rebuilt without a restart. Without a base domain the
-> server has no way to address an app, so it serves the admin only.
+> fatal, and can be fixed and rebuilt without a restart. Without a base domain, a
+> server bound to loopback (the default) without TLS uses `localhost` and says so at
+> startup; any other server has no way to address an app, so it serves the admin only.
 
 > **A coding run's previews.** A green `check` in a coding run mounts that build
 > as the run's **preview** at `<label>--<subdomain>.<base-domain>`, beside the
