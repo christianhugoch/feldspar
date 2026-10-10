@@ -60,6 +60,19 @@
 //! their district and the counts per district, with the sentences saying
 //! which filters did not reach a panel; a filter of the dashboard's own
 //! saved and cleared; and the dashboard reopened as it was left.
+//!
+//! **A9** (analytics TODO A9.6): applications with a restricted Analytics UI,
+//! on their own subdomains. A fixed application showing one dashboard of the
+//! admin's for `staff`: before `staff` may read `houses` its tiles say so;
+//! after, a `staff` user's shell is the dashboard alone, its tiles draw and
+//! filter, every change is refused, the admin's endpoints and the other
+//! datasets are not there, and a member and a visitor are kept out. A
+//! self-serve application over `houses` and `neighbourhoods`: the base picker,
+//! a dataset of the user's own explored, `incidents` refused as a base and
+//! `viewings` through a join, only the Data explorer, nothing of the other
+//! application, and sharing with another `staff` user. Then an ownership
+//! formula gives `staff` the newer houses only, and every count, box and test
+//! in both applications is of those rows, against the admin's 200.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -81,6 +94,8 @@ use tower::ServiceExt;
 
 struct Client {
     router: Router,
+    /// The host addressed, on a server with a base domain (A9's applications).
+    host: Option<String>,
     cookies: HashMap<String, String>,
 }
 
@@ -93,6 +108,9 @@ impl Client {
         body: Option<Value>,
     ) -> (StatusCode, String, Vec<u8>) {
         let mut builder = Request::builder().method(method).uri(path);
+        if let Some(host) = &self.host {
+            builder = builder.header(header::HOST, host);
+        }
         if !self.cookies.is_empty() {
             let jar = self
                 .cookies
@@ -190,11 +208,23 @@ async fn setup() -> sc_error::Result<(Client, TestDb)> {
 /// A server over `db`, after `feldspar demo analytics`, with the admin
 /// logged in. On a database with PostGIS the demo makes its map tables too.
 async fn setup_on(db: TestDb) -> sc_error::Result<(Client, TestDb)> {
+    serve(db, None, None).await
+}
+
+/// [`setup_on`]'s server, answering applications' subdomains of
+/// `base_domain` (the admin is then signed in there) and serving `bundle` as
+/// the Analytics UI's.
+async fn serve(
+    db: TestDb,
+    base_domain: Option<&str>,
+    bundle: Option<std::path::PathBuf>,
+) -> sc_error::Result<(Client, TestDb)> {
     let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
     let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
     sc_auth::bootstrap(&catalog).await?;
     sc_catalog::bootstrap_table_meta(&catalog).await?;
     sc_catalog::bootstrap_field_meta(&catalog).await?;
+    sc_app::bootstrap(&catalog).await?;
     // `feldspar demo analytics`, as the Try it begins.
     sc_analytics::demo::demo_analytics(&catalog, false).await?;
     let agents = sc_server::install_agents(&catalog).await?;
@@ -206,18 +236,25 @@ async fn setup_on(db: TestDb) -> sc_error::Result<(Client, TestDb)> {
     let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents, &models).await?;
     let apps = Arc::new(
         AppMounts::new(catalog.clone())
+            .with_base_domain(base_domain.map(str::to_owned))
             .with_triggers(dispatcher)
-            .with_models(models),
+            .with_models(models)
+            .with_analytics_dir(bundle),
     );
+    let config = ServerConfig {
+        base_domain: base_domain.map(str::to_owned),
+        ..ServerConfig::default()
+    };
     let router = build_router_with_apps(
         &sc_api::admin_endpoints(),
         admin_handlers(catalog.clone(), apps.clone()),
         Arc::new(SessionStore::default()),
-        &ServerConfig::default(),
+        &config,
         apps,
     )?;
     let mut client = Client {
         router,
+        host: base_domain.map(str::to_owned),
         cookies: HashMap::new(),
     };
     client.send("GET", "/api/auth/status", None).await;
@@ -2896,5 +2933,581 @@ async fn the_try_it_of_milestone_a6() -> sc_error::Result<()> {
         using.contains(&("Incidents dashboard".to_owned(), "dashboard".to_owned(), 4)),
         "{usage}"
     );
+    Ok(())
+}
+
+/// The base domain A9's applications are subdomains of.
+const BASE_DOMAIN: &str = "example.com";
+
+impl Client {
+    /// A client of the same server addressing `host`, signed in as nobody.
+    fn on_host(&self, host: &str) -> Client {
+        Client {
+            router: self.router.clone(),
+            host: Some(host.to_owned()),
+            cookies: HashMap::new(),
+        }
+    }
+
+    /// Sign in as `email` on this client's host, as the shell's form does.
+    async fn sign_in(&mut self, email: &str) {
+        self.send("GET", "/api/auth/status", None).await;
+        self.ok(
+            "POST",
+            "/api/login",
+            Some(json!({ "email": email, "password": "hunter2pass" })),
+        )
+        .await;
+    }
+
+    /// A refusal: its status and the whole answer, which holds its sentence.
+    async fn refused(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, String) {
+        let (status, value) = self.send(method, path, body).await;
+        assert!(
+            status.is_client_error(),
+            "{:?} {method} {path}: {status} {value}",
+            self.host
+        );
+        (status, value.to_string())
+    }
+
+    /// The names of what a list endpoint answers.
+    async fn names(&mut self, path: &str) -> Vec<String> {
+        let listed = self.ok("GET", path, None).await;
+        let mut names: Vec<String> = listed
+            .as_array()
+            .unwrap_or_else(|| panic!("{path}: {listed}"))
+            .iter()
+            .map(|d| d["name"].as_str().unwrap().to_owned())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// A table's read access: `min_role_read`, and the ownership formula that
+    /// grants rows below it.
+    async fn table_readable(&mut self, table: &str, min_role_read: u8, formula: &str) {
+        self.ok(
+            "PUT",
+            &format!("/api/tables/{table}"),
+            Some(json!({
+                "label": "", "description": "",
+                "min_role_read": min_role_read, "min_role_write": 1,
+                "ownership_formula": formula, "rls_enabled": false,
+            })),
+        )
+        .await;
+    }
+}
+
+/// A demo house, as the admin reads it.
+struct House {
+    neighbourhood: i64,
+    year_built: i64,
+    sold: bool,
+}
+
+/// The houses per neighbourhood, keyed as a count plot's bars are.
+fn per_neighbourhood<'a>(houses: impl Iterator<Item = &'a House>) -> BTreeMap<String, i64> {
+    let mut out = BTreeMap::new();
+    for house in houses {
+        *out.entry(house.neighbourhood.to_string()).or_insert(0) += 1;
+    }
+    out
+}
+
+#[tokio::test]
+async fn the_try_it_of_milestone_a9() -> sc_error::Result<()> {
+    // A stand-in for the built Analytics UI: an application serves it at `/`.
+    let bundle = std::env::temp_dir().join(format!("sc-analytics-a9-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(bundle.join("assets")).unwrap();
+    std::fs::write(
+        bundle.join("index.html"),
+        "<!doctype html><div id=\"root\"></div>",
+    )
+    .unwrap();
+    let (mut admin, _db) = serve(
+        TestDb::new().await?,
+        Some(BASE_DOMAIN),
+        Some(bundle.clone()),
+    )
+    .await?;
+    let admin = &mut admin;
+
+    // The role `staff`, two staff users and a member, who is below it.
+    for (role, name) in [(40, "staff"), (80, "member")] {
+        admin
+            .ok(
+                "POST",
+                "/api/roles",
+                Some(json!({ "role": role, "name": name, "description": "" })),
+            )
+            .await;
+    }
+    for (email, role) in [
+        ("sam@example.com", 40),
+        ("lee@example.com", 40),
+        ("pat@example.com", 80),
+    ] {
+        admin
+            .ok(
+                "POST",
+                "/api/users",
+                Some(json!({ "email": email, "password": "hunter2pass", "role": role })),
+            )
+            .await;
+    }
+
+    // Every house as the admin reads it: what the counts below are made from.
+    let houses = admin.dataset_named("Houses").await;
+    let measurements = admin.dataset_named("Measurements").await;
+    let all: Vec<House> = admin
+        .every_row(&houses)
+        .await
+        .iter()
+        .map(|row| House {
+            neighbourhood: row["neighbourhood"].as_i64().unwrap(),
+            year_built: row["year_built"].as_i64().unwrap(),
+            sold: row["sold"].as_bool().unwrap(),
+        })
+        .collect();
+    assert_eq!(all.len(), sc_analytics::demo::DEMO_HOUSES);
+    let newer = |h: &&House| h.year_built >= 1990;
+
+    // The admin's dashboard on the demo's `Houses`: a card counting them, the
+    // houses per neighbourhood, and the prices by neighbourhood as a box plot.
+    // (The tutorial uses part 6's dashboard; it needs PostGIS, and nothing
+    // here does.)
+    let data = json!({ "kind": "dataset", "dataset": houses });
+    let card = panel_of(
+        "Houses",
+        "stat_card",
+        json!({ "dataset": houses, "value": { "function": "count" } }),
+    );
+    let bars_panel = panel_of(
+        "Houses per neighbourhood",
+        "plot",
+        json!({ "spec": { "data": data, "layers": [{ "mark": "bar", "stat": { "kind": "count" },
+                          "encoding": { "x": { "field": "neighbourhood" } } }] } }),
+    );
+    let boxed = json!({ "x": { "field": "neighbourhood" }, "y": [{ "field": "price" }] });
+    let suggested = admin
+        .suggest(json!({ "dataset": houses, "assignment": boxed }))
+        .await;
+    let box_panel = panel_of("Prices", "plot", json!({ "spec": suggested["spec"] }));
+    let tests_of = json!({ "data": data, "y": [{ "field": "price" }],
+                           "x": { "field": "neighbourhood" } });
+    let dashboard = admin.workspace("Houses dashboard", "dashboard").await;
+    admin
+        .save_state(
+            &dashboard,
+            &json!({ "tiles": [
+                tile("card", &card, [0, 0, 3, 2]),
+                tile("bars", &bars_panel, [3, 0, 5, 5]),
+                tile("box", &box_panel, [8, 0, 4, 5]),
+            ] }),
+        )
+        .await;
+
+    // 1. The fixed application, showing only the dashboard, for `staff`.
+    let application = |subdomain: &str, config: Value, tables: &[&str]| {
+        json!({
+            "name": format!("{subdomain} insights"), "description": "",
+            "subdomain": subdomain,
+            "framework": { "name": "analytics", "config": config },
+            "extra_frameworks": [], "tables": tables, "file_stores": [], "triggers": [],
+            "apis": [], "static_dirs": [], "attributes": {}
+        })
+    };
+    let fixed = admin
+        .ok(
+            "POST",
+            "/api/applications",
+            Some(application(
+                "board",
+                json!({ "mode": "fixed", "min_role": 40, "workspaces": ["Houses dashboard"] }),
+                &[],
+            )),
+        )
+        .await;
+    assert_eq!(fixed["mounted"], json!(true), "{fixed}");
+    // `staff` may not read `houses` yet: the dashboard is there, and says so.
+    let mut sam = admin.on_host("board.example.com");
+    sam.sign_in("sam@example.com").await;
+    let (_, why) = sam
+        .send("POST", "/api/panels/render", Some(json!({ "panel": card })))
+        .await;
+    assert!(
+        why.to_string().contains("you may not read `houses`"),
+        "{why}"
+    );
+    admin.table_readable("houses", 40, "").await;
+
+    // 2. Sam, a `staff` user, at the application's address. The page is the
+    //    Analytics UI's; the shell is the dashboard alone.
+    let (status, _, body) = sam.raw("GET", "/", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&body).contains("id=\"root\""));
+    let shell = sam.ok("GET", "/api/analytics/shell", None).await;
+    let app = &shell["application"];
+    assert_eq!(app["mode"], json!("fixed"), "{shell}");
+    assert_eq!(
+        app["workspaces"],
+        json!([{ "id": dashboard, "name": "Houses dashboard", "kind": "dashboard" }])
+    );
+    assert_eq!(app["dataset_editor"], json!(false));
+    assert_eq!(app["create_workspaces"], json!(false));
+    // No workspace list beyond it, no other dataset, no table to build on.
+    let listed = sam.ok("GET", "/api/workspaces", None).await;
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed[0]["may_change"], json!(false), "{listed}");
+    assert_eq!(sam.names("/api/datasets").await, ["Houses"]);
+    assert!(sam.names("/api/datasets/tables").await.is_empty());
+    let kinds = sam.ok("GET", "/api/workspace-kinds", None).await;
+    assert_eq!(kinds.as_array().unwrap().len(), 1, "{kinds}");
+    assert_eq!(kinds[0]["kind"], json!("dashboard"));
+    // No admin links: the admin's endpoints are not there to call.
+    for path in [
+        "/api/models",
+        "/api/tables",
+        "/api/users",
+        "/api/applications",
+    ] {
+        let (code, _) = sam.refused("GET", path, None).await;
+        assert_eq!(code, StatusCode::NOT_FOUND, "{path}");
+    }
+    let (code, _) = sam
+        .refused("GET", &format!("/api/datasets/{measurements}"), None)
+        .await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    // Interactive: every tile draws all 200 houses, and a click on a bar
+    // filters the card.
+    let tiles = sam.state_of(&dashboard).await["tiles"].clone();
+    let panel_at = |id: &str| -> Value {
+        tiles
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == id)
+            .unwrap()["panel"]
+            .clone()
+    };
+    let (value, _, _) = card_numbers(&sam.render_in(&panel_at("card"), &[]).await);
+    assert_eq!(value, all.len() as f64);
+    assert_eq!(
+        bars(&sam.render_in(&panel_at("bars"), &[]).await),
+        per_neighbourhood(all.iter())
+    );
+    let clicked = json!({ "id": "sel:bars:neighbourhood", "dataset": houses,
+                          "column": "neighbourhood", "values": [2] });
+    let (value, _, _) = card_numbers(&sam.render_in(&panel_at("card"), &[&clicked]).await);
+    assert_eq!(
+        value,
+        all.iter().filter(|h| h.neighbourhood == 2).count() as f64
+    );
+    let answer = sam.tests(tests_of.clone()).await;
+    assert_eq!(
+        answer["sections"][0]["n"],
+        json!(all.iter().filter(|h| h.sold).count())
+    );
+    // Nothing of it is Sam's to change, and nothing new is made.
+    for (method, path, body) in [
+        (
+            "PUT",
+            format!("/api/workspaces/{dashboard}/state"),
+            json!({ "state": { "tiles": [] } }),
+        ),
+        (
+            "PUT",
+            format!("/api/workspaces/{dashboard}"),
+            json!({ "name": "Mine" }),
+        ),
+        (
+            "PUT",
+            format!("/api/workspaces/{dashboard}/share"),
+            json!({ "share_role": 80 }),
+        ),
+        (
+            "DELETE",
+            format!("/api/workspaces/{dashboard}"),
+            Value::Null,
+        ),
+        (
+            "POST",
+            "/api/workspaces".to_owned(),
+            json!({ "name": "New", "kind": "dashboard" }),
+        ),
+        (
+            "POST",
+            "/api/datasets".to_owned(),
+            json!({ "name": "Mine", "base": { "kind": "table", "table": "houses" },
+                    "operations": [] }),
+        ),
+        (
+            "PUT",
+            format!("/api/datasets/{houses}/share"),
+            json!({ "share_role": 80 }),
+        ),
+    ] {
+        let body = (!body.is_null()).then_some(body);
+        let (code, why) = sam.refused(method, &path, body).await;
+        assert_eq!(code, StatusCode::UNAUTHORIZED, "{method} {path}: {why}");
+    }
+    assert_eq!(
+        admin.state_of(&dashboard).await["tiles"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    // A member is below the application's floor; a visitor is asked to sign in.
+    let mut pat = admin.on_host("board.example.com");
+    pat.sign_in("pat@example.com").await;
+    let (code, _) = pat.refused("GET", "/api/workspaces", None).await;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+    let mut visitor = admin.on_host("board.example.com");
+    let status = visitor.ok("GET", "/api/auth/status", None).await;
+    assert_eq!(status["current_user"], Value::Null, "{status}");
+    let (code, _) = visitor.refused("GET", "/api/workspaces", None).await;
+    assert_eq!(code, StatusCode::UNAUTHORIZED);
+
+    // 3. The self-serve application: `houses` and `neighbourhoods`, the
+    //    Dataset editor on, the Data explorer.
+    admin.table_readable("neighbourhoods", 40, "").await;
+    let serve_app = admin
+        .ok(
+            "POST",
+            "/api/applications",
+            Some(application(
+                "explore",
+                json!({ "mode": "self_serve", "min_role": 40, "dataset_editor": true,
+                        "workspace_kinds": ["data_explorer"], "create_workspaces": true }),
+                &["houses", "neighbourhoods"],
+            )),
+        )
+        .await;
+    let explore_id = serve_app["id"].as_str().unwrap().to_owned();
+    let mut sam = admin.on_host("explore.example.com");
+    sam.sign_in("sam@example.com").await;
+    let shell = sam.ok("GET", "/api/analytics/shell", None).await;
+    let app = &shell["application"];
+    assert_eq!(app["mode"], json!("self_serve"), "{shell}");
+    assert_eq!(app["dataset_editor"], json!(true));
+    assert_eq!(app["workspace_kinds"], json!(["data_explorer"]));
+    assert_eq!(app["workspaces"], json!([]));
+
+    // 4. A dataset on `houses`, explored. The demo's datasets are the
+    //    admin's, not shared: Sam's list starts empty.
+    assert!(sam.names("/api/datasets").await.is_empty());
+    assert_eq!(
+        sam.names("/api/datasets/tables").await,
+        ["houses", "neighbourhoods"]
+    );
+    let made = sam
+        .ok(
+            "POST",
+            "/api/datasets",
+            Some(json!({
+                "name": "My houses", "base": { "kind": "table", "table": "houses" },
+                "operations": [op("hood", "calculated",
+                                  json!({ "name": "hood", "formula": "neighbourhoodⱵname" }))],
+            })),
+        )
+        .await;
+    let mine = made["dataset"]["id"].as_str().unwrap().to_owned();
+    let mine_def = made["dataset"].clone();
+    let (names, rows, total) = sam.stage(&mine_def, 1).await;
+    assert_eq!(total, all.len() as i64);
+    let hood = names.iter().position(|n| n == "hood").unwrap();
+    assert!(
+        rows.iter().all(|r| r[hood].is_string()),
+        "a neighbourhood's name each"
+    );
+    let my_data = json!({ "kind": "dataset", "dataset": mine });
+    let my_bars = json!({ "data": my_data, "layers": [{ "mark": "bar",
+                          "stat": { "kind": "count" },
+                          "encoding": { "x": { "field": "neighbourhood" } } }] });
+    let explorer = sam.workspace("Exploring my houses", "data_explorer").await;
+    sam.save_state(&explorer, &json!({ "dataset": mine, "spec": my_bars }))
+        .await;
+    let drawn = sam
+        .ok(
+            "POST",
+            "/api/panels/render",
+            Some(json!({ "panel":
+            panel_of("Mine per neighbourhood", "plot", json!({ "spec": my_bars })) })),
+        )
+        .await;
+    assert_eq!(bars(&drawn), per_neighbourhood(all.iter()));
+    let my_tests = json!({ "data": my_data, "y": [{ "field": "price" }],
+                           "x": { "field": "neighbourhood" } });
+    assert_eq!(
+        sam.tests(my_tests.clone()).await["sections"][0]["n"],
+        json!(all.iter().filter(|h| h.sold).count())
+    );
+    // `incidents` is not offered as a base, and asking for it is refused:
+    // saved, unsaved, or reached by a join.
+    let on = |table: &str| {
+        json!({ "name": "Elsewhere", "base": { "kind": "table", "table": table },
+                "operations": [] })
+    };
+    let (_, why) = sam
+        .refused("POST", "/api/datasets", Some(on("incidents")))
+        .await;
+    assert!(
+        why.contains("`incidents` is not one of the tables"),
+        "{why}"
+    );
+    let (_, why) = sam
+        .refused(
+            "POST",
+            "/api/datasets/stage",
+            Some(json!({ "dataset": on("incidents") })),
+        )
+        .await;
+    assert!(
+        why.contains("`incidents` is not one of the tables"),
+        "{why}"
+    );
+    let mut joined = mine_def.clone();
+    joined["operations"].as_array_mut().unwrap().push(op(
+        "viewed",
+        "join",
+        json!({
+            "with": { "kind": "table", "table": "viewings" },
+            "kind": "left", "on": [{ "left": "id", "right": "house" }],
+        }),
+    ));
+    let (_, why) = sam
+        .refused(
+            "POST",
+            "/api/datasets/stage",
+            Some(json!({ "dataset": joined })),
+        )
+        .await;
+    assert!(why.contains("`viewings` is not one of the tables"), "{why}");
+    // Only the Data explorer: a dashboard is not made here, and the fixed
+    // application's dashboard and datasets are not here at all.
+    let (code, why) = sam
+        .refused(
+            "POST",
+            "/api/workspaces",
+            Some(json!({ "name": "Board", "kind": "dashboard" })),
+        )
+        .await;
+    assert_eq!(code, StatusCode::UNAUTHORIZED, "{why}");
+    let listed = sam.ok("GET", "/api/workspaces", None).await;
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed[0]["application"], json!(explore_id));
+    for path in [
+        format!("/api/workspaces/{dashboard}"),
+        format!("/api/datasets/{houses}"),
+    ] {
+        let (code, _) = sam.refused("GET", &path, None).await;
+        assert_eq!(code, StatusCode::NOT_FOUND, "{path}");
+    }
+    // Nor is Sam's dataset seen on the fixed application's host.
+    let mut sam_on_board = admin.on_host("board.example.com");
+    sam_on_board.sign_in("sam@example.com").await;
+    let (code, _) = sam_on_board
+        .refused("GET", &format!("/api/datasets/{mine}"), None)
+        .await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    // Another `staff` user sees Sam's dataset once it is shared, and does not
+    // change it.
+    let mut lee = admin.on_host("explore.example.com");
+    lee.sign_in("lee@example.com").await;
+    assert!(lee.names("/api/datasets").await.is_empty());
+    sam.ok(
+        "PUT",
+        &format!("/api/datasets/{mine}/share"),
+        Some(json!({ "share_role": 40 })),
+    )
+    .await;
+    assert_eq!(lee.names("/api/datasets").await, ["My houses"]);
+    let (_, why) = lee
+        .refused(
+            "PUT",
+            &format!("/api/datasets/{mine}"),
+            Some(mine_def.clone()),
+        )
+        .await;
+    assert!(why.contains("not yours to change"), "{why}");
+
+    // 5. `staff` reads only the newer houses: `houses` back to the admin's,
+    //    and an ownership formula granting the rest. Sam's plots and tests in
+    //    both applications include those rows only; the admin's all of them.
+    admin
+        .table_readable("houses", 1, "user && year_built >= 1990")
+        .await;
+    let theirs: Vec<&House> = all.iter().filter(newer).collect();
+    assert!(
+        !theirs.is_empty() && theirs.len() < all.len(),
+        "{}",
+        theirs.len()
+    );
+    let sold_of_theirs = theirs.iter().filter(|h| h.sold).count();
+    //    Self-serve.
+    let (_, _, total) = sam.stage(&mine_def, 1).await;
+    assert_eq!(total, theirs.len() as i64);
+    let drawn = sam
+        .ok(
+            "POST",
+            "/api/plots/render",
+            Some(json!({ "spec": my_bars })),
+        )
+        .await;
+    let counted: i64 = drawn["layers"][0]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| cell(&drawn["layers"][0], r, "y").as_i64().unwrap())
+        .sum();
+    assert_eq!(counted, theirs.len() as i64, "{drawn}");
+    assert_eq!(
+        sam.tests(my_tests.clone()).await["sections"][0]["n"],
+        json!(sold_of_theirs)
+    );
+    assert_eq!(
+        lee.ok(
+            "POST",
+            "/api/datasets/stage",
+            Some(json!({ "dataset": mine_def, "limit": 1 }))
+        )
+        .await["total"],
+        json!(theirs.len())
+    );
+    //    Fixed.
+    let (value, _, _) = card_numbers(&sam_on_board.render_in(&panel_at("card"), &[]).await);
+    assert_eq!(value, theirs.len() as f64);
+    assert_eq!(
+        bars(&sam_on_board.render_in(&panel_at("bars"), &[]).await),
+        per_neighbourhood(theirs.iter().copied())
+    );
+    let drawn = sam_on_board.render_in(&panel_at("box"), &[]).await;
+    let layer = &drawn["plot"]["layers"][0];
+    let boxed_n: i64 = layer["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| cell(layer, r, "n").as_i64().unwrap())
+        .sum();
+    assert_eq!(boxed_n, sold_of_theirs as i64, "{drawn}");
+    assert_eq!(
+        sam_on_board.tests(tests_of.clone()).await["sections"][0]["n"],
+        json!(sold_of_theirs)
+    );
+    //    The admin, on the admin host, still reads every house of both.
+    let (value, _, _) = card_numbers(&admin.render_in(&panel_at("card"), &[]).await);
+    assert_eq!(value, all.len() as f64);
+    let (_, _, total) = admin.stage(&mine_def, 1).await;
+    assert_eq!(total, all.len() as i64);
+
+    std::fs::remove_dir_all(bundle).ok();
     Ok(())
 }

@@ -16,6 +16,10 @@ models, draw maps and write reports. Its design is in
   report.
 - **Part 6 — Dashboards:** tiles from any source, stat cards, and filtering every tile by a
   click, a brush or a district on a map, with drill paths and a filter bar.
+- **Part 9 — Applications:** publishing part of the Analytics UI to your users, as a
+  dashboard they can use but not change, or a small Analytics UI of their own over the tables
+  you pick, each reading only the rows their permissions allow. (Parts 7 and 8, simulation and
+  spatial statistics, come with their milestones.)
 
 You need a server and an admin login. Nothing else: the data comes from a command.
 
@@ -841,3 +845,149 @@ delete warning for `Incidents` now lists the dashboard too.
 - **On the server, a filter is a Filter.** The dashboard's conditions become one more Filter
   operation at the end of each dataset, so a plot, a card, a table, a test and a map are filtered
   the same way.
+
+---
+
+## Part 9 — Applications
+
+Everything so far was the admin's. An **application** of the framework **Analytics** publishes
+part of the Analytics UI to other people, at its own address, in a shell with no admin links. It
+is one of two things:
+
+- **Fixed**: some workspaces you made, a dashboard or a report, and nothing else. People can use
+  them, clicking and filtering, but they cannot change them or see anything else.
+- **Self-serve**: a small Analytics UI of their own, over the tables you choose. They make their
+  own datasets and workspaces, and may share them with each other.
+
+Either way, people read **as themselves**. A plot, a count or a test in an application is made
+from the rows their table permissions and ownership formulas let them read. That is the same rule
+the REST API and the application's pages follow ([TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md)
+§7.3). This part uses the dashboard of part 6, so it needs PostGIS. Any dashboard of yours will
+do instead.
+
+Applications are addressed by subdomain, so start the server with a base domain:
+
+```bash
+feldspar serve --base-domain localhost
+```
+
+Browsers send `*.localhost` to your own machine, so `board.localhost` needs no setup.
+
+### Step 1 — A role, some users, and a fixed application
+
+In the admin UI, under **Roles**, add a role `staff` at 40. Under **Users**, add two users with
+the role `staff`, say `sam@example.com` and `lee@example.com`, and one with a less privileged
+role (80, `member`), say `pat@example.com`.
+
+The dashboard reads the `incidents` and `districts` tables, and `staff` may not read them yet:
+a new table is read by the admin alone. Under **Tables**, open each and, in **Edit table
+properties**, set **Minimum role for full read access** to `staff`.
+
+Under **Applications → New application**:
+
+- call it `Incidents board`, with the subdomain `board`;
+- choose the framework **Analytics**. Its settings appear below it.
+- Set **What it shows** to `fixed`. Set **Least privileged role** to 40, so `staff` and anyone
+  more privileged may use it. Set **Workspaces shown** to `["Incidents dashboard"]`.
+
+Press **Save**. A name that is not a workspace is refused here, by name, while you are still
+looking at the form. So is a name two workspaces share: name that one by its id.
+
+### Step 2 — What `staff` sees
+
+Open `http://board.localhost:3032/` in a private window, so that you are not signed in as the
+admin there. The Analytics UI asks you to sign in. Sign in as `sam@example.com`.
+
+The dashboard opens: its stat cards, the bar chart, the line and the map, with the 2,400
+incidents of part 6. It is interactive. Click the **burglary** bar and the other tiles filter to
+its 726 incidents, as they did for you. Brush the line, click a district, use the filter bar.
+What is not there:
+
+- **no front page of workspaces.** An application showing one workspace opens on it. One
+  showing several lists them, and only them;
+- **no editing.** The dashboard's **+ Add**, moving, resizing, renaming and removing are gone.
+  Your clicks and filters are yours until you leave, and nothing is saved;
+- **no Dataset editor and no admin links.** The header has the application's name and a
+  **Sign out** button. The admin's own screens are not there to call: a request for
+  `/api/models` or `/api/users` on this address is answered *not found*.
+
+Sign out and sign in as `pat@example.com`: *this application is not open to your role*.
+
+### Step 3 — A self-serve application
+
+Back in the admin UI, set the minimum role to read `houses` and `neighbourhoods` to `staff` too.
+Then make a second application:
+
+- call it `Explore houses`, with the subdomain `explore` and the framework **Analytics**;
+- under **Tables**, pick `houses` and `neighbourhoods`. These are the tables its users may build
+  on. Every application has this list, and an Analytics application uses it rather than a
+  second one in its settings;
+- set **What it shows** to `self_serve` and **Least privileged role** to 40. Tick **Users may
+  create and edit datasets**, leave **Kinds of workspace** at `["data_explorer"]`, and leave
+  **Users may create workspaces** ticked.
+
+### Step 4 — A dataset of your own
+
+Open `http://explore.localhost:3032/` and sign in as `sam@example.com`. The front page has the
+two lists, both empty. The demo's datasets are the admin's, and Sam sees only what is theirs or
+shared with them.
+
+In the **New dataset** box, call it `My houses` and open **Based on**: only `houses` and
+`neighbourhoods` are offered. Choose `houses`, press **Create**, and add a calculated column
+`hood` = `neighbourhoodⱵname`, as in part 1. Then
+create a Data explorer workspace, `Exploring my houses` (it is the only kind offered), pick `My
+houses` and drop `neighbourhood` on **X**: 49, 28, 43, 42 and 38 houses, all 200. Drop `price`
+on **Y**: a box plot, and its tests count the 170 houses that have a price.
+
+`incidents` is not offered as a base. Nor can it be reached another way: a dataset sent to the
+API on `incidents`, or a Join from `My houses` to `viewings`, is refused with *`viewings` is not
+one of the tables this application reads*. The check is on the server, in the statement every
+read becomes, whatever the browser sends.
+
+In the datasets list, the **Share** select on `My houses` shares it with a role. Share it with
+`staff`, and sign in as `lee@example.com` in another private window: Lee sees `My houses`, can
+explore it, and cannot change it (*not yours to change; clone it to make one of your own*).
+
+Neither application sees the other's things. `Exploring my houses` belongs to `Explore houses`
+and is not on the admin's front page. On `board.localhost`, Sam's dataset is *not found*.
+
+### Step 5 — Only some rows
+
+Now give `staff` only some of the houses. In the admin UI, open `houses`. In **Edit table
+properties**, set **Minimum role for full read access** back to the admin, and give it the
+**Ownership formula**
+
+```js
+user && year_built >= 1990
+```
+
+so that below the admin, a signed-in user reads the houses built since 1990 (§7.3: the formula
+grants rows to those the role floor does not admit).
+
+Reload `Exploring my houses` as Sam. The bars now count 26, 14, 19, 20 and 18 houses, the 97
+newer ones, and the box plot's tests count the 81 of those that have a price. Nothing about the
+dataset or the workspace changed: the rows did, because every read is made as Sam. Lee, reading
+the dataset Sam shared, reads the same 97. Sam's reads are their own, not the dataset owner's.
+The admin still reads all 200 on the admin host.
+
+The same holds in a fixed application. A dashboard on `Houses` shown on `board` would draw
+Sam's 97 houses and the admin's 200 from the same tiles. Had `incidents` an ownership formula,
+the incidents dashboard would show each person their own incidents.
+
+A formula that only the JavaScript evaluator can decide, one that SQL cannot express, is
+refused in the Analytics UI with a sentence saying so. A plot or a count over rows the database
+could not filter would show what the person may not read.
+
+### What to remember
+
+- **An application is part of the Analytics UI, published to a role.** *Fixed* shows the
+  workspaces you name and nothing else. *Self-serve* is a small Analytics UI of its users' own,
+  over the application's tables.
+- **People read as themselves.** Table permissions and ownership formulas decide which rows a
+  plot, a count, a test or a map is made from. Each table a dataset reads is checked: its base,
+  a Join's other side, a Ⱶ path's target.
+- **The server decides.** What an application allows is enforced on every request, whatever
+  the browser asks for. The shell only hides what would be refused.
+- **Things have owners.** Datasets and workspaces belong to whoever made them. They can be shared
+  with a role, and only their owner and the admin change them.
+

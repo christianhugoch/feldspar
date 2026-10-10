@@ -774,9 +774,9 @@ second list in the framework's settings (see the CHANGELOG).
 
 ## Phase 3 — Documentation, definition of done
 
-- [ ] A9.5 `TECHNICAL_DESIGN.md` (the framework, authority in analytics);
+- [x] A9.5 `TECHNICAL_DESIGN.md` (the framework, authority in analytics);
       `tutorial-analytics.md` part 9.
-- [ ] A9.6 Definition of done: an `sc-server` test with both applications, checking what a
+- [x] A9.6 Definition of done: an `sc-server` test with both applications, checking what a
       `staff` user can see and read in each. Walk the Try it by hand.
 
 ---

@@ -90,7 +90,8 @@ feldspar/
 │  ├─ sc-dataset/                 # 5. Datasets (§14.4): a base and an ordered list of
 │  │                              #    operations, compiled into one sc-query statement; the
 │  │                              #    stage shapes and grain, reading a stage, the snapshot a
-│  │                              #    fit records, and `_fd_datasets`
+│  │                              #    fit records, `_fd_datasets`, and reading as the caller
+│  │                              #    (`access.rs`: `Caller`, `Reader::guard`, `Sharing`, §14.9)
 │  ├─ sc-action/                  # 6. Action trait + registry, Event/Trigger model, `_fd_triggers`
 │  │                              #    storage & validation, the live set, dispatch, scheduler
 │  ├─ sc-llm/                     # 6. object-safe LlmProvider seam over a provider crate
@@ -110,7 +111,8 @@ feldspar/
 │  ├─ sc-analytics/               # 6. The Analytics UI's server half (§14.5): workspaces
 │  │                              #    (`_fd_workspaces`), the demo data, plot specs and their
 │  │                              #    stats, tests, a fit's outputs drawn (above sc-model), and —
-│  │                              #    as the analytics milestones arrive — panels, map layers
+│  │                              #    as the analytics milestones arrive — panels, map layers,
+│  │                              #    and the Analytics framework's policy (`app.rs`, §14.9)
 │  ├─ sc-stan/                    # 6. Bayesian models with Stan, beside sc-model (§14.2,
 │  │                              #    "Bayesian models"): CmdStan discovery (`--cmdstan`,
 │  │                              #    `$CMDSTAN`, `~/.cmdstan`) and `feldspar cmdstan install`;
@@ -1088,6 +1090,16 @@ absence — affected-rows 0, mapped to not-found — so "exists but forbidden" i
   creates one deliberately rather than using the image's bootstrap superuser, and a deployment
   that gets this wrong has no enforcement to fall back on but the runtime checks above.
 
+**Aggregated reads: the Analytics UI** (analytics milestone A9; §14.9). A dataset is read as one
+statement that the database counts, bins and sums, and it may reach many tables: a base, a Join's
+other side, a Ⱶ path's target. The same rule applies to each of them, by one guard
+(`sc_dataset::Reader::guard`). After the statement is built, the guard replaces every table it
+reads with the rows of that table the caller may read, as a derived table filtered by the
+ownership formula's translation. Row-level security is left to the policies, inside a read-only
+transaction carrying the caller. The REST provider's fetch-then-filter fallback has no
+equivalent here, so a formula that does not translate is **refused** rather than filtered after
+the fact: a count over rows nobody could filter would show rows the caller may not read.
+
 **The Ⱶ operator is an identifier character, not an operator.** U+2C75 (Latin capital letter
 half H, category Lu) is a valid JavaScript identifier character, so `publisherⱵname` is a
 *single* identifier that V8 and swc both accept unchanged — no preprocessing, no syntax
@@ -1546,14 +1558,18 @@ erDiagram
     json base "a table, or another dataset; never changed"
     json operations "the ordered list of { id, enabled, kind, params }"
     json attributes
+    uuid owner "A9.1: -> users.id, by value; null is the admin's"
+    int share_role "A9.1: the role floor it is shared with; null for its owner alone"
   }
   WORKSPACES["_fd_workspaces"] {
     uuid id PK
     text name
     text kind "one of the six; only those whose milestone arrived can be made"
     json state "the kind's own, restored when it is opened"
-    uuid created_by "-> users.id, by value"
+    uuid created_by "-> users.id, by value; its owner (A9.1)"
     timestamp updated_at
+    int share_role "A9.1: the role floor it is shared with; null for its owner alone"
+    uuid application "A9.3: -> _fd_applications.id, by value; null for the unrestricted UI"
   }
   INSTANCES["_fd_model_instances"] {
     uuid id PK
@@ -6058,6 +6074,19 @@ has to fit on a 1 GB machine. For the same reason a build command of exactly
 without an `npm` process holding ~60 MB for the length of the build. Anything else goes to npm
 as written.
 
+#### Analytics: part of the Analytics UI as an application
+
+The framework **Analytics** (`analytics`; analytics milestone A9) serves the Analytics UI's own
+bundle on an application's subdomain, in a restricted shell, to the application's users. It has
+no build step and no source of its own. Its settings say what part of the UI it shows: some
+workspaces the admin made (*fixed*), or a small Analytics UI of the users' own over the
+application's tables (*self-serve*). Its endpoints are a subset of the admin API, dispatched on
+the application's host under the application's role floor. It added one general hook to the
+framework model: `FrameworkFactory::check_config_against(catalog, config)`, a check of the
+settings against the database. It runs when the application is **saved**, and only then, as the
+store check above does, so that a fixed application naming a workspace that is not there is
+refused on the form. The design is §14.9.
+
 ### 13.4 API providers
 
 ```rust
@@ -7139,8 +7168,8 @@ pub trait ModelProviderHost: Send + Sync {
 ```
 
 The source compiles the dataset (§14.4) into one query and runs it on the primary database, as
-the admin: a model is the admin's, and the Analytics UI's A9 is where a restricted reader's
-permissions enter. A table's non-stored calculated fields are columns of a dataset over it where
+the admin (`Caller::admin()`): a model is the admin's. A restricted reader's permissions enter
+everywhere else the Analytics UI reads (§14.9), and a fit's output data is refused to them. A table's non-stored calculated fields are columns of a dataset over it where
 they become SQL; a provided table (§8.3) cannot be a dataset's base, because a dataset is one
 query. `ModelServices` in `sc-server/src/models.rs` assembles the pieces the way
 `AgentServices` and the trigger dispatcher already are: the registry, the `DatasetSource`, and
@@ -8250,7 +8279,8 @@ back typed by the stage's column types on both backends; a decimal is sent to th
 number.
 
 **The store** is `_fd_datasets` (`id`, `name` unique, `description`, `base`, `operations`,
-`attributes`), read strictly. What a save refuses: an empty or taken name, a missing base, a base
+`attributes`, and since A9 `owner` and `share_role`, which are not part of the definition,
+§14.9), read strictly. What a save refuses: an empty or taken name, a missing base, a base
 that leads back, a changed base ("clone it or create a new one"), and empty or repeated
 operation ids. Deleting a dataset other datasets read is refused, naming them; a model that uses
 it is listed by `datasetUsage` for the warning and afterwards stays listed with its error.
@@ -8342,7 +8372,7 @@ was left in the model's **view state** (§14.2, A3.4), which nothing about fitti
 reads. Split view (A4) holds either editor or a workspace on each side.
 
 **Workspaces** (`sc-analytics`, `_fd_workspaces`: `id`, `name`, `kind`, `state`, `created_by`,
-`updated_at`). `kind` is one of the six of the goals document (Data explorer, Report, Map,
+`updated_at`, and since A9 `share_role` and `application`, §14.9). `kind` is one of the six of the goals document (Data explorer, Report, Map,
 Dashboard, Simulation, Notebook). The store keeps any kind; `createWorkspace`
 refuses one whose milestone has not arrived, naming it ("arrives with milestone A2"), and
 `listWorkspaceKinds` says which are here so the create dialog lists the rest disabled — since
@@ -8350,9 +8380,10 @@ A6.1, the Simulation and the Notebook. `state` is JSON owned by the kind — an 
 drop zones — saved as it changes (`saveWorkspaceState`) and restored when the workspace is
 opened.
 
-**The API** (`sc-api`'s `analytics.rs`, handled in `sc-server`'s `analytics.rs`; admin-only
-until A9): datasets (`listDatasets`, `getDataset`, `createDataset`, `updateDataset`,
-`deleteDataset`, `cloneDataset`, `datasetUsage`, `listDatasetTables`), and the reads, which take
+**The API** (`sc-api`'s `analytics.rs`, handled in `sc-server`'s `analytics.rs`; admin-only on
+the admin host, and a subset of it on an Analytics application's host under that application's
+role floor, §14.9): datasets (`listDatasets`, `getDataset`, `createDataset`, `updateDataset`,
+`shareDataset`, `deleteDataset`, `cloneDataset`, `datasetUsage`, `listDatasetTables`), and the reads, which take
 a **whole definition** in the body so the editor previews edits before they are saved
 (`datasetShapes` — every stage's shape plus what formulas may name; `validateDatasetOperation` —
 one operation compiled where it would go; `readDatasetStage`; `datasetColumnValues`); the model
@@ -8362,15 +8393,16 @@ at the fit's output data, each drawn by `render_plot` unless it is optional and 
 `dataset_changed` — beside the model endpoints of §14.2 (`cloneModel`, `patchModelViewState`,
 `cancelModelFit`, `listModelInstances`) and the fit's progress socket; and workspaces
 (`listWorkspaceKinds`, `listWorkspaces`, `getWorkspace`, `createWorkspace`, `updateWorkspace`,
-`saveWorkspaceState`, `deleteWorkspace`); panels (A4.2): `renderPanel`, with a dashboard's conditions as `filters` (A6.4, §14.8); map layers (A5.5,
+`shareWorkspace`, `saveWorkspaceState`, `deleteWorkspace`); the shell (A9.3): `analyticsShell`; panels (A4.2): `renderPanel`, with a dashboard's conditions as `filters` (A6.4, §14.8); map layers (A5.5,
 §14.6): `layerData`, `layerTile`; maps (A5.6–A5.7, §14.6): `mapSettings`, `suggestMap`,
 `renderMap`; and the Map workspace (A5.8–A5.13, §14.7): `layerRows`, `selectFeatures`,
 `saveSelection`, `allowMapHost`, `listMapTools`, `runMapTool`. `saveWorkspaceState` checks a
 report's document and a map's spec (`check_state`) before it stores it.
 
 **The bundle** (`ui/analytics`): React, TypeScript and react-bootstrap over the generated client,
-like the admin SPA, but a bundle of its own — so that A9 can mount it in an application without
-the admin shell. It is served under `/analytics/` in the way the IDE is (§12.1): admin-only (a
+like the admin SPA, but a bundle of its own, so that an Analytics application can serve it
+without the admin shell (§14.9). On the admin host it is served under `/analytics/` in the way
+the IDE is (§12.1): admin-only (a
 visitor is sent to sign in, a non-admin refused), under its own CSP
 (`analytics_content_security_policy`: the strict `ANALYTICS_CONTENT_SECURITY_POLICY` with the
 base map's hosts added since A5.6, §14.6 — widened for the renderers without touching the admin
@@ -9061,7 +9093,8 @@ given, a WMS as a `GetMap` in EPSG:3857 with `{bbox-epsg-3857}`, an ArcGIS map s
 (§14.6), so a service on another host is shown with a warning and **Allow it**, which calls
 `allowMapHost`: the URL's origin, parsed by `origin_of`, is added to Settings → Maps' further
 hosts (`sc_config::allow_map_host`), and the page is reloaded for the new policy. The admin is
-the only one who can call it; A9 decides what a restricted user may do. `mapSettings` answers
+the only one who can call it: it is not one of the endpoints an Analytics application exposes
+(§14.9). `mapSettings` answers
 `hosts`, the origins allowed now.
 
 **The toolbox** (A5.12, `sc_analytics::tools`) is a list of `MapTool`s. Each declares a form
@@ -9307,6 +9340,217 @@ range for a number, date or timestamp. **Refresh** redraws every tile every 30 s
 follows its data. `check_state` checks a dashboard's `drill`s, `filters` (each a condition,
 different ids) and `refresh` before they are stored.
 
+
+### 14.9 Analytics applications (analytics milestone A9)
+
+An admin publishes a restricted part of the Analytics UI to end users as an **application** whose
+framework is `analytics` (§13.2, §13.3). There are two halves, and both are needed:
+
+- **Authority** (A9.1). Every analytics read is made *as the caller*, through the table
+  permissions and ownership formulas of §7.3. This holds on the admin host too, where the caller
+  happens to be the admin. It decides **which rows** come back.
+- **The framework** (A9.2–A9.4). An application's settings say what may be asked for: which
+  workspaces, which tables, which kinds of workspace, whether datasets may be made. The server
+  enforces them on every request. This decides **what may be asked for**.
+
+Neither replaces the other. A self-serve application over `houses` lets a person build on
+`houses`, and then the ownership formula of `houses` decides which houses they count.
+
+#### Reading as the caller (`sc_dataset::access`)
+
+**Who reads** is a `Caller`: a role, the user's fields as an ownership formula's `user` sees them
+(`id`, `role` and every other column), and, in an application, the tables it may read at all
+(`tables`, `None` for every table). `Caller::of_user` is the request's user, or the public role
+for nobody. `Caller::admin()` is the server reading on its own authority. `within(tables)`
+narrows a caller to an application's tables.
+
+**One guard, after the statement is built.** A dataset compiles to one `sc-query` statement
+(§14.4), and that statement may read many tables: the base, a Join's or a Union's other side, a Ⱶ
+path's target, a Ↄ aggregation's children, the rows a Complete takes its values from. None of
+the operations knows about authority. Instead, `Reader::guard` walks the finished statement (its
+`FROM`, joins, unions, derived tables and the subqueries inside expressions) and replaces every
+`Source::Table` with the rows of that table the caller may read:
+
+```sql
+-- what the statement read           -- what the guard makes of it
+FROM houses AS houses                 FROM (SELECT * FROM houses AS houses
+                                            WHERE <formula for this caller>) AS houses
+```
+
+The replacement keeps the alias the statement already used, so nothing else in the statement
+changes. Each table is answered in this order:
+
+| the table | what the caller reads |
+|---|---|
+| not one of the caller's `tables` | refused: "`t` is not one of the tables this application reads" |
+| `rls_enabled` | the table, with the database's policies deciding inside a **read-only transaction carrying the caller** (`set_caller_context`, §7.3) |
+| the caller meets `min_role_read` | the table as it is |
+| an ownership formula that translates | the rows it grants: the formula translated for this caller (`UserEnv::Inline`) with `translate_rooted` under the alias, the same translation the REST provider ANDs into its reads |
+| a formula that does not translate | refused, with a sentence saying why |
+| anything else | refused: "you may not read `t`" |
+
+The guard makes a **derived table** rather than adding a `WHERE`, because a `WHERE` would not
+reach a Ⱶ path's correlated subquery. A joined value from a row the caller may not read is
+therefore missing, as it is under row-level security. A formula that only the JavaScript
+evaluator can decide is refused rather than filtered after the read. The REST provider can
+fetch a page and filter it. A count, a histogram's bins or a mean are computed by the database,
+and a number over rows nobody could filter would leak them behind a plausible number. The users
+table is read without its password hash by anybody but the admin: its derived table names the
+other columns one by one. A refusal is an error naming the table, the same whether the table is
+the base or three joins away, and it appears under the plot that did not draw.
+
+**Every read goes through it.** `read_stage`, `read_page`, `count`, `read_rows` and
+`column_values` take a `Caller`. So do the renderers: `render_plot`, `render_table`, `run_tests`,
+`render_card`, `render_map`, `render_panel`, their `_in` forms (§14.8), and the layer and
+selection functions of §14.6–§14.7. A plot's rows say where they run (`RowsDb`): on the primary
+database through a `Reader`, or in a fit's private in-memory database.
+
+**Models are the admin's.** A fit, a prediction and the model editor read as `Caller::admin()`.
+A fit's outputs come from rows read on the server's authority, which are not narrowed to anyone,
+so a fit's output data or table in a panel is refused to everybody else, with a sentence ("shown
+only in the unrestricted Analytics UI"). The model endpoints are not among an application's at
+all.
+
+**A consequence for the admin.** The admin's reads of a table with row-level security now run
+inside a caller transaction at role 1, as the admin endpoints' row reads already did. Before,
+the policies of a `FORCE`d table met an unset caller and showed the Analytics UI no rows.
+
+**Owners and sharing.** A dataset and a workspace have an owner and may be shared with a role
+(`Sharing { owner, share_role }`). Sharing is by **role floor**, the way this system already says
+"these people": shared with 40, a thing is seen by every user at 40 or more privileged, as a
+table's `min_role_read` admits them. The admin and the owner see it (`admits`). Only they rename
+it, change it, delete it or share it (`may_change`). A thing with no owner was made by the admin
+before owners existed, and is the admin's. `_fd_datasets` gained `owner` and `share_role`; they
+are not part of the definition, so no fit's snapshot hash changes when a dataset is shared.
+`_fd_workspaces` gained `share_role` and `application`, and its `created_by` is the owner. The
+columns are nullable, so the bootstrap adds them; nothing goes in `TABLES_RENAME.sql`.
+`shareDataset` and `shareWorkspace` set the role. Dataset summaries and workspaces carry
+`share_role` and `may_change`, so a list offers only what the caller may do. Sharing a dataset
+shares its *definition*. Each reader still reads their own rows of it.
+
+#### The framework (`sc_analytics::app`)
+
+The settings, in the `FormField` vocabulary every framework uses (`analytics_config_spec`),
+each mode's shown only in that mode (`show_if`):
+
+| setting | mode | what it is |
+|---|---|---|
+| `mode` | both | `fixed` or `self_serve` (default `fixed`) |
+| `min_role` | both | the role floor: the least privileged role that may use it. Defaults to 1, so an application nobody has thought about yet is shown to nobody else |
+| `workspaces` | fixed | the workspaces shown, in order, each by name or id |
+| `dataset_editor` | self-serve | whether users may create and edit datasets |
+| `workspace_kinds` | self-serve | the kinds they may open (default `["data_explorer"]`) |
+| `create_workspaces` | self-serve | whether they may create workspaces of those kinds (default yes) |
+
+**The tables a self-serve application builds on are the application's own `tables`**, the
+subset every application already declares (§13.2) and the application form already has a
+picker for. They are not a second list in the framework's settings: two lists that had to agree
+would eventually not. (The milestone's plan had a list in the settings. Using `tables` is a
+deliberate deviation, recorded in the CHANGELOG.) In fixed mode `tables` is not read. What a
+fixed application grants is the datasets its workspaces read.
+
+`AnalyticsConfig::read` checks everything that can be checked without the database. It refuses
+an unknown mode, a role outside 1–100, a fixed application with no workspaces, a kind that has
+not arrived (A7's Simulation), and a self-serve application with nothing to do (no kinds and no
+Dataset editor). `check_config_against`, the factory hook of §13.3, runs on save. Each workspace
+named must exist, be the only one of its name (otherwise it is named by id), belong to the
+unrestricted UI rather than to an application, and be of a kind that can be opened.
+
+#### Mounting (`sc_server::analytics_app`)
+
+`AnalyticsFactory` is installed into `sc-app`'s registry beside Saltcorn UI. A mount
+(`AnalyticsFramework`) has nothing to build. It serves the same `ui/analytics` bundle the admin
+host serves: the document at `/` (and `/analytics/`, so a link copied from one host works on the
+other), with `Cache-Control: no-cache`, and the content-hashed assets at `/analytics/…`, the paths
+the bundle already links them by, as immutable. `serve` hands the bundle's directory to
+`AppMounts::with_analytics_dir`. The default policy (`analytics_app_csp`) is the admin host's
+Analytics UI policy with the default base map's origins. A base map from elsewhere is the
+admin's to add to the application's own policy.
+
+**The router** sends an Analytics application's `/api/…` paths to `dispatch_analytics_api`. They
+come after its API providers and static directories, which the admin stated and so win, and
+before the framework, whose document would otherwise answer. The dispatch is the admin
+dispatcher's, with three differences:
+
+1. **Only `APP_ENDPOINTS`.** These are the Analytics UI's endpoints minus what is the admin's
+   alone: models and their outputs, public datasets, Settings → Maps (`allowMapHost`). Anything
+   else under `/api/` is a 404 there, as any endpoint an application does not expose is.
+2. **The application's role floor** replaces the admin's. The endpoints are declared admin-only
+   for the admin host, and here the floor is `min_role`. `authStatus`, `login` and `logout` keep
+   their own requirement, so a visitor can find out who they are and sign in. Below the floor
+   the answer is 403, and nobody signed in gets 401.
+3. **The handler is told the application** (`HandlerCtx::analytics_app`, an `AppScope`). It is
+   loaded on each request from the stored application and the workspaces as they are now, so
+   what the application allows is always the server's answer.
+
+The session is the application's own cookie on its own host, made by the same `login` endpoint.
+On an application's host `login` signs in any user with the right password, and the role floor
+decides from then on. `analyticsShell` tells the bundle what it is running as: the application
+(its name, mode, what it allows, a fixed application's workspaces) and the roles, for the Share
+select. On the admin host `application` is `null`.
+
+**Workspaces belong to an application or to the unrestricted UI** (`application`). One made
+through a self-serve application belongs to it. The admin host's lists show the unrestricted
+UI's own, though the admin can open any workspace by its id. A fixed application shows the
+unrestricted UI's workspaces, which is why `check_config_against` refuses one that belongs to an
+application.
+
+#### Enforcement (`AppScope`, and `Access` in `sc-server`'s `analytics.rs`)
+
+Every analytics handler starts with `Access::of(ctx)`: the caller, narrowed by `AppScope::narrow`
+to the application's tables in self-serve mode, and the application, if any. It asks before it
+does anything, whatever the client sent:
+
+| | fixed | self-serve |
+|---|---|---|
+| datasets seen | those the shown workspaces read (`workspace_datasets`: their panels', an explorer's chosen dataset, a map's layers) | the caller's own and those shared with their role, whose chain of bases starts at one of the application's tables (`root_table`) |
+| the base picker, a formula's completions | nothing | the application's tables |
+| a definition sent to be read | the stored one, **as stored**, whatever operations came with it | with the Dataset editor on, as sent: a stored one must be seen, an unsaved one needs a base that may be built on. With it off, a stored one as stored, and nothing unsaved |
+| creating, changing, sharing, deleting datasets | never | with the Dataset editor on; changing only by the owner |
+| `saveSelection`, `runMapTool` (they make datasets) | never | as creating a dataset |
+| workspaces seen | those shown | the application's, of a kind it allows, the caller's own or shared with them |
+| creating workspaces | never | of an allowed kind, if `create_workspaces` |
+| changing a workspace (rename, share, state, delete) | never | by its owner |
+
+Plots, tables, tests, cards, layers, tiles, maps and panels check every dataset they read,
+including the datasets of a dashboard's conditions (§14.8). A dataset or workspace the caller does
+not see is a 404, answered as one that is not there. A refused action is the 401 of
+`Error::auth`, because there is no 403 kind of error yet. In fixed mode the reads are not
+narrowed to a table list. The grant is the shown workspaces' datasets, read as stored, and the
+caller's table permissions still decide their rows.
+
+#### The restricted shell (`ui/analytics/src/shell.tsx`)
+
+The bundle reads `analyticsShell` before it draws anything and keeps the answer in a context
+(`useShell`). A screen that would offer something an application does not allow asks the context
+first. In an application:
+
+- a visitor gets a sign-in form, and a role below the floor gets "this application is not open
+  to your role";
+- the header shows the application's name and a Sign out button, with no Admin link, and in
+  fixed mode there is no Split;
+- a fixed application showing one workspace opens on it. One showing several has a front page
+  of those workspaces alone (`FixedHome`);
+- models are hidden. A route to one, or to anything a fixed application does not show, says
+  "This application does not show that";
+- a workspace the caller may not change saves nothing. The dashboard hides its editing (Add,
+  move, resize, rename, remove) and keeps filtering and drilling;
+- the dataset and workspace lists hide what the caller may not do, and offer a Share select
+  (`share.tsx`) to whoever may change a row.
+
+None of this is a defence: the server enforces all of it whatever the bundle does. The shell only
+avoids offering what would be refused.
+
+**Not yet.** A report, a map and an explorer shown read-only still offer their editing controls.
+Nothing they change is saved, but only the dashboard hides them. Refusals are 401s until there
+is a 403 kind.
+
+**Tests.** `sc-dataset`'s guard tests find every table at any depth. `sc-analytics`'s `app` tests
+cover the settings and both modes' policy. `sc-server`'s `analytics_apps.rs` runs both modes and
+row-level security over a small schema. `analytics_done::the_try_it_of_milestone_a9` is the
+milestone's Try it over the demo data, with both applications at once: what a `staff` user sees
+and reads in each, before and after an ownership formula narrows `houses`, against the admin's
+reads of every row.
 
 ## 15. Code adapters and polyglot plugins (`sc-module`, `sc-python`)
 

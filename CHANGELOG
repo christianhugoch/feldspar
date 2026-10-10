@@ -2,6 +2,115 @@
 
 Changes in reverse chronological order.
 
+## Analytics A9.5–A9.6: applications documented, and their definition of done
+
+The last phase of milestone A9 (applications with a restricted Analytics UI). No
+product code changed.
+
+- **`TECHNICAL_DESIGN.md` §14.9** (A9.5, new) is the design as built:
+  - **Reading as the caller.** `Caller`. `Reader::guard` rewriting each table a
+    finished statement reads into the rows the caller may read, with the order
+    of its answers as a table. Why a derived table rather than a `WHERE` (a Ⱶ
+    path's subquery). Why a formula that does not translate is refused rather
+    than filtered afterwards. Models are the admin's, and the admin's reads of
+    a table with RLS run in a caller transaction. Owners and sharing by role
+    floor.
+  - **The framework.** The settings as a table. The application's own `tables`
+    as the self-serve subset, recorded again as the plan's deviation. What
+    `AnalyticsConfig::read` and `check_config_against` refuse.
+  - **Mounting.** The bundle at `/` and `/analytics/…`, the default policy, the
+    router's place for `dispatch_analytics_api` and its three differences, the
+    application's own session, `analyticsShell`, workspaces belonging to an
+    application.
+  - **Enforcement.** Fixed against self-serve, row by row of a table: datasets
+    seen, the base picker, a definition sent to be read, creating and changing
+    datasets and workspaces. When the answer is 404 and when it is 401.
+  - **The restricted shell**, and what is not done yet.
+  - Elsewhere:
+    - §7.3 has a paragraph on aggregated reads pointing to it;
+    - §13.3 has *Analytics: part of the Analytics UI as an application*, with
+      the new `FrameworkFactory::check_config_against` hook;
+    - §9's diagram has the new columns of `_fd_datasets` and `_fd_workspaces`,
+      and §14.4–§14.5 name them;
+    - §14.5's endpoint list has `shareDataset`, `shareWorkspace` and
+      `analyticsShell`, and no longer says the API is admin-only "until A9";
+    - §14.2 and §14.7 say where A9 put a restricted reader;
+    - §2's crate table names `access.rs` and `app.rs`.
+- **`tutorial-analytics.md` part 9** (A9.5), the Try it in five steps:
+  - a `staff` role and users, read access, and a fixed application showing
+    part 6's `Incidents dashboard`;
+  - what a `staff` user sees there, and what they don't. A member is told the
+    application is not open to their role;
+  - a self-serve application over `houses` and `neighbourhoods`;
+  - a dataset of Sam's own, explored, with `incidents` and a Join to
+    `viewings` refused. It is shared with Lee, who cannot change it;
+  - the ownership formula `user && year_built >= 1990`. The explorer's bars go
+    from 49, 28, 43, 42 and 38 houses to 26, 14, 19, 20 and 18, and the box
+    plot's tests from 170 houses to 81. The admin still reads all 200.
+
+  The numbers are the demo's, as the test counts them. Parts 7 and 8 are
+  skipped with their milestones, and the part list at the top says so.
+- **Definition of done** (A9.6): `analytics_done::the_try_it_of_milestone_a9`,
+  on plain Postgres, with both applications on one server under the base domain
+  `example.com`.
+  - **Expected numbers.** Every count is made by the test from the admin's
+    reads of all 200 demo houses. None comes from what Sam is answered.
+  - **Fixed** (`board`, showing an admin's dashboard on the demo's `Houses`):
+    - before `staff` may read `houses`, a tile says "you may not read
+      `houses`";
+    - after, Sam's shell is the dashboard alone. Sam lists one workspace, which
+      they may not change, and one dataset. There are no tables to build on and
+      only the dashboard kind;
+    - `/api/models`, `/api/tables`, `/api/users` and `/api/applications` are
+      404s, and another demo dataset is a 404;
+    - the card, the bars and the tests count all 200, and a click on a bar
+      filters the card;
+    - seven kinds of change are refused with 401: the state, a rename,
+      sharing, deleting, a new workspace, a new dataset, sharing a dataset. The
+      stored dashboard is unchanged;
+    - a member gets 403, and a visitor 401 after being told who they are.
+  - **Self-serve** (`explore`, `houses` and `neighbourhoods`):
+    - the shell, an empty dataset list (the demo's datasets are the admin's),
+      and a base picker of the two tables;
+    - Sam's `My houses` with a `Ⱶ` column: the stage, the bars and the tests;
+    - `incidents` refused saved and unsaved, `viewings` refused through a Join,
+      and a dashboard refused;
+    - the board's dashboard and dataset are 404s here, and Sam's dataset is a
+      404 on the board;
+    - shared with `staff`, Lee lists it and cannot change it.
+  - **Then the ownership formula.** In both applications the stage, a
+    histogram, the bars, the box plot's `n`, the card and the tests count the
+    97 newer houses (81 with a price). The same holds for Lee reading Sam's
+    shared dataset. The admin still counts 200.
+  - **A deviation from the Try it.** The test's fixed application shows a
+    dashboard on `Houses` rather than part 6's incidents dashboard. That
+    dashboard needs PostGIS, which nothing else here does, and on `Houses` the
+    ownership formula of step 5 reaches the fixed application too. The
+    tutorial uses part 6's, as the Try it says.
+  - **Test plumbing.** `analytics_done.rs`'s client can address a host, its
+    server can be given a base domain and a bundle (`serve`), and the setup
+    bootstraps `_fd_applications`. A1–A6's tests are unchanged and pass.
+- **Walked in a browser** (headless Chromium driven by puppeteer, not by a
+  person). It ran on a scratch PostGIS database with the demo data, with
+  `feldspar serve --base-domain localhost` and part 6's dashboard (a stat card,
+  the bars by category, the districts map):
+  - **`board.localhost`.** The sign-in form, then the dashboard with no Add, no
+    grips and no Admin link. The card read 189 for December 2025, and the map
+    drew. A misspelt workspace was refused on save, by name. Pat was told
+    *this application is not open to your role*;
+  - **`explore.localhost`.** *Based on* offered `houses` and `neighbourhoods`,
+    and *Kind* offered only the Data explorer. Sam's explorer drew
+    49/28/43/42/38. After the formula it drew 26/14/19/20/18, and the box plot's
+    ANOVA had df (4, 76), so 81 houses. The lists offered **Share**.
+
+  The admin's application form was not walked: this binary was built with
+  `SC_BUILD_ADMIN=0`, so the applications were made through the API, as the
+  test makes them.
+- **Pre-existing, not fixed.** Two `sc-cli` hygiene tests still fail
+  independently of this change. `sc-server/tests/backup_remote.rs` is not in
+  `it.rs`, and the `sc-server` test binary is 618 MB, over the 600 MB ceiling,
+  as it was before this change.
+
 ## Analytics A9.1–A9.4: applications with a restricted Analytics UI
 
 The first two phases of milestone A9. An admin publishes part of the Analytics UI
