@@ -5413,7 +5413,9 @@ the keystore's settings only when it is ticked. A module may also group its sett
 headings with v1's `{ input_type: "section_header", label }`. That entry is not a setting, so it
 is not kept as one: its label becomes the `section` of the next setting, and the form draws it
 above the first shown setting of the group. `plugins/react-native` heads its native apps'
-settings this way, from the server URL on. A target's `env` values are templates too, which
+settings this way, from the server URL on. A text setting may also declare a pattern (v1's
+`regexp`, with `re_invalid_error` as its message), which the form checks as the admin types and
+the server checks on save, for module settings too. A target's `env` values are templates too, which
 is how a secret setting (the keystore password) reaches the build without being written into
 the project. An application's secret framework settings are masked in what the admin API sends
 and kept when a save hands the mask back, as a provider's are; a backup keeps them.

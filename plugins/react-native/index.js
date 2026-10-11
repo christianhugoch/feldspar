@@ -203,7 +203,7 @@ const configuration_workflow = () => ({
             sublabel:
               "Lets Saltcorn create and renew App Store provisioning profiles itself: on every build " +
               'of an app whose profile is "generate", or with the "Generate a provisioning profile" ' +
-              "button. Off: every app uploads its own profile.",
+              "button. Off: every app uploads its own profile, and that button says so.",
           },
           {
             name: "asc_issuer_id",
@@ -212,6 +212,12 @@ const configuration_workflow = () => ({
             sublabel:
               "In App Store Connect under Users and Access → Integrations → App Store Connect API, " +
               "above the list of keys.",
+            // Trimmed by the generator, so whitespace around a pasted value is fine.
+            attributes: {
+              regexp: "\\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\s*",
+              re_invalid_error:
+                "An issuer ID is a UUID, like 57246542-96fe-1a63-e053-0824d011072a.",
+            },
             showIf: { use_asc: true },
           },
           {
@@ -220,6 +226,10 @@ const configuration_workflow = () => ({
             type: "String",
             sublabel:
               "The ID of an API key with the Admin or App Manager role, from the same page.",
+            attributes: {
+              regexp: "\\s*[A-Z0-9]{10}\\s*",
+              re_invalid_error: "A key ID is ten capital letters and digits, like 2X9R4HXF34.",
+            },
             showIf: { use_asc: true },
           },
           {
@@ -230,6 +240,12 @@ const configuration_workflow = () => ({
             sublabel:
               "The contents of the AuthKey_<key ID>.p8 file downloaded when the key was created " +
               "(Apple offers the download only once). Paste the whole file.",
+            attributes: {
+              regexp:
+                "\\s*-----BEGIN PRIVATE KEY-----[\\sA-Za-z0-9+/=]+-----END PRIVATE KEY-----\\s*",
+              re_invalid_error:
+                "Paste the whole .p8 file, from -----BEGIN PRIVATE KEY----- to -----END PRIVATE KEY-----.",
+            },
             showIf: { use_asc: true },
           },
           {
@@ -467,20 +483,27 @@ function targets({
       command: "npm run build:ios:device",
       artifact: "{{ project }}/ios-output/app.ipa",
       options: ios_options,
-      // Only with the App Store Connect API switched on in the module settings.
-      operations: useAsc
-        ? {
-            generate_profile: {
-              label: "Generate a provisioning profile",
-              description:
-                "Creates or reuses an App Store profile for this app's App ID through App Store Connect " +
-                "(API key under Settings → Modules → React Native), stores it in the file store " +
-                "(keys/<subdomain>-app-store-<date>.mobileprovision) and selects it above.",
-              showIf: { ios_profile_source: "own" },
-              run: (ctx) => generateProfileOperation(ctx, ascEnv),
-            },
-          }
-        : {},
+      // Offered for an uploaded profile whether or not the API is switched on,
+      // so the button is there to find; switched off, it says where to turn it on.
+      operations: {
+        generate_profile: {
+          label: "Generate a provisioning profile",
+          description:
+            "Creates or reuses an App Store profile for this app's App ID through App Store Connect " +
+            "(API key under Settings → Modules → React Native), stores it in the file store " +
+            "(keys/<subdomain>-app-store-<date>.mobileprovision) and selects it above.",
+          showIf: { ios_profile_source: "own" },
+          run: (ctx) => {
+            if (!useAsc)
+              throw new Error(
+                'The App Store Connect API is switched off. Tick "Use the App Store Connect API" ' +
+                  "under Settings → Modules → React Native and fill in its key, or upload a profile " +
+                  "made in Apple's developer portal instead.",
+              );
+            return generateProfileOperation(ctx, ascEnv);
+          },
+        },
+      },
       // Environment variables for the build: the CocoaPods directory, and,
       // if the App Store Connect API is on, its key for generating profiles.
       env: { ...podDir, ...ascEnv },

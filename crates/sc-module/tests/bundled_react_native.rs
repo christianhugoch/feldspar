@@ -572,7 +572,8 @@ async fn the_modules_toolchain_settings_are_the_apk_builds_environment() {
     assert_eq!(ios.operations[0].name, "generate_profile");
 
     // Switched off, the key stays with the module: no API settings reach the
-    // build, and there is no operation to call the API with.
+    // build. The operation is still offered, and refuses (see
+    // `the_profile_operation_runs_in_the_modules_worker`).
     let (off, _) = frameworks_configured(
         "bundled-rn-toolchain-asc-off",
         json!({
@@ -592,7 +593,7 @@ async fn the_modules_toolchain_settings_are_the_apk_builds_environment() {
         ipa.env
     );
     let ios = rn_off.targets.iter().find(|t| t.name == "ios").unwrap();
-    assert!(ios.operations.is_empty());
+    assert_eq!(ios.operations[0].name, "generate_profile");
     // Likewise the CocoaPods directory, with its checkbox off.
     assert!(!ipa.env.contains_key("FELDSPAR_POD_DIR"), "{:?}", ipa.env);
 
@@ -633,6 +634,30 @@ async fn the_modules_toolchain_settings_are_the_apk_builds_environment() {
         "{:?}",
         pod.sublabel
     );
+    // The API key's three parts are refused on save unless they look like
+    // what App Store Connect hands out: a pasted key keeps its PEM lines, and
+    // whitespace around a value is fine (the generator trims it).
+    let api = |issuer: &str, key_id: &str, key: &str| {
+        let mut attrs = sc_types::Attrs::new();
+        attrs.insert("use_asc".to_owned(), json!(true));
+        attrs.insert("asc_issuer_id".to_owned(), json!(issuer));
+        attrs.insert("asc_key_id".to_owned(), json!(key_id));
+        attrs.insert("asc_key".to_owned(), json!(key));
+        sc_types::validate_patterns(&spec, &attrs)
+    };
+    let pem = "-----BEGIN PRIVATE KEY-----\nMIGTAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBHkw\nGJ+1/q==\n-----END PRIVATE KEY-----\n";
+    api("57246542-96fe-1a63-e053-0824d011072a ", "2X9R4HXF34", pem).unwrap();
+    // A key pasted into the one-line field loses its line breaks.
+    api("57246542-96fe-1a63-e053-0824d011072a", " 2X9R4HXF34", &pem.replace('\n', "")).unwrap();
+    for (issuer, key_id, key, wanted) in [
+        ("issuer-1", "2X9R4HXF34", pem, "UUID"),
+        ("57246542-96fe-1a63-e053-0824d011072a", "2x9r4hxf34", pem, "ten capital"),
+        ("57246542-96fe-1a63-e053-0824d011072a", "2X9R4HXF34", "MIGTAgEAMBMG", "whole .p8"),
+    ] {
+        let err = api(issuer, key_id, key).unwrap_err().to_string();
+        assert!(err.contains(wanted), "{err}");
+    }
+
     // The key is a secret: a password input, masked by the admin API.
     let key = manifest
         .config_fields
@@ -1486,6 +1511,17 @@ async fn the_profile_operation_runs_in_the_modules_worker() {
         .to_string();
     assert!(err.contains("issuer ID, key ID, private key"), "{err}");
     assert!(err.contains("Use the App Store Connect API"), "{err}");
+
+    // Switched off, the button is still there and says where to switch it on.
+    let (off, _) =
+        frameworks_configured("bundled-rn-profile-op-off", json!({ "use_asc": false })).await;
+    let err = off
+        .call_target_operation(FRAMEWORK, "ios", "generate_profile", context.clone())
+        .await
+        .expect_err("the API is switched off")
+        .to_string();
+    assert!(err.contains("switched off"), "{err}");
+    assert!(err.contains("Settings → Modules → React Native"), "{err}");
 
     let out = std::process::Command::new("node")
         .arg("-e")

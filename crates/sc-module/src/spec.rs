@@ -193,6 +193,20 @@ fn config_field(field: &Json, owner: &str) -> Result<Option<(FormField, Option<S
     {
         form_field = form_field.sublabel(text);
     }
+    // v1's `attributes.regexp`: what a text value must look like, and the
+    // sentence `re_invalid_error` says when it does not.
+    let attributes = field.get("attributes");
+    if let Some(pattern) = attributes
+        .and_then(|a| a.get("regexp"))
+        .and_then(Json::as_str)
+        .filter(|p| !p.is_empty())
+    {
+        let error = attributes
+            .and_then(|a| a.get("re_invalid_error"))
+            .and_then(Json::as_str)
+            .map(str::to_string);
+        form_field = form_field.pattern(pattern, error);
+    }
     Ok(Some((form_field, issue)))
 }
 
@@ -422,6 +436,20 @@ mod tests {
     /// v1's `section_header` groups the settings after it: its label becomes
     /// the next setting's `section`. Two headings in a row are one group (the
     /// later wins), and a heading with nothing after it is dropped.
+    #[test]
+    fn a_v1_regexp_becomes_the_settings_pattern() {
+        let (fields, issues) = translate(json!([
+            { "name": "key_id", "type": "String",
+              "attributes": { "regexp": "[A-Z0-9]{10}", "re_invalid_error": "Ten characters." } },
+            { "name": "plain", "type": "String", "attributes": { "regexp": "" } }
+        ]));
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(fields[0].pattern.as_deref(), Some("[A-Z0-9]{10}"));
+        assert_eq!(fields[0].pattern_error.as_deref(), Some("Ten characters."));
+        // An empty pattern is no pattern.
+        assert_eq!(fields[1].pattern, None);
+    }
+
     #[test]
     fn a_section_header_heads_the_setting_after_it() {
         let (fields, issues) = translate(json!([

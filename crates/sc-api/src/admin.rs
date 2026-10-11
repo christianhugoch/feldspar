@@ -6478,6 +6478,10 @@ fn form_field_schema() -> TypeSchema {
         StructField::new("section", TypeSchema::optional(TypeSchema::text())),
         // A sentence or two shown under the control (v1's `sublabel`), or null.
         StructField::new("sublabel", TypeSchema::optional(TypeSchema::text())),
+        // A regular expression a non-empty text value must match in full
+        // (v1's `regexp`), and what to say when it does not, or null.
+        StructField::new("pattern", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("pattern_error", TypeSchema::optional(TypeSchema::text())),
         // When the setting applies: every named setting holds one of its
         // values. Empty means always. The form hides a setting that does not
         // apply, and the server does not require it.

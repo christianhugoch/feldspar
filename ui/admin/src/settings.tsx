@@ -19,6 +19,7 @@ import type { CodeScope } from "./codeTypes";
 import { T } from "./i18n";
 import type { ExtraOption } from "./newFileStore";
 import { withSections } from "./settingSections";
+import { patternProblem } from "./settingPattern";
 
 /** One settings field, structurally matching the API's `form_field_schema`.
  *
@@ -66,6 +67,11 @@ export type FieldSpec = {
   /** A sentence or two under the control (v1's `sublabel`): what to enter and
    * where to find it. */
   sublabel?: string | null;
+  /** A regular expression a non-empty text value must match in full (v1's
+   * `regexp`), checked as the admin types and again on save. */
+  pattern?: string | null;
+  /** What to say when {@link pattern} does not match (v1's `re_invalid_error`). */
+  pattern_error?: string | null;
 };
 
 /** One condition of a `show_if`: setting `name` must hold one of `values`. */
@@ -330,6 +336,7 @@ export function SettingField({
       </Form.Group>
     );
   }
+  const problem = patternProblem(field, value);
   return (
     <Form.Group className="mb-3" controlId={controlId}>
       <Form.Label>
@@ -347,6 +354,7 @@ export function SettingField({
           value={value}
           required={field.required}
           readOnly={fixed}
+          isInvalid={problem !== null}
           onChange={(e) => onChange(e.target.value)}
           onFocus={(e) => e.currentTarget.select()}
         />
@@ -363,6 +371,7 @@ export function SettingField({
           value={value}
           required={field.required}
           readOnly={fixed}
+          isInvalid={problem !== null}
           onChange={(e) => onChange(e.target.value)}
           // A secret arrives as the sentinel, and the sentinel is what the
           // server reads as "unchanged". Clearing it on focus is what makes
@@ -374,6 +383,7 @@ export function SettingField({
           onBlur={field.secret ? () => value === "" && onChange(SECRET_SENTINEL) : undefined}
         />
       )}
+      {problem && <Form.Control.Feedback type="invalid">{problem}</Form.Control.Feedback>}
       {description}
       {fixedHint}
       {field.secret && value === SECRET_SENTINEL && (

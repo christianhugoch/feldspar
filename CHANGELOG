@@ -12,14 +12,16 @@ still needs the app's "Server URL for the mobile app".
 
 - Tests: `sc-server` config tests and `crates/sc-cli/tests/config_file.rs`.
 
-## Module settings can have section headings and descriptions
+## Module settings: headings, descriptions and input checks
 
-Saltcorn 1's `section_header` entries and `sublabel` descriptions in a settings spec are no
-longer dropped. A heading groups the settings that follow it, and a description appears under
-its input. The admin UI shows both on application forms and on the Modules tab, which now also
-honours `show_if`. The React Native settings are grouped under "Android" and "iOS".
+Settings can be grouped under headings, explained under their input, and checked against a
+pattern, using Saltcorn 1's `section_header`, `sublabel` and `regexp`. This works on application
+forms and on the Modules tab. A value that does not match is marked as you type and refused
+on save. The React Native settings use this to group Android and iOS, and to check the App
+Store Connect API key.
 
-- Tests: `spec::tests::a_section_header_heads_the_setting_after_it`, `settingSections.test.ts`.
+- Tests: `sc-module` spec tests, `sc-types` field tests, `settingSections.test.ts`,
+  `settingPattern.test.ts`.
 
 ## React Native: iOS builds
 
@@ -34,8 +36,8 @@ same Expo project. On Linux, the iOS targets show as not ready.
   the App Store Connect API. The certificate's private key must be in the keychain of the
   user the server runs as. A bad profile or a missing certificate stops the build before
   Xcode starts. Only App Store profiles are supported.
-- **"Generate a provisioning profile"**: a target operation that stores an App Store profile
-  in the file store without building. It works from any OS.
+- **"Generate a provisioning profile"**: a button on the iOS app card that stores an App Store
+  profile in the file store without building, from any OS.
 - **Module settings:** a custom CocoaPods directory, the App Store Connect API key (the `.p8`
   is a secret) and the distribution certificate to use.
 - **Application settings:** the App ID, version and icon (PNG only) now apply to both

@@ -56,6 +56,9 @@ pub fn translate_spec(spec: &mut [FormField], locale: &Locale) {
         if let Some(sublabel) = &field.sublabel {
             field.sublabel = Some(sc_i18n::core::translate(locale, sublabel, &[]));
         }
+        if let Some(message) = &field.pattern_error {
+            field.pattern_error = Some(sc_i18n::core::translate(locale, message, &[]));
+        }
     }
 }
 
