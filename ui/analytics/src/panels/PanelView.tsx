@@ -26,7 +26,7 @@ import type { Picked } from "../plot/select";
 import { isRefused, type PlotData, type PlotSpec, type TableData } from "../plot/spec";
 import { SummaryTable } from "../plot/SummaryTable";
 import { useDocumentTheme, type Theme } from "../theme";
-import { Markdown } from "./Markdown";
+import { Markdown } from "./MarkdownView";
 import type { MapData, MapSpec } from "../map/spec";
 import { isCardData } from "./card";
 import { setPanelDrag, type Panel } from "./panel";
